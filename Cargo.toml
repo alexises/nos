@@ -1,5 +1,5 @@
 [workspace]
-members = ["config", "bgp"]
+members = ["proto", "config", "bgp"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -11,8 +11,13 @@ tracing     = "0.1"
 thiserror   = "1"
 bytes       = "1"
 garde       = { version = "0.22", features = ["derive", "full"] }
+postcard    = { version = "1", features = ["alloc"] }
+tokio-util  = { version = "0.7", features = ["codec"] }
+futures     = "0.3"
+nos-proto   = { path = "proto" }
 
 # test dependencies
+tempfile    = "3"
 proptest    = "1"
 insta       = "1"
 

@@ -14,7 +14,11 @@ serde_yaml = { workspace = true }
 tracing    = { workspace = true }
 thiserror  = { workspace = true }
 garde      = { workspace = true }
+nos-proto  = { workspace = true }
+tokio-util = { workspace = true }
+futures    = { workspace = true }
 
 [dev-dependencies]
 insta    = { workspace = true }
 proptest = { workspace = true }
+tempfile = { workspace = true }

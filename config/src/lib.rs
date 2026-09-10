@@ -1,8 +1,7 @@
 pub mod error;
-pub mod schema;
+pub mod server;
 pub mod store;
-pub mod validators;
 
 pub use error::ConfigError;
-pub use schema::{BgpInstance, Config};
+pub use nos_proto::{BgpInstance, Config};
 pub use store::ConfigStore;

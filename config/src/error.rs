@@ -6,4 +6,6 @@ pub enum ConfigError {
     Validation(#[from] garde::Report),
     #[error("no candidate config to commit")]
     NoCandidate,
+    #[error("IPC I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }

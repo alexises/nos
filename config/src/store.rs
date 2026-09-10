@@ -3,8 +3,9 @@ use std::sync::Arc;
 use garde::Validate as _;
 use tokio::sync::{RwLock, broadcast};
 
+use nos_proto::Config;
+
 use crate::error::ConfigError;
-use crate::schema::Config;
 
 const BROADCAST_CAPACITY: usize = 16;
 
@@ -54,14 +55,25 @@ impl ConfigStore {
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<Config>> {
         self.tx.subscribe()
     }
+
+    /// Binds a Unix socket at `socket_path` and starts the IPC server in the background.
+    ///
+    /// Returns a `JoinHandle` — keep it alive for the server to continue running.
+    pub fn start_ipc_server(
+        &self,
+        socket_path: &std::path::Path,
+    ) -> std::io::Result<tokio::task::JoinHandle<()>> {
+        crate::server::start(socket_path, Arc::clone(&self.running), self.tx.clone())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
 
+    use nos_proto::BgpInstance;
+
     use super::*;
-    use crate::schema::BgpInstance;
 
     fn instance(name: &str, asn: u32) -> BgpInstance {
         BgpInstance {

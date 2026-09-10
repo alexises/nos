@@ -1,0 +1,16 @@
+[package]
+name    = "nos-proto"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde      = { workspace = true }
+garde      = { workspace = true }
+thiserror  = { workspace = true }
+postcard   = { workspace = true }
+tokio-util = { workspace = true }
+bytes      = { workspace = true }
+futures    = { workspace = true }
