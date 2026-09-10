@@ -1,0 +1,27 @@
+[workspace]
+members = ["config", "bgp"]
+resolver = "2"
+
+[workspace.dependencies]
+tokio       = { version = "1", features = ["full"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+serde_yaml  = "0.9"
+tracing     = "0.1"
+thiserror   = "1"
+bytes       = "1"
+
+# test dependencies
+proptest    = "1"
+insta       = "1"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+pedantic              = { level = "warn", priority = -1 }
+# allow noisy pedantic lints that produce more churn than value at this stage
+must_use_candidate        = "allow"
+module_name_repetitions   = "allow"
+missing_errors_doc        = "allow"
+missing_panics_doc        = "allow"

@@ -1,0 +1,17 @@
+[package]
+name    = "nos-bgp"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio     = { workspace = true }
+serde     = { workspace = true }
+tracing   = { workspace = true }
+thiserror = { workspace = true }
+bytes     = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
