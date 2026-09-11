@@ -9,6 +9,7 @@ A network operating system built from scratch in Rust.
 | `proto/` | `nos-proto` | Shared wire types, IPC codec — single source of truth for all inter-process contracts |
 | `config/` | `nos-config` | Configuration store and IPC server |
 | `bgp/` | `nos-bgp` | BGP-4 implementation |
+| `cli/` | `nos-cli` | Interactive shell (binary `nos`) — main user-facing entry point |
 
 ## Architecture
 
@@ -23,10 +24,10 @@ Each component (BGP, RIB, OSPF, …) runs as a dedicated OS process. No componen
 │  Listens on: /run/nos/config.sock                    │
 └───────────────────────┬──────────────────────────────┘
                         │ Unix socket (nos-proto wire protocol)
-          ┌─────────────┼─────────────┐
-          ▼             ▼             ▼
-    nos-bgp         nos-rib       nos-ospf
-    process         process       process
+          ┌─────────────┼─────────────┬─────────────┐
+          ▼             ▼             ▼             ▼
+    nos-bgp         nos-rib       nos-ospf       nos-cli
+    process         process       process        (shell)
     (future)        (future)
 ```
 
@@ -47,7 +48,7 @@ All wire types live in `nos-proto`. Since every component imports its message ty
 ```
 nos-proto   (no NOS dependencies)
     ↑               ↑
-nos-config      nos-bgp, nos-rib, nos-ospf, …
+nos-config      nos-bgp, nos-rib, nos-ospf, nos-cli, …
 (server)        (clients)
 ```
 
