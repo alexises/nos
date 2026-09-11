@@ -25,7 +25,9 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("nos-configd listening on {}", args.listen);
 
-    tokio::signal::ctrl_c().await.context("waiting for Ctrl-C")?;
+    tokio::signal::ctrl_c()
+        .await
+        .context("waiting for Ctrl-C")?;
 
     tracing::info!("shutting down");
     Ok(())

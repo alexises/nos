@@ -24,8 +24,9 @@ pub enum ClientError {
 
 /// Dials the daemon, sends a one-shot `Request::Get`, and returns the snapshot.
 pub async fn fetch_running_config(socket_path: &Path) -> Result<Config, ClientError> {
-    let stream =
-        UnixStream::connect(socket_path).await.map_err(|source| ClientError::Connect {
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .map_err(|source| ClientError::Connect {
             path: socket_path.to_path_buf(),
             source,
         })?;

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
 use nos_proto::{Config, Event, IpcCodec, Request};
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, warn};
@@ -185,5 +185,7 @@ async fn handle_connection<S>(
         }
     }
 
-    if let Some(h) = sub_task { h.abort(); }
+    if let Some(h) = sub_task {
+        h.abort();
+    }
 }

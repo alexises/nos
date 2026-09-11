@@ -8,7 +8,12 @@ pub fn render_config(config: &Config) -> String {
     config
         .bgp_instances
         .iter()
-        .map(|i| format!("bgp instance {}: router-id {}, asn {}", i.name, i.router_id, i.asn))
+        .map(|i| {
+            format!(
+                "bgp instance {}: router-id {}, asn {}",
+                i.name, i.router_id, i.asn
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -22,7 +27,11 @@ mod tests {
     use super::*;
 
     fn instance(name: &str, asn: u32) -> BgpInstance {
-        BgpInstance { name: name.to_string(), router_id: Ipv4Addr::new(1, 1, 1, 1), asn }
+        BgpInstance {
+            name: name.to_string(),
+            router_id: Ipv4Addr::new(1, 1, 1, 1),
+            asn,
+        }
     }
 
     #[test]
@@ -33,14 +42,20 @@ mod tests {
 
     #[test]
     fn single_instance() {
-        let cfg = Config { bgp_instances: vec![instance("default", 65000)] };
-        assert_eq!(render_config(&cfg), "bgp instance default: router-id 1.1.1.1, asn 65000");
+        let cfg = Config {
+            bgp_instances: vec![instance("default", 65000)],
+        };
+        assert_eq!(
+            render_config(&cfg),
+            "bgp instance default: router-id 1.1.1.1, asn 65000"
+        );
     }
 
     #[test]
     fn multiple_instances() {
-        let cfg =
-            Config { bgp_instances: vec![instance("vrf-a", 65001), instance("vrf-b", 65002)] };
+        let cfg = Config {
+            bgp_instances: vec![instance("vrf-a", 65001), instance("vrf-b", 65002)],
+        };
         assert_eq!(
             render_config(&cfg),
             "bgp instance vrf-a: router-id 1.1.1.1, asn 65001\n\

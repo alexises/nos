@@ -79,6 +79,14 @@ Both planes use the same transport stack. The data plane will use a separate soc
 ## Development
 
 ```bash
+make check   # build + fmt + clippy + test (matches CI's fast jobs)
+make fix     # auto-fix formatting and clippy-fixable lints
+make help    # list all available targets
+```
+
+Or run the underlying commands directly:
+
+```bash
 cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace -- -D warnings

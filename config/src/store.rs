@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use garde::Validate as _;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{broadcast, RwLock};
 
 use nos_proto::Config;
 
@@ -86,7 +86,11 @@ mod tests {
     #[tokio::test]
     async fn commit_valid_candidate_updates_running() {
         let mut store = ConfigStore::new(Config::default());
-        store.edit_candidate().await.bgp_instances.push(instance("default", 65000));
+        store
+            .edit_candidate()
+            .await
+            .bgp_instances
+            .push(instance("default", 65000));
         store.commit().await.unwrap();
         let running = store.running().read().await.clone();
         assert_eq!(running.bgp_instances.len(), 1);
@@ -97,7 +101,11 @@ mod tests {
     async fn commit_invalid_candidate_leaves_running_unchanged() {
         let mut store = ConfigStore::new(Config::default());
         // ASN 0 is invalid
-        store.edit_candidate().await.bgp_instances.push(instance("bad", 0));
+        store
+            .edit_candidate()
+            .await
+            .bgp_instances
+            .push(instance("bad", 0));
         assert!(store.commit().await.is_err());
         let running = store.running().read().await.clone();
         assert!(running.bgp_instances.is_empty());

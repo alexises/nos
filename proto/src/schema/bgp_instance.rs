@@ -44,7 +44,9 @@ mod tests {
     }
 
     fn config_with(instances: Vec<BgpInstance>) -> Config {
-        Config { bgp_instances: instances }
+        Config {
+            bgp_instances: instances,
+        }
     }
 
     #[test]

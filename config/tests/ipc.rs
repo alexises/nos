@@ -8,10 +8,16 @@ use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 fn instance(name: &str, asn: u32) -> BgpInstance {
-    BgpInstance { name: name.to_string(), router_id: Ipv4Addr::new(1, 1, 1, 1), asn }
+    BgpInstance {
+        name: name.to_string(),
+        router_id: Ipv4Addr::new(1, 1, 1, 1),
+        asn,
+    }
 }
 
-async fn connect(socket_path: &std::path::Path) -> (
+async fn connect(
+    socket_path: &std::path::Path,
+) -> (
     FramedRead<tokio::net::unix::OwnedReadHalf, IpcCodec<Event>>,
     FramedWrite<tokio::net::unix::OwnedWriteHalf, IpcCodec<Request>>,
 ) {
@@ -29,9 +35,15 @@ async fn get_returns_current_config() {
     let path = tmp.path().join("config.sock");
 
     let mut store = ConfigStore::new(Config::default());
-    store.edit_candidate().await.bgp_instances.push(instance("default", 65000));
+    store
+        .edit_candidate()
+        .await
+        .bgp_instances
+        .push(instance("default", 65000));
     store.commit().await.unwrap();
-    let _srv = store.start_ipc_server(&ListenAddr::Unix(path.clone())).unwrap();
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()))
+        .unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     writer.send(Request::Get).await.unwrap();
@@ -52,7 +64,9 @@ async fn subscribe_receives_initial_snapshot_then_updates() {
     let path = tmp.path().join("config.sock");
 
     let mut store = ConfigStore::new(Config::default());
-    let _srv = store.start_ipc_server(&ListenAddr::Unix(path.clone())).unwrap();
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()))
+        .unwrap();
 
     // Give the accept loop a moment to be ready.
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -65,7 +79,11 @@ async fn subscribe_receives_initial_snapshot_then_updates() {
     assert!(matches!(event, Event::Config(c) if c.bgp_instances.is_empty()));
 
     // Commit a change.
-    store.edit_candidate().await.bgp_instances.push(instance("vrf-a", 65001));
+    store
+        .edit_candidate()
+        .await
+        .bgp_instances
+        .push(instance("vrf-a", 65001));
     store.commit().await.unwrap();
 
     // Receive the update.
@@ -82,7 +100,9 @@ async fn unsubscribe_stops_updates() {
     let path = tmp.path().join("config.sock");
 
     let mut store = ConfigStore::new(Config::default());
-    let _srv = store.start_ipc_server(&ListenAddr::Unix(path.clone())).unwrap();
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()))
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(10)).await;
 
     let (mut reader, mut writer) = connect(&path).await;
@@ -95,12 +115,18 @@ async fn unsubscribe_stops_updates() {
     writer.send(Request::Unsubscribe).await.unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await; // let server process Unsubscribe
 
-    store.edit_candidate().await.bgp_instances.push(instance("vrf-b", 65002));
+    store
+        .edit_candidate()
+        .await
+        .bgp_instances
+        .push(instance("vrf-b", 65002));
     store.commit().await.unwrap();
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     // No event should arrive within a short timeout.
-    let result =
-        tokio::time::timeout(Duration::from_millis(50), reader.next()).await;
-    assert!(result.is_err(), "expected timeout, but received an event after Unsubscribe");
+    let result = tokio::time::timeout(Duration::from_millis(50), reader.next()).await;
+    assert!(
+        result.is_err(),
+        "expected timeout, but received an event after Unsubscribe"
+    );
 }

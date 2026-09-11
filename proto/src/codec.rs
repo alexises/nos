@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use bytes::{Buf, BufMut, BytesMut};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Serialize};
 use tokio_util::codec::{Decoder, Encoder};
 
 /// Framed codec for IPC messages over a Unix socket.
