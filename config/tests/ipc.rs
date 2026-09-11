@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use nos_config::{BgpInstance, Config, ConfigStore};
+use nos_config::{BgpInstance, Config, ConfigStore, ListenAddr};
 use nos_proto::{Event, IpcCodec, Request};
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -31,7 +31,7 @@ async fn get_returns_current_config() {
     let mut store = ConfigStore::new(Config::default());
     store.edit_candidate().await.bgp_instances.push(instance("default", 65000));
     store.commit().await.unwrap();
-    let _srv = store.start_ipc_server(&path).unwrap();
+    let _srv = store.start_ipc_server(&ListenAddr::Unix(path.clone())).unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     writer.send(Request::Get).await.unwrap();
@@ -52,7 +52,7 @@ async fn subscribe_receives_initial_snapshot_then_updates() {
     let path = tmp.path().join("config.sock");
 
     let mut store = ConfigStore::new(Config::default());
-    let _srv = store.start_ipc_server(&path).unwrap();
+    let _srv = store.start_ipc_server(&ListenAddr::Unix(path.clone())).unwrap();
 
     // Give the accept loop a moment to be ready.
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -82,7 +82,7 @@ async fn unsubscribe_stops_updates() {
     let path = tmp.path().join("config.sock");
 
     let mut store = ConfigStore::new(Config::default());
-    let _srv = store.start_ipc_server(&path).unwrap();
+    let _srv = store.start_ipc_server(&ListenAddr::Unix(path.clone())).unwrap();
     tokio::time::sleep(Duration::from_millis(10)).await;
 
     let (mut reader, mut writer) = connect(&path).await;

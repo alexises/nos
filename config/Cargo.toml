@@ -16,7 +16,14 @@ thiserror  = { workspace = true }
 garde      = { workspace = true }
 nos-proto  = { workspace = true }
 tokio-util = { workspace = true }
-futures    = { workspace = true }
+futures            = { workspace = true }
+clap               = { workspace = true }
+anyhow             = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[bin]]
+name = "nos-configd"
+path = "src/main.rs"
 
 [dev-dependencies]
 insta    = { workspace = true }

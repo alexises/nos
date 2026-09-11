@@ -1,61 +1,131 @@
-use std::path::Path;
+use std::fmt;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
 use nos_proto::{Config, Event, IpcCodec, Request};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, warn};
 
-/// Binds a Unix domain socket at `socket_path` and spawns the IPC accept loop.
+/// Where the IPC server binds.
+///
+/// Parsed from a string: tries `SocketAddr` first (IPv4 or IPv6); if that
+/// fails the whole string is used as a Unix socket path (absolute or relative).
+///
+/// Examples:
+///   `127.0.0.1:9000`          → TCP
+///   `[::1]:9000`              → TCP (IPv6)
+///   `/run/nos/config.sock`    → Unix (absolute)
+///   `config.sock`             → Unix (relative to CWD)
+#[derive(Debug, Clone)]
+pub enum ListenAddr {
+    Unix(PathBuf),
+    Tcp(SocketAddr),
+}
+
+impl FromStr for ListenAddr {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(addr) = s.parse::<SocketAddr>() {
+            return Ok(ListenAddr::Tcp(addr));
+        }
+        Ok(ListenAddr::Unix(PathBuf::from(s)))
+    }
+}
+
+impl fmt::Display for ListenAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ListenAddr::Tcp(addr) => write!(f, "{addr}"),
+            ListenAddr::Unix(path) => write!(f, "unix:{}", path.display()),
+        }
+    }
+}
+
+/// Binds the given address and spawns the IPC accept loop.
 ///
 /// Returns a `JoinHandle` the caller must keep alive for the server to run.
-/// When the handle is dropped (or aborted), the server stops accepting new connections.
 pub fn start(
-    socket_path: &Path,
+    addr: &ListenAddr,
     running: Arc<RwLock<Config>>,
     tx: broadcast::Sender<Arc<Config>>,
 ) -> std::io::Result<JoinHandle<()>> {
-    if socket_path.exists() {
-        std::fs::remove_file(socket_path)?;
-    }
-    let listener = UnixListener::bind(socket_path)?;
-
-    let handle = tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    tokio::spawn(handle_connection(
-                        stream,
-                        Arc::clone(&running),
-                        tx.clone(),
-                    ));
-                }
-                Err(e) => {
-                    warn!("IPC accept error: {e}");
-                    break;
-                }
+    match addr {
+        ListenAddr::Unix(path) => {
+            if path.exists() {
+                std::fs::remove_file(path)?;
             }
+            let listener = UnixListener::bind(path)?;
+            Ok(tokio::spawn(accept_loop_unix(listener, running, tx)))
         }
-    });
-
-    Ok(handle)
+        ListenAddr::Tcp(addr) => {
+            // TcpListener::bind is async, so we bind inside the spawned task.
+            let addr = *addr;
+            Ok(tokio::spawn(async move {
+                match TcpListener::bind(addr).await {
+                    Ok(listener) => accept_loop_tcp(listener, running, tx).await,
+                    Err(e) => warn!("IPC TCP bind error: {e}"),
+                }
+            }))
+        }
+    }
 }
 
-async fn handle_connection(
-    stream: UnixStream,
+async fn accept_loop_unix(
+    listener: UnixListener,
+    running: Arc<RwLock<Config>>,
+    tx: broadcast::Sender<Arc<Config>>,
+) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                tokio::spawn(handle_connection(stream, Arc::clone(&running), tx.clone()));
+            }
+            Err(e) => {
+                warn!("IPC accept error: {e}");
+                break;
+            }
+        }
+    }
+}
+
+async fn accept_loop_tcp(
+    listener: TcpListener,
+    running: Arc<RwLock<Config>>,
+    tx: broadcast::Sender<Arc<Config>>,
+) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                tokio::spawn(handle_connection(stream, Arc::clone(&running), tx.clone()));
+            }
+            Err(e) => {
+                warn!("IPC TCP accept error: {e}");
+                break;
+            }
+        }
+    }
+}
+
+async fn handle_connection<S>(
+    stream: S,
     running: Arc<RwLock<Config>>,
     broadcast_tx: broadcast::Sender<Arc<Config>>,
-) {
-    let (read_half, write_half) = stream.into_split();
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<Request>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<Event>::default());
 
-    // mpsc channel that bridges the broadcast channel to this connection.
-    // The sender is cloned into a spawned forwarder task on Subscribe; we keep the
-    // receiver here so the select! loop can drain it without borrowing anything across arms.
+    // mpsc bridges the broadcast channel to this connection so we never hold
+    // a &mut borrow across select! arms.
     let (sub_tx, mut sub_rx) = mpsc::channel::<Arc<Config>>(16);
     let mut sub_task: Option<JoinHandle<()>> = None;
 
@@ -70,10 +140,8 @@ async fn handle_connection(
                         }
                     }
                     Some(Ok(Request::Subscribe)) => {
-                        // Cancel any existing subscription forwarder.
                         if let Some(h) = sub_task.take() { h.abort(); }
 
-                        // Spawn a task that forwards broadcast updates → mpsc.
                         let mut bcast_rx = broadcast_tx.subscribe();
                         let forward_tx = sub_tx.clone();
                         sub_task = Some(tokio::spawn(async move {
@@ -81,19 +149,17 @@ async fn handle_connection(
                                 match bcast_rx.recv().await {
                                     Ok(cfg) => {
                                         if forward_tx.send(cfg).await.is_err() {
-                                            break; // connection writer dropped
+                                            break;
                                         }
                                     }
                                     Err(broadcast::error::RecvError::Lagged(n)) => {
                                         warn!("IPC subscriber lagged by {n} messages");
-                                        // Continue — the next recv will return the latest value.
                                     }
                                     Err(broadcast::error::RecvError::Closed) => break,
                                 }
                             }
                         }));
 
-                        // Send the current snapshot as the initial event.
                         let cfg = running.read().await.clone();
                         if writer.send(Event::Config(cfg)).await.is_err() {
                             break;
@@ -108,7 +174,7 @@ async fn handle_connection(
                         warn!("IPC read error: {e}");
                         break;
                     }
-                    None => break, // client closed connection
+                    None => break,
                 }
             }
             Some(update) = sub_rx.recv() => {

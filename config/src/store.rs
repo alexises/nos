@@ -56,14 +56,14 @@ impl ConfigStore {
         self.tx.subscribe()
     }
 
-    /// Binds a Unix socket at `socket_path` and starts the IPC server in the background.
+    /// Binds the given address and starts the IPC server in the background.
     ///
     /// Returns a `JoinHandle` — keep it alive for the server to continue running.
     pub fn start_ipc_server(
         &self,
-        socket_path: &std::path::Path,
+        addr: &crate::server::ListenAddr,
     ) -> std::io::Result<tokio::task::JoinHandle<()>> {
-        crate::server::start(socket_path, Arc::clone(&self.running), self.tx.clone())
+        crate::server::start(addr, Arc::clone(&self.running), self.tx.clone())
     }
 }
 
