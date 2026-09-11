@@ -22,7 +22,9 @@ impl<T: Serialize> Encoder<T> for IpcCodec<T> {
     fn encode(&mut self, item: T, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let payload = postcard::to_allocvec(&item)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        dst.put_u32_le(payload.len() as u32);
+        let len = u32::try_from(payload.len())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        dst.put_u32_le(len);
         dst.put_slice(&payload);
         Ok(())
     }

@@ -42,7 +42,7 @@ async fn get_returns_current_config() {
             assert_eq!(c.bgp_instances.len(), 1);
             assert_eq!(c.bgp_instances[0].name, "default");
         }
-        _ => panic!("expected Config event"),
+        Event::Error(_) => panic!("expected Config event"),
     }
 }
 
@@ -72,7 +72,7 @@ async fn subscribe_receives_initial_snapshot_then_updates() {
     let event = reader.next().await.unwrap().unwrap();
     match event {
         Event::Config(c) => assert_eq!(c.bgp_instances[0].name, "vrf-a"),
-        _ => panic!("expected Config event"),
+        Event::Error(_) => panic!("expected Config event"),
     }
 }
 

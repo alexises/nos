@@ -7,7 +7,7 @@ use nos_config::{Config, ConfigStore, ListenAddr};
 struct Args {
     /// Where to listen for IPC connections.
     /// Accepts a Unix socket path (/run/nos/config.sock, config.sock)
-    /// or a TCP address (127.0.0.1:9000, [::1]:9000).
+    /// or a TCP address (127.0.0.1:9000, `[::1]:9000`).
     #[arg(long, default_value = "/run/nos/config.sock")]
     listen: ListenAddr,
 }
