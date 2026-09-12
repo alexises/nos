@@ -55,6 +55,7 @@ pub fn start(
     addr: &ListenAddr,
     running: Arc<RwLock<Config>>,
     tx: broadcast::Sender<Arc<Config>>,
+    config_path: Option<Arc<PathBuf>>,
 ) -> std::io::Result<JoinHandle<()>> {
     match addr {
         ListenAddr::Unix(path) => {
@@ -62,14 +63,19 @@ pub fn start(
                 std::fs::remove_file(path)?;
             }
             let listener = UnixListener::bind(path)?;
-            Ok(tokio::spawn(accept_loop_unix(listener, running, tx)))
+            Ok(tokio::spawn(accept_loop_unix(
+                listener,
+                running,
+                tx,
+                config_path,
+            )))
         }
         ListenAddr::Tcp(addr) => {
             // TcpListener::bind is async, so we bind inside the spawned task.
             let addr = *addr;
             Ok(tokio::spawn(async move {
                 match TcpListener::bind(addr).await {
-                    Ok(listener) => accept_loop_tcp(listener, running, tx).await,
+                    Ok(listener) => accept_loop_tcp(listener, running, tx, config_path).await,
                     Err(e) => warn!("IPC TCP bind error: {e}"),
                 }
             }))
@@ -81,11 +87,17 @@ async fn accept_loop_unix(
     listener: UnixListener,
     running: Arc<RwLock<Config>>,
     tx: broadcast::Sender<Arc<Config>>,
+    config_path: Option<Arc<PathBuf>>,
 ) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                tokio::spawn(handle_connection(stream, Arc::clone(&running), tx.clone()));
+                tokio::spawn(handle_connection(
+                    stream,
+                    Arc::clone(&running),
+                    tx.clone(),
+                    config_path.clone(),
+                ));
             }
             Err(e) => {
                 warn!("IPC accept error: {e}");
@@ -99,11 +111,17 @@ async fn accept_loop_tcp(
     listener: TcpListener,
     running: Arc<RwLock<Config>>,
     tx: broadcast::Sender<Arc<Config>>,
+    config_path: Option<Arc<PathBuf>>,
 ) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                tokio::spawn(handle_connection(stream, Arc::clone(&running), tx.clone()));
+                tokio::spawn(handle_connection(
+                    stream,
+                    Arc::clone(&running),
+                    tx.clone(),
+                    config_path.clone(),
+                ));
             }
             Err(e) => {
                 warn!("IPC TCP accept error: {e}");
@@ -117,6 +135,7 @@ async fn handle_connection<S>(
     stream: S,
     running: Arc<RwLock<Config>>,
     broadcast_tx: broadcast::Sender<Arc<Config>>,
+    config_path: Option<Arc<PathBuf>>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -169,6 +188,23 @@ async fn handle_connection<S>(
                     Some(Ok(Request::Unsubscribe)) => {
                         if let Some(h) = sub_task.take() { h.abort(); }
                         debug!("IPC client unsubscribed");
+                    }
+                    Some(Ok(Request::Save)) => {
+                        let event = match &config_path {
+                            Some(path) => {
+                                let cfg = running.read().await.clone();
+                                match crate::persistence::save_to_disk(&cfg, path) {
+                                    Ok(()) => Event::Saved,
+                                    Err(e) => Event::Error(e.to_string()),
+                                }
+                            }
+                            None => Event::Error(
+                                "config persistence is not configured on this daemon (no --config-file set)".to_string(),
+                            ),
+                        };
+                        if writer.send(event).await.is_err() {
+                            break;
+                        }
                     }
                     Some(Err(e)) => {
                         warn!("IPC read error: {e}");

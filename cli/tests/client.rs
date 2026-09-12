@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 
 use futures::{SinkExt, StreamExt};
-use nos_cli::client::{fetch_running_config, ClientError};
+use nos_cli::client::{fetch_running_config, save_running_config, ClientError};
 use nos_proto::{BgpInstance, Config, Event, IpcCodec, Request};
 use tokio::net::UnixListener;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -24,6 +24,17 @@ async fn serve_once(listener: UnixListener, reply: Event) {
     let mut writer = FramedWrite::new(w, IpcCodec::<Event>::default());
 
     assert!(matches!(reader.next().await, Some(Ok(Request::Get))));
+    writer.send(reply).await.unwrap();
+}
+
+/// Accepts a single connection, reads one `Request::Save`, and replies with the given `Event`.
+async fn serve_save_once(listener: UnixListener, reply: Event) {
+    let (stream, _) = listener.accept().await.unwrap();
+    let (r, w) = stream.into_split();
+    let mut reader = FramedRead::new(r, IpcCodec::<Request>::default());
+    let mut writer = FramedWrite::new(w, IpcCodec::<Event>::default());
+
+    assert!(matches!(reader.next().await, Some(Ok(Request::Save))));
     writer.send(reply).await.unwrap();
 }
 
@@ -61,5 +72,44 @@ async fn returns_connect_error_for_missing_socket() {
     let path = tmp.path().join("does-not-exist.sock");
 
     let err = fetch_running_config(&path).await.unwrap_err();
+    assert!(matches!(err, ClientError::Connect { .. }));
+}
+
+#[tokio::test]
+async fn save_returns_ok_on_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let server = tokio::spawn(serve_save_once(listener, Event::Saved));
+
+    save_running_config(&path).await.unwrap();
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn save_returns_daemon_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let server = tokio::spawn(serve_save_once(
+        listener,
+        Event::Error("disk full".to_string()),
+    ));
+
+    let err = save_running_config(&path).await.unwrap_err();
+    assert!(matches!(err, ClientError::Daemon(msg) if msg == "disk full"));
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn save_returns_connect_error_for_missing_socket() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("does-not-exist.sock");
+
+    let err = save_running_config(&path).await.unwrap_err();
     assert!(matches!(err, ClientError::Connect { .. }));
 }

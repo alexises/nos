@@ -61,10 +61,12 @@ Client → Server:
   Request::Get          one-shot read of the current running config
   Request::Subscribe    receive current snapshot + all future commits
   Request::Unsubscribe  stop receiving updates (connection stays open)
+  Request::Save         persist the current running config to disk
 
 Server → Client:
   Event::Config(Config) config snapshot (initial + on every commit)
   Event::Error(String)  error from the daemon
+  Event::Saved          confirms the running config was persisted (reply to Save)
 ```
 
 ### Config plane vs data plane

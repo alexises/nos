@@ -12,7 +12,7 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 |--------|------|
 | `main.rs` | Arg parsing (`--config-socket`), the reedline REPL loop, command dispatch |
 | `command.rs` | `Command::parse(&str) -> Command` — pure parsing, no I/O |
-| `client.rs` | `fetch_running_config(&Path) -> Result<Config, ClientError>` — one-shot IPC call to `nos-configd` |
+| `client.rs` | `fetch_running_config(&Path) -> Result<Config, ClientError>`, `save_running_config(&Path) -> Result<(), ClientError>` — one-shot IPC calls to `nos-configd` |
 | `format.rs` | `render_config(&Config) -> String` — human-readable rendering (`Config`/`BgpInstance` only derive `Debug`, no `Display`) |
 
 ## Commands
@@ -20,6 +20,7 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | Command | Behavior |
 |---------|----------|
 | `show config` | Sends `Request::Get` to `nos-configd`, prints the returned config |
+| `save` | Sends `Request::Save` to `nos-configd`; persists the running config to disk |
 | `help` | Lists available commands |
 | `exit` / `quit` | Exits the shell |
 
@@ -27,6 +28,6 @@ Not yet implemented: `configure`, `set`, `delete`, `commit`, or any other comman
 
 ## Connection behavior
 
-Each `show config` invocation dials the daemon fresh (`UnixStream::connect` → split → `FramedRead<Event>`/`FramedWrite<Request>` → `Request::Get` → single `Event::Config`/`Event::Error` reply → connection dropped). No persistent connection is held across commands — revisit only if a `Subscribe`-based live command is added.
+Each command dials the daemon fresh (`UnixStream::connect` → split → `FramedRead<Event>`/`FramedWrite<Request>` → one `Request` → single `Event` reply → connection dropped). No persistent connection is held across commands — revisit only if a `Subscribe`-based live command is added.
 
 Default socket path is `/run/nos/config.sock`, overridable via `--config-socket <path>`.

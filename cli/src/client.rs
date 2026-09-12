@@ -39,6 +39,35 @@ pub async fn fetch_running_config(socket_path: &Path) -> Result<Config, ClientEr
     match reader.next().await {
         Some(Ok(Event::Config(cfg))) => Ok(cfg),
         Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
+        Some(Ok(Event::Saved)) => Err(ClientError::Daemon(
+            "unexpected Saved event in reply to Get".to_string(),
+        )),
+        Some(Err(e)) => Err(ClientError::Io(e)),
+        None => Err(ClientError::ConnectionClosed),
+    }
+}
+
+/// Dials the daemon, sends a one-shot `Request::Save`, and waits for
+/// confirmation that the running config was persisted to disk.
+pub async fn save_running_config(socket_path: &Path) -> Result<(), ClientError> {
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .map_err(|source| ClientError::Connect {
+            path: socket_path.to_path_buf(),
+            source,
+        })?;
+    let (r, w) = stream.into_split();
+    let mut reader = FramedRead::new(r, IpcCodec::<Event>::default());
+    let mut writer = FramedWrite::new(w, IpcCodec::<Request>::default());
+
+    writer.send(Request::Save).await?;
+
+    match reader.next().await {
+        Some(Ok(Event::Saved)) => Ok(()),
+        Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
+        Some(Ok(Event::Config(_))) => Err(ClientError::Daemon(
+            "unexpected Config event in reply to Save".to_string(),
+        )),
         Some(Err(e)) => Err(ClientError::Io(e)),
         None => Err(ClientError::ConnectionClosed),
     }

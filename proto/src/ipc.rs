@@ -11,6 +11,9 @@ pub enum Request {
     Subscribe,
     /// Stop streaming updates (connection stays open for further requests).
     Unsubscribe,
+    /// Persist the current running config to disk at the daemon's configured
+    /// config-file path.
+    Save,
 }
 
 /// Messages sent from the config daemon to a component client.
@@ -21,4 +24,6 @@ pub enum Event {
     Config(Config),
     /// A human-readable error message from the daemon.
     Error(String),
+    /// The running config was successfully persisted to disk, in reply to `Save`.
+    Saved,
 }

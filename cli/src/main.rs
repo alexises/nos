@@ -56,6 +56,10 @@ async fn main() -> anyhow::Result<()> {
                         Err(e) => eprintln!("error: {e}"),
                     }
                 }
+                Command::Save => match client::save_running_config(&args.config_socket).await {
+                    Ok(()) => println!("configuration saved"),
+                    Err(e) => eprintln!("error: {e}"),
+                },
                 Command::Help => print_help(),
                 Command::Exit => break,
                 Command::Unknown(cmd) => {
@@ -77,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
 fn print_help() {
     println!("Available commands:");
     println!("  show config   Print the running configuration from nos-configd");
+    println!("  save          Persist the running configuration to disk");
     println!("  help          Show this help message");
     println!("  exit, quit    Exit the shell");
 }

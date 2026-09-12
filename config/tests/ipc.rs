@@ -42,7 +42,7 @@ async fn get_returns_current_config() {
         .push(instance("default", 65000));
     store.commit().await.unwrap();
     let _srv = store
-        .start_ipc_server(&ListenAddr::Unix(path.clone()))
+        .start_ipc_server(&ListenAddr::Unix(path.clone()), None)
         .unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
@@ -55,6 +55,7 @@ async fn get_returns_current_config() {
             assert_eq!(c.bgp_instances[0].name, "default");
         }
         Event::Error(_) => panic!("expected Config event"),
+        Event::Saved => panic!("unexpected Saved event"),
     }
 }
 
@@ -65,7 +66,7 @@ async fn subscribe_receives_initial_snapshot_then_updates() {
 
     let mut store = ConfigStore::new(Config::default());
     let _srv = store
-        .start_ipc_server(&ListenAddr::Unix(path.clone()))
+        .start_ipc_server(&ListenAddr::Unix(path.clone()), None)
         .unwrap();
 
     // Give the accept loop a moment to be ready.
@@ -91,6 +92,7 @@ async fn subscribe_receives_initial_snapshot_then_updates() {
     match event {
         Event::Config(c) => assert_eq!(c.bgp_instances[0].name, "vrf-a"),
         Event::Error(_) => panic!("expected Config event"),
+        Event::Saved => panic!("unexpected Saved event"),
     }
 }
 
@@ -101,7 +103,7 @@ async fn unsubscribe_stops_updates() {
 
     let mut store = ConfigStore::new(Config::default());
     let _srv = store
-        .start_ipc_server(&ListenAddr::Unix(path.clone()))
+        .start_ipc_server(&ListenAddr::Unix(path.clone()), None)
         .unwrap();
     tokio::time::sleep(Duration::from_millis(10)).await;
 
@@ -129,4 +131,52 @@ async fn unsubscribe_stops_updates() {
         result.is_err(),
         "expected timeout, but received an event after Unsubscribe"
     );
+}
+
+#[tokio::test]
+async fn save_persists_running_config_to_disk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock_path = tmp.path().join("config.sock");
+    let config_path = tmp.path().join("config.yaml");
+
+    let mut store = ConfigStore::new(Config::default());
+    store
+        .edit_candidate()
+        .await
+        .bgp_instances
+        .push(instance("default", 65000));
+    store.commit().await.unwrap();
+    let _srv = store
+        .start_ipc_server(
+            &ListenAddr::Unix(sock_path.clone()),
+            Some(config_path.clone()),
+        )
+        .unwrap();
+
+    let (mut reader, mut writer) = connect(&sock_path).await;
+    writer.send(Request::Save).await.unwrap();
+
+    let event = reader.next().await.unwrap().unwrap();
+    assert!(matches!(event, Event::Saved));
+
+    let saved = nos_config::persistence::load_or_default(&config_path).unwrap();
+    assert_eq!(saved.bgp_instances.len(), 1);
+    assert_eq!(saved.bgp_instances[0].name, "default");
+}
+
+#[tokio::test]
+async fn save_without_configured_path_returns_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock_path = tmp.path().join("config.sock");
+
+    let store = ConfigStore::new(Config::default());
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(sock_path.clone()), None)
+        .unwrap();
+
+    let (mut reader, mut writer) = connect(&sock_path).await;
+    writer.send(Request::Save).await.unwrap();
+
+    let event = reader.next().await.unwrap().unwrap();
+    assert!(matches!(event, Event::Error(_)));
 }

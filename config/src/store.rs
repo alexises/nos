@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use garde::Validate as _;
@@ -58,12 +59,21 @@ impl ConfigStore {
 
     /// Binds the given address and starts the IPC server in the background.
     ///
+    /// `config_path`, when set, is where a `Request::Save` persists the
+    /// running config to disk. If unset, `Request::Save` replies with an error.
+    ///
     /// Returns a `JoinHandle` — keep it alive for the server to continue running.
     pub fn start_ipc_server(
         &self,
         addr: &crate::server::ListenAddr,
+        config_path: Option<PathBuf>,
     ) -> std::io::Result<tokio::task::JoinHandle<()>> {
-        crate::server::start(addr, Arc::clone(&self.running), self.tx.clone())
+        crate::server::start(
+            addr,
+            Arc::clone(&self.running),
+            self.tx.clone(),
+            config_path.map(Arc::new),
+        )
     }
 }
 

@@ -2,6 +2,7 @@
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     ShowConfig,
+    Save,
     Help,
     Exit,
     Empty,
@@ -14,6 +15,7 @@ impl Command {
         match trimmed.split_whitespace().collect::<Vec<_>>().as_slice() {
             [] => Command::Empty,
             ["show", "config"] => Command::ShowConfig,
+            ["save"] => Command::Save,
             ["help"] => Command::Help,
             ["exit" | "quit"] => Command::Exit,
             _ => Command::Unknown(trimmed.to_string()),
@@ -33,6 +35,11 @@ mod tests {
     #[test]
     fn show_config_extra_whitespace() {
         assert_eq!(Command::parse("  show   config  "), Command::ShowConfig);
+    }
+
+    #[test]
+    fn save() {
+        assert_eq!(Command::parse("save"), Command::Save);
     }
 
     #[test]
