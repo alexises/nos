@@ -103,8 +103,10 @@ Containerized test environment:
 ```bash
 make docker-build                        # build the nos-configd/nos Docker image
 docker compose up -d configd             # run the daemon in a container
-docker compose exec configd nos          # interactive shell against the containerized daemon
+docker compose run --rm cli              # interactive shell, as its own container, sharing configd's socket
 ```
+
+`configd` and `cli` share the same image and an `nos-run` volume mounted at `/run/nos`, so `cli` reaches the daemon over the same Unix socket path both binaries default to. `configd` also gets an `nos-data` volume at `/var/lib/nos` so `save`d config survives container restarts. `docker compose exec configd nos` still works too — it just runs the shell inside the daemon's own container instead of a separate one.
 
 Or run the underlying commands directly:
 

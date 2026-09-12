@@ -15,8 +15,8 @@ FROM debian:bookworm-slim AS runtime
 
 RUN groupadd --system nos \
     && useradd --system --gid nos --no-create-home --home-dir /nonexistent nos \
-    && mkdir -p /run/nos \
-    && chown nos:nos /run/nos
+    && mkdir -p /run/nos /var/lib/nos \
+    && chown nos:nos /run/nos /var/lib/nos
 
 COPY --from=builder /app/target/release/nos-configd /usr/local/bin/nos-configd
 COPY --from=builder /app/target/release/nos /usr/local/bin/nos

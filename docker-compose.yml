@@ -1,7 +1,27 @@
+x-nos-image: &nos-image
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: nos:local
+
 services:
   configd:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: nos:local
+    <<: *nos-image
     container_name: nos-configd
+    volumes:
+      - nos-run:/run/nos
+      - nos-data:/var/lib/nos
+
+  cli:
+    <<: *nos-image
+    entrypoint: ["nos"]
+    depends_on:
+      - configd
+    volumes:
+      - nos-run:/run/nos
+    stdin_open: true
+    tty: true
+
+volumes:
+  nos-run:
+  nos-data:
