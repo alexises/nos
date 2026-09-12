@@ -1,0 +1,7 @@
+services:
+  configd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nos:local
+    container_name: nos-configd

@@ -1,8 +1,10 @@
 .DEFAULT_GOAL := help
 export RUSTFLAGS ?= -D warnings
 
+IMAGE ?= nos:local
+
 .PHONY: help build fmt fmt-fix clippy clippy-fix fix test test-plain \
-        deny audit geiger miri mutants check ci tools
+        deny audit geiger miri mutants check ci tools docker-lint docker-build
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -59,3 +61,10 @@ ci: check deny audit geiger ## Everything check does, plus deny/audit/geiger (sk
 
 tools: ## Install optional cargo subcommands used by deny/audit/geiger/mutants/test targets
 	cargo install --locked cargo-nextest cargo-deny cargo-audit cargo-geiger cargo-mutants
+
+docker-lint: ## Lint the Dockerfile with hadolint
+	@command -v hadolint >/dev/null 2>&1 || { echo "hadolint not found — install it (already available in this env)"; exit 1; }
+	hadolint Dockerfile
+
+docker-build: docker-lint ## Lint, then build the nos Docker image (nos-configd + nos)
+	docker build -t $(IMAGE) .

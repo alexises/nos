@@ -86,6 +86,14 @@ make fix     # auto-fix formatting and clippy-fixable lints
 make help    # list all available targets
 ```
 
+Containerized test environment:
+
+```bash
+make docker-build                        # build the nos-configd/nos Docker image
+docker compose up -d configd             # run the daemon in a container
+docker compose exec configd nos          # interactive shell against the containerized daemon
+```
+
 Or run the underlying commands directly:
 
 ```bash
