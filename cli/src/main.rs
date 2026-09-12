@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{self, Write as _};
+use std::io::{self, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -355,6 +355,10 @@ async fn handle_action(
         }
         Resolved::Commit => Outcome::Continue(commit(mode, socket).await),
         Resolved::Discard => Outcome::Continue(discard(mode, socket).await),
+        Resolved::Diff => {
+            diff(&mode, socket).await;
+            Outcome::Continue(mode)
+        }
         Resolved::Error(msg) => {
             eprintln!("error: {msg}");
             Outcome::Continue(mode)
@@ -446,6 +450,22 @@ async fn show_transaction(mode: &Mode, socket: &Path) {
     let path = current_path(mode);
     match client::get_transaction(socket, &transaction).await {
         Ok(snap) => println!("{}", format::render_transaction(&snap, &path)),
+        Err(e) => eprintln!("error: {e}"),
+    }
+}
+
+/// Whether to emit ANSI color/highlight codes for `diff`: only when stdout
+/// is an actual terminal, and never when `NO_COLOR` is set (the informal
+/// but widely-honored convention — <https://no-color.org>).
+fn use_color() -> bool {
+    io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+async fn diff(mode: &Mode, socket: &Path) {
+    let transaction = current_transaction(mode);
+    match client::diff_transaction(socket, &transaction).await {
+        Ok(d) if d.is_empty() => println!("no changes"),
+        Ok(d) => println!("{}", format::render_diff(&d, use_color())),
         Err(e) => eprintln!("error: {e}"),
     }
 }

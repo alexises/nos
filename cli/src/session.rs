@@ -56,6 +56,8 @@ pub enum Resolved {
     },
     Commit,
     Discard,
+    /// `diff` — fetch and render the transaction's diff against running.
+    Diff,
     Error(String),
 }
 
@@ -169,6 +171,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
 
         Command::Commit => Resolved::Commit,
         Command::Discard => Resolved::Discard,
+        Command::Diff => Resolved::Diff,
 
         Command::Configure { .. }
         | Command::Empty
@@ -506,6 +509,18 @@ mod tests {
         assert_eq!(
             resolve(&config_mode("t1", Path::Root, true), Command::Discard),
             Resolved::Discard
+        );
+    }
+
+    #[test]
+    fn diff_requires_configuration_mode() {
+        assert!(matches!(
+            resolve(&Mode::Operational, Command::Diff),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(&config_mode("t1", Path::Root, false), Command::Diff),
+            Resolved::Diff
         );
     }
 

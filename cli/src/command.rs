@@ -60,6 +60,8 @@ pub enum Command {
     Commit,
     /// `discard` | `abort`
     Discard,
+    /// `diff` — only meaningful in configuration mode.
+    Diff,
     Empty,
     Unknown(String),
 }
@@ -76,6 +78,7 @@ impl Command {
             ["exit" | "quit" | "end"] => Command::Exit,
             ["commit"] => Command::Commit,
             ["discard" | "abort"] => Command::Discard,
+            ["diff"] => Command::Diff,
             ["up"] => Command::Up,
             ["top"] => Command::Top,
             ["configure", name] => Command::Configure {
@@ -179,6 +182,11 @@ mod tests {
     fn discard_and_abort() {
         assert_eq!(Command::parse("discard"), Command::Discard);
         assert_eq!(Command::parse("abort"), Command::Discard);
+    }
+
+    #[test]
+    fn diff() {
+        assert_eq!(Command::parse("diff"), Command::Diff);
     }
 
     #[test]

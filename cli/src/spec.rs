@@ -259,6 +259,12 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         doc: Doc::FromConfig(Topic::DiscardTransaction),
         availability: Availability::Configuration,
     },
+    CommandSpec {
+        tokens: &[Token::Literal("diff")],
+        usage: "diff",
+        doc: Doc::FromConfig(Topic::DiffTransaction),
+        availability: Availability::Configuration,
+    },
 ];
 
 #[cfg(test)]

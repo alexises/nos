@@ -47,6 +47,12 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              running config is never affected by a discard — only a successful commit \
              changes it.",
         ),
+        Topic::DiffTransaction => (
+            "Show what a transaction changes relative to the running config.",
+            "Compares the transaction's in-progress config against the current running \
+             config and returns only what differs: fields added, removed, or changed. \
+             Runs no validation — an invalid in-progress config can still be diffed.",
+        ),
         Topic::EnsureBgpInstance => (
             "Create a BGP instance in the transaction if it doesn't already exist.",
             "Adds a new BGP instance with the given name to the transaction's in-progress \
@@ -102,6 +108,7 @@ mod tests {
         Topic::GetTransaction,
         Topic::CommitTransaction,
         Topic::DiscardTransaction,
+        Topic::DiffTransaction,
         Topic::EnsureBgpInstance,
         Topic::SetBgpInstanceAsn,
         Topic::SetBgpInstanceRouterId,

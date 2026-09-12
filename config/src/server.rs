@@ -133,6 +133,10 @@ async fn dispatch_request(store: &ConfigStore, req: Request) -> Option<Event> {
             Err(e) => Event::Error(e.to_string()),
         },
         Request::Describe { topic } => Event::Description(crate::docs::command_doc(topic)),
+        Request::DiffTransaction { name } => match store.diff_transaction(&name).await {
+            Ok(diff) => Event::Diff(diff),
+            Err(e) => Event::Error(e.to_string()),
+        },
         Request::Subscribe | Request::Unsubscribe => return None,
     })
 }

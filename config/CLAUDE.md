@@ -5,7 +5,7 @@ Owns the running configuration and exposes it to all component processes via a U
 ## Responsibilities
 
 - **Config store**: named, server-held transactions (each an independent in-progress `Config`) plus the running config, with atomic commit and garde-based validation.
-- **IPC server**: accepts connections from component processes, handles `Get`, `Subscribe`/`Unsubscribe`, `Save`, and the transaction lifecycle requests (`OpenTransaction`, `ApplyOp`, `GetTransaction`, `CommitTransaction`, `DiscardTransaction`).
+- **IPC server**: accepts connections from component processes, handles `Get`, `Subscribe`/`Unsubscribe`, `Save`, and the transaction lifecycle requests (`OpenTransaction`, `ApplyOp`, `GetTransaction`, `CommitTransaction`, `DiscardTransaction`, `DiffTransaction`).
 - **Change propagation**: broadcasts committed configs (whether from `Save`-adjacent tooling or a transaction commit) to all subscribed connections.
 - **Persistence**: loads the running config from disk at startup and writes it back out on `Save`.
 
@@ -36,6 +36,7 @@ store.apply_op(name, op).await                  // Result<TransactionSnapshot, C
 store.get_transaction(name).await               // Result<TransactionSnapshot, ConfigError>
 store.commit_transaction(name).await            // validate → promote to running → broadcast → remove transaction
 store.discard_transaction(name).await           // remove transaction without touching running
+store.diff_transaction(name).await              // Result<ConfigDiff, ConfigError> — running vs. transaction, no validation
 
 store.start_ipc_server(&addr)                   // bind socket, start accept loop
 ```
@@ -49,7 +50,7 @@ Lock ordering: always lock `transactions` before `running` to avoid deadlock.
 - `Request::Subscribe` → send snapshot, then spawn a forwarder task that bridges `broadcast::Receiver` → `mpsc::Sender`. The select loop drains the `mpsc::Receiver` and forwards `Event::Config` to the client.
 - `Request::Unsubscribe` → abort the forwarder task.
 - `Request::Save` → serializes the running config as YAML and atomically writes it to the daemon's `--config-file` path; replies `Event::Saved` on success, `Event::Error` if no `--config-file` was configured or the write fails.
-- `Request::OpenTransaction`/`ApplyOp`/`GetTransaction`/`CommitTransaction`/`DiscardTransaction` → thin calls into the matching `ConfigStore` method (see `dispatch_request` in `server.rs`), replying `Event::Transaction`/`Event::Committed`/`Event::Discarded`/`Event::Error`.
+- `Request::OpenTransaction`/`ApplyOp`/`GetTransaction`/`CommitTransaction`/`DiscardTransaction`/`DiffTransaction` → thin calls into the matching `ConfigStore` method (see `dispatch_request` in `server.rs`), replying `Event::Transaction`/`Event::Committed`/`Event::Discarded`/`Event::Diff`/`Event::Error`.
 - Connection drop → forwarder task is aborted, connection task exits. **Transactions have no lifecycle tie to connections** — they live purely in `ConfigStore`, keyed by name, so a dropped connection never loses or discards one; only an explicit `DiscardTransaction` does.
 
 ## Socket path convention

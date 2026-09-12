@@ -1,4 +1,4 @@
-use nos_proto::{BgpInstance, Config, TransactionSnapshot};
+use nos_proto::{BgpInstance, Config, ConfigDiff, DiffStatus, FieldDiff, TransactionSnapshot};
 
 use crate::session::Path;
 
@@ -46,11 +46,145 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
     }
 }
 
+// ANSI SGR codes for `render_diff`. Hand-rolled rather than pulling in a
+// color crate — this is the only place in `nos-cli` that needs color, and
+// keeping the base color active while toggling bold/underline (via `22;24`,
+// which turns those off without a full reset) lets a diff line's word-level
+// highlight nest inside its red/green without ever losing that color.
+const RED: &str = "\x1b[31m";
+const GREEN: &str = "\x1b[32m";
+const EMPH_ON: &str = "\x1b[1;4m";
+const EMPH_OFF: &str = "\x1b[22;24m";
+const RESET: &str = "\x1b[0m";
+
+/// Renders the structural difference between the running config and a
+/// transaction's in-progress config, computed server-side by `nos-config`
+/// (see `nos_proto::diff_configs`). `nos-cli`'s only job here is turning
+/// that structured diff into colored, highlighted terminal text — with just
+/// enough unmodified context (an unstyled section header) that a changed
+/// field can always be traced back to the section it lives in.
+pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
+    let mut lines = Vec::new();
+
+    if let Some(field) = &diff.hostname {
+        render_field_diff(&mut lines, field, "", color);
+    }
+
+    for section in &diff.bgp_instances {
+        let header = format!("{}:", section.header);
+        match section.status {
+            // The section itself didn't change — only shown so a reader can
+            // tell which section its changed fields (below) belong to.
+            DiffStatus::Modified => lines.push(context_line(&header)),
+            DiffStatus::Added => lines.push(added_line(&header, color)),
+            DiffStatus::Removed => lines.push(removed_line(&header, color)),
+        }
+        for field in &section.fields {
+            render_field_diff(&mut lines, field, "  ", color);
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn render_field_diff(lines: &mut Vec<String>, field: &FieldDiff, indent: &str, color: bool) {
+    match (&field.old, &field.new) {
+        (Some(old), Some(new)) => {
+            let (old_h, new_h) = highlight(old, new, color);
+            lines.push(removed_line(
+                &format!("{indent}{}: {old_h}", field.label),
+                color,
+            ));
+            lines.push(added_line(
+                &format!("{indent}{}: {new_h}", field.label),
+                color,
+            ));
+        }
+        (None, Some(new)) => {
+            lines.push(added_line(
+                &format!("{indent}{}: {new}", field.label),
+                color,
+            ));
+        }
+        (Some(old), None) => {
+            lines.push(removed_line(
+                &format!("{indent}{}: {old}", field.label),
+                color,
+            ));
+        }
+        (None, None) => {}
+    }
+}
+
+fn context_line(text: &str) -> String {
+    format!("  {text}")
+}
+
+fn added_line(text: &str, color: bool) -> String {
+    styled_line('+', GREEN, text, color)
+}
+
+fn removed_line(text: &str, color: bool) -> String {
+    styled_line('-', RED, text, color)
+}
+
+fn styled_line(marker: char, code: &str, text: &str, color: bool) -> String {
+    if color {
+        format!("{marker} {code}{text}{RESET}")
+    } else {
+        format!("{marker} {text}")
+    }
+}
+
+/// Highlights only the substring that actually differs between `old` and
+/// `new` (a simple common-prefix/common-suffix split, not a full LCS/Myers
+/// diff — config field values are short atomic strings like hostnames,
+/// ASNs, and IPs, not prose). Returns plain, unmarked strings when `color`
+/// is off.
+fn highlight(old: &str, new: &str, color: bool) -> (String, String) {
+    if !color {
+        return (old.to_string(), new.to_string());
+    }
+    let old_chars: Vec<char> = old.chars().collect();
+    let new_chars: Vec<char> = new.chars().collect();
+    let (prefix, suffix) = common_affixes(&old_chars, &new_chars);
+    (
+        emphasize_middle(&old_chars, prefix, suffix),
+        emphasize_middle(&new_chars, prefix, suffix),
+    )
+}
+
+/// Common prefix/suffix character counts between `a` and `b`, capped so
+/// they never overlap.
+fn common_affixes(a: &[char], b: &[char]) -> (usize, usize) {
+    let limit = a.len().min(b.len());
+    let prefix = a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count();
+    let max_suffix = a
+        .iter()
+        .rev()
+        .zip(b.iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    let suffix = max_suffix.min(limit - prefix);
+    (prefix, suffix)
+}
+
+fn emphasize_middle(chars: &[char], prefix: usize, suffix: usize) -> String {
+    let end = chars.len() - suffix;
+    let head: String = chars[..prefix].iter().collect();
+    let mid: String = chars[prefix..end].iter().collect();
+    let tail: String = chars[end..].iter().collect();
+    if mid.is_empty() {
+        return format!("{head}{tail}");
+    }
+    format!("{head}{EMPH_ON}{mid}{EMPH_OFF}{tail}")
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
 
-    use nos_proto::BgpInstance;
+    use nos_proto::{BgpInstance, SectionDiff};
 
     use super::*;
 
@@ -133,5 +267,97 @@ mod tests {
     fn render_transaction_at_bgp_instance_not_found() {
         let rendered = render_transaction(&snapshot(false), &Path::BgpInstance("r2".to_string()));
         assert_eq!(rendered, "bgp instance 'r2' not found");
+    }
+
+    fn field(label: &str, old: Option<&str>, new: Option<&str>) -> FieldDiff {
+        FieldDiff {
+            label: label.to_string(),
+            old: old.map(str::to_string),
+            new: new.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn render_diff_hostname_change_no_color() {
+        let diff = ConfigDiff {
+            hostname: Some(field("hostname", Some("router-a"), Some("router-b"))),
+            bgp_instances: vec![],
+        };
+        assert_eq!(
+            render_diff(&diff, false),
+            "- hostname: router-a\n+ hostname: router-b"
+        );
+    }
+
+    #[test]
+    fn render_diff_modified_section_shows_unstyled_header_as_context() {
+        let diff = ConfigDiff {
+            hostname: None,
+            bgp_instances: vec![SectionDiff {
+                header: "bgp instance r1".to_string(),
+                status: DiffStatus::Modified,
+                fields: vec![field("asn", Some("65000"), Some("65001"))],
+            }],
+        };
+        assert_eq!(
+            render_diff(&diff, false),
+            "  bgp instance r1:\n-   asn: 65000\n+   asn: 65001"
+        );
+    }
+
+    #[test]
+    fn render_diff_added_section_marks_every_line() {
+        let diff = ConfigDiff {
+            hostname: None,
+            bgp_instances: vec![SectionDiff {
+                header: "bgp instance r1".to_string(),
+                status: DiffStatus::Added,
+                fields: vec![
+                    field("router-id", None, Some("1.1.1.1")),
+                    field("asn", None, Some("65000")),
+                ],
+            }],
+        };
+        assert_eq!(
+            render_diff(&diff, false),
+            "+ bgp instance r1:\n+   router-id: 1.1.1.1\n+   asn: 65000"
+        );
+    }
+
+    #[test]
+    fn render_diff_removed_section_marks_every_line() {
+        let diff = ConfigDiff {
+            hostname: None,
+            bgp_instances: vec![SectionDiff {
+                header: "bgp instance r1".to_string(),
+                status: DiffStatus::Removed,
+                fields: vec![field("asn", Some("65000"), None)],
+            }],
+        };
+        assert_eq!(
+            render_diff(&diff, false),
+            "- bgp instance r1:\n-   asn: 65000"
+        );
+    }
+
+    #[test]
+    fn highlight_marks_only_differing_middle() {
+        let (old, new) = highlight("65000", "65001", true);
+        assert_eq!(old, format!("6500{EMPH_ON}0{EMPH_OFF}"));
+        assert_eq!(new, format!("6500{EMPH_ON}1{EMPH_OFF}"));
+    }
+
+    #[test]
+    fn highlight_handles_pure_suffix_addition() {
+        let (old, new) = highlight("ab", "abc", true);
+        assert_eq!(old, "ab");
+        assert_eq!(new, format!("ab{EMPH_ON}c{EMPH_OFF}"));
+    }
+
+    #[test]
+    fn highlight_without_color_is_plain() {
+        let (old, new) = highlight("65000", "65001", false);
+        assert_eq!(old, "65000");
+        assert_eq!(new, "65001");
     }
 }

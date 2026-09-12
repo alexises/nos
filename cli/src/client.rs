@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
 use nos_proto::{
-    CommandDoc, Config, ConfigOp, Event, IpcCodec, Request, Topic, TransactionBase,
+    CommandDoc, Config, ConfigDiff, ConfigOp, Event, IpcCodec, Request, Topic, TransactionBase,
     TransactionSnapshot,
 };
 use thiserror::Error;
@@ -178,6 +178,26 @@ pub async fn describe(socket_path: &Path, topic: Topic) -> Result<CommandDoc, Cl
         Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
         Some(Ok(_)) => Err(ClientError::Daemon(
             "unexpected event in reply to Describe".to_string(),
+        )),
+        Some(Err(e)) => Err(ClientError::Io(e)),
+        None => Err(ClientError::ConnectionClosed),
+    }
+}
+
+/// Fetches the structural difference between the running config and a named
+/// transaction's in-progress config.
+pub async fn diff_transaction(socket_path: &Path, name: &str) -> Result<ConfigDiff, ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
+    writer
+        .send(Request::DiffTransaction {
+            name: name.to_string(),
+        })
+        .await?;
+    match reader.next().await {
+        Some(Ok(Event::Diff(diff))) => Ok(diff),
+        Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
+        Some(Ok(_)) => Err(ClientError::Daemon(
+            "unexpected event in reply to DiffTransaction".to_string(),
         )),
         Some(Err(e)) => Err(ClientError::Io(e)),
         None => Err(ClientError::ConnectionClosed),

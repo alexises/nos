@@ -16,8 +16,8 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `spec.rs` | `COMMAND_SPECS` — the CLI's own grammar table (token syntax + which `Mode`/`Path` each command is valid in). Owns *syntax* only; see "Help, `?`, and Tab-completion" for where the descriptive text comes from |
 | `completer.rs` | `NosCompleter` — a `reedline::Completer` driven by `spec::COMMAND_SPECS`, shared by Tab-completion and the live `?` key |
 | `help_menu.rs` | `HelpMenu` — the `reedline::Menu` backing the live `?` key (brief vs. detailed views) |
-| `client.rs` | One-shot IPC calls to `nos-configd`: `fetch_running_config`, `save_running_config`, `open_transaction`, `apply_op`, `get_transaction`, `commit_transaction`, `discard_transaction`, `describe` — plus `subscribe`, the one long-lived exception (see "Connection behavior") |
-| `format.rs` | `render_config`, `render_bgp_instance`, `render_transaction` — human-readable rendering (`Config`/`BgpInstance` only derive `Debug`, no `Display`) |
+| `client.rs` | One-shot IPC calls to `nos-configd`: `fetch_running_config`, `save_running_config`, `open_transaction`, `apply_op`, `get_transaction`, `commit_transaction`, `discard_transaction`, `diff_transaction`, `describe` — plus `subscribe`, the one long-lived exception (see "Connection behavior") |
+| `format.rs` | `render_config`, `render_bgp_instance`, `render_transaction`, `render_diff` — human-readable rendering (`Config`/`BgpInstance` only derive `Debug`, no `Display`). `render_diff` is also the one place that emits ANSI color/highlight codes, hand-rolled rather than via a color crate |
 
 ## Commands
 
@@ -33,6 +33,7 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `delete` / `delete bgp instance <name>` | Deletes the current instance (returns to the transaction root) or a named one |
 | `up` / `top` | Navigates back to the transaction root |
 | `show this` | Shows the transaction, or just the current BGP instance if navigated into one |
+| `diff` | Shows what the transaction changes relative to the running config — colored `+`/`-` lines, word-level highlighting of the changed portion of a value, and an unstyled section header shown as context wherever a field inside it changed |
 | `commit` | Validates and commits the transaction, replacing the running config and returning to operational mode; on validation failure the transaction stays open for another attempt |
 | `discard` / `abort` | Deletes the transaction without touching the running config |
 | `help` | Lists available commands |

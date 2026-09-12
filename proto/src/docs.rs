@@ -20,6 +20,8 @@ pub enum Topic {
     CommitTransaction,
     /// `Request::DiscardTransaction`
     DiscardTransaction,
+    /// `Request::DiffTransaction`
+    DiffTransaction,
     /// `ConfigOp::BgpInstance(BgpInstanceOp::Ensure)`
     EnsureBgpInstance,
     /// `ConfigOp::BgpInstance(BgpInstanceOp::SetAsn)`

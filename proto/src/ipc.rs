@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::diff::ConfigDiff;
 use crate::docs::{CommandDoc, Topic};
 use crate::ops::ConfigOp;
 use crate::schema::Config;
@@ -40,6 +41,9 @@ pub enum Request {
     /// single `Topic` rather than the whole catalog, so a client only ever
     /// pays for the docs it actually displays.
     Describe { topic: Topic },
+    /// One-shot: compute and return the structural difference between the
+    /// running config and a named transaction's in-progress config.
+    DiffTransaction { name: String },
 }
 
 /// Messages sent from the config daemon to a component client.
@@ -65,6 +69,9 @@ pub enum Event {
     Discarded,
     /// One operation's documentation, in reply to `Describe`.
     Description(CommandDoc),
+    /// The structural difference between the running config and a named
+    /// transaction's in-progress config, in reply to `DiffTransaction`.
+    Diff(ConfigDiff),
 }
 
 /// What a newly opened transaction's in-progress config should start from.

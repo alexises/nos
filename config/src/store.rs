@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use garde::Validate as _;
-use nos_proto::{Config, ConfigOp, TransactionBase, TransactionSnapshot};
+use nos_proto::{diff_configs, Config, ConfigDiff, ConfigOp, TransactionBase, TransactionSnapshot};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::error::ConfigError;
@@ -149,6 +149,22 @@ impl ConfigStore {
         // Ignore send errors — no active receivers is not a failure.
         let _ = self.0.tx.send(shared);
         Ok(())
+    }
+
+    /// Computes the structural difference between the running config and a
+    /// named transaction's in-progress config. Runs no validation — matches
+    /// `get_transaction`'s behavior, so an invalid in-progress config can
+    /// still be diffed.
+    pub async fn diff_transaction(&self, name: &str) -> Result<ConfigDiff, ConfigError> {
+        let txs = self.0.transactions.lock().await;
+        let candidate = txs
+            .get(name)
+            .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?
+            .config
+            .clone();
+        drop(txs);
+        let running = self.running_snapshot().await;
+        Ok(diff_configs(&running, &candidate))
     }
 
     /// Deletes a named transaction without touching the running config.
@@ -298,6 +314,32 @@ mod tests {
         let store = ConfigStore::new(Config::default(), None);
         assert!(matches!(
             store.commit_transaction("missing").await,
+            Err(ConfigError::TransactionNotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn diff_transaction_reports_changes_against_running() {
+        let store = ConfigStore::new(
+            Config {
+                bgp_instances: vec![instance("r1", 65000)],
+                ..Default::default()
+            },
+            None,
+        );
+        store.open_transaction("t1", TransactionBase::Current).await;
+        store.apply_op("t1", set_asn_op("r1", 65001)).await.unwrap();
+
+        let diff = store.diff_transaction("t1").await.unwrap();
+        assert_eq!(diff.bgp_instances.len(), 1);
+        assert_eq!(diff.bgp_instances[0].header, "bgp instance r1");
+    }
+
+    #[tokio::test]
+    async fn diff_transaction_missing_transaction_returns_error() {
+        let store = ConfigStore::new(Config::default(), None);
+        assert!(matches!(
+            store.diff_transaction("missing").await,
             Err(ConfigError::TransactionNotFound(_))
         ));
     }
