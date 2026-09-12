@@ -41,7 +41,7 @@ pub enum DeleteTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     ShowConfig,
-    /// Bare `show` — only meaningful in configuration mode.
+    /// `show this` — only meaningful in configuration mode.
     Show,
     Save,
     Help,
@@ -70,7 +70,7 @@ impl Command {
         match trimmed.split_whitespace().collect::<Vec<_>>().as_slice() {
             [] => Command::Empty,
             ["show", "config"] => Command::ShowConfig,
-            ["show"] => Command::Show,
+            ["show", "this"] => Command::Show,
             ["save"] => Command::Save,
             ["help"] => Command::Help,
             ["exit" | "quit" | "end"] => Command::Exit,
@@ -144,8 +144,13 @@ mod tests {
     }
 
     #[test]
-    fn bare_show() {
-        assert_eq!(Command::parse("show"), Command::Show);
+    fn show_this() {
+        assert_eq!(Command::parse("show this"), Command::Show);
+    }
+
+    #[test]
+    fn bare_show_is_unknown() {
+        assert_eq!(Command::parse("show"), Command::Unknown("show".to_string()));
     }
 
     #[test]

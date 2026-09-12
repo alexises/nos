@@ -41,7 +41,7 @@ pub enum Resolved {
     LeaveConfigPrompt,
     NavigateTop,
     ShowRunningConfig,
-    /// Bare `show` in configuration mode — fetch the transaction and render
+    /// `show this` in configuration mode — fetch the transaction and render
     /// it at the current path.
     ShowTransaction,
     SaveRunningConfig,
@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_show_requires_configuration_mode() {
+    fn show_this_requires_configuration_mode() {
         assert!(matches!(
             resolve(&Mode::Operational, Command::Show),
             Resolved::Error(_)

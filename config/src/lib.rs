@@ -1,3 +1,4 @@
+pub mod docs;
 pub mod error;
 pub mod persistence;
 pub mod server;

@@ -67,6 +67,7 @@ Client → Server:
   Request::GetTransaction      one-shot read of a named transaction's in-progress config
   Request::CommitTransaction   validate, promote to running, broadcast, and delete the transaction
   Request::DiscardTransaction  delete a named transaction without touching running config
+  Request::Describe            one-shot fetch of one operation's documentation, by Topic
 
 Server → Client:
   Event::Config(Config)             config snapshot (initial + on every commit, incl. via a transaction commit)
@@ -75,7 +76,10 @@ Server → Client:
   Event::Transaction(Snapshot)      a named transaction's current state (reply to Open/Apply/Get)
   Event::Committed                  confirms a transaction was committed
   Event::Discarded                  confirms a transaction was discarded
+  Event::Description(CommandDoc)    one operation's documentation (reply to Describe)
 ```
+
+`Describe`/`Description` exist so that command/operation documentation (what an operation does, in human terms) is authored once in `nos-config` and shared by every client, rather than duplicated per-client — see `nos-cli`'s `spec.rs`/`help_menu.rs` for the reference consumer. It's scoped to a single `Topic` per request (not a bulk catalog fetch) so a client only ever fetches the docs it actually displays.
 
 ### Named transactions
 

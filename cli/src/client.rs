@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{Config, ConfigOp, Event, IpcCodec, Request, TransactionBase, TransactionSnapshot};
+use nos_proto::{
+    CommandDoc, Config, ConfigOp, Event, IpcCodec, Request, Topic, TransactionBase,
+    TransactionSnapshot,
+};
 use thiserror::Error;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
@@ -158,6 +161,23 @@ pub async fn commit_transaction(socket_path: &Path, name: &str) -> Result<(), Cl
         Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
         Some(Ok(_)) => Err(ClientError::Daemon(
             "unexpected event in reply to CommitTransaction".to_string(),
+        )),
+        Some(Err(e)) => Err(ClientError::Io(e)),
+        None => Err(ClientError::ConnectionClosed),
+    }
+}
+
+/// Dials the daemon, sends a one-shot `Request::Describe` for a single
+/// topic, and returns its documentation.
+pub async fn describe(socket_path: &Path, topic: Topic) -> Result<CommandDoc, ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
+    writer.send(Request::Describe { topic }).await?;
+
+    match reader.next().await {
+        Some(Ok(Event::Description(doc))) => Ok(doc),
+        Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
+        Some(Ok(_)) => Err(ClientError::Daemon(
+            "unexpected event in reply to Describe".to_string(),
         )),
         Some(Err(e)) => Err(ClientError::Io(e)),
         None => Err(ClientError::ConnectionClosed),

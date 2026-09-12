@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use nos_config::{BgpInstance, Config, ConfigStore, ListenAddr};
-use nos_proto::{BgpInstanceOp, ConfigOp, Event, IpcCodec, Request, TransactionBase};
+use nos_proto::{BgpInstanceOp, ConfigOp, Event, IpcCodec, Request, Topic, TransactionBase};
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -658,5 +658,34 @@ async fn hostname_change_is_broadcast_to_all_subscribers() {
             .unwrap()
             .unwrap();
         assert!(matches!(update, Event::Config(c) if c.hostname == "router1"));
+    }
+}
+
+#[tokio::test]
+async fn describe_returns_the_requested_topics_doc() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+
+    let store = ConfigStore::new(Config::default(), None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()))
+        .unwrap();
+
+    let (mut reader, mut writer) = connect(&path).await;
+    writer
+        .send(Request::Describe {
+            topic: Topic::SetHostname,
+        })
+        .await
+        .unwrap();
+
+    let event = reader.next().await.unwrap().unwrap();
+    match event {
+        Event::Description(doc) => {
+            assert_eq!(doc.topic, Topic::SetHostname);
+            assert!(!doc.summary.is_empty());
+            assert!(!doc.detail.is_empty());
+        }
+        other => panic!("expected Description event, got {other:?}"),
     }
 }

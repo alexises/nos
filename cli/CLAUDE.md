@@ -4,16 +4,19 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 
 ## What lives here vs nos-proto / nos-config
 
-`nos-cli` depends only on `nos-proto` for wire types (`Config`, `Request`, `Event`, `IpcCodec`) — it does **not** depend on `nos-config` internals, matching the rule in the root `CLAUDE.md` that client components never depend on the config daemon directly. It dials the daemon's Unix socket the same way any future component client would.
+`nos-cli` depends only on `nos-proto` for wire types (`Config`, `Request`, `Event`, `IpcCodec`, `CommandDoc`, `Topic`) — it does **not** depend on `nos-config` internals, matching the rule in the root `CLAUDE.md` that client components never depend on the config daemon directly. It dials the daemon's Unix socket the same way any future component client would.
 
 ## Modules
 
 | Module | Role |
 |--------|------|
-| `main.rs` | Arg parsing (`--config-socket`), the reedline REPL loop, mode-aware prompt, dispatch of `session::Resolved` actions |
+| `main.rs` | Arg parsing (`--config-socket`), the reedline REPL loop (completer + menus + keybindings), mode-aware prompt, `DocCache`/`doc_for`/`doc_for_blocking`, dispatch of `session::Resolved` actions |
 | `command.rs` | `Command::parse(&str) -> Command` — pure parsing, no I/O, no mode awareness |
 | `session.rs` | `Mode` (`Operational` / `Configuration { transaction, path, dirty }`), `Path` (navigation position), and `resolve(&Mode, Command) -> Resolved` — the pure semantic layer mapping a command plus current mode to a concrete action |
-| `client.rs` | One-shot IPC calls to `nos-configd`: `fetch_running_config`, `save_running_config`, `open_transaction`, `apply_op`, `get_transaction`, `commit_transaction`, `discard_transaction` — plus `subscribe`, the one long-lived exception (see "Connection behavior") |
+| `spec.rs` | `COMMAND_SPECS` — the CLI's own grammar table (token syntax + which `Mode`/`Path` each command is valid in). Owns *syntax* only; see "Help, `?`, and Tab-completion" for where the descriptive text comes from |
+| `completer.rs` | `NosCompleter` — a `reedline::Completer` driven by `spec::COMMAND_SPECS`, shared by Tab-completion and the live `?` key |
+| `help_menu.rs` | `HelpMenu` — the `reedline::Menu` backing the live `?` key (brief vs. detailed views) |
+| `client.rs` | One-shot IPC calls to `nos-configd`: `fetch_running_config`, `save_running_config`, `open_transaction`, `apply_op`, `get_transaction`, `commit_transaction`, `discard_transaction`, `describe` — plus `subscribe`, the one long-lived exception (see "Connection behavior") |
 | `format.rs` | `render_config`, `render_bgp_instance`, `render_transaction` — human-readable rendering (`Config`/`BgpInstance` only derive `Debug`, no `Display`) |
 
 ## Commands
@@ -24,18 +27,30 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `save` | Sends `Request::Save` to `nos-configd`; persists the running config to disk (operational mode only) |
 | `configure <name> [from blank\|current]` | Enters configuration mode on a named transaction — creates it if new (default base: `current`), resumes it unchanged if it already exists |
 | `edit bgp instance <name>` | Creates the instance in the transaction if missing, then navigates into it |
-| `set asn <n>` / `set router-id <ip>` | Sets a field on the current BGP instance (only valid while navigated into one) |
-| `set bgp instance <name> asn <n>\|router-id <ip>` | Fully-qualified form — works from the transaction root without navigating |
+| `set asn <n>` / `set router-id <router-id>` | Sets a field on the current BGP instance (only valid while navigated into one) |
+| `set bgp instance <name> asn <n>\|router-id <router-id>` | Fully-qualified form — works from the transaction root without navigating |
 | `set hostname <name>` | Sets the top-level `hostname` field — works from anywhere in configuration mode, since hostname has no navigation context |
 | `delete` / `delete bgp instance <name>` | Deletes the current instance (returns to the transaction root) or a named one |
 | `up` / `top` | Navigates back to the transaction root |
-| `show` (bare) | Shows the transaction, or just the current BGP instance if navigated into one |
+| `show this` | Shows the transaction, or just the current BGP instance if navigated into one |
 | `commit` | Validates and commits the transaction, replacing the running config and returning to operational mode; on validation failure the transaction stays open for another attempt |
 | `discard` / `abort` | Deletes the transaction without touching the running config |
 | `help` | Lists available commands |
 | `exit` / `quit` / `end` | Exits the shell (operational mode); in configuration mode, returns to operational mode — prompting for commit/discard/leave-open first if there are uncommitted changes |
 
 Command matching is exact-token only (no case-folding or abbreviations).
+
+## Help, `?`, and Tab-completion
+
+`help` (typed + Enter), the live `?` key, and Tab-completion are all driven by the one grammar table in `spec.rs` (`COMMAND_SPECS`), filtered to the current `Mode`/`Path` via `spec::availability_matches` — so all three always agree on what's valid to type next, and none of them ever show a configuration-only command outside a transaction (or vice versa).
+
+`spec.rs` only owns **syntax** (token order, e.g. `"set bgp instance <name> asn <n>"`) and **availability**. The *semantic* explanation of what a command does — `summary`/`detail` text — is **not** duplicated here: for any command backed by a real `nos-config` operation, `spec::Doc::FromConfig(topic)` points at a `nos_proto::docs::Topic`, resolved at display time via `Request::Describe { topic }` / `Event::Description(CommandDoc)`. This is deliberate — `nos-cli` won't be the only client talking to `nos-config`, so the explanation of what e.g. `SetAsn` does belongs with the daemon, not copied into each client. Only the handful of purely local shell mechanics with no server-side meaning (`help`, `exit`/`quit`/`end`, `up`, `top`) carry their text directly as `spec::Doc::Local`.
+
+Each topic is fetched **at most once per session, lazily** — only when something actually needs to display it — and cached in `main.rs`'s `DocCache` (`Arc<Mutex<HashMap<Topic, CommandDoc>>>`, starts empty; there is deliberately no bulk fetch at startup). `doc_for` (async, used by `print_help`) and `doc_for_blocking` (used by `NosCompleter`/`HelpMenu`, which run inside reedline's synchronous callbacks) are both cache-first, falling back to a placeholder string if `nos-configd` is unreachable rather than failing the whole shell.
+
+- **Tab** opens/cycles `completion_menu` (a stock `reedline::ColumnarMenu`) backed by `NosCompleter` (`completer.rs`), which completes both literal keywords and, for an `edit`/`set`/`delete bgp instance <Tab>` slot, live BGP instance names fetched from the current transaction (`client::get_transaction`, blocking via `tokio::task::block_in_place` since `Completer::complete` is synchronous).
+- **`?`** is a live keystroke, not a submitted command — it's bound (alongside Tab) in `main.rs`'s `keybindings()`, on top of `default_emacs_keybindings()`. The first press activates `nos_help` (a custom `Menu` impl, `help_menu.rs`) showing each candidate's `usage` + one-line summary; a second consecutive press switches the same menu to a fuller `usage` + detail view, both sourced from the one already-cached `CommandDoc` (a `?` never issues a second fetch just to go from brief to detailed). This exploits `reedline`'s own event semantics: `ReedlineEvent::Menu(name)` only fires when no menu is active, so `UntilFound([Menu("nos_help"), MenuPageNext])` routes a repeat press to `MenuPageNext`, which `HelpMenu` interprets as "show more detail" rather than literal pagination.
+- `HelpMenu` is read-only — `can_quick_complete`/`can_partially_complete` are `false` and `replace_in_buffer` is a no-op, so it never edits the typed line. Pressing Enter while it (or the Tab menu) is active dismisses the menu without submitting, matching `reedline`'s standard menu-Enter behavior; a second Enter submits normally.
 
 ## Mode and navigation
 

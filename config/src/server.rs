@@ -132,6 +132,7 @@ async fn dispatch_request(store: &ConfigStore, req: Request) -> Option<Event> {
             Ok(()) => Event::Discarded,
             Err(e) => Event::Error(e.to_string()),
         },
+        Request::Describe { topic } => Event::Description(crate::docs::command_doc(topic)),
         Request::Subscribe | Request::Unsubscribe => return None,
     })
 }

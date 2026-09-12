@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::docs::{CommandDoc, Topic};
 use crate::ops::ConfigOp;
 use crate::schema::Config;
 
@@ -33,6 +34,12 @@ pub enum Request {
     CommitTransaction { name: String },
     /// Deletes a named transaction without touching the running config.
     DiscardTransaction { name: String },
+    /// One-shot: fetch the daemon-authored documentation for one operation
+    /// (see `nos_proto::docs::CommandDoc`), so any client can show
+    /// consistent help text without hardcoding its own copy. Scoped to a
+    /// single `Topic` rather than the whole catalog, so a client only ever
+    /// pays for the docs it actually displays.
+    Describe { topic: Topic },
 }
 
 /// Messages sent from the config daemon to a component client.
@@ -56,6 +63,8 @@ pub enum Event {
     /// A named transaction was successfully discarded, in reply to
     /// `DiscardTransaction`.
     Discarded,
+    /// One operation's documentation, in reply to `Describe`.
+    Description(CommandDoc),
 }
 
 /// What a newly opened transaction's in-progress config should start from.

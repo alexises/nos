@@ -2,12 +2,12 @@ use std::net::Ipv4Addr;
 
 use futures::{SinkExt, StreamExt};
 use nos_cli::client::{
-    apply_op, commit_transaction, discard_transaction, fetch_running_config, get_transaction,
-    open_transaction, save_running_config, subscribe, ClientError,
+    apply_op, commit_transaction, describe, discard_transaction, fetch_running_config,
+    get_transaction, open_transaction, save_running_config, subscribe, ClientError,
 };
 use nos_proto::{
-    BgpInstance, BgpInstanceOp, Config, ConfigOp, Event, IpcCodec, Request, TransactionBase,
-    TransactionSnapshot,
+    BgpInstance, BgpInstanceOp, CommandDoc, Config, ConfigOp, Event, IpcCodec, Request, Topic,
+    TransactionBase, TransactionSnapshot,
 };
 use tokio::net::UnixListener;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -374,6 +374,50 @@ async fn discard_transaction_returns_daemon_error() {
 
     let err = discard_transaction(&path, "missing").await.unwrap_err();
     assert!(matches!(err, ClientError::Daemon(_)));
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn describe_returns_doc_on_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let doc = CommandDoc {
+        topic: Topic::SetHostname,
+        summary: "Set the configuration's hostname.".to_string(),
+        detail: "Sets the top-level hostname field.".to_string(),
+    };
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::Describe {
+            topic: Topic::SetHostname,
+        },
+        Event::Description(doc.clone()),
+    ));
+
+    let got = describe(&path, Topic::SetHostname).await.unwrap();
+    assert_eq!(got.topic, Topic::SetHostname);
+    assert_eq!(got.summary, doc.summary);
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn describe_returns_daemon_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::Describe { topic: Topic::Save },
+        Event::Error("boom".to_string()),
+    ));
+
+    let err = describe(&path, Topic::Save).await.unwrap_err();
+    assert!(matches!(err, ClientError::Daemon(msg) if msg == "boom"));
 
     server.await.unwrap();
 }

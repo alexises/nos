@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -6,10 +7,21 @@ use std::sync::{Arc, Mutex};
 use clap::Parser;
 use futures::StreamExt;
 use nos_cli::command::Command;
+use nos_cli::completer::NosCompleter;
+use nos_cli::help_menu::HelpMenu;
 use nos_cli::session::{self, Mode, PathAfter, Resolved};
+use nos_cli::spec::{self, Doc};
 use nos_cli::{client, format};
-use nos_proto::{ConfigOp, Event};
-use reedline::{Prompt, PromptEditMode, PromptHistorySearch, Reedline, Signal};
+use nos_proto::{CommandDoc, ConfigOp, Event, Topic};
+use reedline::{
+    default_emacs_keybindings, ColumnarMenu, Completer, Emacs, KeyCode, KeyModifiers, MenuBuilder,
+    Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, Signal,
+};
+
+/// Per-session cache of operation documentation fetched from `nos-configd`,
+/// keyed by `Topic` — populated lazily, at most once per topic per session
+/// (see `doc_for`/`doc_for_blocking`), never bulk-fetched up front.
+type DocCache = Arc<Mutex<HashMap<Topic, CommandDoc>>>;
 
 #[derive(Parser)]
 #[command(name = "nos", about = "NOS interactive shell")]
@@ -95,11 +107,131 @@ enum Outcome {
     Exit,
 }
 
+/// `?` and Tab both leave text insertion alone otherwise, so both need an
+/// explicit keybinding on top of `default_emacs_keybindings()`: Tab opens
+/// (or cycles) `completion_menu`, and `?` opens (or, on a second consecutive
+/// press — see `help_menu::HelpMenu`) deepens `nos_help`. Both follow the
+/// same `UntilFound([Menu(name), MenuNext-ish])` shape reedline's own docs
+/// use for Tab — `ReedlineEvent::Menu(name)` only fires when no menu is
+/// already active, so the second event in each pair is what a repeat press
+/// falls through to.
+fn keybindings() -> reedline::Keybindings {
+    let mut keybindings = default_emacs_keybindings();
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Tab,
+        ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::Menu("completion_menu".to_string()),
+            ReedlineEvent::MenuNext,
+        ]),
+    );
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Char('?'),
+        ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::Menu("nos_help".to_string()),
+            ReedlineEvent::MenuPageNext,
+        ]),
+    );
+    keybindings
+}
+
+/// Builds the completer for the *current* `mode` — called fresh each loop
+/// iteration (mirroring `NosPrompt::for_mode`, already rebuilt every
+/// iteration) so completions/`?`/`help` always reflect the mode the last
+/// command actually landed in.
+fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Completer + Send> {
+    let doc_socket = socket.clone();
+    let doc_source: Box<dyn FnMut(Topic) -> CommandDoc + Send> =
+        Box::new(move |topic| doc_for_blocking(&doc_socket, &cache, topic));
+
+    let instance_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
+        Mode::Configuration { transaction, .. } => {
+            let transaction = transaction.clone();
+            Box::new(move || {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(client::get_transaction(&socket, &transaction))
+                })
+                .map(|snap| {
+                    snap.config
+                        .bgp_instances
+                        .into_iter()
+                        .map(|i| i.name)
+                        .collect()
+                })
+                .unwrap_or_default()
+            })
+        }
+        Mode::Operational => Box::new(Vec::new),
+    };
+
+    Box::new(NosCompleter::new(
+        mode.clone(),
+        doc_source,
+        instance_name_source,
+    ))
+}
+
+/// Cache-first lookup for a topic's documentation, from a synchronous
+/// context (reedline's `Completer`/`Menu` callbacks aren't `async`). Blocks
+/// on one IPC round trip only on a cache miss — see `DocCache`.
+fn doc_for_blocking(socket: &Path, cache: &DocCache, topic: Topic) -> CommandDoc {
+    if let Some(doc) = cache.lock().unwrap().get(&topic) {
+        return doc.clone();
+    }
+    let fetched = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(client::describe(socket, topic))
+    });
+    match fetched {
+        Ok(doc) => {
+            cache.lock().unwrap().insert(topic, doc.clone());
+            doc
+        }
+        Err(_) => unavailable_doc(topic),
+    }
+}
+
+/// Cache-first lookup for a topic's documentation, from an `async` context
+/// (used by `print_help`, which can simply `.await` rather than block).
+async fn doc_for(socket: &Path, cache: &DocCache, topic: Topic) -> CommandDoc {
+    if let Some(doc) = cache.lock().unwrap().get(&topic) {
+        return doc.clone();
+    }
+    match client::describe(socket, topic).await {
+        Ok(doc) => {
+            cache.lock().unwrap().insert(topic, doc.clone());
+            doc
+        }
+        Err(_) => unavailable_doc(topic),
+    }
+}
+
+fn unavailable_doc(topic: Topic) -> CommandDoc {
+    let text = "description unavailable — could not reach nos-configd".to_string();
+    CommandDoc {
+        topic,
+        summary: text.clone(),
+        detail: text,
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let mut line_editor = Reedline::create();
     let mut mode = Mode::Operational;
+    let doc_cache: DocCache = Arc::new(Mutex::new(HashMap::new()));
+
+    let completion_menu = ColumnarMenu::default().with_name("completion_menu");
+    let mut line_editor = Reedline::create()
+        .with_completer(completer_for(
+            args.config_socket.clone(),
+            doc_cache.clone(),
+            &mode,
+        ))
+        .with_menu(ReedlineMenu::EngineCompleter(Box::new(completion_menu)))
+        .with_menu(ReedlineMenu::EngineCompleter(Box::new(HelpMenu::new())))
+        .with_edit_mode(Box::new(Emacs::new(keybindings())));
 
     let hostname = Arc::new(Mutex::new(FALLBACK_HOSTNAME.to_string()));
     match client::fetch_running_config(&args.config_socket).await {
@@ -121,17 +253,22 @@ async fn main() -> anyhow::Result<()> {
         notify_repaint,
     ));
 
-    println!("NOS interactive shell. Type 'help' for available commands.");
+    println!("NOS interactive shell. Type 'help' for available commands, or press '?' at any point while typing.");
 
     loop {
         let prompt = NosPrompt::for_mode(hostname.clone(), &mode);
         match line_editor.read_line(&prompt) {
             Ok(Signal::Success(line)) => {
                 let action = session::resolve(&mode, Command::parse(&line));
-                match handle_action(action, mode, &args.config_socket).await {
+                match handle_action(action, mode, &args.config_socket, &doc_cache).await {
                     Outcome::Continue(next_mode) => mode = next_mode,
                     Outcome::Exit => break,
                 }
+                line_editor = line_editor.with_completer(completer_for(
+                    args.config_socket.clone(),
+                    doc_cache.clone(),
+                    &mode,
+                ));
             }
             Ok(Signal::CtrlC | Signal::CtrlD) => {
                 if let Mode::Configuration { transaction, .. } = &mode {
@@ -181,11 +318,16 @@ async fn subscribe_hostname_task(
     }
 }
 
-async fn handle_action(action: Resolved, mode: Mode, socket: &Path) -> Outcome {
+async fn handle_action(
+    action: Resolved,
+    mode: Mode,
+    socket: &Path,
+    doc_cache: &DocCache,
+) -> Outcome {
     match action {
         Resolved::Nothing => Outcome::Continue(mode),
         Resolved::Help => {
-            print_help();
+            print_help(&mode, socket, doc_cache).await;
             Outcome::Continue(mode)
         }
         Resolved::ExitShell => Outcome::Exit,
@@ -394,34 +536,20 @@ async fn discard(mode: Mode, socket: &Path) -> Mode {
     }
 }
 
-fn print_help() {
+/// Lists every command valid in `mode` right now — the same filtering (and,
+/// for server-backed commands, the same lazily-fetched, session-cached
+/// text) that the live `?` key's brief mode uses. Equivalent to pressing
+/// `?` on an empty line.
+async fn print_help(mode: &Mode, socket: &Path, cache: &DocCache) {
     println!("Available commands:");
-    println!("  show config                              Print the running configuration from nos-configd");
-    println!(
-        "  save                                      Persist the running configuration to disk"
-    );
-    println!("  configure <name> [from blank|current]     Enter configuration mode on a named transaction (default: current)");
-    println!("  edit bgp instance <name>                  Create/navigate into a BGP instance");
-    println!(
-        "  set asn <n> | router-id <ip>               Set a field on the current BGP instance"
-    );
-    println!("  set bgp instance <name> asn <n>|router-id <ip>   Set a field on a named BGP instance from anywhere");
-    println!(
-        "  set hostname <name>                       Set the config's hostname (works from anywhere in configuration mode)"
-    );
-    println!(
-        "  delete [bgp instance <name>]               Delete the current or a named BGP instance"
-    );
-    println!("  up, top                                    Navigate back to the transaction root");
-    println!(
-        "  show                                       Show the transaction (or current section)"
-    );
-    println!(
-        "  commit                                     Validate and commit the current transaction"
-    );
-    println!("  discard, abort                             Discard the current transaction");
-    println!("  help                                       Show this help message");
-    println!(
-        "  exit, quit, end                            Leave configuration mode, or exit the shell"
-    );
+    for command in spec::COMMAND_SPECS {
+        if !spec::availability_matches(command.availability, mode) {
+            continue;
+        }
+        let summary = match &command.doc {
+            Doc::Local { summary, .. } => (*summary).to_string(),
+            Doc::FromConfig(topic) => doc_for(socket, cache, *topic).await.summary,
+        };
+        println!("  {:<45} {}", command.usage, summary);
+    }
 }
