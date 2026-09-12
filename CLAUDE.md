@@ -20,7 +20,7 @@ Each component (BGP, RIB, OSPF, …) runs as a dedicated OS process. No componen
 ```
 ┌──────────────────────────────────────────────────────┐
 │  nos-config process                                  │
-│  ConfigStore (candidate/running) + IPC server        │
+│  ConfigStore (named transactions/running) + IPC      │
 │  Listens on: /run/nos/config.sock                    │
 └───────────────────────┬──────────────────────────────┘
                         │ Unix socket (nos-proto wire protocol)
@@ -58,16 +58,28 @@ Component crates depend on `nos-proto` for types and `nos-proto::IpcCodec` for t
 
 ```
 Client → Server:
-  Request::Get          one-shot read of the current running config
-  Request::Subscribe    receive current snapshot + all future commits
-  Request::Unsubscribe  stop receiving updates (connection stays open)
-  Request::Save         persist the current running config to disk
+  Request::Get                 one-shot read of the current running config
+  Request::Subscribe           receive current snapshot + all future commits
+  Request::Unsubscribe         stop receiving updates (connection stays open)
+  Request::Save                persist the current running config to disk
+  Request::OpenTransaction     open (or resume) a named transaction from blank/current
+  Request::ApplyOp             apply one edit (e.g. a BgpInstanceOp) to a named transaction
+  Request::GetTransaction      one-shot read of a named transaction's in-progress config
+  Request::CommitTransaction   validate, promote to running, broadcast, and delete the transaction
+  Request::DiscardTransaction  delete a named transaction without touching running config
 
 Server → Client:
-  Event::Config(Config) config snapshot (initial + on every commit)
-  Event::Error(String)  error from the daemon
-  Event::Saved          confirms the running config was persisted (reply to Save)
+  Event::Config(Config)             config snapshot (initial + on every commit, incl. via a transaction commit)
+  Event::Error(String)              error from the daemon
+  Event::Saved                      confirms the running config was persisted (reply to Save)
+  Event::Transaction(Snapshot)      a named transaction's current state (reply to Open/Apply/Get)
+  Event::Committed                  confirms a transaction was committed
+  Event::Discarded                  confirms a transaction was discarded
 ```
+
+### Named transactions
+
+Editing the config happens inside a **named transaction**, held server-side in `nos-config`, not tied to any one connection. `OpenTransaction` creates it from a blank config or a clone of the running config (`TransactionBase::Blank`/`Current`), or — if a transaction with that name already exists — resumes its current in-progress state unchanged. `CommitTransaction` validates the transaction and, if valid, atomically replaces the running config and broadcasts it to every `Subscribe`d connection (the same fan-out `Get`/`Subscribe` already use); on invalid input the transaction is left alive so the caller can keep editing. `DiscardTransaction` deletes it outright. Because transactions live only in the daemon and are addressed by name, a client can disconnect (crash, Ctrl-C, network drop) and resume the same transaction later from a fresh connection — see `nos-cli`'s `configure <name>` command.
 
 ### Config plane vs data plane
 

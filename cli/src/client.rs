@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{Config, Event, IpcCodec, Request};
+use nos_proto::{Config, ConfigOp, Event, IpcCodec, Request, TransactionBase, TransactionSnapshot};
 use thiserror::Error;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -22,8 +23,11 @@ pub enum ClientError {
     Daemon(String),
 }
 
-/// Dials the daemon, sends a one-shot `Request::Get`, and returns the snapshot.
-pub async fn fetch_running_config(socket_path: &Path) -> Result<Config, ClientError> {
+type Reader = FramedRead<OwnedReadHalf, IpcCodec<Event>>;
+type Writer = FramedWrite<OwnedWriteHalf, IpcCodec<Request>>;
+
+/// Dials `nos-configd` for a single request/reply exchange.
+async fn connect(socket_path: &Path) -> Result<(Reader, Writer), ClientError> {
     let stream = UnixStream::connect(socket_path)
         .await
         .map_err(|source| ClientError::Connect {
@@ -31,16 +35,36 @@ pub async fn fetch_running_config(socket_path: &Path) -> Result<Config, ClientEr
             source,
         })?;
     let (r, w) = stream.into_split();
-    let mut reader = FramedRead::new(r, IpcCodec::<Event>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<Request>::default());
+    Ok((
+        FramedRead::new(r, IpcCodec::<Event>::default()),
+        FramedWrite::new(w, IpcCodec::<Request>::default()),
+    ))
+}
 
+fn expect_transaction(
+    event: Option<Result<Event, std::io::Error>>,
+) -> Result<TransactionSnapshot, ClientError> {
+    match event {
+        Some(Ok(Event::Transaction(snap))) => Ok(snap),
+        Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
+        Some(Ok(_)) => Err(ClientError::Daemon(
+            "unexpected event in reply to a transaction request".to_string(),
+        )),
+        Some(Err(e)) => Err(ClientError::Io(e)),
+        None => Err(ClientError::ConnectionClosed),
+    }
+}
+
+/// Dials the daemon, sends a one-shot `Request::Get`, and returns the snapshot.
+pub async fn fetch_running_config(socket_path: &Path) -> Result<Config, ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
     writer.send(Request::Get).await?;
 
     match reader.next().await {
         Some(Ok(Event::Config(cfg))) => Ok(cfg),
         Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
-        Some(Ok(Event::Saved)) => Err(ClientError::Daemon(
-            "unexpected Saved event in reply to Get".to_string(),
+        Some(Ok(_)) => Err(ClientError::Daemon(
+            "unexpected event in reply to Get".to_string(),
         )),
         Some(Err(e)) => Err(ClientError::Io(e)),
         None => Err(ClientError::ConnectionClosed),
@@ -50,23 +74,98 @@ pub async fn fetch_running_config(socket_path: &Path) -> Result<Config, ClientEr
 /// Dials the daemon, sends a one-shot `Request::Save`, and waits for
 /// confirmation that the running config was persisted to disk.
 pub async fn save_running_config(socket_path: &Path) -> Result<(), ClientError> {
-    let stream = UnixStream::connect(socket_path)
-        .await
-        .map_err(|source| ClientError::Connect {
-            path: socket_path.to_path_buf(),
-            source,
-        })?;
-    let (r, w) = stream.into_split();
-    let mut reader = FramedRead::new(r, IpcCodec::<Event>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<Request>::default());
-
+    let (mut reader, mut writer) = connect(socket_path).await?;
     writer.send(Request::Save).await?;
 
     match reader.next().await {
         Some(Ok(Event::Saved)) => Ok(()),
         Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
-        Some(Ok(Event::Config(_))) => Err(ClientError::Daemon(
-            "unexpected Config event in reply to Save".to_string(),
+        Some(Ok(_)) => Err(ClientError::Daemon(
+            "unexpected event in reply to Save".to_string(),
+        )),
+        Some(Err(e)) => Err(ClientError::Io(e)),
+        None => Err(ClientError::ConnectionClosed),
+    }
+}
+
+/// Opens (or resumes) a named transaction.
+pub async fn open_transaction(
+    socket_path: &Path,
+    name: &str,
+    base: TransactionBase,
+) -> Result<TransactionSnapshot, ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
+    writer
+        .send(Request::OpenTransaction {
+            name: name.to_string(),
+            base,
+        })
+        .await?;
+    expect_transaction(reader.next().await)
+}
+
+/// Applies one edit to a named transaction.
+pub async fn apply_op(
+    socket_path: &Path,
+    name: &str,
+    op: ConfigOp,
+) -> Result<TransactionSnapshot, ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
+    writer
+        .send(Request::ApplyOp {
+            name: name.to_string(),
+            op,
+        })
+        .await?;
+    expect_transaction(reader.next().await)
+}
+
+/// Fetches a named transaction's current in-progress config.
+pub async fn get_transaction(
+    socket_path: &Path,
+    name: &str,
+) -> Result<TransactionSnapshot, ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
+    writer
+        .send(Request::GetTransaction {
+            name: name.to_string(),
+        })
+        .await?;
+    expect_transaction(reader.next().await)
+}
+
+/// Validates and commits a named transaction, replacing the running config.
+pub async fn commit_transaction(socket_path: &Path, name: &str) -> Result<(), ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
+    writer
+        .send(Request::CommitTransaction {
+            name: name.to_string(),
+        })
+        .await?;
+    match reader.next().await {
+        Some(Ok(Event::Committed)) => Ok(()),
+        Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
+        Some(Ok(_)) => Err(ClientError::Daemon(
+            "unexpected event in reply to CommitTransaction".to_string(),
+        )),
+        Some(Err(e)) => Err(ClientError::Io(e)),
+        None => Err(ClientError::ConnectionClosed),
+    }
+}
+
+/// Deletes a named transaction without touching the running config.
+pub async fn discard_transaction(socket_path: &Path, name: &str) -> Result<(), ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
+    writer
+        .send(Request::DiscardTransaction {
+            name: name.to_string(),
+        })
+        .await?;
+    match reader.next().await {
+        Some(Ok(Event::Discarded)) => Ok(()),
+        Some(Ok(Event::Error(msg))) => Err(ClientError::Daemon(msg)),
+        Some(Ok(_)) => Err(ClientError::Daemon(
+            "unexpected event in reply to DiscardTransaction".to_string(),
         )),
         Some(Err(e)) => Err(ClientError::Io(e)),
         None => Err(ClientError::ConnectionClosed),

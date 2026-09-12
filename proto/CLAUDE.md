@@ -14,7 +14,8 @@ Component processes (`nos-bgp`, `nos-rib`, …) must not depend on `nos-config` 
 |--------|---------|
 | `schema/` | Config tree types: `Config`, `BgpInstance`. Derived `garde::Validate` for commit-time validation. |
 | `validators` | Generic reusable validation helpers (e.g. `unique_in`). |
-| `ipc` | IPC message types: `Request` (client→server) and `Event` (server→client). |
+| `ops/` | Section-scoped edit types applied to a transaction's in-progress config (e.g. `BgpInstanceOp`), wrapped by `ConfigOp`. Never validated — only `garde` at commit time is. |
+| `ipc` | IPC message types: `Request` (client→server) and `Event` (server→client), plus `TransactionBase` and `TransactionSnapshot`. |
 | `codec` | `IpcCodec<T>`: framing codec (4-byte LE length prefix + postcard payload). |
 
 ## Wire format
@@ -33,4 +34,9 @@ Use `IpcCodec<T>` with `tokio_util::codec::{FramedRead, FramedWrite}` to get typ
 1. Add the new struct in `schema/` deriving `Serialize, Deserialize, garde::Validate`.
 2. Add `#[garde(context(Config as ctx))]` and use the context for any cross-references.
 3. Add the field to `Config` in `schema/mod.rs` with `#[garde(dive)]`.
-4. Re-export from `lib.rs` if it's part of the public API.
+4. Add a sibling `<Section>Op` enum in `ops/<section>.rs` with a synchronous `apply(&self, config: &mut Config) -> Result<(), OpError>` (create/update/delete by name, no `garde` validation — that only runs at commit), then add a `ConfigOp` variant wrapping it in `ops/mod.rs`.
+5. Re-export from `lib.rs` if it's part of the public API.
+
+## Wire compatibility
+
+`Request`/`Event` variants must always be **appended**, never inserted or reordered — `postcard` encodes enum variants by index, so reordering breaks compatibility with already-built binaries.

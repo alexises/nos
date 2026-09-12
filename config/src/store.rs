@@ -1,79 +1,172 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use garde::Validate as _;
-use tokio::sync::{broadcast, RwLock};
-
-use nos_proto::Config;
+use nos_proto::{Config, ConfigOp, TransactionBase, TransactionSnapshot};
+use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::error::ConfigError;
 
 const BROADCAST_CAPACITY: usize = 16;
 
-pub struct ConfigStore {
-    running: Arc<RwLock<Config>>,
-    candidate: Option<Config>,
-    tx: broadcast::Sender<Arc<Config>>,
+#[derive(Debug, Clone)]
+struct Transaction {
+    config: Config,
+    dirty: bool,
 }
 
+struct Inner {
+    running: RwLock<Config>,
+    transactions: Mutex<HashMap<String, Transaction>>,
+    tx: broadcast::Sender<Arc<Config>>,
+    config_path: Option<PathBuf>,
+}
+
+/// A cheap, cloneable handle to the daemon's config state: the running
+/// config, all named in-progress transactions, and the broadcast channel
+/// used to notify subscribers of committed changes.
+///
+/// Lock ordering: always lock `transactions` before `running` to avoid
+/// deadlock (every method below follows this).
+#[derive(Clone)]
+pub struct ConfigStore(Arc<Inner>);
+
 impl ConfigStore {
-    pub fn new(initial: Config) -> Self {
+    pub fn new(initial: Config, config_path: Option<PathBuf>) -> Self {
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
-        Self {
-            running: Arc::new(RwLock::new(initial)),
-            candidate: None,
+        Self(Arc::new(Inner {
+            running: RwLock::new(initial),
+            transactions: Mutex::new(HashMap::new()),
             tx,
-        }
+            config_path,
+        }))
     }
 
-    /// Returns a mutable reference to the candidate config, creating one from
-    /// the current running config if none exists.
-    pub async fn edit_candidate(&mut self) -> &mut Config {
-        if self.candidate.is_none() {
-            let running = self.running.read().await;
-            self.candidate = Some(running.clone());
-        }
-        self.candidate.as_mut().expect("candidate just set")
-    }
-
-    /// Validates the candidate and, if valid, atomically promotes it to running.
-    /// Broadcasts the new running config to all subscribers.
-    pub async fn commit(&mut self) -> Result<(), ConfigError> {
-        let candidate = self.candidate.take().ok_or(ConfigError::NoCandidate)?;
-        // Pass the candidate itself as the validation context (cross-reference checks).
-        candidate.validate_with(&candidate)?;
-        let shared = Arc::new(candidate);
-        *self.running.write().await = (*shared).clone();
-        // Ignore send errors — no active receivers is not a failure.
-        let _ = self.tx.send(shared);
-        Ok(())
-    }
-
-    pub fn running(&self) -> Arc<RwLock<Config>> {
-        Arc::clone(&self.running)
+    pub async fn running_snapshot(&self) -> Config {
+        self.0.running.read().await.clone()
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<Config>> {
-        self.tx.subscribe()
+        self.0.tx.subscribe()
+    }
+
+    /// Serializes the running config to disk at the daemon's configured
+    /// `--config-file` path. Errors if none was configured.
+    pub async fn save_to_disk(&self) -> Result<(), ConfigError> {
+        let path = self
+            .0
+            .config_path
+            .as_ref()
+            .ok_or(ConfigError::PersistenceNotConfigured)?;
+        let cfg = self.running_snapshot().await;
+        crate::persistence::save_to_disk(&cfg, path)
+    }
+
+    /// Opens a named transaction: creates it from `base` if it doesn't
+    /// already exist, or resumes its current in-progress config unchanged
+    /// (ignoring `base`) if it does.
+    pub async fn open_transaction(&self, name: &str, base: TransactionBase) -> TransactionSnapshot {
+        let mut txs = self.0.transactions.lock().await;
+        if let Some(existing) = txs.get(name) {
+            return TransactionSnapshot {
+                name: name.to_string(),
+                config: existing.config.clone(),
+                dirty: existing.dirty,
+                resumed: true,
+            };
+        }
+        let config = match base {
+            TransactionBase::Blank => Config::default(),
+            TransactionBase::Current => self.0.running.read().await.clone(),
+        };
+        txs.insert(
+            name.to_string(),
+            Transaction {
+                config: config.clone(),
+                dirty: false,
+            },
+        );
+        TransactionSnapshot {
+            name: name.to_string(),
+            config,
+            dirty: false,
+            resumed: false,
+        }
+    }
+
+    /// Applies one edit to a named transaction's in-progress config. Never
+    /// runs `garde` validation — only `commit_transaction` does.
+    pub async fn apply_op(
+        &self,
+        name: &str,
+        op: ConfigOp,
+    ) -> Result<TransactionSnapshot, ConfigError> {
+        let mut txs = self.0.transactions.lock().await;
+        let txn = txs
+            .get_mut(name)
+            .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        op.apply(&mut txn.config)?;
+        txn.dirty = true;
+        Ok(TransactionSnapshot {
+            name: name.to_string(),
+            config: txn.config.clone(),
+            dirty: true,
+            resumed: true,
+        })
+    }
+
+    pub async fn get_transaction(&self, name: &str) -> Result<TransactionSnapshot, ConfigError> {
+        let txs = self.0.transactions.lock().await;
+        let txn = txs
+            .get(name)
+            .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        Ok(TransactionSnapshot {
+            name: name.to_string(),
+            config: txn.config.clone(),
+            dirty: txn.dirty,
+            resumed: true,
+        })
+    }
+
+    /// Validates the named transaction and, if valid, atomically promotes it
+    /// to running, broadcasts the change to subscribers, and removes the
+    /// transaction. If invalid, the transaction is left intact so the caller
+    /// can keep editing and retry.
+    pub async fn commit_transaction(&self, name: &str) -> Result<(), ConfigError> {
+        let mut txs = self.0.transactions.lock().await;
+        let txn = txs
+            .get(name)
+            .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        // Pass the config itself as the validation context (cross-reference checks).
+        txn.config.validate_with(&txn.config)?;
+        let config = txn.config.clone();
+        txs.remove(name);
+        drop(txs);
+
+        let shared = Arc::new(config);
+        *self.0.running.write().await = (*shared).clone();
+        // Ignore send errors — no active receivers is not a failure.
+        let _ = self.0.tx.send(shared);
+        Ok(())
+    }
+
+    /// Deletes a named transaction without touching the running config.
+    pub async fn discard_transaction(&self, name: &str) -> Result<(), ConfigError> {
+        let mut txs = self.0.transactions.lock().await;
+        txs.remove(name)
+            .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        Ok(())
     }
 
     /// Binds the given address and starts the IPC server in the background.
-    ///
-    /// `config_path`, when set, is where a `Request::Save` persists the
-    /// running config to disk. If unset, `Request::Save` replies with an error.
     ///
     /// Returns a `JoinHandle` — keep it alive for the server to continue running.
     pub fn start_ipc_server(
         &self,
         addr: &crate::server::ListenAddr,
-        config_path: Option<PathBuf>,
     ) -> std::io::Result<tokio::task::JoinHandle<()>> {
-        crate::server::start(
-            addr,
-            Arc::clone(&self.running),
-            self.tx.clone(),
-            config_path.map(Arc::new),
-        )
+        crate::server::start(addr, self.clone())
     }
 }
 
@@ -81,7 +174,7 @@ impl ConfigStore {
 mod tests {
     use std::net::Ipv4Addr;
 
-    use nos_proto::BgpInstance;
+    use nos_proto::{BgpInstance, BgpInstanceOp};
 
     use super::*;
 
@@ -93,48 +186,165 @@ mod tests {
         }
     }
 
+    fn set_asn_op(name: &str, asn: u32) -> ConfigOp {
+        ConfigOp::BgpInstance(BgpInstanceOp::SetAsn {
+            name: name.to_string(),
+            asn,
+        })
+    }
+
+    fn ensure_op(name: &str) -> ConfigOp {
+        ConfigOp::BgpInstance(BgpInstanceOp::Ensure {
+            name: name.to_string(),
+        })
+    }
+
     #[tokio::test]
-    async fn commit_valid_candidate_updates_running() {
-        let mut store = ConfigStore::new(Config::default());
-        store
-            .edit_candidate()
+    async fn open_blank_starts_empty_even_if_running_is_not() {
+        let store = ConfigStore::new(
+            Config {
+                bgp_instances: vec![instance("default", 65000)],
+            },
+            None,
+        );
+        let snap = store.open_transaction("t1", TransactionBase::Blank).await;
+        assert!(snap.config.bgp_instances.is_empty());
+        assert!(!snap.dirty);
+        assert!(!snap.resumed);
+    }
+
+    #[tokio::test]
+    async fn open_current_clones_running() {
+        let store = ConfigStore::new(
+            Config {
+                bgp_instances: vec![instance("default", 65000)],
+            },
+            None,
+        );
+        let snap = store.open_transaction("t1", TransactionBase::Current).await;
+        assert_eq!(snap.config.bgp_instances.len(), 1);
+        assert!(!snap.resumed);
+    }
+
+    #[tokio::test]
+    async fn reopen_resumes_existing_transaction_and_ignores_base() {
+        let store = ConfigStore::new(Config::default(), None);
+        store.open_transaction("t1", TransactionBase::Blank).await;
+        store.apply_op("t1", ensure_op("r1")).await.unwrap();
+
+        let snap = store.open_transaction("t1", TransactionBase::Current).await;
+        assert!(snap.resumed);
+        assert!(snap.dirty);
+        assert_eq!(snap.config.bgp_instances.len(), 1);
+        assert_eq!(snap.config.bgp_instances[0].name, "r1");
+    }
+
+    #[tokio::test]
+    async fn apply_op_updates_transaction_leaves_running_unchanged() {
+        let store = ConfigStore::new(Config::default(), None);
+        store.open_transaction("t1", TransactionBase::Blank).await;
+        let snap = store.apply_op("t1", ensure_op("r1")).await.unwrap();
+        assert_eq!(snap.config.bgp_instances.len(), 1);
+        assert!(store.running_snapshot().await.bgp_instances.is_empty());
+    }
+
+    #[tokio::test]
+    async fn apply_op_missing_transaction_returns_error() {
+        let store = ConfigStore::new(Config::default(), None);
+        let err = store
+            .apply_op("missing", ensure_op("r1"))
             .await
-            .bgp_instances
-            .push(instance("default", 65000));
-        store.commit().await.unwrap();
-        let running = store.running().read().await.clone();
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::TransactionNotFound(n) if n == "missing"));
+    }
+
+    #[tokio::test]
+    async fn commit_valid_transaction_updates_running_and_removes_transaction() {
+        let store = ConfigStore::new(Config::default(), None);
+        store.open_transaction("t1", TransactionBase::Blank).await;
+        store.apply_op("t1", ensure_op("r1")).await.unwrap();
+        store.apply_op("t1", set_asn_op("r1", 65000)).await.unwrap();
+
+        store.commit_transaction("t1").await.unwrap();
+
+        let running = store.running_snapshot().await;
         assert_eq!(running.bgp_instances.len(), 1);
-        assert_eq!(running.bgp_instances[0].name, "default");
+        assert_eq!(running.bgp_instances[0].name, "r1");
+        assert!(matches!(
+            store.get_transaction("t1").await,
+            Err(ConfigError::TransactionNotFound(_))
+        ));
     }
 
     #[tokio::test]
-    async fn commit_invalid_candidate_leaves_running_unchanged() {
-        let mut store = ConfigStore::new(Config::default());
-        // ASN 0 is invalid
-        store
-            .edit_candidate()
-            .await
-            .bgp_instances
-            .push(instance("bad", 0));
-        assert!(store.commit().await.is_err());
-        let running = store.running().read().await.clone();
-        assert!(running.bgp_instances.is_empty());
+    async fn commit_invalid_transaction_leaves_running_unchanged_and_keeps_transaction_alive() {
+        let store = ConfigStore::new(Config::default(), None);
+        store.open_transaction("t1", TransactionBase::Blank).await;
+        // ASN 0 is invalid, and Ensure leaves asn at the placeholder 0.
+        store.apply_op("t1", ensure_op("bad")).await.unwrap();
+
+        assert!(store.commit_transaction("t1").await.is_err());
+        assert!(store.running_snapshot().await.bgp_instances.is_empty());
+
+        // The transaction must still be there, editable, for a retry.
+        let snap = store.get_transaction("t1").await.unwrap();
+        assert_eq!(snap.config.bgp_instances.len(), 1);
     }
 
     #[tokio::test]
-    async fn commit_without_candidate_returns_error() {
-        let mut store = ConfigStore::new(Config::default());
-        assert!(store.commit().await.is_err());
+    async fn commit_missing_transaction_returns_error() {
+        let store = ConfigStore::new(Config::default(), None);
+        assert!(matches!(
+            store.commit_transaction("missing").await,
+            Err(ConfigError::TransactionNotFound(_))
+        ));
     }
 
+    #[tokio::test]
+    async fn discard_removes_transaction_without_touching_running() {
+        let store = ConfigStore::new(Config::default(), None);
+        store.open_transaction("t1", TransactionBase::Blank).await;
+        store.apply_op("t1", ensure_op("r1")).await.unwrap();
+
+        store.discard_transaction("t1").await.unwrap();
+
+        assert!(matches!(
+            store.get_transaction("t1").await,
+            Err(ConfigError::TransactionNotFound(_))
+        ));
+        assert!(store.running_snapshot().await.bgp_instances.is_empty());
+    }
+
+    #[tokio::test]
+    async fn discard_missing_transaction_returns_error() {
+        let store = ConfigStore::new(Config::default(), None);
+        assert!(matches!(
+            store.discard_transaction("missing").await,
+            Err(ConfigError::TransactionNotFound(_))
+        ));
+    }
+
+    /// `ConfigOp` cannot construct two `BgpInstance`s with the same name
+    /// through the public op API (`Ensure` is idempotent per name), so this
+    /// seeds the duplicate directly into the transaction map (test-only
+    /// access via `super::*`) to confirm `garde` validation genuinely still
+    /// runs at commit regardless of how the transaction's `Config` was
+    /// populated.
     #[tokio::test]
     async fn commit_duplicate_names_returns_error() {
-        let mut store = ConfigStore::new(Config::default());
-        let cand = store.edit_candidate().await;
-        cand.bgp_instances.push(instance("vrf-a", 65001));
-        cand.bgp_instances.push(instance("vrf-a", 65002));
-        assert!(store.commit().await.is_err());
-        // Running must still be empty
-        assert!(store.running().read().await.bgp_instances.is_empty());
+        let store = ConfigStore::new(Config::default(), None);
+        let bad_config = Config {
+            bgp_instances: vec![instance("vrf-a", 65001), instance("vrf-a", 65002)],
+        };
+        store.0.transactions.lock().await.insert(
+            "t1".to_string(),
+            Transaction {
+                config: bad_config,
+                dirty: true,
+            },
+        );
+
+        assert!(store.commit_transaction("t1").await.is_err());
+        assert!(store.running_snapshot().await.bgp_instances.is_empty());
     }
 }

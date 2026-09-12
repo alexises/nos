@@ -6,8 +6,12 @@ use thiserror::Error;
 pub enum ConfigError {
     #[error("validation failed:\n{0}")]
     Validation(#[from] garde::Report),
-    #[error("no candidate config to commit")]
-    NoCandidate,
+    #[error("no transaction named '{0}'")]
+    TransactionNotFound(String),
+    #[error("edit failed: {0}")]
+    Op(#[from] nos_proto::OpError),
+    #[error("config persistence is not configured on this daemon (no --config-file set)")]
+    PersistenceNotConfigured,
     #[error("IPC I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("failed to read/write config file at {path}: {source}")]

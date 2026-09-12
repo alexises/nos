@@ -7,10 +7,12 @@ use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
 use nos_proto::{Config, Event, IpcCodec, Request};
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, warn};
+
+use crate::store::ConfigStore;
 
 /// Where the IPC server binds.
 ///
@@ -51,31 +53,21 @@ impl fmt::Display for ListenAddr {
 /// Binds the given address and spawns the IPC accept loop.
 ///
 /// Returns a `JoinHandle` the caller must keep alive for the server to run.
-pub fn start(
-    addr: &ListenAddr,
-    running: Arc<RwLock<Config>>,
-    tx: broadcast::Sender<Arc<Config>>,
-    config_path: Option<Arc<PathBuf>>,
-) -> std::io::Result<JoinHandle<()>> {
+pub fn start(addr: &ListenAddr, store: ConfigStore) -> std::io::Result<JoinHandle<()>> {
     match addr {
         ListenAddr::Unix(path) => {
             if path.exists() {
                 std::fs::remove_file(path)?;
             }
             let listener = UnixListener::bind(path)?;
-            Ok(tokio::spawn(accept_loop_unix(
-                listener,
-                running,
-                tx,
-                config_path,
-            )))
+            Ok(tokio::spawn(accept_loop_unix(listener, store)))
         }
         ListenAddr::Tcp(addr) => {
             // TcpListener::bind is async, so we bind inside the spawned task.
             let addr = *addr;
             Ok(tokio::spawn(async move {
                 match TcpListener::bind(addr).await {
-                    Ok(listener) => accept_loop_tcp(listener, running, tx, config_path).await,
+                    Ok(listener) => accept_loop_tcp(listener, store).await,
                     Err(e) => warn!("IPC TCP bind error: {e}"),
                 }
             }))
@@ -83,21 +75,11 @@ pub fn start(
     }
 }
 
-async fn accept_loop_unix(
-    listener: UnixListener,
-    running: Arc<RwLock<Config>>,
-    tx: broadcast::Sender<Arc<Config>>,
-    config_path: Option<Arc<PathBuf>>,
-) {
+async fn accept_loop_unix(listener: UnixListener, store: ConfigStore) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                tokio::spawn(handle_connection(
-                    stream,
-                    Arc::clone(&running),
-                    tx.clone(),
-                    config_path.clone(),
-                ));
+                tokio::spawn(handle_connection(stream, store.clone()));
             }
             Err(e) => {
                 warn!("IPC accept error: {e}");
@@ -107,21 +89,11 @@ async fn accept_loop_unix(
     }
 }
 
-async fn accept_loop_tcp(
-    listener: TcpListener,
-    running: Arc<RwLock<Config>>,
-    tx: broadcast::Sender<Arc<Config>>,
-    config_path: Option<Arc<PathBuf>>,
-) {
+async fn accept_loop_tcp(listener: TcpListener, store: ConfigStore) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                tokio::spawn(handle_connection(
-                    stream,
-                    Arc::clone(&running),
-                    tx.clone(),
-                    config_path.clone(),
-                ));
+                tokio::spawn(handle_connection(stream, store.clone()));
             }
             Err(e) => {
                 warn!("IPC TCP accept error: {e}");
@@ -131,12 +103,41 @@ async fn accept_loop_tcp(
     }
 }
 
-async fn handle_connection<S>(
-    stream: S,
-    running: Arc<RwLock<Config>>,
-    broadcast_tx: broadcast::Sender<Arc<Config>>,
-    config_path: Option<Arc<PathBuf>>,
-) where
+/// Handles every `Request` variant except `Subscribe`/`Unsubscribe`, which
+/// the caller manages itself since they control the connection's forwarder
+/// task rather than producing a single reply `Event`.
+async fn dispatch_request(store: &ConfigStore, req: Request) -> Option<Event> {
+    Some(match req {
+        Request::Get => Event::Config(store.running_snapshot().await),
+        Request::Save => match store.save_to_disk().await {
+            Ok(()) => Event::Saved,
+            Err(e) => Event::Error(e.to_string()),
+        },
+        Request::OpenTransaction { name, base } => {
+            Event::Transaction(store.open_transaction(&name, base).await)
+        }
+        Request::ApplyOp { name, op } => match store.apply_op(&name, op).await {
+            Ok(snap) => Event::Transaction(snap),
+            Err(e) => Event::Error(e.to_string()),
+        },
+        Request::GetTransaction { name } => match store.get_transaction(&name).await {
+            Ok(snap) => Event::Transaction(snap),
+            Err(e) => Event::Error(e.to_string()),
+        },
+        Request::CommitTransaction { name } => match store.commit_transaction(&name).await {
+            Ok(()) => Event::Committed,
+            Err(e) => Event::Error(e.to_string()),
+        },
+        Request::DiscardTransaction { name } => match store.discard_transaction(&name).await {
+            Ok(()) => Event::Discarded,
+            Err(e) => Event::Error(e.to_string()),
+        },
+        Request::Subscribe | Request::Unsubscribe => return None,
+    })
+}
+
+async fn handle_connection<S>(stream: S, store: ConfigStore)
+where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let (read_half, write_half) = tokio::io::split(stream);
@@ -152,16 +153,10 @@ async fn handle_connection<S>(
         tokio::select! {
             msg = reader.next() => {
                 match msg {
-                    Some(Ok(Request::Get)) => {
-                        let cfg = running.read().await.clone();
-                        if writer.send(Event::Config(cfg)).await.is_err() {
-                            break;
-                        }
-                    }
                     Some(Ok(Request::Subscribe)) => {
                         if let Some(h) = sub_task.take() { h.abort(); }
 
-                        let mut bcast_rx = broadcast_tx.subscribe();
+                        let mut bcast_rx = store.subscribe();
                         let forward_tx = sub_tx.clone();
                         sub_task = Some(tokio::spawn(async move {
                             loop {
@@ -179,7 +174,7 @@ async fn handle_connection<S>(
                             }
                         }));
 
-                        let cfg = running.read().await.clone();
+                        let cfg = store.running_snapshot().await;
                         if writer.send(Event::Config(cfg)).await.is_err() {
                             break;
                         }
@@ -189,21 +184,11 @@ async fn handle_connection<S>(
                         if let Some(h) = sub_task.take() { h.abort(); }
                         debug!("IPC client unsubscribed");
                     }
-                    Some(Ok(Request::Save)) => {
-                        let event = match &config_path {
-                            Some(path) => {
-                                let cfg = running.read().await.clone();
-                                match crate::persistence::save_to_disk(&cfg, path) {
-                                    Ok(()) => Event::Saved,
-                                    Err(e) => Event::Error(e.to_string()),
-                                }
+                    Some(Ok(req)) => {
+                        if let Some(event) = dispatch_request(&store, req).await {
+                            if writer.send(event).await.is_err() {
+                                break;
                             }
-                            None => Event::Error(
-                                "config persistence is not configured on this daemon (no --config-file set)".to_string(),
-                            ),
-                        };
-                        if writer.send(event).await.is_err() {
-                            break;
                         }
                     }
                     Some(Err(e)) => {

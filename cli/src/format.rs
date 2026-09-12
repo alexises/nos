@@ -1,4 +1,14 @@
-use nos_proto::Config;
+use nos_proto::{BgpInstance, Config, TransactionSnapshot};
+
+use crate::session::Path;
+
+/// Render one BGP instance as human-readable text.
+pub fn render_bgp_instance(instance: &BgpInstance) -> String {
+    format!(
+        "bgp instance {}: router-id {}, asn {}",
+        instance.name, instance.router_id, instance.asn
+    )
+}
 
 /// Render a full running-config snapshot as human-readable text.
 pub fn render_config(config: &Config) -> String {
@@ -8,14 +18,34 @@ pub fn render_config(config: &Config) -> String {
     config
         .bgp_instances
         .iter()
-        .map(|i| {
-            format!(
-                "bgp instance {}: router-id {}, asn {}",
-                i.name, i.router_id, i.asn
-            )
-        })
+        .map(render_bgp_instance)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Render a transaction's in-progress config, scoped to the current
+/// navigation path: the whole config at `Path::Root`, or a single BGP
+/// instance at `Path::BgpInstance(name)`.
+pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String {
+    match path {
+        Path::Root => {
+            let header = if snapshot.dirty {
+                format!("transaction '{}' (uncommitted changes):", snapshot.name)
+            } else {
+                format!("transaction '{}':", snapshot.name)
+            };
+            format!("{header}\n{}", render_config(&snapshot.config))
+        }
+        Path::BgpInstance(name) => snapshot
+            .config
+            .bgp_instances
+            .iter()
+            .find(|i| &i.name == name)
+            .map_or_else(
+                || format!("bgp instance '{name}' not found"),
+                render_bgp_instance,
+            ),
+    }
 }
 
 #[cfg(test)]
@@ -61,5 +91,43 @@ mod tests {
             "bgp instance vrf-a: router-id 1.1.1.1, asn 65001\n\
              bgp instance vrf-b: router-id 1.1.1.1, asn 65002"
         );
+    }
+
+    fn snapshot(dirty: bool) -> TransactionSnapshot {
+        TransactionSnapshot {
+            name: "demo".to_string(),
+            config: Config {
+                bgp_instances: vec![instance("r1", 65001)],
+            },
+            dirty,
+            resumed: false,
+        }
+    }
+
+    #[test]
+    fn render_transaction_at_root_clean() {
+        let rendered = render_transaction(&snapshot(false), &Path::Root);
+        assert_eq!(
+            rendered,
+            "transaction 'demo':\nbgp instance r1: router-id 1.1.1.1, asn 65001"
+        );
+    }
+
+    #[test]
+    fn render_transaction_at_root_dirty() {
+        let rendered = render_transaction(&snapshot(true), &Path::Root);
+        assert!(rendered.starts_with("transaction 'demo' (uncommitted changes):"));
+    }
+
+    #[test]
+    fn render_transaction_at_bgp_instance_found() {
+        let rendered = render_transaction(&snapshot(false), &Path::BgpInstance("r1".to_string()));
+        assert_eq!(rendered, "bgp instance r1: router-id 1.1.1.1, asn 65001");
+    }
+
+    #[test]
+    fn render_transaction_at_bgp_instance_not_found() {
+        let rendered = render_transaction(&snapshot(false), &Path::BgpInstance("r2".to_string()));
+        assert_eq!(rendered, "bgp instance 'r2' not found");
     }
 }

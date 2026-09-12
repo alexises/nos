@@ -29,9 +29,9 @@ async fn main() -> anyhow::Result<()> {
     let initial = persistence::load_or_default(&args.config_file)
         .with_context(|| format!("failed to load config from {}", args.config_file.display()))?;
 
-    let store = ConfigStore::new(initial);
+    let store = ConfigStore::new(initial, Some(args.config_file.clone()));
     let _handle = store
-        .start_ipc_server(&args.listen, Some(args.config_file.clone()))
+        .start_ipc_server(&args.listen)
         .with_context(|| format!("failed to bind {}", args.listen))?;
 
     tracing::info!("nos-configd listening on {}", args.listen);

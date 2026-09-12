@@ -1,8 +1,14 @@
 use std::net::Ipv4Addr;
 
 use futures::{SinkExt, StreamExt};
-use nos_cli::client::{fetch_running_config, save_running_config, ClientError};
-use nos_proto::{BgpInstance, Config, Event, IpcCodec, Request};
+use nos_cli::client::{
+    apply_op, commit_transaction, discard_transaction, fetch_running_config, get_transaction,
+    open_transaction, save_running_config, ClientError,
+};
+use nos_proto::{
+    BgpInstance, BgpInstanceOp, Config, ConfigOp, Event, IpcCodec, Request, TransactionBase,
+    TransactionSnapshot,
+};
 use tokio::net::UnixListener;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -16,25 +22,25 @@ fn sample_config() -> Config {
     }
 }
 
-/// Accepts a single connection, reads one `Request`, and replies with the given `Event`.
-async fn serve_once(listener: UnixListener, reply: Event) {
-    let (stream, _) = listener.accept().await.unwrap();
-    let (r, w) = stream.into_split();
-    let mut reader = FramedRead::new(r, IpcCodec::<Request>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<Event>::default());
-
-    assert!(matches!(reader.next().await, Some(Ok(Request::Get))));
-    writer.send(reply).await.unwrap();
+fn sample_snapshot() -> TransactionSnapshot {
+    TransactionSnapshot {
+        name: "demo".to_string(),
+        config: sample_config(),
+        dirty: true,
+        resumed: false,
+    }
 }
 
-/// Accepts a single connection, reads one `Request::Save`, and replies with the given `Event`.
-async fn serve_save_once(listener: UnixListener, reply: Event) {
+/// Accepts a single connection, reads one `Request`, asserts it matches
+/// `expected`, and replies with the given `Event`.
+async fn serve_once(listener: UnixListener, expected: Request, reply: Event) {
     let (stream, _) = listener.accept().await.unwrap();
     let (r, w) = stream.into_split();
     let mut reader = FramedRead::new(r, IpcCodec::<Request>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<Event>::default());
 
-    assert!(matches!(reader.next().await, Some(Ok(Request::Save))));
+    let got = reader.next().await.unwrap().unwrap();
+    assert_eq!(format!("{got:?}"), format!("{expected:?}"));
     writer.send(reply).await.unwrap();
 }
 
@@ -44,7 +50,11 @@ async fn returns_config_on_success() {
     let path = tmp.path().join("config.sock");
     let listener = UnixListener::bind(&path).unwrap();
 
-    let server = tokio::spawn(serve_once(listener, Event::Config(sample_config())));
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::Get,
+        Event::Config(sample_config()),
+    ));
 
     let cfg = fetch_running_config(&path).await.unwrap();
     assert_eq!(cfg, sample_config());
@@ -58,7 +68,11 @@ async fn returns_daemon_error() {
     let path = tmp.path().join("config.sock");
     let listener = UnixListener::bind(&path).unwrap();
 
-    let server = tokio::spawn(serve_once(listener, Event::Error("boom".to_string())));
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::Get,
+        Event::Error("boom".to_string()),
+    ));
 
     let err = fetch_running_config(&path).await.unwrap_err();
     assert!(matches!(err, ClientError::Daemon(msg) if msg == "boom"));
@@ -81,7 +95,7 @@ async fn save_returns_ok_on_success() {
     let path = tmp.path().join("config.sock");
     let listener = UnixListener::bind(&path).unwrap();
 
-    let server = tokio::spawn(serve_save_once(listener, Event::Saved));
+    let server = tokio::spawn(serve_once(listener, Request::Save, Event::Saved));
 
     save_running_config(&path).await.unwrap();
 
@@ -94,8 +108,9 @@ async fn save_returns_daemon_error() {
     let path = tmp.path().join("config.sock");
     let listener = UnixListener::bind(&path).unwrap();
 
-    let server = tokio::spawn(serve_save_once(
+    let server = tokio::spawn(serve_once(
         listener,
+        Request::Save,
         Event::Error("disk full".to_string()),
     ));
 
@@ -112,4 +127,217 @@ async fn save_returns_connect_error_for_missing_socket() {
 
     let err = save_running_config(&path).await.unwrap_err();
     assert!(matches!(err, ClientError::Connect { .. }));
+}
+
+#[tokio::test]
+async fn open_transaction_returns_snapshot_on_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::OpenTransaction {
+            name: "demo".to_string(),
+            base: TransactionBase::Blank,
+        },
+        Event::Transaction(sample_snapshot()),
+    ));
+
+    let snap = open_transaction(&path, "demo", TransactionBase::Blank)
+        .await
+        .unwrap();
+    assert_eq!(snap.name, "demo");
+    assert_eq!(snap.config, sample_config());
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn open_transaction_returns_daemon_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::OpenTransaction {
+            name: "demo".to_string(),
+            base: TransactionBase::Current,
+        },
+        Event::Error("boom".to_string()),
+    ));
+
+    let err = open_transaction(&path, "demo", TransactionBase::Current)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ClientError::Daemon(msg) if msg == "boom"));
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn apply_op_returns_snapshot_on_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let op = ConfigOp::BgpInstance(BgpInstanceOp::Ensure {
+        name: "r1".to_string(),
+    });
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::ApplyOp {
+            name: "demo".to_string(),
+            op: op.clone(),
+        },
+        Event::Transaction(sample_snapshot()),
+    ));
+
+    let snap = apply_op(&path, "demo", op).await.unwrap();
+    assert_eq!(snap.name, "demo");
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn apply_op_returns_daemon_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let op = ConfigOp::BgpInstance(BgpInstanceOp::Delete {
+        name: "r1".to_string(),
+    });
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::ApplyOp {
+            name: "demo".to_string(),
+            op: op.clone(),
+        },
+        Event::Error("bgp instance 'r1' not found".to_string()),
+    ));
+
+    let err = apply_op(&path, "demo", op).await.unwrap_err();
+    assert!(matches!(err, ClientError::Daemon(_)));
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn get_transaction_returns_snapshot_on_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::GetTransaction {
+            name: "demo".to_string(),
+        },
+        Event::Transaction(sample_snapshot()),
+    ));
+
+    let snap = get_transaction(&path, "demo").await.unwrap();
+    assert_eq!(snap.name, "demo");
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn get_transaction_returns_daemon_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::GetTransaction {
+            name: "missing".to_string(),
+        },
+        Event::Error("no transaction named 'missing'".to_string()),
+    ));
+
+    let err = get_transaction(&path, "missing").await.unwrap_err();
+    assert!(matches!(err, ClientError::Daemon(_)));
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn commit_transaction_returns_ok_on_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::CommitTransaction {
+            name: "demo".to_string(),
+        },
+        Event::Committed,
+    ));
+
+    commit_transaction(&path, "demo").await.unwrap();
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn commit_transaction_returns_daemon_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::CommitTransaction {
+            name: "demo".to_string(),
+        },
+        Event::Error("validation failed".to_string()),
+    ));
+
+    let err = commit_transaction(&path, "demo").await.unwrap_err();
+    assert!(matches!(err, ClientError::Daemon(_)));
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn discard_transaction_returns_ok_on_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::DiscardTransaction {
+            name: "demo".to_string(),
+        },
+        Event::Discarded,
+    ));
+
+    discard_transaction(&path, "demo").await.unwrap();
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn discard_transaction_returns_daemon_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let server = tokio::spawn(serve_once(
+        listener,
+        Request::DiscardTransaction {
+            name: "missing".to_string(),
+        },
+        Event::Error("no transaction named 'missing'".to_string()),
+    ));
+
+    let err = discard_transaction(&path, "missing").await.unwrap_err();
+    assert!(matches!(err, ClientError::Daemon(_)));
+
+    server.await.unwrap();
 }
