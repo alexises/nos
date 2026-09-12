@@ -1,12 +1,14 @@
 use std::borrow::Cow;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use clap::Parser;
+use futures::StreamExt;
 use nos_cli::command::Command;
 use nos_cli::session::{self, Mode, PathAfter, Resolved};
 use nos_cli::{client, format};
-use nos_proto::ConfigOp;
+use nos_proto::{ConfigOp, Event};
 use reedline::{Prompt, PromptEditMode, PromptHistorySearch, Reedline, Signal};
 
 #[derive(Parser)]
@@ -17,32 +19,37 @@ struct Args {
     config_socket: PathBuf,
 }
 
+/// Placeholder shown until the daemon is reachable — see `subscribe_hostname_task`.
+const FALLBACK_HOSTNAME: &str = "nos";
+
 struct NosPrompt {
-    left: String,
+    hostname: Arc<Mutex<String>>,
+    suffix: String,
 }
 
 impl NosPrompt {
-    fn for_mode(mode: &Mode) -> Self {
-        let left = match mode {
-            Mode::Operational => "nos".to_string(),
+    fn for_mode(hostname: Arc<Mutex<String>>, mode: &Mode) -> Self {
+        let suffix = match mode {
+            Mode::Operational => String::new(),
             Mode::Configuration {
                 transaction,
                 path: session::Path::Root,
                 ..
-            } => format!("nos({transaction})"),
+            } => format!("({transaction})"),
             Mode::Configuration {
                 transaction,
                 path: session::Path::BgpInstance(name),
                 ..
-            } => format!("nos({transaction}/bgp:{name})"),
+            } => format!("({transaction}/bgp:{name})"),
         };
-        Self { left }
+        Self { hostname, suffix }
     }
 }
 
 impl Prompt for NosPrompt {
     fn render_prompt_left(&self) -> Cow<'_, str> {
-        Cow::Borrowed(&self.left)
+        let hostname = self.hostname.lock().unwrap().clone();
+        Cow::Owned(format!("{hostname}{}", self.suffix))
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
@@ -94,10 +101,30 @@ async fn main() -> anyhow::Result<()> {
     let mut line_editor = Reedline::create();
     let mut mode = Mode::Operational;
 
+    let hostname = Arc::new(Mutex::new(FALLBACK_HOSTNAME.to_string()));
+    match client::fetch_running_config(&args.config_socket).await {
+        Ok(cfg) => *hostname.lock().unwrap() = cfg.hostname,
+        Err(_) => eprintln!(
+            "warning: could not reach nos-configd at startup; hostname prompt may be stale"
+        ),
+    }
+
+    // `RepaintSignal` isn't reachable outside the reedline crate (its return
+    // type here is public but its owning module isn't) — capture it in a
+    // closure instead of naming it, so `subscribe_hostname_task` only needs
+    // an `impl Fn()` bound.
+    let repaint_signal = line_editor.repaint_signal();
+    let notify_repaint = move || repaint_signal.request_repaint();
+    tokio::spawn(subscribe_hostname_task(
+        args.config_socket.clone(),
+        hostname.clone(),
+        notify_repaint,
+    ));
+
     println!("NOS interactive shell. Type 'help' for available commands.");
 
     loop {
-        let prompt = NosPrompt::for_mode(&mode);
+        let prompt = NosPrompt::for_mode(hostname.clone(), &mode);
         match line_editor.read_line(&prompt) {
             Ok(Signal::Success(line)) => {
                 let action = session::resolve(&mode, Command::parse(&line));
@@ -123,6 +150,35 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Holds a long-lived `Request::Subscribe` connection for the shell's whole
+/// lifetime, keeping `hostname` current and triggering an in-place prompt
+/// repaint (via `RepaintSignal`) whenever it changes — including while the
+/// shell is idle at the prompt, not just on the next command. Reconnects on
+/// a fixed 1s delay after any disconnect/error; this is nos-cli's first
+/// long-lived connection, so unlike every one-shot `client::*` call (which
+/// simply reports its own error per command), leaving this unattended would
+/// otherwise freeze the prompt's hostname for the rest of the session after
+/// a daemon restart.
+async fn subscribe_hostname_task(
+    socket: PathBuf,
+    hostname: Arc<Mutex<String>>,
+    notify_repaint: impl Fn() + Send + 'static,
+) {
+    loop {
+        if let Ok(mut reader) = client::subscribe(&socket).await {
+            while let Some(Ok(Event::Config(cfg))) = reader.next().await {
+                let mut guard = hostname.lock().unwrap();
+                if *guard != cfg.hostname {
+                    *guard = cfg.hostname;
+                    drop(guard);
+                    notify_repaint();
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 }
 
 async fn handle_action(action: Resolved, mode: Mode, socket: &Path) -> Outcome {
@@ -350,6 +406,9 @@ fn print_help() {
         "  set asn <n> | router-id <ip>               Set a field on the current BGP instance"
     );
     println!("  set bgp instance <name> asn <n>|router-id <ip>   Set a field on a named BGP instance from anywhere");
+    println!(
+        "  set hostname <name>                       Set the config's hostname (works from anywhere in configuration mode)"
+    );
     println!(
         "  delete [bgp instance <name>]               Delete the current or a named BGP instance"
     );

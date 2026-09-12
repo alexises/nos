@@ -101,6 +101,7 @@ mod tests {
     fn ensure_is_noop_when_present() {
         let mut cfg = Config {
             bgp_instances: vec![instance("r1", 65000)],
+            ..Default::default()
         };
         BgpInstanceOp::Ensure {
             name: "r1".to_string(),
@@ -115,6 +116,7 @@ mod tests {
     fn set_asn_updates_existing() {
         let mut cfg = Config {
             bgp_instances: vec![instance("r1", 65000)],
+            ..Default::default()
         };
         BgpInstanceOp::SetAsn {
             name: "r1".to_string(),
@@ -141,6 +143,7 @@ mod tests {
     fn set_router_id_updates_existing() {
         let mut cfg = Config {
             bgp_instances: vec![instance("r1", 65000)],
+            ..Default::default()
         };
         BgpInstanceOp::SetRouterId {
             name: "r1".to_string(),
@@ -155,6 +158,7 @@ mod tests {
     fn delete_removes_existing() {
         let mut cfg = Config {
             bgp_instances: vec![instance("r1", 65000), instance("r2", 65001)],
+            ..Default::default()
         };
         BgpInstanceOp::Delete {
             name: "r1".to_string(),

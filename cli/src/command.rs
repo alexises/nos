@@ -23,6 +23,9 @@ pub enum SetTarget {
     },
     /// Context-relative — only valid while navigated into a BGP instance.
     Relative { field: BgpInstanceField },
+    /// A top-level scalar with no navigation context — works from anywhere
+    /// in configuration mode, regardless of the current path.
+    Hostname(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +119,7 @@ impl Command {
                 }),
                 Err(_) => Command::Unknown(trimmed.to_string()),
             },
+            ["set", "hostname", name] => Command::Set(SetTarget::Hostname((*name).to_string())),
             ["delete"] => Command::Delete(DeleteTarget::Current),
             ["delete", "bgp", "instance", name] => Command::Delete(DeleteTarget::BgpInstance {
                 name: (*name).to_string(),
@@ -290,6 +294,14 @@ mod tests {
         assert_eq!(
             Command::parse("set router-id not-an-ip"),
             Command::Unknown("set router-id not-an-ip".to_string())
+        );
+    }
+
+    #[test]
+    fn set_hostname() {
+        assert_eq!(
+            Command::parse("set hostname router1"),
+            Command::Set(SetTarget::Hostname("router1".to_string()))
         );
     }
 

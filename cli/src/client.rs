@@ -55,6 +55,17 @@ fn expect_transaction(
     }
 }
 
+/// Opens a long-lived connection: sends `Request::Subscribe` and returns the
+/// reader half for the caller to loop on indefinitely (an initial config
+/// snapshot, then one more `Event::Config` per future commit). Unlike every
+/// other function here, this connection is not one-shot — the caller owns
+/// its lifetime.
+pub async fn subscribe(socket_path: &Path) -> Result<Reader, ClientError> {
+    let (reader, mut writer) = connect(socket_path).await?;
+    writer.send(Request::Subscribe).await?;
+    Ok(reader)
+}
+
 /// Dials the daemon, sends a one-shot `Request::Get`, and returns the snapshot.
 pub async fn fetch_running_config(socket_path: &Path) -> Result<Config, ClientError> {
     let (mut reader, mut writer) = connect(socket_path).await?;

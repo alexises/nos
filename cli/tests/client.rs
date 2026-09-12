@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use futures::{SinkExt, StreamExt};
 use nos_cli::client::{
     apply_op, commit_transaction, discard_transaction, fetch_running_config, get_transaction,
-    open_transaction, save_running_config, ClientError,
+    open_transaction, save_running_config, subscribe, ClientError,
 };
 use nos_proto::{
     BgpInstance, BgpInstanceOp, Config, ConfigOp, Event, IpcCodec, Request, TransactionBase,
@@ -19,6 +19,7 @@ fn sample_config() -> Config {
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             asn: 65000,
         }],
+        ..Default::default()
     }
 }
 
@@ -87,6 +88,41 @@ async fn returns_connect_error_for_missing_socket() {
 
     let err = fetch_running_config(&path).await.unwrap_err();
     assert!(matches!(err, ClientError::Connect { .. }));
+}
+
+#[tokio::test]
+async fn subscribe_returns_initial_snapshot_then_committed_update() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let updated = Config {
+        hostname: "router1".to_string(),
+        ..sample_config()
+    };
+    let server = tokio::spawn({
+        let updated = updated.clone();
+        async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, w) = stream.into_split();
+            let mut reader = FramedRead::new(r, IpcCodec::<Request>::default());
+            let mut writer = FramedWrite::new(w, IpcCodec::<Event>::default());
+
+            let got = reader.next().await.unwrap().unwrap();
+            assert!(matches!(got, Request::Subscribe));
+
+            writer.send(Event::Config(sample_config())).await.unwrap();
+            writer.send(Event::Config(updated)).await.unwrap();
+        }
+    });
+
+    let mut reader = subscribe(&path).await.unwrap();
+    let first = reader.next().await.unwrap().unwrap();
+    assert!(matches!(first, Event::Config(c) if c == sample_config()));
+    let second = reader.next().await.unwrap().unwrap();
+    assert!(matches!(second, Event::Config(c) if c.hostname == "router1"));
+
+    server.await.unwrap();
 }
 
 #[tokio::test]

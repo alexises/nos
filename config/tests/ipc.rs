@@ -202,6 +202,7 @@ async fn open_transaction_blank_and_current_over_ipc() {
     let store = ConfigStore::new(
         Config {
             bgp_instances: vec![instance("default", 65000)],
+            ..Default::default()
         },
         None,
     );
@@ -594,5 +595,68 @@ async fn subscribed_client_receives_broadcast_after_named_transaction_commit() {
             assert_eq!(c.bgp_instances[0].asn, 65001);
         }
         other => panic!("expected Config event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn hostname_change_is_broadcast_to_all_subscribers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock_path = tmp.path().join("config.sock");
+
+    let store = ConfigStore::new(Config::default(), None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(sock_path.clone()))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Two independently-connected subscribers, standing in for two `nos`
+    // shells watching the same daemon.
+    let (mut reader_a, mut writer_a) = connect(&sock_path).await;
+    writer_a.send(Request::Subscribe).await.unwrap();
+    let initial_a = reader_a.next().await.unwrap().unwrap();
+    assert!(matches!(initial_a, Event::Config(c) if c.hostname == "nos"));
+
+    let (mut reader_b, mut writer_b) = connect(&sock_path).await;
+    writer_b.send(Request::Subscribe).await.unwrap();
+    let initial_b = reader_b.next().await.unwrap().unwrap();
+    assert!(matches!(initial_b, Event::Config(c) if c.hostname == "nos"));
+
+    // A third connection commits a hostname change.
+    let (mut reader_c, mut writer_c) = connect(&sock_path).await;
+    writer_c
+        .send(Request::OpenTransaction {
+            name: "t1".to_string(),
+            base: TransactionBase::Blank,
+        })
+        .await
+        .unwrap();
+    reader_c.next().await.unwrap().unwrap();
+    writer_c
+        .send(Request::ApplyOp {
+            name: "t1".to_string(),
+            op: ConfigOp::SetHostname("router1".to_string()),
+        })
+        .await
+        .unwrap();
+    reader_c.next().await.unwrap().unwrap();
+    writer_c
+        .send(Request::CommitTransaction {
+            name: "t1".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        reader_c.next().await.unwrap().unwrap(),
+        Event::Committed
+    ));
+
+    // Both subscribers — every connected client — must see the new hostname.
+    for reader in [&mut reader_a, &mut reader_b] {
+        let update = tokio::time::timeout(Duration::from_millis(200), reader.next())
+            .await
+            .expect("subscribed connection did not receive the hostname broadcast")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(update, Event::Config(c) if c.hostname == "router1"));
     }
 }

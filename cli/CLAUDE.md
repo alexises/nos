@@ -13,7 +13,7 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `main.rs` | Arg parsing (`--config-socket`), the reedline REPL loop, mode-aware prompt, dispatch of `session::Resolved` actions |
 | `command.rs` | `Command::parse(&str) -> Command` — pure parsing, no I/O, no mode awareness |
 | `session.rs` | `Mode` (`Operational` / `Configuration { transaction, path, dirty }`), `Path` (navigation position), and `resolve(&Mode, Command) -> Resolved` — the pure semantic layer mapping a command plus current mode to a concrete action |
-| `client.rs` | One-shot IPC calls to `nos-configd`: `fetch_running_config`, `save_running_config`, `open_transaction`, `apply_op`, `get_transaction`, `commit_transaction`, `discard_transaction` |
+| `client.rs` | One-shot IPC calls to `nos-configd`: `fetch_running_config`, `save_running_config`, `open_transaction`, `apply_op`, `get_transaction`, `commit_transaction`, `discard_transaction` — plus `subscribe`, the one long-lived exception (see "Connection behavior") |
 | `format.rs` | `render_config`, `render_bgp_instance`, `render_transaction` — human-readable rendering (`Config`/`BgpInstance` only derive `Debug`, no `Display`) |
 
 ## Commands
@@ -26,6 +26,7 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `edit bgp instance <name>` | Creates the instance in the transaction if missing, then navigates into it |
 | `set asn <n>` / `set router-id <ip>` | Sets a field on the current BGP instance (only valid while navigated into one) |
 | `set bgp instance <name> asn <n>\|router-id <ip>` | Fully-qualified form — works from the transaction root without navigating |
+| `set hostname <name>` | Sets the top-level `hostname` field — works from anywhere in configuration mode, since hostname has no navigation context |
 | `delete` / `delete bgp instance <name>` | Deletes the current instance (returns to the transaction root) or a named one |
 | `up` / `top` | Navigates back to the transaction root |
 | `show` (bare) | Shows the transaction, or just the current BGP instance if navigated into one |
@@ -38,10 +39,12 @@ Command matching is exact-token only (no case-folding or abbreviations).
 
 ## Mode and navigation
 
-The shell tracks a local `Mode` (`session.rs`) — `Operational` or `Configuration { transaction, path, dirty }` — purely as client-side UI state; the daemon has no notion of "the current CLI session." `path` supports one level of nesting today (`Root` or `BgpInstance(name)`); the prompt reflects it (`nos>`, `nos(<txn>)>`, `nos(<txn>/bgp:<name>)>`). Since named transactions live entirely server-side, an abnormal exit (Ctrl-C, Ctrl-D, kill, dropped connection) never loses or discards one — only the explicit `discard`/`abort` command does, or choosing "discard" at the uncommitted-changes prompt on plain `exit`.
+The shell tracks a local `Mode` (`session.rs`) — `Operational` or `Configuration { transaction, path, dirty }` — purely as client-side UI state; the daemon has no notion of "the current CLI session." `path` supports one level of nesting today (`Root` or `BgpInstance(name)`); the prompt reflects it (`<hostname>>`, `<hostname>(<txn>)>`, `<hostname>(<txn>/bgp:<name>)>`), where `<hostname>` is the config's live `hostname` field (see "Connection behavior"), not a fixed literal. Since named transactions live entirely server-side, an abnormal exit (Ctrl-C, Ctrl-D, kill, dropped connection) never loses or discards one — only the explicit `discard`/`abort` command does, or choosing "discard" at the uncommitted-changes prompt on plain `exit`.
 
 ## Connection behavior
 
-Each command dials the daemon fresh (`UnixStream::connect` → split → `FramedRead<Event>`/`FramedWrite<Request>` → one `Request` → single `Event` reply → connection dropped). No persistent connection is held across commands — the transaction name plus the CLI's local `Mode` are the only state carried between commands; revisit the one-shot style only if a `Subscribe`-based live command is added.
+Each command dials the daemon fresh (`UnixStream::connect` → split → `FramedRead<Event>`/`FramedWrite<Request>` → one `Request` → single `Event` reply → connection dropped). No persistent connection is held across commands — the transaction name plus the CLI's local `Mode` are the only state carried between commands.
+
+**One deliberate exception**: at shell startup, `main.rs` spawns a background task (`subscribe_hostname_task`) that opens exactly one long-lived `Request::Subscribe` connection (via `client::subscribe`) purely to keep the prompt's hostname live. It loops on `Event::Config` for the shell's whole lifetime, updates a shared `Arc<Mutex<String>>`, and — only when the value actually changes — triggers an in-place prompt repaint via `reedline::Reedline::repaint_signal()`'s handle, so the prompt updates even while the shell is sitting idle with no keystroke. `RepaintSignal` itself isn't reachable outside the `reedline` crate in this version (its type lives in a private module despite the constructor method being public), so the handle is captured in a `move || ...` closure rather than named directly. On disconnect or error the task retries after a fixed 1s delay — no backoff — since it's the shell's only long-lived connection and a daemon restart shouldn't permanently freeze the prompt. The initial hostname is still seeded from a one-shot `fetch_running_config` at startup, and shell startup never blocks or fails if the daemon is briefly unreachable. Every other command still dials one-shot as before.
 
 Default socket path is `/run/nos/config.sock`, overridable via `--config-socket <path>`.

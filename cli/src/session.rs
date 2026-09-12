@@ -131,6 +131,12 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             op: set_op(name, field),
             after: PathAfter::Stay,
         },
+        // No navigation context to check — hostname is a top-level scalar,
+        // valid from anywhere in configuration mode.
+        Command::Set(SetTarget::Hostname(name)) => Resolved::ApplyOp {
+            op: ConfigOp::SetHostname(name),
+            after: PathAfter::Stay,
+        },
         Command::Set(SetTarget::Relative { field }) => match path {
             Path::BgpInstance(name) => Resolved::ApplyOp {
                 op: set_op(name.clone(), field),
@@ -390,6 +396,34 @@ mod tests {
                     name: "r1".to_string(),
                     router_id: Ipv4Addr::new(10, 0, 0, 1)
                 }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_hostname_works_from_root() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::Hostname("router1".to_string()))
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::SetHostname("router1".to_string()),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_hostname_works_from_bgp_instance_context() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::BgpInstance("r1".to_string()), false),
+                Command::Set(SetTarget::Hostname("router1".to_string()))
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::SetHostname("router1".to_string()),
                 after: PathAfter::Stay,
             }
         );

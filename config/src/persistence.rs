@@ -64,6 +64,7 @@ mod tests {
                 router_id: Ipv4Addr::new(10, 0, 0, 1),
                 asn: 65000,
             }],
+            ..Default::default()
         }
     }
 

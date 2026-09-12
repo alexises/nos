@@ -204,6 +204,7 @@ mod tests {
         let store = ConfigStore::new(
             Config {
                 bgp_instances: vec![instance("default", 65000)],
+                ..Default::default()
             },
             None,
         );
@@ -218,6 +219,7 @@ mod tests {
         let store = ConfigStore::new(
             Config {
                 bgp_instances: vec![instance("default", 65000)],
+                ..Default::default()
             },
             None,
         );
@@ -335,6 +337,7 @@ mod tests {
         let store = ConfigStore::new(Config::default(), None);
         let bad_config = Config {
             bgp_instances: vec![instance("vrf-a", 65001), instance("vrf-a", 65002)],
+            ..Default::default()
         };
         store.0.transactions.lock().await.insert(
             "t1".to_string(),

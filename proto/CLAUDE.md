@@ -37,6 +37,13 @@ Use `IpcCodec<T>` with `tokio_util::codec::{FramedRead, FramedWrite}` to get typ
 4. Add a sibling `<Section>Op` enum in `ops/<section>.rs` with a synchronous `apply(&self, config: &mut Config) -> Result<(), OpError>` (create/update/delete by name, no `garde` validation — that only runs at commit), then add a `ConfigOp` variant wrapping it in `ops/mod.rs`.
 5. Re-export from `lib.rs` if it's part of the public API.
 
+## Adding a scalar top-level field
+
+For a single always-present scalar with exactly one possible edit (e.g. `hostname`), skip the dedicated `<Section>Op` enum and file — that convention exists to give named/keyed collections per-name create/update/delete semantics, which a lone scalar doesn't need:
+
+1. Add the field directly to `Config` in `schema/mod.rs` with its own `#[garde(...)]` rule(s). If the desired default isn't the field type's own `Default::default()` (e.g. `hostname` defaults to `"nos"`, not `""`), add `#[serde(default = "some_fn")]` on the field — required so pre-existing on-disk config missing that key still deserializes — and give `Config` a manual `impl Default` instead of deriving it.
+2. Add one `ConfigOp` variant directly in `ops/mod.rs`'s enum (e.g. `SetHostname(String)`), with an `apply` arm that sets the field. No new `OpError` variant needed unless the edit can fail structurally.
+
 ## Wire compatibility
 
 `Request`/`Event` variants must always be **appended**, never inserted or reordered — `postcard` encodes enum variants by index, so reordering breaks compatibility with already-built binaries.
