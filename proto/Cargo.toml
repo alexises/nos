@@ -9,6 +9,7 @@ workspace = true
 [dependencies]
 serde      = { workspace = true }
 garde      = { workspace = true }
+ipnet      = { workspace = true }
 thiserror  = { workspace = true }
 postcard   = { workspace = true }
 tokio-util = { workspace = true }

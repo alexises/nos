@@ -10,5 +10,12 @@ pub use codec::IpcCodec;
 pub use diff::{diff_configs, ConfigDiff, DiffStatus, FieldDiff, SectionDiff};
 pub use docs::{CommandDoc, Topic};
 pub use ipc::{Event, Request, TransactionBase, TransactionSnapshot};
-pub use ops::{BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, ConfigOp, OpError};
-pub use schema::{AddressFamily, BgpInstance, BgpPeer, BgpPeerGroup, Config};
+pub use ipnet::IpNet;
+pub use ops::{
+    BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, ConfigOp, OpError, RoutingTableOp, StaticRouteOp,
+    StaticRoutingInstanceOp,
+};
+pub use schema::{
+    AddressFamily, BgpInstance, BgpPeer, BgpPeerGroup, Config, RoutingTable, StaticRoute,
+    StaticRoutingInstance,
+};

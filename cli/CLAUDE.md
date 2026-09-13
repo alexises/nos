@@ -17,7 +17,7 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `completer.rs` | `NosCompleter` — a `reedline::Completer` driven by `spec::COMMAND_SPECS`, shared by Tab-completion and the live `?` key |
 | `help_menu.rs` | `HelpMenu` — the `reedline::Menu` backing the live `?` key (brief vs. detailed views) |
 | `client.rs` | One-shot IPC calls to `nos-configd`: `fetch_running_config`, `save_running_config`, `open_transaction`, `apply_op`, `get_transaction`, `commit_transaction`, `discard_transaction`, `diff_transaction`, `describe` — plus `subscribe`, the one long-lived exception (see "Connection behavior") |
-| `format.rs` | `render_config`, `render_bgp_instance`, `render_transaction`, `render_diff` — human-readable rendering (`Config`/`BgpInstance` only derive `Debug`, no `Display`). `render_diff` is also the one place that emits ANSI color/highlight codes, hand-rolled rather than via a color crate |
+| `format.rs` | `render_config`, `render_bgp_instance`, `render_routing_table`, `render_static_routing_instance`, `render_transaction`, `render_diff` — human-readable rendering (`Config`/`BgpInstance` only derive `Debug`, no `Display`). `render_diff` is also the one place that emits ANSI color/highlight codes, hand-rolled rather than via a color crate |
 
 ## Commands
 
@@ -31,8 +31,16 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `set bgp instance <name> asn <n>\|router-id <router-id>` | Fully-qualified form — works from the transaction root without navigating |
 | `set hostname <name>` | Sets the top-level `hostname` field — works from anywhere in configuration mode, since hostname has no navigation context |
 | `delete` / `delete bgp instance <name>` | Deletes the current instance (returns to the transaction root) or a named one |
+| `edit routing-table <name>` | Creates the routing table in the transaction if missing, then navigates into it |
+| `set bgp-instance <instance>` / `set routing-table <name> bgp-instance <instance>` | Associates a BGP instance with a routing table (relative / fully-qualified) |
+| `set static-routing-instance <instance>` / `set routing-table <name> static-routing-instance <instance>` | Associates a static routing instance with a routing table (relative / fully-qualified) |
+| `delete` / `delete routing-table <name>` | Deletes the current routing table (returns to the transaction root) or a named one |
+| `edit static-routing-instance <name>` | Creates the static routing instance in the transaction if missing, then navigates into it |
+| `set route <subnet> gateway <address>` / `set static-routing-instance <name> route <subnet> gateway <address>` | Adds or repoints a static route (relative / fully-qualified) |
+| `delete route <subnet>` / `delete static-routing-instance <name> route <subnet>` | Removes a static route (relative / fully-qualified) |
+| `delete` / `delete static-routing-instance <name>` | Deletes the current static routing instance (returns to the transaction root) or a named one |
 | `up` / `top` | Navigates back to the transaction root |
-| `show this` | Shows the transaction, or just the current BGP instance if navigated into one |
+| `show this` | Shows the transaction, or just the current BGP instance/routing table/static routing instance if navigated into one |
 | `diff` | Shows what the transaction changes relative to the running config — colored `+`/`-` lines, word-level highlighting of the changed portion of a value, and an unstyled section header shown as context wherever a field inside it changed |
 | `commit` | Validates and commits the transaction, replacing the running config and returning to operational mode; on validation failure the transaction stays open for another attempt |
 | `discard` / `abort` | Deletes the transaction without touching the running config |
@@ -55,7 +63,7 @@ Each topic is fetched **at most once per session, lazily** — only when somethi
 
 ## Mode and navigation
 
-The shell tracks a local `Mode` (`session.rs`) — `Operational` or `Configuration { transaction, path, dirty }` — purely as client-side UI state; the daemon has no notion of "the current CLI session." `path` supports one level of nesting today (`Root` or `BgpInstance(name)`); the prompt reflects it (`<hostname>>`, `<hostname>(<txn>)>`, `<hostname>(<txn>/bgp:<name>)>`), where `<hostname>` is the config's live `hostname` field (see "Connection behavior"), not a fixed literal. Since named transactions live entirely server-side, an abnormal exit (Ctrl-C, Ctrl-D, kill, dropped connection) never loses or discards one — only the explicit `discard`/`abort` command does, or choosing "discard" at the uncommitted-changes prompt on plain `exit`.
+The shell tracks a local `Mode` (`session.rs`) — `Operational` or `Configuration { transaction, path, dirty }` — purely as client-side UI state; the daemon has no notion of "the current CLI session." `path` supports one level of nesting (`Root`, `BgpInstance(name)`, `BgpPeerGroup{..}`, `RoutingTable(name)`, or `StaticRoutingInstance(name)` — the latter two have no navigable child, since a routing table's associations and a static routing instance's routes are edited without a further navigation step); the prompt reflects it (`<hostname>>`, `<hostname>(<txn>)>`, `<hostname>(<txn>/bgp:<name>)>`, `<hostname>(<txn>/routing-table:<name>)>`, `<hostname>(<txn>/static-routing-instance:<name>)>`), where `<hostname>` is the config's live `hostname` field (see "Connection behavior"), not a fixed literal. Since named transactions live entirely server-side, an abnormal exit (Ctrl-C, Ctrl-D, kill, dropped connection) never loses or discards one — only the explicit `discard`/`abort` command does, or choosing "discard" at the uncommitted-changes prompt on plain `exit`.
 
 ## Connection behavior
 

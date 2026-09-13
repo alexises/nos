@@ -1,13 +1,20 @@
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
+pub mod routing_table;
+pub mod static_route;
+pub mod static_routing_instance;
 
 pub use bgp_instance::BgpInstanceOp;
 pub use bgp_peer::BgpPeerOp;
 pub use bgp_peer_group::BgpPeerGroupOp;
+pub use routing_table::RoutingTableOp;
+pub use static_route::StaticRouteOp;
+pub use static_routing_instance::StaticRoutingInstanceOp;
 
 use std::net::IpAddr;
 
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -27,6 +34,9 @@ pub enum ConfigOp {
     SetHostname(String),
     BgpPeerGroup(BgpPeerGroupOp),
     BgpPeer(BgpPeerOp),
+    RoutingTable(RoutingTableOp),
+    StaticRoutingInstance(StaticRoutingInstanceOp),
+    StaticRoute(StaticRouteOp),
 }
 
 impl ConfigOp {
@@ -42,6 +52,9 @@ impl ConfigOp {
             }
             ConfigOp::BgpPeerGroup(op) => op.apply(config),
             ConfigOp::BgpPeer(op) => op.apply(config),
+            ConfigOp::RoutingTable(op) => op.apply(config),
+            ConfigOp::StaticRoutingInstance(op) => op.apply(config),
+            ConfigOp::StaticRoute(op) => op.apply(config),
         }
     }
 }
@@ -57,6 +70,12 @@ pub enum OpError {
         instance: String,
         remote_address: IpAddr,
     },
+    #[error("routing table '{0}' not found")]
+    RoutingTableNotFound(String),
+    #[error("static routing instance '{0}' not found")]
+    StaticRoutingInstanceNotFound(String),
+    #[error("route to '{subnet}' not found in static routing instance '{instance}'")]
+    StaticRouteNotFound { instance: String, subnet: IpNet },
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use nos_proto::{
     AddressFamily, BgpInstance, BgpPeer, BgpPeerGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
-    SectionDiff, TransactionSnapshot,
+    RoutingTable, SectionDiff, StaticRoute, StaticRoutingInstance, TransactionSnapshot,
 };
 
 use crate::session::Path;
@@ -50,6 +50,31 @@ pub fn render_bgp_instance(instance: &BgpInstance) -> String {
     lines.join("\n")
 }
 
+/// Render one routing table as human-readable text.
+pub fn render_routing_table(table: &RoutingTable) -> String {
+    let bgp_instance = table.bgp_instance.as_deref().unwrap_or("unset");
+    let static_routing_instance = table.static_routing_instance.as_deref().unwrap_or("unset");
+    format!(
+        "routing-table {}: bgp-instance {bgp_instance}, static-routing-instance {static_routing_instance}",
+        table.name
+    )
+}
+
+/// Render one static route as human-readable text.
+pub fn render_static_route(route: &StaticRoute) -> String {
+    format!("route {}: gateway {}", route.subnet, route.gateway)
+}
+
+/// Render one static routing instance as human-readable text, including any
+/// nested routes, each indented one level under the instance line.
+pub fn render_static_routing_instance(instance: &StaticRoutingInstance) -> String {
+    let mut lines = vec![format!("static-routing-instance {}", instance.name)];
+    for route in &instance.routes {
+        lines.push(format!("  {}", render_static_route(route)));
+    }
+    lines.join("\n")
+}
+
 /// Render a full running-config snapshot as human-readable text.
 pub fn render_config(config: &Config) -> String {
     let mut lines = vec![format!("hostname: {}", config.hostname)];
@@ -57,6 +82,21 @@ pub fn render_config(config: &Config) -> String {
         lines.push("no BGP instances configured".to_string());
     } else {
         lines.extend(config.bgp_instances.iter().map(render_bgp_instance));
+    }
+    if config.routing_tables.is_empty() {
+        lines.push("no routing tables configured".to_string());
+    } else {
+        lines.extend(config.routing_tables.iter().map(render_routing_table));
+    }
+    if config.static_routing_instances.is_empty() {
+        lines.push("no static routing instances configured".to_string());
+    } else {
+        lines.extend(
+            config
+                .static_routing_instances
+                .iter()
+                .map(render_static_routing_instance),
+        );
     }
     lines.join("\n")
 }
@@ -101,6 +141,24 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
                     ),
             }
         }
+        Path::RoutingTable(name) => snapshot
+            .config
+            .routing_tables
+            .iter()
+            .find(|t| &t.name == name)
+            .map_or_else(
+                || format!("routing-table '{name}' not found"),
+                render_routing_table,
+            ),
+        Path::StaticRoutingInstance(name) => snapshot
+            .config
+            .static_routing_instances
+            .iter()
+            .find(|i| &i.name == name)
+            .map_or_else(
+                || format!("static routing instance '{name}' not found"),
+                render_static_routing_instance,
+            ),
     }
 }
 
@@ -129,6 +187,12 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
     }
 
     for section in &diff.bgp_instances {
+        render_section(&mut lines, section, 0, color);
+    }
+    for section in &diff.routing_tables {
+        render_section(&mut lines, section, 0, color);
+    }
+    for section in &diff.static_routing_instances {
         render_section(&mut lines, section, 0, color);
     }
 
@@ -273,7 +337,7 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(
             render_config(&cfg),
-            "hostname: nos\nno BGP instances configured"
+            "hostname: nos\nno BGP instances configured\nno routing tables configured\nno static routing instances configured"
         );
     }
 
@@ -285,7 +349,8 @@ mod tests {
         };
         assert_eq!(
             render_config(&cfg),
-            "hostname: nos\nbgp instance default: router-id 1.1.1.1, asn 65000"
+            "hostname: nos\nbgp instance default: router-id 1.1.1.1, asn 65000\n\
+             no routing tables configured\nno static routing instances configured"
         );
     }
 
@@ -298,7 +363,8 @@ mod tests {
         assert_eq!(
             render_config(&cfg),
             "hostname: nos\nbgp instance vrf-a: router-id 1.1.1.1, asn 65001\n\
-             bgp instance vrf-b: router-id 1.1.1.1, asn 65002"
+             bgp instance vrf-b: router-id 1.1.1.1, asn 65002\n\
+             no routing tables configured\nno static routing instances configured"
         );
     }
 
@@ -319,7 +385,8 @@ mod tests {
         let rendered = render_transaction(&snapshot(false), &Path::Root);
         assert_eq!(
             rendered,
-            "transaction 'demo':\nhostname: nos\nbgp instance r1: router-id 1.1.1.1, asn 65001"
+            "transaction 'demo':\nhostname: nos\nbgp instance r1: router-id 1.1.1.1, asn 65001\n\
+             no routing tables configured\nno static routing instances configured"
         );
     }
 
@@ -354,6 +421,7 @@ mod tests {
         let diff = ConfigDiff {
             hostname: Some(field("hostname", Some("router-a"), Some("router-b"))),
             bgp_instances: vec![],
+            ..Default::default()
         };
         assert_eq!(
             render_diff(&diff, false),
@@ -371,6 +439,7 @@ mod tests {
                 fields: vec![field("asn", Some("65000"), Some("65001"))],
                 subsections: vec![],
             }],
+            ..Default::default()
         };
         assert_eq!(
             render_diff(&diff, false),
@@ -391,6 +460,7 @@ mod tests {
                 ],
                 subsections: vec![],
             }],
+            ..Default::default()
         };
         assert_eq!(
             render_diff(&diff, false),
@@ -408,6 +478,7 @@ mod tests {
                 fields: vec![field("asn", Some("65000"), None)],
                 subsections: vec![],
             }],
+            ..Default::default()
         };
         assert_eq!(
             render_diff(&diff, false),
@@ -529,6 +600,7 @@ mod tests {
                     subsections: vec![],
                 }],
             }],
+            ..Default::default()
         };
         assert_eq!(
             render_diff(&diff, false),

@@ -1,6 +1,9 @@
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
+pub mod routing_table;
+pub mod static_route;
+pub mod static_routing_instance;
 
 use serde::{Deserialize, Serialize};
 
@@ -50,11 +53,16 @@ pub struct SectionDiff {
 pub struct ConfigDiff {
     pub hostname: Option<FieldDiff>,
     pub bgp_instances: Vec<SectionDiff>,
+    pub routing_tables: Vec<SectionDiff>,
+    pub static_routing_instances: Vec<SectionDiff>,
 }
 
 impl ConfigDiff {
     pub fn is_empty(&self) -> bool {
-        self.hostname.is_none() && self.bgp_instances.is_empty()
+        self.hostname.is_none()
+            && self.bgp_instances.is_empty()
+            && self.routing_tables.is_empty()
+            && self.static_routing_instances.is_empty()
     }
 }
 
@@ -72,6 +80,14 @@ pub fn diff_configs(base: &Config, candidate: &Config) -> ConfigDiff {
         bgp_instances: bgp_instance::diff_bgp_instances(
             &base.bgp_instances,
             &candidate.bgp_instances,
+        ),
+        routing_tables: routing_table::diff_routing_tables(
+            &base.routing_tables,
+            &candidate.routing_tables,
+        ),
+        static_routing_instances: static_routing_instance::diff_static_routing_instances(
+            &base.static_routing_instances,
+            &candidate.static_routing_instances,
         ),
     }
 }
@@ -125,10 +141,12 @@ mod tests {
         let base = Config {
             hostname: "router-a".to_string(),
             bgp_instances: vec![instance("r1", 65000)],
+            ..Default::default()
         };
         let candidate = Config {
             hostname: "router-b".to_string(),
             bgp_instances: vec![instance("r1", 65001), instance("r2", 65002)],
+            ..Default::default()
         };
         let diff = diff_configs(&base, &candidate);
         assert!(diff.hostname.is_some());

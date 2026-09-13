@@ -30,6 +30,25 @@ fn set_asn_op(name: &str, asn: u32) -> ConfigOp {
     })
 }
 
+fn ensure_routing_table_op(name: &str) -> ConfigOp {
+    ConfigOp::RoutingTable(nos_proto::RoutingTableOp::Ensure {
+        name: name.to_string(),
+    })
+}
+
+fn set_routing_table_bgp_instance_op(name: &str, bgp_instance: &str) -> ConfigOp {
+    ConfigOp::RoutingTable(nos_proto::RoutingTableOp::SetBgpInstance {
+        name: name.to_string(),
+        bgp_instance: bgp_instance.to_string(),
+    })
+}
+
+fn ensure_static_routing_instance_op(name: &str) -> ConfigOp {
+    ConfigOp::StaticRoutingInstance(nos_proto::StaticRoutingInstanceOp::Ensure {
+        name: name.to_string(),
+    })
+}
+
 async fn connect(
     socket_path: &std::path::Path,
 ) -> (
@@ -661,6 +680,129 @@ async fn hostname_change_is_broadcast_to_all_subscribers() {
             .unwrap();
         assert!(matches!(update, Event::Config(c) if c.hostname == "router1"));
     }
+}
+
+#[tokio::test]
+async fn routing_table_and_static_routing_instance_round_trip_over_ipc() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+
+    let store = ConfigStore::new(Config::default(), None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()))
+        .unwrap();
+
+    let (mut reader, mut writer) = connect(&path).await;
+    writer
+        .send(Request::OpenTransaction {
+            name: "t1".to_string(),
+            base: TransactionBase::Blank,
+        })
+        .await
+        .unwrap();
+    reader.next().await.unwrap().unwrap();
+
+    for op in [
+        ensure_op("r1"),
+        set_asn_op("r1", 65000),
+        ensure_static_routing_instance_op("sri1"),
+        ConfigOp::StaticRoute(nos_proto::StaticRouteOp::Set {
+            instance: "sri1".to_string(),
+            subnet: "10.0.0.0/24".parse().unwrap(),
+            gateway: "10.0.0.1".parse().unwrap(),
+        }),
+        ensure_routing_table_op("rt1"),
+        set_routing_table_bgp_instance_op("rt1", "r1"),
+        ConfigOp::RoutingTable(nos_proto::RoutingTableOp::SetStaticRoutingInstance {
+            name: "rt1".to_string(),
+            static_routing_instance: "sri1".to_string(),
+        }),
+    ] {
+        writer
+            .send(Request::ApplyOp {
+                name: "t1".to_string(),
+                op,
+            })
+            .await
+            .unwrap();
+        reader.next().await.unwrap().unwrap();
+    }
+
+    writer
+        .send(Request::CommitTransaction {
+            name: "t1".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        reader.next().await.unwrap().unwrap(),
+        Event::Committed
+    ));
+
+    let (mut reader2, mut writer2) = connect(&path).await;
+    writer2.send(Request::Get).await.unwrap();
+    match reader2.next().await.unwrap().unwrap() {
+        Event::Config(c) => {
+            assert_eq!(c.routing_tables.len(), 1);
+            assert_eq!(c.routing_tables[0].bgp_instance.as_deref(), Some("r1"));
+            assert_eq!(
+                c.routing_tables[0].static_routing_instance.as_deref(),
+                Some("sri1")
+            );
+            assert_eq!(c.static_routing_instances.len(), 1);
+            assert_eq!(c.static_routing_instances[0].routes.len(), 1);
+        }
+        other => panic!("expected Config event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn commit_fails_when_static_routing_instance_referenced_table_is_missing_over_ipc() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+
+    let store = ConfigStore::new(Config::default(), None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()))
+        .unwrap();
+
+    let (mut reader, mut writer) = connect(&path).await;
+    writer
+        .send(Request::OpenTransaction {
+            name: "t1".to_string(),
+            base: TransactionBase::Blank,
+        })
+        .await
+        .unwrap();
+    reader.next().await.unwrap().unwrap();
+
+    writer
+        .send(Request::ApplyOp {
+            name: "t1".to_string(),
+            op: ensure_routing_table_op("rt1"),
+        })
+        .await
+        .unwrap();
+    reader.next().await.unwrap().unwrap();
+    writer
+        .send(Request::ApplyOp {
+            name: "t1".to_string(),
+            op: set_routing_table_bgp_instance_op("rt1", "does-not-exist"),
+        })
+        .await
+        .unwrap();
+    reader.next().await.unwrap().unwrap();
+
+    writer
+        .send(Request::CommitTransaction {
+            name: "t1".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        reader.next().await.unwrap().unwrap(),
+        Event::Error(_)
+    ));
 }
 
 #[tokio::test]

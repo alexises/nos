@@ -217,6 +217,32 @@ mod tests {
         })
     }
 
+    fn ensure_routing_table_op(name: &str) -> ConfigOp {
+        ConfigOp::RoutingTable(nos_proto::RoutingTableOp::Ensure {
+            name: name.to_string(),
+        })
+    }
+
+    fn set_routing_table_bgp_instance_op(name: &str, bgp_instance: &str) -> ConfigOp {
+        ConfigOp::RoutingTable(nos_proto::RoutingTableOp::SetBgpInstance {
+            name: name.to_string(),
+            bgp_instance: bgp_instance.to_string(),
+        })
+    }
+
+    fn set_routing_table_static_routing_instance_op(name: &str, sri: &str) -> ConfigOp {
+        ConfigOp::RoutingTable(nos_proto::RoutingTableOp::SetStaticRoutingInstance {
+            name: name.to_string(),
+            static_routing_instance: sri.to_string(),
+        })
+    }
+
+    fn ensure_static_routing_instance_op(name: &str) -> ConfigOp {
+        ConfigOp::StaticRoutingInstance(nos_proto::StaticRoutingInstanceOp::Ensure {
+            name: name.to_string(),
+        })
+    }
+
     #[tokio::test]
     async fn open_blank_starts_empty_even_if_running_is_not() {
         let store = ConfigStore::new(
@@ -393,5 +419,153 @@ mod tests {
 
         assert!(store.commit_transaction("t1").await.is_err());
         assert!(store.running_snapshot().await.bgp_instances.is_empty());
+    }
+
+    #[tokio::test]
+    async fn routing_table_with_both_associations_round_trips_through_commit() {
+        let store = ConfigStore::new(Config::default(), None);
+        store.open_transaction("t1", TransactionBase::Blank).await;
+        store.apply_op("t1", ensure_op("r1")).await.unwrap();
+        store.apply_op("t1", set_asn_op("r1", 65000)).await.unwrap();
+        store
+            .apply_op("t1", ensure_static_routing_instance_op("sri1"))
+            .await
+            .unwrap();
+        store
+            .apply_op("t1", ensure_routing_table_op("rt1"))
+            .await
+            .unwrap();
+        store
+            .apply_op("t1", set_routing_table_bgp_instance_op("rt1", "r1"))
+            .await
+            .unwrap();
+        store
+            .apply_op(
+                "t1",
+                set_routing_table_static_routing_instance_op("rt1", "sri1"),
+            )
+            .await
+            .unwrap();
+
+        store.commit_transaction("t1").await.unwrap();
+
+        let running = store.running_snapshot().await;
+        assert_eq!(running.routing_tables.len(), 1);
+        assert_eq!(
+            running.routing_tables[0].bgp_instance.as_deref(),
+            Some("r1")
+        );
+        assert_eq!(
+            running.routing_tables[0].static_routing_instance.as_deref(),
+            Some("sri1")
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_fails_when_routing_table_references_missing_bgp_instance() {
+        let store = ConfigStore::new(Config::default(), None);
+        store.open_transaction("t1", TransactionBase::Blank).await;
+        store
+            .apply_op("t1", ensure_routing_table_op("rt1"))
+            .await
+            .unwrap();
+        store
+            .apply_op(
+                "t1",
+                set_routing_table_bgp_instance_op("rt1", "does-not-exist"),
+            )
+            .await
+            .unwrap();
+
+        assert!(store.commit_transaction("t1").await.is_err());
+        assert!(store.running_snapshot().await.routing_tables.is_empty());
+    }
+
+    #[tokio::test]
+    async fn commit_fails_when_two_routing_tables_claim_same_bgp_instance() {
+        let store = ConfigStore::new(Config::default(), None);
+        store.open_transaction("t1", TransactionBase::Blank).await;
+        store.apply_op("t1", ensure_op("r1")).await.unwrap();
+        store
+            .apply_op("t1", ensure_routing_table_op("rt1"))
+            .await
+            .unwrap();
+        store
+            .apply_op("t1", ensure_routing_table_op("rt2"))
+            .await
+            .unwrap();
+        store
+            .apply_op("t1", set_routing_table_bgp_instance_op("rt1", "r1"))
+            .await
+            .unwrap();
+        store
+            .apply_op("t1", set_routing_table_bgp_instance_op("rt2", "r1"))
+            .await
+            .unwrap();
+
+        assert!(store.commit_transaction("t1").await.is_err());
+        assert!(store.running_snapshot().await.routing_tables.is_empty());
+    }
+
+    #[tokio::test]
+    async fn commit_fails_when_two_routing_tables_claim_same_static_routing_instance() {
+        let store = ConfigStore::new(Config::default(), None);
+        store.open_transaction("t1", TransactionBase::Blank).await;
+        store
+            .apply_op("t1", ensure_static_routing_instance_op("sri1"))
+            .await
+            .unwrap();
+        store
+            .apply_op("t1", ensure_routing_table_op("rt1"))
+            .await
+            .unwrap();
+        store
+            .apply_op("t1", ensure_routing_table_op("rt2"))
+            .await
+            .unwrap();
+        store
+            .apply_op(
+                "t1",
+                set_routing_table_static_routing_instance_op("rt1", "sri1"),
+            )
+            .await
+            .unwrap();
+        store
+            .apply_op(
+                "t1",
+                set_routing_table_static_routing_instance_op("rt2", "sri1"),
+            )
+            .await
+            .unwrap();
+
+        assert!(store.commit_transaction("t1").await.is_err());
+        assert!(store.running_snapshot().await.routing_tables.is_empty());
+    }
+
+    #[tokio::test]
+    async fn static_routing_instance_with_route_round_trips_through_commit() {
+        let store = ConfigStore::new(Config::default(), None);
+        store.open_transaction("t1", TransactionBase::Blank).await;
+        store
+            .apply_op("t1", ensure_static_routing_instance_op("sri1"))
+            .await
+            .unwrap();
+        store
+            .apply_op(
+                "t1",
+                ConfigOp::StaticRoute(nos_proto::StaticRouteOp::Set {
+                    instance: "sri1".to_string(),
+                    subnet: "10.0.0.0/24".parse().unwrap(),
+                    gateway: "10.0.0.1".parse().unwrap(),
+                }),
+            )
+            .await
+            .unwrap();
+
+        store.commit_transaction("t1").await.unwrap();
+
+        let running = store.running_snapshot().await;
+        assert_eq!(running.static_routing_instances.len(), 1);
+        assert_eq!(running.static_routing_instances[0].routes.len(), 1);
     }
 }

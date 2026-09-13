@@ -9,6 +9,7 @@ workspace = true
 [dependencies]
 tokio      = { workspace = true }
 nos-proto  = { workspace = true }
+ipnet      = { workspace = true }
 tokio-util = { workspace = true }
 futures    = { workspace = true }
 clap       = { workspace = true }

@@ -1,4 +1,7 @@
-use nos_proto::{BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, ConfigOp, TransactionBase};
+use nos_proto::{
+    BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, ConfigOp, RoutingTableOp, StaticRouteOp,
+    StaticRoutingInstanceOp, TransactionBase,
+};
 
 use crate::command::{
     BgpInstanceField, BgpPeerGroupField, Command, DeleteTarget, EditTarget, SetTarget,
@@ -10,6 +13,8 @@ pub enum Path {
     Root,
     BgpInstance(String),
     BgpPeerGroup { instance: String, group: String },
+    RoutingTable(String),
+    StaticRoutingInstance(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -130,6 +135,8 @@ fn not_configuring(cmd: &Command) -> Resolved {
 const NO_CURRENT_INSTANCE: &str = "no current instance — use 'edit bgp instance <name>' or the fully-qualified 'set bgp instance <name> ...' form";
 const NO_CURRENT_PEER_GROUP: &str =
     "no current peer-group — use 'edit peer-group <name>' or the fully-qualified 'set bgp instance <name> peer-group <group> ...' form";
+const NO_CURRENT_ROUTING_TABLE: &str = "no current routing table — use 'edit routing-table <name>' or the fully-qualified 'set routing-table <name> ...' form";
+const NO_CURRENT_STATIC_ROUTING_INSTANCE: &str = "no current static routing instance — use 'edit static-routing-instance <name>' or the fully-qualified 'set static-routing-instance <name> ...' form";
 
 fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
     match cmd {
@@ -160,9 +167,20 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                     group: name,
                 }),
             },
-            Path::Root | Path::BgpPeerGroup { .. } => {
-                Resolved::Error(NO_CURRENT_INSTANCE.to_string())
-            }
+            Path::Root
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+        },
+        Command::Edit(EditTarget::RoutingTable { name }) => Resolved::ApplyOp {
+            op: ConfigOp::RoutingTable(RoutingTableOp::Ensure { name: name.clone() }),
+            after: PathAfter::To(Path::RoutingTable(name)),
+        },
+        Command::Edit(EditTarget::StaticRoutingInstance { name }) => Resolved::ApplyOp {
+            op: ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Ensure {
+                name: name.clone(),
+            }),
+            after: PathAfter::To(Path::StaticRoutingInstance(name)),
         },
 
         Command::Set(SetTarget::BgpInstance { name, field }) => Resolved::ApplyOp {
@@ -180,9 +198,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 op: set_op(name.clone(), field),
                 after: PathAfter::Stay,
             },
-            Path::Root | Path::BgpPeerGroup { .. } => {
-                Resolved::Error(NO_CURRENT_INSTANCE.to_string())
-            }
+            Path::Root
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Set(SetTarget::BgpPeerGroup {
             instance,
@@ -197,7 +216,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 op: peer_group_set_op(instance.clone(), group.clone(), field),
                 after: PathAfter::Stay,
             },
-            Path::Root | Path::BgpInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Set(SetTarget::BgpPeer {
             instance,
@@ -223,8 +245,83 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 }),
                 after: PathAfter::Stay,
             },
-            Path::Root | Path::BgpPeerGroup { .. } => {
-                Resolved::Error(NO_CURRENT_INSTANCE.to_string())
+            Path::Root
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+        },
+        Command::Set(SetTarget::RoutingTable { name, bgp_instance }) => Resolved::ApplyOp {
+            op: ConfigOp::RoutingTable(RoutingTableOp::SetBgpInstance { name, bgp_instance }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::RoutingTableRelative { bgp_instance }) => match path {
+            Path::RoutingTable(name) => Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::SetBgpInstance {
+                    name: name.clone(),
+                    bgp_instance,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::StaticRoutingInstance(_) => {
+                Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string())
+            }
+        },
+        Command::Set(SetTarget::RoutingTableStaticRoutingInstance {
+            name,
+            static_routing_instance,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::RoutingTable(RoutingTableOp::SetStaticRoutingInstance {
+                name,
+                static_routing_instance,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::RoutingTableStaticRoutingInstanceRelative {
+            static_routing_instance,
+        }) => match path {
+            Path::RoutingTable(name) => Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::SetStaticRoutingInstance {
+                    name: name.clone(),
+                    static_routing_instance,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::StaticRoutingInstance(_) => {
+                Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string())
+            }
+        },
+        Command::Set(SetTarget::StaticRoute {
+            instance,
+            subnet,
+            gateway,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::StaticRoute(StaticRouteOp::Set {
+                instance,
+                subnet,
+                gateway,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::StaticRouteRelative { subnet, gateway }) => match path {
+            Path::StaticRoutingInstance(instance) => Resolved::ApplyOp {
+                op: ConfigOp::StaticRoute(StaticRouteOp::Set {
+                    instance: instance.clone(),
+                    subnet,
+                    gateway,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_) => {
+                Resolved::Error(NO_CURRENT_STATIC_ROUTING_INSTANCE.to_string())
             }
         },
 
@@ -244,9 +341,82 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 }),
                 after: PathAfter::To(Path::BgpInstance(instance.clone())),
             },
+            Path::RoutingTable(name) => Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::Delete { name: name.clone() }),
+                after: PathAfter::ToRoot,
+            },
+            Path::StaticRoutingInstance(name) => Resolved::ApplyOp {
+                op: ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Delete {
+                    name: name.clone(),
+                }),
+                after: PathAfter::ToRoot,
+            },
             Path::Root => Resolved::Error(
                 "nothing to delete at the top level — use 'delete bgp instance <name>'".to_string(),
             ),
+        },
+        Command::Delete(DeleteTarget::RoutingTable { name }) => Resolved::ApplyOp {
+            op: ConfigOp::RoutingTable(RoutingTableOp::Delete { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::RoutingTableBgpInstance { name }) => Resolved::ApplyOp {
+            op: ConfigOp::RoutingTable(RoutingTableOp::ClearBgpInstance { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::RoutingTableBgpInstanceRelative) => match path {
+            Path::RoutingTable(name) => Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::ClearBgpInstance { name: name.clone() }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::StaticRoutingInstance(_) => {
+                Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string())
+            }
+        },
+        Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstance { name }) => {
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::ClearStaticRoutingInstance { name }),
+                after: PathAfter::Stay,
+            }
+        }
+        Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstanceRelative) => match path {
+            Path::RoutingTable(name) => Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::ClearStaticRoutingInstance {
+                    name: name.clone(),
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::StaticRoutingInstance(_) => {
+                Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string())
+            }
+        },
+        Command::Delete(DeleteTarget::StaticRoutingInstance { name }) => Resolved::ApplyOp {
+            op: ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Delete { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::StaticRoute { instance, subnet }) => Resolved::ApplyOp {
+            op: ConfigOp::StaticRoute(StaticRouteOp::Delete { instance, subnet }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::StaticRouteRelative { subnet }) => match path {
+            Path::StaticRoutingInstance(instance) => Resolved::ApplyOp {
+                op: ConfigOp::StaticRoute(StaticRouteOp::Delete {
+                    instance: instance.clone(),
+                    subnet,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_) => {
+                Resolved::Error(NO_CURRENT_STATIC_ROUTING_INSTANCE.to_string())
+            }
         },
         Command::Delete(DeleteTarget::BgpPeerGroup { instance, name }) => Resolved::ApplyOp {
             op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Delete { instance, name }),
@@ -260,9 +430,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 }),
                 after: PathAfter::Stay,
             },
-            Path::Root | Path::BgpPeerGroup { .. } => {
-                Resolved::Error(NO_CURRENT_INSTANCE.to_string())
-            }
+            Path::Root
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Delete(DeleteTarget::BgpPeer {
             instance,
@@ -282,9 +453,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 }),
                 after: PathAfter::Stay,
             },
-            Path::Root | Path::BgpPeerGroup { .. } => {
-                Resolved::Error(NO_CURRENT_INSTANCE.to_string())
-            }
+            Path::Root
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Delete(DeleteTarget::SourceAddress) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -294,7 +466,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 }),
                 after: PathAfter::Stay,
             },
-            Path::Root | Path::BgpInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::AddressFamily(af)) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -305,20 +480,30 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 }),
                 after: PathAfter::Stay,
             },
-            Path::Root | Path::BgpInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
 
         // `top` always lands at the root, however deep the current path is.
         Command::Top => match path {
             Path::Root => Resolved::Error("already at the top level".to_string()),
-            Path::BgpInstance(_) | Path::BgpPeerGroup { .. } => Resolved::NavigateTop,
+            Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_) => Resolved::NavigateTop,
         },
         // `up` moves exactly one level — from an instance that's the root
         // (coinciding with `top`), but from a peer-group it's the owning
-        // instance, not the root.
+        // instance, not the root. Routing tables and static routing
+        // instances have no navigable child (routes aren't a `Path`
+        // position), so they behave like a BGP instance here.
         Command::Up => match path {
             Path::Root => Resolved::Error("already at the top level".to_string()),
-            Path::BgpInstance(_) => Resolved::NavigateTop,
+            Path::BgpInstance(_) | Path::RoutingTable(_) | Path::StaticRoutingInstance(_) => {
+                Resolved::NavigateTop
+            }
             Path::BgpPeerGroup { instance, .. } => {
                 Resolved::Navigate(Path::BgpInstance(instance.clone()))
             }
@@ -932,5 +1117,282 @@ mod tests {
             ),
             Resolved::Error(_)
         ));
+    }
+
+    #[test]
+    fn edit_routing_table_navigates() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Edit(EditTarget::RoutingTable {
+                    name: "rt1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::Ensure {
+                    name: "rt1".to_string()
+                }),
+                after: PathAfter::To(Path::RoutingTable("rt1".to_string())),
+            }
+        );
+    }
+
+    #[test]
+    fn edit_static_routing_instance_navigates() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Edit(EditTarget::StaticRoutingInstance {
+                    name: "sri1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Ensure {
+                    name: "sri1".to_string()
+                }),
+                after: PathAfter::To(Path::StaticRoutingInstance("sri1".to_string())),
+            }
+        );
+    }
+
+    #[test]
+    fn set_routing_table_bgp_instance_qualified_and_relative() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::RoutingTable {
+                    name: "rt1".to_string(),
+                    bgp_instance: "r1".to_string(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::SetBgpInstance {
+                    name: "rt1".to_string(),
+                    bgp_instance: "r1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::RoutingTableRelative {
+                    bgp_instance: "r1".to_string()
+                })
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::RoutingTable("rt1".to_string()), false),
+                Command::Set(SetTarget::RoutingTableRelative {
+                    bgp_instance: "r1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::SetBgpInstance {
+                    name: "rt1".to_string(),
+                    bgp_instance: "r1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_routing_table_static_routing_instance_qualified_and_relative() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::RoutingTableStaticRoutingInstance {
+                    name: "rt1".to_string(),
+                    static_routing_instance: "sri1".to_string(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::SetStaticRoutingInstance {
+                    name: "rt1".to_string(),
+                    static_routing_instance: "sri1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::RoutingTable("rt1".to_string()), false),
+                Command::Set(SetTarget::RoutingTableStaticRoutingInstanceRelative {
+                    static_routing_instance: "sri1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::SetStaticRoutingInstance {
+                    name: "rt1".to_string(),
+                    static_routing_instance: "sri1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_static_route_qualified_and_relative() {
+        let subnet: ipnet::IpNet = "10.0.0.0/24".parse().unwrap();
+        let gateway: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::StaticRoute {
+                    instance: "sri1".to_string(),
+                    subnet,
+                    gateway,
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::StaticRoute(StaticRouteOp::Set {
+                    instance: "sri1".to_string(),
+                    subnet,
+                    gateway,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::StaticRouteRelative { subnet, gateway })
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::StaticRoutingInstance("sri1".to_string()), false),
+                Command::Set(SetTarget::StaticRouteRelative { subnet, gateway })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::StaticRoute(StaticRouteOp::Set {
+                    instance: "sri1".to_string(),
+                    subnet,
+                    gateway,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn delete_current_at_routing_table_and_static_routing_instance_returns_to_root() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::RoutingTable("rt1".to_string()), false),
+                Command::Delete(DeleteTarget::Current)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::Delete {
+                    name: "rt1".to_string()
+                }),
+                after: PathAfter::ToRoot,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::StaticRoutingInstance("sri1".to_string()), false),
+                Command::Delete(DeleteTarget::Current)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Delete {
+                    name: "sri1".to_string()
+                }),
+                after: PathAfter::ToRoot,
+            }
+        );
+    }
+
+    #[test]
+    fn delete_routing_table_bgp_instance_qualified_and_relative() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Delete(DeleteTarget::RoutingTableBgpInstance {
+                    name: "rt1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::ClearBgpInstance {
+                    name: "rt1".to_string()
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Delete(DeleteTarget::RoutingTableBgpInstanceRelative)
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::RoutingTable("rt1".to_string()), false),
+                Command::Delete(DeleteTarget::RoutingTableBgpInstanceRelative)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::ClearBgpInstance {
+                    name: "rt1".to_string()
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn delete_static_route_qualified_and_relative() {
+        let subnet: ipnet::IpNet = "10.0.0.0/24".parse().unwrap();
+
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Delete(DeleteTarget::StaticRoute {
+                    instance: "sri1".to_string(),
+                    subnet,
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::StaticRoute(StaticRouteOp::Delete {
+                    instance: "sri1".to_string(),
+                    subnet,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::StaticRoutingInstance("sri1".to_string()), false),
+                Command::Delete(DeleteTarget::StaticRouteRelative { subnet })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::StaticRoute(StaticRouteOp::Delete {
+                    instance: "sri1".to_string(),
+                    subnet,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn up_and_top_from_routing_table_and_static_routing_instance_navigate_to_root() {
+        let rt_mode = config_mode("t1", Path::RoutingTable("rt1".to_string()), false);
+        assert_eq!(resolve(&rt_mode, Command::Up), Resolved::NavigateTop);
+        assert_eq!(resolve(&rt_mode, Command::Top), Resolved::NavigateTop);
+
+        let sri_mode = config_mode("t1", Path::StaticRoutingInstance("sri1".to_string()), false);
+        assert_eq!(resolve(&sri_mode, Command::Up), Resolved::NavigateTop);
+        assert_eq!(resolve(&sri_mode, Command::Top), Resolved::NavigateTop);
     }
 }

@@ -1,5 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr};
 
+use ipnet::IpNet;
 use nos_proto::{AddressFamily, TransactionBase};
 
 /// A single field edit targeting a BGP instance.
@@ -29,6 +30,12 @@ pub enum EditTarget {
     },
     /// Context-relative — only valid while navigated into a BGP instance.
     PeerGroupRelative {
+        name: String,
+    },
+    RoutingTable {
+        name: String,
+    },
+    StaticRoutingInstance {
         name: String,
     },
 }
@@ -67,6 +74,27 @@ pub enum SetTarget {
         remote_address: IpAddr,
         peer_group: String,
     },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    RoutingTable { name: String, bgp_instance: String },
+    /// Context-relative — only valid while navigated into a routing table.
+    RoutingTableRelative { bgp_instance: String },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    RoutingTableStaticRoutingInstance {
+        name: String,
+        static_routing_instance: String,
+    },
+    /// Context-relative — only valid while navigated into a routing table.
+    RoutingTableStaticRoutingInstanceRelative { static_routing_instance: String },
+    /// Fully-qualified route upsert — works from anywhere in configuration
+    /// mode.
+    StaticRoute {
+        instance: String,
+        subnet: IpNet,
+        gateway: IpAddr,
+    },
+    /// Context-relative — only valid while navigated into a static routing
+    /// instance.
+    StaticRouteRelative { subnet: IpNet, gateway: IpAddr },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +124,35 @@ pub enum DeleteTarget {
     /// `delete address-family ipv4|ipv6` — only valid while navigated into
     /// a peer-group.
     AddressFamily(AddressFamily),
+    RoutingTable {
+        name: String,
+    },
+    /// `delete routing-table <name> bgp-instance` — qualified clear.
+    RoutingTableBgpInstance {
+        name: String,
+    },
+    /// `delete bgp-instance` — relative clear, only valid while navigated
+    /// into a routing table.
+    RoutingTableBgpInstanceRelative,
+    /// `delete routing-table <name> static-routing-instance` — qualified
+    /// clear.
+    RoutingTableStaticRoutingInstance {
+        name: String,
+    },
+    /// `delete static-routing-instance` — relative clear, only valid while
+    /// navigated into a routing table.
+    RoutingTableStaticRoutingInstanceRelative,
+    StaticRoutingInstance {
+        name: String,
+    },
+    StaticRoute {
+        instance: String,
+        subnet: IpNet,
+    },
+    /// Only valid while navigated into a static routing instance.
+    StaticRouteRelative {
+        subnet: IpNet,
+    },
 }
 
 /// A parsed REPL input line.
@@ -166,6 +223,14 @@ impl Command {
             ["edit", "peer-group", group] => Command::Edit(EditTarget::PeerGroupRelative {
                 name: (*group).to_string(),
             }),
+            ["edit", "routing-table", name] => Command::Edit(EditTarget::RoutingTable {
+                name: (*name).to_string(),
+            }),
+            ["edit", "static-routing-instance", name] => {
+                Command::Edit(EditTarget::StaticRoutingInstance {
+                    name: (*name).to_string(),
+                })
+            }
             ["set", "bgp", "instance", name, "asn", n] => match n.parse::<u32>() {
                 Ok(asn) => Command::Set(SetTarget::BgpInstance {
                     name: (*name).to_string(),
@@ -262,6 +327,44 @@ impl Command {
                 }),
                 Err(_) => Command::Unknown(trimmed.to_string()),
             },
+            ["set", "routing-table", name, "bgp-instance", instance] => {
+                Command::Set(SetTarget::RoutingTable {
+                    name: (*name).to_string(),
+                    bgp_instance: (*instance).to_string(),
+                })
+            }
+            ["set", "bgp-instance", instance] => Command::Set(SetTarget::RoutingTableRelative {
+                bgp_instance: (*instance).to_string(),
+            }),
+            ["set", "routing-table", name, "static-routing-instance", instance] => {
+                Command::Set(SetTarget::RoutingTableStaticRoutingInstance {
+                    name: (*name).to_string(),
+                    static_routing_instance: (*instance).to_string(),
+                })
+            }
+            ["set", "static-routing-instance", instance] => {
+                Command::Set(SetTarget::RoutingTableStaticRoutingInstanceRelative {
+                    static_routing_instance: (*instance).to_string(),
+                })
+            }
+            ["set", "static-routing-instance", name, "route", subnet, "gateway", addr] => {
+                match (subnet.parse::<IpNet>(), addr.parse::<IpAddr>()) {
+                    (Ok(subnet), Ok(gateway)) => Command::Set(SetTarget::StaticRoute {
+                        instance: (*name).to_string(),
+                        subnet,
+                        gateway,
+                    }),
+                    _ => Command::Unknown(trimmed.to_string()),
+                }
+            }
+            ["set", "route", subnet, "gateway", addr] => {
+                match (subnet.parse::<IpNet>(), addr.parse::<IpAddr>()) {
+                    (Ok(subnet), Ok(gateway)) => {
+                        Command::Set(SetTarget::StaticRouteRelative { subnet, gateway })
+                    }
+                    _ => Command::Unknown(trimmed.to_string()),
+                }
+            }
             ["delete"] => Command::Delete(DeleteTarget::Current),
             ["delete", "bgp", "instance", name] => Command::Delete(DeleteTarget::BgpInstance {
                 name: (*name).to_string(),
@@ -295,6 +398,43 @@ impl Command {
             ["delete", "address-family", "ipv6"] => {
                 Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv6Unicast))
             }
+            ["delete", "routing-table", name] => Command::Delete(DeleteTarget::RoutingTable {
+                name: (*name).to_string(),
+            }),
+            ["delete", "routing-table", name, "bgp-instance"] => {
+                Command::Delete(DeleteTarget::RoutingTableBgpInstance {
+                    name: (*name).to_string(),
+                })
+            }
+            ["delete", "bgp-instance"] => {
+                Command::Delete(DeleteTarget::RoutingTableBgpInstanceRelative)
+            }
+            ["delete", "routing-table", name, "static-routing-instance"] => {
+                Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstance {
+                    name: (*name).to_string(),
+                })
+            }
+            ["delete", "static-routing-instance"] => {
+                Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstanceRelative)
+            }
+            ["delete", "static-routing-instance", name] => {
+                Command::Delete(DeleteTarget::StaticRoutingInstance {
+                    name: (*name).to_string(),
+                })
+            }
+            ["delete", "static-routing-instance", name, "route", subnet] => {
+                match subnet.parse::<IpNet>() {
+                    Ok(subnet) => Command::Delete(DeleteTarget::StaticRoute {
+                        instance: (*name).to_string(),
+                        subnet,
+                    }),
+                    Err(_) => Command::Unknown(trimmed.to_string()),
+                }
+            }
+            ["delete", "route", subnet] => match subnet.parse::<IpNet>() {
+                Ok(subnet) => Command::Delete(DeleteTarget::StaticRouteRelative { subnet }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
             _ => Command::Unknown(trimmed.to_string()),
         }
     }
@@ -628,6 +768,140 @@ mod tests {
             Command::parse("delete peer 192.0.2.1"),
             Command::Delete(DeleteTarget::PeerRelative {
                 remote_address: "192.0.2.1".parse::<IpAddr>().unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn edit_routing_table() {
+        assert_eq!(
+            Command::parse("edit routing-table rt1"),
+            Command::Edit(EditTarget::RoutingTable {
+                name: "rt1".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn edit_static_routing_instance() {
+        assert_eq!(
+            Command::parse("edit static-routing-instance sri1"),
+            Command::Edit(EditTarget::StaticRoutingInstance {
+                name: "sri1".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn set_routing_table_bgp_instance_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set routing-table rt1 bgp-instance r1"),
+            Command::Set(SetTarget::RoutingTable {
+                name: "rt1".to_string(),
+                bgp_instance: "r1".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("set bgp-instance r1"),
+            Command::Set(SetTarget::RoutingTableRelative {
+                bgp_instance: "r1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn set_routing_table_static_routing_instance_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set routing-table rt1 static-routing-instance sri1"),
+            Command::Set(SetTarget::RoutingTableStaticRoutingInstance {
+                name: "rt1".to_string(),
+                static_routing_instance: "sri1".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("set static-routing-instance sri1"),
+            Command::Set(SetTarget::RoutingTableStaticRoutingInstanceRelative {
+                static_routing_instance: "sri1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn set_static_route_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set static-routing-instance sri1 route 10.0.0.0/24 gateway 10.0.0.1"),
+            Command::Set(SetTarget::StaticRoute {
+                instance: "sri1".to_string(),
+                subnet: "10.0.0.0/24".parse().unwrap(),
+                gateway: "10.0.0.1".parse().unwrap(),
+            })
+        );
+        assert_eq!(
+            Command::parse("set route 10.0.0.0/24 gateway 10.0.0.1"),
+            Command::Set(SetTarget::StaticRouteRelative {
+                subnet: "10.0.0.0/24".parse().unwrap(),
+                gateway: "10.0.0.1".parse().unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn set_static_route_malformed_subnet_is_unknown() {
+        assert_eq!(
+            Command::parse("set route not-a-subnet gateway 10.0.0.1"),
+            Command::Unknown("set route not-a-subnet gateway 10.0.0.1".to_string())
+        );
+    }
+
+    #[test]
+    fn delete_routing_table_and_its_associations() {
+        assert_eq!(
+            Command::parse("delete routing-table rt1"),
+            Command::Delete(DeleteTarget::RoutingTable {
+                name: "rt1".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete routing-table rt1 bgp-instance"),
+            Command::Delete(DeleteTarget::RoutingTableBgpInstance {
+                name: "rt1".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete bgp-instance"),
+            Command::Delete(DeleteTarget::RoutingTableBgpInstanceRelative)
+        );
+        assert_eq!(
+            Command::parse("delete routing-table rt1 static-routing-instance"),
+            Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstance {
+                name: "rt1".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete static-routing-instance"),
+            Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstanceRelative)
+        );
+    }
+
+    #[test]
+    fn delete_static_routing_instance_and_its_routes() {
+        assert_eq!(
+            Command::parse("delete static-routing-instance sri1"),
+            Command::Delete(DeleteTarget::StaticRoutingInstance {
+                name: "sri1".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete static-routing-instance sri1 route 10.0.0.0/24"),
+            Command::Delete(DeleteTarget::StaticRoute {
+                instance: "sri1".to_string(),
+                subnet: "10.0.0.0/24".parse().unwrap(),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete route 10.0.0.0/24"),
+            Command::Delete(DeleteTarget::StaticRouteRelative {
+                subnet: "10.0.0.0/24".parse().unwrap(),
             })
         );
     }

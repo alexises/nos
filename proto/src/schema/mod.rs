@@ -1,10 +1,16 @@
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
+pub mod routing_table;
+pub mod static_route;
+pub mod static_routing_instance;
 
 pub use bgp_instance::BgpInstance;
 pub use bgp_peer::BgpPeer;
 pub use bgp_peer_group::{AddressFamily, BgpPeerGroup};
+pub use routing_table::RoutingTable;
+pub use static_route::StaticRoute;
+pub use static_routing_instance::StaticRoutingInstance;
 
 use garde::Validate;
 use serde::{Deserialize, Serialize};
@@ -17,6 +23,12 @@ pub struct Config {
     #[garde(dive)]
     pub bgp_instances: Vec<BgpInstance>,
 
+    #[garde(dive)]
+    pub routing_tables: Vec<RoutingTable>,
+
+    #[garde(dive)]
+    pub static_routing_instances: Vec<StaticRoutingInstance>,
+
     #[serde(default = "default_hostname")]
     #[garde(length(min = 1, max = 253), custom(|h, _ctx: &Config| hostname_charset(h)))]
     pub hostname: String,
@@ -26,6 +38,8 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             bgp_instances: Vec::new(),
+            routing_tables: Vec::new(),
+            static_routing_instances: Vec::new(),
             hostname: default_hostname(),
         }
     }

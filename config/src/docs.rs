@@ -141,6 +141,68 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Deletes the remote-address-to-peer-group association from the named BGP \
              instance in the transaction's in-progress config.",
         ),
+        Topic::EnsureRoutingTable => (
+            "Create a routing table in the transaction if it doesn't already exist.",
+            "Adds a new routing table with the given name to the transaction's in-progress \
+             config if none exists with that name yet; if one already exists, this is a \
+             no-op. Does not itself associate a BGP instance or a static routing instance.",
+        ),
+        Topic::SetRoutingTableBgpInstance => (
+            "Associate a BGP instance with a routing table.",
+            "Points a routing table at a BGP instance by name. The instance must exist, and \
+             a given instance may be associated with at most one routing table at a time; \
+             both are checked at commit time, not when the edit is applied.",
+        ),
+        Topic::ClearRoutingTableBgpInstance => (
+            "Remove a routing table's BGP instance association.",
+            "Unsets the bgp-instance field on a routing table, reverting to no explicit \
+             association.",
+        ),
+        Topic::SetRoutingTableStaticRoutingInstance => (
+            "Associate a static routing instance with a routing table.",
+            "Points a routing table at a static routing instance by name. The instance must \
+             exist, and a given static routing instance may be associated with at most one \
+             routing table at a time; both are checked at commit time, not when the edit is \
+             applied.",
+        ),
+        Topic::ClearRoutingTableStaticRoutingInstance => (
+            "Remove a routing table's static routing instance association.",
+            "Unsets the static-routing-instance field on a routing table, reverting to no \
+             explicit association.",
+        ),
+        Topic::DeleteRoutingTable => (
+            "Delete a routing table from the transaction.",
+            "Removes a routing table from the transaction's in-progress config. This only \
+             clears the table's own associations — it does not delete the BGP instance or \
+             static routing instance it referenced.",
+        ),
+        Topic::EnsureStaticRoutingInstance => (
+            "Create a static routing instance in the transaction if it doesn't already exist.",
+            "Adds a new static routing instance with the given name to the transaction's \
+             in-progress config if none exists with that name yet; if one already exists, \
+             this is a no-op. A static routing instance carries no reference to any routing \
+             table — only a routing table's static-routing-instance field names it.",
+        ),
+        Topic::DeleteStaticRoutingInstance => (
+            "Delete a static routing instance from the transaction.",
+            "Removes a static routing instance and all of its routes from the transaction's \
+             in-progress config. Any routing table still referencing it by name becomes \
+             invalid — checked at commit time, not when the static routing instance is \
+             deleted.",
+        ),
+        Topic::SetStaticRoute => (
+            "Add or repoint a static route.",
+            "Creates a route for the given subnet within a static routing instance if it \
+             doesn't exist, or repoints its gateway if it does. The gateway's address family \
+             must match the subnet's, and a subnet must not repeat within the same instance; \
+             both are checked at commit time. Only one gateway per subnet is supported — \
+             ECMP is not modeled in this iteration.",
+        ),
+        Topic::DeleteStaticRoute => (
+            "Remove a static route.",
+            "Deletes the route for the given subnet from the named static routing instance \
+             in the transaction's in-progress config.",
+        ),
     };
     CommandDoc {
         topic,
@@ -179,6 +241,16 @@ mod tests {
         Topic::DeleteBgpPeerGroup,
         Topic::SetBgpPeer,
         Topic::DeleteBgpPeer,
+        Topic::EnsureRoutingTable,
+        Topic::SetRoutingTableBgpInstance,
+        Topic::ClearRoutingTableBgpInstance,
+        Topic::SetRoutingTableStaticRoutingInstance,
+        Topic::ClearRoutingTableStaticRoutingInstance,
+        Topic::DeleteRoutingTable,
+        Topic::EnsureStaticRoutingInstance,
+        Topic::DeleteStaticRoutingInstance,
+        Topic::SetStaticRoute,
+        Topic::DeleteStaticRoute,
     ];
 
     #[test]

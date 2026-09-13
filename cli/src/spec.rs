@@ -27,6 +27,8 @@ pub enum ArgKind {
     Plain,
     BgpInstanceName,
     BgpPeerGroupName,
+    RoutingTableName,
+    StaticRoutingInstanceName,
 }
 
 /// Where a command's summary/detail text comes from.
@@ -49,7 +51,10 @@ pub enum Availability {
     Configuration,
     ConfigurationInstance,
     ConfigurationPeerGroup,
-    /// Any non-root navigation position — `BgpInstance` or `BgpPeerGroup`.
+    ConfigurationRoutingTable,
+    ConfigurationStaticRoutingInstance,
+    /// Any non-root navigation position — `BgpInstance`, `BgpPeerGroup`,
+    /// `RoutingTable`, or `StaticRoutingInstance`.
     ConfigurationNested,
 }
 
@@ -72,10 +77,27 @@ pub fn availability_matches(availability: Availability, mode: &Mode) -> bool {
                 ..
             }
         ),
+        Availability::ConfigurationRoutingTable => matches!(
+            mode,
+            Mode::Configuration {
+                path: Path::RoutingTable(_),
+                ..
+            }
+        ),
+        Availability::ConfigurationStaticRoutingInstance => matches!(
+            mode,
+            Mode::Configuration {
+                path: Path::StaticRoutingInstance(_),
+                ..
+            }
+        ),
         Availability::ConfigurationNested => matches!(
             mode,
             Mode::Configuration {
-                path: Path::BgpInstance(_) | Path::BgpPeerGroup { .. },
+                path: Path::BgpInstance(_)
+                    | Path::BgpPeerGroup { .. }
+                    | Path::RoutingTable(_)
+                    | Path::StaticRoutingInstance(_),
                 ..
             }
         ),
@@ -504,6 +526,175 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         usage: "diff",
         doc: Doc::FromConfig(Topic::DiffTransaction),
         availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("edit"),
+            Token::Literal("routing-table"),
+            Token::Arg(ArgKind::RoutingTableName),
+        ],
+        usage: "edit routing-table <name>",
+        doc: Doc::FromConfig(Topic::EnsureRoutingTable),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("routing-table"),
+            Token::Arg(ArgKind::RoutingTableName),
+            Token::Literal("bgp-instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+        ],
+        usage: "set routing-table <name> bgp-instance <instance>",
+        doc: Doc::FromConfig(Topic::SetRoutingTableBgpInstance),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("bgp-instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+        ],
+        usage: "set bgp-instance <instance>",
+        doc: Doc::FromConfig(Topic::SetRoutingTableBgpInstance),
+        availability: Availability::ConfigurationRoutingTable,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("routing-table"),
+            Token::Arg(ArgKind::RoutingTableName),
+            Token::Literal("bgp-instance"),
+        ],
+        usage: "delete routing-table <name> bgp-instance",
+        doc: Doc::FromConfig(Topic::ClearRoutingTableBgpInstance),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[Token::Literal("delete"), Token::Literal("bgp-instance")],
+        usage: "delete bgp-instance",
+        doc: Doc::FromConfig(Topic::ClearRoutingTableBgpInstance),
+        availability: Availability::ConfigurationRoutingTable,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("routing-table"),
+            Token::Arg(ArgKind::RoutingTableName),
+            Token::Literal("static-routing-instance"),
+            Token::Arg(ArgKind::StaticRoutingInstanceName),
+        ],
+        usage: "set routing-table <name> static-routing-instance <instance>",
+        doc: Doc::FromConfig(Topic::SetRoutingTableStaticRoutingInstance),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("static-routing-instance"),
+            Token::Arg(ArgKind::StaticRoutingInstanceName),
+        ],
+        usage: "set static-routing-instance <instance>",
+        doc: Doc::FromConfig(Topic::SetRoutingTableStaticRoutingInstance),
+        availability: Availability::ConfigurationRoutingTable,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("routing-table"),
+            Token::Arg(ArgKind::RoutingTableName),
+            Token::Literal("static-routing-instance"),
+        ],
+        usage: "delete routing-table <name> static-routing-instance",
+        doc: Doc::FromConfig(Topic::ClearRoutingTableStaticRoutingInstance),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("static-routing-instance"),
+        ],
+        usage: "delete static-routing-instance",
+        doc: Doc::FromConfig(Topic::ClearRoutingTableStaticRoutingInstance),
+        availability: Availability::ConfigurationRoutingTable,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("routing-table"),
+            Token::Arg(ArgKind::RoutingTableName),
+        ],
+        usage: "delete routing-table <name>",
+        doc: Doc::FromConfig(Topic::DeleteRoutingTable),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("edit"),
+            Token::Literal("static-routing-instance"),
+            Token::Arg(ArgKind::StaticRoutingInstanceName),
+        ],
+        usage: "edit static-routing-instance <name>",
+        doc: Doc::FromConfig(Topic::EnsureStaticRoutingInstance),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("static-routing-instance"),
+            Token::Arg(ArgKind::StaticRoutingInstanceName),
+        ],
+        usage: "delete static-routing-instance <name>",
+        doc: Doc::FromConfig(Topic::DeleteStaticRoutingInstance),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("static-routing-instance"),
+            Token::Arg(ArgKind::StaticRoutingInstanceName),
+            Token::Literal("route"),
+            Token::Arg(ArgKind::Plain),
+            Token::Literal("gateway"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set static-routing-instance <name> route <subnet> gateway <address>",
+        doc: Doc::FromConfig(Topic::SetStaticRoute),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("route"),
+            Token::Arg(ArgKind::Plain),
+            Token::Literal("gateway"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set route <subnet> gateway <address>",
+        doc: Doc::FromConfig(Topic::SetStaticRoute),
+        availability: Availability::ConfigurationStaticRoutingInstance,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("static-routing-instance"),
+            Token::Arg(ArgKind::StaticRoutingInstanceName),
+            Token::Literal("route"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "delete static-routing-instance <name> route <subnet>",
+        doc: Doc::FromConfig(Topic::DeleteStaticRoute),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("route"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "delete route <subnet>",
+        doc: Doc::FromConfig(Topic::DeleteStaticRoute),
+        availability: Availability::ConfigurationStaticRoutingInstance,
     },
 ];
 

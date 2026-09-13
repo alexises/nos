@@ -11,6 +11,7 @@ tracing     = "0.1"
 thiserror   = "1"
 bytes       = "1"
 garde       = { version = "0.22", features = ["derive", "full"] }
+ipnet       = { version = "2", features = ["serde"] }
 postcard    = { version = "1", features = ["alloc"] }
 tokio-util  = { version = "0.7", features = ["codec"] }
 futures     = "0.3"

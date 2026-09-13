@@ -58,6 +58,16 @@ impl NosPrompt {
                 path: session::Path::BgpPeerGroup { instance, group },
                 ..
             } => format!("({transaction}/bgp:{instance}/peer-group:{group})"),
+            Mode::Configuration {
+                transaction,
+                path: session::Path::RoutingTable(name),
+                ..
+            } => format!("({transaction}/routing-table:{name})"),
+            Mode::Configuration {
+                transaction,
+                path: session::Path::StaticRoutingInstance(name),
+                ..
+            } => format!("({transaction}/static-routing-instance:{name})"),
         };
         Self { hostname, suffix }
     }
@@ -179,6 +189,7 @@ fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Compl
     let peer_group_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
         Mode::Configuration { transaction, .. } => {
             let transaction = transaction.clone();
+            let socket = socket.clone();
             Box::new(move || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current()
@@ -198,11 +209,56 @@ fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Compl
         Mode::Operational => Box::new(Vec::new),
     };
 
+    let routing_table_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
+        Mode::Configuration { transaction, .. } => {
+            let transaction = transaction.clone();
+            let socket = socket.clone();
+            Box::new(move || {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(client::get_transaction(&socket, &transaction))
+                })
+                .map(|snap| {
+                    snap.config
+                        .routing_tables
+                        .into_iter()
+                        .map(|t| t.name)
+                        .collect()
+                })
+                .unwrap_or_default()
+            })
+        }
+        Mode::Operational => Box::new(Vec::new),
+    };
+
+    let static_routing_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
+        Mode::Configuration { transaction, .. } => {
+            let transaction = transaction.clone();
+            Box::new(move || {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(client::get_transaction(&socket, &transaction))
+                })
+                .map(|snap| {
+                    snap.config
+                        .static_routing_instances
+                        .into_iter()
+                        .map(|i| i.name)
+                        .collect()
+                })
+                .unwrap_or_default()
+            })
+        }
+        Mode::Operational => Box::new(Vec::new),
+    };
+
     Box::new(NosCompleter::new(
         mode.clone(),
         doc_source,
         instance_name_source,
         peer_group_name_source,
+        routing_table_name_source,
+        static_routing_instance_name_source,
     ))
 }
 

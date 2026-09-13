@@ -50,6 +50,26 @@ pub enum Topic {
     SetBgpPeer,
     /// `ConfigOp::BgpPeer(BgpPeerOp::Delete)`
     DeleteBgpPeer,
+    /// `ConfigOp::RoutingTable(RoutingTableOp::Ensure)`
+    EnsureRoutingTable,
+    /// `ConfigOp::RoutingTable(RoutingTableOp::SetBgpInstance)`
+    SetRoutingTableBgpInstance,
+    /// `ConfigOp::RoutingTable(RoutingTableOp::ClearBgpInstance)`
+    ClearRoutingTableBgpInstance,
+    /// `ConfigOp::RoutingTable(RoutingTableOp::SetStaticRoutingInstance)`
+    SetRoutingTableStaticRoutingInstance,
+    /// `ConfigOp::RoutingTable(RoutingTableOp::ClearStaticRoutingInstance)`
+    ClearRoutingTableStaticRoutingInstance,
+    /// `ConfigOp::RoutingTable(RoutingTableOp::Delete)`
+    DeleteRoutingTable,
+    /// `ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Ensure)`
+    EnsureStaticRoutingInstance,
+    /// `ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Delete)`
+    DeleteStaticRoutingInstance,
+    /// `ConfigOp::StaticRoute(StaticRouteOp::Set)`
+    SetStaticRoute,
+    /// `ConfigOp::StaticRoute(StaticRouteOp::Delete)`
+    DeleteStaticRoute,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client
