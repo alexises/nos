@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
 use nos_proto::{IpcCodec, PrefixRoutes, RibEvent, RibRequest, RouteSourceKind};
-use nos_rib::{server, Rib, RibEntry, RouteSource};
+use nos_rib::{server, NoopRibDriver, Rib, RibEntry, RouteSource};
 use tokio::net::UnixStream;
 use tokio::sync::RwLock;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -50,7 +50,7 @@ async fn get_routes_returns_sorted_prefixes_with_ranked_candidates() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("rib.sock");
     let rib = Arc::new(RwLock::new(sample_rib()));
-    let _server = server::start(&path, rib).unwrap();
+    let _server = server::start(&path, "rt1".to_string(), rib, Arc::new(NoopRibDriver)).unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     writer.send(RibRequest::GetRoutes).await.unwrap();
@@ -73,7 +73,7 @@ async fn lookup_matches_longest_prefix() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("rib.sock");
     let rib = Arc::new(RwLock::new(sample_rib()));
-    let _server = server::start(&path, rib).unwrap();
+    let _server = server::start(&path, "rt1".to_string(), rib, Arc::new(NoopRibDriver)).unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     let addr: IpAddr = "10.0.1.5".parse().unwrap();
@@ -92,7 +92,7 @@ async fn lookup_with_no_covering_prefix_returns_no_match() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("rib.sock");
     let rib = Arc::new(RwLock::new(sample_rib()));
-    let _server = server::start(&path, rib).unwrap();
+    let _server = server::start(&path, "rt1".to_string(), rib, Arc::new(NoopRibDriver)).unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     let addr: IpAddr = "192.168.0.1".parse().unwrap();
@@ -100,4 +100,58 @@ async fn lookup_with_no_covering_prefix_returns_no_match() {
     let event = reader.next().await.unwrap().unwrap();
 
     assert!(matches!(event, RibEvent::NoMatch));
+}
+
+/// A driver that reports a canned VRF name, so `GetVrfName`'s dispatch can
+/// be tested without any real kernel/netlink involvement.
+#[derive(Debug)]
+struct FakeVrfDriver(Option<String>);
+
+#[async_trait::async_trait]
+impl nos_rib::RibDriver for FakeVrfDriver {
+    async fn apply(
+        &self,
+        _table_name: &str,
+        _best_routes: &std::collections::HashMap<nos_proto::IpNet, RibEntry>,
+    ) -> Result<(), nos_rib::DriverError> {
+        Ok(())
+    }
+
+    async fn teardown(&self, _table_name: &str) -> Result<(), nos_rib::DriverError> {
+        Ok(())
+    }
+
+    async fn vrf_name(&self, _table_name: &str) -> Option<String> {
+        self.0.clone()
+    }
+}
+
+#[tokio::test]
+async fn get_vrf_name_returns_the_drivers_answer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rib.sock");
+    let rib = Arc::new(RwLock::new(sample_rib()));
+    let driver: Arc<dyn nos_rib::RibDriver> = Arc::new(FakeVrfDriver(Some("vrf100".to_string())));
+    let _server = server::start(&path, "rt1".to_string(), rib, driver).unwrap();
+
+    let (mut reader, mut writer) = connect(&path).await;
+    writer.send(RibRequest::GetVrfName).await.unwrap();
+    let event = reader.next().await.unwrap().unwrap();
+
+    assert!(matches!(event, RibEvent::VrfName(Some(name)) if name == "vrf100"));
+}
+
+#[tokio::test]
+async fn get_vrf_name_is_none_when_the_driver_has_no_vrf_yet() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rib.sock");
+    let rib = Arc::new(RwLock::new(sample_rib()));
+    let driver: Arc<dyn nos_rib::RibDriver> = Arc::new(FakeVrfDriver(None));
+    let _server = server::start(&path, "rt1".to_string(), rib, driver).unwrap();
+
+    let (mut reader, mut writer) = connect(&path).await;
+    writer.send(RibRequest::GetVrfName).await.unwrap();
+    let event = reader.next().await.unwrap().unwrap();
+
+    assert!(matches!(event, RibEvent::VrfName(None)));
 }

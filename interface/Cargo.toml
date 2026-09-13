@@ -18,6 +18,8 @@ tracing-subscriber = { workspace = true }
 nos-proto          = { workspace = true }
 tokio-util         = { workspace = true }
 futures            = { workspace = true }
+async-trait        = { workspace = true }
+rtnetlink          = { workspace = true }
 
 [[bin]]
 name = "nos-interfaced"

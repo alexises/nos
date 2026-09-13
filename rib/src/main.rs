@@ -4,10 +4,40 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Parser;
 use nos_proto::{ServiceRef, DEFAULT_WATCHDOG_SOCKET};
-use nos_rib::{reconcile, server, watchdog_client, Rib};
+use nos_rib::{reconcile, server, watchdog_client, LinuxRibDriver, NoopRibDriver, Rib, RibDriver};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{watch, RwLock};
 use tracing::info;
+
+/// Default location for `nos-ribd`'s own private table-id↔VRF-name
+/// registry (see `nos_rib::driver::table_registry`) — never read by any
+/// other process; `nos-interfaced` learns the VRF name over IPC instead
+/// (`RibRequest::GetVrfName`).
+const DEFAULT_TABLE_REGISTRY_PATH: &str = "/var/lib/nos/linux-driver/table-ids.yaml";
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum DriverKind {
+    Noop,
+    Linux,
+}
+
+impl std::fmt::Display for DriverKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DriverKind::Noop => write!(f, "noop"),
+            DriverKind::Linux => write!(f, "linux"),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn default_driver_kind() -> DriverKind {
+    DriverKind::Linux
+}
+#[cfg(not(target_os = "linux"))]
+fn default_driver_kind() -> DriverKind {
+    DriverKind::Noop
+}
 
 #[derive(Parser)]
 #[command(name = "nos-ribd", about = "NOS RIB (routing information base) daemon")]
@@ -28,6 +58,17 @@ struct Args {
     /// instances.
     #[arg(long)]
     listen_socket: Option<PathBuf>,
+
+    /// Which backend actually applies routes to the OS: `linux` (real
+    /// `rtnetlink` calls, the default on Linux) or `noop` (log-only, no OS
+    /// effect — the default off-Linux, and useful for tests/dev).
+    #[arg(long, value_enum, default_value_t = default_driver_kind())]
+    driver: DriverKind,
+
+    /// Only used by `--driver linux`: where this instance persists its own
+    /// table-id↔VRF-name allocation, for restart survival.
+    #[arg(long, default_value = DEFAULT_TABLE_REGISTRY_PATH)]
+    table_registry_path: PathBuf,
 }
 
 #[tokio::main]
@@ -53,14 +94,24 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
+    let driver: Arc<dyn RibDriver> = match args.driver {
+        DriverKind::Noop => Arc::new(NoopRibDriver),
+        DriverKind::Linux => Arc::new(
+            LinuxRibDriver::new(args.table_registry_path.clone())
+                .context("initializing linux rib driver")?,
+        ),
+    };
+
     let rib = Arc::new(RwLock::new(Rib::new()));
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.table.clone(),
         rib.clone(),
+        driver.clone(),
         shutdown_rx,
     ));
-    let server_task = server::start(&listen_socket, rib).context("starting RIB IPC server")?;
+    let server_task = server::start(&listen_socket, args.table.clone(), rib, driver)
+        .context("starting RIB IPC server")?;
 
     wait_for_shutdown_signal()
         .await

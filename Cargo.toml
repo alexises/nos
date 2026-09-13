@@ -21,6 +21,9 @@ anyhow             = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reedline            = "0.51.0"
 nix                 = { version = "0.29", default-features = false, features = ["signal", "process"] }
+async-trait         = "0.1"
+rtnetlink           = "0.23"
+fs2                 = "0.4"
 
 # test dependencies
 tempfile    = "3"

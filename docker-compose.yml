@@ -8,6 +8,14 @@ services:
   watchdog:
     <<: *nos-image
     container_name: nos-watchdog
+    # nos-ribd/nos-interfaced's Linux drivers program the kernel (VRF
+    # devices, addresses, routes) via rtnetlink; NET_ADMIN/NET_RAW here
+    # widen the container's capability bounding set so the setcap file
+    # capabilities baked into those two binaries (see Dockerfile) are
+    # actually usable by the non-root `nos` user watchdog execs them as.
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     volumes:
       - nos-run:/run/nos
       - nos-data:/var/lib/nos

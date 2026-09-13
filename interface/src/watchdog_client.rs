@@ -12,8 +12,16 @@ use tracing::warn;
 /// `nos-watchdog`'s own reconnect policy for config subscriptions.
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
-/// One-shot resolve of `service` against `nos-watchdogd`'s broker socket.
-async fn resolve_once(watchdog_socket: &Path, service: &ServiceRef) -> Option<PathBuf> {
+/// One-shot resolve of `service` against `nos-watchdogd`'s broker socket —
+/// no retry, `None` on any failure (connect error, decode error,
+/// `WatchdogEvent::NotAvailable`). Used by the Linux interface driver
+/// (`driver::linux`) to resolve a routing table's owning `nos-ribd`
+/// instance on every reconcile pass, where "not available yet" is an
+/// expected, frequently-recurring condition (e.g. that table's `nos-ribd`
+/// hasn't started, or was just removed) rather than something worth
+/// retrying in a loop right here — the caller's own periodic re-apply tick
+/// is what retries this, so this must return quickly either way.
+pub async fn resolve_once(watchdog_socket: &Path, service: &ServiceRef) -> Option<PathBuf> {
     let stream = UnixStream::connect(watchdog_socket).await.ok()?;
     let (r, w) = stream.into_split();
     let mut reader = FramedRead::new(r, IpcCodec::<WatchdogEvent>::default());

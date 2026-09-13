@@ -9,8 +9,8 @@ A network operating system built from scratch in Rust.
 | `proto/` | `nos-proto` | Shared wire types, IPC codec — single source of truth for all inter-process contracts |
 | `config/` | `nos-config` | Configuration store and IPC server |
 | `bgp/` | `nos-bgp` | BGP-4 implementation |
-| `rib/` | `nos-rib` | Routing information base daemon — best-path selection per routing table |
-| `interface/` | `nos-interface` | Interface reconciliation daemon — one process manages every configured interface (placeholder only, no real OS effect yet) |
+| `rib/` | `nos-rib` | Routing information base daemon — best-path selection per routing table, applied to the kernel via a Linux driver (VRF device + routes) |
+| `interface/` | `nos-interface` | Interface reconciliation daemon — one process manages every configured interface, applying addresses and VRF enslavement to the kernel via a Linux driver |
 | `cli/` | `nos-cli` | Interactive shell (binary `nos`) — main user-facing entry point |
 | `watchdog/` | `nos-watchdog` | Process supervisor — starts and restarts the other component processes |
 
@@ -113,7 +113,15 @@ Because the watchdog is the one process that actually spawns every other daemon,
 
 Each `nos-ribd` instance also gains a real IPC listener for route queries (`nos_proto::rib`: `RibRequest::GetRoutes` / `RibRequest::Lookup { addr }` → `RibEvent::Routes(Vec<PrefixRoutes>)` / `Match(PrefixRoutes)` / `NoMatch`), backing `nos-cli`'s `show route <table>` (whole table) and `show route <table> <address>` (longest-prefix-match) commands — resolved via the broker, then queried directly, with every candidate route per prefix shown ordered best-to-worst rather than only the winner, since `Rib` is multi-source.
 
-`nos-interfaced` similarly gains a real IPC listener for interface queries (`nos_proto::interface`: `InterfaceRequest::GetInterfaces` / `GetInterface { name }` → `InterfaceEvent::Interfaces(Vec<InterfaceStatus>)` / `Interface(InterfaceStatus)` / `NotFound`), backing `nos-cli`'s `show interface` (every interface) and `show interface <name>` (one) commands. Since `nos-interfaced` doesn't yet apply anything to the OS (see `interface/CLAUDE.md`), these queries reflect *desired* state reconciled from config, not necessarily the kernel's actual state.
+`nos-interfaced` similarly gains a real IPC listener for interface queries (`nos_proto::interface`: `InterfaceRequest::GetInterfaces` / `GetInterface { name }` → `InterfaceEvent::Interfaces(Vec<InterfaceStatus>)` / `Interface(InterfaceStatus)` / `NotFound`), backing `nos-cli`'s `show interface` (every interface) and `show interface <name>` (one) commands.
+
+### Linux drivers
+
+Both `nos-ribd` and `nos-interfaced` apply their reconciled desired state to the real Linux network stack via `rtnetlink`, behind a swappable `Driver` trait per crate (`interface::driver::InterfaceDriver`, `rib::driver::RibDriver`) selected with `--driver linux|noop` (default `linux` on Linux, `noop` elsewhere — the `noop` driver is today's original log-only placeholder behavior, kept as a portability/test fallback). This is deliberately in-process rather than a separate privileged process, so a future non-Linux/hardware backend only needs a new `Driver` impl, not new IPC or supervision wiring. Both binaries run as the unprivileged `nos` user; the kernel access their Linux drivers need comes from `CAP_NET_ADMIN`/`CAP_NET_RAW` file capabilities baked onto the two binaries at image build time plus a matching `cap_add` on the `watchdog` container (see `Dockerfile`/`docker-compose.yml`).
+
+`nos-ribd`'s Linux driver owns creating a Linux VRF device + kernel routing table for its `RoutingTable`, allocating a kernel table id on first use and persisting the name→id mapping to a local file (`--table-registry-path`, default `/var/lib/nos/linux-driver/table-ids.yaml`) purely so a crash/restart reuses the same id and VRF name — this file is never read by any other process. On shutdown (the same SIGINT used for both "watchdog is stopping" and "this table was removed from config") it deletes the kernel VRF and its routes, but never the registry entry, so an ordinary restart recreates the identically-named VRF.
+
+Because `nos-interfaced` needs to enslave an interface into the VRF device that backs its configured `routing_table`, but has no way to derive that VRF's real Linux interface name on its own (it's allocated entirely inside `nos-ribd`'s driver), `nos-ribd`'s per-table socket gains one more request: `RibRequest::GetVrfName` → `RibEvent::VrfName(Option<String>)`. `nos-interfaced`'s Linux driver resolves the owning `nos-ribd` instance via the broker (`ServiceRef::RibTable(name)`) and queries it directly — **this is the first direct daemon-to-daemon IPC link in the system** (every other component only ever talks to `nos-configd` or the watchdog broker). A `None` answer (table not running yet, or running but hasn't created its VRF yet) is treated as an ordinary transient condition, not an error, and retried automatically by both daemons' periodic re-apply tick (in addition to their existing config-diff-triggered resync) — needed here specifically because "the other daemon became ready" isn't a config change either daemon would otherwise be notified of. The same live per-table socket is expected to be reused by a future feature having `nos-ribd` query `nos-interfaced`'s existing `GetInterfaces` to compute directly-connected routes from interface addresses — not yet implemented.
 
 ## Development
 

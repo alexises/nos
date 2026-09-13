@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
+use nos_interface::driver::{InterfaceDriver, LinuxInterfaceDriver, NoopInterfaceDriver};
 use nos_interface::{reconcile, server, watchdog_client, Interfaces};
 use nos_proto::{ServiceRef, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
@@ -15,11 +16,33 @@ use tracing::info;
 /// per instance name.
 const DEFAULT_LISTEN_SOCKET: &str = "/run/nos/interface.sock";
 
+/// Which backend applies desired interface state to the OS. `Noop` is the
+/// portable default off Linux (and for tests); `Linux` is the real
+/// `rtnetlink`-backed implementation. Deliberately not shared with
+/// `nos-ribd`'s own `DriverKind` — each crate defines its own, per the
+/// star-dependency rule.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum DriverKind {
+    Noop,
+    Linux,
+}
+
+#[cfg(target_os = "linux")]
+fn default_driver_kind() -> DriverKind {
+    DriverKind::Linux
+}
+#[cfg(not(target_os = "linux"))]
+fn default_driver_kind() -> DriverKind {
+    DriverKind::Noop
+}
+
 #[derive(Parser)]
 #[command(name = "nos-interfaced", about = "NOS interface reconciliation daemon")]
 struct Args {
     /// Path to nos-watchdogd's broker socket, used to resolve nos-configd's
-    /// current address rather than assuming a hardcoded default.
+    /// current address rather than assuming a hardcoded default, and (with
+    /// `--driver linux`) to resolve the owning `nos-ribd` instance for a
+    /// routing table's VRF interface name.
     #[arg(long, default_value = DEFAULT_WATCHDOG_SOCKET)]
     watchdog_socket: PathBuf,
 
@@ -27,6 +50,10 @@ struct Args {
     /// interface`).
     #[arg(long, default_value = DEFAULT_LISTEN_SOCKET)]
     listen_socket: PathBuf,
+
+    /// Which backend applies desired interface state to the OS.
+    #[arg(long, value_enum, default_value_t = default_driver_kind())]
+    driver: DriverKind,
 }
 
 #[tokio::main]
@@ -48,10 +75,19 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
+    let driver: Arc<dyn InterfaceDriver> = match args.driver {
+        DriverKind::Noop => Arc::new(NoopInterfaceDriver),
+        DriverKind::Linux => Arc::new(
+            LinuxInterfaceDriver::new(args.watchdog_socket.clone())
+                .context("initializing linux interface driver")?,
+        ),
+    };
+
     let interfaces = Arc::new(RwLock::new(Interfaces::new()));
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         interfaces.clone(),
+        driver,
         shutdown_rx,
     ));
     let server_task =

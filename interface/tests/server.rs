@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
+use nos_interface::driver::NoopInterfaceDriver;
 use nos_interface::{server, InterfaceState, Interfaces};
 use nos_proto::{InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec};
 use tokio::net::UnixStream;
 use tokio::sync::RwLock;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-fn sample_interfaces() -> Interfaces {
+async fn sample_interfaces() -> Interfaces {
     let mut by_name = std::collections::HashMap::new();
     by_name.insert(
         "eth0".to_string(),
@@ -39,7 +40,7 @@ fn sample_interfaces() -> Interfaces {
             .collect(),
         ..Default::default()
     };
-    nos_interface::state::build_from_config(&cfg)
+    nos_interface::state::build_from_config(&cfg, &NoopInterfaceDriver, &Interfaces::new()).await
 }
 
 async fn connect(
@@ -60,7 +61,7 @@ async fn connect(
 async fn get_interfaces_returns_every_interface_sorted_by_name() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("interface.sock");
-    let interfaces = Arc::new(RwLock::new(sample_interfaces()));
+    let interfaces = Arc::new(RwLock::new(sample_interfaces().await));
     let _server = server::start(&path, interfaces).unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
@@ -79,7 +80,7 @@ async fn get_interfaces_returns_every_interface_sorted_by_name() {
 async fn get_interface_returns_matching_status() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("interface.sock");
-    let interfaces = Arc::new(RwLock::new(sample_interfaces()));
+    let interfaces = Arc::new(RwLock::new(sample_interfaces().await));
     let _server = server::start(&path, interfaces).unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
@@ -108,7 +109,7 @@ async fn get_interface_returns_matching_status() {
 async fn get_interface_missing_returns_not_found() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("interface.sock");
-    let interfaces = Arc::new(RwLock::new(sample_interfaces()));
+    let interfaces = Arc::new(RwLock::new(sample_interfaces().await));
     let _server = server::start(&path, interfaces).unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;

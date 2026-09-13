@@ -1,4 +1,5 @@
 pub mod config_client;
+pub mod driver;
 pub mod reconcile;
 pub mod server;
 pub mod state;

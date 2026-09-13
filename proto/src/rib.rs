@@ -39,6 +39,16 @@ pub enum RibRequest {
     GetRoutes,
     /// One-shot: longest-prefix-match lookup for one destination address.
     Lookup { addr: IpAddr },
+    /// One-shot: this table's Linux VRF interface name, if its driver has
+    /// allocated/created one. The only cross-daemon consumer today is
+    /// `nos-interfaced`'s Linux driver, resolving which device to enslave
+    /// an interface into — see root `CLAUDE.md`'s "Endpoint broker"
+    /// section for how it finds this instance's socket
+    /// (`ServiceRef::RibTable`). No table name is carried on the request:
+    /// which table you're asking about is implicit in which per-table
+    /// `nos-ribd` socket you connected to, exactly like `GetRoutes`/
+    /// `Lookup` above.
+    GetVrfName,
 }
 
 /// Messages sent from a `nos-ribd` instance to a client.
@@ -53,4 +63,9 @@ pub enum RibEvent {
     NoMatch,
     /// A human-readable error message from the daemon.
     Error(String),
+    /// Reply to `GetVrfName`. `None` if no VRF has been allocated/created
+    /// yet (or the running driver never backs a table with a real VRF at
+    /// all, e.g. a no-op driver) — a normal, expected transient state, not
+    /// an error.
+    VrfName(Option<String>),
 }
