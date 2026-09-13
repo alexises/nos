@@ -15,6 +15,7 @@ pub fn diff_bgp_peer_groups(base: &[BgpPeerGroup], candidate: &[BgpPeerGroup]) -
                 if !fields.is_empty() {
                     sections.push(SectionDiff {
                         header: header_for(&b.name),
+                        name: b.name.clone(),
                         status: DiffStatus::Modified,
                         fields,
                         subsections: Vec::new(),
@@ -83,6 +84,7 @@ fn changed_fields(base: &BgpPeerGroup, candidate: &BgpPeerGroup) -> Vec<FieldDif
 fn removed_section(pg: &BgpPeerGroup) -> SectionDiff {
     SectionDiff {
         header: header_for(&pg.name),
+        name: pg.name.clone(),
         status: DiffStatus::Removed,
         fields: vec![
             FieldDiff {
@@ -108,6 +110,7 @@ fn removed_section(pg: &BgpPeerGroup) -> SectionDiff {
 fn added_section(pg: &BgpPeerGroup) -> SectionDiff {
     SectionDiff {
         header: header_for(&pg.name),
+        name: pg.name.clone(),
         status: DiffStatus::Added,
         fields: vec![
             FieldDiff {

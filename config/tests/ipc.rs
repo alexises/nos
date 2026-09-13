@@ -3,7 +3,10 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use nos_config::{BgpInstance, Config, ConfigStore, ListenAddr};
-use nos_proto::{BgpInstanceOp, ConfigOp, Event, IpcCodec, Request, Topic, TransactionBase};
+use nos_proto::{
+    BgpInstanceOp, ConfigOp, DiffScope, DiffStatus, Event, IpcCodec, Request, Topic,
+    TransactionBase,
+};
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -166,6 +169,210 @@ async fn unsubscribe_stops_updates() {
     assert!(
         result.is_err(),
         "expected timeout, but received an event after Unsubscribe"
+    );
+}
+
+/// Regression test: a `Subscribe` client is documented (`client::subscribe`)
+/// to send its request then drop its write half — "the caller owns its
+/// lifetime" — so the connection must keep delivering events after that
+/// half-close, not just the initial snapshot. Uses raw `UnixStream::connect`
+/// (not the shared `connect` helper) specifically so `writer` can be dropped
+/// independently of `reader`, mirroring real client usage exactly.
+#[tokio::test]
+async fn subscribe_survives_client_dropping_its_write_half() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+
+    let store = ConfigStore::new(Config::default(), None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let mut reader = {
+        let (mut reader, mut writer) = connect(&path).await;
+        writer.send(Request::Subscribe).await.unwrap();
+        reader.next().await.unwrap().unwrap(); // initial snapshot
+        reader
+        // `writer` dropped here — the connection's write-to-server half closes.
+    };
+
+    store.open_transaction("t1", TransactionBase::Blank).await;
+    store.apply_op("t1", ensure_op("vrf-c")).await.unwrap();
+    store
+        .apply_op("t1", set_asn_op("vrf-c", 65003))
+        .await
+        .unwrap();
+    store.commit_transaction("t1").await.unwrap();
+
+    let event = tokio::time::timeout(Duration::from_millis(200), reader.next())
+        .await
+        .expect("expected a Config event after commit, connection closed instead")
+        .unwrap()
+        .unwrap();
+    match event {
+        Event::Config(c) => assert_eq!(c.bgp_instances[0].name, "vrf-c"),
+        other => panic!("expected Config event, got {other:?}"),
+    }
+}
+
+/// Same regression as `subscribe_survives_client_dropping_its_write_half`,
+/// for the `SubscribeDiff` path.
+#[tokio::test]
+async fn subscribe_diff_survives_client_dropping_its_write_half() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+
+    let store = ConfigStore::new(Config::default(), None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let mut reader = {
+        let (mut reader, mut writer) = connect(&path).await;
+        writer
+            .send(Request::SubscribeDiff {
+                scopes: vec![DiffScope::BgpInstances],
+            })
+            .await
+            .unwrap();
+        reader.next().await.unwrap().unwrap(); // initial diff
+        reader
+        // `writer` dropped here — the connection's write-to-server half closes.
+    };
+
+    store.open_transaction("t1", TransactionBase::Blank).await;
+    store.apply_op("t1", ensure_op("vrf-d")).await.unwrap();
+    store
+        .apply_op("t1", set_asn_op("vrf-d", 65004))
+        .await
+        .unwrap();
+    store.commit_transaction("t1").await.unwrap();
+
+    let event = tokio::time::timeout(Duration::from_millis(200), reader.next())
+        .await
+        .expect("expected a Diff event after commit, connection closed instead")
+        .unwrap()
+        .unwrap();
+    match event {
+        Event::Diff(diff) => {
+            assert_eq!(diff.bgp_instances.len(), 1);
+            assert_eq!(diff.bgp_instances[0].name, "vrf-d");
+            assert_eq!(diff.bgp_instances[0].status, DiffStatus::Added);
+        }
+        other => panic!("expected Diff event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn subscribe_diff_reports_pre_existing_instance_as_added_then_incremental_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+
+    let store = ConfigStore::new(Config::default(), None);
+    store.open_transaction("t1", TransactionBase::Blank).await;
+    store.apply_op("t1", ensure_op("r1")).await.unwrap();
+    store.apply_op("t1", set_asn_op("r1", 65000)).await.unwrap();
+    store.commit_transaction("t1").await.unwrap();
+
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let (mut reader, mut writer) = connect(&path).await;
+    writer
+        .send(Request::SubscribeDiff {
+            scopes: vec![DiffScope::BgpInstances],
+        })
+        .await
+        .unwrap();
+
+    // Initial diff: the pre-existing instance shows up as Added, since it's
+    // synthesized against an empty config.
+    let event = reader.next().await.unwrap().unwrap();
+    match event {
+        Event::Diff(diff) => {
+            assert_eq!(diff.bgp_instances.len(), 1);
+            assert_eq!(diff.bgp_instances[0].name, "r1");
+            assert_eq!(diff.bgp_instances[0].status, DiffStatus::Added);
+        }
+        other => panic!("expected Diff event, got {other:?}"),
+    }
+
+    // Add a second instance and remove the first in one commit.
+    store.open_transaction("t2", TransactionBase::Current).await;
+    store.apply_op("t2", ensure_op("r2")).await.unwrap();
+    store.apply_op("t2", set_asn_op("r2", 65001)).await.unwrap();
+    store
+        .apply_op(
+            "t2",
+            ConfigOp::BgpInstance(BgpInstanceOp::Delete {
+                name: "r1".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+    store.commit_transaction("t2").await.unwrap();
+
+    let event = reader.next().await.unwrap().unwrap();
+    match event {
+        Event::Diff(diff) => {
+            assert_eq!(diff.bgp_instances.len(), 2);
+            let added = diff
+                .bgp_instances
+                .iter()
+                .find(|s| s.status == DiffStatus::Added)
+                .expect("added section");
+            let removed = diff
+                .bgp_instances
+                .iter()
+                .find(|s| s.status == DiffStatus::Removed)
+                .expect("removed section");
+            assert_eq!(added.name, "r2");
+            assert_eq!(removed.name, "r1");
+        }
+        other => panic!("expected Diff event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn subscribe_diff_skips_commits_outside_requested_scope() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.sock");
+
+    let store = ConfigStore::new(Config::default(), None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(path.clone()))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let (mut reader, mut writer) = connect(&path).await;
+    writer
+        .send(Request::SubscribeDiff {
+            scopes: vec![DiffScope::BgpInstances],
+        })
+        .await
+        .unwrap();
+
+    // Initial diff — nothing configured yet, so it's empty.
+    let event = reader.next().await.unwrap().unwrap();
+    assert!(matches!(event, Event::Diff(d) if d.is_empty()));
+
+    // A hostname-only commit is out of scope and must never be forwarded.
+    store.open_transaction("t1", TransactionBase::Blank).await;
+    store
+        .apply_op("t1", ConfigOp::SetHostname("router-b".to_string()))
+        .await
+        .unwrap();
+    store.commit_transaction("t1").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let result = tokio::time::timeout(Duration::from_millis(50), reader.next()).await;
+    assert!(
+        result.is_err(),
+        "expected timeout, but received a Diff event for an out-of-scope commit"
     );
 }
 

@@ -5,8 +5,8 @@ Owns the running configuration and exposes it to all component processes via a U
 ## Responsibilities
 
 - **Config store**: named, server-held transactions (each an independent in-progress `Config`) plus the running config, with atomic commit and garde-based validation.
-- **IPC server**: accepts connections from component processes, handles `Get`, `Subscribe`/`Unsubscribe`, `Save`, and the transaction lifecycle requests (`OpenTransaction`, `ApplyOp`, `GetTransaction`, `CommitTransaction`, `DiscardTransaction`, `DiffTransaction`).
-- **Change propagation**: broadcasts committed configs (whether from `Save`-adjacent tooling or a transaction commit) to all subscribed connections.
+- **IPC server**: accepts connections from component processes, handles `Get`, `Subscribe`/`SubscribeDiff`/`Unsubscribe`, `Save`, and the transaction lifecycle requests (`OpenTransaction`, `ApplyOp`, `GetTransaction`, `CommitTransaction`, `DiscardTransaction`, `DiffTransaction`).
+- **Change propagation**: broadcasts each commit's new config *and* the diff that produced it to all subscribed connections — `Subscribe` connections get the full config, `SubscribeDiff` connections get just the diff, scoped to the sections they asked for.
 - **Persistence**: loads the running config from disk at startup and writes it back out on `Save`.
 
 ## What lives here vs nos-proto
@@ -18,7 +18,8 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 
 | Type | File | Role |
 |------|------|------|
-| `ConfigStore` | `store.rs` | Cheap `Clone` handle (`Arc<Inner>`) over `running: RwLock<Config>` + `transactions: Mutex<HashMap<String, Transaction>>` + `broadcast::Sender` + `config_path` |
+| `ConfigStore` | `store.rs` | Cheap `Clone` handle (`Arc<Inner>`) over `running: RwLock<Config>` + `transactions: Mutex<HashMap<String, Transaction>>` + `broadcast::Sender<Arc<CommitUpdate>>` + `config_path` |
+| `CommitUpdate` | `store.rs` | Internal (never sent over the wire directly) — one commit's `{ config: Config, diff: ConfigDiff }`, broadcast together so `Subscribe` and `SubscribeDiff` connections can each take the half they need |
 | `ConfigError` | `error.rs` | `Validation`, `TransactionNotFound`, `Op`, `PersistenceNotConfigured`, `Io`, `Persistence`, `Serialization` |
 | `server::start()` | `server.rs` | Binds `UnixListener`, spawns per-connection tasks, each holding a cloned `ConfigStore` |
 | `persistence::{save_to_disk, load_or_default}` | `persistence.rs` | Serialize/atomically write, and load-with-fallback, the config file |
@@ -28,7 +29,8 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 ```rust
 ConfigStore::new(initial, config_path)          // create with an initial running config + optional persistence path
 store.running_snapshot().await                  // Config — a clone of the current running config
-store.subscribe()                               // broadcast::Receiver<Arc<Config>>
+store.subscribe()                               // broadcast::Receiver<Arc<CommitUpdate>> — pub(crate), server.rs only
+store.initial_diff().await                      // ConfigDiff — running vs. Config::default(), for a fresh SubscribeDiff connection's first event
 store.save_to_disk().await                      // persist running config to config_path
 
 store.open_transaction(name, base).await        // TransactionSnapshot — create from Blank/Current, or resume if `name` exists
@@ -47,11 +49,14 @@ Lock ordering: always lock `transactions` before `running` to avoid deadlock.
 
 `server::start()` binds a `UnixListener` and spawns an accept loop, each connection sharing a cloned `ConfigStore`. Per-connection:
 - `Request::Get` → send `Event::Config(current_running)` once.
-- `Request::Subscribe` → send snapshot, then spawn a forwarder task that bridges `broadcast::Receiver` → `mpsc::Sender`. The select loop drains the `mpsc::Receiver` and forwards `Event::Config` to the client.
-- `Request::Unsubscribe` → abort the forwarder task.
+- `Request::Subscribe` → send the current full snapshot, then spawn a forwarder task that bridges `broadcast::Receiver<Arc<CommitUpdate>>` → `mpsc::Sender<Event>`, building `Event::Config(update.config.clone())` per commit. The select loop drains the `mpsc::Receiver` and forwards whatever `Event` it built to the client.
+- `Request::SubscribeDiff { scopes }` → send `store.initial_diff().await.scoped(&scopes)` as the first `Event::Diff`, then spawn a forwarder that builds `Event::Diff(update.diff.scoped(&scopes))` per commit and skips sending it when `ConfigDiff::is_empty()` — a scoped subscriber is never woken for a commit outside its scopes.
+- `Request::Unsubscribe` → abort whichever forwarder task (`Subscribe` or `SubscribeDiff`) is active.
 - `Request::Save` → serializes the running config as YAML and atomically writes it to the daemon's `--config-file` path; replies `Event::Saved` on success, `Event::Error` if no `--config-file` was configured or the write fails.
 - `Request::OpenTransaction`/`ApplyOp`/`GetTransaction`/`CommitTransaction`/`DiscardTransaction`/`DiffTransaction` → thin calls into the matching `ConfigStore` method (see `dispatch_request` in `server.rs`), replying `Event::Transaction`/`Event::Committed`/`Event::Discarded`/`Event::Diff`/`Event::Error`.
 - Connection drop → forwarder task is aborted, connection task exits. **Transactions have no lifecycle tie to connections** — they live purely in `ConfigStore`, keyed by name, so a dropped connection never loses or discards one; only an explicit `DiscardTransaction` does.
+
+**Half-closed subscriber connections stay open.** A `Subscribe`/`SubscribeDiff` client is documented (see `client::subscribe` in `nos-cli`) to send its request then never write to the connection again — "the caller owns its lifetime." If the per-connection loop treated EOF/an error on the *request* read side as reason to tear down the whole connection, every such client would stop receiving events right after their first one (this was a real, previously-unnoticed bug — no existing test dropped its write half while still reading, so it went uncaught until `SubscribeDiff`'s own tests exercised that exact pattern end-to-end). The fix: once a subscription (`sub_task`) is active, EOF/an error on `reader` only disables further request reads (`reader_open = false`) — it does not `break` the connection. The connection then stays alive purely to keep draining `sub_rx` into `writer` until a write actually fails (the client is truly gone), at which point it closes and aborts the forwarder task. Without an active subscription, EOF/error still ends the connection immediately, as before.
 
 ## Socket path convention
 

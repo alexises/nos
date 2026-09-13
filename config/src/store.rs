@@ -16,10 +16,19 @@ struct Transaction {
     dirty: bool,
 }
 
+/// One committed change, broadcast to every subscriber connection — the new
+/// running config (for classic `Subscribe`), and what changed to produce it
+/// (for `SubscribeDiff`). Internal only — never sent over the wire directly;
+/// `server.rs` unwraps this into `Event::Config`/`Event::Diff` per connection.
+pub(crate) struct CommitUpdate {
+    pub config: Config,
+    pub diff: ConfigDiff,
+}
+
 struct Inner {
     running: RwLock<Config>,
     transactions: Mutex<HashMap<String, Transaction>>,
-    tx: broadcast::Sender<Arc<Config>>,
+    tx: broadcast::Sender<Arc<CommitUpdate>>,
     config_path: Option<PathBuf>,
 }
 
@@ -47,7 +56,7 @@ impl ConfigStore {
         self.0.running.read().await.clone()
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<Arc<Config>> {
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<Arc<CommitUpdate>> {
         self.0.tx.subscribe()
     }
 
@@ -144,11 +153,21 @@ impl ConfigStore {
         txs.remove(name);
         drop(txs);
 
-        let shared = Arc::new(config);
-        *self.0.running.write().await = (*shared).clone();
+        let mut running = self.0.running.write().await;
+        let diff = diff_configs(&running, &config);
+        *running = config.clone();
+        drop(running);
         // Ignore send errors — no active receivers is not a failure.
-        let _ = self.0.tx.send(shared);
+        let _ = self.0.tx.send(Arc::new(CommitUpdate { config, diff }));
         Ok(())
+    }
+
+    /// The diff a fresh `SubscribeDiff` connection should see as its initial
+    /// event: everything currently in the running config, reported as
+    /// `Added` (diffing against an empty config can never produce
+    /// `Removed`/`Modified`).
+    pub(crate) async fn initial_diff(&self) -> ConfigDiff {
+        diff_configs(&Config::default(), &self.running_snapshot().await)
     }
 
     /// Computes the structural difference between the running config and a

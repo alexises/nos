@@ -992,9 +992,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "futures",
  "nix",
+ "nos-proto",
  "proptest",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]

@@ -39,6 +39,11 @@ pub struct SectionDiff {
     /// itself didn't change, so a reader can tell which section a changed
     /// field belongs to without being shown the whole config.
     pub header: String,
+    /// The section's identifying key as a plain string (e.g. a BGP
+    /// instance's `name`, a peer's `remote_address`, a route's `subnet`) —
+    /// structured, unlike `header`, so a machine consumer never has to parse
+    /// display text to find out which item changed.
+    pub name: String,
     pub status: DiffStatus,
     pub fields: Vec<FieldDiff>,
     /// Nested sections one level deeper (e.g. a BGP instance's peer-groups
@@ -64,6 +69,45 @@ impl ConfigDiff {
             && self.routing_tables.is_empty()
             && self.static_routing_instances.is_empty()
     }
+
+    /// A copy of this diff keeping only the sections/fields covered by
+    /// `scopes` — sections not requested are treated as unchanged (empty),
+    /// even if they did change.
+    #[must_use]
+    pub fn scoped(&self, scopes: &[DiffScope]) -> ConfigDiff {
+        ConfigDiff {
+            hostname: if scopes.contains(&DiffScope::Hostname) {
+                self.hostname.clone()
+            } else {
+                None
+            },
+            bgp_instances: if scopes.contains(&DiffScope::BgpInstances) {
+                self.bgp_instances.clone()
+            } else {
+                Vec::new()
+            },
+            routing_tables: if scopes.contains(&DiffScope::RoutingTables) {
+                self.routing_tables.clone()
+            } else {
+                Vec::new()
+            },
+            static_routing_instances: if scopes.contains(&DiffScope::StaticRoutingInstances) {
+                self.static_routing_instances.clone()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+}
+
+/// Which top-level `ConfigDiff` sections a diff subscriber cares about — see
+/// `Request::SubscribeDiff`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiffScope {
+    Hostname,
+    BgpInstances,
+    RoutingTables,
+    StaticRoutingInstances,
 }
 
 /// Computes what changed between `base` (e.g. the running config) and

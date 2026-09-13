@@ -21,6 +21,7 @@ pub fn diff_static_routing_instances(
                 if !subsections.is_empty() {
                     sections.push(SectionDiff {
                         header: header_for(&b.name),
+                        name: b.name.clone(),
                         status: DiffStatus::Modified,
                         fields: Vec::new(),
                         subsections,
@@ -46,6 +47,7 @@ fn header_for(name: &str) -> String {
 fn removed_section(instance: &StaticRoutingInstance) -> SectionDiff {
     SectionDiff {
         header: header_for(&instance.name),
+        name: instance.name.clone(),
         status: DiffStatus::Removed,
         fields: Vec::new(),
         subsections: static_route::diff_static_routes(&instance.routes, &[]),
@@ -55,6 +57,7 @@ fn removed_section(instance: &StaticRoutingInstance) -> SectionDiff {
 fn added_section(instance: &StaticRoutingInstance) -> SectionDiff {
     SectionDiff {
         header: header_for(&instance.name),
+        name: instance.name.clone(),
         status: DiffStatus::Added,
         fields: Vec::new(),
         subsections: static_route::diff_static_routes(&[], &instance.routes),

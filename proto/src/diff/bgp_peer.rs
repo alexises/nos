@@ -19,6 +19,7 @@ pub fn diff_bgp_peers(base: &[BgpPeer], candidate: &[BgpPeer]) -> Vec<SectionDif
                 if b.peer_group != c.peer_group {
                     sections.push(SectionDiff {
                         header: header_for(&b.remote_address),
+                        name: b.remote_address.to_string(),
                         status: DiffStatus::Modified,
                         fields: vec![FieldDiff {
                             label: "peer-group".to_string(),
@@ -48,6 +49,7 @@ fn header_for(addr: &IpAddr) -> String {
 fn removed_section(peer: &BgpPeer) -> SectionDiff {
     SectionDiff {
         header: header_for(&peer.remote_address),
+        name: peer.remote_address.to_string(),
         status: DiffStatus::Removed,
         fields: vec![FieldDiff {
             label: "peer-group".to_string(),
@@ -61,6 +63,7 @@ fn removed_section(peer: &BgpPeer) -> SectionDiff {
 fn added_section(peer: &BgpPeer) -> SectionDiff {
     SectionDiff {
         header: header_for(&peer.remote_address),
+        name: peer.remote_address.to_string(),
         status: DiffStatus::Added,
         fields: vec![FieldDiff {
             label: "peer-group".to_string(),

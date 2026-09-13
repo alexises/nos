@@ -15,6 +15,7 @@ pub fn diff_routing_tables(base: &[RoutingTable], candidate: &[RoutingTable]) ->
                 if !fields.is_empty() {
                     sections.push(SectionDiff {
                         header: header_for(&b.name),
+                        name: b.name.clone(),
                         status: DiffStatus::Modified,
                         fields,
                         subsections: Vec::new(),
@@ -71,6 +72,7 @@ fn changed_fields(base: &RoutingTable, candidate: &RoutingTable) -> Vec<FieldDif
 fn removed_section(table: &RoutingTable) -> SectionDiff {
     SectionDiff {
         header: header_for(&table.name),
+        name: table.name.clone(),
         status: DiffStatus::Removed,
         fields: vec![
             FieldDiff {
@@ -91,6 +93,7 @@ fn removed_section(table: &RoutingTable) -> SectionDiff {
 fn added_section(table: &RoutingTable) -> SectionDiff {
     SectionDiff {
         header: header_for(&table.name),
+        name: table.name.clone(),
         status: DiffStatus::Added,
         fields: vec![
             FieldDiff {

@@ -13,6 +13,9 @@ tracing-subscriber = { workspace = true }
 clap               = { workspace = true }
 anyhow             = { workspace = true }
 nix                = { workspace = true }
+nos-proto          = { workspace = true }
+futures            = { workspace = true }
+tokio-util         = { workspace = true }
 
 [[bin]]
 name = "nos-watchdogd"

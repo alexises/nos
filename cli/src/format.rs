@@ -435,6 +435,7 @@ mod tests {
             hostname: None,
             bgp_instances: vec![SectionDiff {
                 header: "bgp instance r1".to_string(),
+                name: "r1".to_string(),
                 status: DiffStatus::Modified,
                 fields: vec![field("asn", Some("65000"), Some("65001"))],
                 subsections: vec![],
@@ -453,6 +454,7 @@ mod tests {
             hostname: None,
             bgp_instances: vec![SectionDiff {
                 header: "bgp instance r1".to_string(),
+                name: "r1".to_string(),
                 status: DiffStatus::Added,
                 fields: vec![
                     field("router-id", None, Some("1.1.1.1")),
@@ -474,6 +476,7 @@ mod tests {
             hostname: None,
             bgp_instances: vec![SectionDiff {
                 header: "bgp instance r1".to_string(),
+                name: "r1".to_string(),
                 status: DiffStatus::Removed,
                 fields: vec![field("asn", Some("65000"), None)],
                 subsections: vec![],
@@ -591,10 +594,12 @@ mod tests {
             hostname: None,
             bgp_instances: vec![SectionDiff {
                 header: "bgp instance r1".to_string(),
+                name: "r1".to_string(),
                 status: DiffStatus::Modified,
                 fields: vec![],
                 subsections: vec![SectionDiff {
                     header: "peer-group pg1".to_string(),
+                    name: "pg1".to_string(),
                     status: DiffStatus::Modified,
                     fields: vec![field("remote-as", Some("65001"), Some("65002"))],
                     subsections: vec![],

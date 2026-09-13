@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_watchdog::{supervise_one, BackoffPolicy, ProcessSpec};
+use nos_watchdog::{bgp_instances, supervise_one, BackoffPolicy, ProcessSpec};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 use tracing::info;
@@ -18,13 +18,22 @@ struct Args {
     #[arg(long = "configd-arg", allow_hyphen_values = true)]
     configd_flags: Vec<String>,
 
-    /// Path to the nos-bgpd binary to supervise.
+    /// Path to the nos-bgpd binary to supervise (one instance is spawned per
+    /// BGP instance in the running config).
     #[arg(long, default_value = "/usr/local/bin/nos-bgpd")]
     bgpd_bin: PathBuf,
 
-    /// Extra arguments forwarded to nos-bgpd.
+    /// Extra arguments forwarded to every nos-bgpd instance.
     #[arg(long = "bgpd-arg", allow_hyphen_values = true)]
     bgpd_flags: Vec<String>,
+
+    /// Path to nos-configd's IPC Unix socket, used by the watchdog itself to
+    /// subscribe to BGP instance changes. Independent of `--configd-arg`,
+    /// which is an opaque pass-through to the child — if the child's actual
+    /// listen address is overridden via `--configd-arg --listen=...`, this
+    /// must be updated to match.
+    #[arg(long, default_value = "/run/nos/config.sock")]
+    config_socket: PathBuf,
 }
 
 #[tokio::main]
@@ -35,17 +44,21 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let policy = BackoffPolicy::default();
 
-    let specs = [
-        ProcessSpec::new("nos-configd", args.configd_bin, args.configd_flags),
-        ProcessSpec::new("nos-bgpd", args.bgpd_bin, args.bgpd_flags),
-    ];
+    let configd_spec = ProcessSpec::new("nos-configd", args.configd_bin, args.configd_flags);
+    let mut tasks = vec![tokio::spawn(supervise_one(
+        configd_spec,
+        policy,
+        shutdown_rx.clone(),
+    ))];
+    tasks.push(tokio::spawn(bgp_instances::manage(
+        args.config_socket,
+        args.bgpd_bin,
+        args.bgpd_flags,
+        policy,
+        shutdown_rx.clone(),
+    )));
 
-    let tasks: Vec<_> = specs
-        .into_iter()
-        .map(|spec| tokio::spawn(supervise_one(spec, policy, shutdown_rx.clone())))
-        .collect();
-
-    info!("nos-watchdogd supervising {} process(es)", tasks.len());
+    info!("nos-watchdogd supervising {} task(s)", tasks.len());
 
     wait_for_shutdown_signal().await?;
     info!("shutdown signal received, stopping supervised processes");

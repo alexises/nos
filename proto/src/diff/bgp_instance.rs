@@ -25,6 +25,7 @@ pub fn diff_bgp_instances(base: &[BgpInstance], candidate: &[BgpInstance]) -> Ve
                 if !fields.is_empty() || !subsections.is_empty() {
                     sections.push(SectionDiff {
                         header: header_for(&b.name),
+                        name: b.name.clone(),
                         status: DiffStatus::Modified,
                         fields,
                         subsections,
@@ -69,6 +70,7 @@ fn changed_fields(base: &BgpInstance, candidate: &BgpInstance) -> Vec<FieldDiff>
 fn removed_section(instance: &BgpInstance) -> SectionDiff {
     SectionDiff {
         header: header_for(&instance.name),
+        name: instance.name.clone(),
         status: DiffStatus::Removed,
         fields: vec![
             FieldDiff {
@@ -93,6 +95,7 @@ fn removed_section(instance: &BgpInstance) -> SectionDiff {
 fn added_section(instance: &BgpInstance) -> SectionDiff {
     SectionDiff {
         header: header_for(&instance.name),
+        name: instance.name.clone(),
         status: DiffStatus::Added,
         fields: vec![
             FieldDiff {

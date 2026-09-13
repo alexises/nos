@@ -111,7 +111,10 @@ pub async fn supervise_one(
 }
 
 /// Sleeps for `delay`, or returns early (`true`) if shutdown fires first.
-async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>) -> bool {
+pub(crate) async fn wait_or_shutdown(
+    delay: Duration,
+    shutdown: &mut watch::Receiver<bool>,
+) -> bool {
     tokio::select! {
         () = tokio::time::sleep(delay) => false,
         _ = shutdown.changed() => *shutdown.borrow(),

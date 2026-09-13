@@ -2,10 +2,9 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{Config, Event, IpcCodec, Request};
+use nos_proto::{Event, IpcCodec, Request};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -137,7 +136,7 @@ async fn dispatch_request(store: &ConfigStore, req: Request) -> Option<Event> {
             Ok(diff) => Event::Diff(diff),
             Err(e) => Event::Error(e.to_string()),
         },
-        Request::Subscribe | Request::Unsubscribe => return None,
+        Request::Subscribe | Request::Unsubscribe | Request::SubscribeDiff { .. } => return None,
     })
 }
 
@@ -150,13 +149,24 @@ where
     let mut writer = FramedWrite::new(write_half, IpcCodec::<Event>::default());
 
     // mpsc bridges the broadcast channel to this connection so we never hold
-    // a &mut borrow across select! arms.
-    let (sub_tx, mut sub_rx) = mpsc::channel::<Arc<Config>>(16);
+    // a &mut borrow across select! arms. The forwarder task builds the exact
+    // `Event` to send (Config for Subscribe, Diff for SubscribeDiff), so this
+    // channel is type-erased at the Event level rather than tied to one kind
+    // of subscription.
+    let (sub_tx, mut sub_rx) = mpsc::channel::<Event>(16);
     let mut sub_task: Option<JoinHandle<()>> = None;
+    // A Subscribe/SubscribeDiff client is expected to send its request then
+    // drop (or never touch again) its write half — "the caller owns its
+    // lifetime" per `client::subscribe`'s doc comment — so seeing EOF/an
+    // error on `reader` must not tear down the connection while a
+    // subscription is active; it only means no further *requests* will
+    // arrive. Once there is no active subscription, EOF/error does mean the
+    // connection is genuinely done.
+    let mut reader_open = true;
 
     loop {
         tokio::select! {
-            msg = reader.next() => {
+            msg = reader.next(), if reader_open => {
                 match msg {
                     Some(Ok(Request::Subscribe)) => {
                         if let Some(h) = sub_task.take() { h.abort(); }
@@ -166,8 +176,9 @@ where
                         sub_task = Some(tokio::spawn(async move {
                             loop {
                                 match bcast_rx.recv().await {
-                                    Ok(cfg) => {
-                                        if forward_tx.send(cfg).await.is_err() {
+                                    Ok(update) => {
+                                        let event = Event::Config(update.config.clone());
+                                        if forward_tx.send(event).await.is_err() {
                                             break;
                                         }
                                     }
@@ -185,6 +196,37 @@ where
                         }
                         debug!("IPC client subscribed");
                     }
+                    Some(Ok(Request::SubscribeDiff { scopes })) => {
+                        if let Some(h) = sub_task.take() { h.abort(); }
+
+                        let mut bcast_rx = store.subscribe();
+                        let forward_tx = sub_tx.clone();
+                        let task_scopes = scopes.clone();
+                        sub_task = Some(tokio::spawn(async move {
+                            loop {
+                                match bcast_rx.recv().await {
+                                    Ok(update) => {
+                                        let scoped = update.diff.scoped(&task_scopes);
+                                        if !scoped.is_empty()
+                                            && forward_tx.send(Event::Diff(scoped)).await.is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                                        warn!("IPC subscriber lagged by {n} messages");
+                                    }
+                                    Err(broadcast::error::RecvError::Closed) => break,
+                                }
+                            }
+                        }));
+
+                        let initial = store.initial_diff().await.scoped(&scopes);
+                        if writer.send(Event::Diff(initial)).await.is_err() {
+                            break;
+                        }
+                        debug!("IPC client subscribed to diff (scopes: {scopes:?})");
+                    }
                     Some(Ok(Request::Unsubscribe)) => {
                         if let Some(h) = sub_task.take() { h.abort(); }
                         debug!("IPC client unsubscribed");
@@ -198,13 +240,21 @@ where
                     }
                     Some(Err(e)) => {
                         warn!("IPC read error: {e}");
-                        break;
+                        if sub_task.is_none() {
+                            break;
+                        }
+                        reader_open = false;
                     }
-                    None => break,
+                    None => {
+                        if sub_task.is_none() {
+                            break;
+                        }
+                        reader_open = false;
+                    }
                 }
             }
-            Some(update) = sub_rx.recv() => {
-                if writer.send(Event::Config((*update).clone())).await.is_err() {
+            Some(event) = sub_rx.recv() => {
+                if writer.send(event).await.is_err() {
                     break;
                 }
             }

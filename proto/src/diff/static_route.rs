@@ -14,6 +14,7 @@ pub fn diff_static_routes(base: &[StaticRoute], candidate: &[StaticRoute]) -> Ve
                 if b.gateway != c.gateway {
                     sections.push(SectionDiff {
                         header: header_for(&b.subnet),
+                        name: b.subnet.to_string(),
                         status: DiffStatus::Modified,
                         fields: vec![FieldDiff {
                             label: "gateway".to_string(),
@@ -43,6 +44,7 @@ fn header_for(subnet: &ipnet::IpNet) -> String {
 fn removed_section(route: &StaticRoute) -> SectionDiff {
     SectionDiff {
         header: header_for(&route.subnet),
+        name: route.subnet.to_string(),
         status: DiffStatus::Removed,
         fields: vec![FieldDiff {
             label: "gateway".to_string(),
@@ -56,6 +58,7 @@ fn removed_section(route: &StaticRoute) -> SectionDiff {
 fn added_section(route: &StaticRoute) -> SectionDiff {
     SectionDiff {
         header: header_for(&route.subnet),
+        name: route.subnet.to_string(),
         status: DiffStatus::Added,
         fields: vec![FieldDiff {
             label: "gateway".to_string(),

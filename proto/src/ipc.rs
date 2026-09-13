@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::diff::ConfigDiff;
+use crate::diff::{ConfigDiff, DiffScope};
 use crate::docs::{CommandDoc, Topic};
 use crate::ops::ConfigOp;
 use crate::schema::Config;
@@ -44,6 +44,12 @@ pub enum Request {
     /// One-shot: compute and return the structural difference between the
     /// running config and a named transaction's in-progress config.
     DiffTransaction { name: String },
+    /// Start streaming diffs: an initial diff synthesized against an empty
+    /// config (so a fresh subscriber sees every currently-configured item in
+    /// `scopes` as `Added`), then one more `Event::Diff` per future commit
+    /// that touches at least one requested scope — other commits are not
+    /// sent at all.
+    SubscribeDiff { scopes: Vec<DiffScope> },
 }
 
 /// Messages sent from the config daemon to a component client.

@@ -7,7 +7,7 @@ pub mod schema;
 pub mod validators;
 
 pub use codec::IpcCodec;
-pub use diff::{diff_configs, ConfigDiff, DiffStatus, FieldDiff, SectionDiff};
+pub use diff::{diff_configs, ConfigDiff, DiffScope, DiffStatus, FieldDiff, SectionDiff};
 pub use docs::{CommandDoc, Topic};
 pub use ipc::{Event, Request, TransactionBase, TransactionSnapshot};
 pub use ipnet::IpNet;
