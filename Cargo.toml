@@ -1,5 +1,5 @@
 [workspace]
-members = ["proto", "config", "bgp", "cli", "watchdog"]
+members = ["proto", "config", "bgp", "rib", "cli", "watchdog"]
 resolver = "2"
 
 [workspace.dependencies]

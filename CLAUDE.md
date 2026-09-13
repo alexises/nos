@@ -9,6 +9,7 @@ A network operating system built from scratch in Rust.
 | `proto/` | `nos-proto` | Shared wire types, IPC codec — single source of truth for all inter-process contracts |
 | `config/` | `nos-config` | Configuration store and IPC server |
 | `bgp/` | `nos-bgp` | BGP-4 implementation |
+| `rib/` | `nos-rib` | Routing information base daemon — best-path selection per routing table |
 | `cli/` | `nos-cli` | Interactive shell (binary `nos`) — main user-facing entry point |
 | `watchdog/` | `nos-watchdog` | Process supervisor — starts and restarts the other component processes |
 
@@ -29,7 +30,7 @@ Each component (BGP, RIB, OSPF, …) runs as a dedicated OS process. No componen
           ▼             ▼             ▼             ▼
     nos-bgp         nos-rib       nos-ospf       nos-cli
     process         process       process        (shell)
-    (future)        (future)
+    (future)
 ```
 
 ### IPC transport
@@ -99,6 +100,8 @@ Both planes use the same transport stack. The data plane will use a separate soc
 
 `nos-watchdog` (binary `nos-watchdogd`) starts and supervises the other component processes as OS child processes, and is the container's entrypoint. It always runs exactly one supervised `nos-configd`. For BGP, rather than a single static `nos-bgpd`, the watchdog subscribes to `nos-configd` over its own `--config-socket` connection (`Request::SubscribeDiff`, independent of whatever address is forwarded to the `nos-configd` child via the opaque `--configd-arg` pass-through) and dynamically spawns one `nos-bgpd --instance <name>` per `BgpInstance` in the live config. It reconciles on every diff it receives: a fresh connection's first diff is synthesized against an empty config (so every currently-configured instance shows up as `Added`) and is treated as the authoritative full membership list — anything already running that isn't in it gets stopped, closing the gap where an instance removed while disconnected could otherwise leak as an orphan process — while every later diff on the same connection is applied incrementally (`Added`/`Removed` only, `Modified` is a no-op since the `nos-bgpd` stub doesn't read instance parameters yet). The config subscription itself reconnects on a fixed 1s delay with no backoff if dropped (distinct from the exponential process-crash backoff below) — since `nos-configd` is supervised independently, its own crash/restart is transparent to already-running `nos-bgpd` instances. Every supervised process (`nos-configd` and each per-instance `nos-bgpd`) is respawned after an exponential backoff on unexpected exit (starting at 1s, doubling, capped at 30s, resetting to 1s once it's stayed up for 60s). On SIGTERM or SIGINT to the watchdog, or an instance's removal from config, its process is sent SIGINT (the signal `nos-configd`/`nos-bgpd` handle via `tokio::signal::ctrl_c()`), given up to 10s to exit cleanly, then force-killed — on watchdog shutdown this happens for every remaining process before it exits, so nothing is left orphaned.
 
+RIB tables follow the identical dynamic-spawn pattern: the watchdog subscribes to `DiffScope::RoutingTables` and spawns one `nos-ribd --table <name>` per `RoutingTable` in the live config, with the same first-diff-is-authoritative reconciliation, fixed 1s reconnect delay, and exponential per-process crash backoff as BGP instances. `Modified` is likewise a no-op at this level — a table's `bgp_instance`/`static_routing_instance` association changing doesn't restart its `nos-ribd`, since that process independently subscribes to config (`RoutingTables` and `StaticRoutingInstances`) and re-resolves its own associations on every relevant diff, rebuilding its in-memory RIB from a fresh `Request::Get` rather than losing state to a restart.
+
 `nos-config`'s IPC protocol supports this via `Request::SubscribeDiff { scopes }`: a subscriber names which `ConfigDiff` sections it cares about (`DiffScope::{Hostname,BgpInstances,RoutingTables,StaticRoutingInstances}`) and only receives `Event::Diff` for commits that touch a requested scope — commits outside every requested scope are never sent. This is a separate, additive path alongside the original `Request::Subscribe`/`Event::Config` (full snapshot on every commit, used by `nos-cli`'s live hostname prompt), which is unchanged. Both paths rely on a documented but easy-to-miss connection-lifecycle rule in `server.rs`: a subscriber (of either kind) is expected to send its request and then never write to the connection again — "the caller owns its lifetime" — so the server must not treat EOF/an error on the *request* side of a subscribed connection as reason to close the whole connection; it only stops reading further requests; the connection stays open to keep pushing events until the client is actually gone (detected when writing to it fails).
 
 ## Development
@@ -112,8 +115,8 @@ make help    # list all available targets
 Containerized test environment:
 
 ```bash
-make docker-build                        # build the nos-watchdogd/nos-configd/nos-bgpd/nos Docker image
-docker compose up -d watchdog            # run the watchdog (which starts nos-configd + nos-bgpd) in a container
+make docker-build                        # build the nos-watchdogd/nos-configd/nos-bgpd/nos-ribd/nos Docker image
+docker compose up -d watchdog            # run the watchdog (which starts nos-configd + nos-bgpd + nos-ribd) in a container
 docker compose run --rm cli              # interactive shell, as its own container, sharing configd's socket
 ```
 

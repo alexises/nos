@@ -1,0 +1,27 @@
+[package]
+name    = "nos-rib"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio              = { workspace = true }
+serde              = { workspace = true }
+tracing            = { workspace = true }
+thiserror          = { workspace = true }
+bytes              = { workspace = true }
+clap               = { workspace = true }
+anyhow             = { workspace = true }
+tracing-subscriber = { workspace = true }
+nos-proto          = { workspace = true }
+tokio-util         = { workspace = true }
+futures            = { workspace = true }
+
+[[bin]]
+name = "nos-ribd"
+path = "src/main.rs"
+
+[dev-dependencies]
+proptest = { workspace = true }

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_watchdog::{bgp_instances, supervise_one, BackoffPolicy, ProcessSpec};
+use nos_watchdog::{bgp_instances, routing_tables, supervise_one, BackoffPolicy, ProcessSpec};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 use tracing::info;
@@ -27,11 +27,20 @@ struct Args {
     #[arg(long = "bgpd-arg", allow_hyphen_values = true)]
     bgpd_flags: Vec<String>,
 
+    /// Path to the nos-ribd binary to supervise (one instance is spawned per
+    /// routing table in the running config).
+    #[arg(long, default_value = "/usr/local/bin/nos-ribd")]
+    ribd_bin: PathBuf,
+
+    /// Extra arguments forwarded to every nos-ribd instance.
+    #[arg(long = "ribd-arg", allow_hyphen_values = true)]
+    ribd_flags: Vec<String>,
+
     /// Path to nos-configd's IPC Unix socket, used by the watchdog itself to
-    /// subscribe to BGP instance changes. Independent of `--configd-arg`,
-    /// which is an opaque pass-through to the child — if the child's actual
-    /// listen address is overridden via `--configd-arg --listen=...`, this
-    /// must be updated to match.
+    /// subscribe to BGP instance and routing table changes. Independent of
+    /// `--configd-arg`, which is an opaque pass-through to the child — if
+    /// the child's actual listen address is overridden via `--configd-arg
+    /// --listen=...`, this must be updated to match.
     #[arg(long, default_value = "/run/nos/config.sock")]
     config_socket: PathBuf,
 }
@@ -51,9 +60,16 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     ))];
     tasks.push(tokio::spawn(bgp_instances::manage(
-        args.config_socket,
+        args.config_socket.clone(),
         args.bgpd_bin,
         args.bgpd_flags,
+        policy,
+        shutdown_rx.clone(),
+    )));
+    tasks.push(tokio::spawn(routing_tables::manage(
+        args.config_socket,
+        args.ribd_bin,
+        args.ribd_flags,
         policy,
         shutdown_rx.clone(),
     )));

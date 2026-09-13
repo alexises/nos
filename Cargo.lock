@@ -987,6 +987,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nos-rib"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "futures",
+ "nos-proto",
+ "proptest",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nos-watchdog"
 version = "0.1.0"
 dependencies = [
