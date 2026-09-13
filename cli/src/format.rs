@@ -1,6 +1,7 @@
 use nos_proto::{
     AddressFamily, BgpInstance, BgpPeer, BgpPeerGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
-    RoutingTable, SectionDiff, StaticRoute, StaticRoutingInstance, TransactionSnapshot,
+    PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, StaticRoute, StaticRoutingInstance,
+    TransactionSnapshot,
 };
 
 use crate::session::Path;
@@ -63,6 +64,35 @@ pub fn render_routing_table(table: &RoutingTable) -> String {
 /// Render one static route as human-readable text.
 pub fn render_static_route(route: &StaticRoute) -> String {
     format!("route {}: gateway {}", route.subnet, route.gateway)
+}
+
+fn render_route_source(source: RouteSourceKind) -> &'static str {
+    match source {
+        RouteSourceKind::Static => "static",
+        RouteSourceKind::Bgp => "bgp",
+    }
+}
+
+/// Render one prefix's candidate routes, best (winner, marked `*`) to worst,
+/// one line per candidate. Used for both `show route <table>` (many entries)
+/// and `show route <table> <address>` (one entry, wrapped in a slice).
+pub fn render_prefix_routes(entries: &[PrefixRoutes]) -> String {
+    if entries.is_empty() {
+        return "no routes".to_string();
+    }
+    let mut lines = Vec::new();
+    for entry in entries {
+        lines.push(format!("{}", entry.prefix));
+        for (i, candidate) in entry.candidates.iter().enumerate() {
+            let marker = if i == 0 { "*" } else { " " };
+            lines.push(format!(
+                "  {marker} via {} [{}]",
+                candidate.gateway,
+                render_route_source(candidate.source)
+            ));
+        }
+    }
+    lines.join("\n")
 }
 
 /// Render one static routing instance as human-readable text, including any

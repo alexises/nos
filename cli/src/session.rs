@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use nos_proto::{
     BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, ConfigOp, RoutingTableOp, StaticRouteOp,
     StaticRoutingInstanceOp, TransactionBase,
@@ -56,6 +58,12 @@ pub enum Resolved {
     /// `show this` in configuration mode — fetch the transaction and render
     /// it at the current path.
     ShowTransaction,
+    /// `show route <table>` (whole table) or `show route <table> <address>`
+    /// (longest-prefix-match lookup) — data-plane, valid in any mode.
+    ShowRoute {
+        table: String,
+        address: Option<IpAddr>,
+    },
     SaveRunningConfig,
     OpenTransaction {
         name: String,
@@ -78,6 +86,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::Empty => Resolved::Nothing,
         Command::Help => Resolved::Help,
         Command::ShowConfig => Resolved::ShowRunningConfig,
+        Command::ShowRoute { table, address } => Resolved::ShowRoute { table, address },
         Command::Unknown(s) => {
             Resolved::Error(format!("unknown command: '{s}' (type 'help' for a list)"))
         }
@@ -517,6 +526,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::Empty
         | Command::Help
         | Command::ShowConfig
+        | Command::ShowRoute { .. }
         | Command::Unknown(_)
         | Command::Exit
         | Command::Save => {
@@ -588,6 +598,37 @@ mod tests {
         assert_eq!(
             resolve(&config_mode("t1", Path::Root, false), Command::ShowConfig),
             Resolved::ShowRunningConfig
+        );
+    }
+
+    #[test]
+    fn show_route_works_in_any_mode() {
+        let addr: IpAddr = "10.0.0.5".parse().unwrap();
+        assert_eq!(
+            resolve(
+                &Mode::Operational,
+                Command::ShowRoute {
+                    table: "rt1".to_string(),
+                    address: Some(addr),
+                }
+            ),
+            Resolved::ShowRoute {
+                table: "rt1".to_string(),
+                address: Some(addr),
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::ShowRoute {
+                    table: "rt1".to_string(),
+                    address: None,
+                }
+            ),
+            Resolved::ShowRoute {
+                table: "rt1".to_string(),
+                address: None,
+            }
         );
     }
 

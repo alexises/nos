@@ -4,26 +4,30 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 
 ## What lives here vs nos-proto / nos-config
 
-`nos-cli` depends only on `nos-proto` for wire types (`Config`, `Request`, `Event`, `IpcCodec`, `CommandDoc`, `Topic`) — it does **not** depend on `nos-config` internals, matching the rule in the root `CLAUDE.md` that client components never depend on the config daemon directly. It dials the daemon's Unix socket the same way any future component client would.
+`nos-cli` depends only on `nos-proto` for wire types (`Config`, `Request`, `Event`, `IpcCodec`, `CommandDoc`, `Topic`, `ServiceRef`, `WatchdogRequest`/`WatchdogEvent`, `RibRequest`/`RibEvent`) — it does **not** depend on `nos-config` internals, matching the rule in the root `CLAUDE.md` that client components never depend on the config daemon directly. It dials each daemon's Unix socket the same way any future component client would.
 
 ## Modules
 
 | Module | Role |
 |--------|------|
-| `main.rs` | Arg parsing (`--config-socket`), the reedline REPL loop (completer + menus + keybindings), mode-aware prompt, `DocCache`/`doc_for`/`doc_for_blocking`, dispatch of `session::Resolved` actions |
+| `main.rs` | Arg parsing (`--watchdog-socket`), resolves `nos-configd`'s address via the watchdog broker at startup (falling back to the conventional default and warning if unreachable), the reedline REPL loop (completer + menus + keybindings), mode-aware prompt, `DocCache`/`doc_for`/`doc_for_blocking`, dispatch of `session::Resolved` actions |
 | `command.rs` | `Command::parse(&str) -> Command` — pure parsing, no I/O, no mode awareness |
 | `session.rs` | `Mode` (`Operational` / `Configuration { transaction, path, dirty }`), `Path` (navigation position), and `resolve(&Mode, Command) -> Resolved` — the pure semantic layer mapping a command plus current mode to a concrete action |
 | `spec.rs` | `COMMAND_SPECS` — the CLI's own grammar table (token syntax + which `Mode`/`Path` each command is valid in). Owns *syntax* only; see "Help, `?`, and Tab-completion" for where the descriptive text comes from |
 | `completer.rs` | `NosCompleter` — a `reedline::Completer` driven by `spec::COMMAND_SPECS`, shared by Tab-completion and the live `?` key |
 | `help_menu.rs` | `HelpMenu` — the `reedline::Menu` backing the live `?` key (brief vs. detailed views) |
 | `client.rs` | One-shot IPC calls to `nos-configd`: `fetch_running_config`, `save_running_config`, `open_transaction`, `apply_op`, `get_transaction`, `commit_transaction`, `discard_transaction`, `diff_transaction`, `describe` — plus `subscribe`, the one long-lived exception (see "Connection behavior") |
-| `format.rs` | `render_config`, `render_bgp_instance`, `render_routing_table`, `render_static_routing_instance`, `render_transaction`, `render_diff` — human-readable rendering (`Config`/`BgpInstance` only derive `Debug`, no `Display`). `render_diff` is also the one place that emits ANSI color/highlight codes, hand-rolled rather than via a color crate |
+| `watchdog_client.rs` | `resolve(watchdog_socket, service) -> Result<Option<PathBuf>, _>` — one-shot `WatchdogRequest::ResolveEndpoint` call against `nos-watchdogd`'s broker socket; `Ok(None)` means the broker is reachable but reports the service unavailable |
+| `rib_client.rs` | One-shot IPC calls to a resolved `nos-ribd` instance: `get_routes` (`RibRequest::GetRoutes`), `lookup` (`RibRequest::Lookup`) |
+| `format.rs` | `render_config`, `render_bgp_instance`, `render_routing_table`, `render_static_routing_instance`, `render_transaction`, `render_diff`, `render_prefix_routes` — human-readable rendering (`Config`/`BgpInstance` only derive `Debug`, no `Display`). `render_diff` is also the one place that emits ANSI color/highlight codes, hand-rolled rather than via a color crate |
 
 ## Commands
 
 | Command | Behavior |
 |---------|----------|
 | `show config` | Sends `Request::Get` to `nos-configd`, prints the returned running config (works in any mode) |
+| `show route <table>` | Resolves `<table>`'s `nos-ribd` instance via the watchdog broker, then `RibRequest::GetRoutes` — every prefix, every candidate route ordered best to worst (works in any mode) |
+| `show route <table> <address>` | Same resolution, then `RibRequest::Lookup { addr }` — a longest-prefix-match lookup, printing every candidate for the matched prefix ordered best to worst, or "no route matches" (works in any mode) |
 | `save` | Sends `Request::Save` to `nos-configd`; persists the running config to disk (operational mode only) |
 | `configure <name> [from blank\|current]` | Enters configuration mode on a named transaction — creates it if new (default base: `current`), resumes it unchanged if it already exists |
 | `edit bgp instance <name>` | Creates the instance in the transaction if missing, then navigates into it |
@@ -71,4 +75,4 @@ Each command dials the daemon fresh (`UnixStream::connect` → split → `Framed
 
 **One deliberate exception**: at shell startup, `main.rs` spawns a background task (`subscribe_hostname_task`) that opens exactly one long-lived `Request::Subscribe` connection (via `client::subscribe`) purely to keep the prompt's hostname live. It loops on `Event::Config` for the shell's whole lifetime, updates a shared `Arc<Mutex<String>>`, and — only when the value actually changes — triggers an in-place prompt repaint via `reedline::Reedline::repaint_signal()`'s handle, so the prompt updates even while the shell is sitting idle with no keystroke. `RepaintSignal` itself isn't reachable outside the `reedline` crate in this version (its type lives in a private module despite the constructor method being public), so the handle is captured in a `move || ...` closure rather than named directly. On disconnect or error the task retries after a fixed 1s delay — no backoff — since it's the shell's only long-lived connection and a daemon restart shouldn't permanently freeze the prompt. The initial hostname is still seeded from a one-shot `fetch_running_config` at startup, and shell startup never blocks or fails if the daemon is briefly unreachable. Every other command still dials one-shot as before.
 
-Default socket path is `/run/nos/config.sock`, overridable via `--config-socket <path>`.
+`nos-configd`'s address is no longer a fixed default: it's resolved once at startup via `nos-watchdogd`'s broker socket (`--watchdog-socket <path>`, default `/run/nos/watchdog.sock`) and reused for the whole session. If the broker is unreachable or reports `nos-configd` unavailable, the shell warns and falls back to the conventional `/run/nos/config.sock` rather than failing startup. `show route`'s `nos-ribd` resolution happens fresh per command instead, since routing-table instances come and go during a session.

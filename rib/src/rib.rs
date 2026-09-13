@@ -78,9 +78,42 @@ impl Rib {
             .collect()
     }
 
+    /// Every prefix's full candidate list, each sorted best (winner) to
+    /// worst by source preference, with prefixes themselves in ascending
+    /// CIDR order — for serving an unfiltered `show route <table>` query.
+    pub fn all_routes(&self) -> Vec<(IpNet, Vec<RibEntry>)> {
+        let mut out: Vec<(IpNet, Vec<RibEntry>)> = self
+            .entries
+            .iter()
+            .map(|(prefix, candidates)| (*prefix, sorted_by_preference(candidates)))
+            .collect();
+        out.sort_by_key(|(prefix, _)| *prefix);
+        out
+    }
+
+    /// Longest-prefix-match lookup: the most specific configured prefix that
+    /// covers `addr`, with its full candidate list sorted best to worst.
+    /// `None` if no configured prefix covers `addr` (no default route).
+    pub fn lookup(&self, addr: IpAddr) -> Option<(IpNet, Vec<RibEntry>)> {
+        let (prefix, candidates) = self
+            .entries
+            .iter()
+            .filter(|(net, _)| net.contains(&addr))
+            .max_by_key(|(net, _)| net.prefix_len())?;
+        Some((*prefix, sorted_by_preference(candidates)))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+/// Clones and sorts a prefix's candidates best (lowest preference value)
+/// first.
+fn sorted_by_preference(candidates: &[RibEntry]) -> Vec<RibEntry> {
+    let mut sorted = candidates.to_vec();
+    sorted.sort_by_key(|e| e.source.preference());
+    sorted
 }
 
 /// Builds a fresh `Rib` for `table_name` from a freshly fetched `Config`.
@@ -184,6 +217,65 @@ mod tests {
             source: RouteSource::Static,
         });
         assert_eq!(rib.best_routes().len(), 2);
+    }
+
+    #[test]
+    fn all_routes_sorts_prefixes_and_candidates() {
+        let mut rib = Rib::new();
+        let p1: IpNet = "10.0.1.0/24".parse().unwrap();
+        let p2: IpNet = "10.0.0.0/24".parse().unwrap();
+        rib.insert(RibEntry {
+            prefix: p1,
+            gateway: "10.0.1.1".parse().unwrap(),
+            source: RouteSource::Static,
+        });
+        rib.insert(RibEntry {
+            prefix: p2,
+            gateway: "10.0.0.9".parse().unwrap(),
+            source: RouteSource::Bgp,
+        });
+        rib.insert(RibEntry {
+            prefix: p2,
+            gateway: "10.0.0.1".parse().unwrap(),
+            source: RouteSource::Static,
+        });
+
+        let all = rib.all_routes();
+        assert_eq!(all.len(), 2);
+        // p2 (10.0.0.0/24) sorts before p1 (10.0.1.0/24).
+        assert_eq!(all[0].0, p2);
+        assert_eq!(all[1].0, p1);
+        // p2's candidates are ordered best (Static) to worst (Bgp).
+        assert_eq!(all[0].1.len(), 2);
+        assert_eq!(all[0].1[0].source, RouteSource::Static);
+        assert_eq!(all[0].1[1].source, RouteSource::Bgp);
+    }
+
+    #[test]
+    fn lookup_performs_longest_prefix_match() {
+        let mut rib = Rib::new();
+        let broad: IpNet = "10.0.0.0/16".parse().unwrap();
+        let narrow: IpNet = "10.0.1.0/24".parse().unwrap();
+        rib.insert(RibEntry {
+            prefix: broad,
+            gateway: "10.0.0.1".parse().unwrap(),
+            source: RouteSource::Static,
+        });
+        rib.insert(RibEntry {
+            prefix: narrow,
+            gateway: "10.0.1.1".parse().unwrap(),
+            source: RouteSource::Static,
+        });
+
+        let (matched, candidates) = rib.lookup("10.0.1.5".parse().unwrap()).unwrap();
+        assert_eq!(matched, narrow);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].gateway, "10.0.1.1".parse::<IpAddr>().unwrap());
+
+        let (matched, _) = rib.lookup("10.0.2.5".parse().unwrap()).unwrap();
+        assert_eq!(matched, broad);
+
+        assert!(rib.lookup("192.168.0.1".parse().unwrap()).is_none());
     }
 
     #[test]

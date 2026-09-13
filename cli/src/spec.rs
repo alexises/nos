@@ -135,6 +135,39 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         availability: Availability::Configuration,
     },
     CommandSpec {
+        tokens: &[
+            Token::Literal("show"),
+            Token::Literal("route"),
+            Token::Arg(ArgKind::RoutingTableName),
+        ],
+        usage: "show route <table>",
+        doc: Doc::Local {
+            summary: "Show every route in a routing table, best to worst per prefix.",
+            detail: "Queries the table's nos-ribd instance (resolved via nos-watchdogd) for \
+                     every prefix it currently knows, each with its full list of candidate \
+                     routes ordered from the winning route to the losing ones — since more \
+                     than one source (e.g. static and BGP) can target the same prefix. \
+                     Prefixes are listed in ascending CIDR order.",
+        },
+        availability: Availability::Always,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("show"),
+            Token::Literal("route"),
+            Token::Arg(ArgKind::RoutingTableName),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "show route <table> <address>",
+        doc: Doc::Local {
+            summary: "Look up the best route(s) for one destination address.",
+            detail: "Performs a longest-prefix-match lookup against the table's nos-ribd \
+                     instance for the given address, and shows every candidate route for the \
+                     matched prefix, ordered from the winning route to the losing ones.",
+        },
+        availability: Availability::Always,
+    },
+    CommandSpec {
         tokens: &[Token::Literal("save")],
         usage: "save",
         doc: Doc::FromConfig(Topic::Save),

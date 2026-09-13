@@ -25,3 +25,4 @@ path = "src/main.rs"
 
 [dev-dependencies]
 proptest = { workspace = true }
+tempfile = { workspace = true }

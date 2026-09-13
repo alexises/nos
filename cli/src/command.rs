@@ -161,6 +161,12 @@ pub enum Command {
     ShowConfig,
     /// `show this` — only meaningful in configuration mode.
     Show,
+    /// `show route <table>` (whole table) or `show route <table> <address>`
+    /// (longest-prefix-match lookup).
+    ShowRoute {
+        table: String,
+        address: Option<IpAddr>,
+    },
     Save,
     Help,
     /// `exit` | `quit` | `end`
@@ -191,6 +197,17 @@ impl Command {
             [] => Command::Empty,
             ["show", "config"] => Command::ShowConfig,
             ["show", "this"] => Command::Show,
+            ["show", "route", table] => Command::ShowRoute {
+                table: (*table).to_string(),
+                address: None,
+            },
+            ["show", "route", table, addr] => match addr.parse::<IpAddr>() {
+                Ok(address) => Command::ShowRoute {
+                    table: (*table).to_string(),
+                    address: Some(address),
+                },
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
             ["save"] => Command::Save,
             ["help"] => Command::Help,
             ["exit" | "quit" | "end"] => Command::Exit,
@@ -462,6 +479,36 @@ mod tests {
     #[test]
     fn bare_show_is_unknown() {
         assert_eq!(Command::parse("show"), Command::Unknown("show".to_string()));
+    }
+
+    #[test]
+    fn show_route_whole_table() {
+        assert_eq!(
+            Command::parse("show route rt1"),
+            Command::ShowRoute {
+                table: "rt1".to_string(),
+                address: None,
+            }
+        );
+    }
+
+    #[test]
+    fn show_route_with_address() {
+        assert_eq!(
+            Command::parse("show route rt1 10.0.0.5"),
+            Command::ShowRoute {
+                table: "rt1".to_string(),
+                address: Some("10.0.0.5".parse().unwrap()),
+            }
+        );
+    }
+
+    #[test]
+    fn show_route_with_invalid_address_is_unknown() {
+        assert_eq!(
+            Command::parse("show route rt1 not-an-address"),
+            Command::Unknown("show route rt1 not-an-address".to_string())
+        );
     }
 
     #[test]

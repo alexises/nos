@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
 use nos_proto::{DiffScope, Event};
-use tokio::sync::watch;
+use tokio::sync::{watch, RwLock};
 use tokio::time::sleep;
 use tracing::{info, warn};
 
@@ -22,9 +23,12 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// — rather than incremental diff application, since `SectionDiff`/
 /// `FieldDiff` only carry pre-formatted display strings, not structured
 /// route data (see `nos_proto::diff::routing_table`/`static_routing_instance`).
-pub async fn run(config_socket: PathBuf, table: String, mut shutdown: watch::Receiver<bool>) {
-    let mut rib = Rib::new();
-
+pub async fn run(
+    config_socket: PathBuf,
+    table: String,
+    rib: Arc<RwLock<Rib>>,
+    mut shutdown: watch::Receiver<bool>,
+) {
     while !*shutdown.borrow() {
         match config_client::subscribe_diff(
             &config_socket,
@@ -38,7 +42,7 @@ pub async fn run(config_socket: PathBuf, table: String, mut shutdown: watch::Rec
                     tokio::select! {
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(_))) => {
-                                resync(&config_socket, &table, &mut rib).await;
+                                resync(&config_socket, &table, &rib).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -73,7 +77,7 @@ pub async fn run(config_socket: PathBuf, table: String, mut shutdown: watch::Rec
     info!(table = %table, "reconciliation loop stopped");
 }
 
-async fn resync(config_socket: &Path, table: &str, rib: &mut Rib) {
+async fn resync(config_socket: &Path, table: &str, rib: &Arc<RwLock<Rib>>) {
     match config_client::fetch_config(config_socket).await {
         Ok(cfg) => {
             if let Some(new_rib) = build_from_config(&cfg, table) {
@@ -88,13 +92,13 @@ async fn resync(config_socket: &Path, table: &str, rib: &mut Rib) {
                         "best route"
                     );
                 }
-                *rib = new_rib;
+                *rib.write().await = new_rib;
             } else {
                 warn!(
                     table = %table,
                     "routing table not found in running config; RIB left empty until it appears"
                 );
-                *rib = Rib::new();
+                *rib.write().await = Rib::new();
             }
         }
         Err(e) => {

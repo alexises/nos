@@ -1,0 +1,81 @@
+use futures::{SinkExt, StreamExt};
+use nos_cli::rib_client::{get_routes, lookup};
+use nos_proto::{IpcCodec, PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind};
+use tokio::net::UnixListener;
+use tokio_util::codec::{FramedRead, FramedWrite};
+
+fn sample_prefix_routes() -> PrefixRoutes {
+    PrefixRoutes {
+        prefix: "10.0.0.0/24".parse().unwrap(),
+        candidates: vec![RouteEntry {
+            gateway: "10.0.0.1".parse().unwrap(),
+            source: RouteSourceKind::Static,
+        }],
+    }
+}
+
+async fn serve_once(listener: UnixListener, expected: RibRequest, reply: RibEvent) {
+    let (stream, _) = listener.accept().await.unwrap();
+    let (r, w) = stream.into_split();
+    let mut reader = FramedRead::new(r, IpcCodec::<RibRequest>::default());
+    let mut writer = FramedWrite::new(w, IpcCodec::<RibEvent>::default());
+
+    let got = reader.next().await.unwrap().unwrap();
+    assert_eq!(format!("{got:?}"), format!("{expected:?}"));
+    writer.send(reply).await.unwrap();
+}
+
+#[tokio::test]
+async fn get_routes_returns_routes_on_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rib.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let server = tokio::spawn(serve_once(
+        listener,
+        RibRequest::GetRoutes,
+        RibEvent::Routes(vec![sample_prefix_routes()]),
+    ));
+
+    let routes = get_routes(&path).await.unwrap();
+    assert_eq!(routes, vec![sample_prefix_routes()]);
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn lookup_returns_none_on_no_match() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rib.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let addr = "192.168.0.1".parse().unwrap();
+
+    let server = tokio::spawn(serve_once(
+        listener,
+        RibRequest::Lookup { addr },
+        RibEvent::NoMatch,
+    ));
+
+    let matched = lookup(&path, addr).await.unwrap();
+    assert_eq!(matched, None);
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn get_routes_returns_daemon_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rib.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let server = tokio::spawn(serve_once(
+        listener,
+        RibRequest::GetRoutes,
+        RibEvent::Error("boom".to_string()),
+    ));
+
+    let err = get_routes(&path).await.unwrap_err();
+    assert!(err.to_string().contains("boom"));
+
+    server.await.unwrap();
+}

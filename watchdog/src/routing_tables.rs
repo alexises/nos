@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::config_client;
+use crate::registry::EndpointRegistry;
 use crate::supervisor::{supervise_one, wait_or_shutdown, BackoffPolicy, ProcessSpec};
 
 /// Fixed reconnect delay for the config subscription itself — distinct from
@@ -32,6 +33,8 @@ pub async fn manage(
     ribd_bin: PathBuf,
     ribd_flags: Vec<String>,
     policy: BackoffPolicy,
+    registry: EndpointRegistry,
+    watchdog_listen_socket: PathBuf,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut instances: HashMap<String, InstanceHandle> = HashMap::new();
@@ -52,10 +55,10 @@ pub async fn manage(
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(diff))) => {
                                 if first_event {
-                                    sync_from_initial(&mut instances, &diff.routing_tables, &ribd_bin, &ribd_flags, policy);
+                                    sync_from_initial(&mut instances, &diff.routing_tables, &ribd_bin, &ribd_flags, policy, &registry, &watchdog_listen_socket).await;
                                     first_event = false;
                                 } else {
-                                    apply_diff(&mut instances, &diff.routing_tables, &ribd_bin, &ribd_flags, policy);
+                                    apply_diff(&mut instances, &diff.routing_tables, &ribd_bin, &ribd_flags, policy, &registry, &watchdog_listen_socket).await;
                                 }
                             }
                             Some(Ok(_)) => {}
@@ -90,12 +93,15 @@ pub async fn manage(
 /// Reconciles the full set of currently-wanted table names (all `Added` by
 /// construction — see `manage`'s doc comment) against what's already
 /// supervised: spawns anything missing, stops anything no longer wanted.
-fn sync_from_initial(
+#[allow(clippy::too_many_arguments)]
+async fn sync_from_initial(
     instances: &mut HashMap<String, InstanceHandle>,
     sections: &[SectionDiff],
     ribd_bin: &Path,
     ribd_flags: &[String],
     policy: BackoffPolicy,
+    registry: &EndpointRegistry,
+    watchdog_listen_socket: &Path,
 ) {
     let wanted: HashSet<&str> = sections.iter().map(|s| s.name.as_str()).collect();
 
@@ -105,12 +111,21 @@ fn sync_from_initial(
         .cloned()
         .collect();
     for name in stale {
-        stop_instance(instances, &name);
+        stop_instance(instances, &name, registry).await;
     }
 
     for name in wanted {
         if !instances.contains_key(name) {
-            spawn_instance(instances, name, ribd_bin, ribd_flags, policy);
+            spawn_instance(
+                instances,
+                name,
+                ribd_bin,
+                ribd_flags,
+                policy,
+                registry,
+                watchdog_listen_socket,
+            )
+            .await;
         }
     }
 }
@@ -122,50 +137,78 @@ fn sync_from_initial(
 /// subscribes to config and re-resolves its own associations on every
 /// relevant diff, so restarting the process here would be redundant and
 /// would needlessly drop its in-memory RIB.
-fn apply_diff(
+#[allow(clippy::too_many_arguments)]
+async fn apply_diff(
     instances: &mut HashMap<String, InstanceHandle>,
     sections: &[SectionDiff],
     ribd_bin: &Path,
     ribd_flags: &[String],
     policy: BackoffPolicy,
+    registry: &EndpointRegistry,
+    watchdog_listen_socket: &Path,
 ) {
     for section in sections {
         match section.status {
             DiffStatus::Added => {
                 if !instances.contains_key(&section.name) {
-                    spawn_instance(instances, &section.name, ribd_bin, ribd_flags, policy);
+                    spawn_instance(
+                        instances,
+                        &section.name,
+                        ribd_bin,
+                        ribd_flags,
+                        policy,
+                        registry,
+                        watchdog_listen_socket,
+                    )
+                    .await;
                 }
             }
-            DiffStatus::Removed => stop_instance(instances, &section.name),
+            DiffStatus::Removed => stop_instance(instances, &section.name, registry).await,
             DiffStatus::Modified => {}
         }
     }
 }
 
-fn spawn_instance(
+#[allow(clippy::too_many_arguments)]
+async fn spawn_instance(
     instances: &mut HashMap<String, InstanceHandle>,
     name: &str,
     ribd_bin: &Path,
     ribd_flags: &[String],
     policy: BackoffPolicy,
+    registry: &EndpointRegistry,
+    watchdog_listen_socket: &Path,
 ) {
+    let rib_socket = PathBuf::from(format!("/run/nos/rib-{name}.sock"));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let spec = ProcessSpec::new(
         format!("nos-ribd[{name}]"),
         ribd_bin.to_path_buf(),
         std::iter::once("--table".to_string())
             .chain(std::iter::once(name.to_string()))
+            .chain(std::iter::once("--listen-socket".to_string()))
+            .chain(std::iter::once(rib_socket.display().to_string()))
+            .chain(std::iter::once("--watchdog-socket".to_string()))
+            .chain(std::iter::once(
+                watchdog_listen_socket.display().to_string(),
+            ))
             .chain(ribd_flags.iter().cloned())
             .collect(),
     );
+    registry.set_rib_table(name, rib_socket).await;
     info!(table = %name, "spawning nos-ribd for new routing table");
     let task = tokio::spawn(supervise_one(spec, policy, shutdown_rx));
     instances.insert(name.to_string(), InstanceHandle { shutdown_tx, task });
 }
 
-fn stop_instance(instances: &mut HashMap<String, InstanceHandle>, name: &str) {
+async fn stop_instance(
+    instances: &mut HashMap<String, InstanceHandle>,
+    name: &str,
+    registry: &EndpointRegistry,
+) {
     if let Some(handle) = instances.remove(name) {
         info!(table = %name, "routing table removed from config, stopping nos-ribd");
+        registry.remove_rib_table(name).await;
         let _ = handle.shutdown_tx.send(true);
         // Don't block reconciliation on this shutdown's up-to-10s grace period.
         tokio::spawn(async move {

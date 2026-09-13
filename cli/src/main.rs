@@ -11,8 +11,8 @@ use nos_cli::completer::NosCompleter;
 use nos_cli::help_menu::HelpMenu;
 use nos_cli::session::{self, Mode, PathAfter, Resolved};
 use nos_cli::spec::{self, Doc};
-use nos_cli::{client, format};
-use nos_proto::{CommandDoc, ConfigOp, Event, Topic};
+use nos_cli::{client, format, rib_client, watchdog_client};
+use nos_proto::{CommandDoc, ConfigOp, Event, ServiceRef, Topic, DEFAULT_CONFIG_SOCKET};
 use reedline::{
     default_emacs_keybindings, ColumnarMenu, Completer, Emacs, KeyCode, KeyModifiers, MenuBuilder,
     Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, Signal,
@@ -26,9 +26,11 @@ type DocCache = Arc<Mutex<HashMap<Topic, CommandDoc>>>;
 #[derive(Parser)]
 #[command(name = "nos", about = "NOS interactive shell")]
 struct Args {
-    /// Path to the nos-configd IPC Unix socket.
-    #[arg(long, default_value = "/run/nos/config.sock")]
-    config_socket: PathBuf,
+    /// Path to nos-watchdogd's broker socket, used to resolve nos-configd's
+    /// current address and, for `show route`, a specific nos-ribd
+    /// instance's address — rather than assuming a hardcoded default.
+    #[arg(long, default_value = nos_proto::DEFAULT_WATCHDOG_SOCKET)]
+    watchdog_socket: PathBuf,
 }
 
 /// Placeholder shown until the daemon is reachable — see `subscribe_hostname_task`.
@@ -228,7 +230,20 @@ fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Compl
                 .unwrap_or_default()
             })
         }
-        Mode::Operational => Box::new(Vec::new),
+        // `show route <table>` needs table-name completion in operational
+        // mode too, where there's no open transaction to read from — fall
+        // back to the running config instead.
+        Mode::Operational => {
+            let socket = socket.clone();
+            Box::new(move || {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(client::fetch_running_config(&socket))
+                })
+                .map(|cfg| cfg.routing_tables.into_iter().map(|t| t.name).collect())
+                .unwrap_or_default()
+            })
+        }
     };
 
     let static_routing_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
@@ -311,10 +326,12 @@ async fn main() -> anyhow::Result<()> {
     let mut mode = Mode::Operational;
     let doc_cache: DocCache = Arc::new(Mutex::new(HashMap::new()));
 
+    let config_socket = resolve_config_socket(&args.watchdog_socket).await;
+
     let completion_menu = ColumnarMenu::default().with_name("completion_menu");
     let mut line_editor = Reedline::create()
         .with_completer(completer_for(
-            args.config_socket.clone(),
+            config_socket.clone(),
             doc_cache.clone(),
             &mode,
         ))
@@ -323,7 +340,7 @@ async fn main() -> anyhow::Result<()> {
         .with_edit_mode(Box::new(Emacs::new(keybindings())));
 
     let hostname = Arc::new(Mutex::new(FALLBACK_HOSTNAME.to_string()));
-    match client::fetch_running_config(&args.config_socket).await {
+    match client::fetch_running_config(&config_socket).await {
         Ok(cfg) => *hostname.lock().unwrap() = cfg.hostname,
         Err(_) => eprintln!(
             "warning: could not reach nos-configd at startup; hostname prompt may be stale"
@@ -337,7 +354,7 @@ async fn main() -> anyhow::Result<()> {
     let repaint_signal = line_editor.repaint_signal();
     let notify_repaint = move || repaint_signal.request_repaint();
     tokio::spawn(subscribe_hostname_task(
-        args.config_socket.clone(),
+        config_socket.clone(),
         hostname.clone(),
         notify_repaint,
     ));
@@ -349,12 +366,20 @@ async fn main() -> anyhow::Result<()> {
         match line_editor.read_line(&prompt) {
             Ok(Signal::Success(line)) => {
                 let action = session::resolve(&mode, Command::parse(&line));
-                match handle_action(action, mode, &args.config_socket, &doc_cache).await {
+                match handle_action(
+                    action,
+                    mode,
+                    &config_socket,
+                    &args.watchdog_socket,
+                    &doc_cache,
+                )
+                .await
+                {
                     Outcome::Continue(next_mode) => mode = next_mode,
                     Outcome::Exit => break,
                 }
                 line_editor = line_editor.with_completer(completer_for(
-                    args.config_socket.clone(),
+                    config_socket.clone(),
                     doc_cache.clone(),
                     &mode,
                 ));
@@ -376,6 +401,29 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolves nos-configd's address via nos-watchdogd's broker, once at
+/// startup. On any failure (broker unreachable, or it reports the service as
+/// unavailable) falls back to the conventional default socket path and warns
+/// — preserving the shell's existing resilience property that startup never
+/// blocks or fails just because a daemon is briefly unreachable.
+async fn resolve_config_socket(watchdog_socket: &Path) -> PathBuf {
+    match watchdog_client::resolve(watchdog_socket, ServiceRef::Config).await {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            eprintln!(
+                "warning: nos-watchdogd reports nos-configd as unavailable; falling back to {DEFAULT_CONFIG_SOCKET}"
+            );
+            PathBuf::from(DEFAULT_CONFIG_SOCKET)
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: could not resolve nos-configd via nos-watchdogd ({e}); falling back to {DEFAULT_CONFIG_SOCKET}"
+            );
+            PathBuf::from(DEFAULT_CONFIG_SOCKET)
+        }
+    }
 }
 
 /// Holds a long-lived `Request::Subscribe` connection for the shell's whole
@@ -411,6 +459,7 @@ async fn handle_action(
     action: Resolved,
     mode: Mode,
     socket: &Path,
+    watchdog_socket: &Path,
     doc_cache: &DocCache,
 ) -> Outcome {
     match action {
@@ -429,6 +478,10 @@ async fn handle_action(
         }
         Resolved::ShowTransaction => {
             show_transaction(&mode, socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowRoute { table, address } => {
+            show_route(watchdog_socket, &table, address).await;
             Outcome::Continue(mode)
         }
         Resolved::SaveRunningConfig => {
@@ -551,6 +604,40 @@ async fn show_transaction(mode: &Mode, socket: &Path) {
     match client::get_transaction(socket, &transaction).await {
         Ok(snap) => println!("{}", format::render_transaction(&snap, &path)),
         Err(e) => eprintln!("error: {e}"),
+    }
+}
+
+/// Resolves `table`'s nos-ribd instance fresh (not cached — tables come and
+/// go during a session) via the watchdog broker, then queries it either for
+/// the whole table (`address: None`) or a longest-prefix-match lookup.
+async fn show_route(watchdog_socket: &Path, table: &str, address: Option<std::net::IpAddr>) {
+    let rib_socket = match watchdog_client::resolve(
+        watchdog_socket,
+        nos_proto::ServiceRef::RibTable(table.to_string()),
+    )
+    .await
+    {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            eprintln!("routing table '{table}' is not running");
+            return;
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+
+    match address {
+        None => match rib_client::get_routes(&rib_socket).await {
+            Ok(routes) => println!("{}", format::render_prefix_routes(&routes)),
+            Err(e) => eprintln!("error: {e}"),
+        },
+        Some(addr) => match rib_client::lookup(&rib_socket, addr).await {
+            Ok(Some(matched)) => println!("{}", format::render_prefix_routes(&[matched])),
+            Ok(None) => println!("no route matches {addr}"),
+            Err(e) => eprintln!("error: {e}"),
+        },
     }
 }
 

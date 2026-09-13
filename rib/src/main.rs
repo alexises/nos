@@ -1,10 +1,12 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_rib::reconcile;
+use nos_proto::{ServiceRef, DEFAULT_WATCHDOG_SOCKET};
+use nos_rib::{reconcile, server, watchdog_client, Rib};
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::watch;
+use tokio::sync::{watch, RwLock};
 use tracing::info;
 
 #[derive(Parser)]
@@ -15,9 +17,17 @@ struct Args {
     #[arg(long)]
     table: String,
 
-    /// Path to nos-configd's IPC Unix socket.
-    #[arg(long, default_value = "/run/nos/config.sock")]
-    config_socket: PathBuf,
+    /// Path to nos-watchdogd's broker socket, used to resolve nos-configd's
+    /// current address rather than assuming a hardcoded default.
+    #[arg(long, default_value = DEFAULT_WATCHDOG_SOCKET)]
+    watchdog_socket: PathBuf,
+
+    /// Unix socket to listen on for route queries (e.g. from `nos show
+    /// route`). Defaults to a path derived from `--table` for standalone/dev
+    /// runs; nos-watchdog always passes this explicitly for supervised
+    /// instances.
+    #[arg(long)]
+    listen_socket: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -26,12 +36,31 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     info!(table = %args.table, "nos-ribd starting");
 
+    let listen_socket = args
+        .listen_socket
+        .unwrap_or_else(|| PathBuf::from(format!("/run/nos/rib-{}.sock", args.table)));
+
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let task = tokio::spawn(reconcile::run(
-        args.config_socket,
+
+    let Some(config_socket) = watchdog_client::resolve_with_retry(
+        &args.watchdog_socket,
+        ServiceRef::Config,
+        &mut shutdown_rx.clone(),
+    )
+    .await
+    else {
+        info!(table = %args.table, "shutdown signal received while resolving nos-configd, exiting");
+        return Ok(());
+    };
+
+    let rib = Arc::new(RwLock::new(Rib::new()));
+    let reconcile_task = tokio::spawn(reconcile::run(
+        config_socket,
         args.table.clone(),
+        rib.clone(),
         shutdown_rx,
     ));
+    let server_task = server::start(&listen_socket, rib).context("starting RIB IPC server")?;
 
     wait_for_shutdown_signal()
         .await
@@ -39,7 +68,8 @@ async fn main() -> anyhow::Result<()> {
     info!(table = %args.table, "shutdown signal received");
 
     let _ = shutdown_tx.send(true);
-    let _ = task.await;
+    let _ = reconcile_task.await;
+    server_task.abort();
 
     info!(table = %args.table, "shutting down");
     Ok(())
