@@ -38,6 +38,9 @@ pub enum EditTarget {
     StaticRoutingInstance {
         name: String,
     },
+    Interface {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +98,14 @@ pub enum SetTarget {
     /// Context-relative — only valid while navigated into a static routing
     /// instance.
     StaticRouteRelative { subnet: IpNet, gateway: IpAddr },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    InterfaceAddress { name: String, address: IpNet },
+    /// Context-relative — only valid while navigated into an interface.
+    InterfaceAddressRelative { address: IpNet },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    InterfaceRoutingTable { name: String, routing_table: String },
+    /// Context-relative — only valid while navigated into an interface.
+    InterfaceRoutingTableRelative { routing_table: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +164,26 @@ pub enum DeleteTarget {
     StaticRouteRelative {
         subnet: IpNet,
     },
+    Interface {
+        name: String,
+    },
+    /// `delete interface <name> address <cidr>` — qualified.
+    InterfaceAddress {
+        name: String,
+        address: IpNet,
+    },
+    /// `delete address <cidr>` — relative, only valid while navigated into
+    /// an interface.
+    InterfaceAddressRelative {
+        address: IpNet,
+    },
+    /// `delete interface <name> routing-table` — qualified clear.
+    InterfaceRoutingTable {
+        name: String,
+    },
+    /// `delete routing-table` — relative clear, only valid while navigated
+    /// into an interface.
+    InterfaceRoutingTableRelative,
 }
 
 /// A parsed REPL input line.
@@ -166,6 +197,10 @@ pub enum Command {
     ShowRoute {
         table: String,
         address: Option<IpAddr>,
+    },
+    /// `show interface` (every interface) or `show interface <name>` (one).
+    ShowInterface {
+        name: Option<String>,
     },
     Save,
     Help,
@@ -208,6 +243,10 @@ impl Command {
                 },
                 Err(_) => Command::Unknown(trimmed.to_string()),
             },
+            ["show", "interface"] => Command::ShowInterface { name: None },
+            ["show", "interface", name] => Command::ShowInterface {
+                name: Some((*name).to_string()),
+            },
             ["save"] => Command::Save,
             ["help"] => Command::Help,
             ["exit" | "quit" | "end"] => Command::Exit,
@@ -248,6 +287,9 @@ impl Command {
                     name: (*name).to_string(),
                 })
             }
+            ["edit", "interface", name] => Command::Edit(EditTarget::Interface {
+                name: (*name).to_string(),
+            }),
             ["set", "bgp", "instance", name, "asn", n] => match n.parse::<u32>() {
                 Ok(asn) => Command::Set(SetTarget::BgpInstance {
                     name: (*name).to_string(),
@@ -382,6 +424,28 @@ impl Command {
                     _ => Command::Unknown(trimmed.to_string()),
                 }
             }
+            ["set", "interface", name, "address", addr] => match addr.parse::<IpNet>() {
+                Ok(address) => Command::Set(SetTarget::InterfaceAddress {
+                    name: (*name).to_string(),
+                    address,
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["set", "address", addr] => match addr.parse::<IpNet>() {
+                Ok(address) => Command::Set(SetTarget::InterfaceAddressRelative { address }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["set", "interface", name, "routing-table", table] => {
+                Command::Set(SetTarget::InterfaceRoutingTable {
+                    name: (*name).to_string(),
+                    routing_table: (*table).to_string(),
+                })
+            }
+            ["set", "routing-table", table] => {
+                Command::Set(SetTarget::InterfaceRoutingTableRelative {
+                    routing_table: (*table).to_string(),
+                })
+            }
             ["delete"] => Command::Delete(DeleteTarget::Current),
             ["delete", "bgp", "instance", name] => Command::Delete(DeleteTarget::BgpInstance {
                 name: (*name).to_string(),
@@ -452,6 +516,28 @@ impl Command {
                 Ok(subnet) => Command::Delete(DeleteTarget::StaticRouteRelative { subnet }),
                 Err(_) => Command::Unknown(trimmed.to_string()),
             },
+            ["delete", "interface", name] => Command::Delete(DeleteTarget::Interface {
+                name: (*name).to_string(),
+            }),
+            ["delete", "interface", name, "address", addr] => match addr.parse::<IpNet>() {
+                Ok(address) => Command::Delete(DeleteTarget::InterfaceAddress {
+                    name: (*name).to_string(),
+                    address,
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["delete", "address", addr] => match addr.parse::<IpNet>() {
+                Ok(address) => Command::Delete(DeleteTarget::InterfaceAddressRelative { address }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["delete", "interface", name, "routing-table"] => {
+                Command::Delete(DeleteTarget::InterfaceRoutingTable {
+                    name: (*name).to_string(),
+                })
+            }
+            ["delete", "routing-table"] => {
+                Command::Delete(DeleteTarget::InterfaceRoutingTableRelative)
+            }
             _ => Command::Unknown(trimmed.to_string()),
         }
     }
@@ -966,6 +1052,113 @@ mod tests {
         assert_eq!(
             Command::parse("delete address-family ipv6"),
             Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv6Unicast))
+        );
+    }
+
+    #[test]
+    fn show_interface_all_and_named() {
+        assert_eq!(
+            Command::parse("show interface"),
+            Command::ShowInterface { name: None }
+        );
+        assert_eq!(
+            Command::parse("show interface eth0"),
+            Command::ShowInterface {
+                name: Some("eth0".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn edit_interface() {
+        assert_eq!(
+            Command::parse("edit interface eth0"),
+            Command::Edit(EditTarget::Interface {
+                name: "eth0".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn set_interface_address_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set interface eth0 address 10.0.0.1/24"),
+            Command::Set(SetTarget::InterfaceAddress {
+                name: "eth0".to_string(),
+                address: "10.0.0.1/24".parse().unwrap(),
+            })
+        );
+        assert_eq!(
+            Command::parse("set address 10.0.0.1/24"),
+            Command::Set(SetTarget::InterfaceAddressRelative {
+                address: "10.0.0.1/24".parse().unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn set_interface_address_malformed_is_unknown() {
+        assert_eq!(
+            Command::parse("set interface eth0 address not-a-cidr"),
+            Command::Unknown("set interface eth0 address not-a-cidr".to_string())
+        );
+    }
+
+    #[test]
+    fn set_interface_routing_table_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set interface eth0 routing-table rt1"),
+            Command::Set(SetTarget::InterfaceRoutingTable {
+                name: "eth0".to_string(),
+                routing_table: "rt1".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("set routing-table rt1"),
+            Command::Set(SetTarget::InterfaceRoutingTableRelative {
+                routing_table: "rt1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_interface_qualified() {
+        assert_eq!(
+            Command::parse("delete interface eth0"),
+            Command::Delete(DeleteTarget::Interface {
+                name: "eth0".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn delete_interface_address_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("delete interface eth0 address 10.0.0.1/24"),
+            Command::Delete(DeleteTarget::InterfaceAddress {
+                name: "eth0".to_string(),
+                address: "10.0.0.1/24".parse().unwrap(),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete address 10.0.0.1/24"),
+            Command::Delete(DeleteTarget::InterfaceAddressRelative {
+                address: "10.0.0.1/24".parse().unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_interface_routing_table_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("delete interface eth0 routing-table"),
+            Command::Delete(DeleteTarget::InterfaceRoutingTable {
+                name: "eth0".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete routing-table"),
+            Command::Delete(DeleteTarget::InterfaceRoutingTableRelative)
         );
     }
 }

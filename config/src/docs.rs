@@ -203,6 +203,43 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Deletes the route for the given subnet from the named static routing instance \
              in the transaction's in-progress config.",
         ),
+        Topic::EnsureInterface => (
+            "Create an interface in the transaction if it doesn't already exist.",
+            "Adds a new interface with the given name to the transaction's in-progress config \
+             if none exists with that name yet; if one already exists, this is a no-op. Does \
+             not itself set any addresses or a routing table.",
+        ),
+        Topic::AddInterfaceAddress => (
+            "Add an IP address to an interface.",
+            "Adds an address to the interface's address list if it isn't already present — a \
+             no-op if it is. An interface may carry any number of addresses, including a mix \
+             of IPv4 and IPv6; a given address must not repeat on the same interface, checked \
+             at commit time.",
+        ),
+        Topic::RemoveInterfaceAddress => (
+            "Remove an IP address from an interface.",
+            "Removes an address from the interface's address list in the transaction's \
+             in-progress config.",
+        ),
+        Topic::SetInterfaceRoutingTable => (
+            "Associate a routing table with an interface.",
+            "Points an interface at a routing table by name — the routing table doubles as \
+             the interface's VRF assignment. The routing table must exist, checked at commit \
+             time; unlike a routing table's own bgp-instance/static-routing-instance \
+             associations, more than one interface may be associated with the same routing \
+             table.",
+        ),
+        Topic::ClearInterfaceRoutingTable => (
+            "Remove an interface's routing table association.",
+            "Unsets the routing-table field on an interface, reverting to no explicit \
+             association.",
+        ),
+        Topic::DeleteInterface => (
+            "Delete an interface from the transaction.",
+            "Removes an interface and all of its addresses from the transaction's in-progress \
+             config. This only clears the interface's own configuration — it does not delete \
+             the routing table it referenced.",
+        ),
     };
     CommandDoc {
         topic,
@@ -251,6 +288,12 @@ mod tests {
         Topic::DeleteStaticRoutingInstance,
         Topic::SetStaticRoute,
         Topic::DeleteStaticRoute,
+        Topic::EnsureInterface,
+        Topic::AddInterfaceAddress,
+        Topic::RemoveInterfaceAddress,
+        Topic::SetInterfaceRoutingTable,
+        Topic::ClearInterfaceRoutingTable,
+        Topic::DeleteInterface,
     ];
 
     #[test]

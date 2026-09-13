@@ -15,6 +15,10 @@ pub enum ServiceRef {
     /// The `nos-ribd` instance currently serving one routing table, named by
     /// the table's config key.
     RibTable(String),
+    /// The single `nos-interfaced` instance, which manages every configured
+    /// interface in one process (unlike `RibTable`, there is no per-name
+    /// variant — see root `CLAUDE.md`'s "Endpoint broker" section).
+    Interfaces,
 }
 
 /// Messages sent from a client to `nos-watchdogd`'s broker socket.

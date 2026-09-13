@@ -1,6 +1,7 @@
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
+pub mod interface;
 pub mod routing_table;
 pub mod static_route;
 pub mod static_routing_instance;
@@ -60,6 +61,7 @@ pub struct ConfigDiff {
     pub bgp_instances: Vec<SectionDiff>,
     pub routing_tables: Vec<SectionDiff>,
     pub static_routing_instances: Vec<SectionDiff>,
+    pub interfaces: Vec<SectionDiff>,
 }
 
 impl ConfigDiff {
@@ -68,6 +70,7 @@ impl ConfigDiff {
             && self.bgp_instances.is_empty()
             && self.routing_tables.is_empty()
             && self.static_routing_instances.is_empty()
+            && self.interfaces.is_empty()
     }
 
     /// A copy of this diff keeping only the sections/fields covered by
@@ -96,6 +99,11 @@ impl ConfigDiff {
             } else {
                 Vec::new()
             },
+            interfaces: if scopes.contains(&DiffScope::Interfaces) {
+                self.interfaces.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -108,6 +116,7 @@ pub enum DiffScope {
     BgpInstances,
     RoutingTables,
     StaticRoutingInstances,
+    Interfaces,
 }
 
 /// Computes what changed between `base` (e.g. the running config) and
@@ -133,6 +142,7 @@ pub fn diff_configs(base: &Config, candidate: &Config) -> ConfigDiff {
             &base.static_routing_instances,
             &candidate.static_routing_instances,
         ),
+        interfaces: interface::diff_interfaces(&base.interfaces, &candidate.interfaces),
     }
 }
 

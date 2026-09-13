@@ -11,13 +11,20 @@ async fn resolves_config_and_registered_rib_table() {
     let tmp = tempfile::tempdir().unwrap();
     let broker_socket = tmp.path().join("watchdog.sock");
     let config_socket = PathBuf::from("/run/nos/config.sock");
+    let interfaces_socket = PathBuf::from("/run/nos/interface.sock");
 
     let registry = EndpointRegistry::default();
     registry
         .set_rib_table("rt1", PathBuf::from("/run/nos/rib-rt1.sock"))
         .await;
 
-    let _server = broker::start(&broker_socket, registry, config_socket.clone()).unwrap();
+    let _server = broker::start(
+        &broker_socket,
+        registry,
+        config_socket.clone(),
+        interfaces_socket.clone(),
+    )
+    .unwrap();
 
     let stream = UnixStream::connect(&broker_socket).await.unwrap();
     let (r, w) = stream.into_split();
@@ -52,4 +59,13 @@ async fn resolves_config_and_registered_rib_table() {
         .unwrap();
     let event = reader.next().await.unwrap().unwrap();
     assert!(matches!(event, WatchdogEvent::NotAvailable));
+
+    writer
+        .send(WatchdogRequest::ResolveEndpoint {
+            service: ServiceRef::Interfaces,
+        })
+        .await
+        .unwrap();
+    let event = reader.next().await.unwrap().unwrap();
+    assert!(matches!(event, WatchdogEvent::Endpoint(p) if p == interfaces_socket));
 }

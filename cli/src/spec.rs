@@ -29,6 +29,7 @@ pub enum ArgKind {
     BgpPeerGroupName,
     RoutingTableName,
     StaticRoutingInstanceName,
+    InterfaceName,
 }
 
 /// Where a command's summary/detail text comes from.
@@ -53,8 +54,9 @@ pub enum Availability {
     ConfigurationPeerGroup,
     ConfigurationRoutingTable,
     ConfigurationStaticRoutingInstance,
+    ConfigurationInterface,
     /// Any non-root navigation position — `BgpInstance`, `BgpPeerGroup`,
-    /// `RoutingTable`, or `StaticRoutingInstance`.
+    /// `RoutingTable`, `StaticRoutingInstance`, or `Interface`.
     ConfigurationNested,
 }
 
@@ -91,13 +93,21 @@ pub fn availability_matches(availability: Availability, mode: &Mode) -> bool {
                 ..
             }
         ),
+        Availability::ConfigurationInterface => matches!(
+            mode,
+            Mode::Configuration {
+                path: Path::Interface(_),
+                ..
+            }
+        ),
         Availability::ConfigurationNested => matches!(
             mode,
             Mode::Configuration {
                 path: Path::BgpInstance(_)
                     | Path::BgpPeerGroup { .. }
                     | Path::RoutingTable(_)
-                    | Path::StaticRoutingInstance(_),
+                    | Path::StaticRoutingInstance(_)
+                    | Path::Interface(_),
                 ..
             }
         ),
@@ -728,6 +738,133 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         usage: "delete route <subnet>",
         doc: Doc::FromConfig(Topic::DeleteStaticRoute),
         availability: Availability::ConfigurationStaticRoutingInstance,
+    },
+    CommandSpec {
+        tokens: &[Token::Literal("show"), Token::Literal("interface")],
+        usage: "show interface",
+        doc: Doc::Local {
+            summary: "Show every interface's reconciled status.",
+            detail: "Queries nos-interfaced (resolved via nos-watchdogd) for every configured \
+                     interface's addresses and routing-table assignment.",
+        },
+        availability: Availability::Always,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("show"),
+            Token::Literal("interface"),
+            Token::Arg(ArgKind::InterfaceName),
+        ],
+        usage: "show interface <name>",
+        doc: Doc::Local {
+            summary: "Show one interface's reconciled status.",
+            detail: "Queries nos-interfaced (resolved via nos-watchdogd) for the named \
+                     interface's addresses and routing-table assignment.",
+        },
+        availability: Availability::Always,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("edit"),
+            Token::Literal("interface"),
+            Token::Arg(ArgKind::InterfaceName),
+        ],
+        usage: "edit interface <name>",
+        doc: Doc::FromConfig(Topic::EnsureInterface),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("interface"),
+            Token::Arg(ArgKind::InterfaceName),
+            Token::Literal("address"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set interface <name> address <cidr>",
+        doc: Doc::FromConfig(Topic::AddInterfaceAddress),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("address"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set address <cidr>",
+        doc: Doc::FromConfig(Topic::AddInterfaceAddress),
+        availability: Availability::ConfigurationInterface,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("interface"),
+            Token::Arg(ArgKind::InterfaceName),
+            Token::Literal("address"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "delete interface <name> address <cidr>",
+        doc: Doc::FromConfig(Topic::RemoveInterfaceAddress),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("address"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "delete address <cidr>",
+        doc: Doc::FromConfig(Topic::RemoveInterfaceAddress),
+        availability: Availability::ConfigurationInterface,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("interface"),
+            Token::Arg(ArgKind::InterfaceName),
+            Token::Literal("routing-table"),
+            Token::Arg(ArgKind::RoutingTableName),
+        ],
+        usage: "set interface <name> routing-table <table>",
+        doc: Doc::FromConfig(Topic::SetInterfaceRoutingTable),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("routing-table"),
+            Token::Arg(ArgKind::RoutingTableName),
+        ],
+        usage: "set routing-table <table>",
+        doc: Doc::FromConfig(Topic::SetInterfaceRoutingTable),
+        availability: Availability::ConfigurationInterface,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("interface"),
+            Token::Arg(ArgKind::InterfaceName),
+            Token::Literal("routing-table"),
+        ],
+        usage: "delete interface <name> routing-table",
+        doc: Doc::FromConfig(Topic::ClearInterfaceRoutingTable),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[Token::Literal("delete"), Token::Literal("routing-table")],
+        usage: "delete routing-table",
+        doc: Doc::FromConfig(Topic::ClearInterfaceRoutingTable),
+        availability: Availability::ConfigurationInterface,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("interface"),
+            Token::Arg(ArgKind::InterfaceName),
+        ],
+        usage: "delete interface <name>",
+        doc: Doc::FromConfig(Topic::DeleteInterface),
+        availability: Availability::Configuration,
     },
 ];
 

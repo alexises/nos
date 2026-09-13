@@ -1,7 +1,7 @@
 use nos_proto::{
     AddressFamily, BgpInstance, BgpPeer, BgpPeerGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
-    PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, StaticRoute, StaticRoutingInstance,
-    TransactionSnapshot,
+    Interface, InterfaceStatus, PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff,
+    StaticRoute, StaticRoutingInstance, TransactionSnapshot,
 };
 
 use crate::session::Path;
@@ -66,6 +66,60 @@ pub fn render_static_route(route: &StaticRoute) -> String {
     format!("route {}: gateway {}", route.subnet, route.gateway)
 }
 
+/// Render one interface's config as human-readable text.
+pub fn render_interface(iface: &Interface) -> String {
+    let addresses = if iface.addresses.is_empty() {
+        "none".to_string()
+    } else {
+        iface
+            .addresses
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let routing_table = iface.routing_table.as_deref().unwrap_or("unset");
+    format!(
+        "interface {}: address [{addresses}], routing-table {routing_table}",
+        iface.name
+    )
+}
+
+/// Render one interface's daemon-reported status (from `nos-interfaced`'s
+/// `InterfaceRequest::GetInterfaces`/`GetInterface`) as human-readable text
+/// — for `show interface`, distinct from `render_interface`'s config-only
+/// view since it reflects what the daemon has reconciled.
+pub fn render_interface_status(status: &InterfaceStatus) -> String {
+    let addresses = if status.addresses.is_empty() {
+        "none".to_string()
+    } else {
+        status
+            .addresses
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let routing_table = status.routing_table.as_deref().unwrap_or("unset");
+    format!(
+        "interface {}: address [{addresses}], routing-table {routing_table}",
+        status.name
+    )
+}
+
+/// Render every interface's daemon-reported status, one per line — used for
+/// both `show interface` (many entries) and `show interface <name>` (one).
+pub fn render_interface_statuses(statuses: &[InterfaceStatus]) -> String {
+    if statuses.is_empty() {
+        return "no interfaces".to_string();
+    }
+    statuses
+        .iter()
+        .map(render_interface_status)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn render_route_source(source: RouteSourceKind) -> &'static str {
     match source {
         RouteSourceKind::Static => "static",
@@ -128,6 +182,11 @@ pub fn render_config(config: &Config) -> String {
                 .map(render_static_routing_instance),
         );
     }
+    if config.interfaces.is_empty() {
+        lines.push("no interfaces configured".to_string());
+    } else {
+        lines.extend(config.interfaces.iter().map(render_interface));
+    }
     lines.join("\n")
 }
 
@@ -189,6 +248,12 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
                 || format!("static routing instance '{name}' not found"),
                 render_static_routing_instance,
             ),
+        Path::Interface(name) => snapshot
+            .config
+            .interfaces
+            .iter()
+            .find(|i| &i.name == name)
+            .map_or_else(|| format!("interface '{name}' not found"), render_interface),
     }
 }
 
@@ -223,6 +288,9 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         render_section(&mut lines, section, 0, color);
     }
     for section in &diff.static_routing_instances {
+        render_section(&mut lines, section, 0, color);
+    }
+    for section in &diff.interfaces {
         render_section(&mut lines, section, 0, color);
     }
 
@@ -367,7 +435,7 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(
             render_config(&cfg),
-            "hostname: nos\nno BGP instances configured\nno routing tables configured\nno static routing instances configured"
+            "hostname: nos\nno BGP instances configured\nno routing tables configured\nno static routing instances configured\nno interfaces configured"
         );
     }
 
@@ -380,7 +448,8 @@ mod tests {
         assert_eq!(
             render_config(&cfg),
             "hostname: nos\nbgp instance default: router-id 1.1.1.1, asn 65000\n\
-             no routing tables configured\nno static routing instances configured"
+             no routing tables configured\nno static routing instances configured\n\
+             no interfaces configured"
         );
     }
 
@@ -394,7 +463,8 @@ mod tests {
             render_config(&cfg),
             "hostname: nos\nbgp instance vrf-a: router-id 1.1.1.1, asn 65001\n\
              bgp instance vrf-b: router-id 1.1.1.1, asn 65002\n\
-             no routing tables configured\nno static routing instances configured"
+             no routing tables configured\nno static routing instances configured\n\
+             no interfaces configured"
         );
     }
 
@@ -416,7 +486,8 @@ mod tests {
         assert_eq!(
             rendered,
             "transaction 'demo':\nhostname: nos\nbgp instance r1: router-id 1.1.1.1, asn 65001\n\
-             no routing tables configured\nno static routing instances configured"
+             no routing tables configured\nno static routing instances configured\n\
+             no interfaces configured"
         );
     }
 

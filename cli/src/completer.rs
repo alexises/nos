@@ -30,9 +30,12 @@ pub struct NosCompleter {
     /// Live static routing instance names for
     /// `ArgKind::StaticRoutingInstanceName` slots.
     static_routing_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
+    /// Live interface names for `ArgKind::InterfaceName` slots.
+    interface_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
 }
 
 impl NosCompleter {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mode: Mode,
         doc_source: Box<dyn FnMut(Topic) -> CommandDoc + Send>,
@@ -40,6 +43,7 @@ impl NosCompleter {
         peer_group_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
         routing_table_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
         static_routing_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
+        interface_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
     ) -> Self {
         Self {
             mode,
@@ -48,6 +52,7 @@ impl NosCompleter {
             peer_group_name_source,
             routing_table_name_source,
             static_routing_instance_name_source,
+            interface_name_source,
         }
     }
 
@@ -194,6 +199,20 @@ impl Completer for NosCompleter {
                         }
                     }
                 }
+                Token::Arg(ArgKind::InterfaceName) => {
+                    for name in (self.interface_name_source)() {
+                        if name.starts_with(partial) && !suggestions.iter().any(|s| s.value == name)
+                        {
+                            suggestions.push(Suggestion {
+                                value: name,
+                                description: None,
+                                span: Span::new(partial_start, line.len()),
+                                append_whitespace: true,
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
                 Token::Arg(ArgKind::Plain) => {
                     // No way to complete an arbitrary value.
                 }
@@ -232,6 +251,10 @@ mod tests {
         Box::new(Vec::new)
     }
 
+    fn no_interfaces() -> Box<dyn FnMut() -> Vec<String> + Send> {
+        Box::new(Vec::new)
+    }
+
     fn values(result: &CompletionResult) -> Vec<String> {
         let mut v: Vec<String> = result
             .suggestions()
@@ -251,6 +274,7 @@ mod tests {
             no_peer_groups(),
             no_routing_tables(),
             no_static_routing_instances(),
+            no_interfaces(),
         );
         let result = completer.complete("sh", 2);
         assert_eq!(values(&result), vec!["show".to_string()]);
@@ -265,6 +289,7 @@ mod tests {
             no_peer_groups(),
             no_routing_tables(),
             no_static_routing_instances(),
+            no_interfaces(),
         );
         let result = completer.complete("com", 3);
         assert!(
@@ -287,6 +312,7 @@ mod tests {
             no_peer_groups(),
             no_routing_tables(),
             no_static_routing_instances(),
+            no_interfaces(),
         );
         let result = completer.complete("com", 3);
         assert_eq!(values(&result), vec!["commit".to_string()]);
@@ -301,6 +327,7 @@ mod tests {
             no_peer_groups(),
             no_routing_tables(),
             no_static_routing_instances(),
+            no_interfaces(),
         );
         let result = completer.complete("", 0);
         let vals = values(&result);
@@ -325,6 +352,7 @@ mod tests {
             no_peer_groups(),
             no_routing_tables(),
             no_static_routing_instances(),
+            no_interfaces(),
         );
         let result = completer.complete("edit bgp instance r", 19);
         assert_eq!(values(&result), vec!["r1".to_string(), "r2".to_string()]);
@@ -346,6 +374,7 @@ mod tests {
             groups,
             no_routing_tables(),
             no_static_routing_instances(),
+            no_interfaces(),
         );
         let result = completer.complete("edit peer-group p", 17);
         assert_eq!(values(&result), vec!["pg1".to_string(), "pg2".to_string()]);
@@ -367,6 +396,7 @@ mod tests {
             no_peer_groups(),
             tables,
             no_static_routing_instances(),
+            no_interfaces(),
         );
         let result = completer.complete("edit routing-table r", 20);
         assert_eq!(values(&result), vec!["rt1".to_string(), "rt2".to_string()]);
@@ -388,6 +418,7 @@ mod tests {
             no_peer_groups(),
             no_routing_tables(),
             instances,
+            no_interfaces(),
         );
         let result = completer.complete("edit static-routing-instance s", 30);
         assert_eq!(
@@ -405,6 +436,7 @@ mod tests {
             no_peer_groups(),
             no_routing_tables(),
             no_static_routing_instances(),
+            no_interfaces(),
         );
         let result = completer.complete("show conf", 9);
         let suggestion = result
@@ -429,6 +461,7 @@ mod tests {
             no_peer_groups(),
             no_routing_tables(),
             no_static_routing_instances(),
+            no_interfaces(),
         );
         let result = completer.complete("show config", 11);
         // Not a completion candidate (already fully typed) — use a partial instead.

@@ -1,6 +1,7 @@
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
+pub mod interface;
 pub mod routing_table;
 pub mod static_route;
 pub mod static_routing_instance;
@@ -8,6 +9,7 @@ pub mod static_routing_instance;
 pub use bgp_instance::BgpInstanceOp;
 pub use bgp_peer::BgpPeerOp;
 pub use bgp_peer_group::BgpPeerGroupOp;
+pub use interface::InterfaceOp;
 pub use routing_table::RoutingTableOp;
 pub use static_route::StaticRouteOp;
 pub use static_routing_instance::StaticRoutingInstanceOp;
@@ -37,6 +39,7 @@ pub enum ConfigOp {
     RoutingTable(RoutingTableOp),
     StaticRoutingInstance(StaticRoutingInstanceOp),
     StaticRoute(StaticRouteOp),
+    Interface(InterfaceOp),
 }
 
 impl ConfigOp {
@@ -55,6 +58,7 @@ impl ConfigOp {
             ConfigOp::RoutingTable(op) => op.apply(config),
             ConfigOp::StaticRoutingInstance(op) => op.apply(config),
             ConfigOp::StaticRoute(op) => op.apply(config),
+            ConfigOp::Interface(op) => op.apply(config),
         }
     }
 }
@@ -76,6 +80,10 @@ pub enum OpError {
     StaticRoutingInstanceNotFound(String),
     #[error("route to '{subnet}' not found in static routing instance '{instance}'")]
     StaticRouteNotFound { instance: String, subnet: IpNet },
+    #[error("interface '{0}' not found")]
+    InterfaceNotFound(String),
+    #[error("address '{address}' not found on interface '{name}'")]
+    InterfaceAddressNotFound { name: String, address: IpNet },
 }
 
 #[cfg(test)]

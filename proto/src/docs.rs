@@ -70,6 +70,18 @@ pub enum Topic {
     SetStaticRoute,
     /// `ConfigOp::StaticRoute(StaticRouteOp::Delete)`
     DeleteStaticRoute,
+    /// `ConfigOp::Interface(InterfaceOp::Ensure)`
+    EnsureInterface,
+    /// `ConfigOp::Interface(InterfaceOp::AddAddress)`
+    AddInterfaceAddress,
+    /// `ConfigOp::Interface(InterfaceOp::RemoveAddress)`
+    RemoveInterfaceAddress,
+    /// `ConfigOp::Interface(InterfaceOp::SetRoutingTable)`
+    SetInterfaceRoutingTable,
+    /// `ConfigOp::Interface(InterfaceOp::ClearRoutingTable)`
+    ClearInterfaceRoutingTable,
+    /// `ConfigOp::Interface(InterfaceOp::Delete)`
+    DeleteInterface,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

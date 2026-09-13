@@ -973,6 +973,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nos-interface"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "futures",
+ "nos-proto",
+ "proptest",
+ "serde",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nos-proto"
 version = "0.1.0"
 dependencies = [

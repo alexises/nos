@@ -40,6 +40,23 @@ struct Args {
     #[arg(long = "ribd-arg", allow_hyphen_values = true)]
     ribd_flags: Vec<String>,
 
+    /// Path to the nos-interfaced binary to supervise. Unlike nos-bgpd/
+    /// nos-ribd, exactly one instance is always supervised regardless of how
+    /// many interfaces are configured — see `interface/CLAUDE.md`.
+    #[arg(long, default_value = "/usr/local/bin/nos-interfaced")]
+    interfaced_bin: PathBuf,
+
+    /// Extra arguments forwarded to nos-interfaced.
+    #[arg(long = "interfaced-arg", allow_hyphen_values = true)]
+    interfaced_flags: Vec<String>,
+
+    /// Unix socket nos-interfaced listens on for interface queries (e.g.
+    /// from `nos show interface`). Also served out as the resolved address
+    /// for `ServiceRef::Interfaces` broker queries, the same way
+    /// `--config-socket` is for `ServiceRef::Config`.
+    #[arg(long, default_value = "/run/nos/interface.sock")]
+    interfaced_listen_socket: PathBuf,
+
     /// Path to nos-configd's IPC Unix socket, used by the watchdog itself to
     /// subscribe to BGP instance and routing table changes. Independent of
     /// `--configd-arg`, which is an opaque pass-through to the child — if
@@ -90,8 +107,28 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     )));
 
-    let broker_task = broker::start(&args.listen_socket, registry, args.config_socket)
-        .context("starting broker IPC server")?;
+    let interfaced_args = std::iter::once("--listen-socket".to_string())
+        .chain(std::iter::once(
+            args.interfaced_listen_socket.display().to_string(),
+        ))
+        .chain(std::iter::once("--watchdog-socket".to_string()))
+        .chain(std::iter::once(args.listen_socket.display().to_string()))
+        .chain(args.interfaced_flags)
+        .collect();
+    let interfaced_spec = ProcessSpec::new("nos-interfaced", args.interfaced_bin, interfaced_args);
+    tasks.push(tokio::spawn(supervise_one(
+        interfaced_spec,
+        policy,
+        shutdown_rx.clone(),
+    )));
+
+    let broker_task = broker::start(
+        &args.listen_socket,
+        registry,
+        args.config_socket,
+        args.interfaced_listen_socket,
+    )
+    .context("starting broker IPC server")?;
 
     info!("nos-watchdogd supervising {} task(s)", tasks.len());
 

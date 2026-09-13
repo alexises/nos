@@ -11,7 +11,7 @@ use nos_cli::completer::NosCompleter;
 use nos_cli::help_menu::HelpMenu;
 use nos_cli::session::{self, Mode, PathAfter, Resolved};
 use nos_cli::spec::{self, Doc};
-use nos_cli::{client, format, rib_client, watchdog_client};
+use nos_cli::{client, format, interface_client, rib_client, watchdog_client};
 use nos_proto::{CommandDoc, ConfigOp, Event, ServiceRef, Topic, DEFAULT_CONFIG_SOCKET};
 use reedline::{
     default_emacs_keybindings, ColumnarMenu, Completer, Emacs, KeyCode, KeyModifiers, MenuBuilder,
@@ -70,6 +70,11 @@ impl NosPrompt {
                 path: session::Path::StaticRoutingInstance(name),
                 ..
             } => format!("({transaction}/static-routing-instance:{name})"),
+            Mode::Configuration {
+                transaction,
+                path: session::Path::Interface(name),
+                ..
+            } => format!("({transaction}/interface:{name})"),
         };
         Self { hostname, suffix }
     }
@@ -249,6 +254,7 @@ fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Compl
     let static_routing_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
         Mode::Configuration { transaction, .. } => {
             let transaction = transaction.clone();
+            let socket = socket.clone();
             Box::new(move || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current()
@@ -267,6 +273,31 @@ fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Compl
         Mode::Operational => Box::new(Vec::new),
     };
 
+    let interface_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
+        Mode::Configuration { transaction, .. } => {
+            let transaction = transaction.clone();
+            let socket = socket.clone();
+            Box::new(move || {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(client::get_transaction(&socket, &transaction))
+                })
+                .map(|snap| snap.config.interfaces.into_iter().map(|i| i.name).collect())
+                .unwrap_or_default()
+            })
+        }
+        // `show interface <name>` needs name completion in operational mode
+        // too, where there's no open transaction to read from — fall back
+        // to the running config instead, mirroring `routing_table_name_source`.
+        Mode::Operational => Box::new(move || {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(client::fetch_running_config(&socket))
+            })
+            .map(|cfg| cfg.interfaces.into_iter().map(|i| i.name).collect())
+            .unwrap_or_default()
+        }),
+    };
+
     Box::new(NosCompleter::new(
         mode.clone(),
         doc_source,
@@ -274,6 +305,7 @@ fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Compl
         peer_group_name_source,
         routing_table_name_source,
         static_routing_instance_name_source,
+        interface_name_source,
     ))
 }
 
@@ -484,6 +516,10 @@ async fn handle_action(
             show_route(watchdog_socket, &table, address).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowInterface { name } => {
+            show_interface(watchdog_socket, name.as_deref()).await;
+            Outcome::Continue(mode)
+        }
         Resolved::SaveRunningConfig => {
             save_running_config(socket).await;
             Outcome::Continue(mode)
@@ -636,6 +672,37 @@ async fn show_route(watchdog_socket: &Path, table: &str, address: Option<std::ne
         Some(addr) => match rib_client::lookup(&rib_socket, addr).await {
             Ok(Some(matched)) => println!("{}", format::render_prefix_routes(&[matched])),
             Ok(None) => println!("no route matches {addr}"),
+            Err(e) => eprintln!("error: {e}"),
+        },
+    }
+}
+
+/// Resolves the single `nos-interfaced` instance fresh (not cached — it's
+/// still just one dial per command, matching `show_route`'s convention) via
+/// the watchdog broker, then queries it either for every interface
+/// (`name: None`) or one named interface.
+async fn show_interface(watchdog_socket: &Path, name: Option<&str>) {
+    let interface_socket =
+        match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Interfaces).await {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                eprintln!("nos-interfaced is not running");
+                return;
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                return;
+            }
+        };
+
+    match name {
+        None => match interface_client::get_interfaces(&interface_socket).await {
+            Ok(statuses) => println!("{}", format::render_interface_statuses(&statuses)),
+            Err(e) => eprintln!("error: {e}"),
+        },
+        Some(name) => match interface_client::get_interface(&interface_socket, name).await {
+            Ok(Some(status)) => println!("{}", format::render_interface_statuses(&[status])),
+            Ok(None) => println!("interface '{name}' not found"),
             Err(e) => eprintln!("error: {e}"),
         },
     }

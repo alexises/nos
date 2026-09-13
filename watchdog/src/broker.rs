@@ -18,15 +18,26 @@ pub fn start(
     listen_socket: &Path,
     registry: EndpointRegistry,
     config_socket: PathBuf,
+    interfaces_socket: PathBuf,
 ) -> std::io::Result<JoinHandle<()>> {
     if listen_socket.exists() {
         std::fs::remove_file(listen_socket)?;
     }
     let listener = UnixListener::bind(listen_socket)?;
-    Ok(tokio::spawn(accept_loop(listener, registry, config_socket)))
+    Ok(tokio::spawn(accept_loop(
+        listener,
+        registry,
+        config_socket,
+        interfaces_socket,
+    )))
 }
 
-async fn accept_loop(listener: UnixListener, registry: EndpointRegistry, config_socket: PathBuf) {
+async fn accept_loop(
+    listener: UnixListener,
+    registry: EndpointRegistry,
+    config_socket: PathBuf,
+    interfaces_socket: PathBuf,
+) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
@@ -34,6 +45,7 @@ async fn accept_loop(listener: UnixListener, registry: EndpointRegistry, config_
                     stream,
                     registry.clone(),
                     config_socket.clone(),
+                    interfaces_socket.clone(),
                 ));
             }
             Err(e) => {
@@ -48,6 +60,7 @@ async fn handle_connection(
     stream: tokio::net::UnixStream,
     registry: EndpointRegistry,
     config_socket: PathBuf,
+    interfaces_socket: PathBuf,
 ) {
     let (read_half, write_half) = stream.into_split();
     let mut reader = FramedRead::new(read_half, IpcCodec::<WatchdogRequest>::default());
@@ -56,7 +69,10 @@ async fn handle_connection(
     while let Some(msg) = reader.next().await {
         let event = match msg {
             Ok(WatchdogRequest::ResolveEndpoint { service }) => {
-                match registry.resolve(&service, &config_socket).await {
+                match registry
+                    .resolve(&service, &config_socket, &interfaces_socket)
+                    .await
+                {
                     Some(path) => WatchdogEvent::Endpoint(path),
                     None => WatchdogEvent::NotAvailable,
                 }
