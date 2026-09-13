@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_proto::{DEFAULT_CONFIG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
+use nos_proto::{DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
+use nos_watchdog::log_client::ForwardingLayer;
 use nos_watchdog::{
     bgp_instances, broker, routing_tables, supervise_one, BackoffPolicy, EndpointRegistry,
     ProcessSpec,
@@ -10,6 +11,8 @@ use nos_watchdog::{
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 use tracing::info;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser)]
 #[command(name = "nos-watchdogd", about = "NOS process supervisor")]
@@ -57,6 +60,25 @@ struct Args {
     #[arg(long, default_value = "/run/nos/interface.sock")]
     interfaced_listen_socket: PathBuf,
 
+    /// Path to the nos-logd binary to supervise. Like nos-interfaced, exactly
+    /// one instance is always supervised regardless of how many other
+    /// daemons are running.
+    #[arg(long, default_value = "/usr/local/bin/nos-logd")]
+    logd_bin: PathBuf,
+
+    /// Extra arguments forwarded to nos-logd.
+    #[arg(long = "logd-arg", allow_hyphen_values = true)]
+    logd_flags: Vec<String>,
+
+    /// Unix socket nos-logd listens on for pushed log entries and queries
+    /// (e.g. from `nos show log`). Also served out as the resolved address
+    /// for `ServiceRef::Log` broker queries, the same way
+    /// `--interfaced-listen-socket` is for `ServiceRef::Interfaces` — and
+    /// passed via `--log-socket` to every other supervised process so it can
+    /// forward its own logs here.
+    #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
+    log_socket: PathBuf,
+
     /// Path to nos-configd's IPC Unix socket, used by the watchdog itself to
     /// subscribe to BGP instance and routing table changes. Independent of
     /// `--configd-arg`, which is an opaque pass-through to the child — if
@@ -77,23 +99,51 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
     let args = Args::parse();
-
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(ForwardingLayer::install(
+            "nos-watchdogd",
+            args.log_socket.clone(),
+            shutdown_rx.clone(),
+        ))
+        .init();
+
     let policy = BackoffPolicy::default();
     let registry = EndpointRegistry::default();
 
-    let configd_spec = ProcessSpec::new("nos-configd", args.configd_bin, args.configd_flags);
+    // nos-logd is spawned first (still just one more supervised process,
+    // with no ordering guarantee enforced) so the window in which every
+    // other process's own forwarder has nothing to connect to is as short
+    // as possible — a fixed 1s retry (see `log_client::run`) covers the
+    // rest.
+    let logd_args = std::iter::once("--listen-socket".to_string())
+        .chain(std::iter::once(args.log_socket.display().to_string()))
+        .chain(args.logd_flags)
+        .collect();
+    let logd_spec = ProcessSpec::new("nos-logd", args.logd_bin, logd_args);
     let mut tasks = vec![tokio::spawn(supervise_one(
-        configd_spec,
+        logd_spec,
         policy,
         shutdown_rx.clone(),
     ))];
+
+    let configd_args = std::iter::once("--log-socket".to_string())
+        .chain(std::iter::once(args.log_socket.display().to_string()))
+        .chain(args.configd_flags)
+        .collect();
+    let configd_spec = ProcessSpec::new("nos-configd", args.configd_bin, configd_args);
+    tasks.push(tokio::spawn(supervise_one(
+        configd_spec,
+        policy,
+        shutdown_rx.clone(),
+    )));
     tasks.push(tokio::spawn(bgp_instances::manage(
         args.config_socket.clone(),
         args.bgpd_bin,
         args.bgpd_flags,
+        args.log_socket.clone(),
         policy,
         shutdown_rx.clone(),
     )));
@@ -101,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
         args.config_socket.clone(),
         args.ribd_bin,
         args.ribd_flags,
+        args.log_socket.clone(),
         policy,
         registry.clone(),
         args.listen_socket.clone(),
@@ -113,6 +164,8 @@ async fn main() -> anyhow::Result<()> {
         ))
         .chain(std::iter::once("--watchdog-socket".to_string()))
         .chain(std::iter::once(args.listen_socket.display().to_string()))
+        .chain(std::iter::once("--log-socket".to_string()))
+        .chain(std::iter::once(args.log_socket.display().to_string()))
         .chain(args.interfaced_flags)
         .collect();
     let interfaced_spec = ProcessSpec::new("nos-interfaced", args.interfaced_bin, interfaced_args);
@@ -127,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
         registry,
         args.config_socket,
         args.interfaced_listen_socket,
+        args.log_socket,
     )
     .context("starting broker IPC server")?;
 

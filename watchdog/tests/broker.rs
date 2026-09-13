@@ -12,6 +12,7 @@ async fn resolves_config_and_registered_rib_table() {
     let broker_socket = tmp.path().join("watchdog.sock");
     let config_socket = PathBuf::from("/run/nos/config.sock");
     let interfaces_socket = PathBuf::from("/run/nos/interface.sock");
+    let log_socket = PathBuf::from("/run/nos/log.sock");
 
     let registry = EndpointRegistry::default();
     registry
@@ -23,6 +24,7 @@ async fn resolves_config_and_registered_rib_table() {
         registry,
         config_socket.clone(),
         interfaces_socket.clone(),
+        log_socket.clone(),
     )
     .unwrap();
 
@@ -68,4 +70,13 @@ async fn resolves_config_and_registered_rib_table() {
         .unwrap();
     let event = reader.next().await.unwrap().unwrap();
     assert!(matches!(event, WatchdogEvent::Endpoint(p) if p == interfaces_socket));
+
+    writer
+        .send(WatchdogRequest::ResolveEndpoint {
+            service: ServiceRef::Log,
+        })
+        .await
+        .unwrap();
+    let event = reader.next().await.unwrap().unwrap();
+    assert!(matches!(event, WatchdogEvent::Endpoint(p) if p == log_socket));
 }

@@ -764,6 +764,59 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         availability: Availability::Always,
     },
     CommandSpec {
+        tokens: &[Token::Literal("show"), Token::Literal("log")],
+        usage: "show log",
+        doc: Doc::Local {
+            summary: "Show the most recent collected log entries from every daemon.",
+            detail: "Queries nos-logd (resolved via nos-watchdogd) for its current buffer of \
+                     log entries pushed by every other component process.",
+        },
+        availability: Availability::Always,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("show"),
+            Token::Literal("log"),
+            Token::Literal("--follow"),
+        ],
+        usage: "show log --follow",
+        doc: Doc::Local {
+            summary: "Live-tail collected log entries from every daemon.",
+            detail: "Prints the current buffer, then streams new entries as they're pushed to \
+                     nos-logd until Ctrl-C is pressed or the connection is lost.",
+        },
+        availability: Availability::Always,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("show"),
+            Token::Literal("log"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "show log <source>",
+        doc: Doc::Local {
+            summary: "Show the most recent collected log entries from one source.",
+            detail: "Same as `show log`, filtered to entries whose source exactly matches \
+                     <source> (e.g. `nos-ribd[rt1]`, `nos-interfaced`, `nos-configd`).",
+        },
+        availability: Availability::Always,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("show"),
+            Token::Literal("log"),
+            Token::Arg(ArgKind::Plain),
+            Token::Literal("--follow"),
+        ],
+        usage: "show log <source> --follow",
+        doc: Doc::Local {
+            summary: "Live-tail collected log entries from one source.",
+            detail: "Same as `show log --follow`, filtered to entries whose source exactly \
+                     matches <source>.",
+        },
+        availability: Availability::Always,
+    },
+    CommandSpec {
         tokens: &[
             Token::Literal("edit"),
             Token::Literal("interface"),

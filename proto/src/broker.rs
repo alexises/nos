@@ -19,6 +19,10 @@ pub enum ServiceRef {
     /// interface in one process (unlike `RibTable`, there is no per-name
     /// variant — see root `CLAUDE.md`'s "Endpoint broker" section).
     Interfaces,
+    /// The single `nos-logd` instance, resolved directly like `Config`/
+    /// `Interfaces` rather than through the registry — there is exactly one
+    /// log collector regardless of how many other daemons are running.
+    Log,
 }
 
 /// Messages sent from a client to `nos-watchdogd`'s broker socket.

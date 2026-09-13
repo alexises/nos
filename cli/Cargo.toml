@@ -16,6 +16,7 @@ clap       = { workspace = true }
 anyhow     = { workspace = true }
 thiserror  = { workspace = true }
 reedline   = { workspace = true }
+chrono     = { workspace = true }
 
 [[bin]]
 name = "nos"

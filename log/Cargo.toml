@@ -1,0 +1,28 @@
+[package]
+name    = "nos-log"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio              = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+tracing            = { workspace = true }
+thiserror          = { workspace = true }
+clap               = { workspace = true }
+anyhow             = { workspace = true }
+tracing-subscriber = { workspace = true }
+nos-proto          = { workspace = true }
+tokio-util         = { workspace = true }
+futures            = { workspace = true }
+tempfile           = { workspace = true }
+
+[[bin]]
+name = "nos-logd"
+path = "src/main.rs"
+
+[dev-dependencies]
+proptest = { workspace = true }

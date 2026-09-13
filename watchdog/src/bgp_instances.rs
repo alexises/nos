@@ -31,6 +31,7 @@ pub async fn manage(
     config_socket: PathBuf,
     bgpd_bin: PathBuf,
     bgpd_flags: Vec<String>,
+    log_socket: PathBuf,
     policy: BackoffPolicy,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -52,10 +53,10 @@ pub async fn manage(
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(diff))) => {
                                 if first_event {
-                                    sync_from_initial(&mut instances, &diff.bgp_instances, &bgpd_bin, &bgpd_flags, policy);
+                                    sync_from_initial(&mut instances, &diff.bgp_instances, &bgpd_bin, &bgpd_flags, &log_socket, policy);
                                     first_event = false;
                                 } else {
-                                    apply_diff(&mut instances, &diff.bgp_instances, &bgpd_bin, &bgpd_flags, policy);
+                                    apply_diff(&mut instances, &diff.bgp_instances, &bgpd_bin, &bgpd_flags, &log_socket, policy);
                                 }
                             }
                             Some(Ok(_)) => {}
@@ -95,6 +96,7 @@ fn sync_from_initial(
     sections: &[SectionDiff],
     bgpd_bin: &Path,
     bgpd_flags: &[String],
+    log_socket: &Path,
     policy: BackoffPolicy,
 ) {
     let wanted: HashSet<&str> = sections.iter().map(|s| s.name.as_str()).collect();
@@ -110,7 +112,7 @@ fn sync_from_initial(
 
     for name in wanted {
         if !instances.contains_key(name) {
-            spawn_instance(instances, name, bgpd_bin, bgpd_flags, policy);
+            spawn_instance(instances, name, bgpd_bin, bgpd_flags, log_socket, policy);
         }
     }
 }
@@ -123,13 +125,21 @@ fn apply_diff(
     sections: &[SectionDiff],
     bgpd_bin: &Path,
     bgpd_flags: &[String],
+    log_socket: &Path,
     policy: BackoffPolicy,
 ) {
     for section in sections {
         match section.status {
             DiffStatus::Added => {
                 if !instances.contains_key(&section.name) {
-                    spawn_instance(instances, &section.name, bgpd_bin, bgpd_flags, policy);
+                    spawn_instance(
+                        instances,
+                        &section.name,
+                        bgpd_bin,
+                        bgpd_flags,
+                        log_socket,
+                        policy,
+                    );
                 }
             }
             DiffStatus::Removed => stop_instance(instances, &section.name),
@@ -143,6 +153,7 @@ fn spawn_instance(
     name: &str,
     bgpd_bin: &Path,
     bgpd_flags: &[String],
+    log_socket: &Path,
     policy: BackoffPolicy,
 ) {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -151,6 +162,8 @@ fn spawn_instance(
         bgpd_bin.to_path_buf(),
         std::iter::once("--instance".to_string())
             .chain(std::iter::once(name.to_string()))
+            .chain(std::iter::once("--log-socket".to_string()))
+            .chain(std::iter::once(log_socket.display().to_string()))
             .chain(bgpd_flags.iter().cloned())
             .collect(),
     );

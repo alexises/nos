@@ -1,6 +1,7 @@
 pub mod bgp_instances;
 pub mod broker;
 pub mod config_client;
+pub mod log_client;
 pub mod registry;
 pub mod routing_tables;
 pub mod supervisor;

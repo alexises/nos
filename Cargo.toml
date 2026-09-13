@@ -1,5 +1,5 @@
 [workspace]
-members = ["proto", "config", "bgp", "rib", "interface", "cli", "watchdog"]
+members = ["proto", "config", "bgp", "rib", "interface", "log", "cli", "watchdog"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -13,6 +13,7 @@ bytes       = "1"
 garde       = { version = "0.22", features = ["derive", "full"] }
 ipnet       = { version = "2", features = ["serde"] }
 postcard    = { version = "1", features = ["alloc"] }
+chrono      = { version = "0.4", default-features = false, features = ["std"] }
 tokio-util  = { version = "0.7", features = ["codec"] }
 futures     = "0.3"
 nos-proto          = { path = "proto" }

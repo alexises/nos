@@ -3,11 +3,14 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_proto::{ServiceRef, DEFAULT_WATCHDOG_SOCKET};
+use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
+use nos_rib::log_client::ForwardingLayer;
 use nos_rib::{reconcile, server, watchdog_client, LinuxRibDriver, NoopRibDriver, Rib, RibDriver};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{watch, RwLock};
 use tracing::info;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// Default location for `nos-ribd`'s own private table-id↔VRF-name
 /// registry (see `nos_rib::driver::table_registry`) — never read by any
@@ -69,19 +72,31 @@ struct Args {
     /// table-id↔VRF-name allocation, for restart survival.
     #[arg(long, default_value = DEFAULT_TABLE_REGISTRY_PATH)]
     table_registry_path: PathBuf,
+
+    /// Unix socket to forward this process's log events to. Passed directly
+    /// by nos-watchdog to every process it spawns (see root `CLAUDE.md`'s
+    /// "Process supervision" section), the same way `--config-socket` is.
+    #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
+    log_socket: PathBuf,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
     let args = Args::parse();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(ForwardingLayer::install(
+            format!("nos-ribd[{}]", args.table),
+            args.log_socket.clone(),
+            shutdown_rx.clone(),
+        ))
+        .init();
     info!(table = %args.table, "nos-ribd starting");
 
     let listen_socket = args
         .listen_socket
         .unwrap_or_else(|| PathBuf::from(format!("/run/nos/rib-{}.sock", args.table)));
-
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let Some(config_socket) = watchdog_client::resolve_with_retry(
         &args.watchdog_socket,

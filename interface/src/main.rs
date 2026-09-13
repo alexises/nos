@@ -4,11 +4,14 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Parser;
 use nos_interface::driver::{InterfaceDriver, LinuxInterfaceDriver, NoopInterfaceDriver};
+use nos_interface::log_client::ForwardingLayer;
 use nos_interface::{reconcile, server, watchdog_client, Interfaces};
-use nos_proto::{ServiceRef, DEFAULT_WATCHDOG_SOCKET};
+use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{watch, RwLock};
 use tracing::info;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// Default listen socket. Unlike `nos-ribd` (one instance per routing
 /// table), `nos-interfaced` is a single process managing every configured
@@ -54,15 +57,27 @@ struct Args {
     /// Which backend applies desired interface state to the OS.
     #[arg(long, value_enum, default_value_t = default_driver_kind())]
     driver: DriverKind,
+
+    /// Unix socket to forward this process's log events to. Passed directly
+    /// by nos-watchdog to every process it spawns (see root `CLAUDE.md`'s
+    /// "Process supervision" section), the same way `--config-socket` is.
+    #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
+    log_socket: PathBuf,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
     let args = Args::parse();
-    info!("nos-interfaced starting");
-
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(ForwardingLayer::install(
+            "nos-interfaced",
+            args.log_socket.clone(),
+            shutdown_rx.clone(),
+        ))
+        .init();
+    info!("nos-interfaced starting");
 
     let Some(config_socket) = watchdog_client::resolve_with_retry(
         &args.watchdog_socket,

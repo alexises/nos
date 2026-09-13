@@ -28,10 +28,12 @@ struct InstanceHandle {
 /// currently in the running config, reconciling on every diff event. Runs
 /// until `shutdown` fires, then stops every still-running instance (same
 /// SIGINT-then-kill path `supervise_one` already uses) before returning.
+#[allow(clippy::too_many_arguments)]
 pub async fn manage(
     config_socket: PathBuf,
     ribd_bin: PathBuf,
     ribd_flags: Vec<String>,
+    log_socket: PathBuf,
     policy: BackoffPolicy,
     registry: EndpointRegistry,
     watchdog_listen_socket: PathBuf,
@@ -55,10 +57,10 @@ pub async fn manage(
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(diff))) => {
                                 if first_event {
-                                    sync_from_initial(&mut instances, &diff.routing_tables, &ribd_bin, &ribd_flags, policy, &registry, &watchdog_listen_socket).await;
+                                    sync_from_initial(&mut instances, &diff.routing_tables, &ribd_bin, &ribd_flags, &log_socket, policy, &registry, &watchdog_listen_socket).await;
                                     first_event = false;
                                 } else {
-                                    apply_diff(&mut instances, &diff.routing_tables, &ribd_bin, &ribd_flags, policy, &registry, &watchdog_listen_socket).await;
+                                    apply_diff(&mut instances, &diff.routing_tables, &ribd_bin, &ribd_flags, &log_socket, policy, &registry, &watchdog_listen_socket).await;
                                 }
                             }
                             Some(Ok(_)) => {}
@@ -99,6 +101,7 @@ async fn sync_from_initial(
     sections: &[SectionDiff],
     ribd_bin: &Path,
     ribd_flags: &[String],
+    log_socket: &Path,
     policy: BackoffPolicy,
     registry: &EndpointRegistry,
     watchdog_listen_socket: &Path,
@@ -121,6 +124,7 @@ async fn sync_from_initial(
                 name,
                 ribd_bin,
                 ribd_flags,
+                log_socket,
                 policy,
                 registry,
                 watchdog_listen_socket,
@@ -143,6 +147,7 @@ async fn apply_diff(
     sections: &[SectionDiff],
     ribd_bin: &Path,
     ribd_flags: &[String],
+    log_socket: &Path,
     policy: BackoffPolicy,
     registry: &EndpointRegistry,
     watchdog_listen_socket: &Path,
@@ -156,6 +161,7 @@ async fn apply_diff(
                         &section.name,
                         ribd_bin,
                         ribd_flags,
+                        log_socket,
                         policy,
                         registry,
                         watchdog_listen_socket,
@@ -175,6 +181,7 @@ async fn spawn_instance(
     name: &str,
     ribd_bin: &Path,
     ribd_flags: &[String],
+    log_socket: &Path,
     policy: BackoffPolicy,
     registry: &EndpointRegistry,
     watchdog_listen_socket: &Path,
@@ -192,6 +199,8 @@ async fn spawn_instance(
             .chain(std::iter::once(
                 watchdog_listen_socket.display().to_string(),
             ))
+            .chain(std::iter::once("--log-socket".to_string()))
+            .chain(std::iter::once(log_socket.display().to_string()))
             .chain(ribd_flags.iter().cloned())
             .collect(),
     );

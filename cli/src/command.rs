@@ -202,6 +202,12 @@ pub enum Command {
     ShowInterface {
         name: Option<String>,
     },
+    /// `show log [<source>] [--follow]` — a one-shot buffer snapshot,
+    /// optionally filtered to one source, or a live tail with `--follow`.
+    ShowLog {
+        source: Option<String>,
+        follow: bool,
+    },
     Save,
     Help,
     /// `exit` | `quit` | `end`
@@ -246,6 +252,22 @@ impl Command {
             ["show", "interface"] => Command::ShowInterface { name: None },
             ["show", "interface", name] => Command::ShowInterface {
                 name: Some((*name).to_string()),
+            },
+            ["show", "log"] => Command::ShowLog {
+                source: None,
+                follow: false,
+            },
+            ["show", "log", "--follow"] => Command::ShowLog {
+                source: None,
+                follow: true,
+            },
+            ["show", "log", source] => Command::ShowLog {
+                source: Some((*source).to_string()),
+                follow: false,
+            },
+            ["show", "log", source, "--follow"] => Command::ShowLog {
+                source: Some((*source).to_string()),
+                follow: true,
             },
             ["save"] => Command::Save,
             ["help"] => Command::Help,
@@ -1052,6 +1074,38 @@ mod tests {
         assert_eq!(
             Command::parse("delete address-family ipv6"),
             Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv6Unicast))
+        );
+    }
+
+    #[test]
+    fn show_log_variants() {
+        assert_eq!(
+            Command::parse("show log"),
+            Command::ShowLog {
+                source: None,
+                follow: false,
+            }
+        );
+        assert_eq!(
+            Command::parse("show log --follow"),
+            Command::ShowLog {
+                source: None,
+                follow: true,
+            }
+        );
+        assert_eq!(
+            Command::parse("show log nos-ribd[rt1]"),
+            Command::ShowLog {
+                source: Some("nos-ribd[rt1]".to_string()),
+                follow: false,
+            }
+        );
+        assert_eq!(
+            Command::parse("show log nos-ribd[rt1] --follow"),
+            Command::ShowLog {
+                source: Some("nos-ribd[rt1]".to_string()),
+                follow: true,
+            }
         );
     }
 

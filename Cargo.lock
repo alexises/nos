@@ -1006,10 +1006,13 @@ dependencies = [
  "anyhow",
  "bytes",
  "clap",
+ "futures",
+ "nos-proto",
  "proptest",
  "serde",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1019,6 +1022,7 @@ name = "nos-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "futures",
  "ipnet",
@@ -1065,6 +1069,25 @@ dependencies = [
  "proptest",
  "rtnetlink",
  "serde",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "nos-log"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "nos-proto",
+ "proptest",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

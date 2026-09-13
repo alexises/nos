@@ -2,7 +2,12 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
+use nos_config::log_client::ForwardingLayer;
 use nos_config::{persistence, ConfigStore, ListenAddr};
+use nos_proto::DEFAULT_LOG_SOCKET;
+use tokio::sync::watch;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser)]
 #[command(name = "nos-configd", about = "NOS configuration daemon")]
@@ -18,13 +23,30 @@ struct Args {
     /// when a client sends the `save` command.
     #[arg(long, default_value = "/var/lib/nos/config.yaml")]
     config_file: PathBuf,
+
+    /// Unix socket to forward this process's log events to. Passed directly
+    /// by nos-watchdog to every process it spawns (see root `CLAUDE.md`'s
+    /// "Process supervision" section).
+    #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
+    log_socket: PathBuf,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-
     let args = Args::parse();
+    // No graceful-shutdown signal of its own (see the bare `ctrl_c()` wait
+    // below) — this channel exists purely so the forwarder's reconnect loop
+    // has something to stop on if it's ever given one; kept alive for the
+    // whole process so the forwarder doesn't see it as closed immediately.
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(ForwardingLayer::install(
+            "nos-configd",
+            args.log_socket.clone(),
+            shutdown_rx,
+        ))
+        .init();
 
     let initial = persistence::load_or_default(&args.config_file)
         .with_context(|| format!("failed to load config from {}", args.config_file.display()))?;

@@ -15,6 +15,9 @@ bytes              = { workspace = true }
 clap               = { workspace = true }
 anyhow             = { workspace = true }
 tracing-subscriber = { workspace = true }
+nos-proto          = { workspace = true }
+tokio-util         = { workspace = true }
+futures            = { workspace = true }
 
 [[bin]]
 name = "nos-bgpd"

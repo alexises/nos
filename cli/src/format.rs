@@ -1,7 +1,8 @@
+use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
     AddressFamily, BgpInstance, BgpPeer, BgpPeerGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
-    Interface, InterfaceStatus, PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff,
-    StaticRoute, StaticRoutingInstance, TransactionSnapshot,
+    Interface, InterfaceStatus, LogEntry, LogLevel, PrefixRoutes, RouteSourceKind, RoutingTable,
+    SectionDiff, StaticRoute, StaticRoutingInstance, TransactionSnapshot,
 };
 
 use crate::session::Path;
@@ -116,6 +117,58 @@ pub fn render_interface_statuses(statuses: &[InterfaceStatus]) -> String {
     statuses
         .iter()
         .map(render_interface_status)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_log_level(level: LogLevel) -> &'static str {
+    match level {
+        LogLevel::Trace => "TRACE",
+        LogLevel::Debug => "DEBUG",
+        LogLevel::Info => "INFO",
+        LogLevel::Warn => "WARN",
+        LogLevel::Error => "ERROR",
+    }
+}
+
+/// Render one log entry as one line: `<timestamp> <LEVEL> <source> <target>: <message> {fields}`.
+pub fn render_log_entry(entry: &LogEntry) -> String {
+    let timestamp = DateTime::<Utc>::from_timestamp_millis(
+        i64::try_from(entry.timestamp_ms).unwrap_or(i64::MAX),
+    )
+    .map_or_else(
+        || entry.timestamp_ms.to_string(),
+        |dt| dt.to_rfc3339_opts(SecondsFormat::Millis, true),
+    );
+    let base = format!(
+        "{timestamp} {:>5} {} {}: {}",
+        render_log_level(entry.level),
+        entry.source,
+        entry.target,
+        entry.message
+    );
+    if entry.fields.is_empty() {
+        return base;
+    }
+    let fields = entry
+        .fields
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{base} ({fields})")
+}
+
+/// Render a buffer of log entries, one per line, in the order given (already
+/// oldest-first from `nos-logd`) — used for both `show log` (a snapshot) and
+/// each streamed line of `show log --follow`.
+pub fn render_log_entries(entries: &[LogEntry]) -> String {
+    if entries.is_empty() {
+        return "no log entries".to_string();
+    }
+    entries
+        .iter()
+        .map(render_log_entry)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -687,6 +740,38 @@ mod tests {
             rendered,
             "peer-group 'pg-missing' not found in bgp instance 'r1'"
         );
+    }
+
+    fn log_entry(source: &str, message: &str) -> LogEntry {
+        LogEntry {
+            timestamp_ms: 0,
+            level: LogLevel::Info,
+            source: source.to_string(),
+            target: "nos_rib::reconcile".to_string(),
+            message: message.to_string(),
+            fields: vec![("table".to_string(), "rt1".to_string())],
+        }
+    }
+
+    #[test]
+    fn render_log_entries_empty_buffer() {
+        assert_eq!(render_log_entries(&[]), "no log entries");
+    }
+
+    #[test]
+    fn render_log_entry_includes_timestamp_level_source_and_fields() {
+        let rendered = render_log_entry(&log_entry("nos-ribd[rt1]", "resynced"));
+        assert_eq!(
+            rendered,
+            "1970-01-01T00:00:00.000Z  INFO nos-ribd[rt1] nos_rib::reconcile: resynced (table=rt1)"
+        );
+    }
+
+    #[test]
+    fn render_log_entries_joins_multiple_lines() {
+        let entries = vec![log_entry("a", "one"), log_entry("b", "two")];
+        let rendered = render_log_entries(&entries);
+        assert_eq!(rendered.lines().count(), 2);
     }
 
     #[test]

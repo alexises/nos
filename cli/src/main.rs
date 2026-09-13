@@ -11,8 +11,8 @@ use nos_cli::completer::NosCompleter;
 use nos_cli::help_menu::HelpMenu;
 use nos_cli::session::{self, Mode, PathAfter, Resolved};
 use nos_cli::spec::{self, Doc};
-use nos_cli::{client, format, interface_client, rib_client, watchdog_client};
-use nos_proto::{CommandDoc, ConfigOp, Event, ServiceRef, Topic, DEFAULT_CONFIG_SOCKET};
+use nos_cli::{client, format, interface_client, log_client, rib_client, watchdog_client};
+use nos_proto::{CommandDoc, ConfigOp, Event, LogEvent, ServiceRef, Topic, DEFAULT_CONFIG_SOCKET};
 use reedline::{
     default_emacs_keybindings, ColumnarMenu, Completer, Emacs, KeyCode, KeyModifiers, MenuBuilder,
     Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, Signal,
@@ -520,6 +520,10 @@ async fn handle_action(
             show_interface(watchdog_socket, name.as_deref()).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowLog { source, follow } => {
+            show_log(watchdog_socket, source, follow).await;
+            Outcome::Continue(mode)
+        }
         Resolved::SaveRunningConfig => {
             save_running_config(socket).await;
             Outcome::Continue(mode)
@@ -705,6 +709,65 @@ async fn show_interface(watchdog_socket: &Path, name: Option<&str>) {
             Ok(None) => println!("interface '{name}' not found"),
             Err(e) => eprintln!("error: {e}"),
         },
+    }
+}
+
+/// Resolves the single `nos-logd` instance fresh (not cached, matching
+/// `show_route`/`show_interface`'s convention) via the watchdog broker, then
+/// either prints a one-shot buffer snapshot or streams a live tail until the
+/// user presses Ctrl-C or the connection is lost.
+async fn show_log(watchdog_socket: &Path, source: Option<String>, follow: bool) {
+    let log_socket = match watchdog_client::resolve(watchdog_socket, ServiceRef::Log).await {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            eprintln!("nos-logd is not running");
+            return;
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+
+    if !follow {
+        match log_client::get_logs(&log_socket, source, None).await {
+            Ok(logs) => println!("{}", format::render_log_entries(&logs)),
+            Err(e) => eprintln!("error: {e}"),
+        }
+        return;
+    }
+
+    let mut reader = match log_client::tail(&log_socket, source).await {
+        Ok(reader) => reader,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+    println!("-- following nos-logd, press Ctrl-C to stop --");
+    loop {
+        tokio::select! {
+            event = reader.next() => match event {
+                Some(Ok(LogEvent::Logs(logs))) => println!("{}", format::render_log_entries(&logs)),
+                Some(Ok(LogEvent::Line(entry))) => println!("{}", format::render_log_entry(&entry)),
+                Some(Ok(LogEvent::Error(msg))) => {
+                    eprintln!("error: {msg}");
+                    break;
+                }
+                Some(Err(e)) => {
+                    eprintln!("error: {e}");
+                    break;
+                }
+                None => {
+                    eprintln!("connection to nos-logd closed");
+                    break;
+                }
+            },
+            _ = tokio::signal::ctrl_c() => {
+                println!();
+                break;
+            }
+        }
     }
 }
 

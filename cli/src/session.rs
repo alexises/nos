@@ -70,6 +70,11 @@ pub enum Resolved {
     ShowInterface {
         name: Option<String>,
     },
+    /// `show log [<source>] [--follow]` — data-plane, valid in any mode.
+    ShowLog {
+        source: Option<String>,
+        follow: bool,
+    },
     SaveRunningConfig,
     OpenTransaction {
         name: String,
@@ -94,6 +99,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowConfig => Resolved::ShowRunningConfig,
         Command::ShowRoute { table, address } => Resolved::ShowRoute { table, address },
         Command::ShowInterface { name } => Resolved::ShowInterface { name },
+        Command::ShowLog { source, follow } => Resolved::ShowLog { source, follow },
         Command::Unknown(s) => {
             Resolved::Error(format!("unknown command: '{s}' (type 'help' for a list)"))
         }
@@ -627,6 +633,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowConfig
         | Command::ShowRoute { .. }
         | Command::ShowInterface { .. }
+        | Command::ShowLog { .. }
         | Command::Unknown(_)
         | Command::Exit
         | Command::Save => {
@@ -1552,6 +1559,36 @@ mod tests {
             ),
             Resolved::ShowInterface {
                 name: Some("eth0".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn show_log_works_in_any_mode() {
+        assert_eq!(
+            resolve(
+                &Mode::Operational,
+                Command::ShowLog {
+                    source: None,
+                    follow: false,
+                }
+            ),
+            Resolved::ShowLog {
+                source: None,
+                follow: false,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::ShowLog {
+                    source: Some("nos-ribd[rt1]".to_string()),
+                    follow: true,
+                }
+            ),
+            Resolved::ShowLog {
+                source: Some("nos-ribd[rt1]".to_string()),
+                follow: true,
             }
         );
     }
