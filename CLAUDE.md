@@ -10,6 +10,7 @@ A network operating system built from scratch in Rust.
 | `config/` | `nos-config` | Configuration store and IPC server |
 | `bgp/` | `nos-bgp` | BGP-4 implementation |
 | `cli/` | `nos-cli` | Interactive shell (binary `nos`) — main user-facing entry point |
+| `watchdog/` | `nos-watchdog` | Process supervisor — starts and restarts the other component processes |
 
 ## Architecture
 
@@ -94,6 +95,10 @@ Editing the config happens inside a **named transaction**, held server-side in `
 
 Both planes use the same transport stack. The data plane will use a separate socket path and separate message types defined in `nos-proto`.
 
+### Process supervision
+
+`nos-watchdog` (binary `nos-watchdogd`) starts and supervises the other component processes — today `nos-configd` and `nos-bgpd` — as OS child processes. It is the container's entrypoint: on startup it spawns both children concurrently (no dependency ordering between them yet) and, if either exits, respawns it after an exponential backoff (starting at 1s, doubling, capped at 30s), resetting the backoff to 1s once a process has stayed up for 60s. It has no IPC dependency on `nos-proto` — v1 supervises purely by watching process exit, not by health-checking over the config socket. On SIGTERM or SIGINT, it sends SIGINT to each child (the signal both `nos-configd` and `nos-bgpd` already handle via `tokio::signal::ctrl_c()`), waits up to 10s for a clean exit, then force-kills and exits itself.
+
 ## Development
 
 ```bash
@@ -105,12 +110,12 @@ make help    # list all available targets
 Containerized test environment:
 
 ```bash
-make docker-build                        # build the nos-configd/nos Docker image
-docker compose up -d configd             # run the daemon in a container
+make docker-build                        # build the nos-watchdogd/nos-configd/nos-bgpd/nos Docker image
+docker compose up -d watchdog            # run the watchdog (which starts nos-configd + nos-bgpd) in a container
 docker compose run --rm cli              # interactive shell, as its own container, sharing configd's socket
 ```
 
-`configd` and `cli` share the same image and an `nos-run` volume mounted at `/run/nos`, so `cli` reaches the daemon over the same Unix socket path both binaries default to. `configd` also gets an `nos-data` volume at `/var/lib/nos` so `save`d config survives container restarts. `docker compose exec configd nos` still works too — it just runs the shell inside the daemon's own container instead of a separate one.
+`watchdog` and `cli` share the same image and an `nos-run` volume mounted at `/run/nos`, so `cli` reaches the daemon over the same Unix socket path both binaries default to. `watchdog` also gets an `nos-data` volume at `/var/lib/nos` so `save`d config survives container restarts. `docker compose exec watchdog nos` still works too — it just runs the shell inside the watchdog's own container instead of a separate one.
 
 Or run the underlying commands directly:
 

@@ -1,0 +1,22 @@
+[package]
+name    = "nos-watchdog"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap               = { workspace = true }
+anyhow             = { workspace = true }
+nix                = { workspace = true }
+
+[[bin]]
+name = "nos-watchdogd"
+path = "src/main.rs"
+
+[dev-dependencies]
+proptest = { workspace = true }

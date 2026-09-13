@@ -5,9 +5,9 @@ x-nos-image: &nos-image
   image: nos:local
 
 services:
-  configd:
+  watchdog:
     <<: *nos-image
-    container_name: nos-configd
+    container_name: nos-watchdog
     volumes:
       - nos-run:/run/nos
       - nos-data:/var/lib/nos
@@ -16,7 +16,7 @@ services:
     <<: *nos-image
     entrypoint: ["nos"]
     depends_on:
-      - configd
+      - watchdog
     volumes:
       - nos-run:/run/nos
     stdin_open: true
