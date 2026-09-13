@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::validators::unique_in;
 
-use super::Config;
+use super::{BgpPeer, BgpPeerGroup, Config};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
@@ -23,6 +23,12 @@ pub struct BgpInstance {
     // RFC 6793: ASN 0 and 4_294_967_295 are reserved.
     #[garde(range(min = 1, max = 4_294_967_294u32))]
     pub asn: u32,
+
+    #[garde(dive)]
+    pub peer_groups: Vec<BgpPeerGroup>,
+
+    #[garde(dive)]
+    pub peers: Vec<BgpPeer>,
 }
 
 #[cfg(test)]
@@ -40,6 +46,8 @@ mod tests {
             name: name.to_string(),
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             asn,
+            peer_groups: Vec::new(),
+            peers: Vec::new(),
         }
     }
 

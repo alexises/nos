@@ -63,6 +63,8 @@ mod tests {
                 name: "default".to_string(),
                 router_id: Ipv4Addr::new(10, 0, 0, 1),
                 asn: 65000,
+                peer_groups: Vec::new(),
+                peers: Vec::new(),
             }],
             ..Default::default()
         }

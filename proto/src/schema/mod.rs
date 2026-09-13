@@ -1,6 +1,10 @@
 pub mod bgp_instance;
+pub mod bgp_peer;
+pub mod bgp_peer_group;
 
 pub use bgp_instance::BgpInstance;
+pub use bgp_peer::BgpPeer;
+pub use bgp_peer_group::{AddressFamily, BgpPeerGroup};
 
 use garde::Validate;
 use serde::{Deserialize, Serialize};

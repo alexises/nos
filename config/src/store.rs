@@ -199,6 +199,8 @@ mod tests {
             name: name.to_string(),
             router_id: Ipv4Addr::new(10, 0, 0, 1),
             asn,
+            peer_groups: Vec::new(),
+            peers: Vec::new(),
         }
     }
 

@@ -12,6 +12,8 @@ fn instance(name: &str, asn: u32) -> BgpInstance {
         name: name.to_string(),
         router_id: Ipv4Addr::new(1, 1, 1, 1),
         asn,
+        peer_groups: Vec::new(),
+        peers: Vec::new(),
     }
 }
 

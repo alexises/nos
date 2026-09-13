@@ -1,4 +1,6 @@
 pub mod bgp_instance;
+pub mod bgp_peer;
+pub mod bgp_peer_group;
 
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +38,9 @@ pub struct SectionDiff {
     pub header: String,
     pub status: DiffStatus,
     pub fields: Vec<FieldDiff>,
+    /// Nested sections one level deeper (e.g. a BGP instance's peer-groups
+    /// and peers). Empty for a section with no nested collections.
+    pub subsections: Vec<SectionDiff>,
 }
 
 /// The structural difference between two `Config` values. Only what changed
@@ -84,6 +89,8 @@ mod tests {
             name: name.to_string(),
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             asn,
+            peer_groups: Vec::new(),
+            peers: Vec::new(),
         }
     }
 

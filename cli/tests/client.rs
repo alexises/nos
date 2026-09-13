@@ -18,6 +18,8 @@ fn sample_config() -> Config {
             name: "default".to_string(),
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             asn: 65000,
+            peer_groups: Vec::new(),
+            peers: Vec::new(),
         }],
         ..Default::default()
     }

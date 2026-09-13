@@ -1,6 +1,12 @@
 pub mod bgp_instance;
+pub mod bgp_peer;
+pub mod bgp_peer_group;
 
 pub use bgp_instance::BgpInstanceOp;
+pub use bgp_peer::BgpPeerOp;
+pub use bgp_peer_group::BgpPeerGroupOp;
+
+use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -19,6 +25,8 @@ use crate::schema::Config;
 pub enum ConfigOp {
     BgpInstance(BgpInstanceOp),
     SetHostname(String),
+    BgpPeerGroup(BgpPeerGroupOp),
+    BgpPeer(BgpPeerOp),
 }
 
 impl ConfigOp {
@@ -32,6 +40,8 @@ impl ConfigOp {
                 config.hostname.clone_from(hostname);
                 Ok(())
             }
+            ConfigOp::BgpPeerGroup(op) => op.apply(config),
+            ConfigOp::BgpPeer(op) => op.apply(config),
         }
     }
 }
@@ -40,6 +50,13 @@ impl ConfigOp {
 pub enum OpError {
     #[error("bgp instance '{0}' not found")]
     BgpInstanceNotFound(String),
+    #[error("peer-group '{name}' not found in bgp instance '{instance}'")]
+    BgpPeerGroupNotFound { instance: String, name: String },
+    #[error("peer '{remote_address}' not found in bgp instance '{instance}'")]
+    BgpPeerNotFound {
+        instance: String,
+        remote_address: IpAddr,
+    },
 }
 
 #[cfg(test)]

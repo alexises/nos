@@ -39,16 +39,18 @@ impl BgpInstanceOp {
                         name: name.clone(),
                         router_id: Ipv4Addr::UNSPECIFIED,
                         asn: 0,
+                        peer_groups: Vec::new(),
+                        peers: Vec::new(),
                     });
                 }
                 Ok(())
             }
             BgpInstanceOp::SetAsn { name, asn } => {
-                find_mut(config, name)?.asn = *asn;
+                find_instance_mut(config, name)?.asn = *asn;
                 Ok(())
             }
             BgpInstanceOp::SetRouterId { name, router_id } => {
-                find_mut(config, name)?.router_id = *router_id;
+                find_instance_mut(config, name)?.router_id = *router_id;
                 Ok(())
             }
             BgpInstanceOp::Delete { name } => {
@@ -63,7 +65,10 @@ impl BgpInstanceOp {
     }
 }
 
-fn find_mut<'a>(config: &'a mut Config, name: &str) -> Result<&'a mut BgpInstance, OpError> {
+pub(crate) fn find_instance_mut<'a>(
+    config: &'a mut Config,
+    name: &str,
+) -> Result<&'a mut BgpInstance, OpError> {
     config
         .bgp_instances
         .iter_mut()
@@ -80,6 +85,8 @@ mod tests {
             name: name.to_string(),
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             asn,
+            peer_groups: Vec::new(),
+            peers: Vec::new(),
         }
     }
 

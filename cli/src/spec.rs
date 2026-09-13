@@ -19,12 +19,14 @@ pub enum Token {
     Arg(ArgKind),
 }
 
-/// What kind of value an argument slot accepts — `BgpInstanceName` is the
-/// one slot Tab-completion can fill from live daemon state.
+/// What kind of value an argument slot accepts — `BgpInstanceName` and
+/// `BgpPeerGroupName` are the slots Tab-completion can fill from live
+/// daemon state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgKind {
     Plain,
     BgpInstanceName,
+    BgpPeerGroupName,
 }
 
 /// Where a command's summary/detail text comes from.
@@ -46,6 +48,9 @@ pub enum Availability {
     Operational,
     Configuration,
     ConfigurationInstance,
+    ConfigurationPeerGroup,
+    /// Any non-root navigation position — `BgpInstance` or `BgpPeerGroup`.
+    ConfigurationNested,
 }
 
 pub fn availability_matches(availability: Availability, mode: &Mode) -> bool {
@@ -57,6 +62,20 @@ pub fn availability_matches(availability: Availability, mode: &Mode) -> bool {
             mode,
             Mode::Configuration {
                 path: Path::BgpInstance(_),
+                ..
+            }
+        ),
+        Availability::ConfigurationPeerGroup => matches!(
+            mode,
+            Mode::Configuration {
+                path: Path::BgpPeerGroup { .. },
+                ..
+            }
+        ),
+        Availability::ConfigurationNested => matches!(
+            mode,
+            Mode::Configuration {
+                path: Path::BgpInstance(_) | Path::BgpPeerGroup { .. },
                 ..
             }
         ),
@@ -206,7 +225,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         tokens: &[Token::Literal("delete")],
         usage: "delete",
         doc: Doc::FromConfig(Topic::DeleteBgpInstance),
-        availability: Availability::ConfigurationInstance,
+        availability: Availability::ConfigurationNested,
     },
     CommandSpec {
         tokens: &[
@@ -220,15 +239,237 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         availability: Availability::Configuration,
     },
     CommandSpec {
+        tokens: &[
+            Token::Literal("edit"),
+            Token::Literal("bgp"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Literal("peer-group"),
+            Token::Arg(ArgKind::BgpPeerGroupName),
+        ],
+        usage: "edit bgp instance <name> peer-group <group>",
+        doc: Doc::FromConfig(Topic::EnsureBgpPeerGroup),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("edit"),
+            Token::Literal("peer-group"),
+            Token::Arg(ArgKind::BgpPeerGroupName),
+        ],
+        usage: "edit peer-group <group>",
+        doc: Doc::FromConfig(Topic::EnsureBgpPeerGroup),
+        availability: Availability::ConfigurationInstance,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("bgp"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Literal("peer-group"),
+            Token::Arg(ArgKind::BgpPeerGroupName),
+            Token::Literal("remote-as"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set bgp instance <name> peer-group <group> remote-as <n>",
+        doc: Doc::FromConfig(Topic::SetBgpPeerGroupRemoteAs),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("bgp"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Literal("peer-group"),
+            Token::Arg(ArgKind::BgpPeerGroupName),
+            Token::Literal("source-address"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set bgp instance <name> peer-group <group> source-address <address>",
+        doc: Doc::FromConfig(Topic::SetBgpPeerGroupSourceAddress),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("bgp"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Literal("peer-group"),
+            Token::Arg(ArgKind::BgpPeerGroupName),
+            Token::Literal("address-family"),
+            Token::Literal("ipv4"),
+        ],
+        usage: "set bgp instance <name> peer-group <group> address-family ipv4",
+        doc: Doc::FromConfig(Topic::AddBgpPeerGroupAddressFamily),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("bgp"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Literal("peer-group"),
+            Token::Arg(ArgKind::BgpPeerGroupName),
+            Token::Literal("address-family"),
+            Token::Literal("ipv6"),
+        ],
+        usage: "set bgp instance <name> peer-group <group> address-family ipv6",
+        doc: Doc::FromConfig(Topic::AddBgpPeerGroupAddressFamily),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("remote-as"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set remote-as <n>",
+        doc: Doc::FromConfig(Topic::SetBgpPeerGroupRemoteAs),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("source-address"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set source-address <address>",
+        doc: Doc::FromConfig(Topic::SetBgpPeerGroupSourceAddress),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("address-family"),
+            Token::Literal("ipv4"),
+        ],
+        usage: "set address-family ipv4",
+        doc: Doc::FromConfig(Topic::AddBgpPeerGroupAddressFamily),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("address-family"),
+            Token::Literal("ipv6"),
+        ],
+        usage: "set address-family ipv6",
+        doc: Doc::FromConfig(Topic::AddBgpPeerGroupAddressFamily),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("bgp"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Literal("peer"),
+            Token::Arg(ArgKind::Plain),
+            Token::Literal("peer-group"),
+            Token::Arg(ArgKind::BgpPeerGroupName),
+        ],
+        usage: "set bgp instance <name> peer <address> peer-group <group>",
+        doc: Doc::FromConfig(Topic::SetBgpPeer),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("peer"),
+            Token::Arg(ArgKind::Plain),
+            Token::Literal("peer-group"),
+            Token::Arg(ArgKind::BgpPeerGroupName),
+        ],
+        usage: "set peer <address> peer-group <group>",
+        doc: Doc::FromConfig(Topic::SetBgpPeer),
+        availability: Availability::ConfigurationInstance,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("bgp"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Literal("peer-group"),
+            Token::Arg(ArgKind::BgpPeerGroupName),
+        ],
+        usage: "delete bgp instance <name> peer-group <group>",
+        doc: Doc::FromConfig(Topic::DeleteBgpPeerGroup),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("peer-group"),
+            Token::Arg(ArgKind::BgpPeerGroupName),
+        ],
+        usage: "delete peer-group <group>",
+        doc: Doc::FromConfig(Topic::DeleteBgpPeerGroup),
+        availability: Availability::ConfigurationInstance,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("bgp"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Literal("peer"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "delete bgp instance <name> peer <address>",
+        doc: Doc::FromConfig(Topic::DeleteBgpPeer),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("peer"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "delete peer <address>",
+        doc: Doc::FromConfig(Topic::DeleteBgpPeer),
+        availability: Availability::ConfigurationInstance,
+    },
+    CommandSpec {
+        tokens: &[Token::Literal("delete"), Token::Literal("source-address")],
+        usage: "delete source-address",
+        doc: Doc::FromConfig(Topic::ClearBgpPeerGroupSourceAddress),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("address-family"),
+            Token::Literal("ipv4"),
+        ],
+        usage: "delete address-family ipv4",
+        doc: Doc::FromConfig(Topic::RemoveBgpPeerGroupAddressFamily),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("address-family"),
+            Token::Literal("ipv6"),
+        ],
+        usage: "delete address-family ipv6",
+        doc: Doc::FromConfig(Topic::RemoveBgpPeerGroupAddressFamily),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
         tokens: &[Token::Literal("up")],
         usage: "up",
         doc: Doc::Local {
-            summary: "Navigate back to the transaction root.",
-            detail: "Moves the current navigation position up one level. Only one level of \
-                     nesting exists today, so this always lands at the transaction root, \
-                     same as `top`.",
+            summary: "Navigate up one level.",
+            detail: "Moves the current navigation position up one level: from a peer-group, \
+                     to its owning BGP instance; from a BGP instance, to the transaction \
+                     root (same as `top`).",
         },
-        availability: Availability::ConfigurationInstance,
+        availability: Availability::ConfigurationNested,
     },
     CommandSpec {
         tokens: &[Token::Literal("top")],
@@ -236,10 +477,9 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         doc: Doc::Local {
             summary: "Navigate back to the transaction root.",
             detail: "Moves the current navigation position directly to the transaction \
-                     root, regardless of how deep it is. Only one level of nesting exists \
-                     today, so this is equivalent to `up`.",
+                     root, regardless of how deep it is.",
         },
-        availability: Availability::ConfigurationInstance,
+        availability: Availability::ConfigurationNested,
     },
     CommandSpec {
         tokens: &[Token::Literal("commit")],
@@ -338,6 +578,53 @@ mod tests {
             Availability::ConfigurationInstance,
             &config_mode(Path::BgpInstance("r1".to_string()))
         ));
+        assert!(!availability_matches(
+            Availability::ConfigurationInstance,
+            &config_mode(peer_group_path())
+        ));
+    }
+
+    fn peer_group_path() -> Path {
+        Path::BgpPeerGroup {
+            instance: "r1".to_string(),
+            group: "pg1".to_string(),
+        }
+    }
+
+    #[test]
+    fn configuration_peer_group_only_matches_peer_group_path() {
+        assert!(!availability_matches(
+            Availability::ConfigurationPeerGroup,
+            &Mode::Operational
+        ));
+        assert!(!availability_matches(
+            Availability::ConfigurationPeerGroup,
+            &config_mode(Path::Root)
+        ));
+        assert!(!availability_matches(
+            Availability::ConfigurationPeerGroup,
+            &config_mode(Path::BgpInstance("r1".to_string()))
+        ));
+        assert!(availability_matches(
+            Availability::ConfigurationPeerGroup,
+            &config_mode(peer_group_path())
+        ));
+    }
+
+    #[test]
+    fn configuration_nested_matches_instance_and_peer_group_but_not_root() {
+        assert!(!availability_matches(
+            Availability::ConfigurationNested,
+            &config_mode(Path::Root)
+        ));
+        assert!(availability_matches(
+            Availability::ConfigurationNested,
+            &config_mode(Path::BgpInstance("r1".to_string()))
+        ));
+        assert!(availability_matches(
+            Availability::ConfigurationNested,
+            &config_mode(peer_group_path())
+        ));
     }
 
     #[test]
@@ -345,7 +632,10 @@ mod tests {
         for spec in COMMAND_SPECS {
             if matches!(
                 spec.availability,
-                Availability::Configuration | Availability::ConfigurationInstance
+                Availability::Configuration
+                    | Availability::ConfigurationInstance
+                    | Availability::ConfigurationPeerGroup
+                    | Availability::ConfigurationNested
             ) {
                 assert!(
                     !availability_matches(spec.availability, &Mode::Operational),

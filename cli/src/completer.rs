@@ -22,6 +22,9 @@ pub struct NosCompleter {
     /// `ArgKind::BgpInstanceName` slots — production code wraps a blocking
     /// call to `client::get_transaction`; tests supply a canned list.
     instance_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
+    /// Live peer-group names (flattened across every instance — see
+    /// `main.rs`'s `completer_for`) for `ArgKind::BgpPeerGroupName` slots.
+    peer_group_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
 }
 
 impl NosCompleter {
@@ -29,11 +32,13 @@ impl NosCompleter {
         mode: Mode,
         doc_source: Box<dyn FnMut(Topic) -> CommandDoc + Send>,
         instance_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
+        peer_group_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
     ) -> Self {
         Self {
             mode,
             doc_source,
             instance_name_source,
+            peer_group_name_source,
         }
     }
 
@@ -138,6 +143,20 @@ impl Completer for NosCompleter {
                         }
                     }
                 }
+                Token::Arg(ArgKind::BgpPeerGroupName) => {
+                    for name in (self.peer_group_name_source)() {
+                        if name.starts_with(partial) && !suggestions.iter().any(|s| s.value == name)
+                        {
+                            suggestions.push(Suggestion {
+                                value: name,
+                                description: None,
+                                span: Span::new(partial_start, line.len()),
+                                append_whitespace: true,
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
                 Token::Arg(ArgKind::Plain) => {
                     // No way to complete an arbitrary value.
                 }
@@ -164,6 +183,10 @@ mod tests {
         Box::new(Vec::new)
     }
 
+    fn no_peer_groups() -> Box<dyn FnMut() -> Vec<String> + Send> {
+        Box::new(Vec::new)
+    }
+
     fn values(result: &CompletionResult) -> Vec<String> {
         let mut v: Vec<String> = result
             .suggestions()
@@ -176,14 +199,24 @@ mod tests {
 
     #[test]
     fn completes_top_level_keyword_in_operational_mode() {
-        let mut completer = NosCompleter::new(Mode::Operational, doc_source(), no_instances());
+        let mut completer = NosCompleter::new(
+            Mode::Operational,
+            doc_source(),
+            no_instances(),
+            no_peer_groups(),
+        );
         let result = completer.complete("sh", 2);
         assert_eq!(values(&result), vec!["show".to_string()]);
     }
 
     #[test]
     fn hides_configuration_only_keywords_in_operational_mode() {
-        let mut completer = NosCompleter::new(Mode::Operational, doc_source(), no_instances());
+        let mut completer = NosCompleter::new(
+            Mode::Operational,
+            doc_source(),
+            no_instances(),
+            no_peer_groups(),
+        );
         let result = completer.complete("com", 3);
         assert!(
             values(&result).is_empty(),
@@ -198,14 +231,19 @@ mod tests {
             path: crate::session::Path::Root,
             dirty: false,
         };
-        let mut completer = NosCompleter::new(mode, doc_source(), no_instances());
+        let mut completer = NosCompleter::new(mode, doc_source(), no_instances(), no_peer_groups());
         let result = completer.complete("com", 3);
         assert_eq!(values(&result), vec!["commit".to_string()]);
     }
 
     #[test]
     fn completes_empty_buffer_with_top_level_keywords_only_operational() {
-        let mut completer = NosCompleter::new(Mode::Operational, doc_source(), no_instances());
+        let mut completer = NosCompleter::new(
+            Mode::Operational,
+            doc_source(),
+            no_instances(),
+            no_peer_groups(),
+        );
         let result = completer.complete("", 0);
         let vals = values(&result);
         assert!(vals.contains(&"show".to_string()));
@@ -222,14 +260,33 @@ mod tests {
         };
         let names: Box<dyn FnMut() -> Vec<String> + Send> =
             Box::new(|| vec!["r1".to_string(), "r2".to_string(), "other".to_string()]);
-        let mut completer = NosCompleter::new(mode, doc_source(), names);
+        let mut completer = NosCompleter::new(mode, doc_source(), names, no_peer_groups());
         let result = completer.complete("edit bgp instance r", 19);
         assert_eq!(values(&result), vec!["r1".to_string(), "r2".to_string()]);
     }
 
     #[test]
+    fn completes_bgp_peer_group_name_from_injected_source() {
+        let mode = Mode::Configuration {
+            transaction: "t1".to_string(),
+            path: crate::session::Path::BgpInstance("r1".to_string()),
+            dirty: false,
+        };
+        let groups: Box<dyn FnMut() -> Vec<String> + Send> =
+            Box::new(|| vec!["pg1".to_string(), "pg2".to_string(), "other".to_string()]);
+        let mut completer = NosCompleter::new(mode, doc_source(), no_instances(), groups);
+        let result = completer.complete("edit peer-group p", 17);
+        assert_eq!(values(&result), vec!["pg1".to_string(), "pg2".to_string()]);
+    }
+
+    #[test]
     fn extra_carries_usage_and_detail_for_help_menu() {
-        let mut completer = NosCompleter::new(Mode::Operational, doc_source(), no_instances());
+        let mut completer = NosCompleter::new(
+            Mode::Operational,
+            doc_source(),
+            no_instances(),
+            no_peer_groups(),
+        );
         let result = completer.complete("show conf", 9);
         let suggestion = result
             .suggestions()
@@ -246,7 +303,12 @@ mod tests {
 
     #[test]
     fn description_comes_from_injected_doc_source() {
-        let mut completer = NosCompleter::new(Mode::Operational, doc_source(), no_instances());
+        let mut completer = NosCompleter::new(
+            Mode::Operational,
+            doc_source(),
+            no_instances(),
+            no_peer_groups(),
+        );
         let result = completer.complete("show config", 11);
         // Not a completion candidate (already fully typed) — use a partial instead.
         let result = if result.suggestions().is_empty() {

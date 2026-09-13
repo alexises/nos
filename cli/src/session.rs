@@ -1,12 +1,15 @@
-use nos_proto::{BgpInstanceOp, ConfigOp, TransactionBase};
+use nos_proto::{BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, ConfigOp, TransactionBase};
 
-use crate::command::{BgpInstanceField, Command, DeleteTarget, EditTarget, SetTarget};
+use crate::command::{
+    BgpInstanceField, BgpPeerGroupField, Command, DeleteTarget, EditTarget, SetTarget,
+};
 
 /// Navigation position within the transaction's config tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Path {
     Root,
     BgpInstance(String),
+    BgpPeerGroup { instance: String, group: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -40,6 +43,10 @@ pub enum Resolved {
     /// REPL must interactively ask commit/discard/leave-open.
     LeaveConfigPrompt,
     NavigateTop,
+    /// Navigate to a specific path with no op applied — used by `up` from a
+    /// peer-group, which lands one level up (its owning instance) rather
+    /// than at the root, unlike `NavigateTop`.
+    Navigate(Path),
     ShowRunningConfig,
     /// `show this` in configuration mode — fetch the transaction and render
     /// it at the current path.
@@ -120,6 +127,10 @@ fn not_configuring(cmd: &Command) -> Resolved {
 /// navigation `path`. Never called with `Command::Configure`, `Empty`,
 /// `Help`, `ShowConfig`, `Unknown`, `Exit`, or `Save` — `resolve` handles
 /// those itself before delegating here.
+const NO_CURRENT_INSTANCE: &str = "no current instance — use 'edit bgp instance <name>' or the fully-qualified 'set bgp instance <name> ...' form";
+const NO_CURRENT_PEER_GROUP: &str =
+    "no current peer-group — use 'edit peer-group <name>' or the fully-qualified 'set bgp instance <name> peer-group <group> ...' form";
+
 fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
     match cmd {
         Command::Show => Resolved::ShowTransaction,
@@ -127,6 +138,31 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         Command::Edit(EditTarget::BgpInstance { name }) => Resolved::ApplyOp {
             op: ConfigOp::BgpInstance(BgpInstanceOp::Ensure { name: name.clone() }),
             after: PathAfter::To(Path::BgpInstance(name)),
+        },
+        Command::Edit(EditTarget::BgpPeerGroup { instance, name }) => Resolved::ApplyOp {
+            op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Ensure {
+                instance: instance.clone(),
+                name: name.clone(),
+            }),
+            after: PathAfter::To(Path::BgpPeerGroup {
+                instance,
+                group: name,
+            }),
+        },
+        Command::Edit(EditTarget::PeerGroupRelative { name }) => match path {
+            Path::BgpInstance(instance) => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Ensure {
+                    instance: instance.clone(),
+                    name: name.clone(),
+                }),
+                after: PathAfter::To(Path::BgpPeerGroup {
+                    instance: instance.clone(),
+                    group: name,
+                }),
+            },
+            Path::Root | Path::BgpPeerGroup { .. } => {
+                Resolved::Error(NO_CURRENT_INSTANCE.to_string())
+            }
         },
 
         Command::Set(SetTarget::BgpInstance { name, field }) => Resolved::ApplyOp {
@@ -144,9 +180,52 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 op: set_op(name.clone(), field),
                 after: PathAfter::Stay,
             },
-            Path::Root => Resolved::Error(
-                "no current instance — use 'edit bgp instance <name>' or the fully-qualified 'set bgp instance <name> ...' form".to_string(),
-            ),
+            Path::Root | Path::BgpPeerGroup { .. } => {
+                Resolved::Error(NO_CURRENT_INSTANCE.to_string())
+            }
+        },
+        Command::Set(SetTarget::BgpPeerGroup {
+            instance,
+            group,
+            field,
+        }) => Resolved::ApplyOp {
+            op: peer_group_set_op(instance, group, field),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::PeerGroupRelative { field }) => match path {
+            Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
+                op: peer_group_set_op(instance.clone(), group.clone(), field),
+                after: PathAfter::Stay,
+            },
+            Path::Root | Path::BgpInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+        },
+        Command::Set(SetTarget::BgpPeer {
+            instance,
+            remote_address,
+            peer_group,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::BgpPeer(BgpPeerOp::Set {
+                instance,
+                remote_address,
+                peer_group,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::PeerRelative {
+            remote_address,
+            peer_group,
+        }) => match path {
+            Path::BgpInstance(instance) => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeer(BgpPeerOp::Set {
+                    instance: instance.clone(),
+                    remote_address,
+                    peer_group,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root | Path::BgpPeerGroup { .. } => {
+                Resolved::Error(NO_CURRENT_INSTANCE.to_string())
+            }
         },
 
         Command::Delete(DeleteTarget::BgpInstance { name }) => Resolved::ApplyOp {
@@ -158,15 +237,91 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 op: ConfigOp::BgpInstance(BgpInstanceOp::Delete { name: name.clone() }),
                 after: PathAfter::ToRoot,
             },
+            Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Delete {
+                    instance: instance.clone(),
+                    name: group.clone(),
+                }),
+                after: PathAfter::To(Path::BgpInstance(instance.clone())),
+            },
             Path::Root => Resolved::Error(
                 "nothing to delete at the top level — use 'delete bgp instance <name>'".to_string(),
             ),
         },
+        Command::Delete(DeleteTarget::BgpPeerGroup { instance, name }) => Resolved::ApplyOp {
+            op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Delete { instance, name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::PeerGroupRelative { name }) => match path {
+            Path::BgpInstance(instance) => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Delete {
+                    instance: instance.clone(),
+                    name,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root | Path::BgpPeerGroup { .. } => {
+                Resolved::Error(NO_CURRENT_INSTANCE.to_string())
+            }
+        },
+        Command::Delete(DeleteTarget::BgpPeer {
+            instance,
+            remote_address,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::BgpPeer(BgpPeerOp::Delete {
+                instance,
+                remote_address,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::PeerRelative { remote_address }) => match path {
+            Path::BgpInstance(instance) => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeer(BgpPeerOp::Delete {
+                    instance: instance.clone(),
+                    remote_address,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root | Path::BgpPeerGroup { .. } => {
+                Resolved::Error(NO_CURRENT_INSTANCE.to_string())
+            }
+        },
+        Command::Delete(DeleteTarget::SourceAddress) => match path {
+            Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearSourceAddress {
+                    instance: instance.clone(),
+                    name: group.clone(),
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root | Path::BgpInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+        },
+        Command::Delete(DeleteTarget::AddressFamily(af)) => match path {
+            Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::RemoveAddressFamily {
+                    instance: instance.clone(),
+                    name: group.clone(),
+                    af,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root | Path::BgpInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+        },
 
-        // Only one level of nesting exists today, so Up and Top coincide.
-        Command::Up | Command::Top => match path {
+        // `top` always lands at the root, however deep the current path is.
+        Command::Top => match path {
+            Path::Root => Resolved::Error("already at the top level".to_string()),
+            Path::BgpInstance(_) | Path::BgpPeerGroup { .. } => Resolved::NavigateTop,
+        },
+        // `up` moves exactly one level — from an instance that's the root
+        // (coinciding with `top`), but from a peer-group it's the owning
+        // instance, not the root.
+        Command::Up => match path {
             Path::Root => Resolved::Error("already at the top level".to_string()),
             Path::BgpInstance(_) => Resolved::NavigateTop,
+            Path::BgpPeerGroup { instance, .. } => {
+                Resolved::Navigate(Path::BgpInstance(instance.clone()))
+            }
         },
 
         Command::Commit => Resolved::Commit,
@@ -189,6 +344,26 @@ fn set_op(name: String, field: BgpInstanceField) -> ConfigOp {
     ConfigOp::BgpInstance(match field {
         BgpInstanceField::Asn(asn) => BgpInstanceOp::SetAsn { name, asn },
         BgpInstanceField::RouterId(router_id) => BgpInstanceOp::SetRouterId { name, router_id },
+    })
+}
+
+fn peer_group_set_op(instance: String, group: String, field: BgpPeerGroupField) -> ConfigOp {
+    ConfigOp::BgpPeerGroup(match field {
+        BgpPeerGroupField::RemoteAs(remote_as) => BgpPeerGroupOp::SetRemoteAs {
+            instance,
+            name: group,
+            remote_as,
+        },
+        BgpPeerGroupField::SourceAddress(address) => BgpPeerGroupOp::SetSourceAddress {
+            instance,
+            name: group,
+            address,
+        },
+        BgpPeerGroupField::AddressFamily(af) => BgpPeerGroupOp::AddAddressFamily {
+            instance,
+            name: group,
+            af,
+        },
     })
 }
 
@@ -522,6 +697,230 @@ mod tests {
             resolve(&config_mode("t1", Path::Root, false), Command::Diff),
             Resolved::Diff
         );
+    }
+
+    use nos_proto::AddressFamily;
+
+    fn peer_group_path(instance: &str, group: &str) -> Path {
+        Path::BgpPeerGroup {
+            instance: instance.to_string(),
+            group: group.to_string(),
+        }
+    }
+
+    #[test]
+    fn edit_bgp_peer_group_qualified_navigates() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Edit(EditTarget::BgpPeerGroup {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Ensure {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                }),
+                after: PathAfter::To(peer_group_path("r1", "pg1")),
+            }
+        );
+    }
+
+    #[test]
+    fn edit_peer_group_relative_requires_bgp_instance_context() {
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Edit(EditTarget::PeerGroupRelative {
+                    name: "pg1".to_string()
+                })
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::BgpInstance("r1".to_string()), false),
+                Command::Edit(EditTarget::PeerGroupRelative {
+                    name: "pg1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Ensure {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                }),
+                after: PathAfter::To(peer_group_path("r1", "pg1")),
+            }
+        );
+    }
+
+    #[test]
+    fn set_peer_group_field_qualified_and_relative() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: "r1".to_string(),
+                    group: "pg1".to_string(),
+                    field: BgpPeerGroupField::RemoteAs(65001),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetRemoteAs {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                    remote_as: 65001,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::RemoteAs(65001)
+                })
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::RemoteAs(65001)
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetRemoteAs {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                    remote_as: 65001,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_peer_qualified_and_relative() {
+        let addr: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::BgpPeer {
+                    instance: "r1".to_string(),
+                    remote_address: addr,
+                    peer_group: "pg1".to_string(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeer(BgpPeerOp::Set {
+                    instance: "r1".to_string(),
+                    remote_address: addr,
+                    peer_group: "pg1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Set(SetTarget::PeerRelative {
+                    remote_address: addr,
+                    peer_group: "pg1".to_string(),
+                })
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::BgpInstance("r1".to_string()), false),
+                Command::Set(SetTarget::PeerRelative {
+                    remote_address: addr,
+                    peer_group: "pg1".to_string(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeer(BgpPeerOp::Set {
+                    instance: "r1".to_string(),
+                    remote_address: addr,
+                    peer_group: "pg1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn delete_current_at_peer_group_deletes_group_and_lands_on_instance() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Delete(DeleteTarget::Current)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Delete {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                }),
+                after: PathAfter::To(Path::BgpInstance("r1".to_string())),
+            }
+        );
+    }
+
+    #[test]
+    fn delete_source_address_and_address_family_require_peer_group_context() {
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::BgpInstance("r1".to_string()), false),
+                Command::Delete(DeleteTarget::SourceAddress)
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Delete(DeleteTarget::SourceAddress)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearSourceAddress {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv4Unicast))
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::RemoveAddressFamily {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                    af: AddressFamily::Ipv4Unicast,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    /// `up`/`top` finally diverge once a second nesting level exists: from a
+    /// peer-group, `up` lands one level up (the owning instance), while
+    /// `top` always lands at the root.
+    #[test]
+    fn up_and_top_diverge_from_peer_group() {
+        let mode = config_mode("t1", peer_group_path("r1", "pg1"), false);
+        assert_eq!(
+            resolve(&mode, Command::Up),
+            Resolved::Navigate(Path::BgpInstance("r1".to_string()))
+        );
+        assert_eq!(resolve(&mode, Command::Top), Resolved::NavigateTop);
     }
 
     #[test]

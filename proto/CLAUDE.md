@@ -12,10 +12,10 @@ Component processes (`nos-bgp`, `nos-rib`, …) must not depend on `nos-config` 
 
 | Module | Purpose |
 |--------|---------|
-| `schema/` | Config tree types: `Config`, `BgpInstance`. Derived `garde::Validate` for commit-time validation. |
-| `validators` | Generic reusable validation helpers (e.g. `unique_in`). |
-| `ops/` | Section-scoped edit types applied to a transaction's in-progress config (e.g. `BgpInstanceOp`), wrapped by `ConfigOp`. Never validated — only `garde` at commit time is. |
-| `diff/` | Structural config comparison: `diff_configs(base, candidate) -> ConfigDiff`, plus one `diff_<section>` helper per section (e.g. `diff_bgp_instances`). Pure and synchronous, like `ops/`'s `apply` — only what changed is included, nothing unchanged. |
+| `schema/` | Config tree types: `Config`, `BgpInstance`, `BgpPeerGroup`, `BgpPeer`. Derived `garde::Validate` for commit-time validation. `BgpPeerGroup`/`BgpPeer` nest one level under `BgpInstance`, showing the pattern for a section nested under another section rather than directly under `Config`. |
+| `validators` | Generic reusable validation helpers (e.g. `unique_in`). Validators that need to search *across* a nested collection (e.g. peer-group name uniqueness scoped globally, not per-instance) live next to their owning schema type instead, since they're not generic. |
+| `ops/` | Section-scoped edit types applied to a transaction's in-progress config (e.g. `BgpInstanceOp`, `BgpPeerGroupOp`), wrapped by `ConfigOp`. Never validated — only `garde` at commit time is. A nested section's `Op` variants carry the owning parent's key too (e.g. `BgpPeerGroupOp::SetRemoteAs { instance, name, .. }`). |
+| `diff/` | Structural config comparison: `diff_configs(base, candidate) -> ConfigDiff`, plus one `diff_<section>` helper per section (e.g. `diff_bgp_instances`, `diff_bgp_peer_groups`). Pure and synchronous, like `ops/`'s `apply` — only what changed is included, nothing unchanged. `SectionDiff.subsections` nests one section inside another for a nested config section. |
 | `ipc` | IPC message types: `Request` (client→server) and `Event` (server→client), plus `TransactionBase` and `TransactionSnapshot`. |
 | `codec` | `IpcCodec<T>`: framing codec (4-byte LE length prefix + postcard payload). |
 

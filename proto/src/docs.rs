@@ -32,6 +32,24 @@ pub enum Topic {
     DeleteBgpInstance,
     /// `ConfigOp::SetHostname`
     SetHostname,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Ensure)`
+    EnsureBgpPeerGroup,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetRemoteAs)`
+    SetBgpPeerGroupRemoteAs,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetSourceAddress)`
+    SetBgpPeerGroupSourceAddress,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearSourceAddress)`
+    ClearBgpPeerGroupSourceAddress,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::AddAddressFamily)`
+    AddBgpPeerGroupAddressFamily,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::RemoveAddressFamily)`
+    RemoveBgpPeerGroupAddressFamily,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Delete)`
+    DeleteBgpPeerGroup,
+    /// `ConfigOp::BgpPeer(BgpPeerOp::Set)`
+    SetBgpPeer,
+    /// `ConfigOp::BgpPeer(BgpPeerOp::Delete)`
+    DeleteBgpPeer,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

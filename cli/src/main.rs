@@ -53,6 +53,11 @@ impl NosPrompt {
                 path: session::Path::BgpInstance(name),
                 ..
             } => format!("({transaction}/bgp:{name})"),
+            Mode::Configuration {
+                transaction,
+                path: session::Path::BgpPeerGroup { instance, group },
+                ..
+            } => format!("({transaction}/bgp:{instance}/peer-group:{group})"),
         };
         Self { hostname, suffix }
     }
@@ -148,6 +153,7 @@ fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Compl
     let instance_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
         Mode::Configuration { transaction, .. } => {
             let transaction = transaction.clone();
+            let socket = socket.clone();
             Box::new(move || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current()
@@ -166,10 +172,37 @@ fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Compl
         Mode::Operational => Box::new(Vec::new),
     };
 
+    // Deliberately flat/global — not scoped to whichever instance name is
+    // already typed on the line — consistent with peer-group names being
+    // unique across the whole config, not just within one instance (see
+    // `nos_proto::schema::bgp_peer_group`).
+    let peer_group_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
+        Mode::Configuration { transaction, .. } => {
+            let transaction = transaction.clone();
+            Box::new(move || {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(client::get_transaction(&socket, &transaction))
+                })
+                .map(|snap| {
+                    snap.config
+                        .bgp_instances
+                        .into_iter()
+                        .flat_map(|i| i.peer_groups)
+                        .map(|g| g.name)
+                        .collect()
+                })
+                .unwrap_or_default()
+            })
+        }
+        Mode::Operational => Box::new(Vec::new),
+    };
+
     Box::new(NosCompleter::new(
         mode.clone(),
         doc_source,
         instance_name_source,
+        peer_group_name_source,
     ))
 }
 
@@ -333,6 +366,7 @@ async fn handle_action(
         Resolved::ExitShell => Outcome::Exit,
         Resolved::LeaveConfigPrompt => Outcome::Continue(handle_leave_prompt(mode, socket).await),
         Resolved::NavigateTop => Outcome::Continue(navigate_top(&mode)),
+        Resolved::Navigate(path) => Outcome::Continue(navigate_to(&mode, path)),
         Resolved::ShowRunningConfig => {
             show_running_config(socket).await;
             Outcome::Continue(mode)
@@ -434,6 +468,16 @@ fn navigate_top(mode: &Mode) -> Mode {
     Mode::Configuration {
         transaction,
         path: session::Path::Root,
+        dirty,
+    }
+}
+
+fn navigate_to(mode: &Mode, path: session::Path) -> Mode {
+    let transaction = current_transaction(mode);
+    let dirty = matches!(mode, Mode::Configuration { dirty: true, .. });
+    Mode::Configuration {
+        transaction,
+        path,
         dirty,
     }
 }

@@ -1,13 +1,14 @@
 use crate::schema::BgpInstance;
 
-use super::{DiffStatus, FieldDiff, SectionDiff};
+use super::{bgp_peer, bgp_peer_group, DiffStatus, FieldDiff, SectionDiff};
 
 /// Diffs two lists of `BgpInstance`s, matched by `name` (the field
 /// `garde`'s `unique_in` validator already treats as each instance's key).
 /// Instances present on only one side are emitted wholesale as
-/// `Added`/`Removed`; instances present on both sides are compared
-/// field-by-field and only included at all if `router_id` or `asn` actually
-/// changed.
+/// `Added`/`Removed`, with their peer-groups/peers nested underneath at the
+/// same status; instances present on both sides are compared field-by-field
+/// and only included at all if `router_id`/`asn` changed, or a nested
+/// peer-group/peer changed.
 pub fn diff_bgp_instances(base: &[BgpInstance], candidate: &[BgpInstance]) -> Vec<SectionDiff> {
     let mut sections = Vec::new();
 
@@ -16,11 +17,17 @@ pub fn diff_bgp_instances(base: &[BgpInstance], candidate: &[BgpInstance]) -> Ve
             None => sections.push(removed_section(b)),
             Some(c) => {
                 let fields = changed_fields(b, c);
-                if !fields.is_empty() {
+                let subsections = [
+                    bgp_peer_group::diff_bgp_peer_groups(&b.peer_groups, &c.peer_groups),
+                    bgp_peer::diff_bgp_peers(&b.peers, &c.peers),
+                ]
+                .concat();
+                if !fields.is_empty() || !subsections.is_empty() {
                     sections.push(SectionDiff {
                         header: header_for(&b.name),
                         status: DiffStatus::Modified,
                         fields,
+                        subsections,
                     });
                 }
             }
@@ -75,6 +82,11 @@ fn removed_section(instance: &BgpInstance) -> SectionDiff {
                 new: None,
             },
         ],
+        subsections: [
+            bgp_peer_group::diff_bgp_peer_groups(&instance.peer_groups, &[]),
+            bgp_peer::diff_bgp_peers(&instance.peers, &[]),
+        ]
+        .concat(),
     }
 }
 
@@ -94,6 +106,11 @@ fn added_section(instance: &BgpInstance) -> SectionDiff {
                 new: Some(instance.asn.to_string()),
             },
         ],
+        subsections: [
+            bgp_peer_group::diff_bgp_peer_groups(&[], &instance.peer_groups),
+            bgp_peer::diff_bgp_peers(&[], &instance.peers),
+        ]
+        .concat(),
     }
 }
 
@@ -108,6 +125,8 @@ mod tests {
             name: name.to_string(),
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             asn,
+            peer_groups: Vec::new(),
+            peers: Vec::new(),
         }
     }
 
@@ -160,5 +179,32 @@ mod tests {
         let sections = diff_bgp_instances(&base, &candidate);
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].header, "bgp instance r1");
+    }
+
+    /// An instance whose own fields are unchanged but whose nested
+    /// peer-group changed must still surface as `Modified`, with empty
+    /// top-level `fields` and the change nested in `subsections`.
+    #[test]
+    fn unchanged_own_fields_but_changed_peer_group_is_modified() {
+        use crate::schema::{AddressFamily, BgpPeerGroup};
+
+        let group = |remote_as: u32| BgpPeerGroup {
+            name: "pg1".to_string(),
+            remote_as,
+            source_address: None,
+            address_families: vec![AddressFamily::Ipv4Unicast],
+        };
+
+        let mut base_instance = instance("r1", 65000);
+        base_instance.peer_groups = vec![group(65001)];
+        let mut candidate_instance = instance("r1", 65000);
+        candidate_instance.peer_groups = vec![group(65002)];
+
+        let sections = diff_bgp_instances(&[base_instance], &[candidate_instance]);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].status, DiffStatus::Modified);
+        assert!(sections[0].fields.is_empty());
+        assert_eq!(sections[0].subsections.len(), 1);
+        assert_eq!(sections[0].subsections[0].header, "peer-group pg1");
     }
 }

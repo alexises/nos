@@ -1,13 +1,53 @@
-use nos_proto::{BgpInstance, Config, ConfigDiff, DiffStatus, FieldDiff, TransactionSnapshot};
+use nos_proto::{
+    AddressFamily, BgpInstance, BgpPeer, BgpPeerGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
+    SectionDiff, TransactionSnapshot,
+};
 
 use crate::session::Path;
 
-/// Render one BGP instance as human-readable text.
-pub fn render_bgp_instance(instance: &BgpInstance) -> String {
+/// Render one peer-group as human-readable text.
+pub fn render_bgp_peer_group(group: &BgpPeerGroup) -> String {
+    let source_address = group
+        .source_address
+        .map_or_else(|| "unset".to_string(), |a| a.to_string());
+    let address_families = if group.address_families.is_empty() {
+        "none".to_string()
+    } else {
+        group
+            .address_families
+            .iter()
+            .map(AddressFamily::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     format!(
+        "peer-group {}: remote-as {}, source-address {source_address}, address-family [{address_families}]",
+        group.name, group.remote_as
+    )
+}
+
+/// Render one peer as human-readable text.
+pub fn render_bgp_peer(peer: &BgpPeer) -> String {
+    format!(
+        "peer {}: peer-group {}",
+        peer.remote_address, peer.peer_group
+    )
+}
+
+/// Render one BGP instance as human-readable text, including any nested
+/// peer-groups and peers, each indented one level under the instance line.
+pub fn render_bgp_instance(instance: &BgpInstance) -> String {
+    let mut lines = vec![format!(
         "bgp instance {}: router-id {}, asn {}",
         instance.name, instance.router_id, instance.asn
-    )
+    )];
+    for group in &instance.peer_groups {
+        lines.push(format!("  {}", render_bgp_peer_group(group)));
+    }
+    for peer in &instance.peers {
+        lines.push(format!("  {}", render_bgp_peer(peer)));
+    }
+    lines.join("\n")
 }
 
 /// Render a full running-config snapshot as human-readable text.
@@ -43,6 +83,24 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
                 || format!("bgp instance '{name}' not found"),
                 render_bgp_instance,
             ),
+        Path::BgpPeerGroup { instance, group } => {
+            match snapshot
+                .config
+                .bgp_instances
+                .iter()
+                .find(|i| &i.name == instance)
+            {
+                None => format!("bgp instance '{instance}' not found"),
+                Some(inst) => inst
+                    .peer_groups
+                    .iter()
+                    .find(|g| &g.name == group)
+                    .map_or_else(
+                        || format!("peer-group '{group}' not found in bgp instance '{instance}'"),
+                        render_bgp_peer_group,
+                    ),
+            }
+        }
     }
 }
 
@@ -71,20 +129,32 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
     }
 
     for section in &diff.bgp_instances {
-        let header = format!("{}:", section.header);
-        match section.status {
-            // The section itself didn't change — only shown so a reader can
-            // tell which section its changed fields (below) belong to.
-            DiffStatus::Modified => lines.push(context_line(&header)),
-            DiffStatus::Added => lines.push(added_line(&header, color)),
-            DiffStatus::Removed => lines.push(removed_line(&header, color)),
-        }
-        for field in &section.fields {
-            render_field_diff(&mut lines, field, "  ", color);
-        }
+        render_section(&mut lines, section, 0, color);
     }
 
     lines.join("\n")
+}
+
+/// Renders one `SectionDiff` at `depth` levels of nesting (2 spaces per
+/// level, matching the existing single-level indent), then recurses into
+/// its `subsections` one level deeper.
+fn render_section(lines: &mut Vec<String>, section: &SectionDiff, depth: usize, color: bool) {
+    let indent = "  ".repeat(depth);
+    let header = format!("{indent}{}:", section.header);
+    match section.status {
+        // The section itself didn't change — only shown so a reader can
+        // tell which section its changed fields (below) belong to.
+        DiffStatus::Modified => lines.push(context_line(&header)),
+        DiffStatus::Added => lines.push(added_line(&header, color)),
+        DiffStatus::Removed => lines.push(removed_line(&header, color)),
+    }
+    let field_indent = "  ".repeat(depth + 1);
+    for field in &section.fields {
+        render_field_diff(lines, field, &field_indent, color);
+    }
+    for subsection in &section.subsections {
+        render_section(lines, subsection, depth + 1, color);
+    }
 }
 
 fn render_field_diff(lines: &mut Vec<String>, field: &FieldDiff, indent: &str, color: bool) {
@@ -193,6 +263,8 @@ mod tests {
             name: name.to_string(),
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             asn,
+            peer_groups: Vec::new(),
+            peers: Vec::new(),
         }
     }
 
@@ -297,6 +369,7 @@ mod tests {
                 header: "bgp instance r1".to_string(),
                 status: DiffStatus::Modified,
                 fields: vec![field("asn", Some("65000"), Some("65001"))],
+                subsections: vec![],
             }],
         };
         assert_eq!(
@@ -316,6 +389,7 @@ mod tests {
                     field("router-id", None, Some("1.1.1.1")),
                     field("asn", None, Some("65000")),
                 ],
+                subsections: vec![],
             }],
         };
         assert_eq!(
@@ -332,6 +406,7 @@ mod tests {
                 header: "bgp instance r1".to_string(),
                 status: DiffStatus::Removed,
                 fields: vec![field("asn", Some("65000"), None)],
+                subsections: vec![],
             }],
         };
         assert_eq!(
@@ -359,5 +434,105 @@ mod tests {
         let (old, new) = highlight("65000", "65001", false);
         assert_eq!(old, "65000");
         assert_eq!(new, "65001");
+    }
+
+    use nos_proto::{BgpPeer, BgpPeerGroup};
+    use std::net::IpAddr;
+
+    fn peer_group(name: &str) -> BgpPeerGroup {
+        BgpPeerGroup {
+            name: name.to_string(),
+            remote_as: 65001,
+            source_address: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            address_families: vec![AddressFamily::Ipv4Unicast],
+        }
+    }
+
+    #[test]
+    fn render_bgp_peer_group_line() {
+        assert_eq!(
+            render_bgp_peer_group(&peer_group("pg1")),
+            "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4]"
+        );
+    }
+
+    #[test]
+    fn render_bgp_peer_group_with_unset_source_address() {
+        let mut pg = peer_group("pg1");
+        pg.source_address = None;
+        assert_eq!(
+            render_bgp_peer_group(&pg),
+            "peer-group pg1: remote-as 65001, source-address unset, address-family [ipv4]"
+        );
+    }
+
+    #[test]
+    fn render_instance_with_peer_groups_and_peers() {
+        let mut inst = instance("r1", 65000);
+        inst.peer_groups = vec![peer_group("pg1")];
+        inst.peers = vec![BgpPeer {
+            remote_address: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            peer_group: "pg1".to_string(),
+        }];
+        assert_eq!(
+            render_bgp_instance(&inst),
+            "bgp instance r1: router-id 1.1.1.1, asn 65000\n  \
+             peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4]\n  \
+             peer 192.0.2.1: peer-group pg1"
+        );
+    }
+
+    #[test]
+    fn render_transaction_at_peer_group_found() {
+        let mut snap = snapshot(false);
+        snap.config.bgp_instances[0].peer_groups = vec![peer_group("pg1")];
+        let rendered = render_transaction(
+            &snap,
+            &Path::BgpPeerGroup {
+                instance: "r1".to_string(),
+                group: "pg1".to_string(),
+            },
+        );
+        assert_eq!(
+            rendered,
+            "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4]"
+        );
+    }
+
+    #[test]
+    fn render_transaction_at_peer_group_not_found() {
+        let rendered = render_transaction(
+            &snapshot(false),
+            &Path::BgpPeerGroup {
+                instance: "r1".to_string(),
+                group: "pg-missing".to_string(),
+            },
+        );
+        assert_eq!(
+            rendered,
+            "peer-group 'pg-missing' not found in bgp instance 'r1'"
+        );
+    }
+
+    #[test]
+    fn render_diff_nested_subsection_indents_one_level_deeper() {
+        let diff = ConfigDiff {
+            hostname: None,
+            bgp_instances: vec![SectionDiff {
+                header: "bgp instance r1".to_string(),
+                status: DiffStatus::Modified,
+                fields: vec![],
+                subsections: vec![SectionDiff {
+                    header: "peer-group pg1".to_string(),
+                    status: DiffStatus::Modified,
+                    fields: vec![field("remote-as", Some("65001"), Some("65002"))],
+                    subsections: vec![],
+                }],
+            }],
+        };
+        assert_eq!(
+            render_diff(&diff, false),
+            "  bgp instance r1:\n    peer-group pg1:\n-     remote-as: 65001\n+     remote-as: 65002"
+        );
     }
 }

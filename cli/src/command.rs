@@ -1,6 +1,6 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
-use nos_proto::TransactionBase;
+use nos_proto::{AddressFamily, TransactionBase};
 
 /// A single field edit targeting a BGP instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,9 +9,28 @@ pub enum BgpInstanceField {
     RouterId(Ipv4Addr),
 }
 
+/// A single field edit targeting a BGP peer-group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BgpPeerGroupField {
+    RemoteAs(u32),
+    SourceAddress(IpAddr),
+    AddressFamily(AddressFamily),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditTarget {
-    BgpInstance { name: String },
+    BgpInstance {
+        name: String,
+    },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    BgpPeerGroup {
+        instance: String,
+        name: String,
+    },
+    /// Context-relative — only valid while navigated into a BGP instance.
+    PeerGroupRelative {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +45,28 @@ pub enum SetTarget {
     /// A top-level scalar with no navigation context — works from anywhere
     /// in configuration mode, regardless of the current path.
     Hostname(String),
+    /// Fully-qualified peer-group field edit — works from anywhere in
+    /// configuration mode.
+    BgpPeerGroup {
+        instance: String,
+        group: String,
+        field: BgpPeerGroupField,
+    },
+    /// Context-relative — only valid while navigated into a peer-group.
+    PeerGroupRelative { field: BgpPeerGroupField },
+    /// Fully-qualified peer upsert — works from anywhere in configuration
+    /// mode.
+    BgpPeer {
+        instance: String,
+        remote_address: IpAddr,
+        peer_group: String,
+    },
+    /// Context-relative — only valid while navigated into a BGP instance
+    /// (peers are siblings of peer-groups, not reachable from inside one).
+    PeerRelative {
+        remote_address: IpAddr,
+        peer_group: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +76,26 @@ pub enum DeleteTarget {
     BgpInstance {
         name: String,
     },
+    BgpPeerGroup {
+        instance: String,
+        name: String,
+    },
+    PeerGroupRelative {
+        name: String,
+    },
+    BgpPeer {
+        instance: String,
+        remote_address: IpAddr,
+    },
+    PeerRelative {
+        remote_address: IpAddr,
+    },
+    /// `delete source-address` — only valid while navigated into a
+    /// peer-group.
+    SourceAddress,
+    /// `delete address-family ipv4|ipv6` — only valid while navigated into
+    /// a peer-group.
+    AddressFamily(AddressFamily),
 }
 
 /// A parsed REPL input line.
@@ -96,6 +157,15 @@ impl Command {
             ["edit", "bgp", "instance", name] => Command::Edit(EditTarget::BgpInstance {
                 name: (*name).to_string(),
             }),
+            ["edit", "bgp", "instance", instance, "peer-group", group] => {
+                Command::Edit(EditTarget::BgpPeerGroup {
+                    instance: (*instance).to_string(),
+                    name: (*group).to_string(),
+                })
+            }
+            ["edit", "peer-group", group] => Command::Edit(EditTarget::PeerGroupRelative {
+                name: (*group).to_string(),
+            }),
             ["set", "bgp", "instance", name, "asn", n] => match n.parse::<u32>() {
                 Ok(asn) => Command::Set(SetTarget::BgpInstance {
                     name: (*name).to_string(),
@@ -123,10 +193,108 @@ impl Command {
                 Err(_) => Command::Unknown(trimmed.to_string()),
             },
             ["set", "hostname", name] => Command::Set(SetTarget::Hostname((*name).to_string())),
+            ["set", "bgp", "instance", instance, "peer-group", group, "remote-as", n] => {
+                match n.parse::<u32>() {
+                    Ok(remote_as) => Command::Set(SetTarget::BgpPeerGroup {
+                        instance: (*instance).to_string(),
+                        group: (*group).to_string(),
+                        field: BgpPeerGroupField::RemoteAs(remote_as),
+                    }),
+                    Err(_) => Command::Unknown(trimmed.to_string()),
+                }
+            }
+            ["set", "bgp", "instance", instance, "peer-group", group, "source-address", addr] => {
+                match addr.parse::<IpAddr>() {
+                    Ok(address) => Command::Set(SetTarget::BgpPeerGroup {
+                        instance: (*instance).to_string(),
+                        group: (*group).to_string(),
+                        field: BgpPeerGroupField::SourceAddress(address),
+                    }),
+                    Err(_) => Command::Unknown(trimmed.to_string()),
+                }
+            }
+            ["set", "bgp", "instance", instance, "peer-group", group, "address-family", "ipv4"] => {
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: (*instance).to_string(),
+                    group: (*group).to_string(),
+                    field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv4Unicast),
+                })
+            }
+            ["set", "bgp", "instance", instance, "peer-group", group, "address-family", "ipv6"] => {
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: (*instance).to_string(),
+                    group: (*group).to_string(),
+                    field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv6Unicast),
+                })
+            }
+            ["set", "remote-as", n] => match n.parse::<u32>() {
+                Ok(remote_as) => Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::RemoteAs(remote_as),
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["set", "source-address", addr] => match addr.parse::<IpAddr>() {
+                Ok(address) => Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::SourceAddress(address),
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["set", "address-family", "ipv4"] => Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv4Unicast),
+            }),
+            ["set", "address-family", "ipv6"] => Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv6Unicast),
+            }),
+            ["set", "bgp", "instance", instance, "peer", ip, "peer-group", group] => {
+                match ip.parse::<IpAddr>() {
+                    Ok(remote_address) => Command::Set(SetTarget::BgpPeer {
+                        instance: (*instance).to_string(),
+                        remote_address,
+                        peer_group: (*group).to_string(),
+                    }),
+                    Err(_) => Command::Unknown(trimmed.to_string()),
+                }
+            }
+            ["set", "peer", ip, "peer-group", group] => match ip.parse::<IpAddr>() {
+                Ok(remote_address) => Command::Set(SetTarget::PeerRelative {
+                    remote_address,
+                    peer_group: (*group).to_string(),
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
             ["delete"] => Command::Delete(DeleteTarget::Current),
             ["delete", "bgp", "instance", name] => Command::Delete(DeleteTarget::BgpInstance {
                 name: (*name).to_string(),
             }),
+            ["delete", "bgp", "instance", instance, "peer-group", group] => {
+                Command::Delete(DeleteTarget::BgpPeerGroup {
+                    instance: (*instance).to_string(),
+                    name: (*group).to_string(),
+                })
+            }
+            ["delete", "peer-group", group] => Command::Delete(DeleteTarget::PeerGroupRelative {
+                name: (*group).to_string(),
+            }),
+            ["delete", "bgp", "instance", instance, "peer", ip] => match ip.parse::<IpAddr>() {
+                Ok(remote_address) => Command::Delete(DeleteTarget::BgpPeer {
+                    instance: (*instance).to_string(),
+                    remote_address,
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["delete", "peer", ip] => match ip.parse::<IpAddr>() {
+                Ok(remote_address) => {
+                    Command::Delete(DeleteTarget::PeerRelative { remote_address })
+                }
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["delete", "source-address"] => Command::Delete(DeleteTarget::SourceAddress),
+            ["delete", "address-family", "ipv4"] => {
+                Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv4Unicast))
+            }
+            ["delete", "address-family", "ipv6"] => {
+                Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv6Unicast))
+            }
             _ => Command::Unknown(trimmed.to_string()),
         }
     }
@@ -333,6 +501,150 @@ mod tests {
             Command::Delete(DeleteTarget::BgpInstance {
                 name: "R1".to_string()
             })
+        );
+    }
+
+    #[test]
+    fn edit_bgp_peer_group_qualified() {
+        assert_eq!(
+            Command::parse("edit bgp instance R1 peer-group PG1"),
+            Command::Edit(EditTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                name: "PG1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn edit_peer_group_relative() {
+        assert_eq!(
+            Command::parse("edit peer-group PG1"),
+            Command::Edit(EditTarget::PeerGroupRelative {
+                name: "PG1".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn set_bgp_peer_group_remote_as_qualified() {
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 remote-as 65001"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::RemoteAs(65001),
+            })
+        );
+    }
+
+    #[test]
+    fn set_bgp_peer_group_source_address_qualified() {
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 source-address 2001:db8::1"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::SourceAddress("2001:db8::1".parse::<IpAddr>().unwrap()),
+            })
+        );
+    }
+
+    #[test]
+    fn set_bgp_peer_group_address_family_qualified() {
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 address-family ipv4"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv4Unicast),
+            })
+        );
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 address-family ipv6"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv6Unicast),
+            })
+        );
+    }
+
+    #[test]
+    fn set_remote_as_relative() {
+        assert_eq!(
+            Command::parse("set remote-as 65001"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::RemoteAs(65001),
+            })
+        );
+    }
+
+    #[test]
+    fn set_peer_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer 192.0.2.1 peer-group PG1"),
+            Command::Set(SetTarget::BgpPeer {
+                instance: "R1".to_string(),
+                remote_address: "192.0.2.1".parse::<IpAddr>().unwrap(),
+                peer_group: "PG1".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("set peer 192.0.2.1 peer-group PG1"),
+            Command::Set(SetTarget::PeerRelative {
+                remote_address: "192.0.2.1".parse::<IpAddr>().unwrap(),
+                peer_group: "PG1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_bgp_peer_group_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("delete bgp instance R1 peer-group PG1"),
+            Command::Delete(DeleteTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                name: "PG1".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete peer-group PG1"),
+            Command::Delete(DeleteTarget::PeerGroupRelative {
+                name: "PG1".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn delete_peer_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("delete bgp instance R1 peer 192.0.2.1"),
+            Command::Delete(DeleteTarget::BgpPeer {
+                instance: "R1".to_string(),
+                remote_address: "192.0.2.1".parse::<IpAddr>().unwrap(),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete peer 192.0.2.1"),
+            Command::Delete(DeleteTarget::PeerRelative {
+                remote_address: "192.0.2.1".parse::<IpAddr>().unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_source_address_and_address_family() {
+        assert_eq!(
+            Command::parse("delete source-address"),
+            Command::Delete(DeleteTarget::SourceAddress)
+        );
+        assert_eq!(
+            Command::parse("delete address-family ipv4"),
+            Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv4Unicast))
+        );
+        assert_eq!(
+            Command::parse("delete address-family ipv6"),
+            Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv6Unicast))
         );
     }
 }

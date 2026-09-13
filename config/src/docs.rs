@@ -85,6 +85,62 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              Unlike BGP instance fields, hostname has no navigation context — it's a single \
              top-level scalar.",
         ),
+        Topic::EnsureBgpPeerGroup => (
+            "Create a peer-group in a BGP instance if it doesn't already exist.",
+            "Adds a new peer-group with the given name to the named BGP instance's \
+             peer-groups in the transaction's in-progress config, if none exists with that \
+             name yet; if one already exists, this is a no-op. Does not itself set any \
+             fields on the peer-group.",
+        ),
+        Topic::SetBgpPeerGroupRemoteAs => (
+            "Set a peer-group's remote autonomous system number.",
+            "Sets the remote-as field on a peer-group. Must be a valid, non-reserved 32-bit \
+             ASN; validity is checked at commit time, not when the edit is applied.",
+        ),
+        Topic::SetBgpPeerGroupSourceAddress => (
+            "Set a peer-group's transport source address.",
+            "Sets the source-address field on a peer-group — the local address BGP uses to \
+             establish sessions in this group. This is independent of which address \
+             families the group exchanges: an IPv6 source-address may still carry IPv4 \
+             unicast routes over the session (RFC 8950 extended next-hop encoding), so \
+             source-address and address-family are never cross-validated against each \
+             other.",
+        ),
+        Topic::ClearBgpPeerGroupSourceAddress => (
+            "Clear a peer-group's transport source address.",
+            "Unsets the source-address field on a peer-group, reverting to no explicit \
+             transport source override.",
+        ),
+        Topic::AddBgpPeerGroupAddressFamily => (
+            "Add an address family to a peer-group.",
+            "Adds one AFI/SAFI (ipv4 or ipv6 unicast) to the set exchanged over this \
+             peer-group's session. A no-op if it's already present. At least one address \
+             family is required for the peer-group to be valid; checked at commit time.",
+        ),
+        Topic::RemoveBgpPeerGroupAddressFamily => (
+            "Remove an address family from a peer-group.",
+            "Removes one AFI/SAFI from the set exchanged over this peer-group's session. A \
+             no-op if it's already absent. Removing the last remaining address family \
+             leaves the peer-group invalid until another is added; checked at commit time.",
+        ),
+        Topic::DeleteBgpPeerGroup => (
+            "Delete a peer-group from a BGP instance.",
+            "Removes a peer-group and all of its fields from the named BGP instance in the \
+             transaction's in-progress config. Any peer still referencing this peer-group \
+             becomes invalid — checked at commit time, not when the peer-group is deleted.",
+        ),
+        Topic::SetBgpPeer => (
+            "Associate a remote address with a peer-group.",
+            "Creates the association between a remote address and a peer-group within a \
+             BGP instance if it doesn't exist yet, or repoints it to a different peer-group \
+             if it does. The referenced peer-group must exist for the config to be valid; \
+             checked at commit time.",
+        ),
+        Topic::DeleteBgpPeer => (
+            "Remove a peer's association to its peer-group.",
+            "Deletes the remote-address-to-peer-group association from the named BGP \
+             instance in the transaction's in-progress config.",
+        ),
     };
     CommandDoc {
         topic,
@@ -114,6 +170,15 @@ mod tests {
         Topic::SetBgpInstanceRouterId,
         Topic::DeleteBgpInstance,
         Topic::SetHostname,
+        Topic::EnsureBgpPeerGroup,
+        Topic::SetBgpPeerGroupRemoteAs,
+        Topic::SetBgpPeerGroupSourceAddress,
+        Topic::ClearBgpPeerGroupSourceAddress,
+        Topic::AddBgpPeerGroupAddressFamily,
+        Topic::RemoveBgpPeerGroupAddressFamily,
+        Topic::DeleteBgpPeerGroup,
+        Topic::SetBgpPeer,
+        Topic::DeleteBgpPeer,
     ];
 
     #[test]
