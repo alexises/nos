@@ -4,7 +4,7 @@ use anyhow::Context;
 use clap::Parser;
 use nos_bgp::log_client::ForwardingLayer;
 use nos_bgp::session::SessionManager;
-use nos_bgp::{reconcile, watchdog_client};
+use nos_bgp::{reconcile, server, watchdog_client};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
@@ -24,6 +24,13 @@ struct Args {
     /// current address rather than assuming a hardcoded default.
     #[arg(long, default_value = DEFAULT_WATCHDOG_SOCKET)]
     watchdog_socket: PathBuf,
+
+    /// Unix socket to listen on for session-summary queries (e.g. from `nos
+    /// show bgp brief`). Defaults to a path derived from `--instance` for
+    /// standalone/dev runs; nos-watchdog always passes this explicitly for
+    /// supervised instances.
+    #[arg(long)]
+    listen_socket: Option<PathBuf>,
 
     /// Unix socket to forward this process's log events to. Passed directly
     /// by nos-watchdog to every process it spawns (see root `CLAUDE.md`'s
@@ -57,14 +64,23 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
+    let listen_socket = args
+        .listen_socket
+        .unwrap_or_else(|| PathBuf::from(format!("/run/nos/bgp-{}.sock", args.instance)));
+
     let sessions = SessionManager::new(args.instance.clone());
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),
         args.instance.clone(),
-        sessions,
+        sessions.clone(),
         shutdown_rx,
     ));
+    let server_task = server::start(&listen_socket, args.instance.clone(), sessions)
+        .inspect_err(|e| {
+            tracing::error!(instance = %args.instance, error = %e, "failed to start BGP IPC server");
+        })
+        .context("starting BGP IPC server")?;
 
     wait_for_shutdown_signal()
         .await
@@ -75,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = reconcile_task.await {
         warn!(instance = %args.instance, error = %e, "reconcile task ended abnormally");
     }
+    server_task.abort();
 
     info!(instance = %args.instance, "shutting down");
     Ok(())

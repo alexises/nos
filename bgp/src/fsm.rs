@@ -22,38 +22,33 @@ use tokio::time::Instant;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, info};
 
+use nos_proto::HOLD_TIME_FLOOR;
+
 use crate::collision::{self, PeerSlot};
 use crate::message::{
     self, BgpCodec, BgpMessage, CeaseSubcode, ErrorCode, MessageHeaderSubcode, NotificationMessage,
     OpenMessage, OpenMessageSubcode, WireError,
 };
 use crate::session::LocalIdentity;
+use crate::status::{PeerState, PeerStatus};
 
 /// RFC 4271's own suggested `ConnectRetryTimer` default. Replaces
 /// `session.rs`'s previous placeholder (30s), which was explicitly
-/// documented as standing in "until the BGP FSM exists."
+/// documented as standing in "until the BGP FSM exists." Used by
+/// `reconcile::resync` as the fallback when a peer-group leaves
+/// `connect_retry_time` unset.
 pub const CONNECT_RETRY_TIME: Duration = Duration::from_secs(120);
-
-/// This instance's own proposed hold time — no per-peer-group config field
-/// exists yet (a deliberate scope decision), so one hardcoded value serves
-/// both as OPEN's own `hold_time` field and as the OpenSent-wait timer (RFC
-/// 4271 separately suggests a "large" ~4-minute wait timer for that purpose,
-/// deliberately not introduced as a second constant here — 90s is already
-/// ample for a TCP-connected peer to send its OPEN). Sits at the fast end of
-/// common router defaults (many ship 90-180s).
-const HOLD_TIME_DEFAULT: u16 = 90;
-
-/// RFC 4271 §6.2: a proposed hold time of 1 or 2 seconds is invalid — it
-/// must be exactly 0 (disables the hold timer and keepalives entirely) or
-/// >= 3.
-const HOLD_TIME_FLOOR: u16 = 3;
 
 /// The peer identity this connection is being validated against —
 /// `expected_remote_as` is compared against the real ASN extracted from the
-/// peer's OPEN (see `message::effective_remote_asn`).
+/// peer's OPEN (see `message::effective_remote_asn`). `local_hold_time`/
+/// `keepalive_override` come from the peer's `BgpPeerGroup` (already
+/// defaulted by `reconcile::resync` — see `nos_proto::HOLD_TIME_DEFAULT`).
 pub struct PeerContext {
     pub remote_address: IpAddr,
     pub expected_remote_as: u32,
+    pub local_hold_time: u16,
+    pub keepalive_override: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +94,7 @@ enum Action {
 struct NegotiationContext {
     expected_remote_as: u32,
     local_hold_time: u16,
+    keepalive_override: Option<u16>,
 }
 
 /// Pure state transition core — the unit-test surface for this module.
@@ -176,7 +172,20 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
     }
 
     let negotiated_hold = ctx.local_hold_time.min(open.hold_time);
-    let keepalive = negotiated_hold / 3;
+    // `keepalive_override` is only validated at commit time against the
+    // locally-configured hold-time, not the negotiated one (negotiation
+    // takes `min()` with a peer-proposed value the validator never sees) —
+    // fall back to the RFC-suggested ratio whenever the override wouldn't
+    // fit under what was actually negotiated. A negotiated hold time of 0
+    // unconditionally disables keepalives, regardless of any override.
+    let keepalive = if negotiated_hold == 0 {
+        0
+    } else {
+        match ctx.keepalive_override {
+            Some(k) if k < negotiated_hold => k,
+            _ => negotiated_hold / 3,
+        }
+    };
     let remote = RemoteInfo {
         asn: remote_asn,
         bgp_id: open.bgp_identifier,
@@ -240,21 +249,46 @@ pub async fn run(
 
     let ctx = NegotiationContext {
         expected_remote_as: peer.expected_remote_as,
-        local_hold_time: HOLD_TIME_DEFAULT,
+        local_hold_time: peer.local_hold_time,
+        keepalive_override: peer.keepalive_override,
     };
 
-    let open = message::build_open(local.asn, local.router_id, HOLD_TIME_DEFAULT);
+    let open = message::build_open(local.asn, local.router_id, peer.local_hold_time);
     if writer.send(BgpMessage::Open(open)).await.is_err() {
         return FsmOutcome::TcpError;
     }
 
     let mut state = State::OpenSent;
-    // Doubles, before negotiation, as the OpenSent-wait timer.
-    let mut hold_period = Some(Duration::from_secs(u64::from(HOLD_TIME_DEFAULT)));
+    // Doubles, before negotiation, as the OpenSent-wait timer. A configured
+    // `local_hold_time` of 0 disarms it entirely, same as a negotiated hold
+    // time of 0 does later via `Action::ArmHoldTimer`.
+    let mut hold_period = if peer.local_hold_time == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(u64::from(peer.local_hold_time)))
+    };
     let mut hold_deadline = hold_period.map(|p| Instant::now() + p);
     let mut keepalive_period: Option<Duration> = None;
     let mut keepalive_deadline: Option<Instant> = None;
+    let mut negotiated_hold_time: Option<u16> = None;
+    let mut negotiated_keepalive: Option<u16> = None;
     let cease = Arc::new(Notify::new());
+
+    // Guarded on `is_established` rather than written unconditionally: an
+    // inbound connection can arrive for a peer that's already `Established`
+    // via the other role (e.g. a flappy/misbehaving peer opening a second
+    // TCP session) — such a connection is always going to lose the
+    // collision at its first `on_open` below, and must never be allowed to
+    // transiently overwrite the genuinely-established session's reported
+    // status in the meantime.
+    if !slot.is_established().await {
+        slot.status.send_modify(|s| {
+            *s = PeerStatus {
+                state: PeerState::OpenSent,
+                ..PeerStatus::default()
+            }
+        });
+    }
 
     loop {
         let event = tokio::select! {
@@ -304,15 +338,28 @@ pub async fn run(
                 let decision = slot
                     .on_open(role, local.router_id, remote.bgp_id, cease.clone())
                     .await;
-                if let collision::Decision::Lose = decision {
-                    next_state = None;
-                    actions = vec![
-                        Action::SendNotification(
-                            ErrorCode::Cease as u8,
-                            CeaseSubcode::ConnectionCollisionResolution as u8,
-                        ),
-                        Action::Close,
-                    ];
+                match decision {
+                    collision::Decision::Lose => {
+                        next_state = None;
+                        actions = vec![
+                            Action::SendNotification(
+                                ErrorCode::Cease as u8,
+                                CeaseSubcode::ConnectionCollisionResolution as u8,
+                            ),
+                            Action::Close,
+                        ];
+                    }
+                    // `on_open` only returns `Proceed` when no other
+                    // connection for this peer is already `Established` (see
+                    // `collision::PeerSlot::on_open`), so this is safe to
+                    // write without an extra `is_established` race check.
+                    collision::Decision::Proceed => {
+                        slot.status.send_modify(|s| {
+                            s.state = PeerState::OpenConfirm;
+                            s.remote_asn = Some(remote.asn);
+                            s.remote_bgp_id = Some(remote.bgp_id);
+                        });
+                    }
                 }
             }
         }
@@ -336,16 +383,28 @@ pub async fn run(
                 Action::ArmHoldTimer(d) => {
                     hold_period = if d.is_zero() { None } else { Some(*d) };
                     hold_deadline = hold_period.map(|p| Instant::now() + p);
+                    // Always derived from a u16 (either the local config or
+                    // the peer's OPEN), so this never actually truncates.
+                    negotiated_hold_time = Some(u16::try_from(d.as_secs()).unwrap_or(u16::MAX));
                 }
                 Action::ArmKeepaliveTimer(d) => {
                     keepalive_period = if d.is_zero() { None } else { Some(*d) };
                     keepalive_deadline = keepalive_period.map(|p| Instant::now() + p);
+                    negotiated_keepalive = Some(u16::try_from(d.as_secs()).unwrap_or(u16::MAX));
                 }
                 Action::ReportEstablished {
                     remote_asn,
                     remote_bgp_id,
                 } => {
                     slot.mark_established(role).await;
+                    slot.status.send_modify(|s| {
+                        s.state = PeerState::Established;
+                        s.remote_asn = Some(*remote_asn);
+                        s.remote_bgp_id = Some(*remote_bgp_id);
+                        s.established_since = Some(Instant::now());
+                        s.negotiated_hold_time = negotiated_hold_time;
+                        s.negotiated_keepalive = negotiated_keepalive;
+                    });
                     info!(
                         peer = %peer.remote_address, remote_asn, remote_bgp_id = %remote_bgp_id,
                         role = ?role, "bgp session established"
@@ -408,6 +467,19 @@ mod tests {
         NegotiationContext {
             expected_remote_as,
             local_hold_time: 90,
+            keepalive_override: None,
+        }
+    }
+
+    fn ctx_with(
+        expected_remote_as: u32,
+        local_hold_time: u16,
+        keepalive_override: Option<u16>,
+    ) -> NegotiationContext {
+        NegotiationContext {
+            expected_remote_as,
+            local_hold_time,
+            keepalive_override,
         }
     }
 
@@ -597,5 +669,56 @@ mod tests {
         );
         assert_eq!(next, Some(State::Established(remote)));
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn non_default_local_hold_time_is_used_in_negotiation() {
+        // Peer proposes 90s but we only proposed 30s locally — negotiated
+        // hold must be the lower of the two.
+        let (_, actions) = step(
+            State::OpenSent,
+            Event::OpenReceived(valid_open(65002, 90)),
+            &ctx_with(65002, 30, None),
+        );
+        assert!(actions.contains(&Action::ArmHoldTimer(Duration::from_secs(30))));
+        assert!(actions.contains(&Action::ArmKeepaliveTimer(Duration::from_secs(10))));
+    }
+
+    #[test]
+    fn handle_open_respects_keepalive_override() {
+        let (_, actions) = step(
+            State::OpenSent,
+            Event::OpenReceived(valid_open(65002, 90)),
+            &ctx_with(65002, 90, Some(5)),
+        );
+        assert!(actions.contains(&Action::ArmKeepaliveTimer(Duration::from_secs(5))));
+    }
+
+    #[test]
+    fn handle_open_falls_back_to_third_when_override_exceeds_negotiated_hold() {
+        // Override 10 is valid against the locally-configured hold-time of
+        // 90, but the peer only proposes 6s — negotiated_hold ends up
+        // smaller than the override, which commit-time validation can't see
+        // in advance, so the runtime must fall back to negotiated_hold / 3.
+        let (_, actions) = step(
+            State::OpenSent,
+            Event::OpenReceived(valid_open(65002, 6)),
+            &ctx_with(65002, 90, Some(10)),
+        );
+        // negotiated_hold = min(90, 6) = 6; override (10) >= 6, so falls
+        // back to negotiated_hold / 3 = 2.
+        assert!(actions.contains(&Action::ArmHoldTimer(Duration::from_secs(6))));
+        assert!(actions.contains(&Action::ArmKeepaliveTimer(Duration::from_secs(2))));
+    }
+
+    #[test]
+    fn handle_open_negotiated_hold_zero_forces_keepalive_zero_even_with_override() {
+        let (_, actions) = step(
+            State::OpenSent,
+            Event::OpenReceived(valid_open(65002, 0)),
+            &ctx_with(65002, 0, Some(5)),
+        );
+        assert!(actions.contains(&Action::ArmHoldTimer(Duration::ZERO)));
+        assert!(actions.contains(&Action::ArmKeepaliveTimer(Duration::ZERO)));
     }
 }

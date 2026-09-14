@@ -73,6 +73,9 @@ mod tests {
             remote_as: 65001,
             source_address: None,
             address_families: vec![AddressFamily::Ipv4Unicast],
+            hold_time: None,
+            keepalive_interval: None,
+            connect_retry_time: None,
         }
     }
 

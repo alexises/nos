@@ -55,6 +55,21 @@ fn address_families_str(pg: &BgpPeerGroup) -> String {
     }
 }
 
+fn hold_time_str(pg: &BgpPeerGroup) -> String {
+    pg.hold_time
+        .map_or_else(|| "default (90s)".to_string(), |h| h.to_string())
+}
+
+fn keepalive_interval_str(pg: &BgpPeerGroup) -> String {
+    pg.keepalive_interval
+        .map_or_else(|| "default (hold-time / 3)".to_string(), |k| k.to_string())
+}
+
+fn connect_retry_time_str(pg: &BgpPeerGroup) -> String {
+    pg.connect_retry_time
+        .map_or_else(|| "default (120s)".to_string(), |c| c.to_string())
+}
+
 fn changed_fields(base: &BgpPeerGroup, candidate: &BgpPeerGroup) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     if base.remote_as != candidate.remote_as {
@@ -76,6 +91,27 @@ fn changed_fields(base: &BgpPeerGroup, candidate: &BgpPeerGroup) -> Vec<FieldDif
             label: "address-family".to_string(),
             old: Some(address_families_str(base)),
             new: Some(address_families_str(candidate)),
+        });
+    }
+    if base.hold_time != candidate.hold_time {
+        fields.push(FieldDiff {
+            label: "hold-time".to_string(),
+            old: Some(hold_time_str(base)),
+            new: Some(hold_time_str(candidate)),
+        });
+    }
+    if base.keepalive_interval != candidate.keepalive_interval {
+        fields.push(FieldDiff {
+            label: "keepalive-interval".to_string(),
+            old: Some(keepalive_interval_str(base)),
+            new: Some(keepalive_interval_str(candidate)),
+        });
+    }
+    if base.connect_retry_time != candidate.connect_retry_time {
+        fields.push(FieldDiff {
+            label: "connect-retry-time".to_string(),
+            old: Some(connect_retry_time_str(base)),
+            new: Some(connect_retry_time_str(candidate)),
         });
     }
     fields
@@ -100,6 +136,21 @@ fn removed_section(pg: &BgpPeerGroup) -> SectionDiff {
             FieldDiff {
                 label: "address-family".to_string(),
                 old: Some(address_families_str(pg)),
+                new: None,
+            },
+            FieldDiff {
+                label: "hold-time".to_string(),
+                old: Some(hold_time_str(pg)),
+                new: None,
+            },
+            FieldDiff {
+                label: "keepalive-interval".to_string(),
+                old: Some(keepalive_interval_str(pg)),
+                new: None,
+            },
+            FieldDiff {
+                label: "connect-retry-time".to_string(),
+                old: Some(connect_retry_time_str(pg)),
                 new: None,
             },
         ],
@@ -128,6 +179,21 @@ fn added_section(pg: &BgpPeerGroup) -> SectionDiff {
                 old: None,
                 new: Some(address_families_str(pg)),
             },
+            FieldDiff {
+                label: "hold-time".to_string(),
+                old: None,
+                new: Some(hold_time_str(pg)),
+            },
+            FieldDiff {
+                label: "keepalive-interval".to_string(),
+                old: None,
+                new: Some(keepalive_interval_str(pg)),
+            },
+            FieldDiff {
+                label: "connect-retry-time".to_string(),
+                old: None,
+                new: Some(connect_retry_time_str(pg)),
+            },
         ],
         subsections: Vec::new(),
     }
@@ -145,6 +211,9 @@ mod tests {
             remote_as,
             source_address: None,
             address_families: vec![AddressFamily::Ipv4Unicast],
+            hold_time: None,
+            keepalive_interval: None,
+            connect_retry_time: None,
         }
     }
 

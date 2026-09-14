@@ -82,6 +82,18 @@ pub enum Topic {
     ClearInterfaceRoutingTable,
     /// `ConfigOp::Interface(InterfaceOp::Delete)`
     DeleteInterface,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetHoldTime)`
+    SetBgpPeerGroupHoldTime,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearHoldTime)`
+    ClearBgpPeerGroupHoldTime,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetKeepaliveInterval)`
+    SetBgpPeerGroupKeepaliveInterval,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearKeepaliveInterval)`
+    ClearBgpPeerGroupKeepaliveInterval,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetConnectRetryTime)`
+    SetBgpPeerGroupConnectRetryTime,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearConnectRetryTime)`
+    ClearBgpPeerGroupConnectRetryTime,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

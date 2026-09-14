@@ -1,3 +1,4 @@
+pub mod bgp_client;
 pub mod client;
 pub mod command;
 pub mod completer;

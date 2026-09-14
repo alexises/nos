@@ -4,7 +4,7 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 
 ## What lives here vs nos-proto / nos-config
 
-`nos-cli` depends only on `nos-proto` for wire types (`Config`, `Request`, `Event`, `IpcCodec`, `CommandDoc`, `Topic`, `ServiceRef`, `WatchdogRequest`/`WatchdogEvent`, `RibRequest`/`RibEvent`, `InterfaceRequest`/`InterfaceEvent`, `LogRequest`/`LogEvent`) — it does **not** depend on `nos-config` internals, matching the rule in the root `CLAUDE.md` that client components never depend on the config daemon directly. It dials each daemon's Unix socket the same way any future component client would.
+`nos-cli` depends only on `nos-proto` for wire types (`Config`, `Request`, `Event`, `IpcCodec`, `CommandDoc`, `Topic`, `ServiceRef`, `WatchdogRequest`/`WatchdogEvent`, `RibRequest`/`RibEvent`, `InterfaceRequest`/`InterfaceEvent`, `LogRequest`/`LogEvent`, `BgpRequest`/`BgpEvent`) — it does **not** depend on `nos-config` internals, matching the rule in the root `CLAUDE.md` that client components never depend on the config daemon directly. It dials each daemon's Unix socket the same way any future component client would.
 
 ## Modules
 
@@ -21,7 +21,8 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `rib_client.rs` | One-shot IPC calls to a resolved `nos-ribd` instance: `get_routes` (`RibRequest::GetRoutes`), `lookup` (`RibRequest::Lookup`) |
 | `interface_client.rs` | One-shot IPC calls to the resolved `nos-interfaced` instance: `get_interfaces` (`InterfaceRequest::GetInterfaces`), `get_interface` (`InterfaceRequest::GetInterface`) |
 | `log_client.rs` | IPC calls to the resolved `nos-logd` instance: `get_logs` (one-shot `LogRequest::GetLogs`) and `tail` (long-lived, like `client::subscribe` — sends `LogRequest::Tail` and returns the reader for the caller to loop on) |
-| `format.rs` | `render_config`, `render_bgp_instance`, `render_routing_table`, `render_static_routing_instance`, `render_interface`, `render_transaction`, `render_diff`, `render_prefix_routes`, `render_interface_statuses`, `render_log_entries`/`render_log_entry` — human-readable rendering (`Config`/`BgpInstance` only derive `Debug`, no `Display`). `render_diff` is also the one place that emits ANSI color/highlight codes, hand-rolled rather than via a color crate. `render_log_entry` is the one place `chrono` is used, to format `LogEntry.timestamp_ms` as RFC 3339 |
+| `bgp_client.rs` | One-shot IPC call to a resolved `nos-bgpd` instance: `get_summary` (`BgpRequest::GetSummary`) |
+| `format.rs` | `render_config`, `render_bgp_instance`, `render_routing_table`, `render_static_routing_instance`, `render_interface`, `render_transaction`, `render_diff`, `render_prefix_routes`, `render_interface_statuses`, `render_log_entries`/`render_log_entry`, `render_bgp_summary` — human-readable rendering (`Config`/`BgpInstance` only derive `Debug`, no `Display`). `render_diff` is also the one place that emits ANSI color/highlight codes, hand-rolled rather than via a color crate. `render_log_entry` is the one place `chrono` is used, to format `LogEntry.timestamp_ms` as RFC 3339 |
 
 ## Commands
 
@@ -49,6 +50,7 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `show interface <name>` | Same resolution, then `InterfaceRequest::GetInterface { name }`, or "not found" if unconfigured (works in any mode) |
 | `show log [<source>]` | Resolves `nos-logd`'s single instance via the watchdog broker, then `LogRequest::GetLogs` — the current buffer, optionally filtered to entries whose source exactly matches `<source>` (works in any mode) |
 | `show log [<source>] --follow` | Same resolution, then `LogRequest::Tail` — prints the current buffer, then streams new matching entries live until Ctrl-C or the connection is lost (works in any mode) |
+| `show bgp brief` | Fetches the running config for the list of `BgpInstance`s, resolves each one's `nos-bgpd` via the watchdog broker, then `BgpRequest::GetSummary` — each peer's FSM state, remote AS, uptime, and negotiated hold-time; an instance whose `nos-bgpd` isn't running is reported individually rather than aborting the command (works in any mode) |
 | `edit interface <name>` | Creates the interface in the transaction if missing, then navigates into it |
 | `set address <cidr>` / `set interface <name> address <cidr>` | Adds an IP address to the interface's address list (relative / fully-qualified) |
 | `delete address <cidr>` / `delete interface <name> address <cidr>` | Removes an IP address from the interface's address list (relative / fully-qualified) |

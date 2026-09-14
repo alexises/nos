@@ -50,6 +50,33 @@ pub enum BgpPeerGroupOp {
         instance: String,
         name: String,
     },
+    SetHoldTime {
+        instance: String,
+        name: String,
+        hold_time: u16,
+    },
+    ClearHoldTime {
+        instance: String,
+        name: String,
+    },
+    SetKeepaliveInterval {
+        instance: String,
+        name: String,
+        keepalive_interval: u16,
+    },
+    ClearKeepaliveInterval {
+        instance: String,
+        name: String,
+    },
+    SetConnectRetryTime {
+        instance: String,
+        name: String,
+        connect_retry_time: u16,
+    },
+    ClearConnectRetryTime {
+        instance: String,
+        name: String,
+    },
 }
 
 impl BgpPeerGroupOp {
@@ -63,6 +90,9 @@ impl BgpPeerGroupOp {
                         remote_as: 0,
                         source_address: None,
                         address_families: Vec::new(),
+                        hold_time: None,
+                        keepalive_interval: None,
+                        connect_retry_time: None,
                     });
                 }
                 Ok(())
@@ -112,6 +142,44 @@ impl BgpPeerGroupOp {
                 }
                 Ok(())
             }
+            BgpPeerGroupOp::SetHoldTime {
+                instance,
+                name,
+                hold_time,
+            } => {
+                find_group_mut(config, instance, name)?.hold_time = Some(*hold_time);
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearHoldTime { instance, name } => {
+                find_group_mut(config, instance, name)?.hold_time = None;
+                Ok(())
+            }
+            BgpPeerGroupOp::SetKeepaliveInterval {
+                instance,
+                name,
+                keepalive_interval,
+            } => {
+                find_group_mut(config, instance, name)?.keepalive_interval =
+                    Some(*keepalive_interval);
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearKeepaliveInterval { instance, name } => {
+                find_group_mut(config, instance, name)?.keepalive_interval = None;
+                Ok(())
+            }
+            BgpPeerGroupOp::SetConnectRetryTime {
+                instance,
+                name,
+                connect_retry_time,
+            } => {
+                find_group_mut(config, instance, name)?.connect_retry_time =
+                    Some(*connect_retry_time);
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearConnectRetryTime { instance, name } => {
+                find_group_mut(config, instance, name)?.connect_retry_time = None;
+                Ok(())
+            }
         }
     }
 }
@@ -156,6 +224,9 @@ mod tests {
             remote_as,
             source_address: None,
             address_families: vec![],
+            hold_time: None,
+            keepalive_interval: None,
+            connect_retry_time: None,
         }
     }
 
@@ -180,6 +251,9 @@ mod tests {
         assert_eq!(inst.peer_groups[0].remote_as, 0);
         assert_eq!(inst.peer_groups[0].source_address, None);
         assert!(inst.peer_groups[0].address_families.is_empty());
+        assert_eq!(inst.peer_groups[0].hold_time, None);
+        assert_eq!(inst.peer_groups[0].keepalive_interval, None);
+        assert_eq!(inst.peer_groups[0].connect_retry_time, None);
     }
 
     #[test]
@@ -258,6 +332,75 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].peer_groups[0].source_address, None);
+    }
+
+    #[test]
+    fn set_and_clear_hold_time() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetHoldTime {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            hold_time: 30,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].hold_time, Some(30));
+
+        BgpPeerGroupOp::ClearHoldTime {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].hold_time, None);
+    }
+
+    #[test]
+    fn set_and_clear_keepalive_interval() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetKeepaliveInterval {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            keepalive_interval: 10,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].keepalive_interval,
+            Some(10)
+        );
+
+        BgpPeerGroupOp::ClearKeepaliveInterval {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].keepalive_interval, None);
+    }
+
+    #[test]
+    fn set_and_clear_connect_retry_time() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetConnectRetryTime {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            connect_retry_time: 45,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].connect_retry_time,
+            Some(45)
+        );
+
+        BgpPeerGroupOp::ClearConnectRetryTime {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].connect_retry_time, None);
     }
 
     #[test]

@@ -7,12 +7,14 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 /// Cheap-`Clone` handle (like `nos-config`'s `ConfigStore`) over the live
-/// mapping from routing-table name to its `nos-ribd` instance's IPC socket.
-/// Updated by `routing_tables::manage` as instances are spawned/stopped, and
-/// read by `broker::start` to answer `ResolveEndpoint` requests.
+/// mapping from routing-table/BGP-instance name to its `nos-ribd`/`nos-bgpd`
+/// instance's IPC socket. Updated by `routing_tables::manage`/
+/// `bgp_instances::manage` as instances are spawned/stopped, and read by
+/// `broker::start` to answer `ResolveEndpoint` requests.
 #[derive(Clone, Default)]
 pub struct EndpointRegistry {
     rib_tables: Arc<RwLock<HashMap<String, PathBuf>>>,
+    bgp_instances: Arc<RwLock<HashMap<String, PathBuf>>>,
 }
 
 impl EndpointRegistry {
@@ -29,13 +31,27 @@ impl EndpointRegistry {
         self.rib_tables.write().await.remove(name);
     }
 
+    pub async fn set_bgp_instance(&self, name: &str, socket: PathBuf) {
+        debug!(instance = %name, socket = %socket.display(), "registered bgp instance endpoint");
+        self.bgp_instances
+            .write()
+            .await
+            .insert(name.to_string(), socket);
+    }
+
+    pub async fn remove_bgp_instance(&self, name: &str) {
+        debug!(instance = %name, "removed bgp instance endpoint");
+        self.bgp_instances.write().await.remove(name);
+    }
+
     /// Resolves `service` to its current socket path, if known.
     /// `config_socket`/`interfaces_socket`/`log_socket` are always
     /// resolvable — the watchdog is told them directly via its own
     /// `--config-socket`/`--interfaced-listen-socket`/`--log-socket` args, so
     /// none needs to be tracked in the map (there's exactly one
     /// `nos-configd`, one `nos-interfaced`, and one `nos-logd`, unlike
-    /// `RibTable`, which is keyed by name because there can be many).
+    /// `RibTable`/`BgpInstance`, which are keyed by name because there can be
+    /// many).
     pub async fn resolve(
         &self,
         service: &ServiceRef,
@@ -48,6 +64,7 @@ impl EndpointRegistry {
             ServiceRef::RibTable(name) => self.rib_tables.read().await.get(name).cloned(),
             ServiceRef::Interfaces => Some(interfaces_socket.to_path_buf()),
             ServiceRef::Log => Some(log_socket.to_path_buf()),
+            ServiceRef::BgpInstance(name) => self.bgp_instances.read().await.get(name).cloned(),
         }
     }
 }
@@ -143,6 +160,40 @@ mod tests {
         );
 
         registry.remove_rib_table("rt1").await;
+        assert_eq!(
+            registry
+                .resolve(&service, config_socket, interfaces_socket, log_socket)
+                .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn bgp_instance_resolves_after_set_and_not_after_remove() {
+        let registry = EndpointRegistry::default();
+        let config_socket = Path::new(CONFIG_SOCKET);
+        let interfaces_socket = Path::new(INTERFACES_SOCKET);
+        let log_socket = Path::new(LOG_SOCKET);
+        let service = ServiceRef::BgpInstance("r1".to_string());
+
+        assert_eq!(
+            registry
+                .resolve(&service, config_socket, interfaces_socket, log_socket)
+                .await,
+            None
+        );
+
+        registry
+            .set_bgp_instance("r1", PathBuf::from("/run/nos/bgp-r1.sock"))
+            .await;
+        assert_eq!(
+            registry
+                .resolve(&service, config_socket, interfaces_socket, log_socket)
+                .await,
+            Some(PathBuf::from("/run/nos/bgp-r1.sock"))
+        );
+
+        registry.remove_bgp_instance("r1").await;
         assert_eq!(
             registry
                 .resolve(&service, config_socket, interfaces_socket, log_socket)

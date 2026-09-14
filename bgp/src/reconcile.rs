@@ -8,6 +8,7 @@ use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 use crate::config_client;
+use crate::fsm;
 use crate::rib_client;
 use crate::session::{LocalIdentity, ResolvedPeer, SessionManager, VrfRequirement};
 use crate::watchdog_client;
@@ -142,6 +143,14 @@ async fn resync(
                 remote_address: peer.remote_address,
                 source_address: group.source_address,
                 remote_as: group.remote_as,
+                peer_group: peer.peer_group.clone(),
+                hold_time: group.hold_time.unwrap_or(nos_proto::HOLD_TIME_DEFAULT),
+                keepalive_interval: group.keepalive_interval,
+                connect_retry_time: group
+                    .connect_retry_time
+                    .map_or(fsm::CONNECT_RETRY_TIME, |s| {
+                        Duration::from_secs(u64::from(s))
+                    }),
             })
         })
         .collect();

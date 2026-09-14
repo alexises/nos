@@ -75,6 +75,10 @@ pub enum Resolved {
         source: Option<String>,
         follow: bool,
     },
+    /// `show bgp brief` — data-plane, valid in any mode. Router-wide (no
+    /// instance argument): the caller iterates every `BgpInstance` in the
+    /// running config itself.
+    ShowBgpBrief,
     SaveRunningConfig,
     OpenTransaction {
         name: String,
@@ -100,6 +104,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowRoute { table, address } => Resolved::ShowRoute { table, address },
         Command::ShowInterface { name } => Resolved::ShowInterface { name },
         Command::ShowLog { source, follow } => Resolved::ShowLog { source, follow },
+        Command::ShowBgpBrief => Resolved::ShowBgpBrief,
         Command::Unknown(s) => {
             Resolved::Error(format!("unknown command: '{s}' (type 'help' for a list)"))
         }
@@ -597,6 +602,48 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
+        Command::Delete(DeleteTarget::HoldTime) => match path {
+            Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearHoldTime {
+                    instance: instance.clone(),
+                    name: group.clone(),
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+        },
+        Command::Delete(DeleteTarget::KeepaliveInterval) => match path {
+            Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearKeepaliveInterval {
+                    instance: instance.clone(),
+                    name: group.clone(),
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+        },
+        Command::Delete(DeleteTarget::ConnectRetryTime) => match path {
+            Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearConnectRetryTime {
+                    instance: instance.clone(),
+                    name: group.clone(),
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+        },
 
         // `top` always lands at the root, however deep the current path is.
         Command::Top => match path {
@@ -634,6 +681,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowRoute { .. }
         | Command::ShowInterface { .. }
         | Command::ShowLog { .. }
+        | Command::ShowBgpBrief
         | Command::Unknown(_)
         | Command::Exit
         | Command::Save => {
@@ -666,6 +714,25 @@ fn peer_group_set_op(instance: String, group: String, field: BgpPeerGroupField) 
             name: group,
             af,
         },
+        BgpPeerGroupField::HoldTime(hold_time) => BgpPeerGroupOp::SetHoldTime {
+            instance,
+            name: group,
+            hold_time,
+        },
+        BgpPeerGroupField::KeepaliveInterval(keepalive_interval) => {
+            BgpPeerGroupOp::SetKeepaliveInterval {
+                instance,
+                name: group,
+                keepalive_interval,
+            }
+        }
+        BgpPeerGroupField::ConnectRetryTime(connect_retry_time) => {
+            BgpPeerGroupOp::SetConnectRetryTime {
+                instance,
+                name: group,
+                connect_retry_time,
+            }
+        }
     })
 }
 
@@ -1138,6 +1205,110 @@ mod tests {
     }
 
     #[test]
+    fn set_peer_group_timer_fields_qualified_and_relative() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: "r1".to_string(),
+                    group: "pg1".to_string(),
+                    field: BgpPeerGroupField::HoldTime(30),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetHoldTime {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                    hold_time: 30,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::KeepaliveInterval(10),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetKeepaliveInterval {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                    keepalive_interval: 10,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::ConnectRetryTime(45),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetConnectRetryTime {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                    connect_retry_time: 45,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn delete_peer_group_timers_require_peer_group_context() {
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::BgpInstance("r1".to_string()), false),
+                Command::Delete(DeleteTarget::HoldTime)
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Delete(DeleteTarget::HoldTime)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearHoldTime {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Delete(DeleteTarget::KeepaliveInterval)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearKeepaliveInterval {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Delete(DeleteTarget::ConnectRetryTime)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearConnectRetryTime {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
     fn set_peer_qualified_and_relative() {
         let addr: std::net::IpAddr = "192.0.2.1".parse().unwrap();
         assert_eq!(
@@ -1590,6 +1761,18 @@ mod tests {
                 source: Some("nos-ribd[rt1]".to_string()),
                 follow: true,
             }
+        );
+    }
+
+    #[test]
+    fn show_bgp_brief_works_in_any_mode() {
+        assert_eq!(
+            resolve(&Mode::Operational, Command::ShowBgpBrief),
+            Resolved::ShowBgpBrief
+        );
+        assert_eq!(
+            resolve(&config_mode("t1", Path::Root, false), Command::ShowBgpBrief),
+            Resolved::ShowBgpBrief
         );
     }
 

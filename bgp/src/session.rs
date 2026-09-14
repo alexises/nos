@@ -2,14 +2,18 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
+use nos_proto::bgp::{BgpSessionState, PeerSummary};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::collision::{PeerSlot, Role};
 use crate::fsm::{self, PeerContext};
+use crate::status::{PeerState, PeerStatus};
 use crate::tcp;
 
 const BGP_PORT: u16 = 179;
@@ -42,12 +46,19 @@ pub struct LocalIdentity {
 
 /// A configured peer with the fields needed to open its TCP session and
 /// validate its OPEN message — resolved from a `BgpPeer` + its
-/// `BgpPeerGroup` (see `reconcile::resync`).
+/// `BgpPeerGroup` (see `reconcile::resync`). `hold_time`/`connect_retry_time`
+/// are already defaulted (`nos_proto::HOLD_TIME_DEFAULT`/`fsm::CONNECT_RETRY_TIME`)
+/// when the peer-group leaves them unset; `keepalive_interval` stays `None`
+/// through to `fsm::run`, which derives `negotiated_hold / 3` itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPeer {
     pub remote_address: IpAddr,
     pub source_address: Option<IpAddr>,
     pub remote_as: u32,
+    pub peer_group: String,
+    pub hold_time: u16,
+    pub keepalive_interval: Option<u16>,
+    pub connect_retry_time: Duration,
 }
 
 struct PeerTask {
@@ -105,6 +116,18 @@ impl SessionManager {
         }
         self.rebind_listeners(&vrf).await;
         self.reconcile_peers(desired).await;
+    }
+
+    /// Every currently-configured peer's current session summary, for
+    /// `server.rs`'s `BgpRequest::GetSummary` handler — backs `nos-cli`'s
+    /// `show bgp brief`.
+    pub async fn peer_summaries(&self) -> Vec<PeerSummary> {
+        self.peers
+            .read()
+            .await
+            .values()
+            .map(|slot| to_peer_summary(slot))
+            .collect()
     }
 
     /// Aborts every peer task and the listener, and clears all state.
@@ -201,6 +224,8 @@ impl SessionManager {
         let instance = self.instance.clone();
         let local = *self.local.borrow();
         let remote_as = slot.peer.remote_as;
+        let local_hold_time = slot.peer.hold_time;
+        let keepalive_override = slot.peer.keepalive_interval;
         tokio::spawn(async move {
             let outcome = fsm::run(
                 stream,
@@ -209,11 +234,14 @@ impl SessionManager {
                 PeerContext {
                     remote_address: remote,
                     expected_remote_as: remote_as,
+                    local_hold_time,
+                    keepalive_override,
                 },
                 slot.clone(),
             )
             .await;
             slot.clear(Role::Passive).await;
+            reset_status_if_not_established(&slot).await;
             info!(instance = %instance, peer = %remote, outcome = ?outcome, "inbound bgp session ended");
         });
     }
@@ -249,6 +277,42 @@ impl SessionManager {
             ));
             tasks.insert(peer.remote_address, PeerTask { peer, task });
         }
+    }
+}
+
+/// Snapshots one peer's current status into the wire-serializable
+/// `PeerSummary` — `PeerStatus.established_since` (a `tokio::time::Instant`)
+/// isn't itself meaningful to another process, so it's converted to an
+/// uptime measured right now instead.
+fn to_peer_summary(slot: &PeerSlot) -> PeerSummary {
+    let status = *slot.status_receiver().borrow();
+    PeerSummary {
+        remote_address: slot.peer.remote_address,
+        peer_group: slot.peer.peer_group.clone(),
+        remote_as: status.remote_asn,
+        remote_bgp_id: status.remote_bgp_id,
+        state: match status.state {
+            PeerState::Idle => BgpSessionState::Idle,
+            PeerState::OpenSent => BgpSessionState::OpenSent,
+            PeerState::OpenConfirm => BgpSessionState::OpenConfirm,
+            PeerState::Established => BgpSessionState::Established,
+        },
+        uptime_secs: status
+            .established_since
+            .map(|since| Instant::now().duration_since(since).as_secs()),
+        negotiated_hold_time: status.negotiated_hold_time,
+        negotiated_keepalive: status.negotiated_keepalive,
+    }
+}
+
+/// Resets a peer's reported status to `Idle` once one of its connections has
+/// ended — but only if no session remains `Established` via the other role
+/// (mirrors the guard in `fsm::run`'s own initial status write): a
+/// losing/redundant connection ending must never clobber the winning
+/// connection's already-reported `Established` status.
+async fn reset_status_if_not_established(slot: &PeerSlot) {
+    if !slot.is_established().await {
+        slot.status.send_modify(|s| *s = PeerStatus::default());
     }
 }
 
@@ -316,6 +380,8 @@ async fn active_connect_loop(
                             PeerContext {
                                 remote_address: slot.peer.remote_address,
                                 expected_remote_as: slot.peer.remote_as,
+                                local_hold_time: slot.peer.hold_time,
+                                keepalive_override: slot.peer.keepalive_interval,
                             },
                             slot.clone(),
                         )
@@ -331,10 +397,11 @@ async fn active_connect_loop(
                     ),
                 }
                 slot.clear(Role::Active).await;
+                reset_status_if_not_established(&slot).await;
             }
         }
         tokio::select! {
-            () = tokio::time::sleep(fsm::CONNECT_RETRY_TIME) => {}
+            () = tokio::time::sleep(slot.peer.connect_retry_time) => {}
             _ = vrf.changed() => {}
         }
     }
@@ -349,7 +416,28 @@ mod tests {
             remote_address: addr.parse().unwrap(),
             source_address: None,
             remote_as: 65000,
+            peer_group: "pg1".to_string(),
+            hold_time: 90,
+            keepalive_interval: None,
+            connect_retry_time: fsm::CONNECT_RETRY_TIME,
         }
+    }
+
+    #[test]
+    fn to_peer_summary_of_a_never_connected_peer_is_idle() {
+        let slot = PeerSlot::new(peer("10.0.0.1"));
+        let summary = to_peer_summary(&slot);
+        assert_eq!(
+            summary.remote_address,
+            "10.0.0.1".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(summary.peer_group, "pg1");
+        assert_eq!(summary.remote_as, None);
+        assert_eq!(summary.remote_bgp_id, None);
+        assert_eq!(summary.state, BgpSessionState::Idle);
+        assert_eq!(summary.uptime_secs, None);
+        assert_eq!(summary.negotiated_hold_time, None);
+        assert_eq!(summary.negotiated_keepalive, None);
     }
 
     #[test]

@@ -25,10 +25,11 @@ use std::cmp::Ordering;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{watch, Mutex, Notify};
 use tracing::warn;
 
 use crate::session::ResolvedPeer;
+use crate::status::{PeerStatus, StatusHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -71,17 +72,31 @@ pub enum Decision {
 
 /// One configured peer's collision-arbitration state, shared between its
 /// active-connect task and the shared passive listener's accept handler.
+/// Also the canonical owner of `status` (see `crate::status`) — since both
+/// an active and a passive connection can be in flight for the same peer at
+/// once but only one becomes canonical, `PeerSlot` (already the single
+/// per-peer arbitration point) is the natural place for `fsm::run` to report
+/// into, rather than either individual connection owning it.
 pub struct PeerSlot {
     pub peer: ResolvedPeer,
     state: Mutex<CollisionState>,
+    pub status: StatusHandle,
 }
 
 impl PeerSlot {
     pub fn new(peer: ResolvedPeer) -> Arc<Self> {
+        let (status, _) = watch::channel(PeerStatus::default());
         Arc::new(Self {
             peer,
             state: Mutex::new(CollisionState::default()),
+            status,
         })
+    }
+
+    /// A snapshot receiver for `session::SessionManager::peer_summaries` to
+    /// read the current status from.
+    pub fn status_receiver(&self) -> watch::Receiver<PeerStatus> {
+        self.status.subscribe()
     }
 
     /// Whether this peer already has an `Established` session, in either
@@ -281,6 +296,10 @@ mod tests {
             remote_address: "10.0.0.1".parse().unwrap(),
             source_address: None,
             remote_as: 65000,
+            peer_group: "pg1".to_string(),
+            hold_time: 90,
+            keepalive_interval: None,
+            connect_retry_time: std::time::Duration::from_secs(120),
         })
     }
 

@@ -1,8 +1,9 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
-    AddressFamily, BgpInstance, BgpPeer, BgpPeerGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
-    Interface, InterfaceStatus, LogEntry, LogLevel, PrefixRoutes, RouteSourceKind, RoutingTable,
-    SectionDiff, StaticRoute, StaticRoutingInstance, TransactionSnapshot,
+    AddressFamily, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState, Config, ConfigDiff,
+    DiffStatus, FieldDiff, Interface, InterfaceStatus, LogEntry, LogLevel, PeerSummary,
+    PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, StaticRoute, StaticRoutingInstance,
+    TransactionSnapshot,
 };
 
 use crate::session::Path;
@@ -22,8 +23,18 @@ pub fn render_bgp_peer_group(group: &BgpPeerGroup) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
+    let hold_time = group
+        .hold_time
+        .map_or_else(|| "default (90s)".to_string(), |h| h.to_string());
+    let keepalive_interval = group
+        .keepalive_interval
+        .map_or_else(|| "default (hold-time / 3)".to_string(), |k| k.to_string());
+    let connect_retry_time = group
+        .connect_retry_time
+        .map_or_else(|| "default (120s)".to_string(), |c| c.to_string());
     format!(
-        "peer-group {}: remote-as {}, source-address {source_address}, address-family [{address_families}]",
+        "peer-group {}: remote-as {}, source-address {source_address}, address-family [{address_families}], \
+         hold-time {hold_time}, keepalive-interval {keepalive_interval}, connect-retry-time {connect_retry_time}",
         group.name, group.remote_as
     )
 }
@@ -198,6 +209,51 @@ pub fn render_prefix_routes(entries: &[PrefixRoutes]) -> String {
                 render_route_source(candidate.source)
             ));
         }
+    }
+    lines.join("\n")
+}
+
+fn render_bgp_session_state(state: BgpSessionState) -> &'static str {
+    match state {
+        BgpSessionState::Idle => "Idle",
+        BgpSessionState::OpenSent => "OpenSent",
+        BgpSessionState::OpenConfirm => "OpenConfirm",
+        BgpSessionState::Established => "Established",
+    }
+}
+
+fn format_uptime(secs: u64) -> String {
+    format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
+/// Render one BGP instance's peer summaries, one line per peer — used for
+/// `show bgp brief`.
+pub fn render_bgp_summary(instance: &str, peers: &[PeerSummary]) -> String {
+    if peers.is_empty() {
+        return format!("bgp instance {instance}: no peers configured");
+    }
+    let mut lines = vec![format!("bgp instance {instance}:")];
+    for peer in peers {
+        let remote_as = peer
+            .remote_as
+            .map_or_else(|| "-".to_string(), |asn| asn.to_string());
+        let uptime = peer
+            .uptime_secs
+            .map_or_else(|| "-".to_string(), format_uptime);
+        let hold_time = peer
+            .negotiated_hold_time
+            .map_or_else(|| "-".to_string(), |h| h.to_string());
+        lines.push(format!(
+            "  {} AS {remote_as} peer-group {} {} uptime {uptime} hold-time {hold_time}",
+            peer.remote_address,
+            peer.peer_group,
+            render_bgp_session_state(peer.state),
+        ));
     }
     lines.join("\n")
 }
@@ -674,6 +730,9 @@ mod tests {
             remote_as: 65001,
             source_address: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
             address_families: vec![AddressFamily::Ipv4Unicast],
+            hold_time: None,
+            keepalive_interval: None,
+            connect_retry_time: None,
         }
     }
 
@@ -681,7 +740,9 @@ mod tests {
     fn render_bgp_peer_group_line() {
         assert_eq!(
             render_bgp_peer_group(&peer_group("pg1")),
-            "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4]"
+            "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
+             hold-time default (90s), keepalive-interval default (hold-time / 3), \
+             connect-retry-time default (120s)"
         );
     }
 
@@ -691,7 +752,22 @@ mod tests {
         pg.source_address = None;
         assert_eq!(
             render_bgp_peer_group(&pg),
-            "peer-group pg1: remote-as 65001, source-address unset, address-family [ipv4]"
+            "peer-group pg1: remote-as 65001, source-address unset, address-family [ipv4], \
+             hold-time default (90s), keepalive-interval default (hold-time / 3), \
+             connect-retry-time default (120s)"
+        );
+    }
+
+    #[test]
+    fn render_bgp_peer_group_with_explicit_timers() {
+        let mut pg = peer_group("pg1");
+        pg.hold_time = Some(30);
+        pg.keepalive_interval = Some(10);
+        pg.connect_retry_time = Some(45);
+        assert_eq!(
+            render_bgp_peer_group(&pg),
+            "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
+             hold-time 30, keepalive-interval 10, connect-retry-time 45"
         );
     }
 
@@ -706,7 +782,9 @@ mod tests {
         assert_eq!(
             render_bgp_instance(&inst),
             "bgp instance r1: router-id 1.1.1.1, asn 65000\n  \
-             peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4]\n  \
+             peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
+             hold-time default (90s), keepalive-interval default (hold-time / 3), \
+             connect-retry-time default (120s)\n  \
              peer 192.0.2.1: peer-group pg1"
         );
     }
@@ -724,7 +802,9 @@ mod tests {
         );
         assert_eq!(
             rendered,
-            "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4]"
+            "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
+             hold-time default (90s), keepalive-interval default (hold-time / 3), \
+             connect-retry-time default (120s)"
         );
     }
 
@@ -797,6 +877,48 @@ mod tests {
         assert_eq!(
             render_diff(&diff, false),
             "  bgp instance r1:\n    peer-group pg1:\n-     remote-as: 65001\n+     remote-as: 65002"
+        );
+    }
+
+    fn idle_peer(addr: &str) -> PeerSummary {
+        PeerSummary {
+            remote_address: addr.parse().unwrap(),
+            peer_group: "pg1".to_string(),
+            remote_as: None,
+            remote_bgp_id: None,
+            state: BgpSessionState::Idle,
+            uptime_secs: None,
+            negotiated_hold_time: None,
+            negotiated_keepalive: None,
+        }
+    }
+
+    #[test]
+    fn render_bgp_summary_empty_list() {
+        assert_eq!(
+            render_bgp_summary("r1", &[]),
+            "bgp instance r1: no peers configured"
+        );
+    }
+
+    #[test]
+    fn render_bgp_summary_one_established_peer_shows_uptime_and_hold_time() {
+        let mut peer = idle_peer("10.0.0.1");
+        peer.remote_as = Some(65002);
+        peer.state = BgpSessionState::Established;
+        peer.uptime_secs = Some(3725);
+        peer.negotiated_hold_time = Some(90);
+        assert_eq!(
+            render_bgp_summary("r1", &[peer]),
+            "bgp instance r1:\n  10.0.0.1 AS 65002 peer-group pg1 Established uptime 01:02:05 hold-time 90"
+        );
+    }
+
+    #[test]
+    fn render_bgp_summary_idle_peer_shows_dashes() {
+        assert_eq!(
+            render_bgp_summary("r1", &[idle_peer("10.0.0.1")]),
+            "bgp instance r1:\n  10.0.0.1 AS - peer-group pg1 Idle uptime - hold-time -"
         );
     }
 }

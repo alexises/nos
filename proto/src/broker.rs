@@ -23,6 +23,10 @@ pub enum ServiceRef {
     /// `Interfaces` rather than through the registry — there is exactly one
     /// log collector regardless of how many other daemons are running.
     Log,
+    /// The `nos-bgpd` instance currently serving one BGP instance, named by
+    /// the instance's config key — resolved through the registry the same
+    /// way as `RibTable`, since there can be many.
+    BgpInstance(String),
 }
 
 /// Messages sent from a client to `nos-watchdogd`'s broker socket.

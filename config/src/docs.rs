@@ -240,6 +240,44 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              config. This only clears the interface's own configuration — it does not delete \
              the routing table it referenced.",
         ),
+        Topic::SetBgpPeerGroupHoldTime => (
+            "Set a peer-group's BGP hold-time.",
+            "Sets the hold-time field on a peer-group — the value this router proposes in its \
+             OPEN message. A value of 0 disables both the hold timer and keepalives entirely; \
+             otherwise it must be at least 3 seconds (RFC 4271 §6.2). The value actually used \
+             by a session is the lower of this and the peer's own proposed hold time. When \
+             both hold-time and keepalive-interval are set, keepalive-interval must be less \
+             than hold-time — checked at commit time, not when the edit is applied.",
+        ),
+        Topic::ClearBgpPeerGroupHoldTime => (
+            "Clear a peer-group's BGP hold-time.",
+            "Unsets the hold-time field on a peer-group, reverting to the default of 90 \
+             seconds.",
+        ),
+        Topic::SetBgpPeerGroupKeepaliveInterval => (
+            "Set a peer-group's BGP keepalive interval.",
+            "Sets the keepalive-interval field on a peer-group — how often this router sends \
+             KEEPALIVE messages on an established session. Must be strictly less than \
+             hold-time whenever both are explicitly set (a hold-time of 0 disables keepalives \
+             entirely, so no explicit keepalive-interval is valid alongside it); checked at \
+             commit time, not when the edit is applied.",
+        ),
+        Topic::ClearBgpPeerGroupKeepaliveInterval => (
+            "Clear a peer-group's BGP keepalive interval.",
+            "Unsets the keepalive-interval field on a peer-group, reverting to the default of \
+             one third of the negotiated hold time.",
+        ),
+        Topic::SetBgpPeerGroupConnectRetryTime => (
+            "Set a peer-group's BGP connect-retry time.",
+            "Sets the connect-retry-time field on a peer-group — how long this router waits \
+             between outbound connection attempts to a peer in this group. Must be at least 1 \
+             second; checked at commit time, not when the edit is applied.",
+        ),
+        Topic::ClearBgpPeerGroupConnectRetryTime => (
+            "Clear a peer-group's BGP connect-retry time.",
+            "Unsets the connect-retry-time field on a peer-group, reverting to the default of \
+             120 seconds.",
+        ),
     };
     CommandDoc {
         topic,
@@ -294,6 +332,12 @@ mod tests {
         Topic::SetInterfaceRoutingTable,
         Topic::ClearInterfaceRoutingTable,
         Topic::DeleteInterface,
+        Topic::SetBgpPeerGroupHoldTime,
+        Topic::ClearBgpPeerGroupHoldTime,
+        Topic::SetBgpPeerGroupKeepaliveInterval,
+        Topic::ClearBgpPeerGroupKeepaliveInterval,
+        Topic::SetBgpPeerGroupConnectRetryTime,
+        Topic::ClearBgpPeerGroupConnectRetryTime,
     ];
 
     #[test]

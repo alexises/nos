@@ -11,7 +11,9 @@ use nos_cli::completer::NosCompleter;
 use nos_cli::help_menu::HelpMenu;
 use nos_cli::session::{self, Mode, PathAfter, Resolved};
 use nos_cli::spec::{self, Doc};
-use nos_cli::{client, format, interface_client, log_client, rib_client, watchdog_client};
+use nos_cli::{
+    bgp_client, client, format, interface_client, log_client, rib_client, watchdog_client,
+};
 use nos_proto::{CommandDoc, ConfigOp, Event, LogEvent, ServiceRef, Topic, DEFAULT_CONFIG_SOCKET};
 use reedline::{
     default_emacs_keybindings, ColumnarMenu, Completer, Emacs, KeyCode, KeyModifiers, MenuBuilder,
@@ -524,6 +526,10 @@ async fn handle_action(
             show_log(watchdog_socket, source, follow).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowBgpBrief => {
+            show_bgp_brief(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
         Resolved::SaveRunningConfig => {
             save_running_config(socket).await;
             Outcome::Continue(mode)
@@ -767,6 +773,43 @@ async fn show_log(watchdog_socket: &Path, source: Option<String>, follow: bool) 
                 println!();
                 break;
             }
+        }
+    }
+}
+
+/// Router-wide, no instance argument: fetches the running config fresh (like
+/// every other one-shot command) for the list of configured `BgpInstance`s,
+/// resolves each one's `nos-bgpd` via the watchdog broker, and queries each
+/// independently — an unreachable instance prints its own line rather than
+/// aborting the whole command, matching `show_route`/`show_interface`'s
+/// per-command resolve-then-query shape.
+async fn show_bgp_brief(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+
+    if cfg.bgp_instances.is_empty() {
+        println!("no bgp instances configured");
+        return;
+    }
+
+    for instance in &cfg.bgp_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::BgpInstance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(bgp_socket)) => match bgp_client::get_summary(&bgp_socket).await {
+                Ok(peers) => println!("{}", format::render_bgp_summary(&instance.name, &peers)),
+                Err(e) => eprintln!("error: {e}"),
+            },
+            Ok(None) => println!("bgp instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {e}"),
         }
     }
 }

@@ -70,11 +70,19 @@ async fn two_real_instances_establish_a_session() {
         remote_address: "10.0.0.2".parse().unwrap(),
         source_address: None,
         remote_as: b_asn,
+        peer_group: "pg1".to_string(),
+        hold_time: 90,
+        keepalive_interval: None,
+        connect_retry_time: Duration::from_secs(120),
     });
     let slot_b = PeerSlot::new(ResolvedPeer {
         remote_address: "10.0.0.1".parse().unwrap(),
         source_address: None,
         remote_as: a_asn,
+        peer_group: "pg1".to_string(),
+        hold_time: 90,
+        keepalive_interval: None,
+        connect_retry_time: Duration::from_secs(120),
     });
 
     let a_fut = fsm::run(
@@ -87,6 +95,8 @@ async fn two_real_instances_establish_a_session() {
         PeerContext {
             remote_address: "10.0.0.2".parse().unwrap(),
             expected_remote_as: b_asn,
+            local_hold_time: 90,
+            keepalive_override: None,
         },
         slot_a,
     );
@@ -100,6 +110,8 @@ async fn two_real_instances_establish_a_session() {
         PeerContext {
             remote_address: "10.0.0.1".parse().unwrap(),
             expected_remote_as: a_asn,
+            local_hold_time: 90,
+            keepalive_override: None,
         },
         slot_b,
     );
@@ -118,6 +130,120 @@ async fn two_real_instances_establish_a_session() {
         b_result.is_err(),
         "instance B should have reached a stable (Established) session, got {b_result:?}"
     );
+}
+
+/// Exercises a non-default, configured local hold time end to end: the real
+/// side proposes 30s, the fake peer proposes 60s, so negotiation must settle
+/// on `min(30, 60) = 30` — the session should still establish and stay
+/// stable well within the test's bounded timeout.
+#[tokio::test]
+async fn established_session_honors_configured_non_default_hold_time() {
+    let (a_stream, b_stream) = loopback_pair().await;
+
+    let a_router_id = Ipv4Addr::new(1, 1, 1, 1);
+    let b_router_id = Ipv4Addr::new(2, 2, 2, 2);
+    let a_asn = 65001;
+    let b_asn = 65002;
+
+    let slot_a = PeerSlot::new(ResolvedPeer {
+        remote_address: "10.0.0.2".parse().unwrap(),
+        source_address: None,
+        remote_as: b_asn,
+        peer_group: "pg1".to_string(),
+        hold_time: 30,
+        keepalive_interval: None,
+        connect_retry_time: Duration::from_secs(120),
+    });
+
+    let a_fut = fsm::run(
+        a_stream,
+        Role::Active,
+        LocalIdentity {
+            asn: a_asn,
+            router_id: a_router_id,
+        },
+        PeerContext {
+            remote_address: "10.0.0.2".parse().unwrap(),
+            expected_remote_as: b_asn,
+            local_hold_time: 30,
+            keepalive_override: None,
+        },
+        slot_a,
+    );
+    let fake_b = tokio::spawn(fake_peer(b_stream, b_asn, b_router_id, 60));
+
+    let timeout = Duration::from_millis(500);
+    let a_result = tokio::time::timeout(timeout, a_fut).await;
+
+    assert!(
+        a_result.is_err(),
+        "instance A should have reached a stable (Established) session \
+         negotiated at min(30, 60) = 30s, got {a_result:?}"
+    );
+
+    fake_b.abort();
+}
+
+/// Exercises the shared `PeerSlot::status` reporting path end to end: once a
+/// real session reaches `Established`, the slot's status (read via
+/// `status_receiver`, the same way `session::to_peer_summary` does for
+/// `show bgp brief`) must reflect it, including the negotiated hold-time and
+/// keepalive derived during the handshake.
+#[tokio::test]
+async fn established_session_reports_status_via_peer_slot() {
+    let (a_stream, b_stream) = loopback_pair().await;
+
+    let a_router_id = Ipv4Addr::new(1, 1, 1, 1);
+    let b_router_id = Ipv4Addr::new(2, 2, 2, 2);
+    let a_asn = 65001;
+    let b_asn = 65002;
+
+    let slot_a = PeerSlot::new(ResolvedPeer {
+        remote_address: "10.0.0.2".parse().unwrap(),
+        source_address: None,
+        remote_as: b_asn,
+        peer_group: "pg1".to_string(),
+        hold_time: 90,
+        keepalive_interval: None,
+        connect_retry_time: Duration::from_secs(120),
+    });
+    let mut status = slot_a.status_receiver();
+
+    let a_fut = fsm::run(
+        a_stream,
+        Role::Active,
+        LocalIdentity {
+            asn: a_asn,
+            router_id: a_router_id,
+        },
+        PeerContext {
+            remote_address: "10.0.0.2".parse().unwrap(),
+            expected_remote_as: b_asn,
+            local_hold_time: 90,
+            keepalive_override: None,
+        },
+        slot_a,
+    );
+    let fake_b = tokio::spawn(fake_peer(b_stream, b_asn, b_router_id, 90));
+
+    let timeout = Duration::from_millis(500);
+    let a_result = tokio::time::timeout(timeout, a_fut).await;
+    assert!(
+        a_result.is_err(),
+        "instance A should have reached a stable (Established) session, got {a_result:?}"
+    );
+
+    // The session is presumed Established by now (per this module's timeout
+    // convention); `status`'s watch channel already holds the latest value.
+    let reported = *status.borrow_and_update();
+    assert_eq!(reported.state, nos_bgp::status::PeerState::Established);
+    assert_eq!(reported.remote_asn, Some(b_asn));
+    assert_eq!(reported.remote_bgp_id, Some(b_router_id));
+    assert_eq!(reported.negotiated_hold_time, Some(90));
+    assert_eq!(reported.negotiated_keepalive, Some(30));
+    assert!(reported.established_since.is_some());
+
+    fake_b.abort();
 }
 
 /// Races a real active and a real passive connection against the same
@@ -152,11 +278,17 @@ async fn collision_leaves_exactly_one_side_running() {
         remote_address: "10.0.0.2".parse().unwrap(),
         source_address: None,
         remote_as: remote_asn,
+        peer_group: "pg1".to_string(),
+        hold_time: 90,
+        keepalive_interval: None,
+        connect_retry_time: Duration::from_secs(120),
     });
 
     let peer_ctx = || PeerContext {
         remote_address: "10.0.0.2".parse().unwrap(),
         expected_remote_as: remote_asn,
+        local_hold_time: 90,
+        keepalive_override: None,
     };
 
     let active_fut = fsm::run(active_local, Role::Active, local, peer_ctx(), slot.clone());

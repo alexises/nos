@@ -1,3 +1,4 @@
+pub mod bgp;
 pub mod broker;
 pub mod codec;
 pub mod derive;
@@ -12,6 +13,7 @@ pub mod rib;
 pub mod schema;
 pub mod validators;
 
+pub use bgp::{BgpEvent, BgpRequest, BgpSessionState, PeerSummary};
 pub use broker::{ServiceRef, WatchdogEvent, WatchdogRequest};
 pub use codec::IpcCodec;
 pub use derive::sync_routing_table_refs;
@@ -29,5 +31,6 @@ pub use paths::{DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCK
 pub use rib::{PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind};
 pub use schema::{
     AddressFamily, BgpInstance, BgpPeer, BgpPeerGroup, Config, Interface, RoutingTable,
-    StaticRoute, StaticRoutingInstance,
+    StaticRoute, StaticRoutingInstance, CONNECT_RETRY_TIME_DEFAULT_SECS, HOLD_TIME_DEFAULT,
+    HOLD_TIME_FLOOR,
 };

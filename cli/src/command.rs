@@ -16,6 +16,9 @@ pub enum BgpPeerGroupField {
     RemoteAs(u32),
     SourceAddress(IpAddr),
     AddressFamily(AddressFamily),
+    HoldTime(u16),
+    KeepaliveInterval(u16),
+    ConnectRetryTime(u16),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +138,14 @@ pub enum DeleteTarget {
     /// `delete address-family ipv4|ipv6` — only valid while navigated into
     /// a peer-group.
     AddressFamily(AddressFamily),
+    /// `delete hold-time` — only valid while navigated into a peer-group.
+    HoldTime,
+    /// `delete keepalive-interval` — only valid while navigated into a
+    /// peer-group.
+    KeepaliveInterval,
+    /// `delete connect-retry-time` — only valid while navigated into a
+    /// peer-group.
+    ConnectRetryTime,
     RoutingTable {
         name: String,
     },
@@ -208,6 +219,9 @@ pub enum Command {
         source: Option<String>,
         follow: bool,
     },
+    /// `show bgp brief` — a one-line-per-peer session summary across every
+    /// configured BGP instance.
+    ShowBgpBrief,
     Save,
     Help,
     /// `exit` | `quit` | `end`
@@ -269,6 +283,7 @@ impl Command {
                 source: Some((*source).to_string()),
                 follow: true,
             },
+            ["show", "bgp", "brief"] => Command::ShowBgpBrief,
             ["save"] => Command::Save,
             ["help"] => Command::Help,
             ["exit" | "quit" | "end"] => Command::Exit,
@@ -373,6 +388,36 @@ impl Command {
                     field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv6Unicast),
                 })
             }
+            ["set", "bgp", "instance", instance, "peer-group", group, "hold-time", n] => {
+                match n.parse::<u16>() {
+                    Ok(hold_time) => Command::Set(SetTarget::BgpPeerGroup {
+                        instance: (*instance).to_string(),
+                        group: (*group).to_string(),
+                        field: BgpPeerGroupField::HoldTime(hold_time),
+                    }),
+                    Err(_) => Command::Unknown(trimmed.to_string()),
+                }
+            }
+            ["set", "bgp", "instance", instance, "peer-group", group, "keepalive-interval", n] => {
+                match n.parse::<u16>() {
+                    Ok(keepalive_interval) => Command::Set(SetTarget::BgpPeerGroup {
+                        instance: (*instance).to_string(),
+                        group: (*group).to_string(),
+                        field: BgpPeerGroupField::KeepaliveInterval(keepalive_interval),
+                    }),
+                    Err(_) => Command::Unknown(trimmed.to_string()),
+                }
+            }
+            ["set", "bgp", "instance", instance, "peer-group", group, "connect-retry-time", n] => {
+                match n.parse::<u16>() {
+                    Ok(connect_retry_time) => Command::Set(SetTarget::BgpPeerGroup {
+                        instance: (*instance).to_string(),
+                        group: (*group).to_string(),
+                        field: BgpPeerGroupField::ConnectRetryTime(connect_retry_time),
+                    }),
+                    Err(_) => Command::Unknown(trimmed.to_string()),
+                }
+            }
             ["set", "remote-as", n] => match n.parse::<u32>() {
                 Ok(remote_as) => Command::Set(SetTarget::PeerGroupRelative {
                     field: BgpPeerGroupField::RemoteAs(remote_as),
@@ -391,6 +436,24 @@ impl Command {
             ["set", "address-family", "ipv6"] => Command::Set(SetTarget::PeerGroupRelative {
                 field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv6Unicast),
             }),
+            ["set", "hold-time", n] => match n.parse::<u16>() {
+                Ok(hold_time) => Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::HoldTime(hold_time),
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["set", "keepalive-interval", n] => match n.parse::<u16>() {
+                Ok(keepalive_interval) => Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::KeepaliveInterval(keepalive_interval),
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["set", "connect-retry-time", n] => match n.parse::<u16>() {
+                Ok(connect_retry_time) => Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::ConnectRetryTime(connect_retry_time),
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
             ["set", "bgp", "instance", instance, "peer", ip, "peer-group", group] => {
                 match ip.parse::<IpAddr>() {
                     Ok(remote_address) => Command::Set(SetTarget::BgpPeer {
@@ -501,6 +564,9 @@ impl Command {
             ["delete", "address-family", "ipv6"] => {
                 Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv6Unicast))
             }
+            ["delete", "hold-time"] => Command::Delete(DeleteTarget::HoldTime),
+            ["delete", "keepalive-interval"] => Command::Delete(DeleteTarget::KeepaliveInterval),
+            ["delete", "connect-retry-time"] => Command::Delete(DeleteTarget::ConnectRetryTime),
             ["delete", "routing-table", name] => Command::Delete(DeleteTarget::RoutingTable {
                 name: (*name).to_string(),
             }),
@@ -865,6 +931,72 @@ mod tests {
     }
 
     #[test]
+    fn set_bgp_peer_group_timers_qualified() {
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 hold-time 30"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::HoldTime(30),
+            })
+        );
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 keepalive-interval 10"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::KeepaliveInterval(10),
+            })
+        );
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 connect-retry-time 45"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::ConnectRetryTime(45),
+            })
+        );
+    }
+
+    #[test]
+    fn set_peer_group_timers_relative() {
+        assert_eq!(
+            Command::parse("set hold-time 30"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::HoldTime(30),
+            })
+        );
+        assert_eq!(
+            Command::parse("set keepalive-interval 10"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::KeepaliveInterval(10),
+            })
+        );
+        assert_eq!(
+            Command::parse("set connect-retry-time 45"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::ConnectRetryTime(45),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_peer_group_timers_relative() {
+        assert_eq!(
+            Command::parse("delete hold-time"),
+            Command::Delete(DeleteTarget::HoldTime)
+        );
+        assert_eq!(
+            Command::parse("delete keepalive-interval"),
+            Command::Delete(DeleteTarget::KeepaliveInterval)
+        );
+        assert_eq!(
+            Command::parse("delete connect-retry-time"),
+            Command::Delete(DeleteTarget::ConnectRetryTime)
+        );
+    }
+
+    #[test]
     fn set_remote_as_relative() {
         assert_eq!(
             Command::parse("set remote-as 65001"),
@@ -1107,6 +1239,11 @@ mod tests {
                 follow: true,
             }
         );
+    }
+
+    #[test]
+    fn show_bgp_brief() {
+        assert_eq!(Command::parse("show bgp brief"), Command::ShowBgpBrief);
     }
 
     #[test]

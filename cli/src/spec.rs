@@ -389,6 +389,51 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec {
         tokens: &[
             Token::Literal("set"),
+            Token::Literal("bgp"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Literal("peer-group"),
+            Token::Arg(ArgKind::BgpPeerGroupName),
+            Token::Literal("hold-time"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set bgp instance <name> peer-group <group> hold-time <n>",
+        doc: Doc::FromConfig(Topic::SetBgpPeerGroupHoldTime),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("bgp"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Literal("peer-group"),
+            Token::Arg(ArgKind::BgpPeerGroupName),
+            Token::Literal("keepalive-interval"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set bgp instance <name> peer-group <group> keepalive-interval <n>",
+        doc: Doc::FromConfig(Topic::SetBgpPeerGroupKeepaliveInterval),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("bgp"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Literal("peer-group"),
+            Token::Arg(ArgKind::BgpPeerGroupName),
+            Token::Literal("connect-retry-time"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set bgp instance <name> peer-group <group> connect-retry-time <n>",
+        doc: Doc::FromConfig(Topic::SetBgpPeerGroupConnectRetryTime),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
             Token::Literal("remote-as"),
             Token::Arg(ArgKind::Plain),
         ],
@@ -424,6 +469,36 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         ],
         usage: "set address-family ipv6",
         doc: Doc::FromConfig(Topic::AddBgpPeerGroupAddressFamily),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("hold-time"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set hold-time <n>",
+        doc: Doc::FromConfig(Topic::SetBgpPeerGroupHoldTime),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("keepalive-interval"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set keepalive-interval <n>",
+        doc: Doc::FromConfig(Topic::SetBgpPeerGroupKeepaliveInterval),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("connect-retry-time"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set connect-retry-time <n>",
+        doc: Doc::FromConfig(Topic::SetBgpPeerGroupConnectRetryTime),
         availability: Availability::ConfigurationPeerGroup,
     },
     CommandSpec {
@@ -523,6 +598,30 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         ],
         usage: "delete address-family ipv6",
         doc: Doc::FromConfig(Topic::RemoveBgpPeerGroupAddressFamily),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[Token::Literal("delete"), Token::Literal("hold-time")],
+        usage: "delete hold-time",
+        doc: Doc::FromConfig(Topic::ClearBgpPeerGroupHoldTime),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("keepalive-interval"),
+        ],
+        usage: "delete keepalive-interval",
+        doc: Doc::FromConfig(Topic::ClearBgpPeerGroupKeepaliveInterval),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("connect-retry-time"),
+        ],
+        usage: "delete connect-retry-time",
+        doc: Doc::FromConfig(Topic::ClearBgpPeerGroupConnectRetryTime),
         availability: Availability::ConfigurationPeerGroup,
     },
     CommandSpec {
@@ -813,6 +912,22 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             summary: "Live-tail collected log entries from one source.",
             detail: "Same as `show log --follow`, filtered to entries whose source exactly \
                      matches <source>.",
+        },
+        availability: Availability::Always,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("show"),
+            Token::Literal("bgp"),
+            Token::Literal("brief"),
+        ],
+        usage: "show bgp brief",
+        doc: Doc::Local {
+            summary: "Show a one-line-per-peer BGP session summary across every instance.",
+            detail: "Queries every configured BGP instance's nos-bgpd (each resolved via \
+                     nos-watchdogd) for its peers' current session state, remote AS, uptime, \
+                     and negotiated hold-time. An instance whose nos-bgpd isn't running is \
+                     reported individually rather than aborting the whole command.",
         },
         availability: Availability::Always,
     },

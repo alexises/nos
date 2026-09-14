@@ -197,6 +197,9 @@ mod tests {
             remote_as,
             source_address: None,
             address_families: vec![AddressFamily::Ipv4Unicast],
+            hold_time: None,
+            keepalive_interval: None,
+            connect_retry_time: None,
         };
 
         let mut base_instance = instance("r1", 65000);

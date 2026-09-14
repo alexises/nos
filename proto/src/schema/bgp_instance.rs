@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::validators::unique_in;
 
+use super::bgp_peer_group;
 use super::{BgpPeer, BgpPeerGroup, Config};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
@@ -24,7 +25,10 @@ pub struct BgpInstance {
     #[garde(range(min = 1, max = 4_294_967_294u32))]
     pub asn: u32,
 
-    #[garde(dive)]
+    #[garde(
+        dive,
+        custom(|groups, _ctx: &Config| bgp_peer_group::valid_peer_group_timers(groups))
+    )]
     pub peer_groups: Vec<BgpPeerGroup>,
 
     #[garde(dive)]
@@ -98,5 +102,38 @@ mod tests {
     fn distinct_names_pass() {
         let cfg = config_with(vec![instance("vrf-a", 65001), instance("vrf-b", 65002)]);
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    /// The cross-field `keepalive_interval < hold_time` check is wired on
+    /// `peer_groups` (not on `BgpPeerGroup` itself, which can't see sibling
+    /// fields) — this proves it fires per-group, not globally across the
+    /// whole list.
+    #[test]
+    fn invalid_timer_combo_on_one_group_fails_even_with_another_valid_group() {
+        use crate::schema::{AddressFamily, BgpPeerGroup};
+
+        let mut inst = instance("r1", 65000);
+        inst.peer_groups = vec![
+            BgpPeerGroup {
+                name: "valid".to_string(),
+                remote_as: 65001,
+                source_address: None,
+                address_families: vec![AddressFamily::Ipv4Unicast],
+                hold_time: Some(30),
+                keepalive_interval: Some(10),
+                connect_retry_time: None,
+            },
+            BgpPeerGroup {
+                name: "invalid".to_string(),
+                remote_as: 65002,
+                source_address: None,
+                address_families: vec![AddressFamily::Ipv4Unicast],
+                hold_time: Some(30),
+                keepalive_interval: Some(30),
+                connect_retry_time: None,
+            },
+        ];
+        let cfg = config_with(vec![inst]);
+        assert!(cfg.validate_with(&cfg).is_err());
     }
 }
