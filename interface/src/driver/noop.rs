@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use tracing::info;
+use tracing::debug;
 
 use super::{DriverError, InterfaceDriver};
 use crate::state::InterfaceState;
@@ -12,7 +12,7 @@ pub struct NoopInterfaceDriver;
 #[async_trait]
 impl InterfaceDriver for NoopInterfaceDriver {
     async fn apply(&self, desired: &InterfaceState) -> Result<(), DriverError> {
-        info!(
+        debug!(
             interface = %desired.name,
             addresses = ?desired.addresses,
             routing_table = ?desired.routing_table,
@@ -22,7 +22,7 @@ impl InterfaceDriver for NoopInterfaceDriver {
     }
 
     async fn remove(&self, name: &str) -> Result<(), DriverError> {
-        info!(
+        debug!(
             interface = %name,
             "would remove interface configuration (noop driver — no OS effect)"
         );

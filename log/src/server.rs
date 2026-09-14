@@ -5,7 +5,7 @@ use nos_proto::{IpcCodec, LogEvent, LogRequest};
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::warn;
+use tracing::{debug, error, info, trace, warn};
 
 use crate::store::LogStore;
 
@@ -17,6 +17,7 @@ pub fn start(listen_socket: &Path, store: LogStore) -> std::io::Result<JoinHandl
         std::fs::remove_file(listen_socket)?;
     }
     let listener = UnixListener::bind(listen_socket)?;
+    info!(socket = %listen_socket.display(), "log IPC server listening");
     Ok(tokio::spawn(accept_loop(listener, store)))
 }
 
@@ -27,7 +28,7 @@ async fn accept_loop(listener: UnixListener, store: LogStore) {
                 tokio::spawn(handle_connection(stream, store.clone()));
             }
             Err(e) => {
-                warn!("log IPC accept error: {e}");
+                error!(error = %e, "log IPC accept loop terminated");
                 break;
             }
         }
@@ -50,7 +51,7 @@ async fn handle_connection(stream: tokio::net::UnixStream, store: LogStore) {
         let req = match msg {
             Ok(req) => req,
             Err(e) => {
-                warn!("log IPC read error: {e}");
+                warn!(error = %e, "log IPC read error");
                 break;
             }
         };
@@ -58,6 +59,7 @@ async fn handle_connection(stream: tokio::net::UnixStream, store: LogStore) {
             LogRequest::Push(entry) => store.record(entry).await,
             LogRequest::GetLogs { source, limit } => {
                 let logs = store.snapshot(source.as_deref(), limit).await;
+                trace!(source = ?source, limit = ?limit, count = logs.len(), "served GetLogs query");
                 if writer.send(LogEvent::Logs(logs)).await.is_err() {
                     break;
                 }
@@ -67,7 +69,10 @@ async fn handle_connection(stream: tokio::net::UnixStream, store: LogStore) {
                 if writer.send(LogEvent::Logs(logs)).await.is_err() {
                     break;
                 }
-                if !tail(&mut reader, &mut writer, &store, source.as_deref()).await {
+                debug!(source = ?source, "log tail subscription started");
+                let result = tail(&mut reader, &mut writer, &store, source.as_deref()).await;
+                debug!("log tail subscription ended");
+                if !result {
                     break;
                 }
             }
@@ -100,7 +105,9 @@ async fn tail(
                 // capacity — resubscribing loses only the gap, not the
                 // connection; a truly closed channel never happens while
                 // `store` (and thus its `tail_tx`) is still alive.
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(skipped, "log tail subscriber lagged, entries dropped");
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
             },
             // Per this codebase's connection-lifecycle convention (see root

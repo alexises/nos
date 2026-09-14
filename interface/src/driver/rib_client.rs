@@ -4,6 +4,7 @@ use futures::{SinkExt, StreamExt};
 use nos_proto::{IpcCodec, RibEvent, RibRequest};
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
+use tracing::trace;
 
 /// One-shot query of a `nos-ribd` instance's Linux VRF interface name.
 ///
@@ -15,14 +16,19 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 /// surfacing as an error to the caller, which just retries next tick. Only
 /// a well-formed `RibEvent::VrfName` reply is distinguished from that.
 pub async fn get_vrf_name(rib_socket: &Path) -> Option<String> {
-    let stream = UnixStream::connect(rib_socket).await.ok()?;
+    let Ok(stream) = UnixStream::connect(rib_socket).await else {
+        trace!(socket = %rib_socket.display(), "failed to connect to nos-ribd for vrf name");
+        return None;
+    };
     let (r, w) = stream.into_split();
     let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
     writer.send(RibRequest::GetVrfName).await.ok()?;
-    match reader.next().await {
-        Some(Ok(RibEvent::VrfName(name))) => name,
-        _ => None,
+    if let Some(Ok(RibEvent::VrfName(name))) = reader.next().await {
+        name
+    } else {
+        trace!("nos-ribd gave no well-formed GetVrfName reply");
+        None
     }
 }
 

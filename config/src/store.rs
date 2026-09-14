@@ -5,6 +5,7 @@ use std::sync::Arc;
 use garde::Validate as _;
 use nos_proto::{diff_configs, Config, ConfigDiff, ConfigOp, TransactionBase, TransactionSnapshot};
 use tokio::sync::{broadcast, Mutex, RwLock};
+use tracing::{debug, info};
 
 use crate::error::ConfigError;
 
@@ -78,6 +79,7 @@ impl ConfigStore {
     pub async fn open_transaction(&self, name: &str, base: TransactionBase) -> TransactionSnapshot {
         let mut txs = self.0.transactions.lock().await;
         if let Some(existing) = txs.get(name) {
+            debug!(transaction = %name, resumed = true, "opened transaction");
             return TransactionSnapshot {
                 name: name.to_string(),
                 config: existing.config.clone(),
@@ -96,6 +98,7 @@ impl ConfigStore {
                 dirty: false,
             },
         );
+        debug!(transaction = %name, ?base, resumed = false, "opened transaction");
         TransactionSnapshot {
             name: name.to_string(),
             config,
@@ -115,6 +118,7 @@ impl ConfigStore {
         let txn = txs
             .get_mut(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        debug!(transaction = %name, ?op, "applying op");
         op.apply(&mut txn.config)?;
         txn.dirty = true;
         Ok(TransactionSnapshot {
@@ -157,6 +161,7 @@ impl ConfigStore {
         let diff = diff_configs(&running, &config);
         *running = config.clone();
         drop(running);
+        info!(transaction = %name, "config committed");
         // Ignore send errors — no active receivers is not a failure.
         let _ = self.0.tx.send(Arc::new(CommitUpdate { config, diff }));
         Ok(())
@@ -191,6 +196,7 @@ impl ConfigStore {
         let mut txs = self.0.transactions.lock().await;
         txs.remove(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        debug!(transaction = %name, "discarded transaction");
         Ok(())
     }
 

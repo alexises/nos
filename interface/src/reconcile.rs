@@ -6,7 +6,7 @@ use futures::StreamExt;
 use nos_proto::{DiffScope, Event};
 use tokio::sync::{watch, RwLock};
 use tokio::time::sleep;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config_client;
 use crate::driver::InterfaceDriver;
@@ -43,7 +43,7 @@ pub async fn run(
     while !*shutdown.borrow() {
         match config_client::subscribe_diff(&config_socket, vec![DiffScope::Interfaces]).await {
             Ok(mut reader) => {
-                info!("connected to nos-configd diff stream");
+                info!(socket = %config_socket.display(), "connected to nos-configd diff stream");
                 let mut reapply = tokio::time::interval(REAPPLY_INTERVAL);
                 reapply.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 // Consume the immediate first tick: the diff stream's own
@@ -62,7 +62,7 @@ pub async fn run(
                                 break;
                             }
                             None => {
-                                warn!("diff stream closed, reconnecting");
+                                warn!(socket = %config_socket.display(), "diff stream closed, reconnecting");
                                 break;
                             }
                         },
@@ -100,7 +100,7 @@ async fn resync(
         Ok(cfg) => {
             let previous = interfaces.read().await.clone();
             let new_interfaces = build_from_config(&cfg, driver, &previous).await;
-            info!(count = cfg.interfaces.len(), "reconciled interfaces");
+            debug!(count = cfg.interfaces.len(), "reconciled interfaces");
             *interfaces.write().await = new_interfaces;
         }
         Err(e) => {

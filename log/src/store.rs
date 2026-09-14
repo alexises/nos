@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use nos_proto::LogEntry;
 use tokio::sync::{broadcast, mpsc, RwLock};
+use tracing::{trace, warn};
 
 /// Live `Tail` subscribers each get their own receiver off this channel;
 /// a slow/absent subscriber never blocks `record` — `broadcast::Sender::send`
@@ -51,11 +52,18 @@ impl LogStore {
             let mut buffer = self.buffer.write().await;
             if buffer.len() >= self.capacity {
                 buffer.pop_front();
+                trace!(
+                    capacity = self.capacity,
+                    "log buffer full, evicted oldest entry"
+                );
             }
             buffer.push_back(entry.clone());
         }
+        // No subscribers is a normal, expected state, not an error.
         let _ = self.tail_tx.send(entry.clone());
-        let _ = self.persist_tx.send(entry);
+        if self.persist_tx.send(entry).is_err() {
+            warn!("persistence task not running, log entry not persisted to disk");
+        }
     }
 
     /// A filtered, capped snapshot of the buffer, oldest-first — the most

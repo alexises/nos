@@ -8,7 +8,7 @@ use nos_rib::log_client::ForwardingLayer;
 use nos_rib::{reconcile, server, watchdog_client, LinuxRibDriver, NoopRibDriver, Rib, RibDriver};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{watch, RwLock};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -113,6 +113,9 @@ async fn main() -> anyhow::Result<()> {
         DriverKind::Noop => Arc::new(NoopRibDriver),
         DriverKind::Linux => Arc::new(
             LinuxRibDriver::new(args.table_registry_path.clone())
+                .inspect_err(|e| {
+                    tracing::error!(table = %args.table, error = %e, "failed to initialize linux rib driver");
+                })
                 .context("initializing linux rib driver")?,
         ),
     };
@@ -126,6 +129,9 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx,
     ));
     let server_task = server::start(&listen_socket, args.table.clone(), rib, driver)
+        .inspect_err(|e| {
+            tracing::error!(table = %args.table, error = %e, "failed to start RIB IPC server");
+        })
         .context("starting RIB IPC server")?;
 
     wait_for_shutdown_signal()
@@ -134,7 +140,9 @@ async fn main() -> anyhow::Result<()> {
     info!(table = %args.table, "shutdown signal received");
 
     let _ = shutdown_tx.send(true);
-    let _ = reconcile_task.await;
+    if let Err(e) = reconcile_task.await {
+        warn!(table = %args.table, error = %e, "reconcile task ended abnormally");
+    }
     server_task.abort();
 
     info!(table = %args.table, "shutting down");

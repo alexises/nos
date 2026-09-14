@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use nos_proto::{Config, IpNet};
-use tracing::warn;
+use tracing::{debug, trace, warn};
 
 use crate::driver::InterfaceDriver;
 
@@ -58,6 +58,12 @@ pub async fn build_from_config(
             addresses: iface.addresses.clone(),
             routing_table: iface.routing_table.clone(),
         };
+        trace!(
+            interface = %state.name,
+            addresses = ?state.addresses,
+            routing_table = ?state.routing_table,
+            "applying interface state"
+        );
         if let Err(e) = driver.apply(&state).await {
             warn!(interface = %state.name, error = %e, "failed to apply interface configuration");
         }
@@ -71,6 +77,7 @@ pub async fn build_from_config(
         .map(|i| i.name.clone())
         .filter(|name| !current.contains(name.as_str()))
     {
+        debug!(interface = %gone, "interface removed from config, cleaning up");
         if let Err(e) = driver.remove(&gone).await {
             warn!(interface = %gone, error = %e, "failed to clean up removed interface");
         }

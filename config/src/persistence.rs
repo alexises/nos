@@ -2,6 +2,7 @@ use std::io::Write as _;
 use std::path::Path;
 
 use nos_proto::Config;
+use tracing::{error, info, warn};
 
 use crate::error::ConfigError;
 
@@ -36,8 +37,20 @@ pub fn save_to_disk(config: &Config, path: &Path) -> Result<(), ConfigError> {
 /// risks masking real data loss.
 pub fn load_or_default(path: &Path) -> Result<Config, ConfigError> {
     match std::fs::read(path) {
-        Ok(bytes) => Ok(serde_yaml::from_slice(&bytes)?),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Ok(bytes) => match serde_yaml::from_slice(&bytes) {
+            Ok(cfg) => {
+                info!(path = %path.display(), "loaded config from disk");
+                Ok(cfg)
+            }
+            Err(e) => {
+                error!(path = %path.display(), error = %e, "failed to parse config file");
+                Err(e.into())
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            warn!(path = %path.display(), "no config file found, starting with default (empty) config");
+            Ok(Config::default())
+        }
         Err(source) => Err(persistence_error(path, source)),
     }
 }

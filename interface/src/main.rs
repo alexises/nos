@@ -9,7 +9,7 @@ use nos_interface::{reconcile, server, watchdog_client, Interfaces};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{watch, RwLock};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -91,11 +91,20 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let driver: Arc<dyn InterfaceDriver> = match args.driver {
-        DriverKind::Noop => Arc::new(NoopInterfaceDriver),
-        DriverKind::Linux => Arc::new(
-            LinuxInterfaceDriver::new(args.watchdog_socket.clone())
-                .context("initializing linux interface driver")?,
-        ),
+        DriverKind::Noop => {
+            info!("using noop interface driver (no OS effect)");
+            Arc::new(NoopInterfaceDriver)
+        }
+        DriverKind::Linux => {
+            info!("using linux interface driver (rtnetlink)");
+            Arc::new(
+                LinuxInterfaceDriver::new(args.watchdog_socket.clone())
+                    .inspect_err(|e| {
+                        tracing::error!(error = %e, "failed to initialize linux interface driver");
+                    })
+                    .context("initializing linux interface driver")?,
+            )
+        }
     };
 
     let interfaces = Arc::new(RwLock::new(Interfaces::new()));
@@ -105,8 +114,9 @@ async fn main() -> anyhow::Result<()> {
         driver,
         shutdown_rx,
     ));
-    let server_task =
-        server::start(&args.listen_socket, interfaces).context("starting interface IPC server")?;
+    let server_task = server::start(&args.listen_socket, interfaces)
+        .inspect_err(|e| tracing::error!(error = %e, "failed to start interface IPC server"))
+        .context("starting interface IPC server")?;
 
     wait_for_shutdown_signal()
         .await
@@ -114,7 +124,9 @@ async fn main() -> anyhow::Result<()> {
     info!("shutdown signal received");
 
     let _ = shutdown_tx.send(true);
-    let _ = reconcile_task.await;
+    if let Err(e) = reconcile_task.await {
+        warn!(error = %e, "reconcile task ended abnormally");
+    }
     server_task.abort();
 
     info!("shutting down");

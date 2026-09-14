@@ -10,7 +10,7 @@ use nos_watchdog::{
 };
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -182,16 +182,19 @@ async fn main() -> anyhow::Result<()> {
         args.interfaced_listen_socket,
         args.log_socket,
     )
+    .inspect_err(|e| tracing::error!(error = %e, "failed to start broker IPC server"))
     .context("starting broker IPC server")?;
 
-    info!("nos-watchdogd supervising {} task(s)", tasks.len());
+    info!(task_count = tasks.len(), "nos-watchdogd supervising tasks");
 
     wait_for_shutdown_signal().await?;
     info!("shutdown signal received, stopping supervised processes");
 
     let _ = shutdown_tx.send(true);
     for task in tasks {
-        let _ = task.await;
+        if let Err(e) = task.await {
+            error!(error = %e, "supervisor task panicked");
+        }
     }
     // The broker's accept loop has no shutdown signal of its own (it never
     // needs to drain in-flight state the way a supervised process does) —

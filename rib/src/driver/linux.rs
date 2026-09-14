@@ -9,7 +9,7 @@ use rtnetlink::packet_route::link::LinkMessage;
 use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage};
 use rtnetlink::packet_route::AddressFamily;
 use rtnetlink::{Handle, LinkUnspec, LinkVrf, RouteMessageBuilder};
-use tracing::warn;
+use tracing::{debug, info, trace, warn};
 
 use super::{table_registry, DriverError, RibDriver};
 use crate::rib::RibEntry;
@@ -66,20 +66,24 @@ impl LinuxRibDriver {
                 .add(LinkVrf::new(vrf_ifname, table_id).build())
                 .execute()
                 .await?;
-            self.find_link(vrf_ifname)
+            let index = self
+                .find_link(vrf_ifname)
                 .await?
                 .map(|link| link.header.index)
                 .ok_or_else(|| {
                     DriverError::Registry(std::io::Error::other(format!(
                         "created VRF {vrf_ifname} but could not find it afterwards"
                     )))
-                })?
+                })?;
+            info!(vrf = %vrf_ifname, table_id, "created VRF device");
+            index
         };
         self.handle
             .link()
             .set(LinkUnspec::new_with_index(index).up().build())
             .execute()
             .await?;
+        trace!(vrf = %vrf_ifname, index, "ensured VRF link is up");
         Ok(index)
     }
 
@@ -136,7 +140,15 @@ impl LinuxRibDriver {
                     .gateway(gateway)
                     .table_id(table_id)
                     .build();
-                self.handle.route().add(route).execute().await?;
+                self.handle
+                    .route()
+                    .add(route)
+                    .execute()
+                    .await
+                    .inspect_err(|e| {
+                        warn!(%prefix, %gateway, table_id, error = %e, "failed to add route");
+                    })?;
+                info!(%prefix, %gateway, table_id, "added route");
             }
             (IpNet::V6(prefix), IpAddr::V6(gateway)) => {
                 let route = RouteMessageBuilder::<Ipv6Addr>::new()
@@ -144,10 +156,18 @@ impl LinuxRibDriver {
                     .gateway(gateway)
                     .table_id(table_id)
                     .build();
-                self.handle.route().add(route).execute().await?;
+                self.handle
+                    .route()
+                    .add(route)
+                    .execute()
+                    .await
+                    .inspect_err(|e| {
+                        warn!(%prefix, %gateway, table_id, error = %e, "failed to add route");
+                    })?;
+                info!(%prefix, %gateway, table_id, "added route");
             }
             _ => {
-                warn!(%prefix, %gateway, "route prefix/gateway address family mismatch, skipping");
+                warn!(%prefix, %gateway, table_id, "route prefix/gateway address family mismatch, skipping");
             }
         }
         Ok(())
@@ -172,6 +192,12 @@ impl LinuxRibDriver {
             .collect();
 
         let (to_add, to_remove) = diff_routes(&observed_map, &desired);
+        debug!(
+            table_id,
+            to_add = to_add.len(),
+            to_remove = to_remove.len(),
+            "reconciling kernel routes"
+        );
 
         // Remove before add: `to_add`/`to_remove` can share the same prefix
         // with a different gateway (an operator changed a static route's
@@ -179,9 +205,17 @@ impl LinuxRibDriver {
         // old one for that exact prefix fails with EEXIST (`rtnetlink`'s
         // route add uses NLM_F_CREATE | NLM_F_EXCL), so the stale entry
         // must be gone first.
-        for (prefix, _gateway) in to_remove {
+        for (prefix, gateway) in to_remove {
             if let Some((_, _, message)) = observed.iter().find(|(p, _, _)| *p == prefix) {
-                self.handle.route().del(message.clone()).execute().await?;
+                self.handle
+                    .route()
+                    .del(message.clone())
+                    .execute()
+                    .await
+                    .inspect_err(|e| {
+                        warn!(%prefix, %gateway, table_id, error = %e, "failed to remove route");
+                    })?;
+                info!(%prefix, %gateway, table_id, "removed route");
             }
         }
         for (prefix, gateway) in to_add {
@@ -198,6 +232,7 @@ impl RibDriver for LinuxRibDriver {
         table_name: &str,
         best_routes: &HashMap<IpNet, RibEntry>,
     ) -> Result<(), DriverError> {
+        debug!(table = %table_name, routes = best_routes.len(), "applying routes to kernel");
         let table_id = table_registry::ensure_table_id(&self.registry_path, table_name)?;
         let vrf_ifname = table_registry::vrf_ifname(table_id);
         self.ensure_vrf(&vrf_ifname, table_id).await?;
@@ -207,6 +242,7 @@ impl RibDriver for LinuxRibDriver {
     async fn teardown(&self, table_name: &str) -> Result<(), DriverError> {
         let Some(table_id) = table_registry::lookup_table_id(&self.registry_path, table_name)
         else {
+            debug!(table = %table_name, "no table id allocated, nothing to tear down");
             return Ok(());
         };
         self.reconcile_routes(table_id, &HashMap::new()).await?;
@@ -214,6 +250,7 @@ impl RibDriver for LinuxRibDriver {
         let vrf_ifname = table_registry::vrf_ifname(table_id);
         if let Some(link) = self.find_link(&vrf_ifname).await? {
             self.handle.link().del(link.header.index).execute().await?;
+            info!(vrf = %vrf_ifname, table_id, "deleted VRF device");
         }
         Ok(())
     }

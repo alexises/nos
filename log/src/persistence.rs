@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use nos_proto::LogEntry;
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 /// Once the store file grows past `capacity * COMPACT_FACTOR` lines, it's
 /// rewritten down to the most recent `capacity` — bounds disk usage without
@@ -68,6 +68,7 @@ pub async fn run(path: PathBuf, capacity: usize, mut rx: mpsc::UnboundedReceiver
         while rx.recv().await.is_some() {}
         return;
     };
+    info!(path = %path.display(), "log persistence started");
     let mut lines_since_compact = count_lines(&path).unwrap_or(0);
 
     while let Some(entry) = rx.recv().await {
@@ -84,6 +85,7 @@ pub async fn run(path: PathBuf, capacity: usize, mut rx: mpsc::UnboundedReceiver
                 Ok(new_file) => {
                     file = new_file;
                     lines_since_compact = capacity;
+                    debug!(path = %path.display(), capacity, "compacted log store file");
                 }
                 Err(e) => warn!(error = %e, "failed to compact log store file"),
             }

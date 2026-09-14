@@ -54,10 +54,12 @@ async fn main() -> anyhow::Result<()> {
     let store = ConfigStore::new(initial, Some(args.config_file.clone()));
     let _handle = store
         .start_ipc_server(&args.listen)
+        .inspect_err(|e| {
+            tracing::error!(error = %e, listen = %args.listen, "failed to bind config IPC server");
+        })
         .with_context(|| format!("failed to bind {}", args.listen))?;
 
-    tracing::info!("nos-configd listening on {}", args.listen);
-    tracing::info!("config file: {}", args.config_file.display());
+    tracing::info!(config_file = %args.config_file.display(), "config file path");
 
     tokio::signal::ctrl_c()
         .await

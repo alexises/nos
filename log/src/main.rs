@@ -39,7 +39,11 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
-    info!("nos-logd starting");
+    info!(
+        listen_socket = %args.listen_socket.display(),
+        capacity = args.capacity,
+        "nos-logd starting"
+    );
 
     let seed = persistence::load_recent(&args.log_store_path, args.capacity);
     info!(entries = seed.len(), path = %args.log_store_path.display(), "loaded persisted log store");

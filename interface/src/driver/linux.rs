@@ -6,7 +6,7 @@ use nos_proto::{IpNet, ServiceRef};
 use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage, AddressScope};
 use rtnetlink::packet_route::link::{LinkAttribute, LinkMessage};
 use rtnetlink::{Handle, LinkUnspec};
-use tracing::debug;
+use tracing::{debug, info, trace};
 
 use super::{rib_client, DriverError, InterfaceDriver};
 use crate::state::InterfaceState;
@@ -78,7 +78,12 @@ impl LinuxInterfaceDriver {
         name
     }
 
-    async fn reconcile_addresses(&self, index: u32, desired: &[IpNet]) -> Result<(), DriverError> {
+    async fn reconcile_addresses(
+        &self,
+        interface: &str,
+        index: u32,
+        desired: &[IpNet],
+    ) -> Result<(), DriverError> {
         let mut observed: Vec<(IpNet, AddressMessage)> = Vec::new();
         let mut addrs = self
             .handle
@@ -114,10 +119,12 @@ impl LinuxInterfaceDriver {
                 .add(index, net.addr(), net.prefix_len())
                 .execute()
                 .await?;
+            info!(interface = %interface, address = %net, "added interface address");
         }
         for net in to_remove {
             if let Some((_, msg)) = observed.iter().find(|(o, _)| *o == net) {
                 self.handle.address().del(msg.clone()).execute().await?;
+                info!(interface = %interface, address = %net, "removed interface address");
             }
         }
         Ok(())
@@ -129,6 +136,7 @@ impl LinuxInterfaceDriver {
     /// kernel link with that exact name.
     async fn reconcile_master(
         &self,
+        interface: &str,
         link: &LinkMessage,
         vrf_ifname: Option<&str>,
     ) -> Result<(), DriverError> {
@@ -162,6 +170,11 @@ impl LinuxInterfaceDriver {
                     .set(LinkUnspec::new_with_index(index).controller(want).build())
                     .execute()
                     .await?;
+                info!(
+                    interface = %interface,
+                    vrf = %vrf_ifname.unwrap_or_default(),
+                    "enslaved interface to vrf"
+                );
             }
             (Some(_), None) => {
                 self.handle
@@ -169,6 +182,7 @@ impl LinuxInterfaceDriver {
                     .set(LinkUnspec::new_with_index(index).nocontroller().build())
                     .execute()
                     .await?;
+                info!(interface = %interface, "removed interface from vrf enslavement");
             }
         }
         Ok(())
@@ -187,28 +201,33 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         };
         let index = link.header.index;
 
-        self.reconcile_addresses(index, &desired.addresses).await?;
+        self.reconcile_addresses(&desired.name, index, &desired.addresses)
+            .await?;
 
         let vrf_ifname = match &desired.routing_table {
             Some(table_name) => self.resolve_vrf_name(table_name).await,
             None => None,
         };
-        self.reconcile_master(&link, vrf_ifname.as_deref()).await?;
+        self.reconcile_master(&desired.name, &link, vrf_ifname.as_deref())
+            .await?;
 
         self.handle
             .link()
             .set(LinkUnspec::new_with_index(index).up().build())
             .execute()
             .await?;
+        trace!(interface = %desired.name, "ensuring interface administratively up");
         Ok(())
     }
 
     async fn remove(&self, name: &str) -> Result<(), DriverError> {
         let Some(link) = self.find_link(name).await? else {
+            debug!(interface = %name, "interface not present in netns, nothing to remove");
             return Ok(());
         };
-        self.reconcile_addresses(link.header.index, &[]).await?;
-        self.reconcile_master(&link, None).await?;
+        self.reconcile_addresses(name, link.header.index, &[])
+            .await?;
+        self.reconcile_master(name, &link, None).await?;
         Ok(())
     }
 }

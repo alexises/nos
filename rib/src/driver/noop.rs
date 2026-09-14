@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use nos_proto::IpNet;
-use tracing::info;
+use tracing::debug;
 
 use super::{DriverError, RibDriver};
 use crate::rib::RibEntry;
@@ -20,7 +20,7 @@ impl RibDriver for NoopRibDriver {
         table_name: &str,
         best_routes: &HashMap<IpNet, RibEntry>,
     ) -> Result<(), DriverError> {
-        info!(
+        debug!(
             table = %table_name,
             prefixes = best_routes.len(),
             "would install routes into a kernel VRF/table (noop driver — no OS effect)"
@@ -29,7 +29,7 @@ impl RibDriver for NoopRibDriver {
     }
 
     async fn teardown(&self, table_name: &str) -> Result<(), DriverError> {
-        info!(
+        debug!(
             table = %table_name,
             "would tear down the kernel VRF/table (noop driver — no OS effect)"
         );

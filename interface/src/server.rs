@@ -7,7 +7,7 @@ use tokio::net::UnixListener;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::warn;
+use tracing::{error, info, trace, warn};
 
 use crate::state::{InterfaceState, Interfaces};
 
@@ -23,6 +23,7 @@ pub fn start(
         std::fs::remove_file(listen_socket)?;
     }
     let listener = UnixListener::bind(listen_socket)?;
+    info!(socket = %listen_socket.display(), "interface IPC server listening");
     Ok(tokio::spawn(accept_loop(listener, interfaces)))
 }
 
@@ -33,7 +34,7 @@ async fn accept_loop(listener: UnixListener, interfaces: Arc<RwLock<Interfaces>>
                 tokio::spawn(handle_connection(stream, interfaces.clone()));
             }
             Err(e) => {
-                warn!("interface IPC accept error: {e}");
+                error!(error = %e, "interface IPC accept loop terminated");
                 break;
             }
         }
@@ -49,7 +50,7 @@ async fn handle_connection(stream: tokio::net::UnixStream, interfaces: Arc<RwLoc
         let event = match msg {
             Ok(req) => dispatch(&interfaces, req).await,
             Err(e) => {
-                warn!("interface IPC read error: {e}");
+                warn!(error = %e, "interface IPC read error");
                 break;
             }
         };
@@ -60,6 +61,7 @@ async fn handle_connection(stream: tokio::net::UnixStream, interfaces: Arc<RwLoc
 }
 
 async fn dispatch(interfaces: &Arc<RwLock<Interfaces>>, req: InterfaceRequest) -> InterfaceEvent {
+    trace!(request = ?req, "serving interface query");
     let guard = interfaces.read().await;
     match req {
         InterfaceRequest::GetInterfaces => {

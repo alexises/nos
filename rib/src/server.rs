@@ -7,7 +7,7 @@ use tokio::net::UnixListener;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::warn;
+use tracing::{error, info, trace, warn};
 
 use crate::driver::RibDriver;
 use crate::rib::{Rib, RibEntry, RouteSource};
@@ -35,6 +35,7 @@ pub fn start(
         std::fs::remove_file(listen_socket)?;
     }
     let listener = UnixListener::bind(listen_socket)?;
+    info!(table = %table, socket = %listen_socket.display(), "RIB IPC server listening");
     let ctx = Arc::new(Context { table, rib, driver });
     Ok(tokio::spawn(accept_loop(listener, ctx)))
 }
@@ -46,7 +47,7 @@ async fn accept_loop(listener: UnixListener, ctx: Arc<Context>) {
                 tokio::spawn(handle_connection(stream, ctx.clone()));
             }
             Err(e) => {
-                warn!("RIB IPC accept error: {e}");
+                error!(table = %ctx.table, error = %e, "RIB IPC accept loop terminated");
                 break;
             }
         }
@@ -62,7 +63,7 @@ async fn handle_connection(stream: tokio::net::UnixStream, ctx: Arc<Context>) {
         let event = match msg {
             Ok(req) => dispatch(&ctx, req).await,
             Err(e) => {
-                warn!("RIB IPC read error: {e}");
+                warn!(table = %ctx.table, error = %e, "RIB IPC read error");
                 break;
             }
         };
@@ -73,6 +74,7 @@ async fn handle_connection(stream: tokio::net::UnixStream, ctx: Arc<Context>) {
 }
 
 async fn dispatch(ctx: &Context, req: RibRequest) -> RibEvent {
+    trace!(table = %ctx.table, request = ?req, "serving RIB query");
     match req {
         RibRequest::GetRoutes => {
             let guard = ctx.rib.read().await;

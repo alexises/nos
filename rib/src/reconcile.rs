@@ -6,7 +6,7 @@ use futures::StreamExt;
 use nos_proto::{DiffScope, Event};
 use tokio::sync::{watch, RwLock};
 use tokio::time::sleep;
-use tracing::{info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::config_client;
 use crate::driver::RibDriver;
@@ -101,8 +101,9 @@ pub async fn run(
         }
     }
 
-    if let Err(e) = driver.teardown(&table).await {
-        warn!(table = %table, error = %e, "failed to tear down VRF on shutdown");
+    match driver.teardown(&table).await {
+        Ok(()) => debug!(table = %table, "tore down VRF/table on shutdown"),
+        Err(e) => warn!(table = %table, error = %e, "failed to tear down VRF on shutdown"),
     }
     info!(table = %table, "reconciliation loop stopped");
 }
@@ -112,9 +113,9 @@ async fn resync(config_socket: &Path, table: &str, rib: &Arc<RwLock<Rib>>, drive
         Ok(cfg) => {
             if let Some(new_rib) = build_from_config(&cfg, table) {
                 let routes = new_rib.best_routes();
-                info!(table = %table, prefixes = routes.len(), "recomputed RIB");
+                debug!(table = %table, prefixes = routes.len(), "recomputed RIB");
                 for (prefix, entry) in &routes {
-                    info!(
+                    trace!(
                         table = %table,
                         %prefix,
                         gateway = %entry.gateway,
@@ -123,7 +124,7 @@ async fn resync(config_socket: &Path, table: &str, rib: &Arc<RwLock<Rib>>, drive
                     );
                 }
                 if let Err(e) = driver.apply(table, &routes).await {
-                    warn!(table = %table, error = %e, "failed to apply routes to kernel");
+                    error!(table = %table, error = %e, "failed to apply routes to kernel");
                 }
                 *rib.write().await = new_rib;
             } else {

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use nos_proto::ServiceRef;
 use tokio::sync::RwLock;
+use tracing::debug;
 
 /// Cheap-`Clone` handle (like `nos-config`'s `ConfigStore`) over the live
 /// mapping from routing-table name to its `nos-ribd` instance's IPC socket.
@@ -16,6 +17,7 @@ pub struct EndpointRegistry {
 
 impl EndpointRegistry {
     pub async fn set_rib_table(&self, name: &str, socket: PathBuf) {
+        debug!(table = %name, socket = %socket.display(), "registered rib table endpoint");
         self.rib_tables
             .write()
             .await
@@ -23,6 +25,7 @@ impl EndpointRegistry {
     }
 
     pub async fn remove_rib_table(&self, name: &str) {
+        debug!(table = %name, "removed rib table endpoint");
         self.rib_tables.write().await.remove(name);
     }
 

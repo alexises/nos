@@ -127,7 +127,9 @@ async fn shutdown_child(name: &str, child: &mut Child) {
     if let Some(pid) = child.id() {
         info!(process = %name, "sending SIGINT");
         let pid = Pid::from_raw(i32::try_from(pid).unwrap_or(i32::MAX));
-        let _ = signal::kill(pid, Signal::SIGINT);
+        if let Err(e) = signal::kill(pid, Signal::SIGINT) {
+            warn!(process = %name, error = %e, "failed to send SIGINT");
+        }
     }
 
     if tokio::time::timeout(Duration::from_secs(10), child.wait())
@@ -137,7 +139,9 @@ async fn shutdown_child(name: &str, child: &mut Child) {
         info!(process = %name, "exited cleanly");
     } else {
         warn!(process = %name, "did not exit within 10s, killing");
-        let _ = child.kill().await;
+        if let Err(e) = child.kill().await {
+            warn!(process = %name, error = %e, "failed to force-kill process");
+        }
         let _ = child.wait().await;
     }
 }

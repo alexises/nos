@@ -4,6 +4,7 @@ use std::path::Path;
 
 use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, error, info, trace, warn};
 
 /// Linux reserves 0 (unspec), 253 (default), 254 (main), 255 (local).
 pub const MIN_TABLE_ID: u32 = 100;
@@ -43,21 +44,31 @@ pub fn ensure_table_id(path: &Path, table_name: &str) -> io::Result<u32> {
     let result = (|| {
         let mut reg = load(path)?;
         if let Some(&id) = reg.by_name.get(table_name) {
+            trace!(table = %table_name, table_id = id, "reusing allocated table id");
             return Ok(id);
         }
         let used: std::collections::HashSet<u32> = reg.by_name.values().copied().collect();
         let id = (MIN_TABLE_ID..=MAX_TABLE_ID)
             .find(|id| !used.contains(id))
             .ok_or_else(|| {
+                error!(
+                    table = %table_name,
+                    min = MIN_TABLE_ID,
+                    max = MAX_TABLE_ID,
+                    "table id range exhausted, cannot allocate"
+                );
                 io::Error::other(format!(
                     "table id range ({MIN_TABLE_ID}..={MAX_TABLE_ID}) exhausted"
                 ))
             })?;
         reg.by_name.insert(table_name.to_string(), id);
         save(path, &reg)?;
+        info!(table = %table_name, table_id = id, "allocated new kernel routing table id");
         Ok(id)
     })();
-    let _ = fs2::FileExt::unlock(&lock_file);
+    if let Err(e) = fs2::FileExt::unlock(&lock_file) {
+        warn!(table = %table_name, error = %e, "failed to unlock table-id registry lock file");
+    }
     result
 }
 
@@ -78,7 +89,14 @@ fn lock_path(path: &Path) -> std::path::PathBuf {
 
 fn load(path: &Path) -> io::Result<Registry> {
     match std::fs::read(path) {
-        Ok(bytes) => Ok(serde_yaml::from_slice(&bytes).unwrap_or_default()),
+        Ok(bytes) => Ok(serde_yaml::from_slice(&bytes).unwrap_or_else(|e| {
+            warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to parse table-id registry, starting from an empty registry"
+            );
+            Registry::default()
+        })),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Registry::default()),
         Err(e) => Err(e),
     }
@@ -97,6 +115,7 @@ fn save(path: &Path, reg: &Registry) -> io::Result<()> {
     }?;
     tmp.write_all(yaml.as_bytes())?;
     tmp.persist(path).map_err(|e| e.error)?;
+    debug!(path = %path.display(), entries = reg.by_name.len(), "persisted table-id registry");
     Ok(())
 }
 

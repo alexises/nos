@@ -9,7 +9,7 @@ use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{debug, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::store::ConfigStore;
 
@@ -59,6 +59,7 @@ pub fn start(addr: &ListenAddr, store: ConfigStore) -> std::io::Result<JoinHandl
                 std::fs::remove_file(path)?;
             }
             let listener = UnixListener::bind(path)?;
+            info!(listen = %addr, "config IPC server listening");
             Ok(tokio::spawn(accept_loop_unix(listener, store)))
         }
         ListenAddr::Tcp(addr) => {
@@ -66,8 +67,11 @@ pub fn start(addr: &ListenAddr, store: ConfigStore) -> std::io::Result<JoinHandl
             let addr = *addr;
             Ok(tokio::spawn(async move {
                 match TcpListener::bind(addr).await {
-                    Ok(listener) => accept_loop_tcp(listener, store).await,
-                    Err(e) => warn!("IPC TCP bind error: {e}"),
+                    Ok(listener) => {
+                        info!(listen = %addr, "config IPC server listening");
+                        accept_loop_tcp(listener, store).await;
+                    }
+                    Err(e) => error!(error = %e, listen = %addr, "IPC TCP bind failed"),
                 }
             }))
         }
@@ -81,7 +85,7 @@ async fn accept_loop_unix(listener: UnixListener, store: ConfigStore) {
                 tokio::spawn(handle_connection(stream, store.clone()));
             }
             Err(e) => {
-                warn!("IPC accept error: {e}");
+                error!(error = %e, "IPC accept loop terminated");
                 break;
             }
         }
@@ -95,7 +99,7 @@ async fn accept_loop_tcp(listener: TcpListener, store: ConfigStore) {
                 tokio::spawn(handle_connection(stream, store.clone()));
             }
             Err(e) => {
-                warn!("IPC TCP accept error: {e}");
+                error!(error = %e, "IPC TCP accept loop terminated");
                 break;
             }
         }
@@ -110,31 +114,49 @@ async fn dispatch_request(store: &ConfigStore, req: Request) -> Option<Event> {
         Request::Get => Event::Config(store.running_snapshot().await),
         Request::Save => match store.save_to_disk().await {
             Ok(()) => Event::Saved,
-            Err(e) => Event::Error(e.to_string()),
+            Err(e) => {
+                warn!(error = %e, "save to disk failed");
+                Event::Error(e.to_string())
+            }
         },
         Request::OpenTransaction { name, base } => {
             Event::Transaction(store.open_transaction(&name, base).await)
         }
         Request::ApplyOp { name, op } => match store.apply_op(&name, op).await {
             Ok(snap) => Event::Transaction(snap),
-            Err(e) => Event::Error(e.to_string()),
+            Err(e) => {
+                debug!(transaction = %name, error = %e, "apply op failed");
+                Event::Error(e.to_string())
+            }
         },
         Request::GetTransaction { name } => match store.get_transaction(&name).await {
             Ok(snap) => Event::Transaction(snap),
-            Err(e) => Event::Error(e.to_string()),
+            Err(e) => {
+                debug!(transaction = %name, error = %e, "get transaction failed");
+                Event::Error(e.to_string())
+            }
         },
         Request::CommitTransaction { name } => match store.commit_transaction(&name).await {
             Ok(()) => Event::Committed,
-            Err(e) => Event::Error(e.to_string()),
+            Err(e) => {
+                warn!(transaction = %name, error = %e, "commit failed");
+                Event::Error(e.to_string())
+            }
         },
         Request::DiscardTransaction { name } => match store.discard_transaction(&name).await {
             Ok(()) => Event::Discarded,
-            Err(e) => Event::Error(e.to_string()),
+            Err(e) => {
+                debug!(transaction = %name, error = %e, "discard transaction failed");
+                Event::Error(e.to_string())
+            }
         },
         Request::Describe { topic } => Event::Description(crate::docs::command_doc(topic)),
         Request::DiffTransaction { name } => match store.diff_transaction(&name).await {
             Ok(diff) => Event::Diff(diff),
-            Err(e) => Event::Error(e.to_string()),
+            Err(e) => {
+                debug!(transaction = %name, error = %e, "diff transaction failed");
+                Event::Error(e.to_string())
+            }
         },
         Request::Subscribe | Request::Unsubscribe | Request::SubscribeDiff { .. } => return None,
     })
@@ -183,7 +205,7 @@ where
                                         }
                                     }
                                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                                        warn!("IPC subscriber lagged by {n} messages");
+                                        warn!(lagged = n, "IPC subscriber lagged, dropped messages");
                                     }
                                     Err(broadcast::error::RecvError::Closed) => break,
                                 }
@@ -214,7 +236,7 @@ where
                                         }
                                     }
                                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                                        warn!("IPC subscriber lagged by {n} messages");
+                                        warn!(lagged = n, "IPC subscriber lagged, dropped messages");
                                     }
                                     Err(broadcast::error::RecvError::Closed) => break,
                                 }
@@ -225,7 +247,7 @@ where
                         if writer.send(Event::Diff(initial)).await.is_err() {
                             break;
                         }
-                        debug!("IPC client subscribed to diff (scopes: {scopes:?})");
+                        debug!(?scopes, "IPC client subscribed to diff");
                     }
                     Some(Ok(Request::Unsubscribe)) => {
                         if let Some(h) = sub_task.take() { h.abort(); }
@@ -239,7 +261,7 @@ where
                         }
                     }
                     Some(Err(e)) => {
-                        warn!("IPC read error: {e}");
+                        warn!(error = %e, "IPC read error");
                         if sub_task.is_none() {
                             break;
                         }

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 
 use nos_proto::{Config, IpNet};
+use tracing::warn;
 
 /// Where a route came from. New sources are appended as new variants — see
 /// the doc comment on `Bgp` for the seam this leaves for later.
@@ -141,6 +142,12 @@ pub fn build_from_config(cfg: &Config, table_name: &str) -> Option<Rib> {
                     source: RouteSource::Static,
                 });
             }
+        } else {
+            warn!(
+                table = %table_name,
+                static_routing_instance = %sri_name,
+                "static_routing_instance referenced by routing table not found in config"
+            );
         }
     }
 

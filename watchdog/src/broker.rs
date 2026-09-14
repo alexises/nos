@@ -5,7 +5,7 @@ use nos_proto::{IpcCodec, WatchdogEvent, WatchdogRequest};
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::warn;
+use tracing::{debug, error, info, trace, warn};
 
 use crate::registry::EndpointRegistry;
 
@@ -25,6 +25,7 @@ pub fn start(
         std::fs::remove_file(listen_socket)?;
     }
     let listener = UnixListener::bind(listen_socket)?;
+    info!(listen_socket = %listen_socket.display(), "broker IPC listening");
     Ok(tokio::spawn(accept_loop(
         listener,
         registry,
@@ -53,7 +54,7 @@ async fn accept_loop(
                 ));
             }
             Err(e) => {
-                warn!("broker IPC accept error: {e}");
+                error!(error = %e, "broker IPC accept loop terminated");
                 break;
             }
         }
@@ -74,16 +75,19 @@ async fn handle_connection(
     while let Some(msg) = reader.next().await {
         let event = match msg {
             Ok(WatchdogRequest::ResolveEndpoint { service }) => {
-                match registry
+                if let Some(path) = registry
                     .resolve(&service, &config_socket, &interfaces_socket, &log_socket)
                     .await
                 {
-                    Some(path) => WatchdogEvent::Endpoint(path),
-                    None => WatchdogEvent::NotAvailable,
+                    trace!(?service, "resolved endpoint");
+                    WatchdogEvent::Endpoint(path)
+                } else {
+                    debug!(?service, "endpoint not available");
+                    WatchdogEvent::NotAvailable
                 }
             }
             Err(e) => {
-                warn!("broker IPC read error: {e}");
+                warn!(error = %e, "broker IPC read error");
                 break;
             }
         };

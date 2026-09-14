@@ -176,17 +176,22 @@ fn stop_instance(instances: &mut HashMap<String, InstanceHandle>, name: &str) {
     if let Some(handle) = instances.remove(name) {
         info!(instance = %name, "BGP instance removed from config, stopping nos-bgpd");
         let _ = handle.shutdown_tx.send(true);
+        let name = name.to_string();
         // Don't block reconciliation on this shutdown's up-to-10s grace period.
         tokio::spawn(async move {
-            let _ = handle.task.await;
+            if let Err(e) = handle.task.await {
+                warn!(instance = %name, error = %e, "supervised bgpd task panicked");
+            }
         });
     }
 }
 
 async fn shutdown_all(instances: HashMap<String, InstanceHandle>) {
-    futures::future::join_all(instances.into_values().map(|h| async move {
+    futures::future::join_all(instances.into_iter().map(|(name, h)| async move {
         let _ = h.shutdown_tx.send(true);
-        let _ = h.task.await;
+        if let Err(e) = h.task.await {
+            warn!(instance = %name, error = %e, "supervised bgpd task panicked");
+        }
     }))
     .await;
 }
