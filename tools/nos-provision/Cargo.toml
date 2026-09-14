@@ -1,0 +1,20 @@
+[package]
+name    = "nos-provision"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+nos-proto  = { workspace = true }
+tokio      = { workspace = true }
+tokio-util = { workspace = true }
+futures    = { workspace = true }
+clap       = { workspace = true }
+anyhow     = { workspace = true }
+ipnet      = { workspace = true }
+
+[[bin]]
+name = "nos-provision"
+path = "src/main.rs"

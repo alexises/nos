@@ -1113,6 +1113,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nos-provision"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "ipnet",
+ "nos-proto",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "nos-rib"
 version = "0.1.0"
 dependencies = [

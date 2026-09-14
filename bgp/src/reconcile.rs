@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config_client;
 use crate::rib_client;
-use crate::session::{ResolvedPeer, SessionManager, VrfRequirement};
+use crate::session::{LocalIdentity, ResolvedPeer, SessionManager, VrfRequirement};
 use crate::watchdog_client;
 
 /// Fixed reconnect delay for the config subscription, matching every other
@@ -141,11 +141,17 @@ async fn resync(
             Some(ResolvedPeer {
                 remote_address: peer.remote_address,
                 source_address: group.source_address,
+                remote_as: group.remote_as,
             })
         })
         .collect();
 
-    sessions.reconcile(vrf, peers).await;
+    let local = LocalIdentity {
+        asn: own.asn,
+        router_id: own.router_id,
+    };
+
+    sessions.reconcile(vrf, local, peers).await;
 }
 
 /// Resolves `table`'s Linux VRF interface name by asking the owning

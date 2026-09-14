@@ -160,3 +160,19 @@ cargo test --workspace
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 ```
+
+### Two-router BGP verification
+
+`tools/verify-bgp.sh` stands up two independent `nos-watchdogd` containers on a shared docker network, configures each as a full BGP router peering the other, and checks the logs for a real OPEN/KEEPALIVE handshake reaching `Established`, a hold-timer/reconnect cycle after a peer vanishes, and (best-effort, timing-dependent) an RFC 4271 §6.8 collision-resolution event:
+
+```bash
+tools/verify-bgp.sh up            # build image + provisioning tool, start both routers, configure them as peers
+tools/verify-bgp.sh established   # wait for both sides to log "bgp session established"
+tools/verify-bgp.sh reconnect     # kill one side's nos-bgpd, confirm the other detects it and both re-establish
+tools/verify-bgp.sh collision     # restart both nos-bgpd processes at once, check for/report a collision event
+tools/verify-bgp.sh logs [n]      # tail both containers' logs
+tools/verify-bgp.sh down          # tear down containers, volumes, and the network
+tools/verify-bgp.sh all           # up + established + reconnect + collision, in sequence
+```
+
+`nos-cli`'s interactive shell (reedline) can't be scripted over a plain pipe — piped stdin fails with `readline error: No such device or address` — so provisioning goes through `tools/nos-provision`, a small standalone binary that speaks `nos-configd`'s IPC protocol directly (`OpenTransaction`/`ApplyOp`/`CommitTransaction`) using `nos-proto`'s own types, rather than through the shell. It's a workspace member but not meant to be run outside this script; `verify-bgp.sh` builds it via the same `rust:1-slim-bookworm` image the Dockerfile's builder stage uses, into a separate `target/docker-verify/` directory, so its binary's glibc version matches the `debian:bookworm-slim` runtime containers regardless of what the host toolchain would otherwise produce.

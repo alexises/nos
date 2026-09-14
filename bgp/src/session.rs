@@ -1,25 +1,18 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
-use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::collision::{PeerSlot, Role};
+use crate::fsm::{self, PeerContext};
 use crate::tcp;
 
 const BGP_PORT: u16 = 179;
-
-/// Fixed retry interval for a peer's outbound connect attempts — a
-/// placeholder for a real `ConnectRetryTimer` (RFC 4271 default: 120s) once
-/// the BGP FSM exists; kept shorter here so this first raw-TCP pass
-/// reconnects promptly.
-const CONNECT_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Whether, and how, this `nos-bgpd` instance is scoped into a VRF.
 /// Sessions/the listener only ever come up in `Resolved` — see root
@@ -35,21 +28,26 @@ pub enum VrfRequirement {
     Resolved(String),
 }
 
-/// A configured peer with the fields needed to open its TCP session —
-/// resolved from a `BgpPeer` + its `BgpPeerGroup` (see `reconcile::resync`).
+/// This instance's own identity — used to build every OPEN message it sends
+/// and to arbitrate RFC 4271 §6.8 collisions. Read fresh (via
+/// `SessionManager`'s watch channel) by each connection attempt rather than
+/// baked into a peer's task at spawn time, so a config change takes effect
+/// on the next connection attempt without needing to restart already-running
+/// peer tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalIdentity {
+    pub asn: u32,
+    pub router_id: Ipv4Addr,
+}
+
+/// A configured peer with the fields needed to open its TCP session and
+/// validate its OPEN message — resolved from a `BgpPeer` + its
+/// `BgpPeerGroup` (see `reconcile::resync`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPeer {
     pub remote_address: IpAddr,
     pub source_address: Option<IpAddr>,
-}
-
-/// Shared between a peer's active-connect task and the (single, shared)
-/// passive listener's accept handler, so at most one TCP session per peer
-/// is ever held open at a time. See `handle_inbound`/`active_connect_loop`
-/// for the collision rule: whichever side flips this flag first wins.
-struct PeerSlot {
-    peer: ResolvedPeer,
-    occupied: AtomicBool,
+    pub remote_as: u32,
 }
 
 struct PeerTask {
@@ -63,12 +61,13 @@ struct Listeners {
     v6: JoinHandle<()>,
 }
 
-/// Owns every raw-TCP session (active + passive) for one `nos-bgpd`
-/// process. `reconcile` is the sole entry point, called by
-/// `crate::reconcile::run` on every resync; it's idempotent and safe to
-/// call repeatedly with the same desired state.
+/// Owns every raw-TCP + FSM session for one `nos-bgpd` process. `reconcile`
+/// is the sole entry point, called by `crate::reconcile::run` on every
+/// resync; it's idempotent and safe to call repeatedly with the same
+/// desired state.
 pub struct SessionManager {
     instance: String,
+    local: watch::Sender<LocalIdentity>,
     peers: Arc<RwLock<HashMap<IpAddr, Arc<PeerSlot>>>>,
     peer_tasks: Mutex<HashMap<IpAddr, PeerTask>>,
     listeners: Mutex<Option<Listeners>>,
@@ -78,8 +77,13 @@ pub struct SessionManager {
 impl SessionManager {
     pub fn new(instance: String) -> Arc<Self> {
         let (vrf, _) = watch::channel(VrfRequirement::Pending);
+        let (local, _) = watch::channel(LocalIdentity {
+            asn: 0,
+            router_id: Ipv4Addr::UNSPECIFIED,
+        });
         Arc::new(Self {
             instance,
+            local,
             peers: Arc::new(RwLock::new(HashMap::new())),
             peer_tasks: Mutex::new(HashMap::new()),
             listeners: Mutex::new(None),
@@ -87,7 +91,15 @@ impl SessionManager {
         })
     }
 
-    pub async fn reconcile(self: &Arc<Self>, vrf: VrfRequirement, desired: Vec<ResolvedPeer>) {
+    pub async fn reconcile(
+        self: &Arc<Self>,
+        vrf: VrfRequirement,
+        local: LocalIdentity,
+        desired: Vec<ResolvedPeer>,
+    ) {
+        if *self.local.borrow() != local {
+            let _ = self.local.send(local);
+        }
         if *self.vrf.borrow() != vrf {
             let _ = self.vrf.send(vrf.clone());
         }
@@ -178,27 +190,31 @@ impl SessionManager {
             );
             return;
         };
-        if slot
-            .occupied
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            // Real RFC 4271 §6.8 collision resolution needs the peer's
-            // router-id from an OPEN message, which doesn't exist yet —
-            // first-connected-wins is a documented simplification pending
-            // the BGP FSM.
-            warn!(
+        if !slot.begin(Role::Passive).await {
+            debug!(
                 instance = %self.instance, peer = %remote,
-                "collision: peer already has an open session, dropping inbound connection"
+                "rejecting inbound tcp connection: a previous inbound session for this peer is still being torn down"
             );
             return;
         }
         info!(instance = %self.instance, peer = %remote, "accepted inbound bgp tcp session");
         let instance = self.instance.clone();
+        let local = *self.local.borrow();
+        let remote_as = slot.peer.remote_as;
         tokio::spawn(async move {
-            hold_until_closed(stream).await;
-            slot.occupied.store(false, Ordering::SeqCst);
-            info!(instance = %instance, peer = %remote, "inbound bgp tcp session closed");
+            let outcome = fsm::run(
+                stream,
+                Role::Passive,
+                local,
+                PeerContext {
+                    remote_address: remote,
+                    expected_remote_as: remote_as,
+                },
+                slot.clone(),
+            )
+            .await;
+            slot.clear(Role::Passive).await;
+            info!(instance = %instance, peer = %remote, outcome = ?outcome, "inbound bgp session ended");
         });
     }
 
@@ -220,10 +236,7 @@ impl SessionManager {
             self.peers.write().await.remove(&addr);
         }
         for peer in to_spawn {
-            let slot = Arc::new(PeerSlot {
-                peer: peer.clone(),
-                occupied: AtomicBool::new(false),
-            });
+            let slot = PeerSlot::new(peer.clone());
             self.peers
                 .write()
                 .await
@@ -232,6 +245,7 @@ impl SessionManager {
                 self.instance.clone(),
                 slot,
                 self.vrf.subscribe(),
+                self.local.subscribe(),
             ));
             tasks.insert(peer.remote_address, PeerTask { peer, task });
         }
@@ -268,64 +282,59 @@ fn diff_peers(
     (to_stop, to_spawn)
 }
 
-/// Blocks until `stream` closes or errors. No BGP message parsing yet —
-/// any bytes received are simply discarded until the FSM exists; this only
-/// establishes and holds the raw, VRF-scoped TCP session.
-async fn hold_until_closed(mut stream: TcpStream) {
-    let mut buf = [0u8; 256];
-    loop {
-        match stream.read(&mut buf).await {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
-        }
-    }
-}
-
-/// One peer's outbound side: while the VRF is resolved and the slot is
-/// free, attempts a connect on a fixed retry interval; on success, holds
-/// the session until it closes, then resumes retrying. Runs until aborted
-/// by `SessionManager` (peer removed from config, or process shutdown).
+/// One peer's outbound side: while the VRF is resolved, attempts a connect
+/// on a fixed retry interval; on success, runs the FSM until the session
+/// ends, then resumes retrying. Runs until aborted by `SessionManager`
+/// (peer removed from config, or process shutdown).
 async fn active_connect_loop(
     instance: String,
     slot: Arc<PeerSlot>,
     mut vrf: watch::Receiver<VrfRequirement>,
+    local: watch::Receiver<LocalIdentity>,
 ) {
     loop {
         let current_vrf = vrf.borrow().clone();
         if let VrfRequirement::Resolved(vrf_name) = current_vrf {
-            if !slot.occupied.load(Ordering::SeqCst) {
+            if slot.is_established().await {
+                // Already up (via either role) — dialing out again would
+                // just create a pointless collision the existing session
+                // would win anyway. Wait for the retry interval (or a VRF
+                // change) and check again, rather than actually connecting.
+            } else if slot.begin(Role::Active).await {
                 let remote = SocketAddr::new(slot.peer.remote_address, BGP_PORT);
                 match tcp::connect(remote, slot.peer.source_address, Some(&vrf_name)).await {
                     Ok(stream) => {
-                        if slot
-                            .occupied
-                            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                            .is_ok()
-                        {
-                            info!(
-                                instance = %instance, peer = %slot.peer.remote_address,
-                                "established outbound bgp tcp session"
-                            );
-                            hold_until_closed(stream).await;
-                            slot.occupied.store(false, Ordering::SeqCst);
-                            info!(
-                                instance = %instance, peer = %slot.peer.remote_address,
-                                "outbound bgp tcp session closed"
-                            );
-                        }
-                        // Otherwise an inbound connection claimed the slot
-                        // first between our check and this connect
-                        // succeeding — drop our own redundant connection.
+                        info!(
+                            instance = %instance, peer = %slot.peer.remote_address,
+                            "established outbound bgp tcp connection"
+                        );
+                        let local_identity = *local.borrow();
+                        let outcome = fsm::run(
+                            stream,
+                            Role::Active,
+                            local_identity,
+                            PeerContext {
+                                remote_address: slot.peer.remote_address,
+                                expected_remote_as: slot.peer.remote_as,
+                            },
+                            slot.clone(),
+                        )
+                        .await;
+                        info!(
+                            instance = %instance, peer = %slot.peer.remote_address,
+                            outcome = ?outcome, "outbound bgp session ended"
+                        );
                     }
                     Err(e) => debug!(
                         instance = %instance, peer = %slot.peer.remote_address, error = %e,
                         "outbound bgp connect failed, retrying"
                     ),
                 }
+                slot.clear(Role::Active).await;
             }
         }
         tokio::select! {
-            () = tokio::time::sleep(CONNECT_RETRY_INTERVAL) => {}
+            () = tokio::time::sleep(fsm::CONNECT_RETRY_TIME) => {}
             _ = vrf.changed() => {}
         }
     }
@@ -339,6 +348,7 @@ mod tests {
         ResolvedPeer {
             remote_address: addr.parse().unwrap(),
             source_address: None,
+            remote_as: 65000,
         }
     }
 
@@ -377,6 +387,18 @@ mod tests {
         let current = HashMap::from([(addr, peer("10.0.0.1"))]);
         let mut changed = peer("10.0.0.1");
         changed.source_address = Some("10.0.0.9".parse().unwrap());
+        let desired = HashMap::from([(addr, changed.clone())]);
+        let (to_stop, to_spawn) = diff_peers(&current, &desired);
+        assert_eq!(to_stop, vec![addr]);
+        assert_eq!(to_spawn, vec![changed]);
+    }
+
+    #[test]
+    fn remote_as_change_triggers_restart() {
+        let addr: IpAddr = "10.0.0.1".parse().unwrap();
+        let current = HashMap::from([(addr, peer("10.0.0.1"))]);
+        let mut changed = peer("10.0.0.1");
+        changed.remote_as = 65001;
         let desired = HashMap::from([(addr, changed.clone())]);
         let (to_stop, to_spawn) = diff_peers(&current, &desired);
         assert_eq!(to_stop, vec![addr]);
