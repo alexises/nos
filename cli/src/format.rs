@@ -480,6 +480,7 @@ mod tests {
             asn,
             peer_groups: Vec::new(),
             peers: Vec::new(),
+            routing_table: None,
         }
     }
 

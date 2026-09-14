@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use garde::Validate as _;
-use nos_proto::{diff_configs, Config, ConfigDiff, ConfigOp, TransactionBase, TransactionSnapshot};
+use nos_proto::{
+    diff_configs, sync_routing_table_refs, Config, ConfigDiff, ConfigOp, TransactionBase,
+    TransactionSnapshot,
+};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, info};
 
@@ -44,6 +47,8 @@ pub struct ConfigStore(Arc<Inner>);
 
 impl ConfigStore {
     pub fn new(initial: Config, config_path: Option<PathBuf>) -> Self {
+        let mut initial = initial;
+        sync_routing_table_refs(&mut initial);
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self(Arc::new(Inner {
             running: RwLock::new(initial),
@@ -153,7 +158,8 @@ impl ConfigStore {
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
         // Pass the config itself as the validation context (cross-reference checks).
         txn.config.validate_with(&txn.config)?;
-        let config = txn.config.clone();
+        let mut config = txn.config.clone();
+        sync_routing_table_refs(&mut config);
         txs.remove(name);
         drop(txs);
 
@@ -226,6 +232,7 @@ mod tests {
             asn,
             peer_groups: Vec::new(),
             peers: Vec::new(),
+            routing_table: None,
         }
     }
 
@@ -266,6 +273,27 @@ mod tests {
         ConfigOp::StaticRoutingInstance(nos_proto::StaticRoutingInstanceOp::Ensure {
             name: name.to_string(),
         })
+    }
+
+    #[tokio::test]
+    async fn new_derives_routing_table_refs_from_initial_config() {
+        let store = ConfigStore::new(
+            Config {
+                bgp_instances: vec![instance("r1", 65000)],
+                routing_tables: vec![nos_proto::RoutingTable {
+                    name: "rt1".to_string(),
+                    bgp_instance: Some("r1".to_string()),
+                    static_routing_instance: None,
+                }],
+                ..Default::default()
+            },
+            None,
+        );
+        let running = store.running_snapshot().await;
+        assert_eq!(
+            running.bgp_instances[0].routing_table.as_deref(),
+            Some("rt1")
+        );
     }
 
     #[tokio::test]
@@ -479,6 +507,11 @@ mod tests {
         assert_eq!(
             running.routing_tables[0].bgp_instance.as_deref(),
             Some("r1")
+        );
+        assert_eq!(
+            running.bgp_instances[0].routing_table.as_deref(),
+            Some("rt1"),
+            "commit must derive the reflexive BgpInstance.routing_table reference"
         );
         assert_eq!(
             running.routing_tables[0].static_routing_instance.as_deref(),

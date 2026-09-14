@@ -30,11 +30,15 @@ COPY --from=builder /app/target/release/nos            /usr/local/bin/nos
 # program the kernel (VRF devices, addresses, routes) via rtnetlink, even
 # though they run as the unprivileged `nos` user — file capabilities let an
 # exec'd non-root process gain exactly these two capabilities, no more.
+# nos-bgpd needs CAP_NET_RAW to scope its TCP sockets into a VRF via
+# SO_BINDTODEVICE, and CAP_NET_BIND_SERVICE to listen on BGP's well-known
+# port 179 (<1024) as the unprivileged `nos` user.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libcap2-bin \
     && setcap 'cap_net_admin,cap_net_raw=eip' /usr/local/bin/nos-ribd \
     && setcap 'cap_net_admin,cap_net_raw=eip' /usr/local/bin/nos-interfaced \
+    && setcap 'cap_net_raw,cap_net_bind_service=eip' /usr/local/bin/nos-bgpd \
     && apt-get purge -y --auto-remove libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 

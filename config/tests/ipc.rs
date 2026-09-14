@@ -17,6 +17,7 @@ fn instance(name: &str, asn: u32) -> BgpInstance {
         asn,
         peer_groups: Vec::new(),
         peers: Vec::new(),
+        routing_table: None,
     }
 }
 

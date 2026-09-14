@@ -1,5 +1,6 @@
 pub mod broker;
 pub mod codec;
+pub mod derive;
 pub mod diff;
 pub mod docs;
 pub mod interface;
@@ -13,6 +14,7 @@ pub mod validators;
 
 pub use broker::{ServiceRef, WatchdogEvent, WatchdogRequest};
 pub use codec::IpcCodec;
+pub use derive::sync_routing_table_refs;
 pub use diff::{diff_configs, ConfigDiff, DiffScope, DiffStatus, FieldDiff, SectionDiff};
 pub use docs::{CommandDoc, Topic};
 pub use interface::{InterfaceEvent, InterfaceRequest, InterfaceStatus};

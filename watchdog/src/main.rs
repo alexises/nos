@@ -145,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
         args.bgpd_flags,
         args.log_socket.clone(),
         policy,
+        args.listen_socket.clone(),
         shutdown_rx.clone(),
     )));
     tasks.push(tokio::spawn(routing_tables::manage(

@@ -100,6 +100,7 @@ mod tests {
             asn: 65000,
             peer_groups: groups,
             peers: Vec::new(),
+            routing_table: None,
         }
     }
 

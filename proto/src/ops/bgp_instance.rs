@@ -41,6 +41,7 @@ impl BgpInstanceOp {
                         asn: 0,
                         peer_groups: Vec::new(),
                         peers: Vec::new(),
+                        routing_table: None,
                     });
                 }
                 Ok(())
@@ -87,6 +88,7 @@ mod tests {
             asn,
             peer_groups: Vec::new(),
             peers: Vec::new(),
+            routing_table: None,
         }
     }
 

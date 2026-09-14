@@ -29,6 +29,17 @@ pub struct BgpInstance {
 
     #[garde(dive)]
     pub peers: Vec<BgpPeer>,
+
+    /// The name of the `RoutingTable` that claims this instance (i.e. the
+    /// VRF it belongs to), mirrored from that table's `bgp_instance` field.
+    /// Derived and read-only: never set by any `BgpInstanceOp`, recomputed
+    /// by `nos-config` (`crate::derive::sync_routing_table_refs`) on every
+    /// commit and on load, so an operator only ever edits the one
+    /// authoritative reference (`RoutingTable.bgp_instance`). `nos-bgpd`
+    /// reads this directly to resolve its own VRF without scanning every
+    /// routing table. Deliberately not rendered by `nos-cli`.
+    #[garde(skip)]
+    pub routing_table: Option<String>,
 }
 
 #[cfg(test)]
@@ -48,6 +59,7 @@ mod tests {
             asn,
             peer_groups: Vec::new(),
             peers: Vec::new(),
+            routing_table: None,
         }
     }
 

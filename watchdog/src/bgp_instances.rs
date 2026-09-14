@@ -33,6 +33,7 @@ pub async fn manage(
     bgpd_flags: Vec<String>,
     log_socket: PathBuf,
     policy: BackoffPolicy,
+    watchdog_listen_socket: PathBuf,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut instances: HashMap<String, InstanceHandle> = HashMap::new();
@@ -53,10 +54,10 @@ pub async fn manage(
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(diff))) => {
                                 if first_event {
-                                    sync_from_initial(&mut instances, &diff.bgp_instances, &bgpd_bin, &bgpd_flags, &log_socket, policy);
+                                    sync_from_initial(&mut instances, &diff.bgp_instances, &bgpd_bin, &bgpd_flags, &log_socket, policy, &watchdog_listen_socket);
                                     first_event = false;
                                 } else {
-                                    apply_diff(&mut instances, &diff.bgp_instances, &bgpd_bin, &bgpd_flags, &log_socket, policy);
+                                    apply_diff(&mut instances, &diff.bgp_instances, &bgpd_bin, &bgpd_flags, &log_socket, policy, &watchdog_listen_socket);
                                 }
                             }
                             Some(Ok(_)) => {}
@@ -98,6 +99,7 @@ fn sync_from_initial(
     bgpd_flags: &[String],
     log_socket: &Path,
     policy: BackoffPolicy,
+    watchdog_listen_socket: &Path,
 ) {
     let wanted: HashSet<&str> = sections.iter().map(|s| s.name.as_str()).collect();
 
@@ -112,14 +114,24 @@ fn sync_from_initial(
 
     for name in wanted {
         if !instances.contains_key(name) {
-            spawn_instance(instances, name, bgpd_bin, bgpd_flags, log_socket, policy);
+            spawn_instance(
+                instances,
+                name,
+                bgpd_bin,
+                bgpd_flags,
+                log_socket,
+                policy,
+                watchdog_listen_socket,
+            );
         }
     }
 }
 
 /// Applies an incremental diff on an unbroken connection: `Added` spawns if
 /// missing (idempotent), `Removed` stops if present, `Modified` is a no-op
-/// (the `nos-bgpd` stub doesn't read instance parameters yet).
+/// at this level — like `nos-ribd`, `nos-bgpd` independently subscribes to
+/// config and re-resolves its own peers/VRF on every relevant diff, so a
+/// parameter change never needs a process restart here.
 fn apply_diff(
     instances: &mut HashMap<String, InstanceHandle>,
     sections: &[SectionDiff],
@@ -127,6 +139,7 @@ fn apply_diff(
     bgpd_flags: &[String],
     log_socket: &Path,
     policy: BackoffPolicy,
+    watchdog_listen_socket: &Path,
 ) {
     for section in sections {
         match section.status {
@@ -139,6 +152,7 @@ fn apply_diff(
                         bgpd_flags,
                         log_socket,
                         policy,
+                        watchdog_listen_socket,
                     );
                 }
             }
@@ -155,6 +169,7 @@ fn spawn_instance(
     bgpd_flags: &[String],
     log_socket: &Path,
     policy: BackoffPolicy,
+    watchdog_listen_socket: &Path,
 ) {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let spec = ProcessSpec::new(
@@ -162,6 +177,10 @@ fn spawn_instance(
         bgpd_bin.to_path_buf(),
         std::iter::once("--instance".to_string())
             .chain(std::iter::once(name.to_string()))
+            .chain(std::iter::once("--watchdog-socket".to_string()))
+            .chain(std::iter::once(
+                watchdog_listen_socket.display().to_string(),
+            ))
             .chain(std::iter::once("--log-socket".to_string()))
             .chain(std::iter::once(log_socket.display().to_string()))
             .chain(bgpd_flags.iter().cloned())

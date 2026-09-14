@@ -63,6 +63,7 @@ mod tests {
             asn: 65000,
             peer_groups: groups,
             peers,
+            routing_table: None,
         }
     }
 
