@@ -17,7 +17,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::Instant;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, info};
@@ -27,8 +27,9 @@ use nos_proto::HOLD_TIME_FLOOR;
 use crate::collision::{self, PeerSlot};
 use crate::message::{
     self, BgpCodec, BgpMessage, CeaseSubcode, ErrorCode, MessageHeaderSubcode, NotificationMessage,
-    OpenMessage, OpenMessageSubcode, WireError,
+    OpenMessage, OpenMessageSubcode, UpdateMessageSubcode, WireError,
 };
+use crate::rib::{BgpRib, OutboundUpdate};
 use crate::session::LocalIdentity;
 use crate::status::{PeerState, PeerStatus};
 
@@ -133,13 +134,13 @@ fn step(state: State, event: Event, ctx: &NegotiationContext) -> (Option<State>,
             Some(State::Established(remote)),
             vec![Action::SendKeepalive],
         ),
-        (_, Event::MalformedMessage(e)) => (
-            None,
-            vec![
-                Action::SendNotification(ErrorCode::MessageHeader as u8, header_subcode(&e) as u8),
-                Action::Close,
-            ],
-        ),
+        (_, Event::MalformedMessage(e)) => {
+            let (code, subcode) = notification_for_wire_error(&e);
+            (
+                None,
+                vec![Action::SendNotification(code, subcode), Action::Close],
+            )
+        }
         // Anything else (an OPEN arriving twice, a KeepaliveTimerExpires
         // while not yet Established, ...) is a protocol sequencing error.
         (_, _) => (
@@ -210,14 +211,28 @@ fn reject(subcode: OpenMessageSubcode) -> (Option<State>, Vec<Action>) {
     )
 }
 
-fn header_subcode(e: &WireError) -> MessageHeaderSubcode {
+/// Maps a decode failure to the `(error_code, error_subcode)` pair its
+/// NOTIFICATION should carry. Every case but `MalformedUpdate` is a Message
+/// Header error (RFC 4271 §6.1); `MalformedUpdate` is the one case that
+/// belongs to the UPDATE Message Error table (§6.3) instead.
+fn notification_for_wire_error(e: &WireError) -> (u8, u8) {
     match e {
-        WireError::BadMarker => MessageHeaderSubcode::ConnectionNotSynchronized,
+        WireError::BadMarker => (
+            ErrorCode::MessageHeader as u8,
+            MessageHeaderSubcode::ConnectionNotSynchronized as u8,
+        ),
         WireError::BadLength(_)
         | WireError::Truncated
         | WireError::MalformedOpen
         | WireError::MalformedNotification
-        | WireError::Io(_) => MessageHeaderSubcode::BadMessageLength,
+        | WireError::Io(_) => (
+            ErrorCode::MessageHeader as u8,
+            MessageHeaderSubcode::BadMessageLength as u8,
+        ),
+        WireError::MalformedUpdate => (
+            ErrorCode::UpdateMessage as u8,
+            UpdateMessageSubcode::MalformedAttributeList as u8,
+        ),
     }
 }
 
@@ -236,13 +251,32 @@ pub enum FsmOutcome {
 /// over an already-connected `stream`. The caller is responsible for
 /// `PeerSlot::begin`/`clear` around this call — `run` only touches
 /// `on_open`/`mark_established`, the transitions intrinsic to FSM progress.
+///
+/// `bgp_rib` is registered with a fresh outbound channel once the session
+/// reaches `Established` (`Action::ReportEstablished`), fed real
+/// `BgpMessage::Update`s back onto the wire from a dedicated `select!` arm,
+/// and unconditionally deregistered (`peer_disconnected`) at this function's
+/// single exit point — whatever the reason this session ended.
 pub async fn run(
     stream: TcpStream,
     role: collision::Role,
     local: LocalIdentity,
     peer: PeerContext,
     slot: Arc<PeerSlot>,
+    bgp_rib: Arc<Mutex<BgpRib>>,
 ) -> FsmOutcome {
+    // Captured before `into_split()` consumes `stream`: this session's own
+    // local address, used for next-hop-self advertisements toward this
+    // peer. `None` if this connection turned out to be over IPv6 (UPDATE
+    // support is IPv4-unicast-only) — such a peer is never eligible for any
+    // advertisement (see `crate::rib::build_advertisement`).
+    let local_addr_v4 = stream.local_addr().ok().and_then(|addr| match addr.ip() {
+        IpAddr::V4(v4) => Some(v4),
+        IpAddr::V6(_) => None,
+    });
+    let remote_is_ibgp = local.asn == peer.expected_remote_as;
+    let (outbox_tx, mut outbox_rx) = mpsc::unbounded_channel::<OutboundUpdate>();
+
     let (read_half, write_half) = stream.into_split();
     let mut reader = FramedRead::new(read_half, BgpCodec);
     let mut writer = FramedWrite::new(write_half, BgpCodec);
@@ -252,11 +286,6 @@ pub async fn run(
         local_hold_time: peer.local_hold_time,
         keepalive_override: peer.keepalive_override,
     };
-
-    let open = message::build_open(local.asn, local.router_id, peer.local_hold_time);
-    if writer.send(BgpMessage::Open(open)).await.is_err() {
-        return FsmOutcome::TcpError;
-    }
 
     let mut state = State::OpenSent;
     // Doubles, before negotiation, as the OpenSent-wait timer. A configured
@@ -290,144 +319,206 @@ pub async fn run(
         });
     }
 
-    loop {
-        let event = tokio::select! {
-            msg = reader.next() => match msg {
-                Some(Ok(bgp_msg)) => {
-                    // Any well-formed inbound message proves liveness —
-                    // reset the hold timer regardless of type (RFC 4271 §4.4).
-                    if let Some(period) = hold_period {
-                        hold_deadline = Some(Instant::now() + period);
+    // Single exit point: every early-return case below (`break 'session
+    // ...`) funnels through the same `bgp_rib.peer_disconnected` call after
+    // this block, rather than returning directly — a session that never
+    // reached `Established` makes that call a safe no-op.
+    let outcome = 'session: {
+        let open = message::build_open(local.asn, local.router_id, peer.local_hold_time);
+        if writer.send(BgpMessage::Open(open)).await.is_err() {
+            break 'session FsmOutcome::TcpError;
+        }
+
+        loop {
+            let event = tokio::select! {
+                msg = reader.next() => match msg {
+                    Some(Ok(bgp_msg)) => {
+                        // Any well-formed inbound message proves liveness —
+                        // reset the hold timer regardless of type (RFC 4271 §4.4).
+                        if let Some(period) = hold_period {
+                            hold_deadline = Some(Instant::now() + period);
+                        }
+                        match bgp_msg {
+                            BgpMessage::Open(open) => Event::OpenReceived(open),
+                            BgpMessage::Keepalive => Event::KeepaliveReceived,
+                            BgpMessage::Notification(n) => Event::NotificationReceived(n),
+                            BgpMessage::Update(update) => {
+                                // Route exchange bypasses `step` entirely —
+                                // it isn't part of the OpenSent/OpenConfirm/
+                                // Established transition table.
+                                if matches!(state, State::Established(_)) {
+                                    bgp_rib.lock().await.handle_update(
+                                        peer.remote_address,
+                                        remote_is_ibgp,
+                                        update,
+                                    );
+                                } else {
+                                    debug!(
+                                        peer = %peer.remote_address,
+                                        "ignoring bgp update received before session established"
+                                    );
+                                }
+                                continue;
+                            }
+                            BgpMessage::Unhandled { message_type, .. } => {
+                                debug!(
+                                    peer = %peer.remote_address, message_type,
+                                    "ignoring unrecognized bgp message type"
+                                );
+                                continue;
+                            }
+                        }
                     }
-                    match bgp_msg {
-                        BgpMessage::Open(open) => Event::OpenReceived(open),
-                        BgpMessage::Keepalive => Event::KeepaliveReceived,
-                        BgpMessage::Notification(n) => Event::NotificationReceived(n),
-                        BgpMessage::Unhandled { message_type, .. } => {
-                            debug!(
-                                peer = %peer.remote_address, message_type,
-                                "ignoring bgp message type (route exchange not implemented yet)"
-                            );
-                            continue;
+                    Some(Err(WireError::Io(_))) => break 'session FsmOutcome::TcpError,
+                    Some(Err(e)) => Event::MalformedMessage(e),
+                    None => Event::TcpFailed,
+                },
+                () = sleep_until_opt(hold_deadline) => Event::HoldTimerExpires,
+                () = sleep_until_opt(keepalive_deadline) => {
+                    if let Some(period) = keepalive_period {
+                        keepalive_deadline = Some(Instant::now() + period);
+                    }
+                    Event::KeepaliveTimerExpires
+                }
+                () = cease.notified() => Event::CollisionLost,
+                Some(update) = outbox_rx.recv() => {
+                    let _ = writer.send(outbound_update_to_message(update)).await;
+                    continue;
+                }
+            };
+
+            let is_open_event = matches!(event, Event::OpenReceived(_));
+            let notification_received = match &event {
+                Event::NotificationReceived(n) => Some((n.error_code, n.error_subcode)),
+                _ => None,
+            };
+            let (mut next_state, mut actions) = step(state, event, &ctx);
+
+            if is_open_event {
+                if let Some(State::OpenConfirm(remote)) = next_state {
+                    let decision = slot
+                        .on_open(role, local.router_id, remote.bgp_id, cease.clone())
+                        .await;
+                    match decision {
+                        collision::Decision::Lose => {
+                            next_state = None;
+                            actions = vec![
+                                Action::SendNotification(
+                                    ErrorCode::Cease as u8,
+                                    CeaseSubcode::ConnectionCollisionResolution as u8,
+                                ),
+                                Action::Close,
+                            ];
+                        }
+                        // `on_open` only returns `Proceed` when no other
+                        // connection for this peer is already `Established` (see
+                        // `collision::PeerSlot::on_open`), so this is safe to
+                        // write without an extra `is_established` race check.
+                        collision::Decision::Proceed => {
+                            slot.status.send_modify(|s| {
+                                s.state = PeerState::OpenConfirm;
+                                s.remote_asn = Some(remote.asn);
+                                s.remote_bgp_id = Some(remote.bgp_id);
+                            });
                         }
                     }
                 }
-                Some(Err(WireError::Io(_))) => return FsmOutcome::TcpError,
-                Some(Err(e)) => Event::MalformedMessage(e),
-                None => Event::TcpFailed,
-            },
-            () = sleep_until_opt(hold_deadline) => Event::HoldTimerExpires,
-            () = sleep_until_opt(keepalive_deadline) => {
-                if let Some(period) = keepalive_period {
-                    keepalive_deadline = Some(Instant::now() + period);
-                }
-                Event::KeepaliveTimerExpires
             }
-            () = cease.notified() => Event::CollisionLost,
-        };
 
-        let is_open_event = matches!(event, Event::OpenReceived(_));
-        let notification_received = match &event {
-            Event::NotificationReceived(n) => Some((n.error_code, n.error_subcode)),
-            _ => None,
-        };
-        let (mut next_state, mut actions) = step(state, event, &ctx);
-
-        if is_open_event {
-            if let Some(State::OpenConfirm(remote)) = next_state {
-                let decision = slot
-                    .on_open(role, local.router_id, remote.bgp_id, cease.clone())
-                    .await;
-                match decision {
-                    collision::Decision::Lose => {
-                        next_state = None;
-                        actions = vec![
-                            Action::SendNotification(
-                                ErrorCode::Cease as u8,
-                                CeaseSubcode::ConnectionCollisionResolution as u8,
-                            ),
-                            Action::Close,
-                        ];
+            let mut notification_sent = None;
+            for action in &actions {
+                match action {
+                    Action::SendKeepalive => {
+                        let _ = writer.send(BgpMessage::Keepalive).await;
                     }
-                    // `on_open` only returns `Proceed` when no other
-                    // connection for this peer is already `Established` (see
-                    // `collision::PeerSlot::on_open`), so this is safe to
-                    // write without an extra `is_established` race check.
-                    collision::Decision::Proceed => {
+                    Action::SendNotification(code, subcode) => {
+                        let _ = writer
+                            .send(BgpMessage::Notification(NotificationMessage {
+                                error_code: *code,
+                                error_subcode: *subcode,
+                                data: Bytes::new(),
+                            }))
+                            .await;
+                        notification_sent = Some((*code, *subcode));
+                    }
+                    Action::ArmHoldTimer(d) => {
+                        hold_period = if d.is_zero() { None } else { Some(*d) };
+                        hold_deadline = hold_period.map(|p| Instant::now() + p);
+                        // Always derived from a u16 (either the local config or
+                        // the peer's OPEN), so this never actually truncates.
+                        negotiated_hold_time = Some(u16::try_from(d.as_secs()).unwrap_or(u16::MAX));
+                    }
+                    Action::ArmKeepaliveTimer(d) => {
+                        keepalive_period = if d.is_zero() { None } else { Some(*d) };
+                        keepalive_deadline = keepalive_period.map(|p| Instant::now() + p);
+                        negotiated_keepalive = Some(u16::try_from(d.as_secs()).unwrap_or(u16::MAX));
+                    }
+                    Action::ReportEstablished {
+                        remote_asn,
+                        remote_bgp_id,
+                    } => {
+                        slot.mark_established(role).await;
+                        bgp_rib.lock().await.peer_established(
+                            peer.remote_address,
+                            remote_is_ibgp,
+                            local_addr_v4,
+                            outbox_tx.clone(),
+                        );
                         slot.status.send_modify(|s| {
-                            s.state = PeerState::OpenConfirm;
-                            s.remote_asn = Some(remote.asn);
-                            s.remote_bgp_id = Some(remote.bgp_id);
+                            s.state = PeerState::Established;
+                            s.remote_asn = Some(*remote_asn);
+                            s.remote_bgp_id = Some(*remote_bgp_id);
+                            s.established_since = Some(Instant::now());
+                            s.negotiated_hold_time = negotiated_hold_time;
+                            s.negotiated_keepalive = negotiated_keepalive;
                         });
+                        info!(
+                            peer = %peer.remote_address, remote_asn, remote_bgp_id = %remote_bgp_id,
+                            role = ?role, "bgp session established"
+                        );
                     }
+                    Action::Close => {}
                 }
             }
-        }
 
-        let mut notification_sent = None;
-        for action in &actions {
-            match action {
-                Action::SendKeepalive => {
-                    let _ = writer.send(BgpMessage::Keepalive).await;
-                }
-                Action::SendNotification(code, subcode) => {
-                    let _ = writer
-                        .send(BgpMessage::Notification(NotificationMessage {
-                            error_code: *code,
-                            error_subcode: *subcode,
-                            data: Bytes::new(),
-                        }))
-                        .await;
-                    notification_sent = Some((*code, *subcode));
-                }
-                Action::ArmHoldTimer(d) => {
-                    hold_period = if d.is_zero() { None } else { Some(*d) };
-                    hold_deadline = hold_period.map(|p| Instant::now() + p);
-                    // Always derived from a u16 (either the local config or
-                    // the peer's OPEN), so this never actually truncates.
-                    negotiated_hold_time = Some(u16::try_from(d.as_secs()).unwrap_or(u16::MAX));
-                }
-                Action::ArmKeepaliveTimer(d) => {
-                    keepalive_period = if d.is_zero() { None } else { Some(*d) };
-                    keepalive_deadline = keepalive_period.map(|p| Instant::now() + p);
-                    negotiated_keepalive = Some(u16::try_from(d.as_secs()).unwrap_or(u16::MAX));
-                }
-                Action::ReportEstablished {
-                    remote_asn,
-                    remote_bgp_id,
-                } => {
-                    slot.mark_established(role).await;
-                    slot.status.send_modify(|s| {
-                        s.state = PeerState::Established;
-                        s.remote_asn = Some(*remote_asn);
-                        s.remote_bgp_id = Some(*remote_bgp_id);
-                        s.established_since = Some(Instant::now());
-                        s.negotiated_hold_time = negotiated_hold_time;
-                        s.negotiated_keepalive = negotiated_keepalive;
-                    });
-                    info!(
-                        peer = %peer.remote_address, remote_asn, remote_bgp_id = %remote_bgp_id,
-                        role = ?role, "bgp session established"
-                    );
-                }
-                Action::Close => {}
+            if let Some(s) = next_state {
+                state = s;
+            } else if let Some((code, subcode)) = notification_received {
+                break 'session FsmOutcome::NotificationReceived { code, subcode };
+            } else if let Some(outcome) = event_outcome(&actions) {
+                break 'session outcome;
+            } else if let Some((code, subcode)) = notification_sent {
+                break 'session FsmOutcome::NotificationSent { code, subcode };
+            } else {
+                break 'session FsmOutcome::PeerClosed;
             }
         }
+    };
 
-        if let Some(s) = next_state {
-            state = s;
-        } else {
-            if let Some((code, subcode)) = notification_received {
-                return FsmOutcome::NotificationReceived { code, subcode };
-            }
-            if let Some(outcome) = event_outcome(&actions) {
-                return outcome;
-            }
-            if let Some((code, subcode)) = notification_sent {
-                return FsmOutcome::NotificationSent { code, subcode };
-            }
-            return FsmOutcome::PeerClosed;
-        }
+    bgp_rib.lock().await.peer_disconnected(peer.remote_address);
+    outcome
+}
+
+/// Converts one outbound RIB decision into the real `BgpMessage::Update` to
+/// send on the wire — the encode side of `crate::rib::BgpRib`'s per-peer
+/// propagation decisions.
+fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
+    match update {
+        OutboundUpdate::Announce(route) => BgpMessage::Update(message::UpdateMessage {
+            withdrawn_routes: Vec::new(),
+            nlri: vec![route.prefix],
+            attributes: Some(message::PathAttributes {
+                origin: route.origin,
+                as_path: route.as_path,
+                next_hop: route.next_hop,
+                local_pref: route.local_pref,
+            }),
+        }),
+        OutboundUpdate::Withdraw(prefix) => BgpMessage::Update(message::UpdateMessage {
+            withdrawn_routes: vec![prefix],
+            nlri: Vec::new(),
+            attributes: None,
+        }),
     }
 }
 

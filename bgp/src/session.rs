@@ -13,6 +13,7 @@ use tracing::{debug, info, warn};
 
 use crate::collision::{PeerSlot, Role};
 use crate::fsm::{self, PeerContext};
+use crate::rib::BgpRib;
 use crate::status::{PeerState, PeerStatus};
 use crate::tcp;
 
@@ -83,6 +84,7 @@ pub struct SessionManager {
     peer_tasks: Mutex<HashMap<IpAddr, PeerTask>>,
     listeners: Mutex<Option<Listeners>>,
     vrf: watch::Sender<VrfRequirement>,
+    bgp_rib: Arc<Mutex<BgpRib>>,
 }
 
 impl SessionManager {
@@ -99,6 +101,7 @@ impl SessionManager {
             peer_tasks: Mutex::new(HashMap::new()),
             listeners: Mutex::new(None),
             vrf,
+            bgp_rib: Arc::new(Mutex::new(BgpRib::new())),
         })
     }
 
@@ -111,11 +114,18 @@ impl SessionManager {
         if *self.local.borrow() != local {
             let _ = self.local.send(local);
         }
+        self.bgp_rib.lock().await.set_local_asn(local.asn);
         if *self.vrf.borrow() != vrf {
             let _ = self.vrf.send(vrf.clone());
         }
         self.rebind_listeners(&vrf).await;
         self.reconcile_peers(desired).await;
+    }
+
+    /// Applies one redistribution update pushed by `nos-ribd`, for
+    /// `server.rs`'s fire-and-forget `BgpRequest::RedistributeRoutes` handler.
+    pub async fn apply_redistribute_update(&self, update: nos_proto::RedistributeUpdate) {
+        self.bgp_rib.lock().await.apply_redistribute_update(update);
     }
 
     /// Every currently-configured peer's current session summary, for
@@ -226,6 +236,7 @@ impl SessionManager {
         let remote_as = slot.peer.remote_as;
         let local_hold_time = slot.peer.hold_time;
         let keepalive_override = slot.peer.keepalive_interval;
+        let bgp_rib = self.bgp_rib.clone();
         tokio::spawn(async move {
             let outcome = fsm::run(
                 stream,
@@ -238,6 +249,7 @@ impl SessionManager {
                     keepalive_override,
                 },
                 slot.clone(),
+                bgp_rib,
             )
             .await;
             slot.clear(Role::Passive).await;
@@ -274,6 +286,7 @@ impl SessionManager {
                 slot,
                 self.vrf.subscribe(),
                 self.local.subscribe(),
+                self.bgp_rib.clone(),
             ));
             tasks.insert(peer.remote_address, PeerTask { peer, task });
         }
@@ -355,6 +368,7 @@ async fn active_connect_loop(
     slot: Arc<PeerSlot>,
     mut vrf: watch::Receiver<VrfRequirement>,
     local: watch::Receiver<LocalIdentity>,
+    bgp_rib: Arc<Mutex<BgpRib>>,
 ) {
     loop {
         let current_vrf = vrf.borrow().clone();
@@ -384,6 +398,7 @@ async fn active_connect_loop(
                                 keepalive_override: slot.peer.keepalive_interval,
                             },
                             slot.clone(),
+                            bgp_rib.clone(),
                         )
                         .await;
                         info!(

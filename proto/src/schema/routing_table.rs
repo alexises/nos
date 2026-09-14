@@ -5,6 +5,62 @@ use crate::validators::unique_in;
 
 use super::Config;
 
+/// The source side of a `Redistribute` rule. Only `Static` exists today —
+/// see `Redistribute`'s doc comment for why this is an enum rather than a
+/// bare marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RedistributeSource {
+    Static,
+}
+
+impl RedistributeSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RedistributeSource::Static => "static",
+        }
+    }
+}
+
+impl std::fmt::Display for RedistributeSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The target side of a `Redistribute` rule. Only `Bgp` exists today — see
+/// `Redistribute`'s doc comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RedistributeTarget {
+    Bgp,
+}
+
+impl RedistributeTarget {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RedistributeTarget::Bgp => "bgp",
+        }
+    }
+}
+
+impl std::fmt::Display for RedistributeTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A single route-redistribution rule on a `RoutingTable` (syntax:
+/// `redistribute from static to bgp`). Modeled as `Option<Redistribute>` on
+/// the table, not `Vec<Redistribute>`: at most one meaningful rule exists
+/// today, and a future second source/target is an enum-variant addition on
+/// `RedistributeSource`/`RedistributeTarget`, not a shape change here.
+/// `Vec<Redistribute>` is the documented follow-up if multiple simultaneous
+/// rules are ever needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Redistribute {
+    pub from: RedistributeSource,
+    pub to: RedistributeTarget,
+}
+
 /// A named routing table, optionally associated with one BGP instance and
 /// one static routing instance. The reference lives only on the table —
 /// `BgpInstance`/`StaticRoutingInstance` have no notion of which table(s)
@@ -23,6 +79,15 @@ pub struct RoutingTable {
 
     #[garde(custom(|sri: &Option<String>, ctx: &Config| static_routing_instance_reference_valid(sri.as_ref(), ctx)))]
     pub static_routing_instance: Option<String>,
+
+    /// `#[garde(skip)]`: the cross-field constraint (the referenced
+    /// `bgp_instance`/`static_routing_instance` must actually be set on this
+    /// same table) can't live in a per-field closure — garde's per-field
+    /// `custom` closures can't see a sibling field — so it's wired one level
+    /// up, on `Config.routing_tables` (`valid_redistribute_rules`), the same
+    /// reason `BgpPeerGroup`'s timer check is wired on `BgpInstance.peer_groups`.
+    #[garde(skip)]
+    pub redistribute: Option<Redistribute>,
 }
 
 /// If set, `bgp_instance` must name an existing `BgpInstance` (cf.
@@ -79,6 +144,37 @@ fn static_routing_instance_reference_valid(
     Ok(())
 }
 
+/// Cross-field check for the whole `routing_tables` list — garde's per-field
+/// `custom` closures only ever see `(field_value, &Config)`, never a sibling
+/// field on the same struct, so `redistribute`'s constraint on
+/// `bgp_instance`/`static_routing_instance` must be wired here instead of on
+/// `RoutingTable.redistribute` itself (mirrors
+/// `bgp_peer_group::valid_peer_group_timers`'s technique).
+///
+/// `from: Static` requires `static_routing_instance` to be set; `to: Bgp`
+/// requires `bgp_instance` to be set. Checked only at commit time, never in
+/// `RoutingTableOp::apply`.
+pub(crate) fn valid_redistribute_rules(tables: &[RoutingTable]) -> garde::Result {
+    for table in tables {
+        let Some(redistribute) = &table.redistribute else {
+            continue;
+        };
+        if redistribute.from == RedistributeSource::Static
+            && table.static_routing_instance.is_none()
+        {
+            return Err(garde::Error::new(
+                "redistribute from static requires static-routing-instance to be set",
+            ));
+        }
+        if redistribute.to == RedistributeTarget::Bgp && table.bgp_instance.is_none() {
+            return Err(garde::Error::new(
+                "redistribute to bgp requires bgp-instance to be set",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::schema::{BgpInstance, Config, StaticRoutingInstance};
@@ -90,6 +186,7 @@ mod tests {
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),
             static_routing_instance: sri.map(str::to_string),
+            redistribute: None,
         }
     }
 
@@ -207,5 +304,40 @@ mod tests {
             vec![static_instance("sri1"), static_instance("sri2")],
         );
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    fn redistribute() -> Redistribute {
+        Redistribute {
+            from: RedistributeSource::Static,
+            to: RedistributeTarget::Bgp,
+        }
+    }
+
+    #[test]
+    fn redistribute_with_both_associations_passes() {
+        let mut rt = table("rt1", Some("r1"), Some("sri1"));
+        rt.redistribute = Some(redistribute());
+        let cfg = config_with(
+            vec![rt],
+            vec![instance("r1")],
+            vec![static_instance("sri1")],
+        );
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn redistribute_without_static_routing_instance_fails() {
+        let mut rt = table("rt1", Some("r1"), None);
+        rt.redistribute = Some(redistribute());
+        let cfg = config_with(vec![rt], vec![instance("r1")], vec![]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn redistribute_without_bgp_instance_fails() {
+        let mut rt = table("rt1", None, Some("sri1"));
+        rt.redistribute = Some(redistribute());
+        let cfg = config_with(vec![rt], vec![], vec![static_instance("sri1")]);
+        assert!(cfg.validate_with(&cfg).is_err());
     }
 }

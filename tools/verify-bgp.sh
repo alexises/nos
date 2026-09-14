@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# End-to-end verification harness for nos-bgpd's session-establishment FSM:
-# stands up two independent nos-watchdogd containers ("router-a"/"router-b")
-# on a shared docker network, configures each as a full BGP router peering
-# the other, and checks the logs for a real OPEN/KEEPALIVE handshake
-# reaching Established, a hold-timer/reconnect cycle, and (best-effort) a
-# collision-resolution event.
+# End-to-end verification harness for nos-bgpd's session-establishment FSM
+# and route redistribution/propagation: stands up two independent
+# nos-watchdogd containers ("router-a"/"router-b") on a shared docker
+# network, configures each as a full BGP router peering the other, and
+# checks the logs for a real OPEN/KEEPALIVE handshake reaching Established,
+# a hold-timer/reconnect cycle, (best-effort) a collision-resolution event,
+# and (via the `redistribute` subcommand) a static route configured on
+# router-a actually being redistributed into its bgp instance, advertised
+# over the wire, and learned into router-b's Adj-RIB-In/Loc-RIB.
 #
 # nos-cli's interactive shell (reedline) can't be scripted over a plain
 # pipe, so provisioning goes through `nos-provision` (tools/nos-provision) —
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|logs [n]|down|all}
+# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|logs [n]|down|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -29,6 +32,10 @@ ASN_A=65001
 ASN_B=65002
 RID_A=1.1.1.1
 RID_B=2.2.2.2
+# TEST-NET-2 (RFC 5737) — reserved for documentation, safe to use as a
+# fake redistributed prefix without colliding with anything real.
+REDISTRIBUTE_PREFIX=198.51.100.0/24
+REDISTRIBUTE_GATEWAY=10.50.0.99
 
 log() { echo "[verify-bgp] $*" >&2; }
 
@@ -94,6 +101,24 @@ provision() {
     --router-id "$router_id" \
     --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
     --peer "$peer_ip"
+}
+
+provision_redistribute() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  log "provisioning $name with a static route + 'redistribute from static to bgp'"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --static-route "$REDISTRIBUTE_PREFIX" \
+    --static-gateway "$REDISTRIBUTE_GATEWAY" \
+    --redistribute
 }
 
 wait_for_log() {
@@ -179,6 +204,21 @@ cmd_check_collision() {
   cmd_check_established
 }
 
+cmd_check_redistribute() {
+  provision_redistribute router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+  log "waiting for router-a to redistribute $REDISTRIBUTE_PREFIX into its bgp instance"
+  wait_for_log router-a "loc-rib best path for $REDISTRIBUTE_PREFIX updated" 60 \
+    && log "router-a: installed redistributed static route into its own loc-rib" \
+    || { log "router-a: FAILED to install redistributed route locally"; return 1; }
+  log "waiting for router-b to learn $REDISTRIBUTE_PREFIX over the bgp session"
+  wait_for_log router-b "learned route for $REDISTRIBUTE_PREFIX into adj-rib-in" 60 \
+    && log "router-b: received redistributed prefix into adj-rib-in" \
+    || { log "router-b: FAILED to receive redistributed prefix"; return 1; }
+  wait_for_log router-b "loc-rib best path for $REDISTRIBUTE_PREFIX updated" 60 \
+    && log "router-b: installed redistributed prefix as its loc-rib best path" \
+    || { log "router-b: FAILED to install redistributed prefix into loc-rib"; return 1; }
+}
+
 cmd_logs() {
   echo "===== router-a ====="
   docker logs router-a 2>&1 | tail -n "${1:-200}"
@@ -197,6 +237,7 @@ case "${1:-}" in
   established) cmd_check_established ;;
   reconnect) cmd_check_reconnect ;;
   collision) cmd_check_collision ;;
+  redistribute) cmd_check_redistribute ;;
   logs) shift; cmd_logs "$@" ;;
   down) cmd_down ;;
   all)
@@ -204,9 +245,10 @@ case "${1:-}" in
     cmd_check_established
     cmd_check_reconnect
     cmd_check_collision
+    cmd_check_redistribute
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|logs [n]|down|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|logs [n]|down|all}" >&2
     exit 2
     ;;
 esac

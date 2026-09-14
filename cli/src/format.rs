@@ -67,8 +67,12 @@ pub fn render_bgp_instance(instance: &BgpInstance) -> String {
 pub fn render_routing_table(table: &RoutingTable) -> String {
     let bgp_instance = table.bgp_instance.as_deref().unwrap_or("unset");
     let static_routing_instance = table.static_routing_instance.as_deref().unwrap_or("unset");
+    let redistribute_str = match &table.redistribute {
+        Some(r) => format!("from {} to {}", r.from, r.to),
+        None => "unset".to_string(),
+    };
     format!(
-        "routing-table {}: bgp-instance {bgp_instance}, static-routing-instance {static_routing_instance}",
+        "routing-table {}: bgp-instance {bgp_instance}, static-routing-instance {static_routing_instance}, redistribute {redistribute_str}",
         table.name
     )
 }

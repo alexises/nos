@@ -50,6 +50,13 @@ fn static_routing_instance_str(t: &RoutingTable) -> String {
         .unwrap_or_else(|| "unset".to_string())
 }
 
+fn redistribute_str(t: &RoutingTable) -> String {
+    match &t.redistribute {
+        None => "unset".to_string(),
+        Some(r) => format!("from {} to {}", r.from, r.to),
+    }
+}
+
 fn changed_fields(base: &RoutingTable, candidate: &RoutingTable) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     if base.bgp_instance != candidate.bgp_instance {
@@ -64,6 +71,13 @@ fn changed_fields(base: &RoutingTable, candidate: &RoutingTable) -> Vec<FieldDif
             label: "static-routing-instance".to_string(),
             old: Some(static_routing_instance_str(base)),
             new: Some(static_routing_instance_str(candidate)),
+        });
+    }
+    if base.redistribute != candidate.redistribute {
+        fields.push(FieldDiff {
+            label: "redistribute".to_string(),
+            old: Some(redistribute_str(base)),
+            new: Some(redistribute_str(candidate)),
         });
     }
     fields
@@ -83,6 +97,11 @@ fn removed_section(table: &RoutingTable) -> SectionDiff {
             FieldDiff {
                 label: "static-routing-instance".to_string(),
                 old: Some(static_routing_instance_str(table)),
+                new: None,
+            },
+            FieldDiff {
+                label: "redistribute".to_string(),
+                old: Some(redistribute_str(table)),
                 new: None,
             },
         ],
@@ -106,6 +125,11 @@ fn added_section(table: &RoutingTable) -> SectionDiff {
                 old: None,
                 new: Some(static_routing_instance_str(table)),
             },
+            FieldDiff {
+                label: "redistribute".to_string(),
+                old: None,
+                new: Some(redistribute_str(table)),
+            },
         ],
         subsections: Vec::new(),
     }
@@ -120,6 +144,7 @@ mod tests {
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),
             static_routing_instance: sri.map(str::to_string),
+            redistribute: None,
         }
     }
 
@@ -153,5 +178,27 @@ mod tests {
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].fields.len(), 1);
         assert_eq!(sections[0].fields[0].label, "bgp-instance");
+    }
+
+    #[test]
+    fn modified_redistribute_only_lists_that_field() {
+        use crate::schema::{Redistribute, RedistributeSource, RedistributeTarget};
+
+        let base = vec![table("rt1", None, None)];
+        let mut candidate_table = table("rt1", None, None);
+        candidate_table.redistribute = Some(Redistribute {
+            from: RedistributeSource::Static,
+            to: RedistributeTarget::Bgp,
+        });
+        let candidate = vec![candidate_table];
+        let sections = diff_routing_tables(&base, &candidate);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].fields.len(), 1);
+        assert_eq!(sections[0].fields[0].label, "redistribute");
+        assert_eq!(sections[0].fields[0].old.as_deref(), Some("unset"));
+        assert_eq!(
+            sections[0].fields[0].new.as_deref(),
+            Some("from static to bgp")
+        );
     }
 }

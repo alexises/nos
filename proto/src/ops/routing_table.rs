@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Config, RoutingTable};
+use crate::schema::{Config, Redistribute, RoutingTable};
 
 use super::OpError;
 
@@ -29,6 +29,13 @@ pub enum RoutingTableOp {
     ClearStaticRoutingInstance {
         name: String,
     },
+    SetRedistribute {
+        name: String,
+        redistribute: Redistribute,
+    },
+    ClearRedistribute {
+        name: String,
+    },
     Delete {
         name: String,
     },
@@ -43,6 +50,7 @@ impl RoutingTableOp {
                         name: name.clone(),
                         bgp_instance: None,
                         static_routing_instance: None,
+                        redistribute: None,
                     });
                 }
                 Ok(())
@@ -65,6 +73,14 @@ impl RoutingTableOp {
             }
             RoutingTableOp::ClearStaticRoutingInstance { name } => {
                 find_table_mut(config, name)?.static_routing_instance = None;
+                Ok(())
+            }
+            RoutingTableOp::SetRedistribute { name, redistribute } => {
+                find_table_mut(config, name)?.redistribute = Some(*redistribute);
+                Ok(())
+            }
+            RoutingTableOp::ClearRedistribute { name } => {
+                find_table_mut(config, name)?.redistribute = None;
                 Ok(())
             }
             RoutingTableOp::Delete { name } => {
@@ -99,6 +115,7 @@ mod tests {
             name: name.to_string(),
             bgp_instance: None,
             static_routing_instance: None,
+            redistribute: None,
         }
     }
 
@@ -122,6 +139,7 @@ mod tests {
                 name: "rt1".to_string(),
                 bgp_instance: Some("r1".to_string()),
                 static_routing_instance: None,
+                redistribute: None,
             }],
             ..Default::default()
         };
@@ -179,6 +197,39 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.routing_tables[0].static_routing_instance, None);
+    }
+
+    #[test]
+    fn set_and_clear_redistribute() {
+        use crate::schema::{RedistributeSource, RedistributeTarget};
+
+        let mut cfg = Config {
+            routing_tables: vec![table("rt1")],
+            ..Default::default()
+        };
+        RoutingTableOp::SetRedistribute {
+            name: "rt1".to_string(),
+            redistribute: Redistribute {
+                from: RedistributeSource::Static,
+                to: RedistributeTarget::Bgp,
+            },
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.routing_tables[0].redistribute,
+            Some(Redistribute {
+                from: RedistributeSource::Static,
+                to: RedistributeTarget::Bgp,
+            })
+        );
+
+        RoutingTableOp::ClearRedistribute {
+            name: "rt1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.routing_tables[0].redistribute, None);
     }
 
     #[test]

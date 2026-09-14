@@ -60,6 +60,10 @@ pub enum Topic {
     SetRoutingTableStaticRoutingInstance,
     /// `ConfigOp::RoutingTable(RoutingTableOp::ClearStaticRoutingInstance)`
     ClearRoutingTableStaticRoutingInstance,
+    /// `ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute)`
+    SetRoutingTableRedistribute,
+    /// `ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute)`
+    ClearRoutingTableRedistribute,
     /// `ConfigOp::RoutingTable(RoutingTableOp::Delete)`
     DeleteRoutingTable,
     /// `ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Ensure)`

@@ -762,6 +762,51 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         tokens: &[
+            Token::Literal("set"),
+            Token::Literal("routing-table"),
+            Token::Arg(ArgKind::RoutingTableName),
+            Token::Literal("redistribute"),
+            Token::Literal("from"),
+            Token::Literal("static"),
+            Token::Literal("to"),
+            Token::Literal("bgp"),
+        ],
+        usage: "set routing-table <name> redistribute from static to bgp",
+        doc: Doc::FromConfig(Topic::SetRoutingTableRedistribute),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("redistribute"),
+            Token::Literal("from"),
+            Token::Literal("static"),
+            Token::Literal("to"),
+            Token::Literal("bgp"),
+        ],
+        usage: "set redistribute from static to bgp",
+        doc: Doc::FromConfig(Topic::SetRoutingTableRedistribute),
+        availability: Availability::ConfigurationRoutingTable,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("routing-table"),
+            Token::Arg(ArgKind::RoutingTableName),
+            Token::Literal("redistribute"),
+        ],
+        usage: "delete routing-table <name> redistribute",
+        doc: Doc::FromConfig(Topic::ClearRoutingTableRedistribute),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[Token::Literal("delete"), Token::Literal("redistribute")],
+        usage: "delete redistribute",
+        doc: Doc::FromConfig(Topic::ClearRoutingTableRedistribute),
+        availability: Availability::ConfigurationRoutingTable,
+    },
+    CommandSpec {
+        tokens: &[
             Token::Literal("delete"),
             Token::Literal("routing-table"),
             Token::Arg(ArgKind::RoutingTableName),

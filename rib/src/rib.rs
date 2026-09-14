@@ -296,6 +296,7 @@ mod tests {
             name: "rt1".into(),
             bgp_instance: None,
             static_routing_instance: None,
+            redistribute: None,
         }];
         let rib = build_from_config(&cfg(tables, vec![]), "rt1").unwrap();
         assert!(rib.is_empty());
@@ -307,6 +308,7 @@ mod tests {
             name: "rt1".into(),
             bgp_instance: None,
             static_routing_instance: Some("sri1".into()),
+            redistribute: None,
         }];
         let instances = vec![StaticRoutingInstance {
             name: "sri1".into(),

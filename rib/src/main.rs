@@ -5,7 +5,9 @@ use anyhow::Context;
 use clap::Parser;
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use nos_rib::log_client::ForwardingLayer;
-use nos_rib::{reconcile, server, watchdog_client, LinuxRibDriver, NoopRibDriver, Rib, RibDriver};
+use nos_rib::{
+    bgp_client, reconcile, server, watchdog_client, LinuxRibDriver, NoopRibDriver, Rib, RibDriver,
+};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{watch, RwLock};
 use tracing::{info, warn};
@@ -120,12 +122,15 @@ async fn main() -> anyhow::Result<()> {
         ),
     };
 
+    let redistribute_tx = bgp_client::spawn(args.watchdog_socket.clone(), shutdown_rx.clone());
+
     let rib = Arc::new(RwLock::new(Rib::new()));
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.table.clone(),
         rib.clone(),
         driver.clone(),
+        redistribute_tx,
         shutdown_rx,
     ));
     let server_task = server::start(&listen_socket, args.table.clone(), rib, driver)

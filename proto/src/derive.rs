@@ -51,6 +51,7 @@ mod tests {
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),
             static_routing_instance: None,
+            redistribute: None,
         }
     }
 

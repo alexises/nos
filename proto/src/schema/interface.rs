@@ -76,6 +76,7 @@ mod tests {
             name: name.to_string(),
             bgp_instance: None,
             static_routing_instance: None,
+            redistribute: None,
         }
     }
 

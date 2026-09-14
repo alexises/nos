@@ -19,6 +19,7 @@ nos-proto          = { workspace = true }
 tokio-util         = { workspace = true }
 futures            = { workspace = true }
 socket2            = { workspace = true }
+ipnet              = { workspace = true }
 
 [[bin]]
 name = "nos-bgpd"

@@ -170,6 +170,17 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Unsets the static-routing-instance field on a routing table, reverting to no \
              explicit association.",
         ),
+        Topic::SetRoutingTableRedistribute => (
+            "Redistribute this table's static routes into its associated BGP instance.",
+            "Sets the redistribute field on a routing table (currently only 'from static to \
+             bgp' is supported). Both bgp-instance and static-routing-instance must already be \
+             set on the table for the rule to be valid — checked at commit time, not when the \
+             rule is set.",
+        ),
+        Topic::ClearRoutingTableRedistribute => (
+            "Clear this table's redistribution rule.",
+            "Unsets the redistribute field on a routing table, reverting to no redistribution.",
+        ),
         Topic::DeleteRoutingTable => (
             "Delete a routing table from the transaction.",
             "Removes a routing table from the transaction's in-progress config. This only \
@@ -321,6 +332,8 @@ mod tests {
         Topic::ClearRoutingTableBgpInstance,
         Topic::SetRoutingTableStaticRoutingInstance,
         Topic::ClearRoutingTableStaticRoutingInstance,
+        Topic::SetRoutingTableRedistribute,
+        Topic::ClearRoutingTableRedistribute,
         Topic::DeleteRoutingTable,
         Topic::EnsureStaticRoutingInstance,
         Topic::DeleteStaticRoutingInstance,

@@ -11,15 +11,22 @@
 //! `Established`.
 
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use nos_bgp::collision::{PeerSlot, Role};
 use nos_bgp::fsm::{self, FsmOutcome, PeerContext};
 use nos_bgp::message::{self, BgpCodec, BgpMessage};
+use nos_bgp::rib::BgpRib;
 use nos_bgp::session::{LocalIdentity, ResolvedPeer};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 use tokio_util::codec::{FramedRead, FramedWrite};
+
+fn new_bgp_rib() -> Arc<Mutex<BgpRib>> {
+    Arc::new(Mutex::new(BgpRib::new()))
+}
 
 async fn loopback_pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -99,6 +106,7 @@ async fn two_real_instances_establish_a_session() {
             keepalive_override: None,
         },
         slot_a,
+        new_bgp_rib(),
     );
     let b_fut = fsm::run(
         b_stream,
@@ -114,6 +122,7 @@ async fn two_real_instances_establish_a_session() {
             keepalive_override: None,
         },
         slot_b,
+        new_bgp_rib(),
     );
 
     let timeout = Duration::from_millis(500);
@@ -169,6 +178,7 @@ async fn established_session_honors_configured_non_default_hold_time() {
             keepalive_override: None,
         },
         slot_a,
+        new_bgp_rib(),
     );
     let fake_b = tokio::spawn(fake_peer(b_stream, b_asn, b_router_id, 60));
 
@@ -223,6 +233,7 @@ async fn established_session_reports_status_via_peer_slot() {
             keepalive_override: None,
         },
         slot_a,
+        new_bgp_rib(),
     );
     let fake_b = tokio::spawn(fake_peer(b_stream, b_asn, b_router_id, 90));
 
@@ -291,13 +302,25 @@ async fn collision_leaves_exactly_one_side_running() {
         keepalive_override: None,
     };
 
-    let active_fut = fsm::run(active_local, Role::Active, local, peer_ctx(), slot.clone());
+    // Both sides share one `PeerSlot` (they're racing for the same peer), so
+    // they share one `BgpRib` too — a real deployment would never run two
+    // `fsm::run` tasks against different `BgpRib`s for the same peer.
+    let bgp_rib = new_bgp_rib();
+    let active_fut = fsm::run(
+        active_local,
+        Role::Active,
+        local,
+        peer_ctx(),
+        slot.clone(),
+        bgp_rib.clone(),
+    );
     let passive_fut = fsm::run(
         passive_local,
         Role::Passive,
         local,
         peer_ctx(),
         slot.clone(),
+        bgp_rib.clone(),
     );
 
     let timeout = Duration::from_millis(500);

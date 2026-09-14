@@ -1,16 +1,22 @@
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use nos_proto::{DiffScope, Event};
+use nos_proto::{
+    Config, DiffScope, Event, IpNet, Redistribute, RedistributeSource, RedistributeTarget,
+    RedistributedRoute,
+};
 use tokio::sync::{watch, RwLock};
 use tokio::time::sleep;
 use tracing::{debug, error, info, trace, warn};
 
+use crate::bgp_client;
 use crate::config_client;
 use crate::driver::RibDriver;
-use crate::rib::{build_from_config, Rib};
+use crate::rib::{build_from_config, Rib, RibEntry, RouteSource};
 
 /// Fixed reconnect delay for the config subscription, matching
 /// `nos-watchdog`'s `bgp_instances::RECONNECT_DELAY` for consistency across
@@ -46,6 +52,7 @@ pub async fn run(
     table: String,
     rib: Arc<RwLock<Rib>>,
     driver: Arc<dyn RibDriver>,
+    redistribute_tx: watch::Sender<bgp_client::RedistributeTarget>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     while !*shutdown.borrow() {
@@ -66,7 +73,7 @@ pub async fn run(
                     tokio::select! {
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(_))) => {
-                                resync(&config_socket, &table, &rib, driver.as_ref()).await;
+                                resync(&config_socket, &table, &rib, driver.as_ref(), &redistribute_tx).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -79,7 +86,7 @@ pub async fn run(
                             }
                         },
                         _ = reapply.tick() => {
-                            resync(&config_socket, &table, &rib, driver.as_ref()).await;
+                            resync(&config_socket, &table, &rib, driver.as_ref(), &redistribute_tx).await;
                         }
                         _ = shutdown.changed() => break,
                     }
@@ -108,7 +115,13 @@ pub async fn run(
     info!(table = %table, "reconciliation loop stopped");
 }
 
-async fn resync(config_socket: &Path, table: &str, rib: &Arc<RwLock<Rib>>, driver: &dyn RibDriver) {
+async fn resync(
+    config_socket: &Path,
+    table: &str,
+    rib: &Arc<RwLock<Rib>>,
+    driver: &dyn RibDriver,
+    redistribute_tx: &watch::Sender<bgp_client::RedistributeTarget>,
+) {
     match config_client::fetch_config(config_socket).await {
         Ok(cfg) => {
             if let Some(new_rib) = build_from_config(&cfg, table) {
@@ -126,12 +139,14 @@ async fn resync(config_socket: &Path, table: &str, rib: &Arc<RwLock<Rib>>, drive
                 if let Err(e) = driver.apply(table, &routes).await {
                     error!(table = %table, error = %e, "failed to apply routes to kernel");
                 }
+                let _ = redistribute_tx.send(compute_redistribute_target(&cfg, table, &routes));
                 *rib.write().await = new_rib;
             } else {
                 warn!(
                     table = %table,
                     "routing table not found in running config; RIB left empty until it appears"
                 );
+                let _ = redistribute_tx.send(bgp_client::RedistributeTarget::default());
                 *rib.write().await = Rib::new();
             }
         }
@@ -141,11 +156,193 @@ async fn resync(config_socket: &Path, table: &str, rib: &Arc<RwLock<Rib>>, drive
     }
 }
 
+/// Computes the `bgp_client::RedistributeTarget` to publish for `table`,
+/// given the just-fetched `cfg` and this resync's freshly recomputed best
+/// routes (`new_rib.best_routes()`). Pure and unit-tested directly.
+///
+/// Redistribution only ever forwards `RouteSource::Static` entries with an
+/// IPv4 prefix — IPv6 needs MP-BGP (RFC 4760), out of scope here — and only
+/// when `table.redistribute` is exactly `Some(Redistribute{from: Static, to:
+/// Bgp})`, the one rule this config schema supports today.
+fn compute_redistribute_target(
+    cfg: &Config,
+    table_name: &str,
+    routes: &HashMap<IpNet, RibEntry>,
+) -> bgp_client::RedistributeTarget {
+    let Some(table) = cfg.routing_tables.iter().find(|t| t.name == table_name) else {
+        return bgp_client::RedistributeTarget::default();
+    };
+
+    let active_rule = table.redistribute
+        == Some(Redistribute {
+            from: RedistributeSource::Static,
+            to: RedistributeTarget::Bgp,
+        });
+
+    let redistributed = if active_rule {
+        routes
+            .values()
+            .filter(|entry| entry.source == RouteSource::Static)
+            .filter_map(|entry| match entry.prefix {
+                IpNet::V4(prefix) => match entry.gateway {
+                    IpAddr::V4(gateway) => Some(RedistributedRoute { prefix, gateway }),
+                    IpAddr::V6(_) => {
+                        warn!(
+                            table = %table_name,
+                            prefix = %entry.prefix,
+                            "static route has an IPv4 prefix but an IPv6 gateway; skipping redistribution"
+                        );
+                        None
+                    }
+                },
+                IpNet::V6(_) => {
+                    debug!(
+                        table = %table_name,
+                        prefix = %entry.prefix,
+                        "IPv6 redistribution unsupported, requires MP-BGP"
+                    );
+                    None
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    bgp_client::RedistributeTarget {
+        bgp_instance: table.bgp_instance.clone(),
+        routes: redistributed,
+    }
+}
+
 /// Local copy of `nos-watchdog::supervisor::wait_or_shutdown` — not
 /// imported, per the star-dependency rule.
 async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>) -> bool {
     tokio::select! {
         () = sleep(delay) => false,
         _ = shutdown.changed() => *shutdown.borrow(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nos_proto::RoutingTable;
+
+    fn cfg_with_table(table: RoutingTable) -> Config {
+        Config {
+            routing_tables: vec![table],
+            ..Default::default()
+        }
+    }
+
+    fn static_entry(prefix: &str, gateway: &str) -> RibEntry {
+        RibEntry {
+            prefix: prefix.parse().unwrap(),
+            gateway: gateway.parse().unwrap(),
+            source: RouteSource::Static,
+        }
+    }
+
+    #[test]
+    fn table_not_found_publishes_idle_target() {
+        let cfg = Config::default();
+        let target = compute_redistribute_target(&cfg, "rt1", &HashMap::new());
+        assert_eq!(target, bgp_client::RedistributeTarget::default());
+    }
+
+    #[test]
+    fn no_redistribute_rule_publishes_bgp_instance_with_empty_routes() {
+        let table = RoutingTable {
+            name: "rt1".into(),
+            bgp_instance: Some("bgp1".into()),
+            static_routing_instance: None,
+            redistribute: None,
+        };
+        let cfg = cfg_with_table(table);
+        let mut routes = HashMap::new();
+        let entry = static_entry("10.0.0.0/24", "10.0.0.1");
+        routes.insert(entry.prefix, entry);
+
+        let target = compute_redistribute_target(&cfg, "rt1", &routes);
+        assert_eq!(target.bgp_instance.as_deref(), Some("bgp1"));
+        assert!(target.routes.is_empty());
+    }
+
+    #[test]
+    fn active_rule_redistributes_static_ipv4_routes() {
+        let table = RoutingTable {
+            name: "rt1".into(),
+            bgp_instance: Some("bgp1".into()),
+            static_routing_instance: None,
+            redistribute: Some(Redistribute {
+                from: RedistributeSource::Static,
+                to: RedistributeTarget::Bgp,
+            }),
+        };
+        let cfg = cfg_with_table(table);
+        let mut routes = HashMap::new();
+        let entry = static_entry("10.0.0.0/24", "10.0.0.1");
+        routes.insert(entry.prefix, entry);
+
+        let target = compute_redistribute_target(&cfg, "rt1", &routes);
+        assert_eq!(target.bgp_instance.as_deref(), Some("bgp1"));
+        assert_eq!(target.routes.len(), 1);
+        assert_eq!(target.routes[0].prefix, "10.0.0.0/24".parse().unwrap());
+        assert_eq!(
+            target.routes[0].gateway,
+            "10.0.0.1".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn active_rule_skips_bgp_sourced_routes() {
+        let table = RoutingTable {
+            name: "rt1".into(),
+            bgp_instance: Some("bgp1".into()),
+            static_routing_instance: None,
+            redistribute: Some(Redistribute {
+                from: RedistributeSource::Static,
+                to: RedistributeTarget::Bgp,
+            }),
+        };
+        let cfg = cfg_with_table(table);
+        let mut routes = HashMap::new();
+        let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
+        routes.insert(
+            prefix,
+            RibEntry {
+                prefix,
+                gateway: "10.0.0.9".parse().unwrap(),
+                source: RouteSource::Bgp,
+            },
+        );
+
+        let target = compute_redistribute_target(&cfg, "rt1", &routes);
+        assert!(target.routes.is_empty());
+    }
+
+    #[test]
+    fn active_rule_skips_ipv6_prefixes() {
+        let table = RoutingTable {
+            name: "rt1".into(),
+            bgp_instance: Some("bgp1".into()),
+            static_routing_instance: None,
+            redistribute: Some(Redistribute {
+                from: RedistributeSource::Static,
+                to: RedistributeTarget::Bgp,
+            }),
+        };
+        let cfg = cfg_with_table(table);
+        let mut routes = HashMap::new();
+        let entry = RibEntry {
+            prefix: "2001:db8::/32".parse().unwrap(),
+            gateway: "2001:db8::1".parse().unwrap(),
+            source: RouteSource::Static,
+        };
+        routes.insert(entry.prefix, entry);
+
+        let target = compute_redistribute_target(&cfg, "rt1", &routes);
+        assert!(target.routes.is_empty());
     }
 }

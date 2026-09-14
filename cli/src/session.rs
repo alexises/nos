@@ -330,6 +330,26 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
+        Command::Set(SetTarget::RoutingTableRedistribute { name, redistribute }) => {
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute { name, redistribute }),
+                after: PathAfter::Stay,
+            }
+        }
+        Command::Set(SetTarget::RoutingTableRedistributeRelative { redistribute }) => match path {
+            Path::RoutingTable(name) => Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
+                    name: name.clone(),
+                    redistribute,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+        },
         Command::Set(SetTarget::StaticRoute {
             instance,
             subnet,
@@ -462,6 +482,23 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstanceRelative) => match path {
             Path::RoutingTable(name) => Resolved::ApplyOp {
                 op: ConfigOp::RoutingTable(RoutingTableOp::ClearStaticRoutingInstance {
+                    name: name.clone(),
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+        },
+        Command::Delete(DeleteTarget::RoutingTableRedistribute { name }) => Resolved::ApplyOp {
+            op: ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::RoutingTableRedistributeRelative) => match path {
+            Path::RoutingTable(name) => Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
                     name: name.clone(),
                 }),
                 after: PathAfter::Stay,
@@ -739,6 +776,8 @@ fn peer_group_set_op(instance: String, group: String, field: BgpPeerGroupField) 
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+
+    use nos_proto::{Redistribute, RedistributeSource, RedistributeTarget};
 
     use super::*;
 
@@ -1520,6 +1559,51 @@ mod tests {
     }
 
     #[test]
+    fn set_routing_table_redistribute_qualified_and_relative() {
+        let redistribute = Redistribute {
+            from: RedistributeSource::Static,
+            to: RedistributeTarget::Bgp,
+        };
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::RoutingTableRedistribute {
+                    name: "rt1".to_string(),
+                    redistribute,
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
+                    name: "rt1".to_string(),
+                    redistribute,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::RoutingTableRedistributeRelative { redistribute })
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::RoutingTable("rt1".to_string()), false),
+                Command::Set(SetTarget::RoutingTableRedistributeRelative { redistribute })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
+                    name: "rt1".to_string(),
+                    redistribute,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
     fn set_routing_table_static_routing_instance_qualified_and_relative() {
         assert_eq!(
             resolve(
@@ -1661,6 +1745,44 @@ mod tests {
             ),
             Resolved::ApplyOp {
                 op: ConfigOp::RoutingTable(RoutingTableOp::ClearBgpInstance {
+                    name: "rt1".to_string()
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn delete_routing_table_redistribute_qualified_and_relative() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Delete(DeleteTarget::RoutingTableRedistribute {
+                    name: "rt1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
+                    name: "rt1".to_string()
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Delete(DeleteTarget::RoutingTableRedistributeRelative)
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::RoutingTable("rt1".to_string()), false),
+                Command::Delete(DeleteTarget::RoutingTableRedistributeRelative)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
                     name: "rt1".to_string()
                 }),
                 after: PathAfter::Stay,

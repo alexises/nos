@@ -13,7 +13,7 @@ pub use bgp_peer_group::{
     HOLD_TIME_FLOOR,
 };
 pub use interface::Interface;
-pub use routing_table::RoutingTable;
+pub use routing_table::{Redistribute, RedistributeSource, RedistributeTarget, RoutingTable};
 pub use static_route::StaticRoute;
 pub use static_routing_instance::StaticRoutingInstance;
 
@@ -28,7 +28,10 @@ pub struct Config {
     #[garde(dive)]
     pub bgp_instances: Vec<BgpInstance>,
 
-    #[garde(dive)]
+    #[garde(
+        dive,
+        custom(|tables, _ctx: &Config| routing_table::valid_redistribute_rules(tables))
+    )]
     pub routing_tables: Vec<RoutingTable>,
 
     #[garde(dive)]

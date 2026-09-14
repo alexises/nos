@@ -45,6 +45,11 @@ async fn accept_loop(listener: UnixListener, instance: String, sessions: Arc<Ses
     }
 }
 
+/// Handles one connection for its whole lifetime. `GetSummary` sends one
+/// reply per request; `RedistributeRoutes` (sent continuously by `nos-ribd`
+/// over one long-lived connection, mirroring `nos-logd`'s handling of
+/// `LogRequest::Push`) gets no reply at all, so the loop just keeps reading
+/// further requests on the same connection.
 async fn handle_connection(
     stream: tokio::net::UnixStream,
     instance: String,
@@ -55,22 +60,24 @@ async fn handle_connection(
     let mut writer = FramedWrite::new(write_half, IpcCodec::<BgpEvent>::default());
 
     while let Some(msg) = reader.next().await {
-        let event = match msg {
-            Ok(req) => dispatch(&instance, &sessions, req).await,
+        let req = match msg {
+            Ok(req) => req,
             Err(e) => {
                 warn!(instance = %instance, error = %e, "BGP IPC read error");
                 break;
             }
         };
-        if writer.send(event).await.is_err() {
-            break;
+        trace!(instance = %instance, request = ?req, "serving BGP query");
+        match req {
+            BgpRequest::GetSummary => {
+                let event = BgpEvent::Summary(sessions.peer_summaries().await);
+                if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
+            BgpRequest::RedistributeRoutes(update) => {
+                sessions.apply_redistribute_update(update).await;
+            }
         }
-    }
-}
-
-async fn dispatch(instance: &str, sessions: &SessionManager, req: BgpRequest) -> BgpEvent {
-    trace!(instance = %instance, request = ?req, "serving BGP query");
-    match req {
-        BgpRequest::GetSummary => BgpEvent::Summary(sessions.peer_summaries().await),
     }
 }

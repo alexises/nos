@@ -19,7 +19,8 @@ use futures::{SinkExt, StreamExt};
 use ipnet::IpNet;
 use nos_proto::{
     AddressFamily, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, ConfigOp, Event, InterfaceOp,
-    IpcCodec, Request, RoutingTableOp, TransactionBase,
+    IpcCodec, Redistribute, RedistributeSource, RedistributeTarget, Request, RoutingTableOp,
+    StaticRouteOp, StaticRoutingInstanceOp, TransactionBase,
 };
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -52,6 +53,21 @@ struct Args {
     #[arg(long)]
     peer: IpAddr,
 
+    /// If set, adds one static route (`--static-gateway` required) to a
+    /// static-routing-instance associated with `--routing-table`.
+    #[arg(long)]
+    static_route: Option<IpNet>,
+    #[arg(long)]
+    static_gateway: Option<IpAddr>,
+    #[arg(long, default_value = "sri1")]
+    static_routing_instance: String,
+
+    /// If set, configures `redistribute from static to bgp` on
+    /// `--routing-table` — requires `--static-route` to also be set (so the
+    /// table has a `static_routing_instance` to redistribute from).
+    #[arg(long)]
+    redistribute: bool,
+
     #[arg(long)]
     save: bool,
 }
@@ -79,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    let ops = [
+    let mut ops = vec![
         ConfigOp::Interface(InterfaceOp::Ensure {
             name: args.interface.clone(),
         }),
@@ -129,6 +145,40 @@ async fn main() -> anyhow::Result<()> {
             peer_group: args.peer_group.clone(),
         }),
     ];
+
+    if let Some(subnet) = args.static_route {
+        let gateway = args
+            .static_gateway
+            .context("--static-gateway is required when --static-route is set")?;
+        ops.push(ConfigOp::StaticRoutingInstance(
+            StaticRoutingInstanceOp::Ensure {
+                name: args.static_routing_instance.clone(),
+            },
+        ));
+        ops.push(ConfigOp::StaticRoute(StaticRouteOp::Set {
+            instance: args.static_routing_instance.clone(),
+            subnet,
+            gateway,
+        }));
+        ops.push(ConfigOp::RoutingTable(
+            RoutingTableOp::SetStaticRoutingInstance {
+                name: args.routing_table.clone(),
+                static_routing_instance: args.static_routing_instance.clone(),
+            },
+        ));
+    } else if args.redistribute {
+        bail!("--redistribute requires --static-route (and --static-gateway) to also be set");
+    }
+
+    if args.redistribute {
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
+            name: args.routing_table.clone(),
+            redistribute: Redistribute {
+                from: RedistributeSource::Static,
+                to: RedistributeTarget::Bgp,
+            },
+        }));
+    }
 
     for op in ops {
         send(

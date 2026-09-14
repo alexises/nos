@@ -1,7 +1,9 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
-use nos_proto::{AddressFamily, TransactionBase};
+use nos_proto::{
+    AddressFamily, Redistribute, RedistributeSource, RedistributeTarget, TransactionBase,
+};
 
 /// A single field edit targeting a BGP instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +93,13 @@ pub enum SetTarget {
     },
     /// Context-relative — only valid while navigated into a routing table.
     RoutingTableStaticRoutingInstanceRelative { static_routing_instance: String },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    RoutingTableRedistribute {
+        name: String,
+        redistribute: Redistribute,
+    },
+    /// Context-relative — only valid while navigated into a routing table.
+    RoutingTableRedistributeRelative { redistribute: Redistribute },
     /// Fully-qualified route upsert — works from anywhere in configuration
     /// mode.
     StaticRoute {
@@ -164,6 +173,13 @@ pub enum DeleteTarget {
     /// `delete static-routing-instance` — relative clear, only valid while
     /// navigated into a routing table.
     RoutingTableStaticRoutingInstanceRelative,
+    /// `delete routing-table <name> redistribute` — qualified clear.
+    RoutingTableRedistribute {
+        name: String,
+    },
+    /// `delete redistribute` — relative clear, only valid while navigated
+    /// into a routing table.
+    RoutingTableRedistributeRelative,
     StaticRoutingInstance {
         name: String,
     },
@@ -491,6 +507,23 @@ impl Command {
                     static_routing_instance: (*instance).to_string(),
                 })
             }
+            ["set", "routing-table", name, "redistribute", "from", "static", "to", "bgp"] => {
+                Command::Set(SetTarget::RoutingTableRedistribute {
+                    name: (*name).to_string(),
+                    redistribute: Redistribute {
+                        from: RedistributeSource::Static,
+                        to: RedistributeTarget::Bgp,
+                    },
+                })
+            }
+            ["set", "redistribute", "from", "static", "to", "bgp"] => {
+                Command::Set(SetTarget::RoutingTableRedistributeRelative {
+                    redistribute: Redistribute {
+                        from: RedistributeSource::Static,
+                        to: RedistributeTarget::Bgp,
+                    },
+                })
+            }
             ["set", "static-routing-instance", name, "route", subnet, "gateway", addr] => {
                 match (subnet.parse::<IpNet>(), addr.parse::<IpAddr>()) {
                     (Ok(subnet), Ok(gateway)) => Command::Set(SetTarget::StaticRoute {
@@ -585,6 +618,14 @@ impl Command {
             }
             ["delete", "static-routing-instance"] => {
                 Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstanceRelative)
+            }
+            ["delete", "routing-table", name, "redistribute"] => {
+                Command::Delete(DeleteTarget::RoutingTableRedistribute {
+                    name: (*name).to_string(),
+                })
+            }
+            ["delete", "redistribute"] => {
+                Command::Delete(DeleteTarget::RoutingTableRedistributeRelative)
             }
             ["delete", "static-routing-instance", name] => {
                 Command::Delete(DeleteTarget::StaticRoutingInstance {
@@ -1114,6 +1155,25 @@ mod tests {
     }
 
     #[test]
+    fn set_routing_table_redistribute_qualified_and_relative() {
+        let redistribute = Redistribute {
+            from: RedistributeSource::Static,
+            to: RedistributeTarget::Bgp,
+        };
+        assert_eq!(
+            Command::parse("set routing-table rt1 redistribute from static to bgp"),
+            Command::Set(SetTarget::RoutingTableRedistribute {
+                name: "rt1".to_string(),
+                redistribute,
+            })
+        );
+        assert_eq!(
+            Command::parse("set redistribute from static to bgp"),
+            Command::Set(SetTarget::RoutingTableRedistributeRelative { redistribute })
+        );
+    }
+
+    #[test]
     fn set_static_route_qualified_and_relative() {
         assert_eq!(
             Command::parse("set static-routing-instance sri1 route 10.0.0.0/24 gateway 10.0.0.1"),
@@ -1167,6 +1227,16 @@ mod tests {
         assert_eq!(
             Command::parse("delete static-routing-instance"),
             Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstanceRelative)
+        );
+        assert_eq!(
+            Command::parse("delete routing-table rt1 redistribute"),
+            Command::Delete(DeleteTarget::RoutingTableRedistribute {
+                name: "rt1".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete redistribute"),
+            Command::Delete(DeleteTarget::RoutingTableRedistributeRelative)
         );
     }
 

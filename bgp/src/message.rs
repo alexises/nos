@@ -1,17 +1,24 @@
 //! RFC 4271 BGP-4 wire message format: header, OPEN, KEEPALIVE, NOTIFICATION,
-//! plus the RFC 6793 four-octet AS number capability. This is BGP's own wire
-//! contract with external routers, not an inter-NOS-daemon IPC contract, so
-//! it lives here rather than in `nos-proto` (whose `IpcCodec` is postcard-
-//! based and structurally incompatible with BGP's raw big-endian format
-//! anyway).
+//! UPDATE, plus the RFC 6793 four-octet AS number capability. This is BGP's
+//! own wire contract with external routers, not an inter-NOS-daemon IPC
+//! contract, so it lives here rather than in `nos-proto` (whose `IpcCodec` is
+//! postcard-based and structurally incompatible with BGP's raw big-endian
+//! format anyway).
 //!
-//! UPDATE message bodies are deliberately never parsed — route exchange is a
-//! future feature. They (and any other/unknown type) decode as
-//! `BgpMessage::Unhandled` so the codec never chokes on one arriving.
+//! UPDATE support is IPv4-unicast-only (RFC 4271's base NLRI; MP-BGP/RFC 4760
+//! for IPv6 is out of scope), decodes `ORIGIN`/`AS_PATH`/`NEXT_HOP`/`LOCAL_PREF`
+//! path attributes and skips any other attribute type by its declared length
+//! (never an error — the same philosophy `parse_optional_parameters` already
+//! applies to unknown OPEN capabilities), and never emits RFC 6793's `AS4_PATH`
+//! transition attribute (`AS_PATH` is always encoded with 4-byte ASNs, since
+//! this NOS always advertises the four-octet AS number capability itself).
+//! Any other/unknown message type still decodes as `BgpMessage::Unhandled` so
+//! the codec never chokes on one arriving.
 
 use std::net::Ipv4Addr;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use ipnet::Ipv4Net;
 use tokio_util::codec::{Decoder, Encoder};
 
 pub const BGP_VERSION: u8 = 4;
@@ -25,11 +32,27 @@ const MAX_MESSAGE_LEN: usize = 4096;
 pub const AS_TRANS: u16 = 23456;
 
 const TYPE_OPEN: u8 = 1;
+const TYPE_UPDATE: u8 = 2;
 const TYPE_NOTIFICATION: u8 = 3;
 const TYPE_KEEPALIVE: u8 = 4;
 
 const OPT_PARAM_CAPABILITIES: u8 = 2;
 const CAP_FOUR_OCTET_ASN: u8 = 65;
+
+const ATTR_ORIGIN: u8 = 1;
+const ATTR_AS_PATH: u8 = 2;
+const ATTR_NEXT_HOP: u8 = 3;
+const ATTR_LOCAL_PREF: u8 = 5;
+/// RFC 4271 §4.3 attribute flag bit indicating a 2-byte (rather than 1-byte)
+/// attribute length field follows the type byte.
+const ATTR_FLAG_EXTENDED_LENGTH: u8 = 0x10;
+/// Well-known transitive, per RFC 4271 §5 — the flag value this
+/// implementation always encodes for `ORIGIN`/`AS_PATH`/`NEXT_HOP`/`LOCAL_PREF`.
+const ATTR_FLAG_WELL_KNOWN_TRANSITIVE: u8 = 0x40;
+const AS_PATH_SEGMENT_SEQUENCE: u8 = 2;
+/// `AS_PATH` segments are encoded as `count: u8`, so a single segment can carry
+/// at most this many ASNs before it must be split into another segment.
+const MAX_AS_PATH_SEGMENT_LEN: usize = 255;
 
 /// Structural decode failures — the type byte itself is never rejected here
 /// (an unknown type decodes as `BgpMessage::Unhandled`), only malformed
@@ -46,6 +69,8 @@ pub enum WireError {
     MalformedOpen,
     #[error("malformed NOTIFICATION message body")]
     MalformedNotification,
+    #[error("malformed UPDATE message body")]
+    MalformedUpdate,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -55,8 +80,6 @@ pub enum WireError {
 pub enum ErrorCode {
     MessageHeader = 1,
     OpenMessage = 2,
-    #[allow(dead_code)]
-    // no UPDATE validation exists yet — kept for completeness of the RFC 4271 §6 table
     UpdateMessage = 3,
     HoldTimerExpired = 4,
     FiniteStateMachine = 5,
@@ -83,6 +106,15 @@ pub enum OpenMessageSubcode {
     #[allow(dead_code)] // no optional parameters besides Capabilities are rejected yet
     UnsupportedOptionalParameter = 4,
     UnacceptableHoldTime = 6,
+}
+
+/// RFC 4271 §6.3 UPDATE Message Error subcodes (only the one this crate's
+/// parser can actually produce is modeled; the rest of the RFC 4271 table —
+/// missing/invalid individual well-known attributes, invalid `NEXT_HOP`, etc.
+/// — isn't distinguished from a generic malformed attribute list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateMessageSubcode {
+    MalformedAttributeList = 1,
 }
 
 /// RFC 4486 Cease subcodes actually used by this crate.
@@ -114,15 +146,46 @@ pub struct NotificationMessage {
     pub data: Bytes,
 }
 
-/// A decoded BGP message. There is deliberately no `Update` variant — see
-/// this module's doc comment.
+/// RFC 4271 §4.3 `ORIGIN` path attribute values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Igp = 0,
+    Egp = 1,
+    Incomplete = 2,
+}
+
+/// The four path attributes this implementation understands. `local_pref` is
+/// `Some` iff the wire message actually carried a `LOCAL_PREF` attribute — this
+/// crate never invents one on decode (`rib.rs` applies the RFC 4271 §5.1.5
+/// default only when propagating, not here).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathAttributes {
+    pub origin: Origin,
+    /// Flattened `AS_SEQUENCE`(s), nearest hop first — `AS_SET` vs.
+    /// `AS_SEQUENCE` segmentation is not preserved (documented simplification).
+    pub as_path: Vec<u32>,
+    pub next_hop: Ipv4Addr,
+    pub local_pref: Option<u32>,
+}
+
+/// An RFC 4271 UPDATE message, IPv4-unicast-only. `attributes` is `Some` iff
+/// `nlri` is non-empty — a pure withdrawal carries no path attributes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateMessage {
+    pub withdrawn_routes: Vec<Ipv4Net>,
+    pub nlri: Vec<Ipv4Net>,
+    pub attributes: Option<PathAttributes>,
+}
+
+/// A decoded BGP message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BgpMessage {
     Open(OpenMessage),
+    Update(UpdateMessage),
     Keepalive,
     Notification(NotificationMessage),
-    /// Any message type this crate doesn't parse a body for (UPDATE, or any
-    /// type unknown to this implementation).
+    /// Any message type this crate doesn't parse a body for (unknown to this
+    /// implementation).
     Unhandled {
         message_type: u8,
         body: Bytes,
@@ -188,6 +251,7 @@ impl Decoder for BgpCodec {
 
         let message = match message_type {
             TYPE_OPEN => BgpMessage::Open(parse_open(&body)?),
+            TYPE_UPDATE => BgpMessage::Update(parse_update(&body)?),
             TYPE_KEEPALIVE => {
                 if !body.is_empty() {
                     return Err(WireError::BadLength(length));
@@ -210,6 +274,7 @@ impl Encoder<BgpMessage> for BgpCodec {
     fn encode(&mut self, item: BgpMessage, dst: &mut BytesMut) -> Result<(), WireError> {
         let (message_type, body) = match item {
             BgpMessage::Open(open) => (TYPE_OPEN, encode_open(&open)),
+            BgpMessage::Update(update) => (TYPE_UPDATE, encode_update(&update)),
             BgpMessage::Keepalive => (TYPE_KEEPALIVE, Vec::new()),
             BgpMessage::Notification(n) => (TYPE_NOTIFICATION, encode_notification(&n)),
             BgpMessage::Unhandled { message_type, body } => (message_type, body.to_vec()),
@@ -334,6 +399,276 @@ fn encode_notification(n: &NotificationMessage) -> Vec<u8> {
     body
 }
 
+/// RFC 4271 §4.3 prefix bit-packing: `prefix_len` (1 byte) followed by the
+/// minimum number of whole octets needed to hold that many bits of the
+/// address, zero-padded. Decodes a `[prefix_len][octets...]` list that
+/// continues until the byte slice is exhausted (both withdrawn-routes and
+/// NLRI use this same encoding, with no count field of their own — the
+/// caller already knows where the list ends).
+fn decode_prefixes(mut data: &[u8]) -> Result<Vec<Ipv4Net>, WireError> {
+    let mut prefixes = Vec::new();
+    while !data.is_empty() {
+        let prefix_len = data[0];
+        if prefix_len > 32 {
+            return Err(WireError::MalformedUpdate);
+        }
+        let byte_len = usize::from(prefix_len).div_ceil(8);
+        if data.len() < 1 + byte_len {
+            return Err(WireError::MalformedUpdate);
+        }
+        let mut octets = [0u8; 4];
+        octets[..byte_len].copy_from_slice(&data[1..=byte_len]);
+        let net = Ipv4Net::new(Ipv4Addr::from(octets), prefix_len)
+            .map_err(|_| WireError::MalformedUpdate)?;
+        prefixes.push(net);
+        data = &data[1 + byte_len..];
+    }
+    Ok(prefixes)
+}
+
+fn encode_prefix(net: Ipv4Net, out: &mut Vec<u8>) {
+    let prefix_len = net.prefix_len();
+    let byte_len = usize::from(prefix_len).div_ceil(8);
+    out.push(prefix_len);
+    out.extend_from_slice(&net.addr().octets()[..byte_len]);
+}
+
+fn encode_prefixes(nets: &[Ipv4Net]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for net in nets {
+        encode_prefix(*net, &mut out);
+    }
+    out
+}
+
+/// The four attributes `parse_path_attributes` looks for, each `Some` only
+/// if the message actually carried it.
+type ParsedAttributeFields = (
+    Option<Origin>,
+    Option<Vec<u32>>,
+    Option<Ipv4Addr>,
+    Option<u32>,
+);
+
+/// Walks the TLV path-attribute list, decoding `ORIGIN`/`AS_PATH`/`NEXT_HOP`/
+/// `LOCAL_PREF` and skipping anything else by its own declared length
+/// (mirrors `parse_optional_parameters`'s handling of unknown OPEN
+/// capabilities). Returns each attribute's value only if the message
+/// actually carried it — callers decide mandatory-attribute enforcement,
+/// since that depends on whether the UPDATE carries any NLRI at all.
+fn parse_path_attributes(mut data: &[u8]) -> Result<ParsedAttributeFields, WireError> {
+    let mut origin = None;
+    let mut as_path = None;
+    let mut next_hop = None;
+    let mut local_pref = None;
+
+    while !data.is_empty() {
+        if data.len() < 2 {
+            return Err(WireError::MalformedUpdate);
+        }
+        let flags = data[0];
+        let attr_type = data[1];
+        let (len, header_len) = if flags & ATTR_FLAG_EXTENDED_LENGTH != 0 {
+            if data.len() < 4 {
+                return Err(WireError::MalformedUpdate);
+            }
+            (usize::from(u16::from_be_bytes([data[2], data[3]])), 4)
+        } else {
+            if data.len() < 3 {
+                return Err(WireError::MalformedUpdate);
+            }
+            (usize::from(data[2]), 3)
+        };
+        if data.len() < header_len + len {
+            return Err(WireError::MalformedUpdate);
+        }
+        let value = &data[header_len..header_len + len];
+
+        match attr_type {
+            ATTR_ORIGIN => {
+                if value.len() != 1 {
+                    return Err(WireError::MalformedUpdate);
+                }
+                origin = Some(match value[0] {
+                    0 => Origin::Igp,
+                    1 => Origin::Egp,
+                    2 => Origin::Incomplete,
+                    _ => return Err(WireError::MalformedUpdate),
+                });
+            }
+            ATTR_AS_PATH => as_path = Some(parse_as_path(value)?),
+            ATTR_NEXT_HOP => {
+                if value.len() != 4 {
+                    return Err(WireError::MalformedUpdate);
+                }
+                next_hop = Some(Ipv4Addr::new(value[0], value[1], value[2], value[3]));
+            }
+            ATTR_LOCAL_PREF => {
+                if value.len() != 4 {
+                    return Err(WireError::MalformedUpdate);
+                }
+                local_pref = Some(u32::from_be_bytes(value.try_into().unwrap()));
+            }
+            _ => {
+                // Unknown attribute type: skip by declared length, never an
+                // error — same philosophy as unrecognized OPEN capabilities.
+            }
+        }
+
+        data = &data[header_len + len..];
+    }
+
+    Ok((origin, as_path, next_hop, local_pref))
+}
+
+/// Flattens one or more `AS_PATH` segments (`segment_type(1) count(1)
+/// count*4 bytes`) into a single `Vec<u32>`, regardless of `AS_SEQUENCE` vs.
+/// `AS_SET` (documented simplification — this crate never distinguishes them).
+fn parse_as_path(mut data: &[u8]) -> Result<Vec<u32>, WireError> {
+    let mut asns = Vec::new();
+    while !data.is_empty() {
+        if data.len() < 2 {
+            return Err(WireError::MalformedUpdate);
+        }
+        let count = usize::from(data[1]);
+        let segment_len = 2 + count * 4;
+        if data.len() < segment_len {
+            return Err(WireError::MalformedUpdate);
+        }
+        let mut asn_data = &data[2..segment_len];
+        for _ in 0..count {
+            asns.push(u32::from_be_bytes(asn_data[..4].try_into().unwrap()));
+            asn_data = &asn_data[4..];
+        }
+        data = &data[segment_len..];
+    }
+    Ok(asns)
+}
+
+/// Parses an UPDATE body: withdrawn-routes (u16 length + packed prefixes),
+/// path attributes (u16 length + TLV list), then NLRI (everything
+/// remaining — RFC 4271 has no explicit NLRI length field, since the outer
+/// message header's length already delimits it). If `nlri` is non-empty,
+/// `ORIGIN`/`AS_PATH`/`NEXT_HOP` must all have been present or this is
+/// `MalformedUpdate`; if `nlri` is empty (a pure withdrawal), `attributes`
+/// is `None`, discarding any attributes present.
+fn parse_update(body: &[u8]) -> Result<UpdateMessage, WireError> {
+    if body.len() < 2 {
+        return Err(WireError::MalformedUpdate);
+    }
+    let withdrawn_len = usize::from(u16::from_be_bytes([body[0], body[1]]));
+    let mut pos = 2;
+    if body.len() < pos + withdrawn_len {
+        return Err(WireError::MalformedUpdate);
+    }
+    let withdrawn_routes = decode_prefixes(&body[pos..pos + withdrawn_len])?;
+    pos += withdrawn_len;
+
+    if body.len() < pos + 2 {
+        return Err(WireError::MalformedUpdate);
+    }
+    let attr_len = usize::from(u16::from_be_bytes([body[pos], body[pos + 1]]));
+    pos += 2;
+    if body.len() < pos + attr_len {
+        return Err(WireError::MalformedUpdate);
+    }
+    let (origin, as_path, next_hop, local_pref) =
+        parse_path_attributes(&body[pos..pos + attr_len])?;
+    pos += attr_len;
+
+    let nlri = decode_prefixes(&body[pos..])?;
+
+    let attributes = if nlri.is_empty() {
+        None
+    } else {
+        Some(PathAttributes {
+            origin: origin.ok_or(WireError::MalformedUpdate)?,
+            as_path: as_path.ok_or(WireError::MalformedUpdate)?,
+            next_hop: next_hop.ok_or(WireError::MalformedUpdate)?,
+            local_pref,
+        })
+    };
+
+    Ok(UpdateMessage {
+        withdrawn_routes,
+        nlri,
+        attributes,
+    })
+}
+
+fn encode_attribute(out: &mut Vec<u8>, attr_type: u8, value: &[u8]) {
+    if let Ok(len) = u8::try_from(value.len()) {
+        out.push(ATTR_FLAG_WELL_KNOWN_TRANSITIVE);
+        out.push(attr_type);
+        out.push(len);
+    } else {
+        out.push(ATTR_FLAG_WELL_KNOWN_TRANSITIVE | ATTR_FLAG_EXTENDED_LENGTH);
+        out.push(attr_type);
+        // Only reached for an attribute value over 255 bytes (a very long
+        // AS_PATH) — still far under a whole message's 4096-byte cap.
+        out.extend_from_slice(&u16::try_from(value.len()).unwrap_or(u16::MAX).to_be_bytes());
+    }
+    out.extend_from_slice(value);
+}
+
+/// Splits `asns` into `AS_PATH_SEGMENT_SEQUENCE` segments of at most
+/// `MAX_AS_PATH_SEGMENT_LEN` ASNs each (the segment's own count field is a
+/// single byte). An empty path encodes as an empty attribute value (no
+/// segments at all) — valid for, e.g., a route redistributed straight to an
+/// iBGP peer, which never gets a local ASN prepended.
+fn encode_as_path(asns: &[u32]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for chunk in asns.chunks(MAX_AS_PATH_SEGMENT_LEN) {
+        out.push(AS_PATH_SEGMENT_SEQUENCE);
+        // `chunks(MAX_AS_PATH_SEGMENT_LEN)` never yields more than 255
+        // elements per chunk, so this always fits in a u8.
+        out.push(u8::try_from(chunk.len()).unwrap_or(u8::MAX));
+        for asn in chunk {
+            out.extend_from_slice(&asn.to_be_bytes());
+        }
+    }
+    out
+}
+
+fn encode_path_attributes(attrs: &PathAttributes) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_attribute(&mut out, ATTR_ORIGIN, &[attrs.origin as u8]);
+    encode_attribute(&mut out, ATTR_AS_PATH, &encode_as_path(&attrs.as_path));
+    encode_attribute(&mut out, ATTR_NEXT_HOP, &attrs.next_hop.octets());
+    if let Some(local_pref) = attrs.local_pref {
+        encode_attribute(&mut out, ATTR_LOCAL_PREF, &local_pref.to_be_bytes());
+    }
+    out
+}
+
+/// Mirror image of `parse_update`. Byte lengths for the withdrawn-routes and
+/// path-attributes sections always fit comfortably in a `u16` in practice —
+/// the whole message is capped at `MAX_MESSAGE_LEN` (4096) bytes by
+/// `BgpCodec::encode`, which will itself reject the overall frame if
+/// something pathological ever made it larger.
+fn encode_update(update: &UpdateMessage) -> Vec<u8> {
+    let mut body = Vec::new();
+
+    let withdrawn = encode_prefixes(&update.withdrawn_routes);
+    body.extend_from_slice(
+        &u16::try_from(withdrawn.len())
+            .unwrap_or(u16::MAX)
+            .to_be_bytes(),
+    );
+    body.extend_from_slice(&withdrawn);
+
+    let attrs = update
+        .attributes
+        .as_ref()
+        .map(encode_path_attributes)
+        .unwrap_or_default();
+    body.extend_from_slice(&u16::try_from(attrs.len()).unwrap_or(u16::MAX).to_be_bytes());
+    body.extend_from_slice(&attrs);
+
+    body.extend_from_slice(&encode_prefixes(&update.nlri));
+    body
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,15 +756,142 @@ mod tests {
     #[test]
     fn unknown_type_decodes_as_unhandled() {
         match roundtrip(BgpMessage::Unhandled {
-            message_type: 2, // UPDATE
+            message_type: 200, // not a type this crate understands
             body: Bytes::from_static(b"not parsed"),
         }) {
             BgpMessage::Unhandled { message_type, body } => {
-                assert_eq!(message_type, 2);
+                assert_eq!(message_type, 200);
                 assert_eq!(&body[..], b"not parsed");
             }
             other => panic!("expected Unhandled, got {other:?}"),
         }
+    }
+
+    fn attrs(as_path: Vec<u32>, local_pref: Option<u32>) -> PathAttributes {
+        PathAttributes {
+            origin: Origin::Igp,
+            as_path,
+            next_hop: Ipv4Addr::new(10, 0, 0, 1),
+            local_pref,
+        }
+    }
+
+    #[test]
+    fn update_announce_roundtrips() {
+        let update = UpdateMessage {
+            withdrawn_routes: vec![],
+            nlri: vec![
+                "10.1.0.0/24".parse().unwrap(),
+                "10.2.0.0/16".parse().unwrap(),
+            ],
+            attributes: Some(attrs(vec![65001, 65002], Some(200))),
+        };
+        assert_eq!(
+            roundtrip(BgpMessage::Update(update.clone())),
+            BgpMessage::Update(update)
+        );
+    }
+
+    #[test]
+    fn update_withdraw_only_roundtrips_with_no_attributes() {
+        let update = UpdateMessage {
+            withdrawn_routes: vec!["10.1.0.0/24".parse().unwrap(), "0.0.0.0/0".parse().unwrap()],
+            nlri: vec![],
+            attributes: None,
+        };
+        assert_eq!(
+            roundtrip(BgpMessage::Update(update.clone())),
+            BgpMessage::Update(update)
+        );
+    }
+
+    #[test]
+    fn update_mixed_withdraw_and_announce_roundtrips() {
+        let update = UpdateMessage {
+            withdrawn_routes: vec!["192.168.1.0/24".parse().unwrap()],
+            nlri: vec!["172.16.0.0/12".parse().unwrap()],
+            attributes: Some(attrs(vec![], None)),
+        };
+        assert_eq!(
+            roundtrip(BgpMessage::Update(update.clone())),
+            BgpMessage::Update(update)
+        );
+    }
+
+    #[test]
+    fn update_as_path_longer_than_one_segment_roundtrips() {
+        let long_path: Vec<u32> = (1..=300).collect();
+        let update = UpdateMessage {
+            withdrawn_routes: vec![],
+            nlri: vec!["10.0.0.0/8".parse().unwrap()],
+            attributes: Some(attrs(long_path, None)),
+        };
+        assert_eq!(
+            roundtrip(BgpMessage::Update(update.clone())),
+            BgpMessage::Update(update)
+        );
+    }
+
+    #[test]
+    fn update_with_unknown_attribute_is_skipped_by_length() {
+        // withdrawn_routes length = 0
+        let mut body = vec![0u8, 0u8];
+        // path attributes: an unknown attribute (type 99) with 3 bytes of
+        // junk, followed by the three mandatory attributes.
+        let mut path_attrs = Vec::new();
+        path_attrs.extend_from_slice(&[0x80, 99, 3, 0xAA, 0xBB, 0xCC]);
+        path_attrs.extend_from_slice(&[0x40, ATTR_ORIGIN, 1, Origin::Igp as u8]);
+        path_attrs.extend_from_slice(&[0x40, ATTR_AS_PATH, 0]);
+        path_attrs.extend_from_slice(&[0x40, ATTR_NEXT_HOP, 4, 10, 0, 0, 1]);
+        body.extend_from_slice(&u16::try_from(path_attrs.len()).unwrap().to_be_bytes());
+        body.extend_from_slice(&path_attrs);
+        // nlri: 10.0.0.0/8
+        body.extend_from_slice(&[8, 10]);
+
+        let parsed = parse_update(&body).unwrap();
+        assert_eq!(parsed.nlri, vec!["10.0.0.0/8".parse().unwrap()]);
+        assert_eq!(
+            parsed.attributes,
+            Some(PathAttributes {
+                origin: Origin::Igp,
+                as_path: vec![],
+                next_hop: Ipv4Addr::new(10, 0, 0, 1),
+                local_pref: None,
+            })
+        );
+    }
+
+    #[test]
+    fn update_with_nlri_but_missing_mandatory_attribute_is_malformed() {
+        // withdrawn_routes length = 0, path attributes length = 0 (no
+        // ORIGIN/AS_PATH/NEXT_HOP at all), nlri = 10.0.0.0/8.
+        let mut body = vec![0u8, 0u8, 0u8, 0u8];
+        body.extend_from_slice(&[8, 10]);
+        assert!(matches!(
+            parse_update(&body),
+            Err(WireError::MalformedUpdate)
+        ));
+    }
+
+    #[test]
+    fn update_with_out_of_range_prefix_length_is_malformed() {
+        // withdrawn_routes: one entry with an invalid prefix length (33).
+        let body = vec![0u8, 2u8, 33u8, 10u8];
+        assert!(matches!(
+            parse_update(&body),
+            Err(WireError::MalformedUpdate)
+        ));
+    }
+
+    #[test]
+    fn update_truncated_prefix_data_is_malformed() {
+        // withdrawn_routes: declares a /24 (needs 3 octets) but only 1 byte
+        // of address data follows before the section's declared length ends.
+        let body = vec![0u8, 2u8, 24u8, 10u8];
+        assert!(matches!(
+            parse_update(&body),
+            Err(WireError::MalformedUpdate)
+        ));
     }
 
     #[test]

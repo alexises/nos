@@ -13,7 +13,7 @@ use tracing::warn;
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// One-shot resolve of `service` against `nos-watchdogd`'s broker socket.
-async fn resolve_once(watchdog_socket: &Path, service: &ServiceRef) -> Option<PathBuf> {
+pub async fn resolve_once(watchdog_socket: &Path, service: &ServiceRef) -> Option<PathBuf> {
     let stream = UnixStream::connect(watchdog_socket).await.ok()?;
     let (r, w) = stream.into_split();
     let mut reader = FramedRead::new(r, IpcCodec::<WatchdogEvent>::default());

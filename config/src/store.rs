@@ -284,6 +284,7 @@ mod tests {
                     name: "rt1".to_string(),
                     bgp_instance: Some("r1".to_string()),
                     static_routing_instance: None,
+                    redistribute: None,
                 }],
                 ..Default::default()
             },

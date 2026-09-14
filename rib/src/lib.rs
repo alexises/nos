@@ -1,3 +1,4 @@
+pub mod bgp_client;
 pub mod config_client;
 pub mod driver;
 pub mod log_client;
