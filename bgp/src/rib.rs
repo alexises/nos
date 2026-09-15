@@ -6,13 +6,24 @@
 //! discriminated by the value itself, the same pattern `nos-rib`'s own `Rib`
 //! already uses.
 //!
-//! This deliberately implements the **simplified** decision/propagation
-//! rules documented in the implementation plan, not full RFC 4271 §9.1.2:
-//!
-//! - Best path: (1) higher `LOCAL_PREF`, (2) shorter `AS_PATH`, (3) a
-//!   locally-redistributed route beats any peer-learned route, (4) lowest
-//!   advertising peer address as a final deterministic tiebreak. No MED,
-//!   origin-type ordering, IGP metric, or router-id tiebreaks.
+//! Best path selection (`best_path`) implements the full RFC 4271 §9.1.2.2
+//! decision process, in order: (1) higher `LOCAL_PREF`; (2) a
+//! locally-redistributed route beats any peer-learned route (not an RFC
+//! step — this implementation's equivalent of "prefer locally originated",
+//! placed here per common vendor convention, e.g. Cisco's own ordering);
+//! (3) shorter `AS_PATH` (`AS_SET` vs. `AS_SEQUENCE` segmentation isn't
+//! preserved — see `message.rs`'s documented simplification — so this
+//! compares flattened length only); (4) lowest `ORIGIN` type (`Igp` <
+//! `Egp` < `Incomplete`); (5) lowest `MULTI_EXIT_DISC`, only compared
+//! between routes sharing the same neighboring AS (`AS_PATH`'s first
+//! entry), missing MED treated as 0; (6) an eBGP-learned route beats an
+//! iBGP-learned one; (7) lowest IGP metric to the next-hop — **not
+//! implemented**: this NOS has no IGP protocol yet, so this step is a
+//! documented no-op rather than a fabricated metric; (8) oldest route
+//! wins (by `received_at`), only between two eBGP-learned candidates,
+//! per RFC 4271's anti-flap tie-break; (9) lowest BGP Identifier
+//! (router-id) of the advertising peer; (10) lowest advertising peer
+//! address, the final deterministic tiebreak.
 //! - Next-hop rewriting is peer-group configurable (`nos_proto::NextHopMode`
 //!   — `SelfAddress`/`Unchanged`), defaulting to `SelfAddress` for an eBGP
 //!   peer and `Unchanged` for an iBGP one. `Unchanged` re-advertises the
@@ -49,7 +60,8 @@
 //! 4271 §6.8 arbitration, not routing state.
 
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
+use std::time::Instant;
 
 use ipnet::IpNet;
 use nos_proto::{AddressFamily, NextHopMode, RedistributeUpdate};
@@ -89,14 +101,26 @@ pub struct RibRoute {
     /// Always the effective value — defaulted to `DEFAULT_LOCAL_PREF` when
     /// the peer's UPDATE omitted `LOCAL_PREF`, or for a `Local` route.
     pub local_pref: u32,
+    /// `Some` iff the peer's UPDATE carried `MULTI_EXIT_DISC`. Always
+    /// `None` for `origin == Local` — a locally-redistributed route never
+    /// carries one.
+    pub med: Option<u32>,
     /// Meaningless when `origin == Local`.
     pub learned_via_ibgp: bool,
+    /// The advertising peer's BGP Identifier, for `origin == Peer(_)` —
+    /// used as the RFC 4271 §9.1.2.2 router-id tiebreak. Always `None` for
+    /// `origin == Local`.
+    pub router_id: Option<Ipv4Addr>,
     /// The `NEXT_HOP` this route was received with, for `origin ==
     /// Peer(_)` — read back out when a destination peer-group's `next_hop`
     /// resolves to `NextHopMode::Unchanged`. Always `None` for `origin ==
     /// Local`: a locally-redistributed route has no "received" next-hop to
     /// preserve, so it always gets next-hop-self regardless of mode.
     pub next_hop: Option<IpAddr>,
+    /// When this candidate was learned — used only by the RFC 4271
+    /// §9.1.2.2 "oldest route wins" tiebreak between two eBGP-learned
+    /// candidates. Meaningless when `origin == Local`.
+    pub received_at: Instant,
 }
 
 /// One update this instance needs to send out over a specific peer's
@@ -122,6 +146,10 @@ pub struct AdvertisedRoute {
     pub next_hop: IpAddr,
     /// `Some` only toward iBGP peers.
     pub local_pref: Option<u32>,
+    /// The route's `MULTI_EXIT_DISC`, forwarded only toward iBGP peers —
+    /// MED is meant for use between adjacent ASes, so it's never
+    /// propagated further to another eBGP peer.
+    pub med: Option<u32>,
     pub origin: message::Origin,
     /// Whether the destination peer negotiated any Multiprotocol Extensions
     /// capability at all — `true` means encode via `MP_REACH_NLRI` (even for
@@ -235,16 +263,24 @@ impl BgpRib {
         }
     }
 
-    /// Handles one inbound UPDATE from `from`. Withdrawals (legacy
-    /// `withdrawn_routes` plus any `mp_unreach` batch) are always processed
-    /// first, unconditionally; announcements (legacy `nlri` plus any
-    /// `mp_reach` batch) are dropped entirely (with a `warn!`) if the
-    /// `AS_PATH` already contains our own ASN (loop prevention), never
-    /// partially applied. `ORIGIN`/`AS_PATH`/`LOCAL_PREF` are shared across
-    /// the legacy `nlri` and every `mp_reach` batch in the same UPDATE (RFC
-    /// 4760: only the next-hop is per-batch); each `mp_reach` batch's own
-    /// `next_hop` is used instead of the legacy attribute's.
-    pub fn handle_update(&mut self, from: IpAddr, remote_is_ibgp: bool, update: &UpdateMessage) {
+    /// Handles one inbound UPDATE from `from`, whose BGP Identifier is
+    /// `remote_bgp_id` (used as the RFC 4271 §9.1.2.2 router-id tiebreak).
+    /// Withdrawals (legacy `withdrawn_routes` plus any `mp_unreach` batch)
+    /// are always processed first, unconditionally; announcements (legacy
+    /// `nlri` plus any `mp_reach` batch) are dropped entirely (with a
+    /// `warn!`) if the `AS_PATH` already contains our own ASN (loop
+    /// prevention), never partially applied. `ORIGIN`/`AS_PATH`/
+    /// `LOCAL_PREF`/`MULTI_EXIT_DISC` are shared across the legacy `nlri`
+    /// and every `mp_reach` batch in the same UPDATE (RFC 4760: only the
+    /// next-hop is per-batch); each `mp_reach` batch's own `next_hop` is
+    /// used instead of the legacy attribute's.
+    pub fn handle_update(
+        &mut self,
+        from: IpAddr,
+        remote_is_ibgp: bool,
+        remote_bgp_id: Ipv4Addr,
+        update: &UpdateMessage,
+    ) {
         let mut touched: HashSet<IpNet> = HashSet::new();
 
         let withdrawn: Vec<IpNet> = update
@@ -290,8 +326,11 @@ impl BgpRib {
                     as_path: attrs.as_path.clone(),
                     bgp_origin: attrs.origin,
                     local_pref: attrs.local_pref.unwrap_or(DEFAULT_LOCAL_PREF),
+                    med: attrs.med,
                     learned_via_ibgp: remote_is_ibgp,
+                    router_id: Some(remote_bgp_id),
                     next_hop: None,
+                    received_at: Instant::now(),
                 };
                 for prefix in &update.nlri {
                     let prefix = IpNet::V4(*prefix);
@@ -425,32 +464,84 @@ fn redistributed_route() -> RibRoute {
         as_path: Vec::new(),
         bgp_origin: message::Origin::Igp,
         local_pref: DEFAULT_LOCAL_PREF,
+        med: None,
         learned_via_ibgp: false,
+        router_id: None,
         next_hop: None,
+        received_at: Instant::now(),
     }
 }
 
-/// The simplified four-step best-path decision documented in the module doc
-/// comment. `candidates` is `(route, source_peer)` — `source_peer` is `None`
-/// for a locally-redistributed route, used only for the final tiebreak.
+/// `ORIGIN` rank for the decision process's step 4 — lower wins (`Igp` <
+/// `Egp` < `Incomplete`), using the enum's own discriminant values.
+fn origin_rank(origin: message::Origin) -> u8 {
+    origin as u8
+}
+
+/// The "neighboring AS" a route was received from, per RFC 4271 §9.1.2.2's
+/// MED comparison rule — the nearest-hop entry in `AS_PATH`. `None` for an
+/// empty `AS_PATH` (e.g. a route relayed by an iBGP peer that never went
+/// through an eBGP hop), which makes it ineligible for MED comparison
+/// against anything.
+fn neighboring_as(route: &RibRoute) -> Option<u32> {
+    route.as_path.first().copied()
+}
+
+/// Step 5: lower `MULTI_EXIT_DISC` wins, but only between routes sharing
+/// the same neighboring AS — otherwise this step is skipped entirely
+/// (`Equal`). Missing MED is treated as 0, the common convention.
+fn compare_med(a: &RibRoute, b: &RibRoute) -> std::cmp::Ordering {
+    match (neighboring_as(a), neighboring_as(b)) {
+        (Some(x), Some(y)) if x == y => b.med.unwrap_or(0).cmp(&a.med.unwrap_or(0)),
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
+/// The full RFC 4271 §9.1.2.2 decision process — see the module doc
+/// comment for the ten-step order. `candidates` is `(route, source_peer)`
+/// — `source_peer` is `None` for a locally-redistributed route, used only
+/// for the final tiebreak (step 10).
 fn best_path(candidates: &[(RibRoute, Option<IpAddr>)]) -> Option<RibRoute> {
     candidates
         .iter()
         .max_by(|(a, a_peer), (b, b_peer)| {
             a.local_pref
                 .cmp(&b.local_pref)
-                .then_with(|| b.as_path.len().cmp(&a.as_path.len()))
                 .then_with(|| {
-                    // A Local route beats any Peer(_) route.
+                    // Step 2 (not an RFC step): a Local route beats any
+                    // Peer(_) route.
                     let a_is_local = matches!(a.origin, RouteOrigin::Local);
                     let b_is_local = matches!(b.origin, RouteOrigin::Local);
                     a_is_local.cmp(&b_is_local)
                 })
+                .then_with(|| b.as_path.len().cmp(&a.as_path.len())) // step 3
+                .then_with(|| origin_rank(b.bgp_origin).cmp(&origin_rank(a.bgp_origin))) // step 4
+                .then_with(|| compare_med(a, b)) // step 5
+                .then_with(|| b.learned_via_ibgp.cmp(&a.learned_via_ibgp)) // step 6: eBGP beats iBGP
+                // Step 7 (IGP metric to next-hop) is a documented no-op:
+                // this NOS has no IGP protocol to source a metric from.
                 .then_with(|| {
-                    // Lowest peer address wins the tiebreak — reverse the
-                    // comparison since `max_by` favors the greater element,
-                    // and `None` (a local route) never reaches this arm
-                    // (already decided by the previous step).
+                    // Step 8: oldest route wins, only between two
+                    // eBGP-learned candidates (RFC 4271's anti-flap rule).
+                    if !a.learned_via_ibgp && !b.learned_via_ibgp {
+                        b.received_at.cmp(&a.received_at)
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .then_with(|| {
+                    // Step 9: lowest advertising peer's BGP Identifier.
+                    match (a.router_id, b.router_id) {
+                        (Some(a_id), Some(b_id)) => b_id.cmp(&a_id),
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                })
+                .then_with(|| {
+                    // Step 10: lowest peer address, the final deterministic
+                    // tiebreak — reverse the comparison since `max_by`
+                    // favors the greater element, and `None` (a local
+                    // route) never reaches this arm (already decided by
+                    // step 2).
                     match (a_peer, b_peer) {
                         (Some(a_addr), Some(b_addr)) => b_addr.cmp(a_addr),
                         _ => std::cmp::Ordering::Equal,
@@ -499,12 +590,16 @@ fn build_advertisement(
         as_path.insert(0, local_asn);
     }
     let local_pref = outbox.is_ibgp.then_some(best.local_pref);
+    // MED is meant for use between adjacent ASes, so it's never forwarded
+    // on to a further eBGP peer, only preserved toward iBGP peers.
+    let med = if outbox.is_ibgp { best.med } else { None };
 
     Some(AdvertisedRoute {
         prefix,
         as_path,
         next_hop,
         local_pref,
+        med,
         origin: best.bgp_origin,
         use_mp: outbox.mp_bgp_negotiated,
     })
@@ -621,6 +716,7 @@ mod tests {
                 as_path,
                 next_hop: v4(next_hop),
                 local_pref: None,
+                med: None,
             }),
             mp_reach: vec![],
             mp_unreach: vec![],
@@ -653,6 +749,7 @@ mod tests {
                 as_path: vec![65000],
                 next_hop: addr("10.0.0.254"),
                 local_pref: None,
+                med: None,
                 origin: message::Origin::Igp,
                 use_mp: false,
             })]
@@ -675,6 +772,7 @@ mod tests {
                 as_path: vec![],
                 next_hop: addr("10.0.0.253"),
                 local_pref: Some(100),
+                med: None,
                 origin: message::Origin::Igp,
                 use_mp: false,
             })]
@@ -690,6 +788,7 @@ mod tests {
         rib.handle_update(
             source,
             false,
+            v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
         );
 
@@ -708,6 +807,7 @@ mod tests {
         rib.handle_update(
             source,
             false,
+            v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
         );
 
@@ -719,6 +819,7 @@ mod tests {
                 as_path: vec![65000, 65001],
                 next_hop: addr("10.0.0.253"),
                 local_pref: None,
+                med: None,
                 origin: message::Origin::Igp,
                 use_mp: false,
             })]
@@ -736,6 +837,7 @@ mod tests {
         rib.handle_update(
             source,
             true,
+            v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![], "10.0.0.1"),
         );
 
@@ -753,6 +855,7 @@ mod tests {
         rib.handle_update(
             source,
             false,
+            v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
         );
 
@@ -767,6 +870,7 @@ mod tests {
                 // ibgp_peer's own local address.
                 next_hop: addr("10.0.0.1"),
                 local_pref: Some(100),
+                med: None,
                 origin: message::Origin::Igp,
                 use_mp: false,
             })]
@@ -790,6 +894,7 @@ mod tests {
         rib.handle_update(
             source,
             false,
+            v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
         );
 
@@ -801,6 +906,7 @@ mod tests {
                 as_path: vec![65001],
                 next_hop: addr("10.0.0.253"),
                 local_pref: Some(100),
+                med: None,
                 origin: message::Origin::Igp,
                 use_mp: false,
             })]
@@ -824,6 +930,7 @@ mod tests {
         rib.handle_update(
             source,
             false,
+            v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
         );
 
@@ -835,6 +942,7 @@ mod tests {
                 as_path: vec![65000, 65001],
                 next_hop: addr("10.0.0.1"),
                 local_pref: None,
+                med: None,
                 origin: message::Origin::Igp,
                 use_mp: false,
             })]
@@ -865,6 +973,7 @@ mod tests {
                 // falls back to next-hop-self regardless of mode.
                 next_hop: addr("10.0.0.253"),
                 local_pref: Some(100),
+                med: None,
                 origin: message::Origin::Igp,
                 use_mp: false,
             })]
@@ -882,6 +991,7 @@ mod tests {
         rib.handle_update(
             source,
             false,
+            v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65002, 65000, 65001], "10.0.0.1"),
         );
 
@@ -904,6 +1014,7 @@ mod tests {
         rib.handle_update(
             peer_a,
             false,
+            v4("192.0.2.1"),
             &UpdateMessage {
                 nlri: vec!["9.9.9.0/24".parse().unwrap()],
                 attributes: Some(message::PathAttributes {
@@ -911,6 +1022,7 @@ mod tests {
                     as_path: vec![],
                     next_hop: v4("10.0.0.1"),
                     local_pref: Some(50),
+                    med: None,
                 }),
                 ..empty_update()
             },
@@ -920,6 +1032,7 @@ mod tests {
         rib.handle_update(
             peer_b,
             false,
+            v4("192.0.2.1"),
             &UpdateMessage {
                 nlri: vec!["9.9.9.0/24".parse().unwrap()],
                 attributes: Some(message::PathAttributes {
@@ -927,6 +1040,7 @@ mod tests {
                     as_path: vec![],
                     next_hop: v4("10.0.0.2"),
                     local_pref: Some(200),
+                    med: None,
                 }),
                 ..empty_update()
             },
@@ -943,6 +1057,7 @@ mod tests {
                 // observer's local address.
                 next_hop: addr("10.0.0.2"),
                 local_pref: Some(200),
+                med: None,
                 origin: message::Origin::Igp,
                 use_mp: false,
             })]
@@ -960,6 +1075,7 @@ mod tests {
         rib.handle_update(
             peer,
             false,
+            v4("192.0.2.1"),
             &ebgp_update(vec!["5.5.5.0/24"], vec![65099], "10.0.0.1"),
         );
         let _ = recv_all(&mut observer_rx);
@@ -974,6 +1090,7 @@ mod tests {
                 as_path: vec![65000],
                 next_hop: addr("10.0.0.253"),
                 local_pref: None,
+                med: None,
                 origin: message::Origin::Igp,
                 use_mp: false,
             })]
@@ -991,6 +1108,7 @@ mod tests {
         rib.handle_update(
             peer,
             false,
+            v4("192.0.2.1"),
             &ebgp_update(vec!["5.5.5.0/24"], vec![65099], "10.0.0.1"),
         );
         let _ = recv_all(&mut observer_rx);
@@ -998,6 +1116,7 @@ mod tests {
         rib.handle_update(
             peer,
             false,
+            v4("192.0.2.1"),
             &UpdateMessage {
                 withdrawn_routes: vec!["5.5.5.0/24".parse().unwrap()],
                 ..empty_update()
@@ -1022,6 +1141,7 @@ mod tests {
         rib.handle_update(
             peer,
             false,
+            v4("192.0.2.1"),
             &ebgp_update(vec!["5.5.5.0/24", "6.6.6.0/24"], vec![65099], "10.0.0.1"),
         );
         let _ = recv_all(&mut observer_rx);
@@ -1100,6 +1220,7 @@ mod tests {
                 as_path: vec![65000],
                 next_hop: addr("10.0.0.253"),
                 local_pref: None,
+                med: None,
                 origin: message::Origin::Igp,
                 use_mp: false,
             })]
@@ -1122,6 +1243,7 @@ mod tests {
                 as_path: vec![65000],
                 next_hop: addr("2001:db8::254"),
                 local_pref: None,
+                med: None,
                 origin: message::Origin::Igp,
                 use_mp: true,
             })]
@@ -1169,6 +1291,7 @@ mod tests {
                 as_path: vec![65000],
                 next_hop: addr("2001:db8::254"),
                 local_pref: None,
+                med: None,
                 origin: message::Origin::Igp,
                 use_mp: true,
             })]
@@ -1190,5 +1313,368 @@ mod tests {
             updates,
             vec![OutboundUpdate::Withdraw(prefix("192.168.1.0/24"), true)]
         );
+    }
+
+    fn update_with(
+        nlri: &str,
+        as_path: Vec<u32>,
+        next_hop: &str,
+        origin: message::Origin,
+        med: Option<u32>,
+    ) -> UpdateMessage {
+        UpdateMessage {
+            nlri: vec![nlri.parse().unwrap()],
+            attributes: Some(message::PathAttributes {
+                origin,
+                as_path,
+                next_hop: v4(next_hop),
+                local_pref: None,
+                med,
+            }),
+            ..empty_update()
+        }
+    }
+
+    #[test]
+    fn lower_origin_type_wins_when_local_pref_and_as_path_tie() {
+        let mut rib = new_rib(65000);
+        let peer_a = addr("10.0.0.1");
+        let peer_b = addr("10.0.0.2");
+        let observer = addr("10.0.0.3");
+        let _rx_a = register_peer(&mut rib, peer_a, false, addr("10.0.0.254"));
+        let _rx_b = register_peer(&mut rib, peer_b, false, addr("10.0.0.253"));
+        let mut observer_rx = register_peer(&mut rib, observer, true, addr("10.0.0.252"));
+
+        rib.handle_update(
+            peer_a,
+            false,
+            v4("192.0.2.1"),
+            &update_with(
+                "9.9.9.0/24",
+                vec![65001],
+                "10.0.0.1",
+                message::Origin::Incomplete,
+                None,
+            ),
+        );
+        let _ = recv_all(&mut observer_rx);
+
+        rib.handle_update(
+            peer_b,
+            false,
+            v4("192.0.2.1"),
+            &update_with(
+                "9.9.9.0/24",
+                vec![65001],
+                "10.0.0.2",
+                message::Origin::Igp,
+                None,
+            ),
+        );
+
+        let updates = recv_all(&mut observer_rx);
+        assert_eq!(
+            updates,
+            vec![OutboundUpdate::Announce(AdvertisedRoute {
+                prefix: prefix("9.9.9.0/24"),
+                as_path: vec![65001],
+                next_hop: addr("10.0.0.2"),
+                local_pref: Some(100),
+                med: None,
+                origin: message::Origin::Igp,
+                use_mp: false,
+            })]
+        );
+    }
+
+    #[test]
+    fn lower_med_wins_when_neighboring_as_matches() {
+        let mut rib = new_rib(65000);
+        let peer_a = addr("10.0.0.1");
+        let peer_b = addr("10.0.0.2");
+        let observer = addr("10.0.0.3");
+        let _rx_a = register_peer(&mut rib, peer_a, false, addr("10.0.0.254"));
+        let _rx_b = register_peer(&mut rib, peer_b, false, addr("10.0.0.253"));
+        let mut observer_rx = register_peer(&mut rib, observer, true, addr("10.0.0.252"));
+
+        // Both candidates' AS_PATH starts with 65001 — same neighboring AS —
+        // so MED is directly comparable between them.
+        rib.handle_update(
+            peer_a,
+            false,
+            v4("192.0.2.1"),
+            &update_with(
+                "9.9.9.0/24",
+                vec![65001],
+                "10.0.0.1",
+                message::Origin::Igp,
+                Some(200),
+            ),
+        );
+        let _ = recv_all(&mut observer_rx);
+
+        rib.handle_update(
+            peer_b,
+            false,
+            v4("192.0.2.1"),
+            &update_with(
+                "9.9.9.0/24",
+                vec![65001],
+                "10.0.0.2",
+                message::Origin::Igp,
+                Some(100),
+            ),
+        );
+
+        let updates = recv_all(&mut observer_rx);
+        assert_eq!(
+            updates,
+            vec![OutboundUpdate::Announce(AdvertisedRoute {
+                prefix: prefix("9.9.9.0/24"),
+                as_path: vec![65001],
+                next_hop: addr("10.0.0.2"),
+                local_pref: Some(100),
+                med: Some(100), // forwarded: the destination is an iBGP peer
+                origin: message::Origin::Igp,
+                use_mp: false,
+            })]
+        );
+    }
+
+    #[test]
+    fn med_is_ignored_between_different_neighboring_as() {
+        let mut rib = new_rib(65000);
+        let peer_a = addr("10.0.0.1");
+        let peer_b = addr("10.0.0.2");
+        let observer = addr("10.0.0.3");
+        let _rx_a = register_peer(&mut rib, peer_a, false, addr("10.0.0.254"));
+        let _rx_b = register_peer(&mut rib, peer_b, false, addr("10.0.0.253"));
+        let mut observer_rx = register_peer(&mut rib, observer, true, addr("10.0.0.252"));
+
+        // peer_a's MED (999) is far worse than peer_b's (1), but their
+        // AS_PATHs start with different ASes, so MED must not be compared
+        // between them — peer_a keeps winning via the earlier "oldest
+        // route" step (step 8), since both are eBGP-learned and peer_a
+        // arrived first, proving the MED comparison was skipped rather
+        // than deciding in peer_b's favor.
+        rib.handle_update(
+            peer_a,
+            false,
+            v4("192.0.2.1"),
+            &update_with(
+                "9.9.9.0/24",
+                vec![65001],
+                "10.0.0.1",
+                message::Origin::Igp,
+                Some(999),
+            ),
+        );
+        let initial = recv_all(&mut observer_rx);
+        assert_eq!(
+            initial,
+            vec![OutboundUpdate::Announce(AdvertisedRoute {
+                prefix: prefix("9.9.9.0/24"),
+                as_path: vec![65001],
+                next_hop: addr("10.0.0.1"),
+                local_pref: Some(100),
+                med: Some(999), // forwarded: the destination is an iBGP peer
+                origin: message::Origin::Igp,
+                use_mp: false,
+            })]
+        );
+
+        rib.handle_update(
+            peer_b,
+            false,
+            v4("192.0.2.1"),
+            &update_with(
+                "9.9.9.0/24",
+                vec![65002],
+                "10.0.0.2",
+                message::Origin::Igp,
+                Some(1),
+            ),
+        );
+
+        // The winner is unchanged (still peer_a), so no new announcement is
+        // sent at all — if MED had been compared across the differing
+        // neighboring ASes, peer_b's much lower MED would have won instead.
+        assert!(recv_all(&mut observer_rx).is_empty());
+    }
+
+    #[test]
+    fn ebgp_learned_route_beats_ibgp_learned_route_when_otherwise_tied() {
+        let mut rib = new_rib(65000);
+        // The iBGP source has the numerically lower peer address, so an
+        // eBGP win here can only be explained by the eBGP-over-iBGP step,
+        // not the final peer-address tiebreak.
+        let ibgp_peer = addr("10.0.0.1");
+        let ebgp_peer = addr("10.0.0.2");
+        let observer = addr("10.0.0.3");
+        let _rx_ibgp = register_peer(&mut rib, ibgp_peer, true, addr("10.0.0.254"));
+        let _rx_ebgp = register_peer(&mut rib, ebgp_peer, false, addr("10.0.0.253"));
+        let mut observer_rx = register_peer(&mut rib, observer, false, addr("10.0.0.252"));
+
+        rib.handle_update(
+            ibgp_peer,
+            true,
+            v4("192.0.2.1"),
+            &update_with(
+                "9.9.9.0/24",
+                vec![65001],
+                "10.0.0.1",
+                message::Origin::Igp,
+                None,
+            ),
+        );
+        let _ = recv_all(&mut observer_rx);
+
+        rib.handle_update(
+            ebgp_peer,
+            false,
+            v4("192.0.2.1"),
+            &update_with(
+                "9.9.9.0/24",
+                vec![65001],
+                "10.0.0.2",
+                message::Origin::Igp,
+                None,
+            ),
+        );
+
+        let updates = recv_all(&mut observer_rx);
+        assert_eq!(
+            updates,
+            vec![OutboundUpdate::Announce(AdvertisedRoute {
+                prefix: prefix("9.9.9.0/24"),
+                as_path: vec![65000, 65001],
+                // Destination is eBGP, so next-hop-self rewrites to the
+                // observer's own local address, not either source's.
+                next_hop: addr("10.0.0.252"),
+                local_pref: None,
+                med: None,
+                origin: message::Origin::Igp,
+                use_mp: false,
+            })]
+        );
+    }
+
+    #[test]
+    fn lower_router_id_wins_when_otherwise_tied() {
+        let mut rib = new_rib(65000);
+        // Both sources are iBGP, so the eBGP-over-iBGP step (6) and the
+        // eBGP-only "oldest route" step (8) both tie — router-id (9) must
+        // decide. peer_b has the higher address but the lower router-id, so
+        // its win can only be explained by the router-id step, not the
+        // final peer-address tiebreak.
+        let peer_a = addr("10.0.0.1");
+        let peer_b = addr("10.0.0.2");
+        let observer = addr("10.0.0.3");
+        let _rx_a = register_peer(&mut rib, peer_a, true, addr("10.0.0.254"));
+        let _rx_b = register_peer(&mut rib, peer_b, true, addr("10.0.0.253"));
+        let mut observer_rx = register_peer(&mut rib, observer, false, addr("10.0.0.252"));
+
+        rib.handle_update(
+            peer_a,
+            true,
+            v4("5.5.5.5"),
+            &update_with(
+                "9.9.9.0/24",
+                vec![65001],
+                "10.0.0.1",
+                message::Origin::Igp,
+                None,
+            ),
+        );
+        let _ = recv_all(&mut observer_rx);
+
+        rib.handle_update(
+            peer_b,
+            true,
+            v4("1.1.1.1"),
+            &update_with(
+                "9.9.9.0/24",
+                vec![65001],
+                "10.0.0.2",
+                message::Origin::Igp,
+                None,
+            ),
+        );
+
+        let updates = recv_all(&mut observer_rx);
+        assert_eq!(
+            updates,
+            vec![OutboundUpdate::Announce(AdvertisedRoute {
+                prefix: prefix("9.9.9.0/24"),
+                // Destination is eBGP, so our own ASN is prepended and
+                // next-hop-self rewrites to the observer's own local
+                // address, not either source's.
+                as_path: vec![65000, 65001],
+                next_hop: addr("10.0.0.252"),
+                local_pref: None,
+                med: None,
+                origin: message::Origin::Igp,
+                use_mp: false,
+            })]
+        );
+    }
+
+    #[test]
+    fn oldest_route_wins_over_a_later_lower_router_id_and_address() {
+        let mut rib = new_rib(65000);
+        // peer_a has the higher address and router-id (would lose steps 9
+        // and 10) but is received first; peer_b has the lower address and
+        // router-id but arrives second. peer_a winning proves the "oldest
+        // route" step (8) is applied, and applied before router-id/address.
+        let peer_a = addr("10.0.0.9");
+        let peer_b = addr("10.0.0.1");
+        let observer = addr("10.0.0.3");
+        let _rx_a = register_peer(&mut rib, peer_a, false, addr("10.0.0.254"));
+        let _rx_b = register_peer(&mut rib, peer_b, false, addr("10.0.0.253"));
+        let mut observer_rx = register_peer(&mut rib, observer, true, addr("10.0.0.252"));
+
+        rib.handle_update(
+            peer_a,
+            false,
+            v4("9.9.9.9"),
+            &update_with(
+                "9.9.9.0/24",
+                vec![65001],
+                "10.0.0.9",
+                message::Origin::Igp,
+                None,
+            ),
+        );
+        let initial = recv_all(&mut observer_rx);
+        assert_eq!(
+            initial,
+            vec![OutboundUpdate::Announce(AdvertisedRoute {
+                prefix: prefix("9.9.9.0/24"),
+                as_path: vec![65001],
+                next_hop: addr("10.0.0.9"),
+                local_pref: Some(100),
+                med: None,
+                origin: message::Origin::Igp,
+                use_mp: false,
+            })]
+        );
+
+        rib.handle_update(
+            peer_b,
+            false,
+            v4("1.1.1.1"),
+            &update_with(
+                "9.9.9.0/24",
+                vec![65001],
+                "10.0.0.1",
+                message::Origin::Igp,
+                None,
+            ),
+        );
+
+        // The winner is unchanged (still peer_a), so no new announcement is
+        // sent — if the oldest-route step didn't apply, peer_b's lower
+        // router-id and address would have won at steps 9/10 instead.
+        assert!(recv_all(&mut observer_rx).is_empty());
     }
 }

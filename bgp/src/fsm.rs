@@ -472,10 +472,11 @@ pub async fn run(
                                 // Route exchange bypasses `step` entirely —
                                 // it isn't part of the OpenSent/OpenConfirm/
                                 // Established transition table.
-                                if matches!(state, State::Established(_)) {
+                                if let State::Established(remote) = &state {
                                     bgp_rib.lock().await.handle_update(
                                         peer.remote_address,
                                         remote_is_ibgp,
+                                        remote.bgp_id,
                                         &update,
                                     );
                                 } else {
@@ -657,6 +658,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     as_path: route.as_path,
                     next_hop: Ipv4Addr::UNSPECIFIED, // unused: the real next-hop lives in mp_reach
                     local_pref: route.local_pref,
+                    med: route.med,
                 }),
                 mp_reach: vec![message::MpReachNlri {
                     afi: afi_of_ipnet(route.prefix),
@@ -675,6 +677,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 as_path: route.as_path,
                 next_hop: expect_ipv4_addr(route.next_hop),
                 local_pref: route.local_pref,
+                med: route.med,
             }),
             mp_reach: Vec::new(),
             mp_unreach: Vec::new(),

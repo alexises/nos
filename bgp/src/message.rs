@@ -14,8 +14,8 @@
 //! capability at all; any other family (and, once a peer does negotiate
 //! MP-BGP, IPv4 unicast too — see `crate::rib::build_advertisement`) goes
 //! through `UpdateMessage::{mp_reach,mp_unreach}` instead. Decodes
-//! `ORIGIN`/`AS_PATH`/`NEXT_HOP`/`LOCAL_PREF`/`MP_REACH_NLRI`/
-//! `MP_UNREACH_NLRI` path attributes and skips any other attribute type by
+//! `ORIGIN`/`AS_PATH`/`NEXT_HOP`/`LOCAL_PREF`/`MULTI_EXIT_DISC`/
+//! `MP_REACH_NLRI`/`MP_UNREACH_NLRI` path attributes and skips any other attribute type by
 //! its declared length (never an error — the same philosophy
 //! `parse_optional_parameters` already applies to unknown OPEN capabilities),
 //! and never emits RFC 6793's `AS4_PATH` transition attribute (`AS_PATH` is
@@ -62,6 +62,7 @@ const AFI_IPV6: u16 = 2;
 const ATTR_ORIGIN: u8 = 1;
 const ATTR_AS_PATH: u8 = 2;
 const ATTR_NEXT_HOP: u8 = 3;
+const ATTR_MULTI_EXIT_DISC: u8 = 4;
 const ATTR_LOCAL_PREF: u8 = 5;
 const ATTR_MP_REACH_NLRI: u8 = 14;
 const ATTR_MP_UNREACH_NLRI: u8 = 15;
@@ -215,6 +216,10 @@ pub struct PathAttributes {
     pub as_path: Vec<u32>,
     pub next_hop: Ipv4Addr,
     pub local_pref: Option<u32>,
+    /// `Some` iff the wire message carried `MULTI_EXIT_DISC` (RFC 4271
+    /// §5.1.4) — this crate never invents one, same convention as
+    /// `local_pref`.
+    pub med: Option<u32>,
 }
 
 /// RFC 4760 `MP_REACH_NLRI`: one AFI/SAFI batch of announced routes sharing
@@ -628,19 +633,21 @@ struct ParsedAttributes {
     as_path: Option<Vec<u32>>,
     next_hop: Option<Ipv4Addr>,
     local_pref: Option<u32>,
+    med: Option<u32>,
     mp_reach: Vec<MpReachNlri>,
     mp_unreach: Vec<MpUnreachNlri>,
 }
 
 /// Walks the TLV path-attribute list, decoding `ORIGIN`/`AS_PATH`/`NEXT_HOP`/
-/// `LOCAL_PREF`/`MP_REACH_NLRI`/`MP_UNREACH_NLRI` and skipping anything else
-/// by its own declared length (mirrors `parse_optional_parameters`'s
-/// handling of unknown OPEN capabilities).
+/// `LOCAL_PREF`/`MULTI_EXIT_DISC`/`MP_REACH_NLRI`/`MP_UNREACH_NLRI` and
+/// skipping anything else by its own declared length (mirrors
+/// `parse_optional_parameters`'s handling of unknown OPEN capabilities).
 fn parse_path_attributes(mut data: &[u8]) -> Result<ParsedAttributes, WireError> {
     let mut origin = None;
     let mut as_path = None;
     let mut next_hop = None;
     let mut local_pref = None;
+    let mut med = None;
     let mut mp_reach = Vec::new();
     let mut mp_unreach = Vec::new();
 
@@ -691,6 +698,12 @@ fn parse_path_attributes(mut data: &[u8]) -> Result<ParsedAttributes, WireError>
                 }
                 local_pref = Some(u32::from_be_bytes(value.try_into().unwrap()));
             }
+            ATTR_MULTI_EXIT_DISC => {
+                if value.len() != 4 {
+                    return Err(WireError::MalformedUpdate);
+                }
+                med = Some(u32::from_be_bytes(value.try_into().unwrap()));
+            }
             ATTR_MP_REACH_NLRI => mp_reach.push(decode_mp_reach(value)?),
             ATTR_MP_UNREACH_NLRI => mp_unreach.push(decode_mp_unreach(value)?),
             _ => {
@@ -707,6 +720,7 @@ fn parse_path_attributes(mut data: &[u8]) -> Result<ParsedAttributes, WireError>
         as_path,
         next_hop,
         local_pref,
+        med,
         mp_reach,
         mp_unreach,
     })
@@ -875,6 +889,7 @@ fn parse_update(body: &[u8]) -> Result<UpdateMessage, WireError> {
             as_path: parsed.as_path.ok_or(WireError::MalformedUpdate)?,
             next_hop,
             local_pref: parsed.local_pref,
+            med: parsed.med,
         })
     } else {
         None
@@ -956,6 +971,14 @@ fn encode_attributes(update: &UpdateMessage) -> Vec<u8> {
                 ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
                 ATTR_LOCAL_PREF,
                 &local_pref.to_be_bytes(),
+            );
+        }
+        if let Some(med) = attrs.med {
+            encode_attribute(
+                &mut out,
+                ATTR_FLAG_OPTIONAL_NON_TRANSITIVE,
+                ATTR_MULTI_EXIT_DISC,
+                &med.to_be_bytes(),
             );
         }
     }
@@ -1124,6 +1147,7 @@ mod tests {
             as_path,
             next_hop: Ipv4Addr::new(10, 0, 0, 1),
             local_pref,
+            med: None,
         }
     }
 
@@ -1287,6 +1311,7 @@ mod tests {
                 as_path: vec![],
                 next_hop: Ipv4Addr::new(10, 0, 0, 1),
                 local_pref: None,
+                med: None,
             })
         );
     }
