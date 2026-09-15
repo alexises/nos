@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nos_proto::bgp::{BgpSessionState, PeerSummary};
-use nos_proto::{BgpAoAlgorithm, BgpAuth, NextHopMode};
+use nos_proto::{AddressFamily, BgpAoAlgorithm, BgpAuth, NextHopMode};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -66,6 +66,10 @@ pub struct ResolvedPeer {
     /// The owning peer-group's configured next-hop override, if any —
     /// threaded straight through to `fsm::PeerContext`.
     pub next_hop: Option<NextHopMode>,
+    /// The owning peer-group's configured address families — threaded
+    /// straight through to `fsm::PeerContext`, independent of
+    /// `remote_address`'s own family (RFC 8950).
+    pub address_families: Vec<AddressFamily>,
 }
 
 /// A peer-group's `BgpAuth` translated into `nos-tcp-auth`'s wire-level
@@ -319,6 +323,7 @@ impl SessionManager {
         let local_hold_time = slot.peer.hold_time;
         let keepalive_override = slot.peer.keepalive_interval;
         let next_hop = slot.peer.next_hop;
+        let address_families = slot.peer.address_families.clone();
         let bgp_rib = self.bgp_rib.clone();
         tokio::spawn(async move {
             let outcome = fsm::run(
@@ -331,6 +336,7 @@ impl SessionManager {
                     local_hold_time,
                     keepalive_override,
                     next_hop,
+                    address_families,
                 },
                 slot.clone(),
                 bgp_rib,
@@ -546,6 +552,7 @@ async fn active_connect_loop(
                                 local_hold_time: slot.peer.hold_time,
                                 keepalive_override: slot.peer.keepalive_interval,
                                 next_hop: slot.peer.next_hop,
+                                address_families: slot.peer.address_families.clone(),
                             },
                             slot.clone(),
                             bgp_rib.clone(),
@@ -587,6 +594,7 @@ mod tests {
             connect_retry_time: fsm::CONNECT_RETRY_TIME,
             auth: None,
             next_hop: None,
+            address_families: vec![AddressFamily::Ipv4Unicast],
         }
     }
 

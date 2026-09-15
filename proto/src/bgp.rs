@@ -5,7 +5,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use ipnet::Ipv4Net;
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 /// The FSM state a peer's session is in, as reported by `nos-bgpd`.
@@ -42,11 +42,13 @@ pub struct PeerSummary {
 /// A single already-resolved winning route pushed by `nos-ribd` for
 /// redistribution into BGP — not `PrefixRoutes`/`RouteEntry`'s
 /// multi-candidate shape. `gateway` is carried for completeness only: the
-/// BGP RIB engine always applies next-hop-self and never reads it.
+/// BGP RIB engine always applies next-hop-self and never reads it. `prefix`
+/// and `gateway` are always the same address family (v4/v6 alike, inferred
+/// from `prefix`'s own `IpNet` variant — no separate AFI tag needed).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RedistributedRoute {
-    pub prefix: Ipv4Net,
-    pub gateway: Ipv4Addr,
+    pub prefix: IpNet,
+    pub gateway: IpAddr,
 }
 
 /// Sent by `nos-ribd` to `nos-bgpd` over a persistent, long-lived
@@ -56,7 +58,7 @@ pub struct RedistributedRoute {
 pub enum RedistributeUpdate {
     Full(Vec<RedistributedRoute>),
     Add(RedistributedRoute),
-    Remove(Ipv4Net),
+    Remove(IpNet),
 }
 
 /// Messages sent from a client to one `nos-bgpd` instance's IPC socket.

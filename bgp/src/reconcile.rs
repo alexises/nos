@@ -153,6 +153,7 @@ async fn resync(
                     }),
                 auth: group.auth.as_ref().map(ResolvedAuth::from),
                 next_hop: group.next_hop,
+                address_families: group.address_families.clone(),
             })
         })
         .collect();

@@ -10,7 +10,7 @@ use super::Config;
 /// `remote_address`. RFC 8950's extended next-hop encoding allows an
 /// IPv6-transport session to carry IPv4 unicast NLRI, so this must never be
 /// derived from, or cross-validated against, either address's IP version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AddressFamily {
     Ipv4Unicast,
     Ipv6Unicast,

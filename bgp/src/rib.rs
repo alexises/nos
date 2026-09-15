@@ -1,7 +1,10 @@
 //! The BGP RIB engine: Adj-RIB-In per peer, a locally-redistributed route
 //! set (fed by `nos-ribd` via `nos_proto::RedistributeUpdate`), a cached
 //! Loc-RIB best-path per prefix, and per-peer outbound channels used to push
-//! `OutboundUpdate`s out to each `fsm::run` task.
+//! `OutboundUpdate`s out to each `fsm::run` task. Prefixes/next-hops are
+//! `IpNet`/`IpAddr` throughout — v4 and v6 share the same maps, family
+//! discriminated by the value itself, the same pattern `nos-rib`'s own `Rib`
+//! already uses.
 //!
 //! This deliberately implements the **simplified** decision/propagation
 //! rules documented in the implementation plan, not full RFC 4271 §9.1.2:
@@ -16,12 +19,23 @@
 //!   route's own stored next-hop (the address it was received with, for a
 //!   peer-learned route); a locally-redistributed route has no such stored
 //!   value, so it always gets next-hop-self regardless of mode.
+//!   `SelfAddress` always uses the destination peer's own session-local
+//!   address (`PeerOutbox::local_addr`), regardless of the prefix's own
+//!   family — this is what makes RFC 8950 cross-family next-hop work: no
+//!   special-casing needed here, since `local_addr` is already whatever
+//!   family this session's transport is.
 //! - Standard iBGP split-horizon (no route reflection): a route learned via
 //!   one iBGP peer is never re-advertised to another iBGP peer.
 //! - `AS_PATH` is prepended with our own ASN only toward eBGP peers;
 //!   `LOCAL_PREF` is included only toward iBGP peers.
 //! - A received route whose `AS_PATH` already contains our own ASN is dropped
 //!   (loop prevention), not just deprioritized.
+//! - A peer only ever gets a prefix whose address family is in its own
+//!   `negotiated_afs` (config ∩ what was actually negotiated in OPEN — see
+//!   `fsm::negotiate_address_families`); `mp_bgp_negotiated` then picks
+//!   whether that peer's `OutboundUpdate`s get encoded as legacy plain NLRI
+//!   or `MP_REACH_NLRI`/`MP_UNREACH_NLRI` (`fsm::outbound_update_to_message`
+//!   is the encode side of that decision).
 //!
 //! Locking: one whole-instance `Arc<tokio::sync::Mutex<BgpRib>>`, owned by
 //! `session::SessionManager`. All methods here are synchronous `&mut self`
@@ -35,10 +49,10 @@
 //! 4271 §6.8 arbitration, not routing state.
 
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 
-use ipnet::Ipv4Net;
-use nos_proto::{NextHopMode, RedistributeUpdate};
+use ipnet::IpNet;
+use nos_proto::{AddressFamily, NextHopMode, RedistributeUpdate};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -48,6 +62,13 @@ use crate::message::{self, UpdateMessage};
 /// omits the attribute (or for every locally-redistributed route, which
 /// carries no wire attributes at all).
 const DEFAULT_LOCAL_PREF: u32 = 100;
+
+fn family_of(net: IpNet) -> AddressFamily {
+    match net {
+        IpNet::V4(_) => AddressFamily::Ipv4Unicast,
+        IpNet::V6(_) => AddressFamily::Ipv6Unicast,
+    }
+}
 
 /// Where a `RibRoute` came from — `Local` for a route pushed in by
 /// `nos-ribd`'s redistribution feed, `Peer(addr)` for one learned from a
@@ -75,41 +96,56 @@ pub struct RibRoute {
     /// resolves to `NextHopMode::Unchanged`. Always `None` for `origin ==
     /// Local`: a locally-redistributed route has no "received" next-hop to
     /// preserve, so it always gets next-hop-self regardless of mode.
-    pub next_hop: Option<Ipv4Addr>,
+    pub next_hop: Option<IpAddr>,
 }
 
 /// One update this instance needs to send out over a specific peer's
-/// session.
+/// session. The `bool` picks the destination peer's wire encoding (`true` =
+/// `MP_REACH_NLRI`/`MP_UNREACH_NLRI`, `false` = legacy plain NLRI — see
+/// `fsm::outbound_update_to_message`), mirroring `AdvertisedRoute::use_mp`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutboundUpdate {
     Announce(AdvertisedRoute),
-    Withdraw(Ipv4Net),
+    Withdraw(IpNet, bool),
 }
 
 /// A route rewritten for advertisement toward one specific peer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AdvertisedRoute {
-    pub prefix: Ipv4Net,
+    pub prefix: IpNet,
     /// Already rewritten for the destination peer (our ASN prepended iff
     /// eBGP).
     pub as_path: Vec<u32>,
     /// Rewritten per the destination peer-group's effective `NextHopMode` —
     /// either that peer's own session's local address (`SelfAddress`) or the
     /// route's stored next-hop (`Unchanged`).
-    pub next_hop: Ipv4Addr,
+    pub next_hop: IpAddr,
     /// `Some` only toward iBGP peers.
     pub local_pref: Option<u32>,
     pub origin: message::Origin,
+    /// Whether the destination peer negotiated any Multiprotocol Extensions
+    /// capability at all — `true` means encode via `MP_REACH_NLRI` (even for
+    /// an `Ipv4Unicast` prefix), `false` means the legacy plain-NLRI fields
+    /// (only ever set for an `Ipv4Unicast` prefix/next-hop).
+    pub use_mp: bool,
 }
 
 struct PeerOutbox {
     tx: mpsc::UnboundedSender<OutboundUpdate>,
     is_ibgp: bool,
-    /// `None` if this peer's own TCP transport turned out not to have an
-    /// IPv4 local address (e.g. a v6 transport) — such a peer is never
-    /// eligible for any advertisement, since next-hop-self has nothing to
-    /// offer it.
-    local_addr: Option<Ipv4Addr>,
+    /// This session's own transport-local address, of whatever family —
+    /// used as next-hop-self for every negotiated address family this peer
+    /// carries, cross-family or not (RFC 8950). `None` if it couldn't be
+    /// determined, in which case this peer is never eligible for a
+    /// `SelfAddress` advertisement.
+    local_addr: Option<IpAddr>,
+    /// Address families this peer actually negotiated (config ∩ what was
+    /// negotiated in OPEN — see `fsm::negotiate_address_families`). A prefix
+    /// whose family isn't in this set is never advertised to this peer.
+    negotiated_afs: HashSet<AddressFamily>,
+    /// Whether this peer negotiated any Multiprotocol Extensions capability
+    /// at all — see `AdvertisedRoute::use_mp`.
+    mp_bgp_negotiated: bool,
     /// This peer-group's configured next-hop override, if any — `None`
     /// resolves to `SelfAddress` for an eBGP peer, `Unchanged` for an iBGP
     /// one (see `build_advertisement`).
@@ -120,11 +156,11 @@ struct PeerOutbox {
 /// comment for the locking model.
 pub struct BgpRib {
     local_asn: u32,
-    adj_rib_in: HashMap<IpAddr, HashMap<Ipv4Net, RibRoute>>,
-    redistributed: HashMap<Ipv4Net, RibRoute>,
-    loc_rib: HashMap<Ipv4Net, RibRoute>,
+    adj_rib_in: HashMap<IpAddr, HashMap<IpNet, RibRoute>>,
+    redistributed: HashMap<IpNet, RibRoute>,
+    loc_rib: HashMap<IpNet, RibRoute>,
     /// What we've last told each peer, for correct withdrawals.
-    adj_rib_out: HashMap<IpAddr, HashSet<Ipv4Net>>,
+    adj_rib_out: HashMap<IpAddr, HashSet<IpNet>>,
     peer_outboxes: HashMap<IpAddr, PeerOutbox>,
 }
 
@@ -152,11 +188,14 @@ impl BgpRib {
 
     /// Registers a newly-`Established` peer's outbound channel and does an
     /// initial full advertisement of the current Loc-RIB to it.
+    #[allow(clippy::too_many_arguments)]
     pub fn peer_established(
         &mut self,
         peer: IpAddr,
         is_ibgp: bool,
-        local_addr: Option<Ipv4Addr>,
+        local_addr: Option<IpAddr>,
+        negotiated_afs: HashSet<AddressFamily>,
+        mp_bgp_negotiated: bool,
         next_hop_mode: Option<NextHopMode>,
         tx: mpsc::UnboundedSender<OutboundUpdate>,
     ) {
@@ -166,6 +205,8 @@ impl BgpRib {
                 tx,
                 is_ibgp,
                 local_addr,
+                negotiated_afs,
+                mp_bgp_negotiated,
                 next_hop_mode,
             },
         );
@@ -194,26 +235,44 @@ impl BgpRib {
         }
     }
 
-    /// Handles one inbound UPDATE from `from`. Withdrawals are always
-    /// processed first, unconditionally; the announcement side is dropped
-    /// entirely (with a `warn!`) if the `AS_PATH` already contains our own
-    /// ASN (loop prevention), never partially applied.
-    pub fn handle_update(&mut self, from: IpAddr, remote_is_ibgp: bool, update: UpdateMessage) {
-        let mut touched: HashSet<Ipv4Net> = HashSet::new();
+    /// Handles one inbound UPDATE from `from`. Withdrawals (legacy
+    /// `withdrawn_routes` plus any `mp_unreach` batch) are always processed
+    /// first, unconditionally; announcements (legacy `nlri` plus any
+    /// `mp_reach` batch) are dropped entirely (with a `warn!`) if the
+    /// `AS_PATH` already contains our own ASN (loop prevention), never
+    /// partially applied. `ORIGIN`/`AS_PATH`/`LOCAL_PREF` are shared across
+    /// the legacy `nlri` and every `mp_reach` batch in the same UPDATE (RFC
+    /// 4760: only the next-hop is per-batch); each `mp_reach` batch's own
+    /// `next_hop` is used instead of the legacy attribute's.
+    pub fn handle_update(&mut self, from: IpAddr, remote_is_ibgp: bool, update: &UpdateMessage) {
+        let mut touched: HashSet<IpNet> = HashSet::new();
 
-        if !update.withdrawn_routes.is_empty() {
+        let withdrawn: Vec<IpNet> = update
+            .withdrawn_routes
+            .iter()
+            .copied()
+            .map(IpNet::V4)
+            .chain(
+                update
+                    .mp_unreach
+                    .iter()
+                    .flat_map(|u| u.withdrawn.iter().copied()),
+            )
+            .collect();
+        if !withdrawn.is_empty() {
             let table = self.adj_rib_in.entry(from).or_default();
-            for prefix in &update.withdrawn_routes {
+            for prefix in &withdrawn {
                 if table.remove(prefix).is_some() {
                     touched.insert(*prefix);
                 }
             }
         }
 
-        if !update.nlri.is_empty() {
-            let Some(attrs) = update.attributes else {
+        if !update.nlri.is_empty() || !update.mp_reach.is_empty() {
+            let Some(attrs) = &update.attributes else {
                 // parse_update never actually produces this (attributes is
-                // Some iff nlri is non-empty), but stay defensive.
+                // Some whenever nlri or mp_reach is non-empty), but stay
+                // defensive.
                 for prefix in touched {
                     self.recompute_and_propagate(prefix);
                 }
@@ -226,18 +285,38 @@ impl BgpRib {
                 );
             } else {
                 let table = self.adj_rib_in.entry(from).or_default();
-                let route = RibRoute {
+                let base_route = RibRoute {
                     origin: RouteOrigin::Peer(from),
-                    as_path: attrs.as_path,
+                    as_path: attrs.as_path.clone(),
                     bgp_origin: attrs.origin,
                     local_pref: attrs.local_pref.unwrap_or(DEFAULT_LOCAL_PREF),
                     learned_via_ibgp: remote_is_ibgp,
-                    next_hop: Some(attrs.next_hop),
+                    next_hop: None,
                 };
                 for prefix in &update.nlri {
+                    let prefix = IpNet::V4(*prefix);
                     info!(peer = %from, "bgp: learned route for {prefix} into adj-rib-in");
-                    table.insert(*prefix, route.clone());
-                    touched.insert(*prefix);
+                    table.insert(
+                        prefix,
+                        RibRoute {
+                            next_hop: Some(IpAddr::V4(attrs.next_hop)),
+                            ..base_route.clone()
+                        },
+                    );
+                    touched.insert(prefix);
+                }
+                for mp in &update.mp_reach {
+                    for prefix in &mp.nlri {
+                        info!(peer = %from, "bgp: learned route for {prefix} into adj-rib-in");
+                        table.insert(
+                            *prefix,
+                            RibRoute {
+                                next_hop: Some(mp.next_hop),
+                                ..base_route.clone()
+                            },
+                        );
+                        touched.insert(*prefix);
+                    }
                 }
             }
         }
@@ -258,9 +337,9 @@ impl BgpRib {
                 for route in routes {
                     new_redistributed.insert(route.prefix, redistributed_route());
                 }
-                let old_keys: HashSet<Ipv4Net> = self.redistributed.keys().copied().collect();
-                let new_keys: HashSet<Ipv4Net> = new_redistributed.keys().copied().collect();
-                let touched: Vec<Ipv4Net> =
+                let old_keys: HashSet<IpNet> = self.redistributed.keys().copied().collect();
+                let new_keys: HashSet<IpNet> = new_redistributed.keys().copied().collect();
+                let touched: Vec<IpNet> =
                     old_keys.symmetric_difference(&new_keys).copied().collect();
                 self.redistributed = new_redistributed;
                 for prefix in touched {
@@ -283,7 +362,7 @@ impl BgpRib {
     /// candidate (redistributed + every peer's Adj-RIB-In), and if the
     /// winner actually changed, pushes `Announce`/`Withdraw` to every
     /// registered peer as appropriate.
-    fn recompute_and_propagate(&mut self, prefix: Ipv4Net) {
+    fn recompute_and_propagate(&mut self, prefix: IpNet) {
         let mut candidates: Vec<(RibRoute, Option<IpAddr>)> = Vec::new();
         if let Some(route) = self.redistributed.get(&prefix) {
             candidates.push((route.clone(), None));
@@ -329,7 +408,9 @@ impl BgpRib {
                     if let Some(sent) = self.adj_rib_out.get_mut(&peer) {
                         if sent.remove(&prefix) {
                             let outbox = self.peer_outboxes.get(&peer).expect("just listed");
-                            let _ = outbox.tx.send(OutboundUpdate::Withdraw(prefix));
+                            let _ = outbox
+                                .tx
+                                .send(OutboundUpdate::Withdraw(prefix, outbox.mp_bgp_negotiated));
                         }
                     }
                 }
@@ -381,14 +462,18 @@ fn best_path(candidates: &[(RibRoute, Option<IpAddr>)]) -> Option<RibRoute> {
 
 /// Decides whether `best` should be advertised to `peer` and, if so, rewrites
 /// it for that destination. `None` covers every ineligibility case
-/// (split-horizon, source-peer echo, no IPv4 local address).
+/// (split-horizon, source-peer echo, family not negotiated by this peer, no
+/// local address for next-hop-self).
 fn build_advertisement(
-    prefix: Ipv4Net,
+    prefix: IpNet,
     best: &RibRoute,
     peer: IpAddr,
     outbox: &PeerOutbox,
     local_asn: u32,
 ) -> Option<AdvertisedRoute> {
+    if !outbox.negotiated_afs.contains(&family_of(prefix)) {
+        return None;
+    }
     if best.origin == RouteOrigin::Peer(peer) {
         // Never echo a route back to the peer it came from.
         return None;
@@ -421,18 +506,21 @@ fn build_advertisement(
         next_hop,
         local_pref,
         origin: best.bgp_origin,
+        use_mp: outbox.mp_bgp_negotiated,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use super::*;
 
-    fn prefix(s: &str) -> Ipv4Net {
+    fn prefix(s: &str) -> IpNet {
         s.parse().unwrap()
     }
 
-    fn peer_addr(s: &str) -> IpAddr {
+    fn addr(s: &str) -> IpAddr {
         s.parse().unwrap()
     }
 
@@ -446,11 +534,17 @@ mod tests {
         rib
     }
 
+    fn all_afs() -> HashSet<AddressFamily> {
+        [AddressFamily::Ipv4Unicast, AddressFamily::Ipv6Unicast]
+            .into_iter()
+            .collect()
+    }
+
     fn register_peer(
         rib: &mut BgpRib,
         peer: IpAddr,
         is_ibgp: bool,
-        local_addr: Ipv4Addr,
+        local_addr: IpAddr,
     ) -> mpsc::UnboundedReceiver<OutboundUpdate> {
         register_peer_with_mode(rib, peer, is_ibgp, local_addr, None)
     }
@@ -459,11 +553,42 @@ mod tests {
         rib: &mut BgpRib,
         peer: IpAddr,
         is_ibgp: bool,
-        local_addr: Ipv4Addr,
+        local_addr: IpAddr,
         next_hop_mode: Option<NextHopMode>,
     ) -> mpsc::UnboundedReceiver<OutboundUpdate> {
         let (tx, rx) = mpsc::unbounded_channel();
-        rib.peer_established(peer, is_ibgp, Some(local_addr), next_hop_mode, tx);
+        rib.peer_established(
+            peer,
+            is_ibgp,
+            Some(local_addr),
+            all_afs(),
+            false,
+            next_hop_mode,
+            tx,
+        );
+        rx
+    }
+
+    /// Registers a peer that negotiated MP-BGP (so `Ipv4Unicast` too gets
+    /// encoded via `MP_REACH_NLRI`/`MP_UNREACH_NLRI`, per
+    /// `AdvertisedRoute::use_mp`), with a given negotiated AF set.
+    fn register_mp_peer(
+        rib: &mut BgpRib,
+        peer: IpAddr,
+        is_ibgp: bool,
+        local_addr: IpAddr,
+        negotiated_afs: HashSet<AddressFamily>,
+    ) -> mpsc::UnboundedReceiver<OutboundUpdate> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        rib.peer_established(
+            peer,
+            is_ibgp,
+            Some(local_addr),
+            negotiated_afs,
+            true,
+            None,
+            tx,
+        );
         rx
     }
 
@@ -473,7 +598,7 @@ mod tests {
                 .into_iter()
                 .map(|(p, gw)| nos_proto::RedistributedRoute {
                     prefix: prefix(p),
-                    gateway: v4(gw),
+                    gateway: addr(gw),
                 })
                 .collect(),
         )
@@ -490,21 +615,33 @@ mod tests {
     fn ebgp_update(nlri: Vec<&str>, as_path: Vec<u32>, next_hop: &str) -> UpdateMessage {
         UpdateMessage {
             withdrawn_routes: vec![],
-            nlri: nlri.into_iter().map(prefix).collect(),
+            nlri: nlri.into_iter().map(|s| s.parse().unwrap()).collect(),
             attributes: Some(message::PathAttributes {
                 origin: message::Origin::Igp,
                 as_path,
                 next_hop: v4(next_hop),
                 local_pref: None,
             }),
+            mp_reach: vec![],
+            mp_unreach: vec![],
+        }
+    }
+
+    fn empty_update() -> UpdateMessage {
+        UpdateMessage {
+            withdrawn_routes: vec![],
+            nlri: vec![],
+            attributes: None,
+            mp_reach: vec![],
+            mp_unreach: vec![],
         }
     }
 
     #[test]
     fn redistributed_route_is_announced_to_ebgp_peer_with_prepend_and_no_local_pref() {
         let mut rib = new_rib(65000);
-        let peer = peer_addr("10.0.0.1");
-        let mut rx = register_peer(&mut rib, peer, false, v4("10.0.0.254"));
+        let peer = addr("10.0.0.1");
+        let mut rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
 
         rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
 
@@ -514,9 +651,10 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 prefix: prefix("192.168.1.0/24"),
                 as_path: vec![65000],
-                next_hop: v4("10.0.0.254"),
+                next_hop: addr("10.0.0.254"),
                 local_pref: None,
                 origin: message::Origin::Igp,
+                use_mp: false,
             })]
         );
     }
@@ -524,8 +662,8 @@ mod tests {
     #[test]
     fn redistributed_route_is_announced_to_ibgp_peer_with_local_pref_and_no_prepend() {
         let mut rib = new_rib(65000);
-        let peer = peer_addr("10.0.0.2");
-        let mut rx = register_peer(&mut rib, peer, true, v4("10.0.0.253"));
+        let peer = addr("10.0.0.2");
+        let mut rx = register_peer(&mut rib, peer, true, addr("10.0.0.253"));
 
         rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
 
@@ -535,9 +673,10 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 prefix: prefix("192.168.1.0/24"),
                 as_path: vec![],
-                next_hop: v4("10.0.0.253"),
+                next_hop: addr("10.0.0.253"),
                 local_pref: Some(100),
                 origin: message::Origin::Igp,
+                use_mp: false,
             })]
         );
     }
@@ -545,13 +684,13 @@ mod tests {
     #[test]
     fn peer_learned_route_beats_nothing_and_is_never_echoed_back_to_source() {
         let mut rib = new_rib(65000);
-        let source = peer_addr("10.0.0.1");
-        let mut source_rx = register_peer(&mut rib, source, false, v4("10.0.0.254"));
+        let source = addr("10.0.0.1");
+        let mut source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
 
         rib.handle_update(
             source,
             false,
-            ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
         );
 
         // Never echoed back to the source peer.
@@ -561,15 +700,15 @@ mod tests {
     #[test]
     fn peer_learned_route_is_propagated_to_a_third_peer() {
         let mut rib = new_rib(65000);
-        let source = peer_addr("10.0.0.1");
-        let other = peer_addr("10.0.0.2");
-        let _source_rx = register_peer(&mut rib, source, false, v4("10.0.0.254"));
-        let mut other_rx = register_peer(&mut rib, other, false, v4("10.0.0.253"));
+        let source = addr("10.0.0.1");
+        let other = addr("10.0.0.2");
+        let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
+        let mut other_rx = register_peer(&mut rib, other, false, addr("10.0.0.253"));
 
         rib.handle_update(
             source,
             false,
-            ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
         );
 
         let updates = recv_all(&mut other_rx);
@@ -578,9 +717,10 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 prefix: prefix("1.2.3.0/24"),
                 as_path: vec![65000, 65001],
-                next_hop: v4("10.0.0.253"),
+                next_hop: addr("10.0.0.253"),
                 local_pref: None,
                 origin: message::Origin::Igp,
+                use_mp: false,
             })]
         );
     }
@@ -588,15 +728,15 @@ mod tests {
     #[test]
     fn ibgp_split_horizon_never_reflects_between_two_ibgp_peers() {
         let mut rib = new_rib(65000);
-        let source = peer_addr("10.0.0.1");
-        let other = peer_addr("10.0.0.2");
-        let _source_rx = register_peer(&mut rib, source, true, v4("10.0.0.254"));
-        let mut other_rx = register_peer(&mut rib, other, true, v4("10.0.0.253"));
+        let source = addr("10.0.0.1");
+        let other = addr("10.0.0.2");
+        let _source_rx = register_peer(&mut rib, source, true, addr("10.0.0.254"));
+        let mut other_rx = register_peer(&mut rib, other, true, addr("10.0.0.253"));
 
         rib.handle_update(
             source,
             true,
-            ebgp_update(vec!["1.2.3.0/24"], vec![], "10.0.0.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![], "10.0.0.1"),
         );
 
         assert!(recv_all(&mut other_rx).is_empty());
@@ -605,15 +745,15 @@ mod tests {
     #[test]
     fn ebgp_learned_route_is_still_propagated_to_an_ibgp_peer_with_next_hop_unchanged() {
         let mut rib = new_rib(65000);
-        let source = peer_addr("10.0.0.1"); // eBGP source
-        let ibgp_peer = peer_addr("10.0.0.2");
-        let _source_rx = register_peer(&mut rib, source, false, v4("10.0.0.254"));
-        let mut ibgp_rx = register_peer(&mut rib, ibgp_peer, true, v4("10.0.0.253"));
+        let source = addr("10.0.0.1"); // eBGP source
+        let ibgp_peer = addr("10.0.0.2");
+        let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
+        let mut ibgp_rx = register_peer(&mut rib, ibgp_peer, true, addr("10.0.0.253"));
 
         rib.handle_update(
             source,
             false,
-            ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
         );
 
         let updates = recv_all(&mut ibgp_rx);
@@ -625,9 +765,10 @@ mod tests {
                 // iBGP defaults to Unchanged: the eBGP source's own
                 // next-hop (10.0.0.1) is preserved, not rewritten to the
                 // ibgp_peer's own local address.
-                next_hop: v4("10.0.0.1"),
+                next_hop: addr("10.0.0.1"),
                 local_pref: Some(100),
                 origin: message::Origin::Igp,
+                use_mp: false,
             })]
         );
     }
@@ -635,21 +776,21 @@ mod tests {
     #[test]
     fn ibgp_peer_with_next_hop_self_override_rewrites_to_local_address() {
         let mut rib = new_rib(65000);
-        let source = peer_addr("10.0.0.1"); // eBGP source
-        let ibgp_peer = peer_addr("10.0.0.2");
-        let _source_rx = register_peer(&mut rib, source, false, v4("10.0.0.254"));
+        let source = addr("10.0.0.1"); // eBGP source
+        let ibgp_peer = addr("10.0.0.2");
+        let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
         let mut ibgp_rx = register_peer_with_mode(
             &mut rib,
             ibgp_peer,
             true,
-            v4("10.0.0.253"),
+            addr("10.0.0.253"),
             Some(NextHopMode::SelfAddress),
         );
 
         rib.handle_update(
             source,
             false,
-            ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
         );
 
         let updates = recv_all(&mut ibgp_rx);
@@ -658,9 +799,10 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 prefix: prefix("1.2.3.0/24"),
                 as_path: vec![65001],
-                next_hop: v4("10.0.0.253"),
+                next_hop: addr("10.0.0.253"),
                 local_pref: Some(100),
                 origin: message::Origin::Igp,
+                use_mp: false,
             })]
         );
     }
@@ -668,21 +810,21 @@ mod tests {
     #[test]
     fn ebgp_peer_with_next_hop_unchanged_override_preserves_received_next_hop() {
         let mut rib = new_rib(65000);
-        let source = peer_addr("10.0.0.1");
-        let other = peer_addr("10.0.0.2");
-        let _source_rx = register_peer(&mut rib, source, false, v4("10.0.0.254"));
+        let source = addr("10.0.0.1");
+        let other = addr("10.0.0.2");
+        let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
         let mut other_rx = register_peer_with_mode(
             &mut rib,
             other,
             false,
-            v4("10.0.0.253"),
+            addr("10.0.0.253"),
             Some(NextHopMode::Unchanged),
         );
 
         rib.handle_update(
             source,
             false,
-            ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
         );
 
         let updates = recv_all(&mut other_rx);
@@ -691,9 +833,10 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 prefix: prefix("1.2.3.0/24"),
                 as_path: vec![65000, 65001],
-                next_hop: v4("10.0.0.1"),
+                next_hop: addr("10.0.0.1"),
                 local_pref: None,
                 origin: message::Origin::Igp,
+                use_mp: false,
             })]
         );
     }
@@ -701,12 +844,12 @@ mod tests {
     #[test]
     fn redistributed_route_always_gets_next_hop_self_even_with_unchanged_override() {
         let mut rib = new_rib(65000);
-        let peer = peer_addr("10.0.0.1");
+        let peer = addr("10.0.0.1");
         let mut rx = register_peer_with_mode(
             &mut rib,
             peer,
             true,
-            v4("10.0.0.253"),
+            addr("10.0.0.253"),
             Some(NextHopMode::Unchanged),
         );
 
@@ -720,9 +863,10 @@ mod tests {
                 as_path: vec![],
                 // No stored next-hop on a Local-origin route, so it always
                 // falls back to next-hop-self regardless of mode.
-                next_hop: v4("10.0.0.253"),
+                next_hop: addr("10.0.0.253"),
                 local_pref: Some(100),
                 origin: message::Origin::Igp,
+                use_mp: false,
             })]
         );
     }
@@ -730,15 +874,15 @@ mod tests {
     #[test]
     fn route_with_own_asn_in_as_path_is_dropped_for_loop_prevention() {
         let mut rib = new_rib(65000);
-        let source = peer_addr("10.0.0.1");
-        let other = peer_addr("10.0.0.2");
-        let _source_rx = register_peer(&mut rib, source, false, v4("10.0.0.254"));
-        let mut other_rx = register_peer(&mut rib, other, false, v4("10.0.0.253"));
+        let source = addr("10.0.0.1");
+        let other = addr("10.0.0.2");
+        let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
+        let mut other_rx = register_peer(&mut rib, other, false, addr("10.0.0.253"));
 
         rib.handle_update(
             source,
             false,
-            ebgp_update(vec!["1.2.3.0/24"], vec![65002, 65000, 65001], "10.0.0.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65002, 65000, 65001], "10.0.0.1"),
         );
 
         assert!(recv_all(&mut other_rx).is_empty());
@@ -750,25 +894,25 @@ mod tests {
         // them from consideration for the iBGP observer below) proposing the
         // same prefix with different LOCAL_PREF values.
         let mut rib = new_rib(65000);
-        let peer_a = peer_addr("10.0.0.1");
-        let peer_b = peer_addr("10.0.0.2");
-        let observer = peer_addr("10.0.0.3");
-        let _rx_a = register_peer(&mut rib, peer_a, false, v4("10.0.0.254"));
-        let _rx_b = register_peer(&mut rib, peer_b, false, v4("10.0.0.253"));
-        let mut observer_rx = register_peer(&mut rib, observer, true, v4("10.0.0.252"));
+        let peer_a = addr("10.0.0.1");
+        let peer_b = addr("10.0.0.2");
+        let observer = addr("10.0.0.3");
+        let _rx_a = register_peer(&mut rib, peer_a, false, addr("10.0.0.254"));
+        let _rx_b = register_peer(&mut rib, peer_b, false, addr("10.0.0.253"));
+        let mut observer_rx = register_peer(&mut rib, observer, true, addr("10.0.0.252"));
 
         rib.handle_update(
             peer_a,
             false,
-            UpdateMessage {
-                withdrawn_routes: vec![],
-                nlri: vec![prefix("9.9.9.0/24")],
+            &UpdateMessage {
+                nlri: vec!["9.9.9.0/24".parse().unwrap()],
                 attributes: Some(message::PathAttributes {
                     origin: message::Origin::Igp,
                     as_path: vec![],
                     next_hop: v4("10.0.0.1"),
                     local_pref: Some(50),
                 }),
+                ..empty_update()
             },
         );
         let _ = recv_all(&mut observer_rx);
@@ -776,15 +920,15 @@ mod tests {
         rib.handle_update(
             peer_b,
             false,
-            UpdateMessage {
-                withdrawn_routes: vec![],
-                nlri: vec![prefix("9.9.9.0/24")],
+            &UpdateMessage {
+                nlri: vec!["9.9.9.0/24".parse().unwrap()],
                 attributes: Some(message::PathAttributes {
                     origin: message::Origin::Igp,
                     as_path: vec![],
                     next_hop: v4("10.0.0.2"),
                     local_pref: Some(200),
                 }),
+                ..empty_update()
             },
         );
 
@@ -797,9 +941,10 @@ mod tests {
                 // iBGP defaults to Unchanged: peer_b's own advertised
                 // next-hop (10.0.0.2) is preserved, not rewritten to the
                 // observer's local address.
-                next_hop: v4("10.0.0.2"),
+                next_hop: addr("10.0.0.2"),
                 local_pref: Some(200),
                 origin: message::Origin::Igp,
+                use_mp: false,
             })]
         );
     }
@@ -807,15 +952,15 @@ mod tests {
     #[test]
     fn local_redistributed_route_beats_peer_learned_route_for_same_prefix() {
         let mut rib = new_rib(65000);
-        let peer = peer_addr("10.0.0.1");
-        let observer = peer_addr("10.0.0.2");
-        let _rx = register_peer(&mut rib, peer, false, v4("10.0.0.254"));
-        let mut observer_rx = register_peer(&mut rib, observer, false, v4("10.0.0.253"));
+        let peer = addr("10.0.0.1");
+        let observer = addr("10.0.0.2");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        let mut observer_rx = register_peer(&mut rib, observer, false, addr("10.0.0.253"));
 
         rib.handle_update(
             peer,
             false,
-            ebgp_update(vec!["5.5.5.0/24"], vec![65099], "10.0.0.1"),
+            &ebgp_update(vec!["5.5.5.0/24"], vec![65099], "10.0.0.1"),
         );
         let _ = recv_all(&mut observer_rx);
 
@@ -827,9 +972,10 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 prefix: prefix("5.5.5.0/24"),
                 as_path: vec![65000],
-                next_hop: v4("10.0.0.253"),
+                next_hop: addr("10.0.0.253"),
                 local_pref: None,
                 origin: message::Origin::Igp,
+                use_mp: false,
             })]
         );
     }
@@ -837,47 +983,46 @@ mod tests {
     #[test]
     fn withdrawal_removes_route_and_notifies_downstream_peers() {
         let mut rib = new_rib(65000);
-        let peer = peer_addr("10.0.0.1");
-        let observer = peer_addr("10.0.0.2");
-        let _rx = register_peer(&mut rib, peer, false, v4("10.0.0.254"));
-        let mut observer_rx = register_peer(&mut rib, observer, false, v4("10.0.0.253"));
+        let peer = addr("10.0.0.1");
+        let observer = addr("10.0.0.2");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        let mut observer_rx = register_peer(&mut rib, observer, false, addr("10.0.0.253"));
 
         rib.handle_update(
             peer,
             false,
-            ebgp_update(vec!["5.5.5.0/24"], vec![65099], "10.0.0.1"),
+            &ebgp_update(vec!["5.5.5.0/24"], vec![65099], "10.0.0.1"),
         );
         let _ = recv_all(&mut observer_rx);
 
         rib.handle_update(
             peer,
             false,
-            UpdateMessage {
-                withdrawn_routes: vec![prefix("5.5.5.0/24")],
-                nlri: vec![],
-                attributes: None,
+            &UpdateMessage {
+                withdrawn_routes: vec!["5.5.5.0/24".parse().unwrap()],
+                ..empty_update()
             },
         );
 
         let updates = recv_all(&mut observer_rx);
         assert_eq!(
             updates,
-            vec![OutboundUpdate::Withdraw(prefix("5.5.5.0/24"))]
+            vec![OutboundUpdate::Withdraw(prefix("5.5.5.0/24"), false)]
         );
     }
 
     #[test]
     fn peer_disconnected_withdraws_every_route_it_contributed() {
         let mut rib = new_rib(65000);
-        let peer = peer_addr("10.0.0.1");
-        let observer = peer_addr("10.0.0.2");
-        let _rx = register_peer(&mut rib, peer, false, v4("10.0.0.254"));
-        let mut observer_rx = register_peer(&mut rib, observer, false, v4("10.0.0.253"));
+        let peer = addr("10.0.0.1");
+        let observer = addr("10.0.0.2");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        let mut observer_rx = register_peer(&mut rib, observer, false, addr("10.0.0.253"));
 
         rib.handle_update(
             peer,
             false,
-            ebgp_update(vec!["5.5.5.0/24", "6.6.6.0/24"], vec![65099], "10.0.0.1"),
+            &ebgp_update(vec!["5.5.5.0/24", "6.6.6.0/24"], vec![65099], "10.0.0.1"),
         );
         let _ = recv_all(&mut observer_rx);
 
@@ -885,24 +1030,24 @@ mod tests {
 
         let mut updates = recv_all(&mut observer_rx);
         updates.sort_by_key(|u| match u {
-            OutboundUpdate::Withdraw(p) => p.to_string(),
+            OutboundUpdate::Withdraw(p, _) => p.to_string(),
             OutboundUpdate::Announce(a) => a.prefix.to_string(),
         });
         assert_eq!(
             updates,
             vec![
-                OutboundUpdate::Withdraw(prefix("5.5.5.0/24")),
-                OutboundUpdate::Withdraw(prefix("6.6.6.0/24")),
+                OutboundUpdate::Withdraw(prefix("5.5.5.0/24"), false),
+                OutboundUpdate::Withdraw(prefix("6.6.6.0/24"), false),
             ]
         );
     }
 
     #[test]
-    fn peer_with_no_ipv4_local_address_is_never_eligible() {
+    fn peer_with_no_local_address_is_never_eligible_for_self_address() {
         let mut rib = new_rib(65000);
-        let peer = peer_addr("10.0.0.1");
+        let peer = addr("10.0.0.1");
         let (tx, mut rx) = mpsc::unbounded_channel();
-        rib.peer_established(peer, false, None, None, tx);
+        rib.peer_established(peer, false, None, all_afs(), false, None, tx);
 
         rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
 
@@ -912,8 +1057,8 @@ mod tests {
     #[test]
     fn redistribute_full_matching_current_state_is_a_no_op() {
         let mut rib = new_rib(65000);
-        let peer = peer_addr("10.0.0.1");
-        let mut rx = register_peer(&mut rib, peer, false, v4("10.0.0.254"));
+        let peer = addr("10.0.0.1");
+        let mut rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
 
         rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
         let _ = recv_all(&mut rx);
@@ -927,8 +1072,8 @@ mod tests {
     #[test]
     fn redistribute_remove_of_absent_prefix_is_a_no_op() {
         let mut rib = new_rib(65000);
-        let peer = peer_addr("10.0.0.1");
-        let mut rx = register_peer(&mut rib, peer, false, v4("10.0.0.254"));
+        let peer = addr("10.0.0.1");
+        let mut rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
 
         rib.apply_redistribute_update(RedistributeUpdate::Remove(prefix("10.10.10.0/24")));
         assert!(recv_all(&mut rx).is_empty());
@@ -937,15 +1082,15 @@ mod tests {
     #[test]
     fn newly_established_peer_gets_full_initial_advertisement_of_loc_rib() {
         let mut rib = new_rib(65000);
-        let first = peer_addr("10.0.0.1");
-        let _rx_first = register_peer(&mut rib, first, false, v4("10.0.0.254"));
+        let first = addr("10.0.0.1");
+        let _rx_first = register_peer(&mut rib, first, false, addr("10.0.0.254"));
 
         rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
 
         // A second peer joining afterward should get the existing route
         // immediately, without needing a fresh redistribute push.
-        let second = peer_addr("10.0.0.2");
-        let mut rx_second = register_peer(&mut rib, second, false, v4("10.0.0.253"));
+        let second = addr("10.0.0.2");
+        let mut rx_second = register_peer(&mut rib, second, false, addr("10.0.0.253"));
 
         let updates = recv_all(&mut rx_second);
         assert_eq!(
@@ -953,10 +1098,97 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 prefix: prefix("192.168.1.0/24"),
                 as_path: vec![65000],
-                next_hop: v4("10.0.0.253"),
+                next_hop: addr("10.0.0.253"),
                 local_pref: None,
                 origin: message::Origin::Igp,
+                use_mp: false,
             })]
+        );
+    }
+
+    #[test]
+    fn ipv6_redistributed_route_is_announced_to_a_dual_stack_peer() {
+        let mut rib = new_rib(65000);
+        let peer = addr("2001:db8::1");
+        let mut rx = register_mp_peer(&mut rib, peer, false, addr("2001:db8::254"), all_afs());
+
+        rib.apply_redistribute_update(full_update(vec![("2001:db8:1::/48", "2001:db8::9")]));
+
+        let updates = recv_all(&mut rx);
+        assert_eq!(
+            updates,
+            vec![OutboundUpdate::Announce(AdvertisedRoute {
+                prefix: prefix("2001:db8:1::/48"),
+                as_path: vec![65000],
+                next_hop: addr("2001:db8::254"),
+                local_pref: None,
+                origin: message::Origin::Igp,
+                use_mp: true,
+            })]
+        );
+    }
+
+    #[test]
+    fn peer_only_negotiated_ipv4_never_gets_an_ipv6_prefix() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let mut rx = register_mp_peer(
+            &mut rib,
+            peer,
+            false,
+            addr("10.0.0.254"),
+            [AddressFamily::Ipv4Unicast].into_iter().collect(),
+        );
+
+        rib.apply_redistribute_update(full_update(vec![("2001:db8:1::/48", "2001:db8::9")]));
+
+        assert!(recv_all(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn cross_family_next_hop_self_uses_transport_local_address() {
+        // RFC 8950: an IPv6-transport peer carrying IPv4 unicast still gets
+        // next-hop-self rewritten to its own (IPv6) session-local address.
+        let mut rib = new_rib(65000);
+        let peer = addr("2001:db8::1");
+        let mut rx = register_mp_peer(
+            &mut rib,
+            peer,
+            false,
+            addr("2001:db8::254"),
+            [AddressFamily::Ipv4Unicast].into_iter().collect(),
+        );
+
+        rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
+
+        let updates = recv_all(&mut rx);
+        assert_eq!(
+            updates,
+            vec![OutboundUpdate::Announce(AdvertisedRoute {
+                prefix: prefix("192.168.1.0/24"),
+                as_path: vec![65000],
+                next_hop: addr("2001:db8::254"),
+                local_pref: None,
+                origin: message::Origin::Igp,
+                use_mp: true,
+            })]
+        );
+    }
+
+    #[test]
+    fn mp_peer_ipv4_withdrawal_is_marked_use_mp() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let mut rx = register_mp_peer(&mut rib, peer, false, addr("10.0.0.254"), all_afs());
+
+        rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
+        let _ = recv_all(&mut rx);
+        rib.apply_redistribute_update(RedistributeUpdate::Remove(prefix("192.168.1.0/24")));
+
+        let updates = recv_all(&mut rx);
+        assert_eq!(
+            updates,
+            vec![OutboundUpdate::Withdraw(prefix("192.168.1.0/24"), true)]
         );
     }
 }

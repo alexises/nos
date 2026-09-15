@@ -302,6 +302,7 @@ mod tests {
             connect_retry_time: std::time::Duration::from_secs(120),
             auth: None,
             next_hop: None,
+            address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
         })
     }
 

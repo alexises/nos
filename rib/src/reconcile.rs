@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -160,9 +159,9 @@ async fn resync(
 /// given the just-fetched `cfg` and this resync's freshly recomputed best
 /// routes (`new_rib.best_routes()`). Pure and unit-tested directly.
 ///
-/// Redistribution only ever forwards `RouteSource::Static` entries with an
-/// IPv4 prefix — IPv6 needs MP-BGP (RFC 4760), out of scope here — and only
-/// when `table.redistribute` is exactly `Some(Redistribute{from: Static, to:
+/// Redistribution forwards every `RouteSource::Static` entry, v4 and v6
+/// alike (nos-bgp negotiates MP-BGP per peer independently), only when
+/// `table.redistribute` is exactly `Some(Redistribute{from: Static, to:
 /// Bgp})`, the one rule this config schema supports today.
 fn compute_redistribute_target(
     cfg: &Config,
@@ -183,26 +182,9 @@ fn compute_redistribute_target(
         routes
             .values()
             .filter(|entry| entry.source == RouteSource::Static)
-            .filter_map(|entry| match entry.prefix {
-                IpNet::V4(prefix) => match entry.gateway {
-                    IpAddr::V4(gateway) => Some(RedistributedRoute { prefix, gateway }),
-                    IpAddr::V6(_) => {
-                        warn!(
-                            table = %table_name,
-                            prefix = %entry.prefix,
-                            "static route has an IPv4 prefix but an IPv6 gateway; skipping redistribution"
-                        );
-                        None
-                    }
-                },
-                IpNet::V6(_) => {
-                    debug!(
-                        table = %table_name,
-                        prefix = %entry.prefix,
-                        "IPv6 redistribution unsupported, requires MP-BGP"
-                    );
-                    None
-                }
+            .map(|entry| RedistributedRoute {
+                prefix: entry.prefix,
+                gateway: entry.gateway,
             })
             .collect()
     } else {
@@ -323,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn active_rule_skips_ipv6_prefixes() {
+    fn active_rule_redistributes_static_ipv6_routes_too() {
         let table = RoutingTable {
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
@@ -343,6 +325,12 @@ mod tests {
         routes.insert(entry.prefix, entry);
 
         let target = compute_redistribute_target(&cfg, "rt1", &routes);
-        assert!(target.routes.is_empty());
+        assert_eq!(
+            target.routes,
+            vec![nos_proto::RedistributedRoute {
+                prefix: "2001:db8::/32".parse().unwrap(),
+                gateway: "2001:db8::1".parse().unwrap(),
+            }]
+        );
     }
 }

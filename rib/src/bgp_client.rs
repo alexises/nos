@@ -15,12 +15,12 @@
 //! sent.
 
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use futures::SinkExt;
-use ipnet::Ipv4Net;
+use ipnet::IpNet;
 use nos_proto::{BgpRequest, IpcCodec, RedistributeUpdate, RedistributedRoute, ServiceRef};
 use tokio::net::UnixStream;
 use tokio::sync::watch;
@@ -45,8 +45,8 @@ pub struct RedistributeTarget {
     /// `BgpInstance`, or doesn't exist in the running config at all.
     pub bgp_instance: Option<String>,
     /// The routes to redistribute — already filtered to whatever rule is
-    /// active (e.g. `redistribute from static to bgp`) and to IPv4-only
-    /// prefixes. Empty when no rule is active.
+    /// active (e.g. `redistribute from static to bgp`), v4 and v6 alike.
+    /// Empty when no rule is active.
     pub routes: Vec<RedistributedRoute>,
 }
 
@@ -209,7 +209,7 @@ async fn wait_retry(
 
 /// Builds the `prefix -> gateway` map a set of routes reduces to, for
 /// diffing purposes.
-fn build_last_sent(routes: &[RedistributedRoute]) -> HashMap<Ipv4Net, Ipv4Addr> {
+fn build_last_sent(routes: &[RedistributedRoute]) -> HashMap<IpNet, IpAddr> {
     routes.iter().map(|r| (r.prefix, r.gateway)).collect()
 }
 
@@ -220,7 +220,7 @@ fn build_last_sent(routes: &[RedistributedRoute]) -> HashMap<Ipv4Net, Ipv4Addr> 
 /// unit-tested directly — the surrounding connection/reconnect machinery
 /// isn't.
 fn diff_routes(
-    last_sent: &HashMap<Ipv4Net, Ipv4Addr>,
+    last_sent: &HashMap<IpNet, IpAddr>,
     new_routes: &[RedistributedRoute],
 ) -> Vec<RedistributeUpdate> {
     let mut updates = Vec::new();

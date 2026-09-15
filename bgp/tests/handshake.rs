@@ -83,6 +83,7 @@ async fn two_real_instances_establish_a_session() {
         connect_retry_time: Duration::from_secs(120),
         auth: None,
         next_hop: None,
+        address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
     });
     let slot_b = PeerSlot::new(ResolvedPeer {
         remote_address: "10.0.0.1".parse().unwrap(),
@@ -94,6 +95,7 @@ async fn two_real_instances_establish_a_session() {
         connect_retry_time: Duration::from_secs(120),
         auth: None,
         next_hop: None,
+        address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
     });
 
     let a_fut = fsm::run(
@@ -109,6 +111,7 @@ async fn two_real_instances_establish_a_session() {
             local_hold_time: 90,
             keepalive_override: None,
             next_hop: None,
+            address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
         },
         slot_a,
         new_bgp_rib(),
@@ -126,6 +129,7 @@ async fn two_real_instances_establish_a_session() {
             local_hold_time: 90,
             keepalive_override: None,
             next_hop: None,
+            address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
         },
         slot_b,
         new_bgp_rib(),
@@ -170,6 +174,7 @@ async fn established_session_honors_configured_non_default_hold_time() {
         connect_retry_time: Duration::from_secs(120),
         auth: None,
         next_hop: None,
+        address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
     });
 
     let a_fut = fsm::run(
@@ -185,6 +190,7 @@ async fn established_session_honors_configured_non_default_hold_time() {
             local_hold_time: 30,
             keepalive_override: None,
             next_hop: None,
+            address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
         },
         slot_a,
         new_bgp_rib(),
@@ -227,6 +233,7 @@ async fn established_session_reports_status_via_peer_slot() {
         connect_retry_time: Duration::from_secs(120),
         auth: None,
         next_hop: None,
+        address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
     });
     let mut status = slot_a.status_receiver();
 
@@ -243,6 +250,7 @@ async fn established_session_reports_status_via_peer_slot() {
             local_hold_time: 90,
             keepalive_override: None,
             next_hop: None,
+            address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
         },
         slot_a,
         new_bgp_rib(),
@@ -307,6 +315,7 @@ async fn collision_leaves_exactly_one_side_running() {
         connect_retry_time: Duration::from_secs(120),
         auth: None,
         next_hop: None,
+        address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
     });
 
     let peer_ctx = || PeerContext {
@@ -315,6 +324,7 @@ async fn collision_leaves_exactly_one_side_running() {
         local_hold_time: 90,
         keepalive_override: None,
         next_hop: None,
+        address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
     };
 
     // Both sides share one `PeerSlot` (they're racing for the same peer), so

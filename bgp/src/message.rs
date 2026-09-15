@@ -1,24 +1,33 @@
 //! RFC 4271 BGP-4 wire message format: header, OPEN, KEEPALIVE, NOTIFICATION,
-//! UPDATE, plus the RFC 6793 four-octet AS number capability. This is BGP's
+//! UPDATE, plus the RFC 6793 four-octet AS number capability, RFC 4760
+//! Multiprotocol Extensions (`MP_REACH_NLRI`/`MP_UNREACH_NLRI`, IPv6 unicast),
+//! and RFC 8950 Extended Next Hop Encoding (a session's transport family is
+//! independent of which address family/families it carries). This is BGP's
 //! own wire contract with external routers, not an inter-NOS-daemon IPC
 //! contract, so it lives here rather than in `nos-proto` (whose `IpcCodec` is
 //! postcard-based and structurally incompatible with BGP's raw big-endian
 //! format anyway).
 //!
-//! UPDATE support is IPv4-unicast-only (RFC 4271's base NLRI; MP-BGP/RFC 4760
-//! for IPv6 is out of scope), decodes `ORIGIN`/`AS_PATH`/`NEXT_HOP`/`LOCAL_PREF`
-//! path attributes and skips any other attribute type by its declared length
-//! (never an error — the same philosophy `parse_optional_parameters` already
-//! applies to unknown OPEN capabilities), and never emits RFC 6793's `AS4_PATH`
-//! transition attribute (`AS_PATH` is always encoded with 4-byte ASNs, since
-//! this NOS always advertises the four-octet AS number capability itself).
-//! Any other/unknown message type still decodes as `BgpMessage::Unhandled` so
-//! the codec never chokes on one arriving.
+//! IPv4 unicast keeps its legacy plain-NLRI wire encoding
+//! (`UpdateMessage::{withdrawn_routes,nlri}` + `PathAttributes::next_hop`) as
+//! a fallback for peers that never negotiate any Multiprotocol Extensions
+//! capability at all; any other family (and, once a peer does negotiate
+//! MP-BGP, IPv4 unicast too — see `crate::rib::build_advertisement`) goes
+//! through `UpdateMessage::{mp_reach,mp_unreach}` instead. Decodes
+//! `ORIGIN`/`AS_PATH`/`NEXT_HOP`/`LOCAL_PREF`/`MP_REACH_NLRI`/
+//! `MP_UNREACH_NLRI` path attributes and skips any other attribute type by
+//! its declared length (never an error — the same philosophy
+//! `parse_optional_parameters` already applies to unknown OPEN capabilities),
+//! and never emits RFC 6793's `AS4_PATH` transition attribute (`AS_PATH` is
+//! always encoded with 4-byte ASNs, since this NOS always advertises the
+//! four-octet AS number capability itself). Any other/unknown message type
+//! still decodes as `BgpMessage::Unhandled` so the codec never chokes on one
+//! arriving.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use ipnet::Ipv4Net;
+use ipnet::{IpNet, Ipv4Net};
 use tokio_util::codec::{Decoder, Encoder};
 
 pub const BGP_VERSION: u8 = 4;
@@ -38,17 +47,34 @@ const TYPE_KEEPALIVE: u8 = 4;
 
 const OPT_PARAM_CAPABILITIES: u8 = 2;
 const CAP_FOUR_OCTET_ASN: u8 = 65;
+/// RFC 4760 §8 Multiprotocol Extensions capability: `AFI(2) reserved(1)
+/// SAFI(1)`.
+const CAP_MULTIPROTOCOL: u8 = 1;
+/// RFC 8950 §3 Extended Next Hop Encoding capability: one or more `NLRI-AFI(2)
+/// NLRI-SAFI(2) NextHop-AFI(2)` tuples — note the NLRI-SAFI field is 2 bytes
+/// here, unlike `CAP_MULTIPROTOCOL`'s 1-byte SAFI.
+const CAP_EXTENDED_NEXT_HOP: u8 = 5;
+
+/// AFI values this crate understands (RFC 4760's registry has many more).
+const AFI_IPV4: u16 = 1;
+const AFI_IPV6: u16 = 2;
 
 const ATTR_ORIGIN: u8 = 1;
 const ATTR_AS_PATH: u8 = 2;
 const ATTR_NEXT_HOP: u8 = 3;
 const ATTR_LOCAL_PREF: u8 = 5;
+const ATTR_MP_REACH_NLRI: u8 = 14;
+const ATTR_MP_UNREACH_NLRI: u8 = 15;
 /// RFC 4271 §4.3 attribute flag bit indicating a 2-byte (rather than 1-byte)
 /// attribute length field follows the type byte.
 const ATTR_FLAG_EXTENDED_LENGTH: u8 = 0x10;
 /// Well-known transitive, per RFC 4271 §5 — the flag value this
 /// implementation always encodes for `ORIGIN`/`AS_PATH`/`NEXT_HOP`/`LOCAL_PREF`.
 const ATTR_FLAG_WELL_KNOWN_TRANSITIVE: u8 = 0x40;
+/// Optional non-transitive, per RFC 4760 §3 — `MP_REACH_NLRI`/
+/// `MP_UNREACH_NLRI`'s own flag value (unlike the four well-known attributes
+/// above).
+const ATTR_FLAG_OPTIONAL_NON_TRANSITIVE: u8 = 0x80;
 const AS_PATH_SEGMENT_SEQUENCE: u8 = 2;
 /// `AS_PATH` segments are encoded as `count: u8`, so a single segment can carry
 /// at most this many ASNs before it must be split into another segment.
@@ -126,17 +152,36 @@ pub enum CeaseSubcode {
     ConnectionCollisionResolution = 7,
 }
 
-/// An OPEN message. `four_octet_asn` is `Some` iff the peer's Capabilities
-/// optional parameter carried capability 65 (RFC 6793) — see
-/// `effective_remote_asn` for how to read the real ASN regardless of which
-/// form it arrived in.
+/// One OPEN capability this crate understands. An unrecognized capability
+/// code (or one with an unexpected length) is silently dropped on decode,
+/// same skip-by-length philosophy as an unknown path attribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capability {
+    /// RFC 6793 code 65.
+    FourOctetAsn(u32),
+    /// RFC 4760 code 1: this session can carry `afi`/`safi` NLRI.
+    MultiProtocol { afi: u16, safi: u8 },
+    /// RFC 8950 code 5: `nlri_afi`/`nlri_safi` NLRI may be advertised with a
+    /// `nh_afi`-family next-hop (the cross-family case — same-family next-hop
+    /// never needs this capability at all).
+    ExtendedNextHop {
+        nlri_afi: u16,
+        nlri_safi: u16,
+        nh_afi: u16,
+    },
+}
+
+/// An OPEN message. See [`Capability`] for the capabilities this crate
+/// builds/understands; `four_octet_asn`/`effective_remote_asn` read the
+/// four-octet-ASN one back out regardless of which form the plain `my_as`
+/// field arrived in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenMessage {
     pub version: u8,
     pub my_as: u16,
     pub hold_time: u16,
     pub bgp_identifier: Ipv4Addr,
-    pub four_octet_asn: Option<u32>,
+    pub capabilities: Vec<Capability>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,10 +199,14 @@ pub enum Origin {
     Incomplete = 2,
 }
 
-/// The four path attributes this implementation understands. `local_pref` is
-/// `Some` iff the wire message actually carried a `LOCAL_PREF` attribute — this
-/// crate never invents one on decode (`rib.rs` applies the RFC 4271 §5.1.5
-/// default only when propagating, not here).
+/// The legacy IPv4-unicast path attributes. `local_pref` is `Some` iff the
+/// wire message actually carried a `LOCAL_PREF` attribute — this crate never
+/// invents one on decode (`rib.rs` applies the RFC 4271 §5.1.5 default only
+/// when propagating, not here). `next_hop` is only meaningful (and only ever
+/// encoded) when the legacy `UpdateMessage::nlri` field is non-empty —
+/// `ORIGIN`/`AS_PATH`/`LOCAL_PREF` are shared with any `mp_reach`/`mp_unreach`
+/// batches in the same UPDATE (RFC 4760: only the next-hop moves into
+/// `MP_REACH_NLRI` itself, everything else stays a regular path attribute).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathAttributes {
     pub origin: Origin,
@@ -168,13 +217,39 @@ pub struct PathAttributes {
     pub local_pref: Option<u32>,
 }
 
-/// An RFC 4271 UPDATE message, IPv4-unicast-only. `attributes` is `Some` iff
-/// `nlri` is non-empty — a pure withdrawal carries no path attributes.
+/// RFC 4760 `MP_REACH_NLRI`: one AFI/SAFI batch of announced routes sharing
+/// one next-hop. `next_hop`'s family need not match `nlri`'s own family (RFC
+/// 8950 cross-family next-hop) — that's purely a wire-level fact here; which
+/// combinations are actually negotiated/allowed is `fsm.rs`'s job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MpReachNlri {
+    pub afi: u16,
+    pub safi: u8,
+    pub next_hop: IpAddr,
+    pub nlri: Vec<IpNet>,
+}
+
+/// RFC 4760 `MP_UNREACH_NLRI`: one AFI/SAFI batch of withdrawn routes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MpUnreachNlri {
+    pub afi: u16,
+    pub safi: u8,
+    pub withdrawn: Vec<IpNet>,
+}
+
+/// An RFC 4271 UPDATE message. `withdrawn_routes`/`nlri`/`attributes.next_hop`
+/// are the legacy IPv4-unicast-only fields (RFC 4271's base NLRI);
+/// `mp_reach`/`mp_unreach` carry everything else, and — once a peer
+/// negotiates MP-BGP at all — IPv4 unicast too (see
+/// `crate::rib::build_advertisement`). `attributes` is `Some` iff `nlri` or
+/// `mp_reach` is non-empty — a pure withdrawal carries no path attributes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateMessage {
     pub withdrawn_routes: Vec<Ipv4Net>,
     pub nlri: Vec<Ipv4Net>,
     pub attributes: Option<PathAttributes>,
+    pub mp_reach: Vec<MpReachNlri>,
+    pub mp_unreach: Vec<MpUnreachNlri>,
 }
 
 /// A decoded BGP message.
@@ -192,9 +267,13 @@ pub enum BgpMessage {
     },
 }
 
-/// Builds this instance's own OPEN. `four_octet_asn` is always populated
-/// once 4-octet-capable, regardless of whether `my_as` needed `AS_TRANS` —
-/// RFC 6793 §4.1 recommends always advertising the capability, since it also
+/// Builds this instance's own OPEN, carrying only the four-octet AS number
+/// capability — callers (`fsm.rs`) push any `MultiProtocol`/
+/// `ExtendedNextHop` capabilities this peer's session needs onto
+/// `capabilities` afterward, since that depends on peer-group config this
+/// module has no business knowing about. Always populated once
+/// 4-octet-capable, regardless of whether `my_as` needed `AS_TRANS` — RFC
+/// 6793 §4.1 recommends always advertising the capability, since it also
 /// governs how the peer's OPEN is interpreted, not just how this one is
 /// represented.
 pub fn build_open(local_asn: u32, router_id: Ipv4Addr, hold_time: u16) -> OpenMessage {
@@ -204,15 +283,23 @@ pub fn build_open(local_asn: u32, router_id: Ipv4Addr, hold_time: u16) -> OpenMe
         my_as,
         hold_time,
         bgp_identifier: router_id,
-        four_octet_asn: Some(local_asn),
+        capabilities: vec![Capability::FourOctetAsn(local_asn)],
     }
+}
+
+/// The four-octet ASN carried in `open`'s capabilities, if any.
+pub fn four_octet_asn(open: &OpenMessage) -> Option<u32> {
+    open.capabilities.iter().find_map(|c| match c {
+        Capability::FourOctetAsn(asn) => Some(*asn),
+        _ => None,
+    })
 }
 
 /// The peer's real ASN, whether carried in the plain 2-byte field or (when
 /// present) the four-octet AS number capability — falling back to the plain
 /// field is what gives interop with peers that never send capability 65.
 pub fn effective_remote_asn(open: &OpenMessage) -> u32 {
-    open.four_octet_asn.unwrap_or(u32::from(open.my_as))
+    four_octet_asn(open).unwrap_or(u32::from(open.my_as))
 }
 
 /// Rejects the well-known non-unicast special cases; anything else is
@@ -304,22 +391,24 @@ fn parse_open(body: &[u8]) -> Result<OpenMessage, WireError> {
     if opt_params.len() < opt_param_len {
         return Err(WireError::Truncated);
     }
-    let four_octet_asn = parse_optional_parameters(&opt_params[..opt_param_len])?;
+    let capabilities = parse_optional_parameters(&opt_params[..opt_param_len])?;
 
     Ok(OpenMessage {
         version,
         my_as,
         hold_time,
         bgp_identifier,
-        four_octet_asn,
+        capabilities,
     })
 }
 
 /// Walks every optional parameter, skipping each by its own declared length
-/// (so a capability after an unrecognized parameter is still found), looking
-/// only for the four-octet AS number capability.
-fn parse_optional_parameters(mut params: &[u8]) -> Result<Option<u32>, WireError> {
-    let mut four_octet_asn = None;
+/// (so a capability after an unrecognized parameter is still found),
+/// collecting every capability from every Capabilities optional parameter
+/// encountered (RFC 5492 allows more than one, though this crate always
+/// encodes just one).
+fn parse_optional_parameters(mut params: &[u8]) -> Result<Vec<Capability>, WireError> {
+    let mut capabilities = Vec::new();
     while !params.is_empty() {
         if params.len() < 2 {
             return Err(WireError::Truncated);
@@ -331,17 +420,15 @@ fn parse_optional_parameters(mut params: &[u8]) -> Result<Option<u32>, WireError
         }
         let param_value = &params[2..2 + param_len];
         if param_type == OPT_PARAM_CAPABILITIES {
-            if let Some(asn) = parse_capabilities(param_value)? {
-                four_octet_asn = Some(asn);
-            }
+            capabilities.extend(parse_capabilities(param_value)?);
         }
         params = &params[2 + param_len..];
     }
-    Ok(four_octet_asn)
+    Ok(capabilities)
 }
 
-fn parse_capabilities(mut data: &[u8]) -> Result<Option<u32>, WireError> {
-    let mut four_octet_asn = None;
+fn parse_capabilities(mut data: &[u8]) -> Result<Vec<Capability>, WireError> {
+    let mut capabilities = Vec::new();
     while !data.is_empty() {
         if data.len() < 2 {
             return Err(WireError::Truncated);
@@ -352,12 +439,33 @@ fn parse_capabilities(mut data: &[u8]) -> Result<Option<u32>, WireError> {
             return Err(WireError::Truncated);
         }
         let cap_value = &data[2..2 + cap_len];
-        if cap_code == CAP_FOUR_OCTET_ASN && cap_len == 4 {
-            four_octet_asn = Some(u32::from_be_bytes(cap_value.try_into().unwrap()));
+        match cap_code {
+            CAP_FOUR_OCTET_ASN if cap_len == 4 => {
+                capabilities.push(Capability::FourOctetAsn(u32::from_be_bytes(
+                    cap_value.try_into().unwrap(),
+                )));
+            }
+            CAP_MULTIPROTOCOL if cap_len == 4 => {
+                let afi = u16::from_be_bytes([cap_value[0], cap_value[1]]);
+                let safi = cap_value[3];
+                capabilities.push(Capability::MultiProtocol { afi, safi });
+            }
+            CAP_EXTENDED_NEXT_HOP if cap_len.is_multiple_of(6) => {
+                for tuple in cap_value.as_chunks::<6>().0 {
+                    capabilities.push(Capability::ExtendedNextHop {
+                        nlri_afi: u16::from_be_bytes([tuple[0], tuple[1]]),
+                        nlri_safi: u16::from_be_bytes([tuple[2], tuple[3]]),
+                        nh_afi: u16::from_be_bytes([tuple[4], tuple[5]]),
+                    });
+                }
+            }
+            // Unknown capability code, or a known one with an unexpected
+            // length: skip by declared length, never an error.
+            _ => {}
         }
         data = &data[2 + cap_len..];
     }
-    Ok(four_octet_asn)
+    Ok(capabilities)
 }
 
 fn parse_notification(body: &[u8]) -> Result<NotificationMessage, WireError> {
@@ -372,13 +480,43 @@ fn parse_notification(body: &[u8]) -> Result<NotificationMessage, WireError> {
 }
 
 fn encode_open(open: &OpenMessage) -> Vec<u8> {
+    let mut cap_bytes = Vec::new();
+    for cap in &open.capabilities {
+        match cap {
+            Capability::FourOctetAsn(asn) => {
+                cap_bytes.push(CAP_FOUR_OCTET_ASN);
+                cap_bytes.push(4);
+                cap_bytes.extend_from_slice(&asn.to_be_bytes());
+            }
+            Capability::MultiProtocol { afi, safi } => {
+                cap_bytes.push(CAP_MULTIPROTOCOL);
+                cap_bytes.push(4);
+                cap_bytes.extend_from_slice(&afi.to_be_bytes());
+                cap_bytes.push(0); // reserved
+                cap_bytes.push(*safi);
+            }
+            Capability::ExtendedNextHop {
+                nlri_afi,
+                nlri_safi,
+                nh_afi,
+            } => {
+                cap_bytes.push(CAP_EXTENDED_NEXT_HOP);
+                cap_bytes.push(6);
+                cap_bytes.extend_from_slice(&nlri_afi.to_be_bytes());
+                cap_bytes.extend_from_slice(&nlri_safi.to_be_bytes());
+                cap_bytes.extend_from_slice(&nh_afi.to_be_bytes());
+            }
+        }
+    }
+
     let mut opt_params = Vec::new();
-    if let Some(asn) = open.four_octet_asn {
+    if !cap_bytes.is_empty() {
         opt_params.push(OPT_PARAM_CAPABILITIES);
-        opt_params.push(6); // capability code(1) + capability length(1) + 4-byte ASN
-        opt_params.push(CAP_FOUR_OCTET_ASN);
-        opt_params.push(4);
-        opt_params.extend_from_slice(&asn.to_be_bytes());
+        opt_params.push(
+            u8::try_from(cap_bytes.len())
+                .expect("this NOS's small, fixed capability set always fits in a u8"),
+        );
+        opt_params.extend_from_slice(&cap_bytes);
     }
 
     let mut body = Vec::with_capacity(10 + opt_params.len());
@@ -386,7 +524,10 @@ fn encode_open(open: &OpenMessage) -> Vec<u8> {
     body.extend_from_slice(&open.my_as.to_be_bytes());
     body.extend_from_slice(&open.hold_time.to_be_bytes());
     body.extend_from_slice(&open.bgp_identifier.octets());
-    body.push(u8::try_from(opt_params.len()).expect("at most one capability, always fits in a u8"));
+    body.push(
+        u8::try_from(opt_params.len())
+            .expect("this NOS's small, fixed capability set always fits in a u8"),
+    );
     body.extend_from_slice(&opt_params);
     body
 }
@@ -404,36 +545,53 @@ fn encode_notification(n: &NotificationMessage) -> Vec<u8> {
 /// address, zero-padded. Decodes a `[prefix_len][octets...]` list that
 /// continues until the byte slice is exhausted (both withdrawn-routes and
 /// NLRI use this same encoding, with no count field of their own — the
-/// caller already knows where the list ends).
-fn decode_prefixes(mut data: &[u8]) -> Result<Vec<Ipv4Net>, WireError> {
+/// caller already knows where the list ends). `afi` picks the address width
+/// (4 bytes for `AFI_IPV4`, 16 for `AFI_IPV6`) and the resulting prefix-length
+/// cap (32/128); any other AFI is `MalformedUpdate` — this crate only
+/// understands unicast IPv4/IPv6.
+fn decode_prefixes(afi: u16, mut data: &[u8]) -> Result<Vec<IpNet>, WireError> {
+    let addr_bytes: usize = match afi {
+        AFI_IPV4 => 4,
+        AFI_IPV6 => 16,
+        _ => return Err(WireError::MalformedUpdate),
+    };
+    let max_prefix_len = u8::try_from(addr_bytes * 8).unwrap();
+
     let mut prefixes = Vec::new();
     while !data.is_empty() {
         let prefix_len = data[0];
-        if prefix_len > 32 {
+        if prefix_len > max_prefix_len {
             return Err(WireError::MalformedUpdate);
         }
         let byte_len = usize::from(prefix_len).div_ceil(8);
         if data.len() < 1 + byte_len {
             return Err(WireError::MalformedUpdate);
         }
-        let mut octets = [0u8; 4];
+        let mut octets = [0u8; 16];
         octets[..byte_len].copy_from_slice(&data[1..=byte_len]);
-        let net = Ipv4Net::new(Ipv4Addr::from(octets), prefix_len)
-            .map_err(|_| WireError::MalformedUpdate)?;
+        let addr: IpAddr = if addr_bytes == 4 {
+            Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]).into()
+        } else {
+            Ipv6Addr::from(octets).into()
+        };
+        let net = IpNet::new(addr, prefix_len).map_err(|_| WireError::MalformedUpdate)?;
         prefixes.push(net);
         data = &data[1 + byte_len..];
     }
     Ok(prefixes)
 }
 
-fn encode_prefix(net: Ipv4Net, out: &mut Vec<u8>) {
+fn encode_prefix(net: IpNet, out: &mut Vec<u8>) {
     let prefix_len = net.prefix_len();
     let byte_len = usize::from(prefix_len).div_ceil(8);
     out.push(prefix_len);
-    out.extend_from_slice(&net.addr().octets()[..byte_len]);
+    match net.addr() {
+        IpAddr::V4(a) => out.extend_from_slice(&a.octets()[..byte_len]),
+        IpAddr::V6(a) => out.extend_from_slice(&a.octets()[..byte_len]),
+    }
 }
 
-fn encode_prefixes(nets: &[Ipv4Net]) -> Vec<u8> {
+fn encode_prefixes(nets: &[IpNet]) -> Vec<u8> {
     let mut out = Vec::new();
     for net in nets {
         encode_prefix(*net, &mut out);
@@ -441,26 +599,50 @@ fn encode_prefixes(nets: &[Ipv4Net]) -> Vec<u8> {
     out
 }
 
-/// The four attributes `parse_path_attributes` looks for, each `Some` only
-/// if the message actually carried it.
-type ParsedAttributeFields = (
-    Option<Origin>,
-    Option<Vec<u32>>,
-    Option<Ipv4Addr>,
-    Option<u32>,
-);
+/// `decode_prefixes(AFI_IPV4, ...)` narrowed back to `Ipv4Net`, for the
+/// legacy withdrawn-routes/NLRI fields — `decode_prefixes` with `afi ==
+/// AFI_IPV4` only ever constructs `IpNet::V4`, so the `V6` arm is
+/// unreachable.
+fn decode_prefixes_v4(data: &[u8]) -> Result<Vec<Ipv4Net>, WireError> {
+    decode_prefixes(AFI_IPV4, data)?
+        .into_iter()
+        .map(|net| match net {
+            IpNet::V4(n) => Ok(n),
+            IpNet::V6(_) => Err(WireError::MalformedUpdate),
+        })
+        .collect()
+}
+
+fn encode_prefixes_v4(nets: &[Ipv4Net]) -> Vec<u8> {
+    let nets: Vec<IpNet> = nets.iter().copied().map(IpNet::V4).collect();
+    encode_prefixes(&nets)
+}
+
+/// Everything `parse_path_attributes` extracts from one UPDATE's attribute
+/// list. The four legacy fields are each `Some`/non-empty only if the
+/// message actually carried that attribute — callers decide mandatory-
+/// attribute enforcement, since that depends on whether the UPDATE carries
+/// any NLRI (legacy or `mp_reach`) at all.
+struct ParsedAttributes {
+    origin: Option<Origin>,
+    as_path: Option<Vec<u32>>,
+    next_hop: Option<Ipv4Addr>,
+    local_pref: Option<u32>,
+    mp_reach: Vec<MpReachNlri>,
+    mp_unreach: Vec<MpUnreachNlri>,
+}
 
 /// Walks the TLV path-attribute list, decoding `ORIGIN`/`AS_PATH`/`NEXT_HOP`/
-/// `LOCAL_PREF` and skipping anything else by its own declared length
-/// (mirrors `parse_optional_parameters`'s handling of unknown OPEN
-/// capabilities). Returns each attribute's value only if the message
-/// actually carried it — callers decide mandatory-attribute enforcement,
-/// since that depends on whether the UPDATE carries any NLRI at all.
-fn parse_path_attributes(mut data: &[u8]) -> Result<ParsedAttributeFields, WireError> {
+/// `LOCAL_PREF`/`MP_REACH_NLRI`/`MP_UNREACH_NLRI` and skipping anything else
+/// by its own declared length (mirrors `parse_optional_parameters`'s
+/// handling of unknown OPEN capabilities).
+fn parse_path_attributes(mut data: &[u8]) -> Result<ParsedAttributes, WireError> {
     let mut origin = None;
     let mut as_path = None;
     let mut next_hop = None;
     let mut local_pref = None;
+    let mut mp_reach = Vec::new();
+    let mut mp_unreach = Vec::new();
 
     while !data.is_empty() {
         if data.len() < 2 {
@@ -509,6 +691,8 @@ fn parse_path_attributes(mut data: &[u8]) -> Result<ParsedAttributeFields, WireE
                 }
                 local_pref = Some(u32::from_be_bytes(value.try_into().unwrap()));
             }
+            ATTR_MP_REACH_NLRI => mp_reach.push(decode_mp_reach(value)?),
+            ATTR_MP_UNREACH_NLRI => mp_unreach.push(decode_mp_unreach(value)?),
             _ => {
                 // Unknown attribute type: skip by declared length, never an
                 // error — same philosophy as unrecognized OPEN capabilities.
@@ -518,7 +702,101 @@ fn parse_path_attributes(mut data: &[u8]) -> Result<ParsedAttributeFields, WireE
         data = &data[header_len + len..];
     }
 
-    Ok((origin, as_path, next_hop, local_pref))
+    Ok(ParsedAttributes {
+        origin,
+        as_path,
+        next_hop,
+        local_pref,
+        mp_reach,
+        mp_unreach,
+    })
+}
+
+/// RFC 4760 `MP_REACH_NLRI` value: `AFI(2) SAFI(1) NextHopLen(1)
+/// NextHop(NextHopLen) SNPACount(1) SNPAs... NLRI...`. SNPAs are always
+/// skipped by their own declared lengths (this crate never emits any, but
+/// stays tolerant of a peer that does).
+fn decode_mp_reach(data: &[u8]) -> Result<MpReachNlri, WireError> {
+    if data.len() < 5 {
+        return Err(WireError::MalformedUpdate);
+    }
+    let afi = u16::from_be_bytes([data[0], data[1]]);
+    let safi = data[2];
+    let nh_len = data[3] as usize;
+    if data.len() < 4 + nh_len + 1 {
+        return Err(WireError::MalformedUpdate);
+    }
+    let next_hop: IpAddr = match nh_len {
+        4 => Ipv4Addr::new(data[4], data[5], data[6], data[7]).into(),
+        16 => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&data[4..20]);
+            Ipv6Addr::from(octets).into()
+        }
+        _ => return Err(WireError::MalformedUpdate),
+    };
+    let mut pos = 4 + nh_len;
+    let snpa_count = data[pos];
+    pos += 1;
+    for _ in 0..snpa_count {
+        if data.len() <= pos {
+            return Err(WireError::MalformedUpdate);
+        }
+        let snpa_len = data[pos] as usize;
+        pos += 1 + snpa_len;
+        if data.len() < pos {
+            return Err(WireError::MalformedUpdate);
+        }
+    }
+    let nlri = decode_prefixes(afi, &data[pos..])?;
+    Ok(MpReachNlri {
+        afi,
+        safi,
+        next_hop,
+        nlri,
+    })
+}
+
+/// RFC 4760 `MP_UNREACH_NLRI` value: `AFI(2) SAFI(1) WithdrawnNLRI...`.
+fn decode_mp_unreach(data: &[u8]) -> Result<MpUnreachNlri, WireError> {
+    if data.len() < 3 {
+        return Err(WireError::MalformedUpdate);
+    }
+    let afi = u16::from_be_bytes([data[0], data[1]]);
+    let safi = data[2];
+    let withdrawn = decode_prefixes(afi, &data[3..])?;
+    Ok(MpUnreachNlri {
+        afi,
+        safi,
+        withdrawn,
+    })
+}
+
+fn encode_mp_reach(mp: &MpReachNlri) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&mp.afi.to_be_bytes());
+    out.push(mp.safi);
+    match mp.next_hop {
+        IpAddr::V4(a) => {
+            out.push(4);
+            out.extend_from_slice(&a.octets());
+        }
+        IpAddr::V6(a) => {
+            out.push(16);
+            out.extend_from_slice(&a.octets());
+        }
+    }
+    out.push(0); // SNPA count — this crate never advertises any.
+    out.extend_from_slice(&encode_prefixes(&mp.nlri));
+    out
+}
+
+fn encode_mp_unreach(mp: &MpUnreachNlri) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&mp.afi.to_be_bytes());
+    out.push(mp.safi);
+    out.extend_from_slice(&encode_prefixes(&mp.withdrawn));
+    out
 }
 
 /// Flattens one or more `AS_PATH` segments (`segment_type(1) count(1)
@@ -545,13 +823,18 @@ fn parse_as_path(mut data: &[u8]) -> Result<Vec<u32>, WireError> {
     Ok(asns)
 }
 
-/// Parses an UPDATE body: withdrawn-routes (u16 length + packed prefixes),
-/// path attributes (u16 length + TLV list), then NLRI (everything
-/// remaining — RFC 4271 has no explicit NLRI length field, since the outer
-/// message header's length already delimits it). If `nlri` is non-empty,
-/// `ORIGIN`/`AS_PATH`/`NEXT_HOP` must all have been present or this is
-/// `MalformedUpdate`; if `nlri` is empty (a pure withdrawal), `attributes`
-/// is `None`, discarding any attributes present.
+/// Parses an UPDATE body: withdrawn-routes (u16 length + packed IPv4
+/// prefixes), path attributes (u16 length + TLV list), then legacy NLRI
+/// (everything remaining — RFC 4271 has no explicit NLRI length field, since
+/// the outer message header's length already delimits it).
+///
+/// `ORIGIN`/`AS_PATH` must be present whenever any NLRI is being announced
+/// (legacy `nlri` or an `MP_REACH_NLRI` batch), else `MalformedUpdate`.
+/// `NEXT_HOP` is additionally mandatory only when the legacy `nlri` field
+/// itself is non-empty — an MP-only announcement carries its next-hop inside
+/// `MP_REACH_NLRI` instead and may omit the legacy attribute entirely. If
+/// nothing is being announced (a pure withdrawal), `attributes` is `None`,
+/// discarding any attributes present.
 fn parse_update(body: &[u8]) -> Result<UpdateMessage, WireError> {
     if body.len() < 2 {
         return Err(WireError::MalformedUpdate);
@@ -561,7 +844,7 @@ fn parse_update(body: &[u8]) -> Result<UpdateMessage, WireError> {
     if body.len() < pos + withdrawn_len {
         return Err(WireError::MalformedUpdate);
     }
-    let withdrawn_routes = decode_prefixes(&body[pos..pos + withdrawn_len])?;
+    let withdrawn_routes = decode_prefixes_v4(&body[pos..pos + withdrawn_len])?;
     pos += withdrawn_len;
 
     if body.len() < pos + 2 {
@@ -572,37 +855,47 @@ fn parse_update(body: &[u8]) -> Result<UpdateMessage, WireError> {
     if body.len() < pos + attr_len {
         return Err(WireError::MalformedUpdate);
     }
-    let (origin, as_path, next_hop, local_pref) =
-        parse_path_attributes(&body[pos..pos + attr_len])?;
+    let parsed = parse_path_attributes(&body[pos..pos + attr_len])?;
     pos += attr_len;
 
-    let nlri = decode_prefixes(&body[pos..])?;
+    let nlri = decode_prefixes_v4(&body[pos..])?;
 
-    let attributes = if nlri.is_empty() {
-        None
-    } else {
+    let announcing = !nlri.is_empty() || !parsed.mp_reach.is_empty();
+    let attributes = if announcing {
+        let next_hop = if nlri.is_empty() {
+            // MP-only announcement: the legacy NEXT_HOP attribute is never
+            // required (each mp_reach batch carries its own), and this value
+            // is never read when nlri is empty.
+            parsed.next_hop.unwrap_or(Ipv4Addr::UNSPECIFIED)
+        } else {
+            parsed.next_hop.ok_or(WireError::MalformedUpdate)?
+        };
         Some(PathAttributes {
-            origin: origin.ok_or(WireError::MalformedUpdate)?,
-            as_path: as_path.ok_or(WireError::MalformedUpdate)?,
-            next_hop: next_hop.ok_or(WireError::MalformedUpdate)?,
-            local_pref,
+            origin: parsed.origin.ok_or(WireError::MalformedUpdate)?,
+            as_path: parsed.as_path.ok_or(WireError::MalformedUpdate)?,
+            next_hop,
+            local_pref: parsed.local_pref,
         })
+    } else {
+        None
     };
 
     Ok(UpdateMessage {
         withdrawn_routes,
         nlri,
         attributes,
+        mp_reach: parsed.mp_reach,
+        mp_unreach: parsed.mp_unreach,
     })
 }
 
-fn encode_attribute(out: &mut Vec<u8>, attr_type: u8, value: &[u8]) {
+fn encode_attribute(out: &mut Vec<u8>, flags: u8, attr_type: u8, value: &[u8]) {
     if let Ok(len) = u8::try_from(value.len()) {
-        out.push(ATTR_FLAG_WELL_KNOWN_TRANSITIVE);
+        out.push(flags);
         out.push(attr_type);
         out.push(len);
     } else {
-        out.push(ATTR_FLAG_WELL_KNOWN_TRANSITIVE | ATTR_FLAG_EXTENDED_LENGTH);
+        out.push(flags | ATTR_FLAG_EXTENDED_LENGTH);
         out.push(attr_type);
         // Only reached for an attribute value over 255 bytes (a very long
         // AS_PATH) — still far under a whole message's 4096-byte cap.
@@ -630,13 +923,57 @@ fn encode_as_path(asns: &[u32]) -> Vec<u8> {
     out
 }
 
-fn encode_path_attributes(attrs: &PathAttributes) -> Vec<u8> {
+/// Builds the whole path-attribute TLV list for one UPDATE: the legacy
+/// `ORIGIN`/`AS_PATH`/(`NEXT_HOP`)/`LOCAL_PREF` attributes (`NEXT_HOP` only
+/// when the legacy `nlri` field is non-empty), then one `MP_REACH_NLRI`/
+/// `MP_UNREACH_NLRI` attribute per batch.
+fn encode_attributes(update: &UpdateMessage) -> Vec<u8> {
     let mut out = Vec::new();
-    encode_attribute(&mut out, ATTR_ORIGIN, &[attrs.origin as u8]);
-    encode_attribute(&mut out, ATTR_AS_PATH, &encode_as_path(&attrs.as_path));
-    encode_attribute(&mut out, ATTR_NEXT_HOP, &attrs.next_hop.octets());
-    if let Some(local_pref) = attrs.local_pref {
-        encode_attribute(&mut out, ATTR_LOCAL_PREF, &local_pref.to_be_bytes());
+    if let Some(attrs) = &update.attributes {
+        encode_attribute(
+            &mut out,
+            ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
+            ATTR_ORIGIN,
+            &[attrs.origin as u8],
+        );
+        encode_attribute(
+            &mut out,
+            ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
+            ATTR_AS_PATH,
+            &encode_as_path(&attrs.as_path),
+        );
+        if !update.nlri.is_empty() {
+            encode_attribute(
+                &mut out,
+                ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
+                ATTR_NEXT_HOP,
+                &attrs.next_hop.octets(),
+            );
+        }
+        if let Some(local_pref) = attrs.local_pref {
+            encode_attribute(
+                &mut out,
+                ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
+                ATTR_LOCAL_PREF,
+                &local_pref.to_be_bytes(),
+            );
+        }
+    }
+    for mp in &update.mp_reach {
+        encode_attribute(
+            &mut out,
+            ATTR_FLAG_OPTIONAL_NON_TRANSITIVE,
+            ATTR_MP_REACH_NLRI,
+            &encode_mp_reach(mp),
+        );
+    }
+    for mp in &update.mp_unreach {
+        encode_attribute(
+            &mut out,
+            ATTR_FLAG_OPTIONAL_NON_TRANSITIVE,
+            ATTR_MP_UNREACH_NLRI,
+            &encode_mp_unreach(mp),
+        );
     }
     out
 }
@@ -649,7 +986,7 @@ fn encode_path_attributes(attrs: &PathAttributes) -> Vec<u8> {
 fn encode_update(update: &UpdateMessage) -> Vec<u8> {
     let mut body = Vec::new();
 
-    let withdrawn = encode_prefixes(&update.withdrawn_routes);
+    let withdrawn = encode_prefixes_v4(&update.withdrawn_routes);
     body.extend_from_slice(
         &u16::try_from(withdrawn.len())
             .unwrap_or(u16::MAX)
@@ -657,15 +994,11 @@ fn encode_update(update: &UpdateMessage) -> Vec<u8> {
     );
     body.extend_from_slice(&withdrawn);
 
-    let attrs = update
-        .attributes
-        .as_ref()
-        .map(encode_path_attributes)
-        .unwrap_or_default();
+    let attrs = encode_attributes(update);
     body.extend_from_slice(&u16::try_from(attrs.len()).unwrap_or(u16::MAX).to_be_bytes());
     body.extend_from_slice(&attrs);
 
-    body.extend_from_slice(&encode_prefixes(&update.nlri));
+    body.extend_from_slice(&encode_prefixes_v4(&update.nlri));
     body
 }
 
@@ -692,7 +1025,7 @@ mod tests {
             my_as: 65001,
             hold_time: 90,
             bgp_identifier: Ipv4Addr::new(1, 1, 1, 1),
-            four_octet_asn: None,
+            capabilities: vec![],
         };
         assert_eq!(
             roundtrip(BgpMessage::Open(open.clone())),
@@ -704,7 +1037,25 @@ mod tests {
     fn open_with_four_octet_capability_roundtrips() {
         let open = build_open(4_200_000_000, Ipv4Addr::new(2, 2, 2, 2), 90);
         assert_eq!(open.my_as, AS_TRANS);
-        assert_eq!(open.four_octet_asn, Some(4_200_000_000));
+        assert_eq!(four_octet_asn(&open), Some(4_200_000_000));
+        assert_eq!(
+            roundtrip(BgpMessage::Open(open.clone())),
+            BgpMessage::Open(open)
+        );
+    }
+
+    #[test]
+    fn open_with_multiprotocol_and_extended_next_hop_capabilities_roundtrips() {
+        let mut open = build_open(65001, Ipv4Addr::new(3, 3, 3, 3), 90);
+        open.capabilities.push(Capability::MultiProtocol {
+            afi: AFI_IPV6,
+            safi: 1,
+        });
+        open.capabilities.push(Capability::ExtendedNextHop {
+            nlri_afi: AFI_IPV4,
+            nlri_safi: 1,
+            nh_afi: AFI_IPV6,
+        });
         assert_eq!(
             roundtrip(BgpMessage::Open(open.clone())),
             BgpMessage::Open(open)
@@ -717,7 +1068,7 @@ mod tests {
         assert_eq!(build_open(65536, Ipv4Addr::LOCALHOST, 90).my_as, AS_TRANS);
         // Always advertised once 4-octet-capable, even when `my_as` didn't need AS_TRANS.
         assert_eq!(
-            build_open(65535, Ipv4Addr::LOCALHOST, 90).four_octet_asn,
+            four_octet_asn(&build_open(65535, Ipv4Addr::LOCALHOST, 90)),
             Some(65535)
         );
     }
@@ -729,12 +1080,12 @@ mod tests {
             my_as: AS_TRANS,
             hold_time: 90,
             bgp_identifier: Ipv4Addr::LOCALHOST,
-            four_octet_asn: Some(4_200_000_000),
+            capabilities: vec![Capability::FourOctetAsn(4_200_000_000)],
         };
         assert_eq!(effective_remote_asn(&with_cap), 4_200_000_000);
 
         let without_cap = OpenMessage {
-            four_octet_asn: None,
+            capabilities: vec![],
             ..with_cap
         };
         assert_eq!(effective_remote_asn(&without_cap), u32::from(AS_TRANS));
@@ -776,15 +1127,25 @@ mod tests {
         }
     }
 
+    fn empty_update() -> UpdateMessage {
+        UpdateMessage {
+            withdrawn_routes: vec![],
+            nlri: vec![],
+            attributes: None,
+            mp_reach: vec![],
+            mp_unreach: vec![],
+        }
+    }
+
     #[test]
     fn update_announce_roundtrips() {
         let update = UpdateMessage {
-            withdrawn_routes: vec![],
             nlri: vec![
                 "10.1.0.0/24".parse().unwrap(),
                 "10.2.0.0/16".parse().unwrap(),
             ],
             attributes: Some(attrs(vec![65001, 65002], Some(200))),
+            ..empty_update()
         };
         assert_eq!(
             roundtrip(BgpMessage::Update(update.clone())),
@@ -796,8 +1157,7 @@ mod tests {
     fn update_withdraw_only_roundtrips_with_no_attributes() {
         let update = UpdateMessage {
             withdrawn_routes: vec!["10.1.0.0/24".parse().unwrap(), "0.0.0.0/0".parse().unwrap()],
-            nlri: vec![],
-            attributes: None,
+            ..empty_update()
         };
         assert_eq!(
             roundtrip(BgpMessage::Update(update.clone())),
@@ -811,6 +1171,7 @@ mod tests {
             withdrawn_routes: vec!["192.168.1.0/24".parse().unwrap()],
             nlri: vec!["172.16.0.0/12".parse().unwrap()],
             attributes: Some(attrs(vec![], None)),
+            ..empty_update()
         };
         assert_eq!(
             roundtrip(BgpMessage::Update(update.clone())),
@@ -822,13 +1183,82 @@ mod tests {
     fn update_as_path_longer_than_one_segment_roundtrips() {
         let long_path: Vec<u32> = (1..=300).collect();
         let update = UpdateMessage {
-            withdrawn_routes: vec![],
             nlri: vec!["10.0.0.0/8".parse().unwrap()],
             attributes: Some(attrs(long_path, None)),
+            ..empty_update()
         };
         assert_eq!(
             roundtrip(BgpMessage::Update(update.clone())),
             BgpMessage::Update(update)
+        );
+    }
+
+    #[test]
+    fn mp_reach_ipv6_announce_roundtrips() {
+        // MP-only announcement (no legacy nlri): the legacy NEXT_HOP
+        // attribute is never encoded, so it must round-trip as
+        // UNSPECIFIED rather than whatever placeholder was passed in.
+        let update = UpdateMessage {
+            attributes: Some(PathAttributes {
+                next_hop: Ipv4Addr::UNSPECIFIED,
+                ..attrs(vec![65001], Some(150))
+            }),
+            mp_reach: vec![MpReachNlri {
+                afi: AFI_IPV6,
+                safi: 1,
+                next_hop: "2001:db8::1".parse().unwrap(),
+                nlri: vec!["2001:db8:1::/48".parse().unwrap(), "::/0".parse().unwrap()],
+            }],
+            ..empty_update()
+        };
+        assert_eq!(
+            roundtrip(BgpMessage::Update(update.clone())),
+            BgpMessage::Update(update)
+        );
+    }
+
+    #[test]
+    fn mp_unreach_ipv6_withdraw_roundtrips() {
+        let update = UpdateMessage {
+            mp_unreach: vec![MpUnreachNlri {
+                afi: AFI_IPV6,
+                safi: 1,
+                withdrawn: vec!["2001:db8:1::/48".parse().unwrap()],
+            }],
+            ..empty_update()
+        };
+        assert_eq!(
+            roundtrip(BgpMessage::Update(update.clone())),
+            BgpMessage::Update(update)
+        );
+    }
+
+    #[test]
+    fn mp_reach_cross_family_next_hop_roundtrips() {
+        // RFC 8950: IPv4 unicast NLRI carried over an IPv6 next-hop.
+        let update = UpdateMessage {
+            attributes: Some(PathAttributes {
+                next_hop: Ipv4Addr::UNSPECIFIED,
+                ..attrs(vec![], None)
+            }),
+            mp_reach: vec![MpReachNlri {
+                afi: AFI_IPV4,
+                safi: 1,
+                next_hop: "2001:db8::1".parse().unwrap(),
+                nlri: vec!["10.0.0.0/24".parse().unwrap()],
+            }],
+            ..empty_update()
+        };
+        let rt = roundtrip(BgpMessage::Update(update.clone()));
+        assert_eq!(rt, BgpMessage::Update(update));
+        // MP-only announcement never encodes the legacy NEXT_HOP attribute.
+        let BgpMessage::Update(u) = rt else {
+            unreachable!()
+        };
+        assert!(u.nlri.is_empty());
+        assert_eq!(
+            u.mp_reach[0].next_hop,
+            "2001:db8::1".parse::<IpAddr>().unwrap()
         );
     }
 
