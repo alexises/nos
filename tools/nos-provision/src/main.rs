@@ -26,6 +26,7 @@ use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 #[derive(Parser)]
+#[allow(clippy::struct_excessive_bools)] // one CLI flag per independent provisioning toggle
 struct Args {
     #[arg(long)]
     config_socket: PathBuf,
@@ -74,6 +75,26 @@ struct Args {
     /// mismatched one on either side does not).
     #[arg(long)]
     md5_password: Option<String>,
+
+    /// If set, marks `--peer-group` as an RFC 4456 route-reflector client
+    /// (requires `--remote-as` to equal `--asn`, i.e. an iBGP peer-group).
+    /// Calling this tool again with the same `--peer-group` but a different
+    /// `--peer` adds a second client to the same peer-group, since
+    /// `BgpPeerOp::Set` upserts by remote-address.
+    #[arg(long)]
+    route_reflector_client: bool,
+
+    /// If set, marks `--peer-group` as an RFC 7947 route-server client
+    /// (requires `--remote-as` to differ from `--asn`, i.e. an eBGP
+    /// peer-group). Mutually exclusive with `--route-reflector-client`.
+    #[arg(long)]
+    route_server_client: bool,
+
+    /// If set, configures `--bgp-instance`'s RFC 4456 cluster-id
+    /// (`BgpInstanceOp::SetClusterId`) — only meaningful alongside
+    /// `--route-reflector-client`.
+    #[arg(long)]
+    cluster_id: Option<Ipv4Addr>,
 
     #[arg(long)]
     save: bool,
@@ -192,6 +213,29 @@ async fn main() -> anyhow::Result<()> {
             instance: args.bgp_instance.clone(),
             name: args.peer_group.clone(),
             password,
+        }));
+    }
+
+    if args.route_reflector_client {
+        ops.push(ConfigOp::BgpPeerGroup(
+            BgpPeerGroupOp::SetRouteReflectorClient {
+                instance: args.bgp_instance.clone(),
+                name: args.peer_group.clone(),
+            },
+        ));
+    }
+    if args.route_server_client {
+        ops.push(ConfigOp::BgpPeerGroup(
+            BgpPeerGroupOp::SetRouteServerClient {
+                instance: args.bgp_instance.clone(),
+                name: args.peer_group.clone(),
+            },
+        ));
+    }
+    if let Some(cluster_id) = args.cluster_id {
+        ops.push(ConfigOp::BgpInstance(BgpInstanceOp::SetClusterId {
+            name: args.bgp_instance.clone(),
+            cluster_id,
         }));
     }
 

@@ -731,6 +731,49 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
+        Command::Delete(DeleteTarget::RouteReflectorClient) => match path {
+            Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearRouteReflectorClient {
+                    instance: instance.clone(),
+                    name: group.clone(),
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+        },
+        Command::Delete(DeleteTarget::RouteServerClient) => match path {
+            Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearRouteServerClient {
+                    instance: instance.clone(),
+                    name: group.clone(),
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+        },
+        Command::Delete(DeleteTarget::BgpInstanceClusterId { name }) => Resolved::ApplyOp {
+            op: ConfigOp::BgpInstance(BgpInstanceOp::ClearClusterId { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::BgpInstanceClusterIdRelative) => match path {
+            Path::BgpInstance(name) => Resolved::ApplyOp {
+                op: ConfigOp::BgpInstance(BgpInstanceOp::ClearClusterId { name: name.clone() }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+        },
 
         // `top` always lands at the root, however deep the current path is.
         Command::Top => match path {
@@ -782,6 +825,7 @@ fn set_op(name: String, field: BgpInstanceField) -> ConfigOp {
     ConfigOp::BgpInstance(match field {
         BgpInstanceField::Asn(asn) => BgpInstanceOp::SetAsn { name, asn },
         BgpInstanceField::RouterId(router_id) => BgpInstanceOp::SetRouterId { name, router_id },
+        BgpInstanceField::ClusterId(cluster_id) => BgpInstanceOp::SetClusterId { name, cluster_id },
     })
 }
 
@@ -857,6 +901,14 @@ fn peer_group_set_op(instance: String, group: String, field: BgpPeerGroupField) 
             instance,
             name: group,
             mode,
+        },
+        BgpPeerGroupField::RouteReflectorClient => BgpPeerGroupOp::SetRouteReflectorClient {
+            instance,
+            name: group,
+        },
+        BgpPeerGroupField::RouteServerClient => BgpPeerGroupOp::SetRouteServerClient {
+            instance,
+            name: group,
         },
     })
 }
@@ -1437,6 +1489,143 @@ mod tests {
                 op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearNextHop {
                     instance: "r1".to_string(),
                     name: "pg1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_and_delete_peer_group_route_reflector_and_server_client_qualified_and_relative() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: "r1".to_string(),
+                    group: "pg1".to_string(),
+                    field: BgpPeerGroupField::RouteReflectorClient,
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetRouteReflectorClient {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::RouteServerClient,
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetRouteServerClient {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::BgpInstance("r1".to_string()), false),
+                Command::Delete(DeleteTarget::RouteReflectorClient)
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Delete(DeleteTarget::RouteReflectorClient)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearRouteReflectorClient {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Delete(DeleteTarget::RouteServerClient)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearRouteServerClient {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_and_delete_bgp_instance_cluster_id_qualified_and_relative() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::BgpInstance {
+                    name: "r1".to_string(),
+                    field: BgpInstanceField::ClusterId(Ipv4Addr::new(1, 2, 3, 4)),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpInstance(BgpInstanceOp::SetClusterId {
+                    name: "r1".to_string(),
+                    cluster_id: Ipv4Addr::new(1, 2, 3, 4),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::BgpInstance("r1".to_string()), false),
+                Command::Set(SetTarget::Relative {
+                    field: BgpInstanceField::ClusterId(Ipv4Addr::new(1, 2, 3, 4)),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpInstance(BgpInstanceOp::SetClusterId {
+                    name: "r1".to_string(),
+                    cluster_id: Ipv4Addr::new(1, 2, 3, 4),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Delete(DeleteTarget::BgpInstanceClusterIdRelative)
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::BgpInstance("r1".to_string()), false),
+                Command::Delete(DeleteTarget::BgpInstanceClusterIdRelative)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpInstance(BgpInstanceOp::ClearClusterId {
+                    name: "r1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Delete(DeleteTarget::BgpInstanceClusterId {
+                    name: "r1".to_string(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpInstance(BgpInstanceOp::ClearClusterId {
+                    name: "r1".to_string(),
                 }),
                 after: PathAfter::Stay,
             }

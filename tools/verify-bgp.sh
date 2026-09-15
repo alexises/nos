@@ -11,12 +11,18 @@
 # subcommand) that matching RFC 2385 TCP MD5 passwords on both routers still
 # establish while a mismatched password on either side does not.
 #
+# Two further subcommands, `reflector` and `route-server`, stand up a third
+# container ("router-c") and reconfigure all three into a hub-and-spoke
+# topology (router-a is the hub; router-b/router-c are not peered with each
+# other) to verify RFC 4456 route reflection and RFC 7947 route-server
+# transparency actually work over real sessions, not just in unit tests.
+#
 # nos-cli's interactive shell (reedline) can't be scripted over a plain
 # pipe, so provisioning goes through `nos-provision` (tools/nos-provision) —
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|logs [n]|down|all}
+# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|reflector|route-server|logs [n]|down|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,10 +36,16 @@ NET=nos-verify-net
 SUBNET=10.50.0.0/24
 IP_A=10.50.0.2
 IP_B=10.50.0.3
+IP_C=10.50.0.4
 ASN_A=65001
 ASN_B=65002
+# Only used by the `route-server` scenario, where router-b and router-c must
+# be in distinct ASes from each other (and from router-a) for the topology
+# to actually exercise eBGP-to-eBGP relaying rather than iBGP.
+ASN_C=65003
 RID_A=1.1.1.1
 RID_B=2.2.2.2
+RID_C=3.3.3.3
 # TEST-NET-2 (RFC 5737) — reserved for documentation, safe to use as a
 # fake redistributed prefix without colliding with anything real.
 REDISTRIBUTE_PREFIX=198.51.100.0/24
@@ -137,6 +149,207 @@ provision_auth() {
     --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
     --peer "$peer_ip" \
     --md5-password "$password"
+}
+
+# --- RFC 4456 route reflector scenario ---
+#
+# router-a is the reflector (cluster-id = its own router-id), with one iBGP
+# peer-group ("pg1", remote-as = its own asn) shared by both router-b and
+# router-c as route-reflector clients — calling nos-provision twice against
+# the same peer-group with a different `--peer` adds a second client, since
+# `BgpPeerOp::Set` upserts by remote-address (see nos-provision's doc
+# comment). router-b and router-c are each just a plain iBGP peer of
+# router-a — neither is configured to know about the other at all.
+
+provision_reflector_hub() {
+  local peer_ip=$1
+  log "provisioning router-a as route reflector (cluster-id=$RID_A) for peer $peer_ip"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "router-a-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${IP_A}/24" \
+    --asn "$ASN_A" \
+    --router-id "$RID_A" \
+    --peer-group pg1 \
+    --remote-as "$ASN_A" \
+    --peer "$peer_ip" \
+    --route-reflector-client \
+    --cluster-id "$RID_A"
+}
+
+provision_reflector_client() {
+  local name=$1 router_id=$2 own_ip=$3
+  log "provisioning $name as a plain iBGP route-reflector client of router-a"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$ASN_A" \
+    --router-id "$router_id" \
+    --remote-as "$ASN_A" \
+    --peer "$IP_A"
+}
+
+provision_reflector_client_redistribute() {
+  local name=$1 router_id=$2 own_ip=$3
+  log "provisioning $name with a static route + 'redistribute from static to bgp'"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$ASN_A" \
+    --router-id "$router_id" \
+    --remote-as "$ASN_A" \
+    --peer "$IP_A" \
+    --static-route "$REDISTRIBUTE_PREFIX" \
+    --static-gateway "$REDISTRIBUTE_GATEWAY" \
+    --redistribute
+}
+
+cmd_up_reflector() {
+  build_image
+  build_provision_tool
+  ensure_network
+  start_router router-a "$IP_A"
+  start_router router-b "$IP_B"
+  start_router router-c "$IP_C"
+  wait_for_config_socket router-a
+  wait_for_config_socket router-b
+  wait_for_config_socket router-c
+  provision_reflector_hub "$IP_B"
+  provision_reflector_hub "$IP_C"
+  provision_reflector_client router-b "$RID_B" "$IP_B"
+  provision_reflector_client router-c "$RID_C" "$IP_C"
+}
+
+cmd_check_reflector() {
+  cmd_up_reflector
+  local ok=0
+  wait_for_log router-a "bgp session established" 60 && log "router-a: established" || { log "router-a: FAILED to establish"; ok=1; }
+  wait_for_log router-b "bgp session established" 60 && log "router-b: established" || { log "router-b: FAILED to establish"; ok=1; }
+  wait_for_log router-c "bgp session established" 60 && log "router-c: established" || { log "router-c: FAILED to establish"; ok=1; }
+  if [[ $ok -ne 0 ]]; then return 1; fi
+
+  provision_reflector_client_redistribute router-b "$RID_B" "$IP_B"
+  log "waiting for router-c to learn $REDISTRIBUTE_PREFIX purely via the reflector (router-c has no direct session to router-b)"
+  wait_for_log router-c "learned route for $REDISTRIBUTE_PREFIX into adj-rib-in" 60 \
+    && log "router-c: received the reflected prefix into adj-rib-in" \
+    || { log "router-c: FAILED to receive the reflected prefix"; return 1; }
+  wait_for_log router-c "loc-rib best path for $REDISTRIBUTE_PREFIX updated" 60 \
+    && log "router-c: installed the reflected prefix as its loc-rib best path" \
+    || { log "router-c: FAILED to install the reflected prefix"; return 1; }
+}
+
+# --- RFC 7947 route server scenario ---
+#
+# router-a is the route server, with two eBGP peer-groups (distinct
+# remote-as per client, both `route_server_client`) — router-b and router-c
+# are ordinary eBGP routers, each in its own AS, each peering only with
+# router-a. Verifies both session establishment and AS_PATH transparency:
+# router-c should see router-b's ASN in the path but never router-a's own.
+
+provision_route_server_hub() {
+  local peer_group=$1 remote_as=$2 peer_ip=$3
+  log "provisioning router-a as route server for $peer_ip (asn=$remote_as)"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "router-a-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${IP_A}/24" \
+    --asn "$ASN_A" \
+    --router-id "$RID_A" \
+    --peer-group "$peer_group" \
+    --remote-as "$remote_as" \
+    --peer "$peer_ip" \
+    --route-server-client
+}
+
+provision_route_server_client() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4
+  log "provisioning $name as an eBGP route-server client of router-a"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$ASN_A" \
+    --peer "$IP_A"
+}
+
+provision_route_server_client_redistribute() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4
+  log "provisioning $name with a static route + 'redistribute from static to bgp'"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$ASN_A" \
+    --peer "$IP_A" \
+    --static-route "$REDISTRIBUTE_PREFIX" \
+    --static-gateway "$REDISTRIBUTE_GATEWAY" \
+    --redistribute
+}
+
+cmd_up_route_server() {
+  build_image
+  build_provision_tool
+  ensure_network
+  start_router router-a "$IP_A"
+  start_router router-b "$IP_B"
+  start_router router-c "$IP_C"
+  wait_for_config_socket router-a
+  wait_for_config_socket router-b
+  wait_for_config_socket router-c
+  provision_route_server_hub pg-b "$ASN_B" "$IP_B"
+  provision_route_server_hub pg-c "$ASN_C" "$IP_C"
+  provision_route_server_client router-b "$ASN_B" "$RID_B" "$IP_B"
+  provision_route_server_client router-c "$ASN_C" "$RID_C" "$IP_C"
+}
+
+cmd_check_route_server() {
+  cmd_up_route_server
+  local ok=0
+  wait_for_log router-a "bgp session established" 60 && log "router-a: established" || { log "router-a: FAILED to establish"; ok=1; }
+  wait_for_log router-b "bgp session established" 60 && log "router-b: established" || { log "router-b: FAILED to establish"; ok=1; }
+  wait_for_log router-c "bgp session established" 60 && log "router-c: established" || { log "router-c: FAILED to establish"; ok=1; }
+  if [[ $ok -ne 0 ]]; then return 1; fi
+
+  provision_route_server_client_redistribute router-b "$ASN_B" "$RID_B" "$IP_B"
+  log "waiting for router-c to learn $REDISTRIBUTE_PREFIX via the route server"
+  wait_for_log router-c "learned route for $REDISTRIBUTE_PREFIX into adj-rib-in" 60 \
+    && log "router-c: received the relayed prefix into adj-rib-in" \
+    || { log "router-c: FAILED to receive the relayed prefix"; return 1; }
+  wait_for_log router-c "loc-rib best path for $REDISTRIBUTE_PREFIX updated" 60 \
+    && log "router-c: installed the relayed prefix into its loc-rib" \
+    || { log "router-c: FAILED to install the relayed prefix"; return 1; }
+
+  log "confirming router-c sees router-b's asn ($ASN_B) but not router-a's own asn ($ASN_A) in as_path -- rfc 7947 transparency"
+  local logs_c line
+  # tracing's colored log output interleaves ANSI escape codes between
+  # field names/separators/values (e.g. "as_path" ESC[0m ESC[2m "="
+  # ESC[0m "[65002]") — strip them first so a plain substring match works.
+  logs_c=$(docker logs router-c 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g') || true
+  line=$(grep "loc-rib best path for $REDISTRIBUTE_PREFIX updated" <<<"$logs_c" | tail -n1) || true
+  if [[ -n "$line" ]] && grep -q "as_path=\[$ASN_B\]" <<<"$line" && ! grep -q "$ASN_A" <<<"$line"; then
+    log "router-c: as_path is transparently [$ASN_B] -- route-server's own asn was not prepended"
+  else
+    log "router-c: FAILED -- expected as_path [$ASN_B] with no route-server asn prepended, got: $line"
+    return 1
+  fi
 }
 
 established_count() {
@@ -284,11 +497,16 @@ cmd_logs() {
   docker logs router-a 2>&1 | tail -n "${1:-200}"
   echo "===== router-b ====="
   docker logs router-b 2>&1 | tail -n "${1:-200}"
+  if docker inspect router-c >/dev/null 2>&1; then
+    echo "===== router-c ====="
+    docker logs router-c 2>&1 | tail -n "${1:-200}"
+  fi
 }
 
 cmd_down() {
-  docker rm -f router-a router-b >/dev/null 2>&1 || true
-  docker volume rm router-a-run router-a-data router-b-run router-b-data >/dev/null 2>&1 || true
+  docker rm -f router-a router-b router-c >/dev/null 2>&1 || true
+  docker volume rm router-a-run router-a-data router-b-run router-b-data router-c-run router-c-data \
+    >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 
@@ -299,6 +517,8 @@ case "${1:-}" in
   collision) cmd_check_collision ;;
   redistribute) cmd_check_redistribute ;;
   auth) cmd_check_auth ;;
+  reflector) cmd_check_reflector ;;
+  route-server) cmd_check_route_server ;;
   logs) shift; cmd_logs "$@" ;;
   down) cmd_down ;;
   all)
@@ -308,9 +528,11 @@ case "${1:-}" in
     cmd_check_collision
     cmd_check_redistribute
     cmd_check_auth
+    cmd_check_reflector
+    cmd_check_route_server
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|logs [n]|down|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|reflector|route-server|logs [n]|down|all}" >&2
     exit 2
     ;;
 esac

@@ -25,6 +25,13 @@ pub enum BgpInstanceOp {
         name: String,
         router_id: Ipv4Addr,
     },
+    SetClusterId {
+        name: String,
+        cluster_id: Ipv4Addr,
+    },
+    ClearClusterId {
+        name: String,
+    },
     Delete {
         name: String,
     },
@@ -41,6 +48,7 @@ impl BgpInstanceOp {
                         asn: 0,
                         peer_groups: Vec::new(),
                         peers: Vec::new(),
+                        cluster_id: None,
                         routing_table: None,
                     });
                 }
@@ -52,6 +60,14 @@ impl BgpInstanceOp {
             }
             BgpInstanceOp::SetRouterId { name, router_id } => {
                 find_instance_mut(config, name)?.router_id = *router_id;
+                Ok(())
+            }
+            BgpInstanceOp::SetClusterId { name, cluster_id } => {
+                find_instance_mut(config, name)?.cluster_id = Some(*cluster_id);
+                Ok(())
+            }
+            BgpInstanceOp::ClearClusterId { name } => {
+                find_instance_mut(config, name)?.cluster_id = None;
                 Ok(())
             }
             BgpInstanceOp::Delete { name } => {
@@ -88,6 +104,7 @@ mod tests {
             asn,
             peer_groups: Vec::new(),
             peers: Vec::new(),
+            cluster_id: None,
             routing_table: None,
         }
     }
@@ -161,6 +178,31 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].router_id, Ipv4Addr::new(10, 0, 0, 1));
+    }
+
+    #[test]
+    fn set_and_clear_cluster_id() {
+        let mut cfg = Config {
+            bgp_instances: vec![instance("r1", 65000)],
+            ..Default::default()
+        };
+        BgpInstanceOp::SetClusterId {
+            name: "r1".to_string(),
+            cluster_id: Ipv4Addr::new(1, 2, 3, 4),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].cluster_id,
+            Some(Ipv4Addr::new(1, 2, 3, 4))
+        );
+
+        BgpInstanceOp::ClearClusterId {
+            name: "r1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].cluster_id, None);
     }
 
     #[test]

@@ -154,6 +154,8 @@ async fn resync(
                 auth: group.auth.as_ref().map(ResolvedAuth::from),
                 next_hop: group.next_hop,
                 address_families: group.address_families.clone(),
+                route_reflector_client: group.route_reflector_client,
+                route_server_client: group.route_server_client,
             })
         })
         .collect();
@@ -161,6 +163,7 @@ async fn resync(
     let local = LocalIdentity {
         asn: own.asn,
         router_id: own.router_id,
+        cluster_id: own.cluster_id.unwrap_or(own.router_id),
     };
 
     sessions.reconcile(vrf, local, peers).await;

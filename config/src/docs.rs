@@ -348,6 +348,45 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Unsets the next-hop field on a peer-group, reverting to the default: 'self' for \
              an eBGP peer-group, 'unchanged' for an iBGP one.",
         ),
+        Topic::SetBgpPeerGroupRouteReflectorClient => (
+            "Mark a peer-group as an RFC 4456 route-reflector client.",
+            "Routes learned from any iBGP peer are reflected to this peer-group's sessions \
+             (and routes learned from this peer-group are reflected to every other iBGP \
+             peer), instead of being withheld by the usual iBGP split-horizon rule. Requires \
+             an iBGP peer-group (remote-as equal to the instance's own asn) and is mutually \
+             exclusive with route-server-client; both are checked at commit time.",
+        ),
+        Topic::ClearBgpPeerGroupRouteReflectorClient => (
+            "Unmark a peer-group as a route-reflector client.",
+            "Reverts this peer-group to the standard iBGP split-horizon rule: routes learned \
+             from one iBGP peer are never re-advertised to another.",
+        ),
+        Topic::SetBgpPeerGroupRouteServerClient => (
+            "Mark a peer-group as an RFC 7947 route-server client.",
+            "This peer-group's own ASN is never prepended to AS_PATH when advertising to it, \
+             and — via RFC 7911 ADD-PATH, if the peer negotiates it — it receives every other \
+             route-server-client's path for a prefix, not just the one instance-wide elected \
+             best path. Requires an eBGP peer-group (remote-as different from the instance's \
+             own asn) and is mutually exclusive with route-reflector-client; both are checked \
+             at commit time.",
+        ),
+        Topic::ClearBgpPeerGroupRouteServerClient => (
+            "Unmark a peer-group as a route-server client.",
+            "Reverts this peer-group to ordinary eBGP advertisement: the instance's own ASN \
+             is prepended to AS_PATH as usual, and only the single elected best path is sent.",
+        ),
+        Topic::SetBgpInstanceClusterId => (
+            "Set a BGP instance's RFC 4456 route-reflector cluster ID.",
+            "Sets the cluster-id field on a BGP instance, written into the CLUSTER_LIST \
+             attribute of every route this instance reflects. Only meaningful when at least \
+             one peer-group has route-reflector-client set; multiple route reflectors serving \
+             the same cluster should share the same cluster-id for correct loop detection.",
+        ),
+        Topic::ClearBgpInstanceClusterId => (
+            "Clear a BGP instance's route-reflector cluster ID override.",
+            "Unsets the cluster-id field, reverting to the default: this instance's own \
+             router-id.",
+        ),
     };
     CommandDoc {
         topic,
@@ -418,6 +457,12 @@ mod tests {
         Topic::ClearBgpPeerGroupAuth,
         Topic::SetBgpPeerGroupNextHop,
         Topic::ClearBgpPeerGroupNextHop,
+        Topic::SetBgpPeerGroupRouteReflectorClient,
+        Topic::ClearBgpPeerGroupRouteReflectorClient,
+        Topic::SetBgpPeerGroupRouteServerClient,
+        Topic::ClearBgpPeerGroupRouteServerClient,
+        Topic::SetBgpInstanceClusterId,
+        Topic::ClearBgpInstanceClusterId,
     ];
 
     #[test]

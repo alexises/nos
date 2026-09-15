@@ -42,8 +42,8 @@ async fn loopback_pair() -> (TcpStream, TcpStream) {
 /// real side's hold timer never fires during the test.
 async fn fake_peer(stream: TcpStream, asn: u32, router_id: Ipv4Addr, hold_time: u16) {
     let (r, w) = stream.into_split();
-    let mut reader = FramedRead::new(r, BgpCodec);
-    let mut writer = FramedWrite::new(w, BgpCodec);
+    let mut reader = FramedRead::new(r, BgpCodec::default());
+    let mut writer = FramedWrite::new(w, BgpCodec::default());
 
     let _ = writer
         .send(BgpMessage::Open(message::build_open(
@@ -84,6 +84,8 @@ async fn two_real_instances_establish_a_session() {
         auth: None,
         next_hop: None,
         address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
+        route_reflector_client: false,
+        route_server_client: false,
     });
     let slot_b = PeerSlot::new(ResolvedPeer {
         remote_address: "10.0.0.1".parse().unwrap(),
@@ -96,6 +98,8 @@ async fn two_real_instances_establish_a_session() {
         auth: None,
         next_hop: None,
         address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
+        route_reflector_client: false,
+        route_server_client: false,
     });
 
     let a_fut = fsm::run(
@@ -104,6 +108,7 @@ async fn two_real_instances_establish_a_session() {
         LocalIdentity {
             asn: a_asn,
             router_id: a_router_id,
+            cluster_id: a_router_id,
         },
         PeerContext {
             remote_address: "10.0.0.2".parse().unwrap(),
@@ -112,6 +117,8 @@ async fn two_real_instances_establish_a_session() {
             keepalive_override: None,
             next_hop: None,
             address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
+            is_rr_client: false,
+            is_rs_client: false,
         },
         slot_a,
         new_bgp_rib(),
@@ -122,6 +129,7 @@ async fn two_real_instances_establish_a_session() {
         LocalIdentity {
             asn: b_asn,
             router_id: b_router_id,
+            cluster_id: b_router_id,
         },
         PeerContext {
             remote_address: "10.0.0.1".parse().unwrap(),
@@ -130,6 +138,8 @@ async fn two_real_instances_establish_a_session() {
             keepalive_override: None,
             next_hop: None,
             address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
+            is_rr_client: false,
+            is_rs_client: false,
         },
         slot_b,
         new_bgp_rib(),
@@ -175,6 +185,8 @@ async fn established_session_honors_configured_non_default_hold_time() {
         auth: None,
         next_hop: None,
         address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
+        route_reflector_client: false,
+        route_server_client: false,
     });
 
     let a_fut = fsm::run(
@@ -183,6 +195,7 @@ async fn established_session_honors_configured_non_default_hold_time() {
         LocalIdentity {
             asn: a_asn,
             router_id: a_router_id,
+            cluster_id: a_router_id,
         },
         PeerContext {
             remote_address: "10.0.0.2".parse().unwrap(),
@@ -191,6 +204,8 @@ async fn established_session_honors_configured_non_default_hold_time() {
             keepalive_override: None,
             next_hop: None,
             address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
+            is_rr_client: false,
+            is_rs_client: false,
         },
         slot_a,
         new_bgp_rib(),
@@ -234,6 +249,8 @@ async fn established_session_reports_status_via_peer_slot() {
         auth: None,
         next_hop: None,
         address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
+        route_reflector_client: false,
+        route_server_client: false,
     });
     let mut status = slot_a.status_receiver();
 
@@ -243,6 +260,7 @@ async fn established_session_reports_status_via_peer_slot() {
         LocalIdentity {
             asn: a_asn,
             router_id: a_router_id,
+            cluster_id: a_router_id,
         },
         PeerContext {
             remote_address: "10.0.0.2".parse().unwrap(),
@@ -251,6 +269,8 @@ async fn established_session_reports_status_via_peer_slot() {
             keepalive_override: None,
             next_hop: None,
             address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
+            is_rr_client: false,
+            is_rs_client: false,
         },
         slot_a,
         new_bgp_rib(),
@@ -300,6 +320,7 @@ async fn collision_leaves_exactly_one_side_running() {
     let local = LocalIdentity {
         asn: 65001,
         router_id: Ipv4Addr::new(5, 5, 5, 5),
+        cluster_id: Ipv4Addr::new(5, 5, 5, 5),
     };
 
     let fake_active = tokio::spawn(fake_peer(active_fake, remote_asn, remote_router_id, 90));
@@ -316,6 +337,8 @@ async fn collision_leaves_exactly_one_side_running() {
         auth: None,
         next_hop: None,
         address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
+        route_reflector_client: false,
+        route_server_client: false,
     });
 
     let peer_ctx = || PeerContext {
@@ -325,6 +348,8 @@ async fn collision_leaves_exactly_one_side_running() {
         keepalive_override: None,
         next_hop: None,
         address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
+        is_rr_client: false,
+        is_rs_client: false,
     };
 
     // Both sides share one `PeerSlot` (they're racing for the same peer), so

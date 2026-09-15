@@ -114,6 +114,18 @@ pub enum Topic {
     SetBgpPeerGroupNextHop,
     /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearNextHop)`
     ClearBgpPeerGroupNextHop,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetRouteReflectorClient)`
+    SetBgpPeerGroupRouteReflectorClient,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearRouteReflectorClient)`
+    ClearBgpPeerGroupRouteReflectorClient,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetRouteServerClient)`
+    SetBgpPeerGroupRouteServerClient,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearRouteServerClient)`
+    ClearBgpPeerGroupRouteServerClient,
+    /// `ConfigOp::BgpInstance(BgpInstanceOp::SetClusterId)`
+    SetBgpInstanceClusterId,
+    /// `ConfigOp::BgpInstance(BgpInstanceOp::ClearClusterId)`
+    ClearBgpInstanceClusterId,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

@@ -161,6 +161,7 @@ mod tests {
             asn,
             peer_groups: Vec::new(),
             peers: Vec::new(),
+            cluster_id: None,
             routing_table: None,
         }
     }

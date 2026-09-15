@@ -142,6 +142,34 @@ fn negotiate_address_families(open: &OpenMessage, ctx: &NegotiationContext) -> (
     )
 }
 
+/// Whether the peer's OPEN granted RFC 7911 ADD-PATH for IPv4/IPv6 unicast —
+/// always `(false, false)` unless `ctx.is_rs_client`, since this session
+/// only ever advertises the capability itself in that case (see `run`);
+/// otherwise `true` for any AFI where the peer's OPEN carried an `AddPath`
+/// tuple with a non-zero `send_receive` (this crate always offers `3`/both
+/// itself, so it doesn't distinguish partial send-only/receive-only grants —
+/// `ponytail: treats ADD-PATH as fully bidirectional once negotiated`).
+fn negotiate_add_path(open: &OpenMessage, ctx: &NegotiationContext) -> (bool, bool) {
+    if !ctx.is_rs_client {
+        return (false, false);
+    }
+    let peer_add_path: HashSet<u16> = open
+        .capabilities
+        .iter()
+        .filter_map(|c| match c {
+            message::Capability::AddPath(tuples) => Some(tuples.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|t| t.send_receive != 0)
+        .map(|t| t.afi)
+        .collect();
+    (
+        peer_add_path.contains(&AFI_IPV4),
+        peer_add_path.contains(&AFI_IPV6),
+    )
+}
+
 /// RFC 4271's own suggested `ConnectRetryTimer` default. Replaces
 /// `session.rs`'s previous placeholder (30s), which was explicitly
 /// documented as standing in "until the BGP FSM exists." Used by
@@ -167,15 +195,28 @@ pub struct PeerContext {
     /// `remote_address`'s own family (RFC 8950), see
     /// `build_mp_capabilities`/`negotiate_address_families`.
     pub address_families: Vec<AddressFamily>,
+    /// RFC 4456 route-reflector client — passed straight through to
+    /// `crate::rib::BgpRib::peer_established`, no FSM-level effect.
+    pub is_rr_client: bool,
+    /// RFC 7947 route-server client — gates whether this session's own OPEN
+    /// advertises the RFC 7911 ADD-PATH capability at all (see `run`) and is
+    /// passed through to `BgpRib::peer_established`.
+    pub is_rs_client: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // each bool is an independently-negotiated capability
 struct RemoteInfo {
     asn: u32,
     bgp_id: Ipv4Addr,
     mp_bgp_negotiated: bool,
     negotiated_ipv4_unicast: bool,
     negotiated_ipv6_unicast: bool,
+    /// RFC 7911 ADD-PATH negotiated for this AFI — always `false` unless
+    /// this session is `is_rs_client` (only such sessions ever advertise the
+    /// capability, see `run`) and the peer echoed it back.
+    add_path_ipv4: bool,
+    add_path_ipv6: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +252,8 @@ enum Action {
         mp_bgp_negotiated: bool,
         negotiated_ipv4_unicast: bool,
         negotiated_ipv6_unicast: bool,
+        add_path_ipv4: bool,
+        add_path_ipv6: bool,
     },
     Close,
 }
@@ -221,6 +264,11 @@ struct NegotiationContext {
     keepalive_override: Option<u16>,
     address_families: Vec<AddressFamily>,
     transport_afi: u16,
+    /// See `PeerContext::is_rs_client` — gates whether `negotiate_add_path`
+    /// ever returns `true` at all (this session only ever offers the
+    /// capability itself when this is set, so a peer's own advertisement of
+    /// it is irrelevant otherwise).
+    is_rs_client: bool,
 }
 
 /// Pure state transition core — the unit-test surface for this module.
@@ -235,6 +283,8 @@ fn step(state: State, event: Event, ctx: &NegotiationContext) -> (Option<State>,
                 mp_bgp_negotiated: remote.mp_bgp_negotiated,
                 negotiated_ipv4_unicast: remote.negotiated_ipv4_unicast,
                 negotiated_ipv6_unicast: remote.negotiated_ipv6_unicast,
+                add_path_ipv4: remote.add_path_ipv4,
+                add_path_ipv6: remote.add_path_ipv6,
             }],
         ),
         (State::Established(remote), Event::KeepaliveReceived) => {
@@ -317,12 +367,15 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
     };
     let (mp_bgp_negotiated, negotiated_ipv4_unicast, negotiated_ipv6_unicast) =
         negotiate_address_families(open, ctx);
+    let (add_path_ipv4, add_path_ipv6) = negotiate_add_path(open, ctx);
     let remote = RemoteInfo {
         asn: remote_asn,
         bgp_id: open.bgp_identifier,
         mp_bgp_negotiated,
         negotiated_ipv4_unicast,
         negotiated_ipv6_unicast,
+        add_path_ipv4,
+        add_path_ipv6,
     };
     (
         Some(State::OpenConfirm(remote)),
@@ -391,6 +444,7 @@ pub enum FsmOutcome {
 /// `BgpMessage::Update`s back onto the wire from a dedicated `select!` arm,
 /// and unconditionally deregistered (`peer_disconnected`) at this function's
 /// single exit point — whatever the reason this session ended.
+#[allow(clippy::similar_names)] // add_path_afis (wire AFI ints) vs. add_path_afs (AddressFamily)
 pub async fn run(
     stream: TcpStream,
     role: collision::Role,
@@ -409,8 +463,8 @@ pub async fn run(
     let (outbox_tx, mut outbox_rx) = mpsc::unbounded_channel::<OutboundUpdate>();
 
     let (read_half, write_half) = stream.into_split();
-    let mut reader = FramedRead::new(read_half, BgpCodec);
-    let mut writer = FramedWrite::new(write_half, BgpCodec);
+    let mut reader = FramedRead::new(read_half, BgpCodec::default());
+    let mut writer = FramedWrite::new(write_half, BgpCodec::default());
 
     let ctx = NegotiationContext {
         expected_remote_as: peer.expected_remote_as,
@@ -418,6 +472,7 @@ pub async fn run(
         keepalive_override: peer.keepalive_override,
         address_families: peer.address_families.clone(),
         transport_afi: afi_of_addr(peer.remote_address),
+        is_rs_client: peer.is_rs_client,
     };
 
     let mut state = State::OpenSent;
@@ -463,6 +518,21 @@ pub async fn run(
             ctx.transport_afi,
         ));
         open.capabilities.push(message::Capability::RouteRefresh);
+        if peer.is_rs_client {
+            // Only ever advertised for a route-server-client peer-group,
+            // unlike this crate's other capabilities — see `bgp/CLAUDE.md`'s
+            // "Route reflection and route server" section for why.
+            let tuples = peer
+                .address_families
+                .iter()
+                .map(|&af| message::AddPathTuple {
+                    afi: afi_of(af),
+                    safi: 1,
+                    send_receive: 3,
+                })
+                .collect();
+            open.capabilities.push(message::Capability::AddPath(tuples));
+        }
         if writer.send(BgpMessage::Open(open)).await.is_err() {
             break 'session FsmOutcome::TcpError;
         }
@@ -645,6 +715,8 @@ pub async fn run(
                         mp_bgp_negotiated,
                         negotiated_ipv4_unicast,
                         negotiated_ipv6_unicast,
+                        add_path_ipv4,
+                        add_path_ipv6,
                     } => {
                         slot.mark_established(role).await;
                         let mut negotiated_afs = HashSet::new();
@@ -654,6 +726,25 @@ pub async fn run(
                         if *negotiated_ipv6_unicast {
                             negotiated_afs.insert(AddressFamily::Ipv6Unicast);
                         }
+                        let mut add_path_afis = HashSet::new();
+                        let mut add_path_afs = HashSet::new();
+                        if *add_path_ipv4 {
+                            add_path_afis.insert(AFI_IPV4);
+                            add_path_afs.insert(AddressFamily::Ipv4Unicast);
+                        }
+                        if *add_path_ipv6 {
+                            add_path_afis.insert(AFI_IPV6);
+                            add_path_afs.insert(AddressFamily::Ipv6Unicast);
+                        }
+                        // Must be set before any further UPDATE is
+                        // decoded/encoded on this connection — done here,
+                        // right after Established, the same point every
+                        // other negotiated-capability field is applied.
+                        reader
+                            .decoder_mut()
+                            .add_path_afis
+                            .clone_from(&add_path_afis);
+                        writer.encoder_mut().add_path_afis = add_path_afis;
                         bgp_rib.lock().await.peer_established(
                             peer.remote_address,
                             remote_is_ibgp,
@@ -661,6 +752,9 @@ pub async fn run(
                             negotiated_afs,
                             *mp_bgp_negotiated,
                             peer.next_hop,
+                            peer.is_rr_client,
+                            peer.is_rs_client,
+                            add_path_afs,
                             outbox_tx.clone(),
                         );
                         slot.status.send_modify(|s| {
@@ -709,58 +803,80 @@ pub async fn run(
 fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
     match update {
         OutboundUpdate::Announce(route) if route.use_mp => {
+            let path_ids = route.path_id.map_or_else(Vec::new, |id| vec![id]);
             BgpMessage::Update(message::UpdateMessage {
                 withdrawn_routes: Vec::new(),
+                withdrawn_path_ids: Vec::new(),
                 nlri: Vec::new(),
+                nlri_path_ids: Vec::new(),
                 attributes: Some(message::PathAttributes {
                     origin: route.origin,
                     as_path: route.as_path,
                     next_hop: Ipv4Addr::UNSPECIFIED, // unused: the real next-hop lives in mp_reach
                     local_pref: route.local_pref,
                     med: route.med,
+                    originator_id: route.originator_id,
+                    cluster_list: route.cluster_list,
                 }),
                 mp_reach: vec![message::MpReachNlri {
                     afi: afi_of_ipnet(route.prefix),
                     safi: 1,
                     next_hop: route.next_hop,
                     nlri: vec![route.prefix],
+                    nlri_path_ids: path_ids,
                 }],
                 mp_unreach: Vec::new(),
             })
         }
-        OutboundUpdate::Announce(route) => BgpMessage::Update(message::UpdateMessage {
-            withdrawn_routes: Vec::new(),
-            nlri: vec![expect_ipv4_net(route.prefix)],
-            attributes: Some(message::PathAttributes {
-                origin: route.origin,
-                as_path: route.as_path,
-                next_hop: expect_ipv4_addr(route.next_hop),
-                local_pref: route.local_pref,
-                med: route.med,
-            }),
-            mp_reach: Vec::new(),
-            mp_unreach: Vec::new(),
-        }),
-        OutboundUpdate::Withdraw(prefix, use_mp) if use_mp => {
+        OutboundUpdate::Announce(route) => {
+            let path_ids = route.path_id.map_or_else(Vec::new, |id| vec![id]);
             BgpMessage::Update(message::UpdateMessage {
                 withdrawn_routes: Vec::new(),
+                withdrawn_path_ids: Vec::new(),
+                nlri: vec![expect_ipv4_net(route.prefix)],
+                nlri_path_ids: path_ids,
+                attributes: Some(message::PathAttributes {
+                    origin: route.origin,
+                    as_path: route.as_path,
+                    next_hop: expect_ipv4_addr(route.next_hop),
+                    local_pref: route.local_pref,
+                    med: route.med,
+                    originator_id: route.originator_id,
+                    cluster_list: route.cluster_list,
+                }),
+                mp_reach: Vec::new(),
+                mp_unreach: Vec::new(),
+            })
+        }
+        OutboundUpdate::Withdraw(prefix, use_mp, path_id) if use_mp => {
+            let path_ids = path_id.map_or_else(Vec::new, |id| vec![id]);
+            BgpMessage::Update(message::UpdateMessage {
+                withdrawn_routes: Vec::new(),
+                withdrawn_path_ids: Vec::new(),
                 nlri: Vec::new(),
+                nlri_path_ids: Vec::new(),
                 attributes: None,
                 mp_reach: Vec::new(),
                 mp_unreach: vec![message::MpUnreachNlri {
                     afi: afi_of_ipnet(prefix),
                     safi: 1,
                     withdrawn: vec![prefix],
+                    withdrawn_path_ids: path_ids,
                 }],
             })
         }
-        OutboundUpdate::Withdraw(prefix, _) => BgpMessage::Update(message::UpdateMessage {
-            withdrawn_routes: vec![expect_ipv4_net(prefix)],
-            nlri: Vec::new(),
-            attributes: None,
-            mp_reach: Vec::new(),
-            mp_unreach: Vec::new(),
-        }),
+        OutboundUpdate::Withdraw(prefix, _, path_id) => {
+            let path_ids = path_id.map_or_else(Vec::new, |id| vec![id]);
+            BgpMessage::Update(message::UpdateMessage {
+                withdrawn_routes: vec![expect_ipv4_net(prefix)],
+                withdrawn_path_ids: path_ids,
+                nlri: Vec::new(),
+                nlri_path_ids: Vec::new(),
+                attributes: None,
+                mp_reach: Vec::new(),
+                mp_unreach: Vec::new(),
+            })
+        }
     }
 }
 
@@ -829,6 +945,7 @@ mod tests {
             keepalive_override: None,
             address_families: vec![AddressFamily::Ipv4Unicast],
             transport_afi: AFI_IPV4,
+            is_rs_client: false,
         }
     }
 
@@ -843,6 +960,7 @@ mod tests {
             keepalive_override,
             address_families: vec![AddressFamily::Ipv4Unicast],
             transport_afi: AFI_IPV4,
+            is_rs_client: false,
         }
     }
 
@@ -950,6 +1068,8 @@ mod tests {
             mp_bgp_negotiated: false,
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
+            add_path_ipv4: false,
+            add_path_ipv6: false,
         };
         let (next, actions) = step(
             State::OpenConfirm(remote),
@@ -970,6 +1090,8 @@ mod tests {
             mp_bgp_negotiated: false,
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
+            add_path_ipv4: false,
+            add_path_ipv6: false,
         };
         for state in [
             State::OpenSent,
@@ -1018,6 +1140,8 @@ mod tests {
             mp_bgp_negotiated: false,
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
+            add_path_ipv4: false,
+            add_path_ipv6: false,
         };
         let (next, actions) = step(
             State::Established(remote),
@@ -1036,6 +1160,8 @@ mod tests {
             mp_bgp_negotiated: false,
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
+            add_path_ipv4: false,
+            add_path_ipv6: false,
         };
         let (next, actions) = step(
             State::Established(remote),

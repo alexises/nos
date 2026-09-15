@@ -34,6 +34,13 @@ pub struct BgpInstance {
     #[garde(dive)]
     pub peers: Vec<BgpPeer>,
 
+    /// RFC 4456 route reflector cluster id. `None` resolves to this
+    /// instance's own `router_id` — the standard single-RR-per-cluster
+    /// convention. Only meaningful when at least one peer-group has
+    /// `route_reflector_client` set; harmless (unused) otherwise.
+    #[garde(skip)]
+    pub cluster_id: Option<Ipv4Addr>,
+
     /// The name of the `RoutingTable` that claims this instance (i.e. the
     /// VRF it belongs to), mirrored from that table's `bgp_instance` field.
     /// Derived and read-only: never set by any `BgpInstanceOp`, recomputed
@@ -44,6 +51,43 @@ pub struct BgpInstance {
     /// routing table. Deliberately not rendered by `nos-cli`.
     #[garde(skip)]
     pub routing_table: Option<String>,
+}
+
+/// Cross-instance check needing both `BgpInstance.asn` and a sibling
+/// `BgpPeerGroup`'s fields — a per-field `custom` closure scoped to
+/// `peer_groups` can't see `asn` (a different field on the same parent), so
+/// this is wired one level up, on `Config.bgp_instances` itself (mirrors
+/// `routing_table::valid_redistribute_rules`'s wiring on
+/// `Config.routing_tables`).
+///
+/// - `route_reflector_client` and `route_server_client` are mutually
+///   exclusive on the same peer-group.
+/// - `route_reflector_client` requires an iBGP peer-group (`remote_as ==
+///   asn`) — reflection is an iBGP-only concept (RFC 4456).
+/// - `route_server_client` requires an eBGP peer-group (`remote_as != asn`)
+///   — a route server's transparency (no `AS_PATH` prepend) is an eBGP concept
+///   (RFC 7947).
+pub(crate) fn valid_route_reflection_and_server(instances: &[BgpInstance]) -> garde::Result {
+    for instance in instances {
+        for group in &instance.peer_groups {
+            if group.route_reflector_client && group.route_server_client {
+                return Err(garde::Error::new(
+                    "route-reflector-client and route-server-client are mutually exclusive",
+                ));
+            }
+            if group.route_reflector_client && group.remote_as != instance.asn {
+                return Err(garde::Error::new(
+                    "route-reflector-client requires an iBGP peer-group (remote-as must equal this instance's asn)",
+                ));
+            }
+            if group.route_server_client && group.remote_as == instance.asn {
+                return Err(garde::Error::new(
+                    "route-server-client requires an eBGP peer-group (remote-as must differ from this instance's asn)",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -63,6 +107,7 @@ mod tests {
             asn,
             peer_groups: Vec::new(),
             peers: Vec::new(),
+            cluster_id: None,
             routing_table: None,
         }
     }
@@ -124,6 +169,8 @@ mod tests {
                 connect_retry_time: None,
                 auth: None,
                 next_hop: None,
+                route_reflector_client: false,
+                route_server_client: false,
             },
             BgpPeerGroup {
                 name: "invalid".to_string(),
@@ -135,9 +182,73 @@ mod tests {
                 connect_retry_time: None,
                 auth: None,
                 next_hop: None,
+                route_reflector_client: false,
+                route_server_client: false,
             },
         ];
         let cfg = config_with(vec![inst]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    fn group_with_flags(
+        name: &str,
+        remote_as: u32,
+        route_reflector_client: bool,
+        route_server_client: bool,
+    ) -> crate::schema::BgpPeerGroup {
+        use crate::schema::AddressFamily;
+        crate::schema::BgpPeerGroup {
+            name: name.to_string(),
+            remote_as,
+            source_address: None,
+            address_families: vec![AddressFamily::Ipv4Unicast],
+            hold_time: None,
+            keepalive_interval: None,
+            connect_retry_time: None,
+            auth: None,
+            next_hop: None,
+            route_reflector_client,
+            route_server_client,
+        }
+    }
+
+    #[test]
+    fn route_reflector_and_route_server_client_together_fails() {
+        let mut inst = instance("r1", 65000);
+        inst.peer_groups = vec![group_with_flags("pg1", 65000, true, true)];
+        let cfg = config_with(vec![inst]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn route_reflector_client_on_ebgp_group_fails() {
+        let mut inst = instance("r1", 65000);
+        inst.peer_groups = vec![group_with_flags("pg1", 65001, true, false)];
+        let cfg = config_with(vec![inst]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn route_reflector_client_on_ibgp_group_passes() {
+        let mut inst = instance("r1", 65000);
+        inst.peer_groups = vec![group_with_flags("pg1", 65000, true, false)];
+        let cfg = config_with(vec![inst]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn route_server_client_on_ibgp_group_fails() {
+        let mut inst = instance("r1", 65000);
+        inst.peer_groups = vec![group_with_flags("pg1", 65000, false, true)];
+        let cfg = config_with(vec![inst]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn route_server_client_on_ebgp_group_passes() {
+        let mut inst = instance("r1", 65000);
+        inst.peer_groups = vec![group_with_flags("pg1", 65001, false, true)];
+        let cfg = config_with(vec![inst]);
+        cfg.validate_with(&cfg).unwrap();
     }
 }

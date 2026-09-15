@@ -337,6 +337,8 @@ mod tests {
             auth: None,
             next_hop: None,
             address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
+            route_reflector_client: false,
+            route_server_client: false,
         })
     }
 

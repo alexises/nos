@@ -24,6 +24,7 @@
 //! still decodes as `BgpMessage::Unhandled` so the codec never chokes on one
 //! arriving.
 
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -57,16 +58,21 @@ const CAP_ROUTE_REFRESH: u8 = 2;
 /// NLRI-SAFI(2) NextHop-AFI(2)` tuples — note the NLRI-SAFI field is 2 bytes
 /// here, unlike `CAP_MULTIPROTOCOL`'s 1-byte SAFI.
 const CAP_EXTENDED_NEXT_HOP: u8 = 5;
+/// RFC 7911 §3 ADD-PATH capability: one or more `AFI(2) SAFI(1)
+/// SendReceive(1)` tuples.
+const CAP_ADD_PATH: u8 = 69;
 
 /// AFI values this crate understands (RFC 4760's registry has many more).
-const AFI_IPV4: u16 = 1;
-const AFI_IPV6: u16 = 2;
+pub(crate) const AFI_IPV4: u16 = 1;
+pub(crate) const AFI_IPV6: u16 = 2;
 
 const ATTR_ORIGIN: u8 = 1;
 const ATTR_AS_PATH: u8 = 2;
 const ATTR_NEXT_HOP: u8 = 3;
 const ATTR_MULTI_EXIT_DISC: u8 = 4;
 const ATTR_LOCAL_PREF: u8 = 5;
+const ATTR_ORIGINATOR_ID: u8 = 9;
+const ATTR_CLUSTER_LIST: u8 = 10;
 const ATTR_MP_REACH_NLRI: u8 = 14;
 const ATTR_MP_UNREACH_NLRI: u8 = 15;
 /// RFC 4271 §4.3 attribute flag bit indicating a 2-byte (rather than 1-byte)
@@ -161,7 +167,7 @@ pub enum CeaseSubcode {
 /// One OPEN capability this crate understands. An unrecognized capability
 /// code (or one with an unexpected length) is silently dropped on decode,
 /// same skip-by-length philosophy as an unknown path attribute.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Capability {
     /// RFC 6793 code 65.
     FourOctetAsn(u32),
@@ -177,6 +183,18 @@ pub enum Capability {
     },
     /// RFC 2918 code 2: this session accepts `ROUTE_REFRESH` messages.
     RouteRefresh,
+    /// RFC 7911 code 69: one or more AFI/SAFI ADD-PATH grants.
+    AddPath(Vec<AddPathTuple>),
+}
+
+/// One RFC 7911 ADD-PATH grant: `afi`/`safi` NLRI may carry a 4-byte Path
+/// Identifier, in the direction(s) `send_receive` names (1 = receive, 2 =
+/// send, 3 = both — "send"/"receive" from the *advertiser's* perspective).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddPathTuple {
+    pub afi: u16,
+    pub safi: u8,
+    pub send_receive: u8,
 }
 
 /// An OPEN message. See [`Capability`] for the capabilities this crate
@@ -234,6 +252,15 @@ pub struct PathAttributes {
     /// §5.1.4) — this crate never invents one, same convention as
     /// `local_pref`.
     pub med: Option<u32>,
+    /// RFC 4456 §5 `ORIGINATOR_ID` — set by the first route reflector to
+    /// reflect this route, never overwritten by a later one. `Some` iff the
+    /// wire message actually carried it.
+    pub originator_id: Option<Ipv4Addr>,
+    /// RFC 4456 §5 `CLUSTER_LIST` — one cluster-id prepended by each route
+    /// reflector in the path, nearest first. Empty iff the wire message
+    /// carried no `CLUSTER_LIST` at all (never reflected, or a reflector
+    /// omitting it purely because a route with no prior list needed one).
+    pub cluster_list: Vec<Ipv4Addr>,
 }
 
 /// RFC 4760 `MP_REACH_NLRI`: one AFI/SAFI batch of announced routes sharing
@@ -246,6 +273,10 @@ pub struct MpReachNlri {
     pub safi: u8,
     pub next_hop: IpAddr,
     pub nlri: Vec<IpNet>,
+    /// RFC 7911 ADD-PATH identifiers, aligned by index with `nlri`. Empty
+    /// unless this AFI negotiated ADD-PATH on this session — never
+    /// partially filled.
+    pub nlri_path_ids: Vec<u32>,
 }
 
 /// RFC 4760 `MP_UNREACH_NLRI`: one AFI/SAFI batch of withdrawn routes.
@@ -254,6 +285,9 @@ pub struct MpUnreachNlri {
     pub afi: u16,
     pub safi: u8,
     pub withdrawn: Vec<IpNet>,
+    /// RFC 7911 ADD-PATH identifiers, aligned by index with `withdrawn`.
+    /// Empty unless this AFI negotiated ADD-PATH on this session.
+    pub withdrawn_path_ids: Vec<u32>,
 }
 
 /// An RFC 4271 UPDATE message. `withdrawn_routes`/`nlri`/`attributes.next_hop`
@@ -265,7 +299,14 @@ pub struct MpUnreachNlri {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateMessage {
     pub withdrawn_routes: Vec<Ipv4Net>,
+    /// RFC 7911 ADD-PATH identifiers, aligned by index with
+    /// `withdrawn_routes`. Empty unless IPv4 unicast negotiated ADD-PATH on
+    /// this session.
+    pub withdrawn_path_ids: Vec<u32>,
     pub nlri: Vec<Ipv4Net>,
+    /// RFC 7911 ADD-PATH identifiers, aligned by index with `nlri`. Empty
+    /// unless IPv4 unicast negotiated ADD-PATH on this session.
+    pub nlri_path_ids: Vec<u32>,
     pub attributes: Option<PathAttributes>,
     pub mp_reach: Vec<MpReachNlri>,
     pub mp_unreach: Vec<MpUnreachNlri>,
@@ -328,8 +369,17 @@ pub fn is_valid_bgp_identifier(id: Ipv4Addr) -> bool {
     !id.is_unspecified() && !id.is_broadcast() && !id.is_multicast()
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct BgpCodec;
+/// `add_path_afis` is empty by default (identical wire behavior to before
+/// RFC 7911 support existed) and is set once, right after this session
+/// reaches `Established` and negotiation is known — see
+/// `fsm::run`'s `Action::ReportEstablished` handling. Only ever non-empty
+/// for a `route_server_client` peer-group (see `bgp/CLAUDE.md`'s "Route
+/// reflection and route server" section for why ADD-PATH isn't advertised
+/// unconditionally like this crate's other capabilities).
+#[derive(Debug, Clone, Default)]
+pub struct BgpCodec {
+    pub add_path_afis: HashSet<u16>,
+}
 
 impl Decoder for BgpCodec {
     type Item = BgpMessage;
@@ -358,7 +408,7 @@ impl Decoder for BgpCodec {
 
         let message = match message_type {
             TYPE_OPEN => BgpMessage::Open(parse_open(&body)?),
-            TYPE_UPDATE => BgpMessage::Update(parse_update(&body)?),
+            TYPE_UPDATE => BgpMessage::Update(parse_update(&body, &self.add_path_afis)?),
             TYPE_KEEPALIVE => {
                 if !body.is_empty() {
                     return Err(WireError::BadLength(length));
@@ -484,6 +534,19 @@ fn parse_capabilities(mut data: &[u8]) -> Result<Vec<Capability>, WireError> {
                     });
                 }
             }
+            CAP_ADD_PATH if cap_len.is_multiple_of(4) => {
+                let tuples = cap_value
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|tuple| AddPathTuple {
+                        afi: u16::from_be_bytes([tuple[0], tuple[1]]),
+                        safi: tuple[2],
+                        send_receive: tuple[3],
+                    })
+                    .collect();
+                capabilities.push(Capability::AddPath(tuples));
+            }
             // Unknown capability code, or a known one with an unexpected
             // length: skip by declared length, never an error.
             _ => {}
@@ -554,6 +617,18 @@ fn encode_open(open: &OpenMessage) -> Vec<u8> {
                 cap_bytes.push(CAP_ROUTE_REFRESH);
                 cap_bytes.push(0);
             }
+            Capability::AddPath(tuples) => {
+                cap_bytes.push(CAP_ADD_PATH);
+                cap_bytes.push(
+                    u8::try_from(tuples.len() * 4)
+                        .expect("this NOS's small, fixed capability set always fits in a u8"),
+                );
+                for tuple in tuples {
+                    cap_bytes.extend_from_slice(&tuple.afi.to_be_bytes());
+                    cap_bytes.push(tuple.safi);
+                    cap_bytes.push(tuple.send_receive);
+                }
+            }
         }
     }
 
@@ -590,14 +665,20 @@ fn encode_notification(n: &NotificationMessage) -> Vec<u8> {
 
 /// RFC 4271 §4.3 prefix bit-packing: `prefix_len` (1 byte) followed by the
 /// minimum number of whole octets needed to hold that many bits of the
-/// address, zero-padded. Decodes a `[prefix_len][octets...]` list that
-/// continues until the byte slice is exhausted (both withdrawn-routes and
-/// NLRI use this same encoding, with no count field of their own — the
-/// caller already knows where the list ends). `afi` picks the address width
-/// (4 bytes for `AFI_IPV4`, 16 for `AFI_IPV6`) and the resulting prefix-length
+/// address, zero-padded — optionally preceded by a 4-byte RFC 7911 ADD-PATH
+/// Path Identifier when `with_ids` is set. Decodes a list that continues
+/// until the byte slice is exhausted (both withdrawn-routes and NLRI use
+/// this same encoding, with no count field of their own — the caller
+/// already knows where the list ends). `afi` picks the address width (4
+/// bytes for `AFI_IPV4`, 16 for `AFI_IPV6`) and the resulting prefix-length
 /// cap (32/128); any other AFI is `MalformedUpdate` — this crate only
-/// understands unicast IPv4/IPv6.
-fn decode_prefixes(afi: u16, mut data: &[u8]) -> Result<Vec<IpNet>, WireError> {
+/// understands unicast IPv4/IPv6. Returns the path ids alongside the
+/// prefixes, aligned by index — empty when `with_ids` is false.
+fn decode_prefixes(
+    afi: u16,
+    mut data: &[u8],
+    with_ids: bool,
+) -> Result<(Vec<IpNet>, Vec<u32>), WireError> {
     let addr_bytes: usize = match afi {
         AFI_IPV4 => 4,
         AFI_IPV6 => 16,
@@ -606,7 +687,21 @@ fn decode_prefixes(afi: u16, mut data: &[u8]) -> Result<Vec<IpNet>, WireError> {
     let max_prefix_len = u8::try_from(addr_bytes * 8).unwrap();
 
     let mut prefixes = Vec::new();
+    let mut path_ids = Vec::new();
     while !data.is_empty() {
+        let path_id = if with_ids {
+            if data.len() < 4 {
+                return Err(WireError::MalformedUpdate);
+            }
+            let id = u32::from_be_bytes(data[..4].try_into().unwrap());
+            data = &data[4..];
+            id
+        } else {
+            0
+        };
+        if data.is_empty() {
+            return Err(WireError::MalformedUpdate);
+        }
         let prefix_len = data[0];
         if prefix_len > max_prefix_len {
             return Err(WireError::MalformedUpdate);
@@ -624,12 +719,18 @@ fn decode_prefixes(afi: u16, mut data: &[u8]) -> Result<Vec<IpNet>, WireError> {
         };
         let net = IpNet::new(addr, prefix_len).map_err(|_| WireError::MalformedUpdate)?;
         prefixes.push(net);
+        if with_ids {
+            path_ids.push(path_id);
+        }
         data = &data[1 + byte_len..];
     }
-    Ok(prefixes)
+    Ok((prefixes, path_ids))
 }
 
-fn encode_prefix(net: IpNet, out: &mut Vec<u8>) {
+fn encode_prefix(net: IpNet, path_id: Option<u32>, out: &mut Vec<u8>) {
+    if let Some(id) = path_id {
+        out.extend_from_slice(&id.to_be_bytes());
+    }
     let prefix_len = net.prefix_len();
     let byte_len = usize::from(prefix_len).div_ceil(8);
     out.push(prefix_len);
@@ -639,10 +740,13 @@ fn encode_prefix(net: IpNet, out: &mut Vec<u8>) {
     }
 }
 
-fn encode_prefixes(nets: &[IpNet]) -> Vec<u8> {
+/// Encodes `nets`, attaching each corresponding entry of `path_ids` (must be
+/// either empty — no ADD-PATH — or exactly `nets.len()` long) as a leading
+/// Path Identifier per prefix.
+fn encode_prefixes(nets: &[IpNet], path_ids: &[u32]) -> Vec<u8> {
     let mut out = Vec::new();
-    for net in nets {
-        encode_prefix(*net, &mut out);
+    for (i, net) in nets.iter().enumerate() {
+        encode_prefix(*net, path_ids.get(i).copied(), &mut out);
     }
     out
 }
@@ -651,19 +755,21 @@ fn encode_prefixes(nets: &[IpNet]) -> Vec<u8> {
 /// legacy withdrawn-routes/NLRI fields — `decode_prefixes` with `afi ==
 /// AFI_IPV4` only ever constructs `IpNet::V4`, so the `V6` arm is
 /// unreachable.
-fn decode_prefixes_v4(data: &[u8]) -> Result<Vec<Ipv4Net>, WireError> {
-    decode_prefixes(AFI_IPV4, data)?
+fn decode_prefixes_v4(data: &[u8], with_ids: bool) -> Result<(Vec<Ipv4Net>, Vec<u32>), WireError> {
+    let (nets, path_ids) = decode_prefixes(AFI_IPV4, data, with_ids)?;
+    let nets = nets
         .into_iter()
         .map(|net| match net {
             IpNet::V4(n) => Ok(n),
             IpNet::V6(_) => Err(WireError::MalformedUpdate),
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((nets, path_ids))
 }
 
-fn encode_prefixes_v4(nets: &[Ipv4Net]) -> Vec<u8> {
+fn encode_prefixes_v4(nets: &[Ipv4Net], path_ids: &[u32]) -> Vec<u8> {
     let nets: Vec<IpNet> = nets.iter().copied().map(IpNet::V4).collect();
-    encode_prefixes(&nets)
+    encode_prefixes(&nets, path_ids)
 }
 
 /// Everything `parse_path_attributes` extracts from one UPDATE's attribute
@@ -677,20 +783,29 @@ struct ParsedAttributes {
     next_hop: Option<Ipv4Addr>,
     local_pref: Option<u32>,
     med: Option<u32>,
+    originator_id: Option<Ipv4Addr>,
+    cluster_list: Vec<Ipv4Addr>,
     mp_reach: Vec<MpReachNlri>,
     mp_unreach: Vec<MpUnreachNlri>,
 }
 
 /// Walks the TLV path-attribute list, decoding `ORIGIN`/`AS_PATH`/`NEXT_HOP`/
-/// `LOCAL_PREF`/`MULTI_EXIT_DISC`/`MP_REACH_NLRI`/`MP_UNREACH_NLRI` and
-/// skipping anything else by its own declared length (mirrors
-/// `parse_optional_parameters`'s handling of unknown OPEN capabilities).
-fn parse_path_attributes(mut data: &[u8]) -> Result<ParsedAttributes, WireError> {
+/// `LOCAL_PREF`/`MULTI_EXIT_DISC`/`ORIGINATOR_ID`/`CLUSTER_LIST`/
+/// `MP_REACH_NLRI`/`MP_UNREACH_NLRI` and skipping anything else by its own
+/// declared length (mirrors `parse_optional_parameters`'s handling of
+/// unknown OPEN capabilities). `add_path_afis` is threaded down into
+/// `MP_REACH_NLRI`/`MP_UNREACH_NLRI` decoding.
+fn parse_path_attributes(
+    mut data: &[u8],
+    add_path_afis: &HashSet<u16>,
+) -> Result<ParsedAttributes, WireError> {
     let mut origin = None;
     let mut as_path = None;
     let mut next_hop = None;
     let mut local_pref = None;
     let mut med = None;
+    let mut originator_id = None;
+    let mut cluster_list = Vec::new();
     let mut mp_reach = Vec::new();
     let mut mp_unreach = Vec::new();
 
@@ -747,8 +862,25 @@ fn parse_path_attributes(mut data: &[u8]) -> Result<ParsedAttributes, WireError>
                 }
                 med = Some(u32::from_be_bytes(value.try_into().unwrap()));
             }
-            ATTR_MP_REACH_NLRI => mp_reach.push(decode_mp_reach(value)?),
-            ATTR_MP_UNREACH_NLRI => mp_unreach.push(decode_mp_unreach(value)?),
+            ATTR_ORIGINATOR_ID => {
+                if value.len() != 4 {
+                    return Err(WireError::MalformedUpdate);
+                }
+                originator_id = Some(Ipv4Addr::new(value[0], value[1], value[2], value[3]));
+            }
+            ATTR_CLUSTER_LIST => {
+                if !value.len().is_multiple_of(4) {
+                    return Err(WireError::MalformedUpdate);
+                }
+                cluster_list = value
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| Ipv4Addr::new(c[0], c[1], c[2], c[3]))
+                    .collect();
+            }
+            ATTR_MP_REACH_NLRI => mp_reach.push(decode_mp_reach(value, add_path_afis)?),
+            ATTR_MP_UNREACH_NLRI => mp_unreach.push(decode_mp_unreach(value, add_path_afis)?),
             _ => {
                 // Unknown attribute type: skip by declared length, never an
                 // error — same philosophy as unrecognized OPEN capabilities.
@@ -764,6 +896,8 @@ fn parse_path_attributes(mut data: &[u8]) -> Result<ParsedAttributes, WireError>
         next_hop,
         local_pref,
         med,
+        originator_id,
+        cluster_list,
         mp_reach,
         mp_unreach,
     })
@@ -772,8 +906,9 @@ fn parse_path_attributes(mut data: &[u8]) -> Result<ParsedAttributes, WireError>
 /// RFC 4760 `MP_REACH_NLRI` value: `AFI(2) SAFI(1) NextHopLen(1)
 /// NextHop(NextHopLen) SNPACount(1) SNPAs... NLRI...`. SNPAs are always
 /// skipped by their own declared lengths (this crate never emits any, but
-/// stays tolerant of a peer that does).
-fn decode_mp_reach(data: &[u8]) -> Result<MpReachNlri, WireError> {
+/// stays tolerant of a peer that does). `add_path_afis` decides whether this
+/// batch's own `afi` carries a leading Path Identifier per NLRI entry.
+fn decode_mp_reach(data: &[u8], add_path_afis: &HashSet<u16>) -> Result<MpReachNlri, WireError> {
     if data.len() < 5 {
         return Err(WireError::MalformedUpdate);
     }
@@ -805,27 +940,35 @@ fn decode_mp_reach(data: &[u8]) -> Result<MpReachNlri, WireError> {
             return Err(WireError::MalformedUpdate);
         }
     }
-    let nlri = decode_prefixes(afi, &data[pos..])?;
+    let (nlri, nlri_path_ids) = decode_prefixes(afi, &data[pos..], add_path_afis.contains(&afi))?;
     Ok(MpReachNlri {
         afi,
         safi,
         next_hop,
         nlri,
+        nlri_path_ids,
     })
 }
 
 /// RFC 4760 `MP_UNREACH_NLRI` value: `AFI(2) SAFI(1) WithdrawnNLRI...`.
-fn decode_mp_unreach(data: &[u8]) -> Result<MpUnreachNlri, WireError> {
+/// `add_path_afis` decides whether this batch's own `afi` carries a leading
+/// Path Identifier per withdrawn entry.
+fn decode_mp_unreach(
+    data: &[u8],
+    add_path_afis: &HashSet<u16>,
+) -> Result<MpUnreachNlri, WireError> {
     if data.len() < 3 {
         return Err(WireError::MalformedUpdate);
     }
     let afi = u16::from_be_bytes([data[0], data[1]]);
     let safi = data[2];
-    let withdrawn = decode_prefixes(afi, &data[3..])?;
+    let (withdrawn, withdrawn_path_ids) =
+        decode_prefixes(afi, &data[3..], add_path_afis.contains(&afi))?;
     Ok(MpUnreachNlri {
         afi,
         safi,
         withdrawn,
+        withdrawn_path_ids,
     })
 }
 
@@ -844,7 +987,7 @@ fn encode_mp_reach(mp: &MpReachNlri) -> Vec<u8> {
         }
     }
     out.push(0); // SNPA count — this crate never advertises any.
-    out.extend_from_slice(&encode_prefixes(&mp.nlri));
+    out.extend_from_slice(&encode_prefixes(&mp.nlri, &mp.nlri_path_ids));
     out
 }
 
@@ -852,7 +995,7 @@ fn encode_mp_unreach(mp: &MpUnreachNlri) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&mp.afi.to_be_bytes());
     out.push(mp.safi);
-    out.extend_from_slice(&encode_prefixes(&mp.withdrawn));
+    out.extend_from_slice(&encode_prefixes(&mp.withdrawn, &mp.withdrawn_path_ids));
     out
 }
 
@@ -891,17 +1034,22 @@ fn parse_as_path(mut data: &[u8]) -> Result<Vec<u32>, WireError> {
 /// itself is non-empty — an MP-only announcement carries its next-hop inside
 /// `MP_REACH_NLRI` instead and may omit the legacy attribute entirely. If
 /// nothing is being announced (a pure withdrawal), `attributes` is `None`,
-/// discarding any attributes present.
-fn parse_update(body: &[u8]) -> Result<UpdateMessage, WireError> {
+/// discarding any attributes present. `add_path_afis` (from the owning
+/// `BgpCodec`) decides whether IPv4 unicast (legacy `withdrawn_routes`/
+/// `nlri`) — and, per-batch, each `mp_reach`/`mp_unreach` entry's own AFI —
+/// carries a leading RFC 7911 Path Identifier.
+fn parse_update(body: &[u8], add_path_afis: &HashSet<u16>) -> Result<UpdateMessage, WireError> {
     if body.len() < 2 {
         return Err(WireError::MalformedUpdate);
     }
+    let with_ids_v4 = add_path_afis.contains(&AFI_IPV4);
     let withdrawn_len = usize::from(u16::from_be_bytes([body[0], body[1]]));
     let mut pos = 2;
     if body.len() < pos + withdrawn_len {
         return Err(WireError::MalformedUpdate);
     }
-    let withdrawn_routes = decode_prefixes_v4(&body[pos..pos + withdrawn_len])?;
+    let (withdrawn_routes, withdrawn_path_ids) =
+        decode_prefixes_v4(&body[pos..pos + withdrawn_len], with_ids_v4)?;
     pos += withdrawn_len;
 
     if body.len() < pos + 2 {
@@ -912,10 +1060,10 @@ fn parse_update(body: &[u8]) -> Result<UpdateMessage, WireError> {
     if body.len() < pos + attr_len {
         return Err(WireError::MalformedUpdate);
     }
-    let parsed = parse_path_attributes(&body[pos..pos + attr_len])?;
+    let parsed = parse_path_attributes(&body[pos..pos + attr_len], add_path_afis)?;
     pos += attr_len;
 
-    let nlri = decode_prefixes_v4(&body[pos..])?;
+    let (nlri, nlri_path_ids) = decode_prefixes_v4(&body[pos..], with_ids_v4)?;
 
     let announcing = !nlri.is_empty() || !parsed.mp_reach.is_empty();
     let attributes = if announcing {
@@ -933,6 +1081,8 @@ fn parse_update(body: &[u8]) -> Result<UpdateMessage, WireError> {
             next_hop,
             local_pref: parsed.local_pref,
             med: parsed.med,
+            originator_id: parsed.originator_id,
+            cluster_list: parsed.cluster_list,
         })
     } else {
         None
@@ -940,7 +1090,9 @@ fn parse_update(body: &[u8]) -> Result<UpdateMessage, WireError> {
 
     Ok(UpdateMessage {
         withdrawn_routes,
+        withdrawn_path_ids,
         nlri,
+        nlri_path_ids,
         attributes,
         mp_reach: parsed.mp_reach,
         mp_unreach: parsed.mp_unreach,
@@ -1024,6 +1176,27 @@ fn encode_attributes(update: &UpdateMessage) -> Vec<u8> {
                 &med.to_be_bytes(),
             );
         }
+        if let Some(originator_id) = attrs.originator_id {
+            encode_attribute(
+                &mut out,
+                ATTR_FLAG_OPTIONAL_NON_TRANSITIVE,
+                ATTR_ORIGINATOR_ID,
+                &originator_id.octets(),
+            );
+        }
+        if !attrs.cluster_list.is_empty() {
+            let value: Vec<u8> = attrs
+                .cluster_list
+                .iter()
+                .flat_map(Ipv4Addr::octets)
+                .collect();
+            encode_attribute(
+                &mut out,
+                ATTR_FLAG_OPTIONAL_NON_TRANSITIVE,
+                ATTR_CLUSTER_LIST,
+                &value,
+            );
+        }
     }
     for mp in &update.mp_reach {
         encode_attribute(
@@ -1052,7 +1225,7 @@ fn encode_attributes(update: &UpdateMessage) -> Vec<u8> {
 fn encode_update(update: &UpdateMessage) -> Vec<u8> {
     let mut body = Vec::new();
 
-    let withdrawn = encode_prefixes_v4(&update.withdrawn_routes);
+    let withdrawn = encode_prefixes_v4(&update.withdrawn_routes, &update.withdrawn_path_ids);
     body.extend_from_slice(
         &u16::try_from(withdrawn.len())
             .unwrap_or(u16::MAX)
@@ -1064,7 +1237,7 @@ fn encode_update(update: &UpdateMessage) -> Vec<u8> {
     body.extend_from_slice(&u16::try_from(attrs.len()).unwrap_or(u16::MAX).to_be_bytes());
     body.extend_from_slice(&attrs);
 
-    body.extend_from_slice(&encode_prefixes_v4(&update.nlri));
+    body.extend_from_slice(&encode_prefixes_v4(&update.nlri, &update.nlri_path_ids));
     body
 }
 
@@ -1073,7 +1246,7 @@ mod tests {
     use super::*;
 
     fn roundtrip(msg: BgpMessage) -> BgpMessage {
-        let mut codec = BgpCodec;
+        let mut codec = BgpCodec::default();
         let mut buf = BytesMut::new();
         codec.encode(msg, &mut buf).unwrap();
         codec.decode(&mut buf).unwrap().unwrap()
@@ -1222,13 +1395,17 @@ mod tests {
             next_hop: Ipv4Addr::new(10, 0, 0, 1),
             local_pref,
             med: None,
+            originator_id: None,
+            cluster_list: vec![],
         }
     }
 
     fn empty_update() -> UpdateMessage {
         UpdateMessage {
             withdrawn_routes: vec![],
+            withdrawn_path_ids: vec![],
             nlri: vec![],
+            nlri_path_ids: vec![],
             attributes: None,
             mp_reach: vec![],
             mp_unreach: vec![],
@@ -1306,6 +1483,7 @@ mod tests {
                 safi: 1,
                 next_hop: "2001:db8::1".parse().unwrap(),
                 nlri: vec!["2001:db8:1::/48".parse().unwrap(), "::/0".parse().unwrap()],
+                nlri_path_ids: vec![],
             }],
             ..empty_update()
         };
@@ -1322,6 +1500,7 @@ mod tests {
                 afi: AFI_IPV6,
                 safi: 1,
                 withdrawn: vec!["2001:db8:1::/48".parse().unwrap()],
+                withdrawn_path_ids: vec![],
             }],
             ..empty_update()
         };
@@ -1344,6 +1523,7 @@ mod tests {
                 safi: 1,
                 next_hop: "2001:db8::1".parse().unwrap(),
                 nlri: vec!["10.0.0.0/24".parse().unwrap()],
+                nlri_path_ids: vec![],
             }],
             ..empty_update()
         };
@@ -1376,7 +1556,7 @@ mod tests {
         // nlri: 10.0.0.0/8
         body.extend_from_slice(&[8, 10]);
 
-        let parsed = parse_update(&body).unwrap();
+        let parsed = parse_update(&body, &HashSet::new()).unwrap();
         assert_eq!(parsed.nlri, vec!["10.0.0.0/8".parse().unwrap()]);
         assert_eq!(
             parsed.attributes,
@@ -1386,6 +1566,8 @@ mod tests {
                 next_hop: Ipv4Addr::new(10, 0, 0, 1),
                 local_pref: None,
                 med: None,
+                originator_id: None,
+                cluster_list: vec![],
             })
         );
     }
@@ -1397,7 +1579,7 @@ mod tests {
         let mut body = vec![0u8, 0u8, 0u8, 0u8];
         body.extend_from_slice(&[8, 10]);
         assert!(matches!(
-            parse_update(&body),
+            parse_update(&body, &HashSet::new()),
             Err(WireError::MalformedUpdate)
         ));
     }
@@ -1407,7 +1589,7 @@ mod tests {
         // withdrawn_routes: one entry with an invalid prefix length (33).
         let body = vec![0u8, 2u8, 33u8, 10u8];
         assert!(matches!(
-            parse_update(&body),
+            parse_update(&body, &HashSet::new()),
             Err(WireError::MalformedUpdate)
         ));
     }
@@ -1418,7 +1600,7 @@ mod tests {
         // of address data follows before the section's declared length ends.
         let body = vec![0u8, 2u8, 24u8, 10u8];
         assert!(matches!(
-            parse_update(&body),
+            parse_update(&body, &HashSet::new()),
             Err(WireError::MalformedUpdate)
         ));
     }
@@ -1429,7 +1611,7 @@ mod tests {
         buf.put_slice(&[0u8; 16]);
         buf.put_u16(19);
         buf.put_u8(4);
-        let mut codec = BgpCodec;
+        let mut codec = BgpCodec::default();
         assert!(matches!(codec.decode(&mut buf), Err(WireError::BadMarker)));
     }
 
@@ -1439,7 +1621,7 @@ mod tests {
         buf.put_slice(&MARKER);
         buf.put_u16(18);
         buf.put_u8(4);
-        let mut codec = BgpCodec;
+        let mut codec = BgpCodec::default();
         assert!(matches!(
             codec.decode(&mut buf),
             Err(WireError::BadLength(18))
@@ -1452,7 +1634,7 @@ mod tests {
         buf.put_slice(&MARKER);
         buf.put_u16(4097);
         buf.put_u8(4);
-        let mut codec = BgpCodec;
+        let mut codec = BgpCodec::default();
         assert!(matches!(
             codec.decode(&mut buf),
             Err(WireError::BadLength(4097))
@@ -1466,7 +1648,7 @@ mod tests {
         buf.put_u16(30);
         buf.put_u8(1);
         // Missing the rest of the OPEN body.
-        let mut codec = BgpCodec;
+        let mut codec = BgpCodec::default();
         assert!(codec.decode(&mut buf).unwrap().is_none());
     }
 

@@ -81,6 +81,7 @@ mod tests {
             asn: 65000,
             peer_groups: Vec::new(),
             peers,
+            cluster_id: None,
             routing_table: None,
         }
     }

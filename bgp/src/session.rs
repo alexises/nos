@@ -45,6 +45,11 @@ pub enum VrfRequirement {
 pub struct LocalIdentity {
     pub asn: u32,
     pub router_id: Ipv4Addr,
+    /// This instance's effective RFC 4456 cluster-id
+    /// (`BgpInstance.cluster_id.unwrap_or(router_id)`, computed by
+    /// `reconcile::resync`) — threaded straight through to
+    /// `crate::rib::BgpRib::set_local_identity`.
+    pub cluster_id: Ipv4Addr,
 }
 
 /// A configured peer with the fields needed to open its TCP session and
@@ -70,6 +75,10 @@ pub struct ResolvedPeer {
     /// straight through to `fsm::PeerContext`, independent of
     /// `remote_address`'s own family (RFC 8950).
     pub address_families: Vec<AddressFamily>,
+    /// The owning peer-group's `route_reflector_client`/`route_server_client`
+    /// — threaded straight through to `fsm::PeerContext`.
+    pub route_reflector_client: bool,
+    pub route_server_client: bool,
 }
 
 /// A peer-group's `BgpAuth` translated into `nos-tcp-auth`'s wire-level
@@ -149,6 +158,7 @@ impl SessionManager {
         let (local, _) = watch::channel(LocalIdentity {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
+            cluster_id: Ipv4Addr::UNSPECIFIED,
         });
         Arc::new(Self {
             instance,
@@ -170,7 +180,10 @@ impl SessionManager {
         if *self.local.borrow() != local {
             let _ = self.local.send(local);
         }
-        self.bgp_rib.lock().await.set_local_asn(local.asn);
+        self.bgp_rib
+            .lock()
+            .await
+            .set_local_identity(local.asn, local.router_id, local.cluster_id);
         if *self.vrf.borrow() != vrf {
             let _ = self.vrf.send(vrf.clone());
         }
@@ -316,6 +329,7 @@ impl SessionManager {
         }
     }
 
+    #[allow(clippy::similar_names)] // is_rr_client (reflector) vs. is_rs_client (server)
     async fn handle_inbound(self: &Arc<Self>, stream: TcpStream, remote: IpAddr) {
         let slot = self.peers.read().await.get(&remote).cloned();
         let Some(slot) = slot else {
@@ -340,6 +354,8 @@ impl SessionManager {
         let keepalive_override = slot.peer.keepalive_interval;
         let next_hop = slot.peer.next_hop;
         let address_families = slot.peer.address_families.clone();
+        let is_rr_client = slot.peer.route_reflector_client;
+        let is_rs_client = slot.peer.route_server_client;
         let bgp_rib = self.bgp_rib.clone();
         tokio::spawn(async move {
             let outcome = fsm::run(
@@ -353,6 +369,8 @@ impl SessionManager {
                     keepalive_override,
                     next_hop,
                     address_families,
+                    is_rr_client,
+                    is_rs_client,
                 },
                 slot.clone(),
                 bgp_rib,
@@ -569,6 +587,8 @@ async fn active_connect_loop(
                                 keepalive_override: slot.peer.keepalive_interval,
                                 next_hop: slot.peer.next_hop,
                                 address_families: slot.peer.address_families.clone(),
+                                is_rr_client: slot.peer.route_reflector_client,
+                                is_rs_client: slot.peer.route_server_client,
                             },
                             slot.clone(),
                             bgp_rib.clone(),
@@ -611,6 +631,8 @@ mod tests {
             auth: None,
             next_hop: None,
             address_families: vec![AddressFamily::Ipv4Unicast],
+            route_reflector_client: false,
+            route_server_client: false,
         }
     }
 

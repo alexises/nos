@@ -85,7 +85,7 @@ fn family_of(net: IpNet) -> AddressFamily {
 /// Where a `RibRoute` came from — `Local` for a route pushed in by
 /// `nos-ribd`'s redistribution feed, `Peer(addr)` for one learned from a
 /// specific peer's Adj-RIB-In.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RouteOrigin {
     Local,
     Peer(IpAddr),
@@ -121,16 +121,29 @@ pub struct RibRoute {
     /// §9.1.2.2 "oldest route wins" tiebreak between two eBGP-learned
     /// candidates. Meaningless when `origin == Local`.
     pub received_at: Instant,
+    /// RFC 4456 §5 `ORIGINATOR_ID`, for `origin == Peer(_)` — `Some` iff the
+    /// peer's UPDATE carried it (meaning this route was already reflected at
+    /// least once upstream). Always `None` for `origin == Local`.
+    pub originator_id: Option<Ipv4Addr>,
+    /// RFC 4456 §5 `CLUSTER_LIST`, for `origin == Peer(_)` — one cluster-id
+    /// per route reflector this route has already passed through, nearest
+    /// first. Always empty for `origin == Local`.
+    pub cluster_list: Vec<Ipv4Addr>,
 }
 
 /// One update this instance needs to send out over a specific peer's
 /// session. The `bool` picks the destination peer's wire encoding (`true` =
 /// `MP_REACH_NLRI`/`MP_UNREACH_NLRI`, `false` = legacy plain NLRI — see
 /// `fsm::outbound_update_to_message`), mirroring `AdvertisedRoute::use_mp`.
+/// `Withdraw`'s trailing `Option<u32>` is the RFC 7911 ADD-PATH identifier
+/// being withdrawn — `Some` only ever comes from
+/// `BgpRib::propagate_rs_view`'s per-source fan-out to a
+/// `route_server_client` peer; every other withdrawal path always sends
+/// `None` (no ADD-PATH in use).
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutboundUpdate {
     Announce(AdvertisedRoute),
-    Withdraw(IpNet, bool),
+    Withdraw(IpNet, bool, Option<u32>),
 }
 
 /// A route rewritten for advertisement toward one specific peer.
@@ -138,7 +151,7 @@ pub enum OutboundUpdate {
 pub struct AdvertisedRoute {
     pub prefix: IpNet,
     /// Already rewritten for the destination peer (our ASN prepended iff
-    /// eBGP).
+    /// eBGP and not a `route_server_client`).
     pub as_path: Vec<u32>,
     /// Rewritten per the destination peer-group's effective `NextHopMode` —
     /// either that peer's own session's local address (`SelfAddress`) or the
@@ -156,8 +169,23 @@ pub struct AdvertisedRoute {
     /// an `Ipv4Unicast` prefix), `false` means the legacy plain-NLRI fields
     /// (only ever set for an `Ipv4Unicast` prefix/next-hop).
     pub use_mp: bool,
+    /// `Some` only when reflecting (RFC 4456 §5) — the route's original
+    /// advertising router, set once by the first reflector and never
+    /// rewritten by a later one.
+    pub originator_id: Option<Ipv4Addr>,
+    /// `Some` only when reflecting — the reflected route's `CLUSTER_LIST`
+    /// with this instance's own cluster-id prepended. Empty otherwise.
+    pub cluster_list: Vec<Ipv4Addr>,
+    /// RFC 7911 ADD-PATH identifier — `Some` only when
+    /// `BgpRib::propagate_rs_view` is sending one of several concurrent
+    /// paths for the same prefix to a `route_server_client` peer that
+    /// negotiated ADD-PATH for this family. `None` for every ordinary
+    /// single-best-path advertisement.
+    pub path_id: Option<u32>,
 }
 
+#[allow(clippy::struct_excessive_bools)] // each bool is an independent, unrelated per-session flag
+#[allow(clippy::similar_names)] // is_rr_client (reflector) vs. is_rs_client (server) are deliberately parallel
 struct PeerOutbox {
     tx: mpsc::UnboundedSender<OutboundUpdate>,
     is_ibgp: bool,
@@ -178,18 +206,44 @@ struct PeerOutbox {
     /// resolves to `SelfAddress` for an eBGP peer, `Unchanged` for an iBGP
     /// one (see `build_advertisement`).
     next_hop_mode: Option<NextHopMode>,
+    /// RFC 4456 route-reflector client — see `build_advertisement`'s
+    /// reflection eligibility check.
+    is_rr_client: bool,
+    /// RFC 7947 route-server client — see `build_advertisement`'s `AS_PATH`
+    /// exception and `BgpRib::propagate_rs_view`.
+    is_rs_client: bool,
+    /// Address families this peer negotiated RFC 7911 ADD-PATH for (always
+    /// empty unless `is_rs_client`) — gates `propagate_rs_view`'s per-source
+    /// multi-path fan-out; a family missing here still gets the ordinary
+    /// single-best-path advertisement like any other peer.
+    add_path_afs: HashSet<AddressFamily>,
 }
 
 /// The BGP RIB engine for one `nos-bgpd` instance. See the module doc
 /// comment for the locking model.
 pub struct BgpRib {
     local_asn: u32,
+    /// This instance's own router-id — used for RFC 4456 §5 `ORIGINATOR_ID`
+    /// loop-prevention on receipt (`handle_update`).
+    local_router_id: Ipv4Addr,
+    /// This instance's effective RFC 4456 cluster-id (`BgpInstance.cluster_id`
+    /// unwrapped to `router_id` when unset) — prepended to `CLUSTER_LIST` on
+    /// reflection and checked for loop-prevention on receipt.
+    cluster_id: Ipv4Addr,
     adj_rib_in: HashMap<IpAddr, HashMap<IpNet, RibRoute>>,
     redistributed: HashMap<IpNet, RibRoute>,
     loc_rib: HashMap<IpNet, RibRoute>,
     /// What we've last told each peer, for correct withdrawals.
     adj_rib_out: HashMap<IpAddr, HashSet<IpNet>>,
     peer_outboxes: HashMap<IpAddr, PeerOutbox>,
+    /// Per `route_server_client` peer, per prefix, the path id and last-sent
+    /// snapshot of every source currently advertised to it — see
+    /// `propagate_rs_view`.
+    rs_sent: HashMap<(IpAddr, IpNet), HashMap<RouteOrigin, (u32, RibRoute)>>,
+    /// Per `route_server_client` peer, per prefix, the next path id to
+    /// allocate — monotonic, never recycled (see `propagate_rs_view`'s doc
+    /// comment).
+    rs_next_id: HashMap<(IpAddr, IpNet), u32>,
 }
 
 impl Default for BgpRib {
@@ -202,21 +256,32 @@ impl BgpRib {
     pub fn new() -> Self {
         Self {
             local_asn: 0,
+            local_router_id: Ipv4Addr::UNSPECIFIED,
+            cluster_id: Ipv4Addr::UNSPECIFIED,
             adj_rib_in: HashMap::new(),
             redistributed: HashMap::new(),
             loc_rib: HashMap::new(),
             adj_rib_out: HashMap::new(),
             peer_outboxes: HashMap::new(),
+            rs_sent: HashMap::new(),
+            rs_next_id: HashMap::new(),
         }
     }
 
-    pub fn set_local_asn(&mut self, asn: u32) {
+    /// Sets this instance's own ASN, router-id, and effective RFC 4456
+    /// cluster-id (already resolved from `BgpInstance.cluster_id.unwrap_or(
+    /// router_id)` by the caller — see `session::LocalIdentity`).
+    pub fn set_local_identity(&mut self, asn: u32, router_id: Ipv4Addr, cluster_id: Ipv4Addr) {
         self.local_asn = asn;
+        self.local_router_id = router_id;
+        self.cluster_id = cluster_id;
     }
 
     /// Registers a newly-`Established` peer's outbound channel and does an
     /// initial full advertisement of the current Loc-RIB to it.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::fn_params_excessive_bools)] // each bool is an independent, unrelated flag
+    #[allow(clippy::similar_names)] // is_rr_client (reflector) vs. is_rs_client (server)
     pub fn peer_established(
         &mut self,
         peer: IpAddr,
@@ -225,6 +290,9 @@ impl BgpRib {
         negotiated_afs: HashSet<AddressFamily>,
         mp_bgp_negotiated: bool,
         next_hop_mode: Option<NextHopMode>,
+        is_rr_client: bool,
+        is_rs_client: bool,
+        add_path_afs: HashSet<AddressFamily>,
         tx: mpsc::UnboundedSender<OutboundUpdate>,
     ) {
         self.peer_outboxes.insert(
@@ -236,17 +304,35 @@ impl BgpRib {
                 negotiated_afs,
                 mp_bgp_negotiated,
                 next_hop_mode,
+                is_rr_client,
+                is_rs_client,
+                add_path_afs,
             },
         );
         let outbox = self.peer_outboxes.get(&peer).expect("just inserted");
         let mut advertised = HashSet::new();
         for (prefix, best) in &self.loc_rib {
-            if let Some(adv) = build_advertisement(*prefix, best, peer, outbox, self.local_asn) {
+            let source_is_rr_client = self.source_is_rr_client(best);
+            if let Some(adv) = build_advertisement(
+                *prefix,
+                best,
+                peer,
+                outbox,
+                self.local_asn,
+                source_is_rr_client,
+                self.cluster_id,
+            ) {
                 let _ = outbox.tx.send(OutboundUpdate::Announce(adv));
                 advertised.insert(*prefix);
             }
         }
         self.adj_rib_out.insert(peer, advertised);
+        if is_rs_client {
+            let prefixes: Vec<IpNet> = self.loc_rib.keys().copied().collect();
+            for prefix in prefixes {
+                self.propagate_rs_view(prefix);
+            }
+        }
     }
 
     /// RFC 2918 `ROUTE_REFRESH` handling: re-sends the current Loc-RIB to
@@ -264,9 +350,31 @@ impl BgpRib {
             if family_of(*prefix) != family {
                 continue;
             }
-            if let Some(adv) = build_advertisement(*prefix, best, peer, outbox, self.local_asn) {
+            let source_is_rr_client = self.source_is_rr_client(best);
+            if let Some(adv) = build_advertisement(
+                *prefix,
+                best,
+                peer,
+                outbox,
+                self.local_asn,
+                source_is_rr_client,
+                self.cluster_id,
+            ) {
                 let _ = outbox.tx.send(OutboundUpdate::Announce(adv));
             }
+        }
+    }
+
+    /// The source peer of `route` is a route-reflector client iff it's still
+    /// a registered peer with `is_rr_client` set — `false` for a `Local`
+    /// route or a source peer that's since disconnected.
+    fn source_is_rr_client(&self, route: &RibRoute) -> bool {
+        match route.origin {
+            RouteOrigin::Peer(addr) => self
+                .peer_outboxes
+                .get(&addr)
+                .is_some_and(|o| o.is_rr_client),
+            RouteOrigin::Local => false,
         }
     }
 
@@ -276,6 +384,8 @@ impl BgpRib {
     pub fn peer_disconnected(&mut self, peer: IpAddr) {
         self.peer_outboxes.remove(&peer);
         self.adj_rib_out.remove(&peer);
+        self.rs_sent.retain(|(p, _), _| *p != peer);
+        self.rs_next_id.retain(|(p, _), _| *p != peer);
         let removed = self.adj_rib_in.remove(&peer);
         if let Some(routes) = removed {
             for prefix in routes.into_keys() {
@@ -340,6 +450,16 @@ impl BgpRib {
                     peer = %from, as_path = ?attrs.as_path,
                     "dropping bgp update: as_path already contains our own asn (loop prevention)"
                 );
+            } else if attrs.cluster_list.contains(&self.cluster_id) {
+                warn!(
+                    peer = %from, cluster_list = ?attrs.cluster_list,
+                    "dropping bgp update: cluster_list already contains our own cluster-id (rfc 4456 reflection loop prevention)"
+                );
+            } else if attrs.originator_id == Some(self.local_router_id) {
+                warn!(
+                    peer = %from, originator_id = ?attrs.originator_id,
+                    "dropping bgp update: originator_id is our own router-id (rfc 4456 reflection loop prevention)"
+                );
             } else {
                 let table = self.adj_rib_in.entry(from).or_default();
                 let base_route = RibRoute {
@@ -352,6 +472,8 @@ impl BgpRib {
                     router_id: Some(remote_bgp_id),
                     next_hop: None,
                     received_at: Instant::now(),
+                    originator_id: attrs.originator_id,
+                    cluster_list: attrs.cluster_list.clone(),
                 };
                 for prefix in &update.nlri {
                     let prefix = IpNet::V4(*prefix);
@@ -423,6 +545,13 @@ impl BgpRib {
     /// winner actually changed, pushes `Announce`/`Withdraw` to every
     /// registered peer as appropriate.
     fn recompute_and_propagate(&mut self, prefix: IpNet) {
+        // Runs independently of the single-elected-best-path logic below —
+        // a route-server-client's view covers every source for a prefix,
+        // not just the one instance-wide winner, so a change to a
+        // non-winning source must still be reflected here even when
+        // `best_path`'s pick doesn't change.
+        self.propagate_rs_view(prefix);
+
         let mut candidates: Vec<(RibRoute, Option<IpAddr>)> = Vec::new();
         if let Some(route) = self.redistributed.get(&prefix) {
             candidates.push((route.clone(), None));
@@ -451,12 +580,21 @@ impl BgpRib {
             self.loc_rib.remove(&prefix);
         }
 
+        let source_is_rr_client = best.as_ref().is_some_and(|r| self.source_is_rr_client(r));
         let peers: Vec<IpAddr> = self.peer_outboxes.keys().copied().collect();
         for peer in peers {
             let outbox = self.peer_outboxes.get(&peer).expect("just listed");
-            let advertisement = best
-                .as_ref()
-                .and_then(|route| build_advertisement(prefix, route, peer, outbox, self.local_asn));
+            let advertisement = best.as_ref().and_then(|route| {
+                build_advertisement(
+                    prefix,
+                    route,
+                    peer,
+                    outbox,
+                    self.local_asn,
+                    source_is_rr_client,
+                    self.cluster_id,
+                )
+            });
 
             match advertisement {
                 Some(adv) => {
@@ -468,13 +606,119 @@ impl BgpRib {
                     if let Some(sent) = self.adj_rib_out.get_mut(&peer) {
                         if sent.remove(&prefix) {
                             let outbox = self.peer_outboxes.get(&peer).expect("just listed");
-                            let _ = outbox
-                                .tx
-                                .send(OutboundUpdate::Withdraw(prefix, outbox.mp_bgp_negotiated));
+                            let _ = outbox.tx.send(OutboundUpdate::Withdraw(
+                                prefix,
+                                outbox.mp_bgp_negotiated,
+                                None,
+                            ));
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// RFC 7947 route-server multi-path fan-out: for every `route_server_client`
+    /// peer that negotiated RFC 7911 ADD-PATH for `prefix`'s family, sends
+    /// every *other* peer's (and any locally-redistributed) contribution for
+    /// `prefix` as a separate path, each with its own stable ADD-PATH
+    /// identifier — not just the one instance-wide elected best path every
+    /// other peer gets. Reuses `build_advertisement` per source unchanged
+    /// (a route-server-client is always eBGP, so the iBGP reflection branch
+    /// never triggers) and only overrides the resulting `path_id`.
+    ///
+    /// `ponytail:` no inbound multi-path support — `adj_rib_in` still stores
+    /// at most one path per peer per prefix, so a client that itself submits
+    /// more than one path for the same prefix only ever contributes its
+    /// latest one here. Add per-path `adj_rib_in` keying if a client needs
+    /// to submit multiple paths itself.
+    fn propagate_rs_view(&mut self, prefix: IpNet) {
+        let rs_peers: Vec<IpAddr> = self
+            .peer_outboxes
+            .iter()
+            .filter(|(_, o)| o.is_rs_client && o.add_path_afs.contains(&family_of(prefix)))
+            .map(|(addr, _)| *addr)
+            .collect();
+        if rs_peers.is_empty() {
+            return;
+        }
+
+        for peer in rs_peers {
+            let mut current: HashMap<RouteOrigin, RibRoute> = HashMap::new();
+            if let Some(route) = self.redistributed.get(&prefix) {
+                current.insert(RouteOrigin::Local, route.clone());
+            }
+            for (src, table) in &self.adj_rib_in {
+                if *src == peer {
+                    continue; // never echo the destination's own contribution
+                }
+                if let Some(route) = table.get(&prefix) {
+                    current.insert(RouteOrigin::Peer(*src), route.clone());
+                }
+            }
+
+            // Owned working copy — avoids holding a live borrow of
+            // `self.rs_sent` across the loop below, which also needs to
+            // borrow `self.peer_outboxes`/`self.rs_next_id`.
+            let mut sent = self.rs_sent.entry((peer, prefix)).or_default().clone();
+            let outbox_tx = self.peer_outboxes[&peer].tx.clone();
+            let mp_bgp_negotiated = self.peer_outboxes[&peer].mp_bgp_negotiated;
+
+            let stale: Vec<RouteOrigin> = sent
+                .keys()
+                .filter(|origin| !current.contains_key(origin))
+                .copied()
+                .collect();
+            for origin in stale {
+                let (id, _) = sent.remove(&origin).expect("just found");
+                let _ = outbox_tx.send(OutboundUpdate::Withdraw(
+                    prefix,
+                    mp_bgp_negotiated,
+                    Some(id),
+                ));
+            }
+
+            for (origin, route) in current {
+                if sent.get(&origin).is_some_and(|(_, last)| *last == route) {
+                    continue; // unchanged since last sent to this peer
+                }
+                let source_is_rr_client = match origin {
+                    RouteOrigin::Peer(addr) => self
+                        .peer_outboxes
+                        .get(&addr)
+                        .is_some_and(|o| o.is_rr_client),
+                    RouteOrigin::Local => false,
+                };
+                let outbox = self.peer_outboxes.get(&peer).expect("just listed");
+                let Some(adv) = build_advertisement(
+                    prefix,
+                    &route,
+                    peer,
+                    outbox,
+                    self.local_asn,
+                    source_is_rr_client,
+                    self.cluster_id,
+                ) else {
+                    continue;
+                };
+                let id = sent.get(&origin).map_or_else(
+                    || {
+                        let counter = self.rs_next_id.entry((peer, prefix)).or_insert(1);
+                        let id = *counter;
+                        *counter += 1;
+                        id
+                    },
+                    |(id, _)| *id,
+                );
+                let adv = AdvertisedRoute {
+                    path_id: Some(id),
+                    ..adv
+                };
+                let _ = outbox_tx.send(OutboundUpdate::Announce(adv));
+                sent.insert(origin, (id, route));
+            }
+
+            self.rs_sent.insert((peer, prefix), sent);
         }
     }
 }
@@ -490,6 +734,8 @@ fn redistributed_route() -> RibRoute {
         router_id: None,
         next_hop: None,
         received_at: Instant::now(),
+        originator_id: None,
+        cluster_list: Vec::new(),
     }
 }
 
@@ -575,13 +821,18 @@ fn best_path(candidates: &[(RibRoute, Option<IpAddr>)]) -> Option<RibRoute> {
 /// Decides whether `best` should be advertised to `peer` and, if so, rewrites
 /// it for that destination. `None` covers every ineligibility case
 /// (split-horizon, source-peer echo, family not negotiated by this peer, no
-/// local address for next-hop-self).
+/// local address for next-hop-self). `source_is_rr_client` is whether the
+/// peer `best` was learned from (if any) is a route-reflector client;
+/// `cluster_id` is this instance's own effective RFC 4456 cluster-id, used
+/// only when actually reflecting.
 fn build_advertisement(
     prefix: IpNet,
     best: &RibRoute,
     peer: IpAddr,
     outbox: &PeerOutbox,
     local_asn: u32,
+    source_is_rr_client: bool,
+    cluster_id: Ipv4Addr,
 ) -> Option<AdvertisedRoute> {
     if !outbox.negotiated_afs.contains(&family_of(prefix)) {
         return None;
@@ -590,11 +841,15 @@ fn build_advertisement(
         // Never echo a route back to the peer it came from.
         return None;
     }
-    if let RouteOrigin::Peer(_) = best.origin {
-        if best.learned_via_ibgp && outbox.is_ibgp {
-            // Standard iBGP split-horizon: no route reflection.
-            return None;
-        }
+    // RFC 4456 §6: a route learned via iBGP is reflected to another iBGP
+    // peer only when the source or the destination is a configured
+    // route-reflector client — otherwise the standard iBGP split-horizon
+    // rule (no reflection, full mesh assumed) still applies unchanged.
+    let ibgp_to_ibgp =
+        matches!(best.origin, RouteOrigin::Peer(_)) && best.learned_via_ibgp && outbox.is_ibgp;
+    let reflecting = ibgp_to_ibgp && (source_is_rr_client || outbox.is_rr_client);
+    if ibgp_to_ibgp && !reflecting {
+        return None;
     }
     let mode = outbox.next_hop_mode.unwrap_or(if outbox.is_ibgp {
         NextHopMode::Unchanged
@@ -607,13 +862,24 @@ fn build_advertisement(
     };
 
     let mut as_path = best.as_path.clone();
-    if !outbox.is_ibgp {
+    // RFC 7947 route-server clients get a fully transparent AS_PATH: no
+    // local-ASN prepend, even though they're always eBGP (enforced at
+    // config-validation time — see `bgp_instance::valid_route_reflection_and_server`).
+    if !outbox.is_ibgp && !outbox.is_rs_client {
         as_path.insert(0, local_asn);
     }
     let local_pref = outbox.is_ibgp.then_some(best.local_pref);
     // MED is meant for use between adjacent ASes, so it's never forwarded
     // on to a further eBGP peer, only preserved toward iBGP peers.
     let med = if outbox.is_ibgp { best.med } else { None };
+
+    let (originator_id, cluster_list) = if reflecting {
+        let mut clusters = best.cluster_list.clone();
+        clusters.insert(0, cluster_id);
+        (best.originator_id.or(best.router_id), clusters)
+    } else {
+        (None, Vec::new())
+    };
 
     Some(AdvertisedRoute {
         prefix,
@@ -623,6 +889,9 @@ fn build_advertisement(
         med,
         origin: best.bgp_origin,
         use_mp: outbox.mp_bgp_negotiated,
+        originator_id,
+        cluster_list,
+        path_id: None,
     })
 }
 
@@ -646,7 +915,13 @@ mod tests {
 
     fn new_rib(local_asn: u32) -> BgpRib {
         let mut rib = BgpRib::new();
-        rib.set_local_asn(local_asn);
+        rib.set_local_identity(local_asn, Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED);
+        rib
+    }
+
+    fn new_rib_with_identity(local_asn: u32, router_id: Ipv4Addr, cluster_id: Ipv4Addr) -> BgpRib {
+        let mut rib = BgpRib::new();
+        rib.set_local_identity(local_asn, router_id, cluster_id);
         rib
     }
 
@@ -680,6 +955,9 @@ mod tests {
             all_afs(),
             false,
             next_hop_mode,
+            false,
+            false,
+            HashSet::new(),
             tx,
         );
         rx
@@ -703,6 +981,38 @@ mod tests {
             negotiated_afs,
             true,
             None,
+            false,
+            false,
+            HashSet::new(),
+            tx,
+        );
+        rx
+    }
+
+    /// Registers a peer with full control over route-reflector-client/
+    /// route-server-client/ADD-PATH — for RFC 4456/RFC 7911 tests.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::similar_names)]
+    fn register_peer_full(
+        rib: &mut BgpRib,
+        peer: IpAddr,
+        is_ibgp: bool,
+        local_addr: IpAddr,
+        is_rr_client: bool,
+        is_rs_client: bool,
+        add_path_afs: HashSet<AddressFamily>,
+    ) -> mpsc::UnboundedReceiver<OutboundUpdate> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        rib.peer_established(
+            peer,
+            is_ibgp,
+            Some(local_addr),
+            all_afs(),
+            false,
+            None,
+            is_rr_client,
+            is_rs_client,
+            add_path_afs,
             tx,
         );
         rx
@@ -731,13 +1041,17 @@ mod tests {
     fn ebgp_update(nlri: Vec<&str>, as_path: Vec<u32>, next_hop: &str) -> UpdateMessage {
         UpdateMessage {
             withdrawn_routes: vec![],
+            withdrawn_path_ids: vec![],
             nlri: nlri.into_iter().map(|s| s.parse().unwrap()).collect(),
+            nlri_path_ids: vec![],
             attributes: Some(message::PathAttributes {
                 origin: message::Origin::Igp,
                 as_path,
                 next_hop: v4(next_hop),
                 local_pref: None,
                 med: None,
+                originator_id: None,
+                cluster_list: vec![],
             }),
             mp_reach: vec![],
             mp_unreach: vec![],
@@ -747,7 +1061,9 @@ mod tests {
     fn empty_update() -> UpdateMessage {
         UpdateMessage {
             withdrawn_routes: vec![],
+            withdrawn_path_ids: vec![],
             nlri: vec![],
+            nlri_path_ids: vec![],
             attributes: None,
             mp_reach: vec![],
             mp_unreach: vec![],
@@ -766,6 +1082,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("192.168.1.0/24"),
                 as_path: vec![65000],
                 next_hop: addr("10.0.0.254"),
@@ -789,6 +1108,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("192.168.1.0/24"),
                 as_path: vec![],
                 next_hop: addr("10.0.0.253"),
@@ -886,6 +1208,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("1.2.3.0/24"),
                 as_path: vec![65000, 65001],
                 next_hop: addr("10.0.0.253"),
@@ -934,6 +1259,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("1.2.3.0/24"),
                 as_path: vec![65001],
                 // iBGP defaults to Unchanged: the eBGP source's own
@@ -973,6 +1301,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("1.2.3.0/24"),
                 as_path: vec![65001],
                 next_hop: addr("10.0.0.253"),
@@ -1009,6 +1340,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("1.2.3.0/24"),
                 as_path: vec![65000, 65001],
                 next_hop: addr("10.0.0.1"),
@@ -1038,6 +1372,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("192.168.1.0/24"),
                 as_path: vec![],
                 // No stored next-hop on a Local-origin route, so it always
@@ -1094,6 +1431,8 @@ mod tests {
                     next_hop: v4("10.0.0.1"),
                     local_pref: Some(50),
                     med: None,
+                    originator_id: None,
+                    cluster_list: vec![],
                 }),
                 ..empty_update()
             },
@@ -1112,6 +1451,8 @@ mod tests {
                     next_hop: v4("10.0.0.2"),
                     local_pref: Some(200),
                     med: None,
+                    originator_id: None,
+                    cluster_list: vec![],
                 }),
                 ..empty_update()
             },
@@ -1121,6 +1462,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("9.9.9.0/24"),
                 as_path: vec![],
                 // iBGP defaults to Unchanged: peer_b's own advertised
@@ -1157,6 +1501,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("5.5.5.0/24"),
                 as_path: vec![65000],
                 next_hop: addr("10.0.0.253"),
@@ -1197,7 +1544,7 @@ mod tests {
         let updates = recv_all(&mut observer_rx);
         assert_eq!(
             updates,
-            vec![OutboundUpdate::Withdraw(prefix("5.5.5.0/24"), false)]
+            vec![OutboundUpdate::Withdraw(prefix("5.5.5.0/24"), false, None)]
         );
     }
 
@@ -1221,14 +1568,14 @@ mod tests {
 
         let mut updates = recv_all(&mut observer_rx);
         updates.sort_by_key(|u| match u {
-            OutboundUpdate::Withdraw(p, _) => p.to_string(),
+            OutboundUpdate::Withdraw(p, _, _) => p.to_string(),
             OutboundUpdate::Announce(a) => a.prefix.to_string(),
         });
         assert_eq!(
             updates,
             vec![
-                OutboundUpdate::Withdraw(prefix("5.5.5.0/24"), false),
-                OutboundUpdate::Withdraw(prefix("6.6.6.0/24"), false),
+                OutboundUpdate::Withdraw(prefix("5.5.5.0/24"), false, None),
+                OutboundUpdate::Withdraw(prefix("6.6.6.0/24"), false, None),
             ]
         );
     }
@@ -1238,7 +1585,18 @@ mod tests {
         let mut rib = new_rib(65000);
         let peer = addr("10.0.0.1");
         let (tx, mut rx) = mpsc::unbounded_channel();
-        rib.peer_established(peer, false, None, all_afs(), false, None, tx);
+        rib.peer_established(
+            peer,
+            false,
+            None,
+            all_afs(),
+            false,
+            None,
+            false,
+            false,
+            HashSet::new(),
+            tx,
+        );
 
         rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
 
@@ -1287,6 +1645,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("192.168.1.0/24"),
                 as_path: vec![65000],
                 next_hop: addr("10.0.0.253"),
@@ -1310,6 +1671,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("2001:db8:1::/48"),
                 as_path: vec![65000],
                 next_hop: addr("2001:db8::254"),
@@ -1358,6 +1722,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("192.168.1.0/24"),
                 as_path: vec![65000],
                 next_hop: addr("2001:db8::254"),
@@ -1382,7 +1749,11 @@ mod tests {
         let updates = recv_all(&mut rx);
         assert_eq!(
             updates,
-            vec![OutboundUpdate::Withdraw(prefix("192.168.1.0/24"), true)]
+            vec![OutboundUpdate::Withdraw(
+                prefix("192.168.1.0/24"),
+                true,
+                None
+            )]
         );
     }
 
@@ -1401,6 +1772,8 @@ mod tests {
                 next_hop: v4(next_hop),
                 local_pref: None,
                 med,
+                originator_id: None,
+                cluster_list: vec![],
             }),
             ..empty_update()
         }
@@ -1447,6 +1820,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("9.9.9.0/24"),
                 as_path: vec![65001],
                 next_hop: addr("10.0.0.2"),
@@ -1501,6 +1877,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("9.9.9.0/24"),
                 as_path: vec![65001],
                 next_hop: addr("10.0.0.2"),
@@ -1544,6 +1923,9 @@ mod tests {
         assert_eq!(
             initial,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("9.9.9.0/24"),
                 as_path: vec![65001],
                 next_hop: addr("10.0.0.1"),
@@ -1617,6 +1999,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("9.9.9.0/24"),
                 as_path: vec![65000, 65001],
                 // Destination is eBGP, so next-hop-self rewrites to the
@@ -1676,6 +2061,9 @@ mod tests {
         assert_eq!(
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("9.9.9.0/24"),
                 // Destination is eBGP, so our own ASN is prepended and
                 // next-hop-self rewrites to the observer's own local
@@ -1720,6 +2108,9 @@ mod tests {
         assert_eq!(
             initial,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
                 prefix: prefix("9.9.9.0/24"),
                 as_path: vec![65001],
                 next_hop: addr("10.0.0.9"),
@@ -1747,5 +2138,298 @@ mod tests {
         // sent — if the oldest-route step didn't apply, peer_b's lower
         // router-id and address would have won at steps 9/10 instead.
         assert!(recv_all(&mut observer_rx).is_empty());
+    }
+
+    // --- RFC 4456 route reflection ---
+
+    #[test]
+    fn route_reflector_reflects_ibgp_route_from_non_client_to_client() {
+        let router_id = v4("1.1.1.1");
+        let cluster_id = v4("9.9.9.9");
+        let mut rib = new_rib_with_identity(65000, router_id, cluster_id);
+        let source = addr("10.0.0.1"); // plain iBGP peer, not a client
+        let client = addr("10.0.0.2"); // route-reflector client
+        let _source_rx = register_peer(&mut rib, source, true, addr("10.0.0.254"));
+        let mut client_rx = register_peer_full(
+            &mut rib,
+            client,
+            true,
+            addr("10.0.0.253"),
+            true,
+            false,
+            HashSet::new(),
+        );
+
+        rib.handle_update(
+            source,
+            true,
+            v4("192.0.2.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![], "10.0.0.1"),
+        );
+
+        let updates = recv_all(&mut client_rx);
+        assert_eq!(
+            updates,
+            vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: Some(v4("192.0.2.1")),
+                cluster_list: vec![cluster_id],
+                path_id: None,
+                prefix: prefix("1.2.3.0/24"),
+                as_path: vec![],
+                next_hop: addr("10.0.0.1"),
+                local_pref: Some(100),
+                med: None,
+                origin: message::Origin::Igp,
+                use_mp: false,
+            })]
+        );
+    }
+
+    #[test]
+    fn route_reflector_reflects_ibgp_route_from_client_to_non_client() {
+        let router_id = v4("1.1.1.1");
+        let cluster_id = v4("9.9.9.9");
+        let mut rib = new_rib_with_identity(65000, router_id, cluster_id);
+        let client = addr("10.0.0.1"); // route-reflector client (source)
+        let other = addr("10.0.0.2"); // plain iBGP peer, not a client
+        let _client_rx = register_peer_full(
+            &mut rib,
+            client,
+            true,
+            addr("10.0.0.254"),
+            true,
+            false,
+            HashSet::new(),
+        );
+        let mut other_rx = register_peer(&mut rib, other, true, addr("10.0.0.253"));
+
+        rib.handle_update(
+            client,
+            true,
+            v4("192.0.2.2"),
+            &ebgp_update(vec!["4.5.6.0/24"], vec![], "10.0.0.1"),
+        );
+
+        let updates = recv_all(&mut other_rx);
+        assert_eq!(
+            updates,
+            vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: Some(v4("192.0.2.2")),
+                cluster_list: vec![cluster_id],
+                path_id: None,
+                prefix: prefix("4.5.6.0/24"),
+                as_path: vec![],
+                next_hop: addr("10.0.0.1"),
+                local_pref: Some(100),
+                med: None,
+                origin: message::Origin::Igp,
+                use_mp: false,
+            })]
+        );
+    }
+
+    #[test]
+    fn inbound_update_with_own_cluster_id_in_cluster_list_is_dropped() {
+        let router_id = v4("1.1.1.1");
+        let cluster_id = v4("9.9.9.9");
+        let mut rib = new_rib_with_identity(65000, router_id, cluster_id);
+        let source = addr("10.0.0.1");
+        let observer = addr("10.0.0.2");
+        let mut observer_rx = register_peer(&mut rib, observer, true, addr("10.0.0.253"));
+
+        let mut update = ebgp_update(vec!["7.8.9.0/24"], vec![], "10.0.0.1");
+        update.attributes.as_mut().unwrap().cluster_list = vec![cluster_id];
+
+        rib.handle_update(source, true, v4("192.0.2.1"), &update);
+
+        assert!(recv_all(&mut observer_rx).is_empty());
+    }
+
+    #[test]
+    fn inbound_update_with_own_router_id_as_originator_id_is_dropped() {
+        let router_id = v4("1.1.1.1");
+        let cluster_id = v4("9.9.9.9");
+        let mut rib = new_rib_with_identity(65000, router_id, cluster_id);
+        let source = addr("10.0.0.1");
+        let observer = addr("10.0.0.2");
+        let mut observer_rx = register_peer(&mut rib, observer, true, addr("10.0.0.253"));
+
+        let mut update = ebgp_update(vec!["7.8.9.0/24"], vec![], "10.0.0.1");
+        update.attributes.as_mut().unwrap().originator_id = Some(router_id);
+
+        rib.handle_update(source, true, v4("192.0.2.1"), &update);
+
+        assert!(recv_all(&mut observer_rx).is_empty());
+    }
+
+    // --- RFC 7947 route server ---
+
+    #[test]
+    fn route_server_client_gets_no_as_path_prepend_but_plain_ebgp_peer_does() {
+        let mut rib = new_rib(65000);
+        let plain_peer = addr("10.0.0.1");
+        let rs_client = addr("10.0.0.2");
+        let mut plain_rx = register_peer(&mut rib, plain_peer, false, addr("10.0.0.254"));
+        let mut rs_rx = register_peer_full(
+            &mut rib,
+            rs_client,
+            false,
+            addr("10.0.0.253"),
+            false,
+            true,
+            HashSet::new(),
+        );
+
+        rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
+
+        let plain_updates = recv_all(&mut plain_rx);
+        assert_eq!(
+            plain_updates,
+            vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
+                prefix: prefix("192.168.1.0/24"),
+                as_path: vec![65000],
+                next_hop: addr("10.0.0.254"),
+                local_pref: None,
+                med: None,
+                origin: message::Origin::Igp,
+                use_mp: false,
+            })]
+        );
+
+        let rs_updates = recv_all(&mut rs_rx);
+        assert_eq!(
+            rs_updates,
+            vec![OutboundUpdate::Announce(AdvertisedRoute {
+                originator_id: None,
+                cluster_list: vec![],
+                path_id: None,
+                prefix: prefix("192.168.1.0/24"),
+                as_path: vec![], // route-server-client: transparent, no local-asn prepend
+                next_hop: addr("10.0.0.253"),
+                local_pref: None,
+                med: None,
+                origin: message::Origin::Igp,
+                use_mp: false,
+            })]
+        );
+    }
+
+    #[test]
+    fn propagate_rs_view_sends_distinct_path_ids_and_withdraws_on_source_disconnect() {
+        let mut rib = new_rib(65000);
+        let peer_a = addr("10.0.0.1");
+        let peer_b = addr("10.0.0.2");
+        let rs_client = addr("10.0.0.3");
+
+        let _rx_a = register_peer(&mut rib, peer_a, false, addr("10.0.0.254"));
+        let _rx_b = register_peer(&mut rib, peer_b, false, addr("10.0.0.253"));
+        let mut rs_rx = register_peer_full(
+            &mut rib,
+            rs_client,
+            false,
+            addr("10.0.0.252"),
+            false,
+            true,
+            [AddressFamily::Ipv4Unicast].into_iter().collect(),
+        );
+
+        rib.handle_update(
+            peer_a,
+            false,
+            v4("192.0.2.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+        );
+        rib.handle_update(
+            peer_b,
+            false,
+            v4("192.0.2.2"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65002], "10.0.0.2"),
+        );
+
+        let updates = recv_all(&mut rs_rx);
+        // Each source's own path reaches the rs-client transparently (no
+        // local-asn prepend), each carrying its own distinct, stable path id
+        // — alongside whichever single path the ordinary fan-out also sends
+        // (with no path id at all).
+        let id_for_a = updates
+            .iter()
+            .find_map(|u| match u {
+                OutboundUpdate::Announce(r) if r.as_path == vec![65001] => r.path_id,
+                _ => None,
+            })
+            .expect("peer_a's path reached the rs-client with a path id");
+        let id_for_b = updates
+            .iter()
+            .find_map(|u| match u {
+                OutboundUpdate::Announce(r) if r.as_path == vec![65002] => r.path_id,
+                _ => None,
+            })
+            .expect("peer_b's path reached the rs-client with a path id");
+        assert_ne!(id_for_a, id_for_b);
+
+        // Disconnecting peer_a withdraws only its path id; peer_b's stays.
+        rib.peer_disconnected(peer_a);
+        let after = recv_all(&mut rs_rx);
+        let withdrawn_ids: Vec<Option<u32>> = after
+            .iter()
+            .filter_map(|u| match u {
+                OutboundUpdate::Withdraw(_, _, id) if id.is_some() => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(withdrawn_ids, vec![Some(id_for_a)]);
+    }
+
+    #[test]
+    fn route_server_client_without_add_path_gets_only_ordinary_single_best() {
+        let mut rib = new_rib(65000);
+        let peer_a = addr("10.0.0.1");
+        let peer_b = addr("10.0.0.2");
+        let rs_client_no_add_path = addr("10.0.0.3");
+
+        let _rx_a = register_peer(&mut rib, peer_a, false, addr("10.0.0.254"));
+        let _rx_b = register_peer(&mut rib, peer_b, false, addr("10.0.0.253"));
+        let mut rs_rx = register_peer_full(
+            &mut rib,
+            rs_client_no_add_path,
+            false,
+            addr("10.0.0.252"),
+            false,
+            true,
+            HashSet::new(), // is_rs_client but no negotiated add_path_afs
+        );
+
+        rib.handle_update(
+            peer_a,
+            false,
+            v4("192.0.2.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+        );
+        rib.handle_update(
+            peer_b,
+            false,
+            v4("192.0.2.2"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65002], "10.0.0.2"),
+        );
+
+        let updates = recv_all(&mut rs_rx);
+        assert!(!updates.is_empty());
+        // No path-id'd traffic at all — propagate_rs_view never runs for a
+        // family this peer didn't negotiate ADD-PATH for.
+        assert!(updates.iter().all(|u| match u {
+            OutboundUpdate::Announce(r) => r.path_id.is_none(),
+            OutboundUpdate::Withdraw(_, _, id) => id.is_none(),
+        }));
+        // Still transparent (no AS_PATH prepend) — that's governed by
+        // is_rs_client alone, independent of ADD-PATH negotiation. Only
+        // peer_a's route ever wins the ordinary single-best election (lower
+        // router-id), so that's the one path this peer ever sees.
+        assert!(updates.iter().any(|u| matches!(
+            u,
+            OutboundUpdate::Announce(r) if r.as_path == vec![65001]
+        )));
     }
 }

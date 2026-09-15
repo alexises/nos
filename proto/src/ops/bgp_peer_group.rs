@@ -129,6 +129,22 @@ pub enum BgpPeerGroupOp {
         instance: String,
         name: String,
     },
+    SetRouteReflectorClient {
+        instance: String,
+        name: String,
+    },
+    ClearRouteReflectorClient {
+        instance: String,
+        name: String,
+    },
+    SetRouteServerClient {
+        instance: String,
+        name: String,
+    },
+    ClearRouteServerClient {
+        instance: String,
+        name: String,
+    },
 }
 
 impl BgpPeerGroupOp {
@@ -147,6 +163,8 @@ impl BgpPeerGroupOp {
                         connect_retry_time: None,
                         auth: None,
                         next_hop: None,
+                        route_reflector_client: false,
+                        route_server_client: false,
                     });
                 }
                 Ok(())
@@ -308,6 +326,22 @@ impl BgpPeerGroupOp {
                 find_group_mut(config, instance, name)?.next_hop = None;
                 Ok(())
             }
+            BgpPeerGroupOp::SetRouteReflectorClient { instance, name } => {
+                find_group_mut(config, instance, name)?.route_reflector_client = true;
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearRouteReflectorClient { instance, name } => {
+                find_group_mut(config, instance, name)?.route_reflector_client = false;
+                Ok(())
+            }
+            BgpPeerGroupOp::SetRouteServerClient { instance, name } => {
+                find_group_mut(config, instance, name)?.route_server_client = true;
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearRouteServerClient { instance, name } => {
+                find_group_mut(config, instance, name)?.route_server_client = false;
+                Ok(())
+            }
         }
     }
 }
@@ -374,6 +408,7 @@ mod tests {
             asn: 65000,
             peer_groups: groups,
             peers: Vec::new(),
+            cluster_id: None,
             routing_table: None,
         }
     }
@@ -389,6 +424,8 @@ mod tests {
             connect_retry_time: None,
             auth: None,
             next_hop: None,
+            route_reflector_client: false,
+            route_server_client: false,
         }
     }
 
@@ -539,6 +576,46 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].peer_groups[0].next_hop, None);
+    }
+
+    #[test]
+    fn set_and_clear_route_reflector_client() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetRouteReflectorClient {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert!(cfg.bgp_instances[0].peer_groups[0].route_reflector_client);
+
+        BgpPeerGroupOp::ClearRouteReflectorClient {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert!(!cfg.bgp_instances[0].peer_groups[0].route_reflector_client);
+    }
+
+    #[test]
+    fn set_and_clear_route_server_client() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetRouteServerClient {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert!(cfg.bgp_instances[0].peer_groups[0].route_server_client);
+
+        BgpPeerGroupOp::ClearRouteServerClient {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert!(!cfg.bgp_instances[0].peer_groups[0].route_server_client);
     }
 
     #[test]

@@ -262,6 +262,8 @@ mod tests {
             connect_retry_time: None,
             auth: None,
             next_hop: None,
+            route_reflector_client: false,
+            route_server_client: false,
         }
     }
 

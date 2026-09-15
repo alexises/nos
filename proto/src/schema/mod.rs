@@ -25,7 +25,10 @@ use crate::validators::hostname_charset;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct Config {
-    #[garde(dive)]
+    #[garde(
+        dive,
+        custom(|instances, _ctx: &Config| bgp_instance::valid_route_reflection_and_server(instances))
+    )]
     pub bgp_instances: Vec<BgpInstance>,
 
     #[garde(

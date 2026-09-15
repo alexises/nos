@@ -41,12 +41,19 @@ pub fn render_bgp_peer_group(group: &BgpPeerGroup, local_asn: u32) -> String {
         None if group.remote_as == local_asn => "default (unchanged, iBGP)".to_string(),
         None => "default (self, eBGP)".to_string(),
     };
-    format!(
+    let mut line = format!(
         "peer-group {}: remote-as {}, source-address {source_address}, address-family [{address_families}], \
          hold-time {hold_time}, keepalive-interval {keepalive_interval}, connect-retry-time {connect_retry_time}, \
          auth {auth}, next-hop {next_hop}",
         group.name, group.remote_as
-    )
+    );
+    if group.route_reflector_client {
+        line.push_str(", route-reflector-client");
+    }
+    if group.route_server_client {
+        line.push_str(", route-server-client");
+    }
+    line
 }
 
 /// Rendered in clear text, like every other field — passwords/keys are
@@ -89,8 +96,11 @@ pub fn render_bgp_peer(peer: &BgpPeer) -> String {
 /// Render one BGP instance as human-readable text, including any nested
 /// peer-groups and peers, each indented one level under the instance line.
 pub fn render_bgp_instance(instance: &BgpInstance) -> String {
+    let cluster_id = instance
+        .cluster_id
+        .map_or_else(|| "default (= router-id)".to_string(), |c| c.to_string());
     let mut lines = vec![format!(
-        "bgp instance {}: router-id {}, asn {}",
+        "bgp instance {}: router-id {}, asn {}, cluster-id {cluster_id}",
         instance.name, instance.router_id, instance.asn
     )];
     for group in &instance.peer_groups {
@@ -579,6 +589,7 @@ mod tests {
             asn,
             peer_groups: Vec::new(),
             peers: Vec::new(),
+            cluster_id: None,
             routing_table: None,
         }
     }
@@ -600,7 +611,7 @@ mod tests {
         };
         assert_eq!(
             render_config(&cfg),
-            "hostname: nos\nbgp instance default: router-id 1.1.1.1, asn 65000\n\
+            "hostname: nos\nbgp instance default: router-id 1.1.1.1, asn 65000, cluster-id default (= router-id)\n\
              no routing tables configured\nno static routing instances configured\n\
              no interfaces configured"
         );
@@ -614,8 +625,8 @@ mod tests {
         };
         assert_eq!(
             render_config(&cfg),
-            "hostname: nos\nbgp instance vrf-a: router-id 1.1.1.1, asn 65001\n\
-             bgp instance vrf-b: router-id 1.1.1.1, asn 65002\n\
+            "hostname: nos\nbgp instance vrf-a: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)\n\
+             bgp instance vrf-b: router-id 1.1.1.1, asn 65002, cluster-id default (= router-id)\n\
              no routing tables configured\nno static routing instances configured\n\
              no interfaces configured"
         );
@@ -638,7 +649,7 @@ mod tests {
         let rendered = render_transaction(&snapshot(false), &Path::Root);
         assert_eq!(
             rendered,
-            "transaction 'demo':\nhostname: nos\nbgp instance r1: router-id 1.1.1.1, asn 65001\n\
+            "transaction 'demo':\nhostname: nos\nbgp instance r1: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)\n\
              no routing tables configured\nno static routing instances configured\n\
              no interfaces configured"
         );
@@ -653,7 +664,10 @@ mod tests {
     #[test]
     fn render_transaction_at_bgp_instance_found() {
         let rendered = render_transaction(&snapshot(false), &Path::BgpInstance("r1".to_string()));
-        assert_eq!(rendered, "bgp instance r1: router-id 1.1.1.1, asn 65001");
+        assert_eq!(
+            rendered,
+            "bgp instance r1: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)"
+        );
     }
 
     #[test]
@@ -778,6 +792,8 @@ mod tests {
             connect_retry_time: None,
             auth: None,
             next_hop: None,
+            route_reflector_client: false,
+            route_server_client: false,
         }
     }
 
@@ -880,7 +896,7 @@ mod tests {
         }];
         assert_eq!(
             render_bgp_instance(&inst),
-            "bgp instance r1: router-id 1.1.1.1, asn 65000\n  \
+            "bgp instance r1: router-id 1.1.1.1, asn 65000, cluster-id default (= router-id)\n  \
              peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
              connect-retry-time default (120s), auth none, next-hop default (self, eBGP)\n  \

@@ -130,6 +130,7 @@ mod tests {
             asn,
             peer_groups: Vec::new(),
             peers: Vec::new(),
+            cluster_id: None,
             routing_table: None,
         }
     }
@@ -202,6 +203,8 @@ mod tests {
             connect_retry_time: None,
             auth: None,
             next_hop: None,
+            route_reflector_client: false,
+            route_server_client: false,
         };
 
         let mut base_instance = instance("r1", 65000);

@@ -108,6 +108,26 @@ pub struct BgpPeerGroup {
     /// `Unchanged` for an iBGP one — see `NextHopMode`.
     #[garde(skip)]
     pub next_hop: Option<NextHopMode>,
+
+    /// RFC 4456 route-reflector client: routes learned from other iBGP
+    /// peers are reflected to this peer (and vice versa) instead of being
+    /// withheld by the usual iBGP split-horizon rule. Requires this
+    /// peer-group's `remote_as` to equal the owning instance's `asn` (an
+    /// iBGP peer-group) — checked cross-instance, see
+    /// `bgp_instance::valid_route_reflection_and_server`. Mutually exclusive
+    /// with `route_server_client`.
+    #[garde(skip)]
+    pub route_reflector_client: bool,
+
+    /// RFC 7947 route-server client: this peer-group's own ASN is never
+    /// prepended to `AS_PATH` when advertising to it, and (via RFC 7911
+    /// ADD-PATH) it receives every other route-server-client's path for a
+    /// prefix, not just the one instance-wide elected best path. Requires
+    /// this peer-group's `remote_as` to differ from the owning instance's
+    /// `asn` (an eBGP peer-group). Mutually exclusive with
+    /// `route_reflector_client`.
+    #[garde(skip)]
+    pub route_server_client: bool,
 }
 
 /// Transport authentication for a peer-group's sessions — mutually
@@ -291,6 +311,7 @@ mod tests {
             asn: 65000,
             peer_groups: groups,
             peers: Vec::new(),
+            cluster_id: None,
             routing_table: None,
         }
     }
@@ -306,6 +327,8 @@ mod tests {
             connect_retry_time: None,
             auth: None,
             next_hop: None,
+            route_reflector_client: false,
+            route_server_client: false,
         }
     }
 

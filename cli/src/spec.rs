@@ -279,6 +279,47 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec {
         tokens: &[
             Token::Literal("set"),
+            Token::Literal("bgp"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Literal("cluster-id"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set bgp instance <name> cluster-id <ip>",
+        doc: Doc::FromConfig(Topic::SetBgpInstanceClusterId),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("cluster-id"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set cluster-id <ip>",
+        doc: Doc::FromConfig(Topic::SetBgpInstanceClusterId),
+        availability: Availability::ConfigurationInstance,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("bgp"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Literal("cluster-id"),
+        ],
+        usage: "delete bgp instance <name> cluster-id",
+        doc: Doc::FromConfig(Topic::ClearBgpInstanceClusterId),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[Token::Literal("delete"), Token::Literal("cluster-id")],
+        usage: "delete cluster-id",
+        doc: Doc::FromConfig(Topic::ClearBgpInstanceClusterId),
+        availability: Availability::ConfigurationInstance,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
             Token::Literal("hostname"),
             Token::Arg(ArgKind::Plain),
         ],
@@ -439,6 +480,34 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             Token::Arg(ArgKind::BgpInstanceName),
             Token::Literal("peer-group"),
             Token::Arg(ArgKind::BgpPeerGroupName),
+            Token::Literal("route-reflector-client"),
+        ],
+        usage: "set bgp instance <name> peer-group <group> route-reflector-client",
+        doc: Doc::FromConfig(Topic::SetBgpPeerGroupRouteReflectorClient),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("bgp"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Literal("peer-group"),
+            Token::Arg(ArgKind::BgpPeerGroupName),
+            Token::Literal("route-server-client"),
+        ],
+        usage: "set bgp instance <name> peer-group <group> route-server-client",
+        doc: Doc::FromConfig(Topic::SetBgpPeerGroupRouteServerClient),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("bgp"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Literal("peer-group"),
+            Token::Arg(ArgKind::BgpPeerGroupName),
             Token::Literal("keepalive-interval"),
             Token::Arg(ArgKind::Plain),
         ],
@@ -584,6 +653,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         ],
         usage: "set next-hop unchanged",
         doc: Doc::FromConfig(Topic::SetBgpPeerGroupNextHop),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[Token::Literal("set"), Token::Literal("route-reflector-client")],
+        usage: "set route-reflector-client",
+        doc: Doc::FromConfig(Topic::SetBgpPeerGroupRouteReflectorClient),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[Token::Literal("set"), Token::Literal("route-server-client")],
+        usage: "set route-server-client",
+        doc: Doc::FromConfig(Topic::SetBgpPeerGroupRouteServerClient),
         availability: Availability::ConfigurationPeerGroup,
     },
     CommandSpec {
@@ -764,6 +845,24 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         tokens: &[Token::Literal("delete"), Token::Literal("next-hop")],
         usage: "delete next-hop",
         doc: Doc::FromConfig(Topic::ClearBgpPeerGroupNextHop),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("route-reflector-client"),
+        ],
+        usage: "delete route-reflector-client",
+        doc: Doc::FromConfig(Topic::ClearBgpPeerGroupRouteReflectorClient),
+        availability: Availability::ConfigurationPeerGroup,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("route-server-client"),
+        ],
+        usage: "delete route-server-client",
+        doc: Doc::FromConfig(Topic::ClearBgpPeerGroupRouteServerClient),
         availability: Availability::ConfigurationPeerGroup,
     },
     CommandSpec {

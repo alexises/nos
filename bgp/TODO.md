@@ -18,15 +18,24 @@ that doc (worth fixing `bgp/CLAUDE.md` too, separately).
 - **Messages**: OPEN/UPDATE/KEEPALIVE/NOTIFICATION/ROUTE_REFRESH (RFC 2918,
   both directions — see `bgp/CLAUDE.md`'s "Route refresh" section).
 - **Capabilities**: 4-byte ASN, MultiProtocol AFI/SAFI, Extended Next-Hop
-  (RFC 8950), Route-Refresh (RFC 2918, code 2). Nothing else (no Graceful
-  Restart/ADD-PATH/ORF capabilities).
+  (RFC 8950), Route-Refresh (RFC 2918, code 2), ADD-PATH (RFC 7911, code 69
+  — only ever advertised for a `route_server_client` peer-group). Nothing
+  else (no Graceful Restart/ORF capabilities).
 - **Path attributes**: ORIGIN, AS_PATH (flattened, no SET/SEQUENCE
-  distinction), NEXT_HOP, MED, LOCAL_PREF, MP_REACH/UNREACH_NLRI.
+  distinction), NEXT_HOP, MED, LOCAL_PREF, ORIGINATOR_ID/CLUSTER_LIST (RFC
+  4456 §5), MP_REACH/UNREACH_NLRI.
 - **AFI/SAFI**: unicast v4+v6 only, SAFI hardcoded to 1.
 - **RIB/best-path**: full RFC 4271 §9.1.2.2 ten-step process, correct
   MED/eBGP-iBGP tiebreaks; IGP-metric step is a documented no-op (no IGP
-  exists). Adj-RIB-In/Out per peer, iBGP split-horizon (no reflection by
-  design), loop prevention, next-hop self/unchanged, static redistribution.
+  exists). Adj-RIB-In/Out per peer, iBGP split-horizon with RFC 4456 route
+  reflection for configured `route_reflector_client` peer-groups, loop
+  prevention (AS_PATH/CLUSTER_LIST/ORIGINATOR_ID), next-hop self/unchanged,
+  static redistribution.
+- **Route server (RFC 7947)**: `route_server_client` peer-groups get a fully
+  transparent AS_PATH (no local-ASN prepend) and, via ADD-PATH, see every
+  other route-server-client's path for a prefix, not just the single
+  instance-wide best path — see `bgp/CLAUDE.md`'s "Route reflection and
+  route server" section.
 - **Collision resolution**: real RFC 4271 §6.8, router-ID based.
 - **Session auth**: RFC 2385 MD5 + RFC 5925 TCP-AO with key rotation.
 - **Config/CLI**: peer-group/peer/instance fields as expected; `show bgp
@@ -36,14 +45,13 @@ that doc (worth fixing `bgp/CLAUDE.md` too, separately).
 
 - **Messages/monitoring**: BMP.
 - **Attributes**: ATOMIC_AGGREGATE, AGGREGATOR, COMMUNITIES, EXTENDED
-  COMMUNITIES, LARGE COMMUNITIES, ORIGINATOR_ID/CLUSTER_LIST,
-  AS4_PATH/AS4_AGGREGATOR (moot — always native 4-byte).
-- **Capabilities**: Graceful Restart, ADD-PATH, ORF, dynamic capability
-  negotiation.
+  COMMUNITIES, LARGE COMMUNITIES, AS4_PATH/AS4_AGGREGATOR (moot — always
+  native 4-byte).
+- **Capabilities**: Graceful Restart, ORF, dynamic capability negotiation.
 - **AFI/SAFI**: VPNv4/VPNv6/MPLS L3VPN, multicast, FlowSpec, EVPN.
-- **Policy**: AS confederations, route reflection (by design), route
-  dampening, and **no policy engine at all** — no route-maps/prefix-lists/
-  AS-path or community filters, no import/export filtering.
+- **Policy**: AS confederations, route dampening, and **no policy engine at
+  all** — no route-maps/prefix-lists/AS-path or community filters, no
+  import/export filtering.
 - **Operational**: MRAI batching (UPDATEs sent immediately), prefix limits,
   dynamic peer-groups, BFD, GTSM/`ebgp-multihop`, `local-as`,
   `allow-as-in`, RIB-inspection CLI command.
@@ -58,6 +66,10 @@ that doc (worth fixing `bgp/CLAUDE.md` too, separately).
 - AS_PATH never preserves SET vs SEQUENCE (decode flattens, encode always
   emits SEQUENCE) — affects best-path fidelity and blocks confederation
   support later.
+- ADD-PATH is send-only from this NOS's perspective: `adj_rib_in` still
+  stores at most one path per peer per prefix, so a route-server-client that
+  itself sends more than one path for the same prefix only ever contributes
+  its latest one to other clients' views.
 
 ## Priority note
 

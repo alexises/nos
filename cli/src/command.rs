@@ -11,6 +11,7 @@ use nos_proto::{
 pub enum BgpInstanceField {
     Asn(u32),
     RouterId(Ipv4Addr),
+    ClusterId(Ipv4Addr),
 }
 
 /// A single field edit targeting a BGP peer-group. Not `Copy` — the auth
@@ -35,6 +36,12 @@ pub enum BgpPeerGroupField {
     AoCurrentKey(u8),
     AoRnextKey(u8),
     NextHop(NextHopMode),
+    /// `route-reflector-client` — always sets it to `true`; clearing goes
+    /// through `DeleteTarget::RouteReflectorClient`.
+    RouteReflectorClient,
+    /// `route-server-client` — always sets it to `true`; clearing goes
+    /// through `DeleteTarget::RouteServerClient`.
+    RouteServerClient,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,6 +183,19 @@ pub enum DeleteTarget {
     AoKey(u8),
     /// `delete next-hop` — only valid while navigated into a peer-group.
     NextHop,
+    /// `delete route-reflector-client` — only valid while navigated into a
+    /// peer-group.
+    RouteReflectorClient,
+    /// `delete route-server-client` — only valid while navigated into a
+    /// peer-group.
+    RouteServerClient,
+    /// `delete bgp instance <name> cluster-id` — qualified clear.
+    BgpInstanceClusterId {
+        name: String,
+    },
+    /// `delete cluster-id` — relative clear, only valid while navigated into
+    /// a BGP instance.
+    BgpInstanceClusterIdRelative,
     RoutingTable {
         name: String,
     },
@@ -391,6 +411,13 @@ impl Command {
                 }),
                 Err(_) => Command::Unknown(trimmed.to_string()),
             },
+            ["set", "bgp", "instance", name, "cluster-id", ip] => match ip.parse::<Ipv4Addr>() {
+                Ok(cluster_id) => Command::Set(SetTarget::BgpInstance {
+                    name: (*name).to_string(),
+                    field: BgpInstanceField::ClusterId(cluster_id),
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
             ["set", "asn", n] => match n.parse::<u32>() {
                 Ok(asn) => Command::Set(SetTarget::Relative {
                     field: BgpInstanceField::Asn(asn),
@@ -400,6 +427,12 @@ impl Command {
             ["set", "router-id", ip] => match ip.parse::<Ipv4Addr>() {
                 Ok(router_id) => Command::Set(SetTarget::Relative {
                     field: BgpInstanceField::RouterId(router_id),
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["set", "cluster-id", ip] => match ip.parse::<Ipv4Addr>() {
+                Ok(cluster_id) => Command::Set(SetTarget::Relative {
+                    field: BgpInstanceField::ClusterId(cluster_id),
                 }),
                 Err(_) => Command::Unknown(trimmed.to_string()),
             },
@@ -482,6 +515,20 @@ impl Command {
                     field: BgpPeerGroupField::NextHop(NextHopMode::Unchanged),
                 })
             }
+            ["set", "bgp", "instance", instance, "peer-group", group, "route-reflector-client"] => {
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: (*instance).to_string(),
+                    group: (*group).to_string(),
+                    field: BgpPeerGroupField::RouteReflectorClient,
+                })
+            }
+            ["set", "bgp", "instance", instance, "peer-group", group, "route-server-client"] => {
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: (*instance).to_string(),
+                    group: (*group).to_string(),
+                    field: BgpPeerGroupField::RouteServerClient,
+                })
+            }
             ["set", "bgp", "instance", instance, "peer-group", group, "md5-password", password] => {
                 Command::Set(SetTarget::BgpPeerGroup {
                     instance: (*instance).to_string(),
@@ -553,6 +600,12 @@ impl Command {
             }),
             ["set", "next-hop", "unchanged"] => Command::Set(SetTarget::PeerGroupRelative {
                 field: BgpPeerGroupField::NextHop(NextHopMode::Unchanged),
+            }),
+            ["set", "route-reflector-client"] => Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::RouteReflectorClient,
+            }),
+            ["set", "route-server-client"] => Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::RouteServerClient,
             }),
             ["set", "hold-time", n] => match n.parse::<u16>() {
                 Ok(hold_time) => Command::Set(SetTarget::PeerGroupRelative {
@@ -713,6 +766,12 @@ impl Command {
             ["delete", "peer-group", group] => Command::Delete(DeleteTarget::PeerGroupRelative {
                 name: (*group).to_string(),
             }),
+            ["delete", "bgp", "instance", name, "cluster-id"] => {
+                Command::Delete(DeleteTarget::BgpInstanceClusterId {
+                    name: (*name).to_string(),
+                })
+            }
+            ["delete", "cluster-id"] => Command::Delete(DeleteTarget::BgpInstanceClusterIdRelative),
             ["delete", "bgp", "instance", instance, "peer", ip] => match ip.parse::<IpAddr>() {
                 Ok(remote_address) => Command::Delete(DeleteTarget::BgpPeer {
                     instance: (*instance).to_string(),
@@ -734,6 +793,10 @@ impl Command {
                 Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv6Unicast))
             }
             ["delete", "next-hop"] => Command::Delete(DeleteTarget::NextHop),
+            ["delete", "route-reflector-client"] => {
+                Command::Delete(DeleteTarget::RouteReflectorClient)
+            }
+            ["delete", "route-server-client"] => Command::Delete(DeleteTarget::RouteServerClient),
             ["delete", "hold-time"] => Command::Delete(DeleteTarget::HoldTime),
             ["delete", "keepalive-interval"] => Command::Delete(DeleteTarget::KeepaliveInterval),
             ["delete", "connect-retry-time"] => Command::Delete(DeleteTarget::ConnectRetryTime),
@@ -1190,6 +1253,85 @@ mod tests {
         assert_eq!(
             Command::parse("delete next-hop"),
             Command::Delete(DeleteTarget::NextHop)
+        );
+    }
+
+    #[test]
+    fn set_bgp_peer_group_route_reflector_and_server_client_qualified() {
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 route-reflector-client"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::RouteReflectorClient,
+            })
+        );
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 route-server-client"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::RouteServerClient,
+            })
+        );
+    }
+
+    #[test]
+    fn set_peer_group_route_reflector_and_server_client_relative() {
+        assert_eq!(
+            Command::parse("set route-reflector-client"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::RouteReflectorClient,
+            })
+        );
+        assert_eq!(
+            Command::parse("set route-server-client"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::RouteServerClient,
+            })
+        );
+    }
+
+    #[test]
+    fn delete_peer_group_route_reflector_and_server_client_relative() {
+        assert_eq!(
+            Command::parse("delete route-reflector-client"),
+            Command::Delete(DeleteTarget::RouteReflectorClient)
+        );
+        assert_eq!(
+            Command::parse("delete route-server-client"),
+            Command::Delete(DeleteTarget::RouteServerClient)
+        );
+    }
+
+    #[test]
+    fn set_and_delete_bgp_instance_cluster_id_qualified() {
+        assert_eq!(
+            Command::parse("set bgp instance R1 cluster-id 1.2.3.4"),
+            Command::Set(SetTarget::BgpInstance {
+                name: "R1".to_string(),
+                field: BgpInstanceField::ClusterId(Ipv4Addr::new(1, 2, 3, 4)),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete bgp instance R1 cluster-id"),
+            Command::Delete(DeleteTarget::BgpInstanceClusterId {
+                name: "R1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn set_and_delete_bgp_instance_cluster_id_relative() {
+        assert_eq!(
+            Command::parse("set cluster-id 1.2.3.4"),
+            Command::Set(SetTarget::Relative {
+                field: BgpInstanceField::ClusterId(Ipv4Addr::new(1, 2, 3, 4)),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete cluster-id"),
+            Command::Delete(DeleteTarget::BgpInstanceClusterIdRelative)
         );
     }
 
