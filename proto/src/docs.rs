@@ -110,6 +110,10 @@ pub enum Topic {
     SetBgpPeerGroupAoRnextKey,
     /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearAuth)`
     ClearBgpPeerGroupAuth,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetNextHop)`
+    SetBgpPeerGroupNextHop,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearNextHop)`
+    ClearBgpPeerGroupNextHop,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

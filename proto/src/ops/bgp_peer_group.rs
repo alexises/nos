@@ -2,7 +2,7 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{AddressFamily, BgpAoKey, BgpAuth, BgpPeerGroup, Config};
+use crate::schema::{AddressFamily, BgpAoKey, BgpAuth, BgpPeerGroup, Config, NextHopMode};
 
 use super::bgp_instance::find_instance_mut;
 use super::OpError;
@@ -120,6 +120,15 @@ pub enum BgpPeerGroupOp {
         instance: String,
         name: String,
     },
+    SetNextHop {
+        instance: String,
+        name: String,
+        mode: NextHopMode,
+    },
+    ClearNextHop {
+        instance: String,
+        name: String,
+    },
 }
 
 impl BgpPeerGroupOp {
@@ -137,6 +146,7 @@ impl BgpPeerGroupOp {
                         keepalive_interval: None,
                         connect_retry_time: None,
                         auth: None,
+                        next_hop: None,
                     });
                 }
                 Ok(())
@@ -286,6 +296,18 @@ impl BgpPeerGroupOp {
                 find_group_mut(config, instance, name)?.auth = None;
                 Ok(())
             }
+            BgpPeerGroupOp::SetNextHop {
+                instance,
+                name,
+                mode,
+            } => {
+                find_group_mut(config, instance, name)?.next_hop = Some(*mode);
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearNextHop { instance, name } => {
+                find_group_mut(config, instance, name)?.next_hop = None;
+                Ok(())
+            }
         }
     }
 }
@@ -366,6 +388,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             auth: None,
+            next_hop: None,
         }
     }
 
@@ -492,6 +515,30 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].peer_groups[0].hold_time, None);
+    }
+
+    #[test]
+    fn set_and_clear_next_hop() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetNextHop {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            mode: NextHopMode::Unchanged,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].next_hop,
+            Some(NextHopMode::Unchanged)
+        );
+
+        BgpPeerGroupOp::ClearNextHop {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].next_hop, None);
     }
 
     #[test]

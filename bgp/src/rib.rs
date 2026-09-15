@@ -10,7 +10,12 @@
 //!   locally-redistributed route beats any peer-learned route, (4) lowest
 //!   advertising peer address as a final deterministic tiebreak. No MED,
 //!   origin-type ordering, IGP metric, or router-id tiebreaks.
-//! - Next-hop-self, always, for every advertisement to every peer.
+//! - Next-hop rewriting is peer-group configurable (`nos_proto::NextHopMode`
+//!   — `SelfAddress`/`Unchanged`), defaulting to `SelfAddress` for an eBGP
+//!   peer and `Unchanged` for an iBGP one. `Unchanged` re-advertises the
+//!   route's own stored next-hop (the address it was received with, for a
+//!   peer-learned route); a locally-redistributed route has no such stored
+//!   value, so it always gets next-hop-self regardless of mode.
 //! - Standard iBGP split-horizon (no route reflection): a route learned via
 //!   one iBGP peer is never re-advertised to another iBGP peer.
 //! - `AS_PATH` is prepended with our own ASN only toward eBGP peers;
@@ -33,7 +38,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::Ipv4Net;
-use nos_proto::RedistributeUpdate;
+use nos_proto::{NextHopMode, RedistributeUpdate};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -65,6 +70,12 @@ pub struct RibRoute {
     pub local_pref: u32,
     /// Meaningless when `origin == Local`.
     pub learned_via_ibgp: bool,
+    /// The `NEXT_HOP` this route was received with, for `origin ==
+    /// Peer(_)` — read back out when a destination peer-group's `next_hop`
+    /// resolves to `NextHopMode::Unchanged`. Always `None` for `origin ==
+    /// Local`: a locally-redistributed route has no "received" next-hop to
+    /// preserve, so it always gets next-hop-self regardless of mode.
+    pub next_hop: Option<Ipv4Addr>,
 }
 
 /// One update this instance needs to send out over a specific peer's
@@ -82,7 +93,9 @@ pub struct AdvertisedRoute {
     /// Already rewritten for the destination peer (our ASN prepended iff
     /// eBGP).
     pub as_path: Vec<u32>,
-    /// Next-hop-self: that peer's own session's local address.
+    /// Rewritten per the destination peer-group's effective `NextHopMode` —
+    /// either that peer's own session's local address (`SelfAddress`) or the
+    /// route's stored next-hop (`Unchanged`).
     pub next_hop: Ipv4Addr,
     /// `Some` only toward iBGP peers.
     pub local_pref: Option<u32>,
@@ -97,6 +110,10 @@ struct PeerOutbox {
     /// eligible for any advertisement, since next-hop-self has nothing to
     /// offer it.
     local_addr: Option<Ipv4Addr>,
+    /// This peer-group's configured next-hop override, if any — `None`
+    /// resolves to `SelfAddress` for an eBGP peer, `Unchanged` for an iBGP
+    /// one (see `build_advertisement`).
+    next_hop_mode: Option<NextHopMode>,
 }
 
 /// The BGP RIB engine for one `nos-bgpd` instance. See the module doc
@@ -140,6 +157,7 @@ impl BgpRib {
         peer: IpAddr,
         is_ibgp: bool,
         local_addr: Option<Ipv4Addr>,
+        next_hop_mode: Option<NextHopMode>,
         tx: mpsc::UnboundedSender<OutboundUpdate>,
     ) {
         self.peer_outboxes.insert(
@@ -148,6 +166,7 @@ impl BgpRib {
                 tx,
                 is_ibgp,
                 local_addr,
+                next_hop_mode,
             },
         );
         let outbox = self.peer_outboxes.get(&peer).expect("just inserted");
@@ -213,6 +232,7 @@ impl BgpRib {
                     bgp_origin: attrs.origin,
                     local_pref: attrs.local_pref.unwrap_or(DEFAULT_LOCAL_PREF),
                     learned_via_ibgp: remote_is_ibgp,
+                    next_hop: Some(attrs.next_hop),
                 };
                 for prefix in &update.nlri {
                     info!(peer = %from, "bgp: learned route for {prefix} into adj-rib-in");
@@ -228,7 +248,9 @@ impl BgpRib {
     }
 
     /// Applies one `nos_proto::RedistributeUpdate` from `nos-ribd`. `gateway`
-    /// on the wire type is never read — next-hop-self always overrides it.
+    /// on the wire type is never read — a locally-redistributed route always
+    /// gets next-hop-self, regardless of the destination peer-group's
+    /// configured mode (see `RibRoute::next_hop`'s doc comment).
     pub fn apply_redistribute_update(&mut self, update: RedistributeUpdate) {
         match update {
             RedistributeUpdate::Full(routes) => {
@@ -323,6 +345,7 @@ fn redistributed_route() -> RibRoute {
         bgp_origin: message::Origin::Igp,
         local_pref: DEFAULT_LOCAL_PREF,
         learned_via_ibgp: false,
+        next_hop: None,
     }
 }
 
@@ -376,7 +399,15 @@ fn build_advertisement(
             return None;
         }
     }
-    let next_hop = outbox.local_addr?;
+    let mode = outbox.next_hop_mode.unwrap_or(if outbox.is_ibgp {
+        NextHopMode::Unchanged
+    } else {
+        NextHopMode::SelfAddress
+    });
+    let next_hop = match mode {
+        NextHopMode::SelfAddress => outbox.local_addr?,
+        NextHopMode::Unchanged => best.next_hop.or(outbox.local_addr)?,
+    };
 
     let mut as_path = best.as_path.clone();
     if !outbox.is_ibgp {
@@ -421,8 +452,18 @@ mod tests {
         is_ibgp: bool,
         local_addr: Ipv4Addr,
     ) -> mpsc::UnboundedReceiver<OutboundUpdate> {
+        register_peer_with_mode(rib, peer, is_ibgp, local_addr, None)
+    }
+
+    fn register_peer_with_mode(
+        rib: &mut BgpRib,
+        peer: IpAddr,
+        is_ibgp: bool,
+        local_addr: Ipv4Addr,
+        next_hop_mode: Option<NextHopMode>,
+    ) -> mpsc::UnboundedReceiver<OutboundUpdate> {
         let (tx, rx) = mpsc::unbounded_channel();
-        rib.peer_established(peer, is_ibgp, Some(local_addr), tx);
+        rib.peer_established(peer, is_ibgp, Some(local_addr), next_hop_mode, tx);
         rx
     }
 
@@ -562,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn ebgp_learned_route_is_still_propagated_to_an_ibgp_peer() {
+    fn ebgp_learned_route_is_still_propagated_to_an_ibgp_peer_with_next_hop_unchanged() {
         let mut rib = new_rib(65000);
         let source = peer_addr("10.0.0.1"); // eBGP source
         let ibgp_peer = peer_addr("10.0.0.2");
@@ -581,6 +622,104 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 prefix: prefix("1.2.3.0/24"),
                 as_path: vec![65001],
+                // iBGP defaults to Unchanged: the eBGP source's own
+                // next-hop (10.0.0.1) is preserved, not rewritten to the
+                // ibgp_peer's own local address.
+                next_hop: v4("10.0.0.1"),
+                local_pref: Some(100),
+                origin: message::Origin::Igp,
+            })]
+        );
+    }
+
+    #[test]
+    fn ibgp_peer_with_next_hop_self_override_rewrites_to_local_address() {
+        let mut rib = new_rib(65000);
+        let source = peer_addr("10.0.0.1"); // eBGP source
+        let ibgp_peer = peer_addr("10.0.0.2");
+        let _source_rx = register_peer(&mut rib, source, false, v4("10.0.0.254"));
+        let mut ibgp_rx = register_peer_with_mode(
+            &mut rib,
+            ibgp_peer,
+            true,
+            v4("10.0.0.253"),
+            Some(NextHopMode::SelfAddress),
+        );
+
+        rib.handle_update(
+            source,
+            false,
+            ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+        );
+
+        let updates = recv_all(&mut ibgp_rx);
+        assert_eq!(
+            updates,
+            vec![OutboundUpdate::Announce(AdvertisedRoute {
+                prefix: prefix("1.2.3.0/24"),
+                as_path: vec![65001],
+                next_hop: v4("10.0.0.253"),
+                local_pref: Some(100),
+                origin: message::Origin::Igp,
+            })]
+        );
+    }
+
+    #[test]
+    fn ebgp_peer_with_next_hop_unchanged_override_preserves_received_next_hop() {
+        let mut rib = new_rib(65000);
+        let source = peer_addr("10.0.0.1");
+        let other = peer_addr("10.0.0.2");
+        let _source_rx = register_peer(&mut rib, source, false, v4("10.0.0.254"));
+        let mut other_rx = register_peer_with_mode(
+            &mut rib,
+            other,
+            false,
+            v4("10.0.0.253"),
+            Some(NextHopMode::Unchanged),
+        );
+
+        rib.handle_update(
+            source,
+            false,
+            ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+        );
+
+        let updates = recv_all(&mut other_rx);
+        assert_eq!(
+            updates,
+            vec![OutboundUpdate::Announce(AdvertisedRoute {
+                prefix: prefix("1.2.3.0/24"),
+                as_path: vec![65000, 65001],
+                next_hop: v4("10.0.0.1"),
+                local_pref: None,
+                origin: message::Origin::Igp,
+            })]
+        );
+    }
+
+    #[test]
+    fn redistributed_route_always_gets_next_hop_self_even_with_unchanged_override() {
+        let mut rib = new_rib(65000);
+        let peer = peer_addr("10.0.0.1");
+        let mut rx = register_peer_with_mode(
+            &mut rib,
+            peer,
+            true,
+            v4("10.0.0.253"),
+            Some(NextHopMode::Unchanged),
+        );
+
+        rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
+
+        let updates = recv_all(&mut rx);
+        assert_eq!(
+            updates,
+            vec![OutboundUpdate::Announce(AdvertisedRoute {
+                prefix: prefix("192.168.1.0/24"),
+                as_path: vec![],
+                // No stored next-hop on a Local-origin route, so it always
+                // falls back to next-hop-self regardless of mode.
                 next_hop: v4("10.0.0.253"),
                 local_pref: Some(100),
                 origin: message::Origin::Igp,
@@ -655,7 +794,10 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 prefix: prefix("9.9.9.0/24"),
                 as_path: vec![],
-                next_hop: v4("10.0.0.252"),
+                // iBGP defaults to Unchanged: peer_b's own advertised
+                // next-hop (10.0.0.2) is preserved, not rewritten to the
+                // observer's local address.
+                next_hop: v4("10.0.0.2"),
                 local_pref: Some(200),
                 origin: message::Origin::Igp,
             })]
@@ -760,7 +902,7 @@ mod tests {
         let mut rib = new_rib(65000);
         let peer = peer_addr("10.0.0.1");
         let (tx, mut rx) = mpsc::unbounded_channel();
-        rib.peer_established(peer, false, None, tx);
+        rib.peer_established(peer, false, None, None, tx);
 
         rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
 

@@ -2,14 +2,16 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
     Config, ConfigDiff, DiffStatus, FieldDiff, Interface, InterfaceStatus, LogEntry, LogLevel,
-    PeerSummary, PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, StaticRoute,
-    StaticRoutingInstance, TransactionSnapshot,
+    NextHopMode, PeerSummary, PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff,
+    StaticRoute, StaticRoutingInstance, TransactionSnapshot,
 };
 
 use crate::session::Path;
 
-/// Render one peer-group as human-readable text.
-pub fn render_bgp_peer_group(group: &BgpPeerGroup) -> String {
+/// Render one peer-group as human-readable text. `local_asn` is the owning
+/// BGP instance's own ASN, needed only to render `next_hop`'s default
+/// (eBGP/iBGP-dependent) label when the field is unset.
+pub fn render_bgp_peer_group(group: &BgpPeerGroup, local_asn: u32) -> String {
     let source_address = group
         .source_address
         .map_or_else(|| "unset".to_string(), |a| a.to_string());
@@ -33,10 +35,16 @@ pub fn render_bgp_peer_group(group: &BgpPeerGroup) -> String {
         .connect_retry_time
         .map_or_else(|| "default (120s)".to_string(), |c| c.to_string());
     let auth = render_bgp_auth(group.auth.as_ref());
+    let next_hop = match group.next_hop {
+        Some(NextHopMode::SelfAddress) => "self".to_string(),
+        Some(NextHopMode::Unchanged) => "unchanged".to_string(),
+        None if group.remote_as == local_asn => "default (unchanged, iBGP)".to_string(),
+        None => "default (self, eBGP)".to_string(),
+    };
     format!(
         "peer-group {}: remote-as {}, source-address {source_address}, address-family [{address_families}], \
          hold-time {hold_time}, keepalive-interval {keepalive_interval}, connect-retry-time {connect_retry_time}, \
-         auth {auth}",
+         auth {auth}, next-hop {next_hop}",
         group.name, group.remote_as
     )
 }
@@ -86,7 +94,7 @@ pub fn render_bgp_instance(instance: &BgpInstance) -> String {
         instance.name, instance.router_id, instance.asn
     )];
     for group in &instance.peer_groups {
-        lines.push(format!("  {}", render_bgp_peer_group(group)));
+        lines.push(format!("  {}", render_bgp_peer_group(group, instance.asn)));
     }
     for peer in &instance.peers {
         lines.push(format!("  {}", render_bgp_peer(peer)));
@@ -370,7 +378,7 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
                     .find(|g| &g.name == group)
                     .map_or_else(
                         || format!("peer-group '{group}' not found in bgp instance '{instance}'"),
-                        render_bgp_peer_group,
+                        |g| render_bgp_peer_group(g, inst.asn),
                     ),
             }
         }
@@ -769,16 +777,17 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             auth: None,
+            next_hop: None,
         }
     }
 
     #[test]
     fn render_bgp_peer_group_line() {
         assert_eq!(
-            render_bgp_peer_group(&peer_group("pg1")),
+            render_bgp_peer_group(&peer_group("pg1"), 65000),
             "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), auth none"
+             connect-retry-time default (120s), auth none, next-hop default (self, eBGP)"
         );
     }
 
@@ -787,10 +796,10 @@ mod tests {
         let mut pg = peer_group("pg1");
         pg.source_address = None;
         assert_eq!(
-            render_bgp_peer_group(&pg),
+            render_bgp_peer_group(&pg, 65000),
             "peer-group pg1: remote-as 65001, source-address unset, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), auth none"
+             connect-retry-time default (120s), auth none, next-hop default (self, eBGP)"
         );
     }
 
@@ -801,9 +810,10 @@ mod tests {
         pg.keepalive_interval = Some(10);
         pg.connect_retry_time = Some(45);
         assert_eq!(
-            render_bgp_peer_group(&pg),
+            render_bgp_peer_group(&pg, 65000),
             "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
-             hold-time 30, keepalive-interval 10, connect-retry-time 45, auth none"
+             hold-time 30, keepalive-interval 10, connect-retry-time 45, auth none, \
+             next-hop default (self, eBGP)"
         );
     }
 
@@ -814,10 +824,11 @@ mod tests {
             password: "secret".to_string(),
         });
         assert_eq!(
-            render_bgp_peer_group(&pg),
+            render_bgp_peer_group(&pg, 65000),
             "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), auth md5-password secret"
+             connect-retry-time default (120s), auth md5-password secret, \
+             next-hop default (self, eBGP)"
         );
     }
 
@@ -837,11 +848,26 @@ mod tests {
             }],
         });
         assert_eq!(
-            render_bgp_peer_group(&pg),
+            render_bgp_peer_group(&pg, 65000),
             "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), auth ao-keys [send-id 1 hmac-sha1 secret (current)]"
+             connect-retry-time default (120s), \
+             auth ao-keys [send-id 1 hmac-sha1 secret (current)], \
+             next-hop default (self, eBGP)"
         );
+    }
+
+    #[test]
+    fn render_bgp_peer_group_next_hop_ibgp_default_and_explicit_override() {
+        let mut pg = peer_group("pg1");
+        pg.remote_as = 65000;
+        assert!(render_bgp_peer_group(&pg, 65000).contains("next-hop default (unchanged, iBGP)"));
+
+        pg.next_hop = Some(NextHopMode::SelfAddress);
+        assert!(render_bgp_peer_group(&pg, 65000).contains("next-hop self"));
+
+        pg.next_hop = Some(NextHopMode::Unchanged);
+        assert!(render_bgp_peer_group(&pg, 65000).contains("next-hop unchanged"));
     }
 
     #[test]
@@ -857,7 +883,7 @@ mod tests {
             "bgp instance r1: router-id 1.1.1.1, asn 65000\n  \
              peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), auth none\n  \
+             connect-retry-time default (120s), auth none, next-hop default (self, eBGP)\n  \
              peer 192.0.2.1: peer-group pg1"
         );
     }
@@ -877,7 +903,7 @@ mod tests {
             rendered,
             "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), auth none"
+             connect-retry-time default (120s), auth none, next-hop default (unchanged, iBGP)"
         );
     }
 

@@ -46,6 +46,20 @@ pub const HOLD_TIME_DEFAULT: u16 = 90;
 /// peer-group leaves `connect_retry_time` unset.
 pub const CONNECT_RETRY_TIME_DEFAULT_SECS: u16 = 120;
 
+/// Controls the `NEXT_HOP` path attribute this instance writes into every
+/// UPDATE it advertises to a peer-group's sessions. `SelfAddress` rewrites it
+/// to the session's own local address ("next-hop-self"); `Unchanged`
+/// preserves the next-hop the route already carries (the address it was
+/// received with, for a peer-learned route). `BgpPeerGroup.next_hop: None`
+/// resolves to `SelfAddress` for an eBGP peer-group and `Unchanged` for an
+/// iBGP one — standard BGP practice, since an iBGP speaker must not silently
+/// mask a route's real eBGP-learned next-hop unless explicitly told to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NextHopMode {
+    SelfAddress,
+    Unchanged,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct BgpPeerGroup {
@@ -89,6 +103,11 @@ pub struct BgpPeerGroup {
     /// — see `BgpAuth`.
     #[garde(custom(|a: &Option<BgpAuth>, _ctx: &Config| valid_auth(a.as_ref())))]
     pub auth: Option<BgpAuth>,
+
+    /// `None` defaults to `SelfAddress` for an eBGP peer-group and
+    /// `Unchanged` for an iBGP one — see `NextHopMode`.
+    #[garde(skip)]
+    pub next_hop: Option<NextHopMode>,
 }
 
 /// Transport authentication for a peer-group's sessions — mutually
@@ -286,6 +305,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             auth: None,
+            next_hop: None,
         }
     }
 

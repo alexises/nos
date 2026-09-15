@@ -301,6 +301,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: std::time::Duration::from_secs(120),
             auth: None,
+            next_hop: None,
         })
     }
 

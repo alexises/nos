@@ -152,6 +152,7 @@ async fn resync(
                         Duration::from_secs(u64::from(s))
                     }),
                 auth: group.auth.as_ref().map(ResolvedAuth::from),
+                next_hop: group.next_hop,
             })
         })
         .collect();

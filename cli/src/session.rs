@@ -710,6 +710,20 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
+        Command::Delete(DeleteTarget::NextHop) => match path {
+            Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearNextHop {
+                    instance: instance.clone(),
+                    name: group.clone(),
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+        },
 
         // `top` always lands at the root, however deep the current path is.
         Command::Top => match path {
@@ -831,6 +845,11 @@ fn peer_group_set_op(instance: String, group: String, field: BgpPeerGroupField) 
             name: group,
             send_id,
         },
+        BgpPeerGroupField::NextHop(mode) => BgpPeerGroupOp::SetNextHop {
+            instance,
+            name: group,
+            mode,
+        },
     })
 }
 
@@ -838,7 +857,7 @@ fn peer_group_set_op(instance: String, group: String, field: BgpPeerGroupField) 
 mod tests {
     use std::net::Ipv4Addr;
 
-    use nos_proto::{Redistribute, RedistributeSource, RedistributeTarget};
+    use nos_proto::{NextHopMode, Redistribute, RedistributeSource, RedistributeTarget};
 
     use super::*;
 
@@ -1352,6 +1371,64 @@ mod tests {
                     instance: "r1".to_string(),
                     name: "pg1".to_string(),
                     connect_retry_time: 45,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_and_delete_peer_group_next_hop_qualified_and_relative() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: "r1".to_string(),
+                    group: "pg1".to_string(),
+                    field: BgpPeerGroupField::NextHop(NextHopMode::SelfAddress),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetNextHop {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                    mode: NextHopMode::SelfAddress,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::NextHop(NextHopMode::Unchanged),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetNextHop {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                    mode: NextHopMode::Unchanged,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::BgpInstance("r1".to_string()), false),
+                Command::Delete(DeleteTarget::NextHop)
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Delete(DeleteTarget::NextHop)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearNextHop {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
                 }),
                 after: PathAfter::Stay,
             }

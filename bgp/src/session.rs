@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nos_proto::bgp::{BgpSessionState, PeerSummary};
-use nos_proto::{BgpAoAlgorithm, BgpAuth};
+use nos_proto::{BgpAoAlgorithm, BgpAuth, NextHopMode};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -63,6 +63,9 @@ pub struct ResolvedPeer {
     pub keepalive_interval: Option<u16>,
     pub connect_retry_time: Duration,
     pub auth: Option<ResolvedAuth>,
+    /// The owning peer-group's configured next-hop override, if any —
+    /// threaded straight through to `fsm::PeerContext`.
+    pub next_hop: Option<NextHopMode>,
 }
 
 /// A peer-group's `BgpAuth` translated into `nos-tcp-auth`'s wire-level
@@ -315,6 +318,7 @@ impl SessionManager {
         let remote_as = slot.peer.remote_as;
         let local_hold_time = slot.peer.hold_time;
         let keepalive_override = slot.peer.keepalive_interval;
+        let next_hop = slot.peer.next_hop;
         let bgp_rib = self.bgp_rib.clone();
         tokio::spawn(async move {
             let outcome = fsm::run(
@@ -326,6 +330,7 @@ impl SessionManager {
                     expected_remote_as: remote_as,
                     local_hold_time,
                     keepalive_override,
+                    next_hop,
                 },
                 slot.clone(),
                 bgp_rib,
@@ -540,6 +545,7 @@ async fn active_connect_loop(
                                 expected_remote_as: slot.peer.remote_as,
                                 local_hold_time: slot.peer.hold_time,
                                 keepalive_override: slot.peer.keepalive_interval,
+                                next_hop: slot.peer.next_hop,
                             },
                             slot.clone(),
                             bgp_rib.clone(),
@@ -580,6 +586,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: fsm::CONNECT_RETRY_TIME,
             auth: None,
+            next_hop: None,
         }
     }
 

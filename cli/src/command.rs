@@ -2,8 +2,8 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
 use nos_proto::{
-    AddressFamily, BgpAoAlgorithm, Redistribute, RedistributeSource, RedistributeTarget,
-    TransactionBase,
+    AddressFamily, BgpAoAlgorithm, NextHopMode, Redistribute, RedistributeSource,
+    RedistributeTarget, TransactionBase,
 };
 
 /// A single field edit targeting a BGP instance.
@@ -34,6 +34,7 @@ pub enum BgpPeerGroupField {
     },
     AoCurrentKey(u8),
     AoRnextKey(u8),
+    NextHop(NextHopMode),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +174,8 @@ pub enum DeleteTarget {
     /// `delete ao-key <send-id>` — only valid while navigated into a
     /// peer-group.
     AoKey(u8),
+    /// `delete next-hop` — only valid while navigated into a peer-group.
+    NextHop,
     RoutingTable {
         name: String,
     },
@@ -452,6 +455,20 @@ impl Command {
                     Err(_) => Command::Unknown(trimmed.to_string()),
                 }
             }
+            ["set", "bgp", "instance", instance, "peer-group", group, "next-hop", "self"] => {
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: (*instance).to_string(),
+                    group: (*group).to_string(),
+                    field: BgpPeerGroupField::NextHop(NextHopMode::SelfAddress),
+                })
+            }
+            ["set", "bgp", "instance", instance, "peer-group", group, "next-hop", "unchanged"] => {
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: (*instance).to_string(),
+                    group: (*group).to_string(),
+                    field: BgpPeerGroupField::NextHop(NextHopMode::Unchanged),
+                })
+            }
             ["set", "bgp", "instance", instance, "peer-group", group, "md5-password", password] => {
                 Command::Set(SetTarget::BgpPeerGroup {
                     instance: (*instance).to_string(),
@@ -517,6 +534,12 @@ impl Command {
             }),
             ["set", "address-family", "ipv6"] => Command::Set(SetTarget::PeerGroupRelative {
                 field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv6Unicast),
+            }),
+            ["set", "next-hop", "self"] => Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::NextHop(NextHopMode::SelfAddress),
+            }),
+            ["set", "next-hop", "unchanged"] => Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::NextHop(NextHopMode::Unchanged),
             }),
             ["set", "hold-time", n] => match n.parse::<u16>() {
                 Ok(hold_time) => Command::Set(SetTarget::PeerGroupRelative {
@@ -697,6 +720,7 @@ impl Command {
             ["delete", "address-family", "ipv6"] => {
                 Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv6Unicast))
             }
+            ["delete", "next-hop"] => Command::Delete(DeleteTarget::NextHop),
             ["delete", "hold-time"] => Command::Delete(DeleteTarget::HoldTime),
             ["delete", "keepalive-interval"] => Command::Delete(DeleteTarget::KeepaliveInterval),
             ["delete", "connect-retry-time"] => Command::Delete(DeleteTarget::ConnectRetryTime),
@@ -1109,6 +1133,50 @@ mod tests {
                 group: "PG1".to_string(),
                 field: BgpPeerGroupField::ConnectRetryTime(45),
             })
+        );
+    }
+
+    #[test]
+    fn set_bgp_peer_group_next_hop_qualified() {
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 next-hop self"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::NextHop(NextHopMode::SelfAddress),
+            })
+        );
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 next-hop unchanged"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::NextHop(NextHopMode::Unchanged),
+            })
+        );
+    }
+
+    #[test]
+    fn set_peer_group_next_hop_relative() {
+        assert_eq!(
+            Command::parse("set next-hop self"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::NextHop(NextHopMode::SelfAddress),
+            })
+        );
+        assert_eq!(
+            Command::parse("set next-hop unchanged"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::NextHop(NextHopMode::Unchanged),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_peer_group_next_hop_relative() {
+        assert_eq!(
+            Command::parse("delete next-hop"),
+            Command::Delete(DeleteTarget::NextHop)
         );
     }
 

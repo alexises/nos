@@ -334,6 +334,20 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              (MD5 password or TCP-AO keys) was set, reverting sessions to no transport \
              authentication.",
         ),
+        Topic::SetBgpPeerGroupNextHop => (
+            "Set a peer-group's advertised BGP next-hop mode.",
+            "Sets the next-hop field on a peer-group to either 'self' (rewrite the NEXT_HOP \
+             attribute to this router's own address on every advertisement — the standard \
+             eBGP default) or 'unchanged' (preserve the next-hop the route already carries \
+             — the standard iBGP default, avoiding the third-party-next-hop problem). \
+             Overrides the mode this peer-group would otherwise default to based on whether \
+             it's eBGP or iBGP (remote-as compared to the instance's own asn).",
+        ),
+        Topic::ClearBgpPeerGroupNextHop => (
+            "Clear a peer-group's advertised BGP next-hop mode override.",
+            "Unsets the next-hop field on a peer-group, reverting to the default: 'self' for \
+             an eBGP peer-group, 'unchanged' for an iBGP one.",
+        ),
     };
     CommandDoc {
         topic,
@@ -402,6 +416,8 @@ mod tests {
         Topic::SetBgpPeerGroupAoCurrentKey,
         Topic::SetBgpPeerGroupAoRnextKey,
         Topic::ClearBgpPeerGroupAuth,
+        Topic::SetBgpPeerGroupNextHop,
+        Topic::ClearBgpPeerGroupNextHop,
     ];
 
     #[test]

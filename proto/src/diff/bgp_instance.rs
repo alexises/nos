@@ -201,6 +201,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             auth: None,
+            next_hop: None,
         };
 
         let mut base_instance = instance("r1", 65000);

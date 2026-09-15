@@ -77,6 +77,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             auth: None,
+            next_hop: None,
         }
     }
 

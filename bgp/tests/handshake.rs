@@ -82,6 +82,7 @@ async fn two_real_instances_establish_a_session() {
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
         auth: None,
+        next_hop: None,
     });
     let slot_b = PeerSlot::new(ResolvedPeer {
         remote_address: "10.0.0.1".parse().unwrap(),
@@ -92,6 +93,7 @@ async fn two_real_instances_establish_a_session() {
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
         auth: None,
+        next_hop: None,
     });
 
     let a_fut = fsm::run(
@@ -106,6 +108,7 @@ async fn two_real_instances_establish_a_session() {
             expected_remote_as: b_asn,
             local_hold_time: 90,
             keepalive_override: None,
+            next_hop: None,
         },
         slot_a,
         new_bgp_rib(),
@@ -122,6 +125,7 @@ async fn two_real_instances_establish_a_session() {
             expected_remote_as: a_asn,
             local_hold_time: 90,
             keepalive_override: None,
+            next_hop: None,
         },
         slot_b,
         new_bgp_rib(),
@@ -165,6 +169,7 @@ async fn established_session_honors_configured_non_default_hold_time() {
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
         auth: None,
+        next_hop: None,
     });
 
     let a_fut = fsm::run(
@@ -179,6 +184,7 @@ async fn established_session_honors_configured_non_default_hold_time() {
             expected_remote_as: b_asn,
             local_hold_time: 30,
             keepalive_override: None,
+            next_hop: None,
         },
         slot_a,
         new_bgp_rib(),
@@ -220,6 +226,7 @@ async fn established_session_reports_status_via_peer_slot() {
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
         auth: None,
+        next_hop: None,
     });
     let mut status = slot_a.status_receiver();
 
@@ -235,6 +242,7 @@ async fn established_session_reports_status_via_peer_slot() {
             expected_remote_as: b_asn,
             local_hold_time: 90,
             keepalive_override: None,
+            next_hop: None,
         },
         slot_a,
         new_bgp_rib(),
@@ -298,6 +306,7 @@ async fn collision_leaves_exactly_one_side_running() {
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
         auth: None,
+        next_hop: None,
     });
 
     let peer_ctx = || PeerContext {
@@ -305,6 +314,7 @@ async fn collision_leaves_exactly_one_side_running() {
         expected_remote_as: remote_asn,
         local_hold_time: 90,
         keepalive_override: None,
+        next_hop: None,
     };
 
     // Both sides share one `PeerSlot` (they're racing for the same peer), so

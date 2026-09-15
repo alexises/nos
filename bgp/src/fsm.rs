@@ -22,7 +22,7 @@ use tokio::time::Instant;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, info};
 
-use nos_proto::HOLD_TIME_FLOOR;
+use nos_proto::{NextHopMode, HOLD_TIME_FLOOR};
 
 use crate::collision::{self, PeerSlot};
 use crate::message::{
@@ -50,6 +50,10 @@ pub struct PeerContext {
     pub expected_remote_as: u32,
     pub local_hold_time: u16,
     pub keepalive_override: Option<u16>,
+    /// The peer-group's configured next-hop override, if any — `None` lets
+    /// `crate::rib::build_advertisement` fall back to the eBGP/iBGP-dependent
+    /// default.
+    pub next_hop: Option<NextHopMode>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -462,6 +466,7 @@ pub async fn run(
                             peer.remote_address,
                             remote_is_ibgp,
                             local_addr_v4,
+                            peer.next_hop,
                             outbox_tx.clone(),
                         );
                         slot.status.send_modify(|s| {
