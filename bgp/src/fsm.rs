@@ -25,10 +25,10 @@ use tracing::{debug, info};
 
 use nos_proto::{AddressFamily, NextHopMode, HOLD_TIME_FLOOR};
 
-use crate::collision::{self, PeerSlot};
+use crate::collision::{self, FsmCommand, PeerSlot};
 use crate::message::{
     self, BgpCodec, BgpMessage, CeaseSubcode, ErrorCode, MessageHeaderSubcode, NotificationMessage,
-    OpenMessage, OpenMessageSubcode, UpdateMessageSubcode, WireError,
+    OpenMessage, OpenMessageSubcode, RouteRefreshMessage, UpdateMessageSubcode, WireError,
 };
 use crate::rib::{BgpRib, OutboundUpdate};
 use crate::session::LocalIdentity;
@@ -49,6 +49,16 @@ fn afi_of_addr(addr: IpAddr) -> u16 {
     match addr {
         IpAddr::V4(_) => AFI_IPV4,
         IpAddr::V6(_) => AFI_IPV6,
+    }
+}
+
+/// The `AddressFamily` a `ROUTE_REFRESH`'s wire AFI names, if it's one this
+/// crate understands.
+fn family_of_afi(afi: u16) -> Option<AddressFamily> {
+    match afi {
+        AFI_IPV4 => Some(AddressFamily::Ipv4Unicast),
+        AFI_IPV6 => Some(AddressFamily::Ipv6Unicast),
+        _ => None,
     }
 }
 
@@ -348,6 +358,7 @@ fn notification_for_wire_error(e: &WireError) -> (u8, u8) {
         | WireError::Truncated
         | WireError::MalformedOpen
         | WireError::MalformedNotification
+        | WireError::MalformedRouteRefresh
         | WireError::Io(_) => (
             ErrorCode::MessageHeader as u8,
             MessageHeaderSubcode::BadMessageLength as u8,
@@ -451,6 +462,7 @@ pub async fn run(
             &peer.address_families,
             ctx.transport_afi,
         ));
+        open.capabilities.push(message::Capability::RouteRefresh);
         if writer.send(BgpMessage::Open(open)).await.is_err() {
             break 'session FsmOutcome::TcpError;
         }
@@ -487,6 +499,28 @@ pub async fn run(
                                 }
                                 continue;
                             }
+                            BgpMessage::RouteRefresh(rr) => {
+                                if let State::Established(_) = &state {
+                                    if let Some(family) = family_of_afi(rr.afi) {
+                                        bgp_rib.lock().await.resend_all(peer.remote_address, family);
+                                        info!(
+                                            peer = %peer.remote_address, afi = rr.afi,
+                                            "bgp: received route refresh, resending loc-rib"
+                                        );
+                                    } else {
+                                        debug!(
+                                            peer = %peer.remote_address, afi = rr.afi,
+                                            "ignoring route-refresh for unrecognized afi"
+                                        );
+                                    }
+                                } else {
+                                    debug!(
+                                        peer = %peer.remote_address,
+                                        "ignoring route refresh received before session established"
+                                    );
+                                }
+                                continue;
+                            }
                             BgpMessage::Unhandled { message_type, .. } => {
                                 debug!(
                                     peer = %peer.remote_address, message_type,
@@ -510,6 +544,31 @@ pub async fn run(
                 () = cease.notified() => Event::CollisionLost,
                 Some(update) = outbox_rx.recv() => {
                     let _ = writer.send(outbound_update_to_message(update)).await;
+                    continue;
+                }
+                // Guarded on `Established`: collision resolution always
+                // happens before either side reaches it, so only the one
+                // task that ever becomes canonical polls (and locks)
+                // `slot`'s shared command receiver — the collision loser
+                // never contends for it.
+                Some(cmd) = slot.recv_command(), if matches!(state, State::Established(_)) => {
+                    match cmd {
+                        FsmCommand::SendRouteRefresh => {
+                            if let State::Established(remote) = &state {
+                                if remote.negotiated_ipv4_unicast {
+                                    let _ = writer.send(BgpMessage::RouteRefresh(
+                                        RouteRefreshMessage { afi: AFI_IPV4, safi: 1 },
+                                    )).await;
+                                }
+                                if remote.negotiated_ipv6_unicast {
+                                    let _ = writer.send(BgpMessage::RouteRefresh(
+                                        RouteRefreshMessage { afi: AFI_IPV6, safi: 1 },
+                                    )).await;
+                                }
+                                info!(peer = %peer.remote_address, "bgp: sent route refresh request to peer");
+                            }
+                        }
+                    }
                     continue;
                 }
             };

@@ -73,10 +73,19 @@ pub enum BgpRequest {
     /// Fire-and-forget, no reply — like `LogRequest::Push`, sent
     /// continuously over one long-lived connection from `nos-ribd`.
     RedistributeRoutes(RedistributeUpdate),
+    /// Operator-triggered `clear bgp <instance> <peer> soft-in` — ask
+    /// `peer`'s live session to send it an RFC 2918 `ROUTE_REFRESH`.
+    SendRouteRefresh { peer: IpAddr },
 }
 
 /// Messages sent from `nos-bgpd` to a query client.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum BgpEvent {
     Summary(Vec<PeerSummary>),
+    /// Reply to `SendRouteRefresh`: the command was delivered to a live,
+    /// `Established` session for that peer.
+    RouteRefreshSent,
+    /// Reply to `SendRouteRefresh`: no `Established` session with that peer
+    /// exists right now.
+    PeerNotFound,
 }

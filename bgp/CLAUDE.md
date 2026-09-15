@@ -4,7 +4,7 @@ BGP-4 implementation for NOS (binary `nos-bgpd`, one process per `BgpInstance`, 
 
 ## Scope
 
-`nos-bgpd` resolves its own configured peers and VRF from `nos-configd`, opens/accepts VRF-scoped TCP connections to/from those peers (see "Raw TCP session model" below), and now runs a real BGP-4 finite state machine (RFC 4271) over each connection: OPEN/KEEPALIVE exchange up through the `Established` state, with hold-timer/keepalive-timer maintenance and real RFC 4271 §6.8 collision resolution. Route exchange (UPDATE messages, RIB integration) is deliberately still out of scope — a future feature layers that on top of `Established` sessions. See "BGP finite state machine" below.
+`nos-bgpd` resolves its own configured peers and VRF from `nos-configd`, opens/accepts VRF-scoped TCP connections to/from those peers (see "Raw TCP session model" below), and runs a real BGP-4 finite state machine (RFC 4271) over each connection: OPEN/KEEPALIVE exchange up through the `Established` state, with hold-timer/keepalive-timer maintenance and real RFC 4271 §6.8 collision resolution. Once `Established`, route exchange (UPDATE messages, full RIB integration — see `rib.rs`) and RFC 2918 ROUTE_REFRESH are both supported. See "BGP finite state machine" and "Route refresh (RFC 2918)" below.
 
 ### VRF resolution
 
@@ -39,7 +39,7 @@ Secrets are stored **clear-text** end-to-end (config, transaction diffs, `nos-cl
 
 OPEN validation (`fsm::handle_open`) checks, in order: BGP version (must be 4), the peer's real ASN against the configured `BgpPeerGroup.remote_as` (see "Four-octet AS numbers" below), the BGP Identifier's validity (`message::is_valid_bgp_identifier` — rejects `0.0.0.0`, multicast, broadcast), and the proposed hold time (`0`, or `>= 3` per RFC 4271 §6.2 — `1`/`2` are invalid). Any failure sends the matching RFC 4271 §6 `NOTIFICATION` (Error Code `OpenMessage`, the specific subcode) and closes; a hold-timer expiry at any state sends `NOTIFICATION(HoldTimerExpired)`. The negotiated hold time is `min(local, remote)`, where "local" is the owning `BgpPeerGroup`'s configured `hold_time` (`nos_proto::HOLD_TIME_DEFAULT`, 90s, when unset); keepalive interval defaults to `negotiated_hold / 3` but can be overridden by the peer-group's `keepalive_interval`, itself falling back to the `/3` derivation whenever the override doesn't fit under what was actually negotiated (config-time validation only checks the override against the locally-configured hold-time, not the post-negotiation one); a negotiated hold time of `0` disables both timers entirely regardless of any override, per RFC 4271. A peer-group's `connect_retry_time` (`nos_proto::CONNECT_RETRY_TIME_DEFAULT_SECS`/`fsm::CONNECT_RETRY_TIME`, 120s, when unset) governs `session.rs`'s outbound retry interval the same way. All three timer constants/defaults live in `nos_proto` (alongside the `BgpPeerGroup` fields themselves) rather than `nos-bgp`, since `nos-config`'s commit-time validation needs the same floor/ratio rules `fsm.rs` applies at runtime.
 
-Every well-formed inbound message (not just KEEPALIVE) resets the hold timer, per RFC 4271 §4.4 — handled centrally in `fsm::run`'s read branch rather than per-message-type. An `Unhandled` message (UPDATE, or anything unrecognized) is logged and ignored rather than treated as an error, since route exchange doesn't exist yet.
+Every well-formed inbound message (not just KEEPALIVE) resets the hold timer, per RFC 4271 §4.4 — handled centrally in `fsm::run`'s read branch rather than per-message-type. UPDATE and ROUTE_REFRESH both bypass `step()`'s OpenSent/OpenConfirm/Established transition table entirely — they're short-circuited directly in `fsm::run`'s read branch, meaningful only once `Established` (silently logged and ignored otherwise, same as before that state). `Unhandled` now covers only genuinely unrecognized message types.
 
 ### Four-octet AS numbers (RFC 6793)
 
@@ -55,6 +55,15 @@ Every well-formed inbound message (not just KEEPALIVE) resets the hold timer, pe
 
 The loser is torn down with `NOTIFICATION(Cease, ConnectionCollisionResolution)` (RFC 4486 §7), signaled via a `tokio::sync::Notify` handle so its own `fsm::run` task sends the notification itself before closing — never a bare socket drop.
 
+### Route refresh (RFC 2918)
+
+`message::build_open` (via `fsm::run`) always advertises the Route Refresh capability (code 2, no payload) — unconditional, like every other capability this NOS sends, with no peer-group opt-out. Both directions are supported once `Established`:
+
+- **Inbound**: a received `BgpMessage::RouteRefresh` is dispatched straight to `BgpRib::resend_all(peer, family)` (`rib.rs`), which re-sends the current Loc-RIB to that peer for the requested address family only, reusing `build_advertisement`'s existing eligibility logic (split-horizon, negotiated-AF check, source-peer echo) — a family the peer never negotiated is silently a no-op.
+- **Outbound**: `nos-cli`'s `clear bgp <instance> <peer> soft-in` reaches a peer's live `nos-bgpd` via `BgpRequest::SendRouteRefresh { peer }` (`server.rs`), which calls `SessionManager::send_command` to deliver an `FsmCommand::SendRouteRefresh` through `collision::PeerSlot`'s command channel. `fsm::run` sends a `RouteRefresh` message for every address family the session actually negotiated.
+
+The command channel lives on `PeerSlot` (not per-connection) since it's already the single per-peer object shared across a peer's active/passive reconnects, alongside `status`. Its receiver is polled in `fsm::run`'s `select!` loop **only while that task's own state is `Established`** — RFC 4271 §6.8 collision resolution always happens before either side reaches `Established` (see above), so the collision loser never polls it: exactly one task ever contends for the shared receiver at a time, with no take/hand-off dance needed.
+
 ## Modules
 
 | Module | Role |
@@ -68,7 +77,7 @@ The loser is torn down with `NOTIFICATION(Cease, ConnectionCollisionResolution)`
 | `tcp.rs` | `connect`/`bind_listener` — the two VRF-scoped socket primitives, via `tokio::net::TcpSocket` + `socket2::SockRef::bind_device`. `apply_auth`/`remove_auth` install/remove a `ResolvedAuth` on a raw fd (outbound socket or shared listener alike) via `nos_tcp_auth` — see "Session authentication" above |
 | `message.rs` | RFC 4271 BGP-4 wire format: the common header, OPEN/KEEPALIVE/NOTIFICATION bodies, the RFC 6793 four-octet AS capability, and `BgpCodec` (a hand-rolled `tokio_util::codec::{Encoder,Decoder}` — BGP's wire format is incompatible with `nos-proto`'s postcard-based `IpcCodec`, and is a contract with external routers rather than an inter-NOS-daemon one, so it lives here, not in `nos-proto`) |
 | `fsm.rs` | The BGP finite state machine (`OpenSent`/`OpenConfirm`/`Established`) — see "BGP finite state machine" above. Also the sole writer of each peer's `status.rs` state, at the same transition points it already calls `PeerSlot::on_open`/`mark_established` |
-| `collision.rs` | RFC 4271 §6.8 connection collision resolution — see "Collision resolution" above. `PeerSlot` also owns each peer's `status::StatusHandle`, since it's already the single per-peer arbitration point shared between the active and passive connection attempts |
+| `collision.rs` | RFC 4271 §6.8 connection collision resolution — see "Collision resolution" above. `PeerSlot` also owns each peer's `status::StatusHandle` and RFC 2918 route-refresh command channel (`FsmCommand`), since it's already the single per-peer arbitration point shared between the active and passive connection attempts — see "Route refresh (RFC 2918)" above |
 | `status.rs` | `PeerState`/`PeerStatus` — the shared, queryable per-peer session status `fsm::run`'s own (otherwise task-local) FSM state doesn't provide on its own; a `tokio::sync::watch` channel per peer, read by `session::to_peer_summary` |
-| `server.rs` | Binds `--listen-socket` and serves `BgpRequest::GetSummary` from `SessionManager::peer_summaries` — backs `nos-cli`'s `show bgp brief`, resolved via the watchdog broker's `ServiceRef::BgpInstance` the same way `nos-ribd`/`nos-interfaced`'s query listeners are |
+| `server.rs` | Binds `--listen-socket` and serves `BgpRequest::GetSummary` from `SessionManager::peer_summaries` (backs `nos-cli`'s `show bgp brief`) and `BgpRequest::SendRouteRefresh` from `SessionManager::send_command` (backs `clear bgp <instance> <peer> soft-in`) — resolved via the watchdog broker's `ServiceRef::BgpInstance` the same way `nos-ribd`/`nos-interfaced`'s query listeners are |
 | `log_client.rs` | `ForwardingLayer` — the `tracing` → `nos-logd` forwarder, reimplemented per-crate like every other daemon's |

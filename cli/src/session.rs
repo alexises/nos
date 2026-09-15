@@ -79,6 +79,12 @@ pub enum Resolved {
     /// instance argument): the caller iterates every `BgpInstance` in the
     /// running config itself.
     ShowBgpBrief,
+    /// `clear bgp <instance> <peer> soft-in` — data-plane action, valid in
+    /// any mode.
+    ClearBgpSoftIn {
+        instance: String,
+        peer: IpAddr,
+    },
     SaveRunningConfig,
     OpenTransaction {
         name: String,
@@ -105,6 +111,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowInterface { name } => Resolved::ShowInterface { name },
         Command::ShowLog { source, follow } => Resolved::ShowLog { source, follow },
         Command::ShowBgpBrief => Resolved::ShowBgpBrief,
+        Command::ClearBgpSoftIn { instance, peer } => Resolved::ClearBgpSoftIn { instance, peer },
         Command::Unknown(s) => {
             Resolved::Error(format!("unknown command: '{s}' (type 'help' for a list)"))
         }
@@ -762,6 +769,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowInterface { .. }
         | Command::ShowLog { .. }
         | Command::ShowBgpBrief
+        | Command::ClearBgpSoftIn { .. }
         | Command::Unknown(_)
         | Command::Exit
         | Command::Save => {
@@ -2151,6 +2159,23 @@ mod tests {
         assert_eq!(
             resolve(&config_mode("t1", Path::Root, false), Command::ShowBgpBrief),
             Resolved::ShowBgpBrief
+        );
+    }
+
+    #[test]
+    fn clear_bgp_soft_in_works_in_any_mode() {
+        let cmd = Command::ClearBgpSoftIn {
+            instance: "r1".to_string(),
+            peer: "10.0.0.1".parse().unwrap(),
+        };
+        let expected = Resolved::ClearBgpSoftIn {
+            instance: "r1".to_string(),
+            peer: "10.0.0.1".parse().unwrap(),
+        };
+        assert_eq!(resolve(&Mode::Operational, cmd.clone()), expected);
+        assert_eq!(
+            resolve(&config_mode("t1", Path::Root, false), cmd),
+            expected
         );
     }
 

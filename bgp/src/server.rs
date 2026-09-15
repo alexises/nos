@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{error, info, trace, warn};
 
+use crate::collision::FsmCommand;
 use crate::session::SessionManager;
 
 /// Binds `listen_socket` and spawns the IPC accept loop for session
@@ -77,6 +78,19 @@ async fn handle_connection(
             }
             BgpRequest::RedistributeRoutes(update) => {
                 sessions.apply_redistribute_update(update).await;
+            }
+            BgpRequest::SendRouteRefresh { peer } => {
+                let event = if sessions
+                    .send_command(peer, FsmCommand::SendRouteRefresh)
+                    .await
+                {
+                    BgpEvent::RouteRefreshSent
+                } else {
+                    BgpEvent::PeerNotFound
+                };
+                if writer.send(event).await.is_err() {
+                    break;
+                }
             }
         }
     }

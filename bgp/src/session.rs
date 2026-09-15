@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
-use crate::collision::{PeerSlot, Role};
+use crate::collision::{FsmCommand, PeerSlot, Role};
 use crate::fsm::{self, PeerContext};
 use crate::rib::BgpRib;
 use crate::status::{PeerState, PeerStatus};
@@ -182,6 +182,22 @@ impl SessionManager {
     /// `server.rs`'s fire-and-forget `BgpRequest::RedistributeRoutes` handler.
     pub async fn apply_redistribute_update(&self, update: nos_proto::RedistributeUpdate) {
         self.bgp_rib.lock().await.apply_redistribute_update(update);
+    }
+
+    /// Delivers an operator-triggered `FsmCommand` to `peer`'s live session,
+    /// for `server.rs`'s `BgpRequest::SendRouteRefresh` handler. `false` if
+    /// `peer` isn't configured or has no `Established` session right now —
+    /// both cases are reported identically to the CLI as "nothing to
+    /// refresh".
+    pub async fn send_command(&self, peer: IpAddr, cmd: FsmCommand) -> bool {
+        let peers = self.peers.read().await;
+        let Some(slot) = peers.get(&peer) else {
+            return false;
+        };
+        if !slot.is_established().await {
+            return false;
+        }
+        slot.send_command(cmd)
     }
 
     /// Every currently-configured peer's current session summary, for

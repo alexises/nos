@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
@@ -18,6 +19,8 @@ pub enum BgpClientError {
     ConnectionClosed,
     #[error("i/o error talking to nos-bgpd: {0}")]
     Io(#[from] std::io::Error),
+    #[error("unexpected reply from nos-bgpd: {0:?}")]
+    UnexpectedReply(BgpEvent),
 }
 
 async fn connect(
@@ -49,6 +52,23 @@ pub async fn get_summary(bgp_socket: &Path) -> Result<Vec<PeerSummary>, BgpClien
     writer.send(BgpRequest::GetSummary).await?;
     match reader.next().await {
         Some(Ok(BgpEvent::Summary(peers))) => Ok(peers),
+        Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
+        Some(Err(e)) => Err(BgpClientError::Io(e)),
+        None => Err(BgpClientError::ConnectionClosed),
+    }
+}
+
+/// Asks `peer`'s live session to send it an RFC 2918 `ROUTE_REFRESH`.
+/// `Ok(true)` if a live `Established` session for `peer` was found and the
+/// command was delivered; `Ok(false)` if there's nothing to refresh right
+/// now (peer not configured, or no `Established` session).
+pub async fn send_route_refresh(bgp_socket: &Path, peer: IpAddr) -> Result<bool, BgpClientError> {
+    let (mut reader, mut writer) = connect(bgp_socket).await?;
+    writer.send(BgpRequest::SendRouteRefresh { peer }).await?;
+    match reader.next().await {
+        Some(Ok(BgpEvent::RouteRefreshSent)) => Ok(true),
+        Some(Ok(BgpEvent::PeerNotFound)) => Ok(false),
+        Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
         Some(Err(e)) => Err(BgpClientError::Io(e)),
         None => Err(BgpClientError::ConnectionClosed),
     }

@@ -249,6 +249,27 @@ impl BgpRib {
         self.adj_rib_out.insert(peer, advertised);
     }
 
+    /// RFC 2918 `ROUTE_REFRESH` handling: re-sends the current Loc-RIB to
+    /// `peer`, for prefixes of `family` only. Reuses `build_advertisement`'s
+    /// full eligibility logic (split-horizon, negotiated-AF check,
+    /// source-peer echo), so a family the peer never negotiated is silently
+    /// a no-op. Does not touch `adj_rib_out`: a resend re-announces exactly
+    /// the prefix set already recorded as sent, so the withdrawal-diffing
+    /// bookkeeping `recompute_and_propagate` relies on is unaffected.
+    pub fn resend_all(&mut self, peer: IpAddr, family: AddressFamily) {
+        let Some(outbox) = self.peer_outboxes.get(&peer) else {
+            return;
+        };
+        for (prefix, best) in &self.loc_rib {
+            if family_of(*prefix) != family {
+                continue;
+            }
+            if let Some(adv) = build_advertisement(*prefix, best, peer, outbox, self.local_asn) {
+                let _ = outbox.tx.send(OutboundUpdate::Announce(adv));
+            }
+        }
+    }
+
     /// Deregisters a peer's outbox and Adj-RIB-In, then re-decides every
     /// prefix that peer had contributed — the implicit withdraw-everything
     /// path for a session ending, whatever the reason.
@@ -777,6 +798,56 @@ mod tests {
                 use_mp: false,
             })]
         );
+    }
+
+    #[test]
+    fn resend_all_resends_loc_rib_filtered_to_one_family() {
+        let mut rib = new_rib(65000);
+        let v4_peer = addr("10.0.0.1");
+        let v6_peer = addr("10.0.0.2");
+        let mut v4_rx = register_mp_peer(
+            &mut rib,
+            v4_peer,
+            false,
+            addr("10.0.0.254"),
+            [AddressFamily::Ipv4Unicast].into_iter().collect(),
+        );
+        let mut v6_rx = register_mp_peer(
+            &mut rib,
+            v6_peer,
+            false,
+            addr("10.0.0.254"),
+            [AddressFamily::Ipv6Unicast].into_iter().collect(),
+        );
+
+        rib.apply_redistribute_update(full_update(vec![
+            ("192.168.1.0/24", "10.9.9.9"),
+            ("2001:db8::/32", "2001:db8::1"),
+        ]));
+        // Drain the initial full-advertisement sends from registration/redistribution.
+        recv_all(&mut v4_rx);
+        recv_all(&mut v6_rx);
+
+        rib.resend_all(v4_peer, AddressFamily::Ipv4Unicast);
+        rib.resend_all(v6_peer, AddressFamily::Ipv6Unicast);
+
+        let v4_updates = recv_all(&mut v4_rx);
+        assert_eq!(v4_updates.len(), 1);
+        assert!(matches!(
+            &v4_updates[0],
+            OutboundUpdate::Announce(adv) if adv.prefix == prefix("192.168.1.0/24")
+        ));
+
+        let v6_updates = recv_all(&mut v6_rx);
+        assert_eq!(v6_updates.len(), 1);
+        assert!(matches!(
+            &v6_updates[0],
+            OutboundUpdate::Announce(adv) if adv.prefix == prefix("2001:db8::/32")
+        ));
+
+        // Requesting the family a peer didn't negotiate is a silent no-op.
+        rib.resend_all(v4_peer, AddressFamily::Ipv6Unicast);
+        assert!(recv_all(&mut v4_rx).is_empty());
     }
 
     #[test]

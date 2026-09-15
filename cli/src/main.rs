@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{self, IsTerminal as _, Write as _};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -530,6 +531,10 @@ async fn handle_action(
             show_bgp_brief(socket, watchdog_socket).await;
             Outcome::Continue(mode)
         }
+        Resolved::ClearBgpSoftIn { instance, peer } => {
+            clear_bgp_soft_in(socket, watchdog_socket, &instance, peer).await;
+            Outcome::Continue(mode)
+        }
         Resolved::SaveRunningConfig => {
             save_running_config(socket).await;
             Outcome::Continue(mode)
@@ -811,6 +816,42 @@ async fn show_bgp_brief(config_socket: &Path, watchdog_socket: &Path) {
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
             Err(e) => eprintln!("error: {e}"),
         }
+    }
+}
+
+/// Targets one named instance (errors clearly if it isn't in the running
+/// config), unlike `show_bgp_brief`'s all-instances loop.
+async fn clear_bgp_soft_in(
+    config_socket: &Path,
+    watchdog_socket: &Path,
+    instance: &str,
+    peer: IpAddr,
+) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+    if !cfg.bgp_instances.iter().any(|i| i.name == instance) {
+        eprintln!("error: no bgp instance named '{instance}' in the running config");
+        return;
+    }
+
+    match watchdog_client::resolve(
+        watchdog_socket,
+        nos_proto::ServiceRef::BgpInstance(instance.to_string()),
+    )
+    .await
+    {
+        Ok(Some(bgp_socket)) => match bgp_client::send_route_refresh(&bgp_socket, peer).await {
+            Ok(true) => println!("route refresh requested for {peer}"),
+            Ok(false) => eprintln!("error: no established session with {peer} on '{instance}'"),
+            Err(e) => eprintln!("error: {e}"),
+        },
+        Ok(None) => println!("bgp instance '{instance}' is not running"),
+        Err(e) => eprintln!("error: {e}"),
     }
 }
 

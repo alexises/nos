@@ -259,6 +259,12 @@ pub enum Command {
     /// `show bgp brief` — a one-line-per-peer session summary across every
     /// configured BGP instance.
     ShowBgpBrief,
+    /// `clear bgp <instance> <peer> soft-in` — ask `<peer>`'s live session
+    /// on `<instance>` to resend its routes (RFC 2918 route refresh).
+    ClearBgpSoftIn {
+        instance: String,
+        peer: IpAddr,
+    },
     Save,
     Help,
     /// `exit` | `quit` | `end`
@@ -321,6 +327,13 @@ impl Command {
                 follow: true,
             },
             ["show", "bgp", "brief"] => Command::ShowBgpBrief,
+            ["clear", "bgp", instance, peer, "soft-in"] => match peer.parse::<IpAddr>() {
+                Ok(peer) => Command::ClearBgpSoftIn {
+                    instance: (*instance).to_string(),
+                    peer,
+                },
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
             ["save"] => Command::Save,
             ["help"] => Command::Help,
             ["exit" | "quit" | "end"] => Command::Exit,
@@ -1579,6 +1592,21 @@ mod tests {
     #[test]
     fn show_bgp_brief() {
         assert_eq!(Command::parse("show bgp brief"), Command::ShowBgpBrief);
+    }
+
+    #[test]
+    fn clear_bgp_soft_in() {
+        assert_eq!(
+            Command::parse("clear bgp r1 10.0.0.1 soft-in"),
+            Command::ClearBgpSoftIn {
+                instance: "r1".to_string(),
+                peer: "10.0.0.1".parse().unwrap(),
+            }
+        );
+        assert_eq!(
+            Command::parse("clear bgp r1 not-an-ip soft-in"),
+            Command::Unknown("clear bgp r1 not-an-ip soft-in".to_string())
+        );
     }
 
     #[test]

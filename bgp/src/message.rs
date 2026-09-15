@@ -44,12 +44,15 @@ const TYPE_OPEN: u8 = 1;
 const TYPE_UPDATE: u8 = 2;
 const TYPE_NOTIFICATION: u8 = 3;
 const TYPE_KEEPALIVE: u8 = 4;
+const TYPE_ROUTE_REFRESH: u8 = 5;
 
 const OPT_PARAM_CAPABILITIES: u8 = 2;
 const CAP_FOUR_OCTET_ASN: u8 = 65;
 /// RFC 4760 §8 Multiprotocol Extensions capability: `AFI(2) reserved(1)
 /// SAFI(1)`.
 const CAP_MULTIPROTOCOL: u8 = 1;
+/// RFC 2918 §3 Route Refresh capability: no payload.
+const CAP_ROUTE_REFRESH: u8 = 2;
 /// RFC 8950 §3 Extended Next Hop Encoding capability: one or more `NLRI-AFI(2)
 /// NLRI-SAFI(2) NextHop-AFI(2)` tuples — note the NLRI-SAFI field is 2 bytes
 /// here, unlike `CAP_MULTIPROTOCOL`'s 1-byte SAFI.
@@ -98,6 +101,8 @@ pub enum WireError {
     MalformedNotification,
     #[error("malformed UPDATE message body")]
     MalformedUpdate,
+    #[error("malformed ROUTE-REFRESH message body")]
+    MalformedRouteRefresh,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -170,6 +175,8 @@ pub enum Capability {
         nlri_safi: u16,
         nh_afi: u16,
     },
+    /// RFC 2918 code 2: this session accepts `ROUTE_REFRESH` messages.
+    RouteRefresh,
 }
 
 /// An OPEN message. See [`Capability`] for the capabilities this crate
@@ -190,6 +197,13 @@ pub struct NotificationMessage {
     pub error_code: u8,
     pub error_subcode: u8,
     pub data: Bytes,
+}
+
+/// RFC 2918 `ROUTE_REFRESH`: `AFI(2) reserved(1) SAFI(1)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteRefreshMessage {
+    pub afi: u16,
+    pub safi: u8,
 }
 
 /// RFC 4271 §4.3 `ORIGIN` path attribute values.
@@ -264,6 +278,7 @@ pub enum BgpMessage {
     Update(UpdateMessage),
     Keepalive,
     Notification(NotificationMessage),
+    RouteRefresh(RouteRefreshMessage),
     /// Any message type this crate doesn't parse a body for (unknown to this
     /// implementation).
     Unhandled {
@@ -351,6 +366,7 @@ impl Decoder for BgpCodec {
                 BgpMessage::Keepalive
             }
             TYPE_NOTIFICATION => BgpMessage::Notification(parse_notification(&body)?),
+            TYPE_ROUTE_REFRESH => BgpMessage::RouteRefresh(parse_route_refresh(&body)?),
             other => BgpMessage::Unhandled {
                 message_type: other,
                 body: body.freeze(),
@@ -369,6 +385,7 @@ impl Encoder<BgpMessage> for BgpCodec {
             BgpMessage::Update(update) => (TYPE_UPDATE, encode_update(&update)),
             BgpMessage::Keepalive => (TYPE_KEEPALIVE, Vec::new()),
             BgpMessage::Notification(n) => (TYPE_NOTIFICATION, encode_notification(&n)),
+            BgpMessage::RouteRefresh(rr) => (TYPE_ROUTE_REFRESH, encode_route_refresh(rr)),
             BgpMessage::Unhandled { message_type, body } => (message_type, body.to_vec()),
         };
         let total_len = HEADER_LEN + body.len();
@@ -455,6 +472,9 @@ fn parse_capabilities(mut data: &[u8]) -> Result<Vec<Capability>, WireError> {
                 let safi = cap_value[3];
                 capabilities.push(Capability::MultiProtocol { afi, safi });
             }
+            CAP_ROUTE_REFRESH if cap_len == 0 => {
+                capabilities.push(Capability::RouteRefresh);
+            }
             CAP_EXTENDED_NEXT_HOP if cap_len.is_multiple_of(6) => {
                 for tuple in cap_value.as_chunks::<6>().0 {
                     capabilities.push(Capability::ExtendedNextHop {
@@ -484,6 +504,25 @@ fn parse_notification(body: &[u8]) -> Result<NotificationMessage, WireError> {
     })
 }
 
+fn parse_route_refresh(body: &[u8]) -> Result<RouteRefreshMessage, WireError> {
+    if body.len() < 4 {
+        return Err(WireError::MalformedRouteRefresh);
+    }
+    Ok(RouteRefreshMessage {
+        afi: u16::from_be_bytes([body[0], body[1]]),
+        // body[2] is the reserved octet.
+        safi: body[3],
+    })
+}
+
+fn encode_route_refresh(rr: RouteRefreshMessage) -> Vec<u8> {
+    let mut body = Vec::with_capacity(4);
+    body.extend_from_slice(&rr.afi.to_be_bytes());
+    body.push(0); // reserved
+    body.push(rr.safi);
+    body
+}
+
 fn encode_open(open: &OpenMessage) -> Vec<u8> {
     let mut cap_bytes = Vec::new();
     for cap in &open.capabilities {
@@ -510,6 +549,10 @@ fn encode_open(open: &OpenMessage) -> Vec<u8> {
                 cap_bytes.extend_from_slice(&nlri_afi.to_be_bytes());
                 cap_bytes.extend_from_slice(&nlri_safi.to_be_bytes());
                 cap_bytes.extend_from_slice(&nh_afi.to_be_bytes());
+            }
+            Capability::RouteRefresh => {
+                cap_bytes.push(CAP_ROUTE_REFRESH);
+                cap_bytes.push(0);
             }
         }
     }
@@ -1124,6 +1167,37 @@ mod tests {
         assert_eq!(
             roundtrip(BgpMessage::Notification(n.clone())),
             BgpMessage::Notification(n)
+        );
+    }
+
+    #[test]
+    fn route_refresh_roundtrips() {
+        let rr = RouteRefreshMessage {
+            afi: AFI_IPV6,
+            safi: 1,
+        };
+        assert_eq!(
+            roundtrip(BgpMessage::RouteRefresh(rr)),
+            BgpMessage::RouteRefresh(rr)
+        );
+    }
+
+    #[test]
+    fn route_refresh_truncated_body_is_malformed() {
+        let body = vec![0u8, 1u8, 0u8]; // 3 bytes, needs 4
+        assert!(matches!(
+            parse_route_refresh(&body),
+            Err(WireError::MalformedRouteRefresh)
+        ));
+    }
+
+    #[test]
+    fn open_with_route_refresh_capability_roundtrips() {
+        let mut open = build_open(65001, Ipv4Addr::new(4, 4, 4, 4), 90);
+        open.capabilities.push(Capability::RouteRefresh);
+        assert_eq!(
+            roundtrip(BgpMessage::Open(open.clone())),
+            BgpMessage::Open(open)
         );
     }
 

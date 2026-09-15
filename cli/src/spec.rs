@@ -1160,6 +1160,24 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         tokens: &[
+            Token::Literal("clear"),
+            Token::Literal("bgp"),
+            Token::Arg(ArgKind::BgpInstanceName),
+            Token::Arg(ArgKind::Plain),
+            Token::Literal("soft-in"),
+        ],
+        usage: "clear bgp <instance> <peer> soft-in",
+        doc: Doc::Local {
+            summary: "Ask a peer to resend its routes (RFC 2918 route refresh).",
+            detail: "Sends a BGP ROUTE_REFRESH message to <peer> over its current session on \
+                     <instance>'s nos-bgpd, asking it to re-advertise its full Adj-RIB-Out for \
+                     every address family this session negotiated. Reported as an error if \
+                     <instance> has no established session with <peer> right now.",
+        },
+        availability: Availability::Always,
+    },
+    CommandSpec {
+        tokens: &[
             Token::Literal("edit"),
             Token::Literal("interface"),
             Token::Arg(ArgKind::InterfaceName),

@@ -25,7 +25,7 @@ use std::cmp::Ordering;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
-use tokio::sync::{watch, Mutex, Notify};
+use tokio::sync::{mpsc, watch, Mutex, Notify};
 use tracing::warn;
 
 use crate::session::ResolvedPeer;
@@ -35,6 +35,15 @@ use crate::status::{PeerStatus, StatusHandle};
 pub enum Role {
     Active,
     Passive,
+}
+
+/// An operator-triggered action against a peer's live session, delivered
+/// through `PeerSlot`'s command channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsmCommand {
+    /// `clear bgp <instance> <peer> soft-in` — ask this peer to resend its
+    /// Adj-RIB-Out to us, for every address family this session negotiated.
+    SendRouteRefresh,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,15 +90,24 @@ pub struct PeerSlot {
     pub peer: ResolvedPeer,
     state: Mutex<CollisionState>,
     pub status: StatusHandle,
+    command_tx: mpsc::UnboundedSender<FsmCommand>,
+    /// Locked fresh on every poll by whichever `fsm::run` task currently owns
+    /// this peer's `Established` session — see `recv_command`. Created once
+    /// here (peer lifetime, not per-connection), so no take/hand-off dance is
+    /// needed across a peer's active/passive reconnects.
+    command_rx: Mutex<mpsc::UnboundedReceiver<FsmCommand>>,
 }
 
 impl PeerSlot {
     pub fn new(peer: ResolvedPeer) -> Arc<Self> {
         let (status, _) = watch::channel(PeerStatus::default());
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
         Arc::new(Self {
             peer,
             state: Mutex::new(CollisionState::default()),
             status,
+            command_tx,
+            command_rx: Mutex::new(command_rx),
         })
     }
 
@@ -97,6 +115,22 @@ impl PeerSlot {
     /// read the current status from.
     pub fn status_receiver(&self) -> watch::Receiver<PeerStatus> {
         self.status.subscribe()
+    }
+
+    /// Delivers an operator command to this peer's live session. `false` if
+    /// no `fsm::run` task is around to receive it (channel closed).
+    pub fn send_command(&self, cmd: FsmCommand) -> bool {
+        self.command_tx.send(cmd).is_ok()
+    }
+
+    /// Waits for the next operator command. Callers must only poll this while
+    /// their own connection is `Established` (e.g. a `tokio::select!` guard)
+    /// — collision resolution always happens before either side reaches
+    /// `Established`, so gating on it guarantees only the one canonical
+    /// session ever locks this shared receiver, never a connection that's
+    /// about to lose (or has lost) the collision.
+    pub async fn recv_command(&self) -> Option<FsmCommand> {
+        self.command_rx.lock().await.recv().await
     }
 
     /// Whether this peer already has an `Established` session, in either
