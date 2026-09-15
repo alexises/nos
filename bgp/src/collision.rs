@@ -300,6 +300,7 @@ mod tests {
             hold_time: 90,
             keepalive_interval: None,
             connect_retry_time: std::time::Duration::from_secs(120),
+            auth: None,
         })
     }
 

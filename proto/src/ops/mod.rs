@@ -69,6 +69,12 @@ pub enum OpError {
     BgpInstanceNotFound(String),
     #[error("peer-group '{name}' not found in bgp instance '{instance}'")]
     BgpPeerGroupNotFound { instance: String, name: String },
+    #[error("ao key with send-id '{send_id}' not found in peer-group '{name}' of bgp instance '{instance}'")]
+    BgpAoKeyNotFound {
+        instance: String,
+        name: String,
+        send_id: u8,
+    },
     #[error("peer '{remote_address}' not found in bgp instance '{instance}'")]
     BgpPeerNotFound {
         instance: String,

@@ -2,7 +2,8 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
 use nos_proto::{
-    AddressFamily, Redistribute, RedistributeSource, RedistributeTarget, TransactionBase,
+    AddressFamily, BgpAoAlgorithm, Redistribute, RedistributeSource, RedistributeTarget,
+    TransactionBase,
 };
 
 /// A single field edit targeting a BGP instance.
@@ -12,8 +13,9 @@ pub enum BgpInstanceField {
     RouterId(Ipv4Addr),
 }
 
-/// A single field edit targeting a BGP peer-group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A single field edit targeting a BGP peer-group. Not `Copy` — the auth
+/// variants carry owned `String` key material.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BgpPeerGroupField {
     RemoteAs(u32),
     SourceAddress(IpAddr),
@@ -21,6 +23,17 @@ pub enum BgpPeerGroupField {
     HoldTime(u16),
     KeepaliveInterval(u16),
     ConnectRetryTime(u16),
+    Md5Password(String),
+    /// A new (or replacement) TCP-AO key — `current`/`rnext` are set via the
+    /// separate `AoCurrentKey`/`AoRnextKey` variants, not here.
+    AoKey {
+        send_id: u8,
+        recv_id: u8,
+        algorithm: BgpAoAlgorithm,
+        key: String,
+    },
+    AoCurrentKey(u8),
+    AoRnextKey(u8),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +168,11 @@ pub enum DeleteTarget {
     /// `delete connect-retry-time` — only valid while navigated into a
     /// peer-group.
     ConnectRetryTime,
+    /// `delete auth` — only valid while navigated into a peer-group.
+    Auth,
+    /// `delete ao-key <send-id>` — only valid while navigated into a
+    /// peer-group.
+    AoKey(u8),
     RoutingTable {
         name: String,
     },
@@ -434,6 +452,54 @@ impl Command {
                     Err(_) => Command::Unknown(trimmed.to_string()),
                 }
             }
+            ["set", "bgp", "instance", instance, "peer-group", group, "md5-password", password] => {
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: (*instance).to_string(),
+                    group: (*group).to_string(),
+                    field: BgpPeerGroupField::Md5Password((*password).to_string()),
+                })
+            }
+            ["set", "bgp", "instance", instance, "peer-group", group, "ao-key", send_id, recv_id, algorithm, key] => {
+                match (
+                    send_id.parse::<u8>(),
+                    recv_id.parse::<u8>(),
+                    parse_ao_algorithm(algorithm),
+                ) {
+                    (Ok(send_id), Ok(recv_id), Some(algorithm)) => {
+                        Command::Set(SetTarget::BgpPeerGroup {
+                            instance: (*instance).to_string(),
+                            group: (*group).to_string(),
+                            field: BgpPeerGroupField::AoKey {
+                                send_id,
+                                recv_id,
+                                algorithm,
+                                key: (*key).to_string(),
+                            },
+                        })
+                    }
+                    _ => Command::Unknown(trimmed.to_string()),
+                }
+            }
+            ["set", "bgp", "instance", instance, "peer-group", group, "ao-key", send_id, "current"] => {
+                match send_id.parse::<u8>() {
+                    Ok(send_id) => Command::Set(SetTarget::BgpPeerGroup {
+                        instance: (*instance).to_string(),
+                        group: (*group).to_string(),
+                        field: BgpPeerGroupField::AoCurrentKey(send_id),
+                    }),
+                    Err(_) => Command::Unknown(trimmed.to_string()),
+                }
+            }
+            ["set", "bgp", "instance", instance, "peer-group", group, "ao-key", send_id, "rnext"] => {
+                match send_id.parse::<u8>() {
+                    Ok(send_id) => Command::Set(SetTarget::BgpPeerGroup {
+                        instance: (*instance).to_string(),
+                        group: (*group).to_string(),
+                        field: BgpPeerGroupField::AoRnextKey(send_id),
+                    }),
+                    Err(_) => Command::Unknown(trimmed.to_string()),
+                }
+            }
             ["set", "remote-as", n] => match n.parse::<u32>() {
                 Ok(remote_as) => Command::Set(SetTarget::PeerGroupRelative {
                     field: BgpPeerGroupField::RemoteAs(remote_as),
@@ -467,6 +533,40 @@ impl Command {
             ["set", "connect-retry-time", n] => match n.parse::<u16>() {
                 Ok(connect_retry_time) => Command::Set(SetTarget::PeerGroupRelative {
                     field: BgpPeerGroupField::ConnectRetryTime(connect_retry_time),
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["set", "md5-password", password] => Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::Md5Password((*password).to_string()),
+            }),
+            ["set", "ao-key", send_id, recv_id, algorithm, key] => {
+                match (
+                    send_id.parse::<u8>(),
+                    recv_id.parse::<u8>(),
+                    parse_ao_algorithm(algorithm),
+                ) {
+                    (Ok(send_id), Ok(recv_id), Some(algorithm)) => {
+                        Command::Set(SetTarget::PeerGroupRelative {
+                            field: BgpPeerGroupField::AoKey {
+                                send_id,
+                                recv_id,
+                                algorithm,
+                                key: (*key).to_string(),
+                            },
+                        })
+                    }
+                    _ => Command::Unknown(trimmed.to_string()),
+                }
+            }
+            ["set", "ao-key", send_id, "current"] => match send_id.parse::<u8>() {
+                Ok(send_id) => Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::AoCurrentKey(send_id),
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["set", "ao-key", send_id, "rnext"] => match send_id.parse::<u8>() {
+                Ok(send_id) => Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::AoRnextKey(send_id),
                 }),
                 Err(_) => Command::Unknown(trimmed.to_string()),
             },
@@ -600,6 +700,11 @@ impl Command {
             ["delete", "hold-time"] => Command::Delete(DeleteTarget::HoldTime),
             ["delete", "keepalive-interval"] => Command::Delete(DeleteTarget::KeepaliveInterval),
             ["delete", "connect-retry-time"] => Command::Delete(DeleteTarget::ConnectRetryTime),
+            ["delete", "auth"] => Command::Delete(DeleteTarget::Auth),
+            ["delete", "ao-key", send_id] => match send_id.parse::<u8>() {
+                Ok(send_id) => Command::Delete(DeleteTarget::AoKey(send_id)),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
             ["delete", "routing-table", name] => Command::Delete(DeleteTarget::RoutingTable {
                 name: (*name).to_string(),
             }),
@@ -669,6 +774,14 @@ impl Command {
             }
             _ => Command::Unknown(trimmed.to_string()),
         }
+    }
+}
+
+fn parse_ao_algorithm(token: &str) -> Option<BgpAoAlgorithm> {
+    match token {
+        "hmac-sha1" => Some(BgpAoAlgorithm::HmacSha1_96),
+        "aes-cmac" => Some(BgpAoAlgorithm::AesCmac96),
+        _ => None,
     }
 }
 
@@ -1034,6 +1147,90 @@ mod tests {
         assert_eq!(
             Command::parse("delete connect-retry-time"),
             Command::Delete(DeleteTarget::ConnectRetryTime)
+        );
+    }
+
+    #[test]
+    fn set_md5_password_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 md5-password hunter2"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::Md5Password("hunter2".to_string()),
+            })
+        );
+        assert_eq!(
+            Command::parse("set md5-password hunter2"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::Md5Password("hunter2".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn set_ao_key_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 ao-key 1 2 hmac-sha1 secret"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::AoKey {
+                    send_id: 1,
+                    recv_id: 2,
+                    algorithm: BgpAoAlgorithm::HmacSha1_96,
+                    key: "secret".to_string(),
+                },
+            })
+        );
+        assert_eq!(
+            Command::parse("set ao-key 1 2 aes-cmac secret"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::AoKey {
+                    send_id: 1,
+                    recv_id: 2,
+                    algorithm: BgpAoAlgorithm::AesCmac96,
+                    key: "secret".to_string(),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn set_ao_key_bad_algorithm_is_unknown() {
+        assert_eq!(
+            Command::parse("set ao-key 1 2 rot13 secret"),
+            Command::Unknown("set ao-key 1 2 rot13 secret".to_string())
+        );
+    }
+
+    #[test]
+    fn set_ao_key_current_and_rnext() {
+        assert_eq!(
+            Command::parse("set ao-key 1 current"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::AoCurrentKey(1),
+            })
+        );
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 ao-key 1 rnext"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::AoRnextKey(1),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_auth_and_ao_key() {
+        assert_eq!(
+            Command::parse("delete auth"),
+            Command::Delete(DeleteTarget::Auth)
+        );
+        assert_eq!(
+            Command::parse("delete ao-key 1"),
+            Command::Delete(DeleteTarget::AoKey(1))
         );
     }
 

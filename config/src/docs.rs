@@ -289,6 +289,51 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Unsets the connect-retry-time field on a peer-group, reverting to the default of \
              120 seconds.",
         ),
+        Topic::SetBgpPeerGroupMd5Auth => (
+            "Set a peer-group's BGP MD5 password.",
+            "Sets a single RFC 2385 TCP MD5 signature password on a peer-group's sessions, \
+             replacing any TCP-AO keys that were set — the two mechanisms are mutually \
+             exclusive, since the kernel accepts only one per socket. Stored clear-text, like \
+             every other field in this config.",
+        ),
+        Topic::SetBgpPeerGroupAoKey => (
+            "Set (or replace) one of a peer-group's TCP-AO keys.",
+            "Adds one RFC 5925 TCP-AO key to a peer-group, identified by its send-id — adding a \
+             key with a send-id that already exists replaces it in place. If the peer-group's \
+             auth wasn't already TCP-AO (unset, or an MD5 password), this starts a fresh key \
+             list containing just this key. Exactly one key across the whole list must be \
+             marked current, and at most one may be marked rnext, for the peer-group to \
+             validate at commit time — see set-bgp-peer-group-ao-current-key/rnext-key. Stored \
+             clear-text, like every other field in this config.",
+        ),
+        Topic::RemoveBgpPeerGroupAoKey => (
+            "Remove one of a peer-group's TCP-AO keys by send-id.",
+            "Removes one TCP-AO key from a peer-group's key list by send-id; a no-op if the \
+             peer-group's auth isn't TCP-AO or no key has that send-id. Does not clear the \
+             peer-group's auth back to unset even if the list becomes empty — an empty TCP-AO \
+             key list fails commit-time validation, so clear the auth explicitly instead if \
+             that's the intent.",
+        ),
+        Topic::SetBgpPeerGroupAoCurrentKey => (
+            "Mark one of a peer-group's TCP-AO keys as current.",
+            "Marks the TCP-AO key with the given send-id as the current key — the one actively \
+             signing outgoing segments — clearing that flag on every other key in the same \
+             peer-group. Fails if the peer-group's auth isn't TCP-AO or no key has that \
+             send-id.",
+        ),
+        Topic::SetBgpPeerGroupAoRnextKey => (
+            "Mark one of a peer-group's TCP-AO keys as rnext.",
+            "Marks the TCP-AO key with the given send-id as the rnext key — a hint requesting \
+             the peer switch to it next, for key rotation without dropping the session — \
+             clearing that flag on every other key in the same peer-group. Fails if the \
+             peer-group's auth isn't TCP-AO or no key has that send-id.",
+        ),
+        Topic::ClearBgpPeerGroupAuth => (
+            "Clear a peer-group's BGP session authentication.",
+            "Unsets the auth field on a peer-group entirely, regardless of which mechanism \
+             (MD5 password or TCP-AO keys) was set, reverting sessions to no transport \
+             authentication.",
+        ),
     };
     CommandDoc {
         topic,
@@ -351,6 +396,12 @@ mod tests {
         Topic::ClearBgpPeerGroupKeepaliveInterval,
         Topic::SetBgpPeerGroupConnectRetryTime,
         Topic::ClearBgpPeerGroupConnectRetryTime,
+        Topic::SetBgpPeerGroupMd5Auth,
+        Topic::SetBgpPeerGroupAoKey,
+        Topic::RemoveBgpPeerGroupAoKey,
+        Topic::SetBgpPeerGroupAoCurrentKey,
+        Topic::SetBgpPeerGroupAoRnextKey,
+        Topic::ClearBgpPeerGroupAuth,
     ];
 
     #[test]

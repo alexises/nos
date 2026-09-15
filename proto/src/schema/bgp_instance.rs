@@ -122,6 +122,7 @@ mod tests {
                 hold_time: Some(30),
                 keepalive_interval: Some(10),
                 connect_retry_time: None,
+                auth: None,
             },
             BgpPeerGroup {
                 name: "invalid".to_string(),
@@ -131,6 +132,7 @@ mod tests {
                 hold_time: Some(30),
                 keepalive_interval: Some(30),
                 connect_retry_time: None,
+                auth: None,
             },
         ];
         let cfg = config_with(vec![inst]);

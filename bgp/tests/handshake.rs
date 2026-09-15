@@ -81,6 +81,7 @@ async fn two_real_instances_establish_a_session() {
         hold_time: 90,
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
+        auth: None,
     });
     let slot_b = PeerSlot::new(ResolvedPeer {
         remote_address: "10.0.0.1".parse().unwrap(),
@@ -90,6 +91,7 @@ async fn two_real_instances_establish_a_session() {
         hold_time: 90,
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
+        auth: None,
     });
 
     let a_fut = fsm::run(
@@ -162,6 +164,7 @@ async fn established_session_honors_configured_non_default_hold_time() {
         hold_time: 30,
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
+        auth: None,
     });
 
     let a_fut = fsm::run(
@@ -216,6 +219,7 @@ async fn established_session_reports_status_via_peer_slot() {
         hold_time: 90,
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
+        auth: None,
     });
     let mut status = slot_a.status_receiver();
 
@@ -293,6 +297,7 @@ async fn collision_leaves_exactly_one_side_running() {
         hold_time: 90,
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
+        auth: None,
     });
 
     let peer_ctx = || PeerContext {

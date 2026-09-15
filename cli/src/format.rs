@@ -1,9 +1,9 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
-    AddressFamily, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState, Config, ConfigDiff,
-    DiffStatus, FieldDiff, Interface, InterfaceStatus, LogEntry, LogLevel, PeerSummary,
-    PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, StaticRoute, StaticRoutingInstance,
-    TransactionSnapshot,
+    AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
+    Config, ConfigDiff, DiffStatus, FieldDiff, Interface, InterfaceStatus, LogEntry, LogLevel,
+    PeerSummary, PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, StaticRoute,
+    StaticRoutingInstance, TransactionSnapshot,
 };
 
 use crate::session::Path;
@@ -32,11 +32,42 @@ pub fn render_bgp_peer_group(group: &BgpPeerGroup) -> String {
     let connect_retry_time = group
         .connect_retry_time
         .map_or_else(|| "default (120s)".to_string(), |c| c.to_string());
+    let auth = render_bgp_auth(group.auth.as_ref());
     format!(
         "peer-group {}: remote-as {}, source-address {source_address}, address-family [{address_families}], \
-         hold-time {hold_time}, keepalive-interval {keepalive_interval}, connect-retry-time {connect_retry_time}",
+         hold-time {hold_time}, keepalive-interval {keepalive_interval}, connect-retry-time {connect_retry_time}, \
+         auth {auth}",
         group.name, group.remote_as
     )
+}
+
+/// Rendered in clear text, like every other field — passwords/keys are
+/// stored unencrypted in this config, so there is nothing to mask.
+fn render_bgp_auth(auth: Option<&BgpAuth>) -> String {
+    match auth {
+        None => "none".to_string(),
+        Some(BgpAuth::Md5 { password }) => format!("md5-password {password}"),
+        Some(BgpAuth::Ao { keys }) => {
+            let rendered = keys
+                .iter()
+                .map(|k| {
+                    let algorithm = match k.algorithm {
+                        BgpAoAlgorithm::HmacSha1_96 => "hmac-sha1",
+                        BgpAoAlgorithm::AesCmac96 => "aes-cmac",
+                    };
+                    let flags = match (k.is_current, k.is_rnext) {
+                        (true, true) => " (current, rnext)",
+                        (true, false) => " (current)",
+                        (false, true) => " (rnext)",
+                        (false, false) => "",
+                    };
+                    format!("send-id {} {algorithm} {}{flags}", k.send_id, k.key)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("ao-keys [{rendered}]")
+        }
+    }
 }
 
 /// Render one peer as human-readable text.
@@ -737,6 +768,7 @@ mod tests {
             hold_time: None,
             keepalive_interval: None,
             connect_retry_time: None,
+            auth: None,
         }
     }
 
@@ -746,7 +778,7 @@ mod tests {
             render_bgp_peer_group(&peer_group("pg1")),
             "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s)"
+             connect-retry-time default (120s), auth none"
         );
     }
 
@@ -758,7 +790,7 @@ mod tests {
             render_bgp_peer_group(&pg),
             "peer-group pg1: remote-as 65001, source-address unset, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s)"
+             connect-retry-time default (120s), auth none"
         );
     }
 
@@ -771,7 +803,44 @@ mod tests {
         assert_eq!(
             render_bgp_peer_group(&pg),
             "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
-             hold-time 30, keepalive-interval 10, connect-retry-time 45"
+             hold-time 30, keepalive-interval 10, connect-retry-time 45, auth none"
+        );
+    }
+
+    #[test]
+    fn render_bgp_peer_group_with_md5_auth() {
+        let mut pg = peer_group("pg1");
+        pg.auth = Some(BgpAuth::Md5 {
+            password: "secret".to_string(),
+        });
+        assert_eq!(
+            render_bgp_peer_group(&pg),
+            "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
+             hold-time default (90s), keepalive-interval default (hold-time / 3), \
+             connect-retry-time default (120s), auth md5-password secret"
+        );
+    }
+
+    #[test]
+    fn render_bgp_peer_group_with_ao_auth() {
+        use nos_proto::BgpAoKey;
+
+        let mut pg = peer_group("pg1");
+        pg.auth = Some(BgpAuth::Ao {
+            keys: vec![BgpAoKey {
+                send_id: 1,
+                recv_id: 1,
+                algorithm: BgpAoAlgorithm::HmacSha1_96,
+                key: "secret".to_string(),
+                is_current: true,
+                is_rnext: false,
+            }],
+        });
+        assert_eq!(
+            render_bgp_peer_group(&pg),
+            "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
+             hold-time default (90s), keepalive-interval default (hold-time / 3), \
+             connect-retry-time default (120s), auth ao-keys [send-id 1 hmac-sha1 secret (current)]"
         );
     }
 
@@ -788,7 +857,7 @@ mod tests {
             "bgp instance r1: router-id 1.1.1.1, asn 65000\n  \
              peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s)\n  \
+             connect-retry-time default (120s), auth none\n  \
              peer 192.0.2.1: peer-group pg1"
         );
     }
@@ -808,7 +877,7 @@ mod tests {
             rendered,
             "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s)"
+             connect-retry-time default (120s), auth none"
         );
     }
 

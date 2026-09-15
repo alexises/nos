@@ -5,16 +5,18 @@
 # network, configures each as a full BGP router peering the other, and
 # checks the logs for a real OPEN/KEEPALIVE handshake reaching Established,
 # a hold-timer/reconnect cycle, (best-effort) a collision-resolution event,
-# and (via the `redistribute` subcommand) a static route configured on
-# router-a actually being redistributed into its bgp instance, advertised
-# over the wire, and learned into router-b's Adj-RIB-In/Loc-RIB.
+# (via the `redistribute` subcommand) a static route configured on router-a
+# actually being redistributed into its bgp instance, advertised over the
+# wire, and learned into router-b's Adj-RIB-In/Loc-RIB, and (via the `auth`
+# subcommand) that matching RFC 2385 TCP MD5 passwords on both routers still
+# establish while a mismatched password on either side does not.
 #
 # nos-cli's interactive shell (reedline) can't be scripted over a plain
 # pipe, so provisioning goes through `nos-provision` (tools/nos-provision) —
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|logs [n]|down|all}
+# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|logs [n]|down|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -121,6 +123,27 @@ provision_redistribute() {
     --redistribute
 }
 
+provision_auth() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 password=$6
+  log "provisioning $name with md5-password (peer=$peer_ip)"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --md5-password "$password"
+}
+
+established_count() {
+  local name=$1
+  docker logs "$name" 2>&1 | grep -c "bgp session established" || true
+}
+
 wait_for_log() {
   local name=$1 pattern=$2 timeout=${3:-60}
   log "waiting for '$pattern' in $name's logs (up to ${timeout}s)"
@@ -219,6 +242,43 @@ cmd_check_redistribute() {
     || { log "router-b: FAILED to install redistributed prefix into loc-rib"; return 1; }
 }
 
+cmd_check_auth() {
+  local password="correct-horse-battery-staple"
+  provision_auth router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$password"
+  provision_auth router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" "$password"
+  log "waiting for both sides to (re-)establish with matching md5 passwords"
+  wait_for_log router-a "bgp session established" 60 \
+    && log "router-a: established with matching md5 password" \
+    || { log "router-a: FAILED to establish with matching md5 password"; return 1; }
+  wait_for_log router-b "bgp session established" 60 \
+    && log "router-b: established with matching md5 password" \
+    || { log "router-b: FAILED to establish with matching md5 password"; return 1; }
+
+  local before_a before_b
+  before_a=$(established_count router-a)
+  before_b=$(established_count router-b)
+
+  log "reconfiguring router-a with a mismatched md5 password"
+  provision_auth router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "wrong-password"
+
+  log "waiting 20s to confirm the session does NOT (re-)establish with mismatched md5 passwords"
+  sleep 20
+  local after_a after_b
+  after_a=$(established_count router-a)
+  after_b=$(established_count router-b)
+  if [[ "$after_a" -gt "$before_a" || "$after_b" -gt "$before_b" ]]; then
+    log "FAILED: session established despite mismatched md5 passwords"
+    return 1
+  fi
+  log "confirmed: no new session established with mismatched md5 passwords"
+
+  log "restoring the matching md5 password on router-a"
+  provision_auth router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$password"
+  wait_for_log router-a "bgp session established" 60 \
+    && log "router-a: re-established after fixing the password" \
+    || { log "router-a: FAILED to re-establish after fixing the password"; return 1; }
+}
+
 cmd_logs() {
   echo "===== router-a ====="
   docker logs router-a 2>&1 | tail -n "${1:-200}"
@@ -238,6 +298,7 @@ case "${1:-}" in
   reconnect) cmd_check_reconnect ;;
   collision) cmd_check_collision ;;
   redistribute) cmd_check_redistribute ;;
+  auth) cmd_check_auth ;;
   logs) shift; cmd_logs "$@" ;;
   down) cmd_down ;;
   all)
@@ -246,9 +307,10 @@ case "${1:-}" in
     cmd_check_reconnect
     cmd_check_collision
     cmd_check_redistribute
+    cmd_check_auth
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|logs [n]|down|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|logs [n]|down|all}" >&2
     exit 2
     ;;
 esac

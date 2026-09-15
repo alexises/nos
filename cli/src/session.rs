@@ -1,8 +1,8 @@
 use std::net::IpAddr;
 
 use nos_proto::{
-    BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, ConfigOp, InterfaceOp, RoutingTableOp, StaticRouteOp,
-    StaticRoutingInstanceOp, TransactionBase,
+    BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, ConfigOp, InterfaceOp, RoutingTableOp,
+    StaticRouteOp, StaticRoutingInstanceOp, TransactionBase,
 };
 
 use crate::command::{
@@ -681,6 +681,35 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
+        Command::Delete(DeleteTarget::Auth) => match path {
+            Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearAuth {
+                    instance: instance.clone(),
+                    name: group.clone(),
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+        },
+        Command::Delete(DeleteTarget::AoKey(send_id)) => match path {
+            Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::RemoveAoKey {
+                    instance: instance.clone(),
+                    name: group.clone(),
+                    send_id,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+        },
 
         // `top` always lands at the root, however deep the current path is.
         Command::Top => match path {
@@ -770,6 +799,38 @@ fn peer_group_set_op(instance: String, group: String, field: BgpPeerGroupField) 
                 connect_retry_time,
             }
         }
+        BgpPeerGroupField::Md5Password(password) => BgpPeerGroupOp::SetMd5Auth {
+            instance,
+            name: group,
+            password,
+        },
+        BgpPeerGroupField::AoKey {
+            send_id,
+            recv_id,
+            algorithm,
+            key,
+        } => BgpPeerGroupOp::SetAoKey {
+            instance,
+            name: group,
+            key: BgpAoKey {
+                send_id,
+                recv_id,
+                algorithm,
+                key,
+                is_current: false,
+                is_rnext: false,
+            },
+        },
+        BgpPeerGroupField::AoCurrentKey(send_id) => BgpPeerGroupOp::SetAoCurrentKey {
+            instance,
+            name: group,
+            send_id,
+        },
+        BgpPeerGroupField::AoRnextKey(send_id) => BgpPeerGroupOp::SetAoRnextKey {
+            instance,
+            name: group,
+            send_id,
+        },
     })
 }
 
@@ -1341,6 +1402,124 @@ mod tests {
                 op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearConnectRetryTime {
                     instance: "r1".to_string(),
                     name: "pg1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_peer_group_auth_relative() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::Md5Password("secret".to_string()),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetMd5Auth {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                    password: "secret".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::AoKey {
+                        send_id: 1,
+                        recv_id: 2,
+                        algorithm: nos_proto::BgpAoAlgorithm::HmacSha1_96,
+                        key: "secret".to_string(),
+                    },
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoKey {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                    key: BgpAoKey {
+                        send_id: 1,
+                        recv_id: 2,
+                        algorithm: nos_proto::BgpAoAlgorithm::HmacSha1_96,
+                        key: "secret".to_string(),
+                        is_current: false,
+                        is_rnext: false,
+                    },
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::AoCurrentKey(1),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoCurrentKey {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                    send_id: 1,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::AoRnextKey(1),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoRnextKey {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                    send_id: 1,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn delete_peer_group_auth_requires_peer_group_context() {
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::BgpInstance("r1".to_string()), false),
+                Command::Delete(DeleteTarget::Auth)
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Delete(DeleteTarget::Auth)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearAuth {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", peer_group_path("r1", "pg1"), false),
+                Command::Delete(DeleteTarget::AoKey(1))
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::RemoveAoKey {
+                    instance: "r1".to_string(),
+                    name: "pg1".to_string(),
+                    send_id: 1,
                 }),
                 after: PathAfter::Stay,
             }

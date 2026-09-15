@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 use crate::config_client;
 use crate::fsm;
 use crate::rib_client;
-use crate::session::{LocalIdentity, ResolvedPeer, SessionManager, VrfRequirement};
+use crate::session::{LocalIdentity, ResolvedAuth, ResolvedPeer, SessionManager, VrfRequirement};
 use crate::watchdog_client;
 
 /// Fixed reconnect delay for the config subscription, matching every other
@@ -151,6 +151,7 @@ async fn resync(
                     .map_or(fsm::CONNECT_RETRY_TIME, |s| {
                         Duration::from_secs(u64::from(s))
                     }),
+                auth: group.auth.as_ref().map(ResolvedAuth::from),
             })
         })
         .collect();

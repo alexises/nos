@@ -68,6 +68,13 @@ struct Args {
     #[arg(long)]
     redistribute: bool,
 
+    /// If set, configures an RFC 2385 TCP MD5 password on `--peer-group`
+    /// (`BgpPeerGroupOp::SetMd5Auth`) — for verifying session authentication
+    /// end to end (matching passwords on both routers establish; a
+    /// mismatched one on either side does not).
+    #[arg(long)]
+    md5_password: Option<String>,
+
     #[arg(long)]
     save: bool,
 }
@@ -177,6 +184,14 @@ async fn main() -> anyhow::Result<()> {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
             },
+        }));
+    }
+
+    if let Some(password) = args.md5_password.clone() {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetMd5Auth {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            password,
         }));
     }
 

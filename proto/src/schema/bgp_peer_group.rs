@@ -83,6 +83,100 @@ pub struct BgpPeerGroup {
     /// `None` defaults to `CONNECT_RETRY_TIME_DEFAULT_SECS` (120s).
     #[garde(custom(|c: &Option<u16>, _ctx: &Config| valid_connect_retry_time(*c)))]
     pub connect_retry_time: Option<u16>,
+
+    /// `None` opens sessions with no transport authentication at all.
+    /// Secrets are stored clear-text, like every other field in this config
+    /// — see `BgpAuth`.
+    #[garde(custom(|a: &Option<BgpAuth>, _ctx: &Config| valid_auth(a.as_ref())))]
+    pub auth: Option<BgpAuth>,
+}
+
+/// Transport authentication for a peer-group's sessions — mutually
+/// exclusive mechanisms, matching the kernel (a socket can carry
+/// `TCP_MD5SIG` or TCP-AO keys, never both at once). Stored clear-text, like
+/// every field in this config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BgpAuth {
+    /// RFC 2385 TCP MD5 signature — a single shared password.
+    Md5 { password: String },
+    /// RFC 5925 TCP Authentication Option — one or more keys, supporting
+    /// rotation via `send_id`/`recv_id` and the `is_current`/`is_rnext`
+    /// flags.
+    Ao { keys: Vec<BgpAoKey> },
+}
+
+/// One TCP-AO key. `send_id`/`recv_id` identify it on the wire (RFC 5925's
+/// KeyID/RNextKeyID); `is_current` marks the key actively signing outgoing
+/// segments (exactly one key must have this set); `is_rnext` optionally
+/// requests the peer switch to this key next, for rotation without a
+/// dropped session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BgpAoKey {
+    pub send_id: u8,
+    pub recv_id: u8,
+    pub algorithm: BgpAoAlgorithm,
+    pub key: String,
+    pub is_current: bool,
+    pub is_rnext: bool,
+}
+
+/// RFC 5925's two mandatory-to-implement algorithms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BgpAoAlgorithm {
+    HmacSha1_96,
+    AesCmac96,
+}
+
+/// Maximum key/password length accepted by Linux's `TCP_MD5SIG`/TCP-AO
+/// socket options (`TCP_MD5SIG_MAXKEYLEN`/`TCP_AO_MAXKEYLEN`, both 80).
+const MAX_AUTH_KEY_LEN: usize = 80;
+
+fn valid_auth(auth: Option<&BgpAuth>) -> garde::Result {
+    match auth {
+        None => Ok(()),
+        Some(BgpAuth::Md5 { password }) => {
+            if password.is_empty() || password.len() > MAX_AUTH_KEY_LEN {
+                return Err(garde::Error::new("md5 password must be 1 to 80 bytes long"));
+            }
+            Ok(())
+        }
+        Some(BgpAuth::Ao { keys }) => {
+            if keys.is_empty() {
+                return Err(garde::Error::new(
+                    "ao auth must have at least one key (or be cleared)",
+                ));
+            }
+            let mut seen_send_ids: Vec<u8> = Vec::new();
+            let mut current_count = 0;
+            let mut rnext_count = 0;
+            for key in keys {
+                if key.key.is_empty() || key.key.len() > MAX_AUTH_KEY_LEN {
+                    return Err(garde::Error::new("ao key must be 1 to 80 bytes long"));
+                }
+                if seen_send_ids.contains(&key.send_id) {
+                    return Err(garde::Error::new(
+                        "ao key send-id must be unique within a peer-group",
+                    ));
+                }
+                seen_send_ids.push(key.send_id);
+                if key.is_current {
+                    current_count += 1;
+                }
+                if key.is_rnext {
+                    rnext_count += 1;
+                }
+            }
+            if current_count != 1 {
+                return Err(garde::Error::new(
+                    "ao auth must have exactly one current key",
+                ));
+            }
+            if rnext_count > 1 {
+                return Err(garde::Error::new("ao auth must have at most one rnext key"));
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Peer-group names are unique across the whole config, not just within the
@@ -191,6 +285,7 @@ mod tests {
             hold_time: None,
             keepalive_interval: None,
             connect_retry_time: None,
+            auth: None,
         }
     }
 
@@ -376,5 +471,104 @@ mod tests {
         pg.keepalive_interval = None;
         let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    fn ao_key(send_id: u8, is_current: bool) -> BgpAoKey {
+        BgpAoKey {
+            send_id,
+            recv_id: send_id,
+            algorithm: BgpAoAlgorithm::HmacSha1_96,
+            key: "secret".to_string(),
+            is_current,
+            is_rnext: false,
+        }
+    }
+
+    #[test]
+    fn md5_password_passes() {
+        let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
+        pg.auth = Some(BgpAuth::Md5 {
+            password: "secret".to_string(),
+        });
+        let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn empty_md5_password_fails() {
+        let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
+        pg.auth = Some(BgpAuth::Md5 {
+            password: String::new(),
+        });
+        let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn oversized_md5_password_fails() {
+        let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
+        pg.auth = Some(BgpAuth::Md5 {
+            password: "x".repeat(81),
+        });
+        let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn ao_with_one_current_key_passes() {
+        let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
+        pg.auth = Some(BgpAuth::Ao {
+            keys: vec![ao_key(1, true)],
+        });
+        let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn ao_with_no_keys_fails() {
+        let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
+        pg.auth = Some(BgpAuth::Ao { keys: vec![] });
+        let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn ao_with_no_current_key_fails() {
+        let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
+        pg.auth = Some(BgpAuth::Ao {
+            keys: vec![ao_key(1, false)],
+        });
+        let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn ao_with_two_current_keys_fails() {
+        let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
+        pg.auth = Some(BgpAuth::Ao {
+            keys: vec![ao_key(1, true), ao_key(2, true)],
+        });
+        let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn ao_with_duplicate_send_id_fails() {
+        let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
+        pg.auth = Some(BgpAuth::Ao {
+            keys: vec![ao_key(1, true), ao_key(1, false)],
+        });
+        let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn ao_with_oversized_key_fails() {
+        let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
+        let mut key = ao_key(1, true);
+        key.key = "x".repeat(81);
+        pg.auth = Some(BgpAuth::Ao { keys: vec![key] });
+        let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
+        assert!(cfg.validate_with(&cfg).is_err());
     }
 }

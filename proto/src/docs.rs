@@ -98,6 +98,18 @@ pub enum Topic {
     SetBgpPeerGroupConnectRetryTime,
     /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearConnectRetryTime)`
     ClearBgpPeerGroupConnectRetryTime,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetMd5Auth)`
+    SetBgpPeerGroupMd5Auth,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoKey)`
+    SetBgpPeerGroupAoKey,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::RemoveAoKey)`
+    RemoveBgpPeerGroupAoKey,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoCurrentKey)`
+    SetBgpPeerGroupAoCurrentKey,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoRnextKey)`
+    SetBgpPeerGroupAoRnextKey,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearAuth)`
+    ClearBgpPeerGroupAuth,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

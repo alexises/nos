@@ -200,6 +200,7 @@ mod tests {
             hold_time: None,
             keepalive_interval: None,
             connect_retry_time: None,
+            auth: None,
         };
 
         let mut base_instance = instance("r1", 65000);

@@ -9,8 +9,8 @@ pub mod static_routing_instance;
 pub use bgp_instance::BgpInstance;
 pub use bgp_peer::BgpPeer;
 pub use bgp_peer_group::{
-    AddressFamily, BgpPeerGroup, CONNECT_RETRY_TIME_DEFAULT_SECS, HOLD_TIME_DEFAULT,
-    HOLD_TIME_FLOOR,
+    AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpPeerGroup,
+    CONNECT_RETRY_TIME_DEFAULT_SECS, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR,
 };
 pub use interface::Interface;
 pub use routing_table::{Redistribute, RedistributeSource, RedistributeTarget, RoutingTable};

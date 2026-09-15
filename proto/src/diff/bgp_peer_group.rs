@@ -1,4 +1,4 @@
-use crate::schema::{AddressFamily, BgpPeerGroup};
+use crate::schema::{AddressFamily, BgpAoAlgorithm, BgpAuth, BgpPeerGroup};
 
 use super::{DiffStatus, FieldDiff, SectionDiff};
 
@@ -70,6 +70,35 @@ fn connect_retry_time_str(pg: &BgpPeerGroup) -> String {
         .map_or_else(|| "default (120s)".to_string(), |c| c.to_string())
 }
 
+/// Rendered in clear text, like every other field — see `BgpAuth`'s doc
+/// comment on why secrets are never masked in this codebase.
+fn auth_str(pg: &BgpPeerGroup) -> String {
+    match &pg.auth {
+        None => "none".to_string(),
+        Some(BgpAuth::Md5 { password }) => format!("md5-password {password}"),
+        Some(BgpAuth::Ao { keys }) => {
+            let rendered = keys
+                .iter()
+                .map(|k| {
+                    let algorithm = match k.algorithm {
+                        BgpAoAlgorithm::HmacSha1_96 => "hmac-sha1",
+                        BgpAoAlgorithm::AesCmac96 => "aes-cmac",
+                    };
+                    let flags = match (k.is_current, k.is_rnext) {
+                        (true, true) => " (current, rnext)",
+                        (true, false) => " (current)",
+                        (false, true) => " (rnext)",
+                        (false, false) => "",
+                    };
+                    format!("send-id {} {algorithm} {}{flags}", k.send_id, k.key)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("ao-keys [{rendered}]")
+        }
+    }
+}
+
 fn changed_fields(base: &BgpPeerGroup, candidate: &BgpPeerGroup) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     if base.remote_as != candidate.remote_as {
@@ -114,6 +143,13 @@ fn changed_fields(base: &BgpPeerGroup, candidate: &BgpPeerGroup) -> Vec<FieldDif
             new: Some(connect_retry_time_str(candidate)),
         });
     }
+    if base.auth != candidate.auth {
+        fields.push(FieldDiff {
+            label: "auth".to_string(),
+            old: Some(auth_str(base)),
+            new: Some(auth_str(candidate)),
+        });
+    }
     fields
 }
 
@@ -151,6 +187,11 @@ fn removed_section(pg: &BgpPeerGroup) -> SectionDiff {
             FieldDiff {
                 label: "connect-retry-time".to_string(),
                 old: Some(connect_retry_time_str(pg)),
+                new: None,
+            },
+            FieldDiff {
+                label: "auth".to_string(),
+                old: Some(auth_str(pg)),
                 new: None,
             },
         ],
@@ -194,6 +235,11 @@ fn added_section(pg: &BgpPeerGroup) -> SectionDiff {
                 old: None,
                 new: Some(connect_retry_time_str(pg)),
             },
+            FieldDiff {
+                label: "auth".to_string(),
+                old: None,
+                new: Some(auth_str(pg)),
+            },
         ],
         subsections: Vec::new(),
     }
@@ -214,6 +260,7 @@ mod tests {
             hold_time: None,
             keepalive_interval: None,
             connect_retry_time: None,
+            auth: None,
         }
     }
 

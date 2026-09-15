@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::time::Duration;
 
 use nos_proto::bgp::{BgpSessionState, PeerSummary};
+use nos_proto::{BgpAoAlgorithm, BgpAuth};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -60,6 +62,41 @@ pub struct ResolvedPeer {
     pub hold_time: u16,
     pub keepalive_interval: Option<u16>,
     pub connect_retry_time: Duration,
+    pub auth: Option<ResolvedAuth>,
+}
+
+/// A peer-group's `BgpAuth` translated into `nos-tcp-auth`'s wire-level
+/// types — resolved once by `reconcile::resync`, then applied at the socket
+/// level (never touched by `fsm.rs`, since authentication is verified by
+/// the kernel before a `TcpStream` even exists). Mirrors `BgpAuth`'s own
+/// mutual exclusion between MD5 and TCP-AO.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedAuth {
+    Md5(String),
+    Ao(Vec<nos_tcp_auth::AoKey>),
+}
+
+impl From<&BgpAuth> for ResolvedAuth {
+    fn from(auth: &BgpAuth) -> Self {
+        match auth {
+            BgpAuth::Md5 { password } => ResolvedAuth::Md5(password.clone()),
+            BgpAuth::Ao { keys } => ResolvedAuth::Ao(
+                keys.iter()
+                    .map(|k| nos_tcp_auth::AoKey {
+                        send_id: k.send_id,
+                        recv_id: k.recv_id,
+                        algorithm: match k.algorithm {
+                            BgpAoAlgorithm::HmacSha1_96 => nos_tcp_auth::AoAlgorithm::HmacSha1_96,
+                            BgpAoAlgorithm::AesCmac96 => nos_tcp_auth::AoAlgorithm::AesCmac96,
+                        },
+                        key: k.key.clone().into_bytes(),
+                        set_current: k.is_current,
+                        set_rnext: k.is_rnext,
+                    })
+                    .collect(),
+            ),
+        }
+    }
 }
 
 struct PeerTask {
@@ -71,6 +108,18 @@ struct Listeners {
     vrf: String,
     v4: JoinHandle<()>,
     v6: JoinHandle<()>,
+    /// Raw fds of the (still-owned-by-the-accept-loop-task) v4/v6 listening
+    /// sockets — kept so incremental auth key changes can be applied to an
+    /// already-bound-and-listening socket without needing to hold the
+    /// `TcpListener` itself (it was moved into `accept_loop`'s spawned
+    /// future). Valid for exactly as long as `v4`/`v6` haven't been aborted.
+    v4_fd: RawFd,
+    v6_fd: RawFd,
+    /// Which peer address currently has which auth key installed on
+    /// whichever of `v4_fd`/`v6_fd` matches its IP family — tracked so a
+    /// later peer removal/change knows what to uninstall before installing
+    /// the new state.
+    applied_auth: HashMap<IpAddr, ResolvedAuth>,
 }
 
 /// Owns every raw-TCP + FSM session for one `nos-bgpd` process. `reconcile`
@@ -118,7 +167,7 @@ impl SessionManager {
         if *self.vrf.borrow() != vrf {
             let _ = self.vrf.send(vrf.clone());
         }
-        self.rebind_listeners(&vrf).await;
+        self.rebind_listeners(&vrf, &desired).await;
         self.reconcile_peers(desired).await;
     }
 
@@ -155,7 +204,7 @@ impl SessionManager {
         }
     }
 
-    async fn rebind_listeners(self: &Arc<Self>, vrf: &VrfRequirement) {
+    async fn rebind_listeners(self: &Arc<Self>, vrf: &VrfRequirement, desired: &[ResolvedPeer]) {
         let desired_vrf_name = match vrf {
             VrfRequirement::Resolved(name) => Some(name.clone()),
             VrfRequirement::Invalid | VrfRequirement::Pending => None,
@@ -172,7 +221,7 @@ impl SessionManager {
             info!(instance = %self.instance, vrf = %old.vrf, "bgp listener torn down");
         }
         if let Some(name) = desired_vrf_name {
-            match self.spawn_listeners(&name) {
+            match self.spawn_listeners(&name, desired) {
                 Ok(new) => {
                     info!(instance = %self.instance, vrf = %name, "bgp listener bound");
                     *listeners = Some(new);
@@ -185,7 +234,17 @@ impl SessionManager {
         }
     }
 
-    fn spawn_listeners(self: &Arc<Self>, vrf: &str) -> io::Result<Listeners> {
+    /// Binds fresh v4/v6 listening sockets and primes every currently
+    /// desired peer's auth key onto whichever socket matches its address
+    /// family — needed here (not just via `sync_listener_auth`'s
+    /// diff-against-previous-peer-set logic) because a fresh listener has no
+    /// prior state to diff against even when the peer set itself is
+    /// unchanged (e.g. a VRF flap with the same peers configured all along).
+    fn spawn_listeners(
+        self: &Arc<Self>,
+        vrf: &str,
+        desired: &[ResolvedPeer],
+    ) -> io::Result<Listeners> {
         let v4_listener = tcp::bind_listener(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), BGP_PORT),
             Some(vrf),
@@ -194,12 +253,32 @@ impl SessionManager {
             SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), BGP_PORT),
             Some(vrf),
         )?;
+        let v4_fd = v4_listener.as_raw_fd();
+        let v6_fd = v6_listener.as_raw_fd();
+        let mut applied_auth = HashMap::new();
+        for peer in desired {
+            if let Some(auth) = &peer.auth {
+                let fd = listener_fd_for(peer.remote_address, v4_fd, v6_fd);
+                match tcp::apply_auth(fd, peer.remote_address, auth) {
+                    Ok(()) => {
+                        applied_auth.insert(peer.remote_address, auth.clone());
+                    }
+                    Err(e) => warn!(
+                        instance = %self.instance, peer = %peer.remote_address, error = %e,
+                        "failed to install bgp listener auth key"
+                    ),
+                }
+            }
+        }
         let v4 = tokio::spawn(self.clone().accept_loop(v4_listener));
         let v6 = tokio::spawn(self.clone().accept_loop(v6_listener));
         Ok(Listeners {
             vrf: vrf.to_string(),
             v4,
             v6,
+            v4_fd,
+            v6_fd,
+            applied_auth,
         })
     }
 
@@ -269,11 +348,13 @@ impl SessionManager {
             .collect();
         let (to_stop, to_spawn) = diff_peers(&current, &desired);
 
-        for addr in to_stop {
-            if let Some(task) = tasks.remove(&addr) {
+        self.sync_listener_auth(&to_stop, &to_spawn).await;
+
+        for addr in &to_stop {
+            if let Some(task) = tasks.remove(addr) {
                 task.task.abort();
             }
-            self.peers.write().await.remove(&addr);
+            self.peers.write().await.remove(addr);
         }
         for peer in to_spawn {
             let slot = PeerSlot::new(peer.clone());
@@ -290,6 +371,62 @@ impl SessionManager {
             ));
             tasks.insert(peer.remote_address, PeerTask { peer, task });
         }
+    }
+
+    /// Keeps the shared listener sockets' installed auth keys in step with
+    /// `to_stop`/`to_spawn` — the same diff `reconcile_peers` already
+    /// computed for active-connect tasks, since "a peer stopped" and "a
+    /// peer's listener key should be removed" (respectively "spawned"/
+    /// "installed") are exactly the same event here. A no-op if no listener
+    /// is currently bound (`VrfRequirement` not `Resolved`).
+    async fn sync_listener_auth(&self, to_stop: &[IpAddr], to_spawn: &[ResolvedPeer]) {
+        let mut listeners = self.listeners.lock().await;
+        let Some(listeners) = listeners.as_mut() else {
+            return;
+        };
+        for addr in to_stop {
+            if let Some(auth) = listeners.applied_auth.remove(addr) {
+                let fd = listener_fd_for(*addr, listeners.v4_fd, listeners.v6_fd);
+                if let Err(e) = tcp::remove_auth(fd, *addr, &auth) {
+                    warn!(
+                        instance = %self.instance, peer = %addr, error = %e,
+                        "failed to remove bgp listener auth key"
+                    );
+                }
+            }
+        }
+        for peer in to_spawn {
+            match &peer.auth {
+                Some(auth) => {
+                    let fd = listener_fd_for(peer.remote_address, listeners.v4_fd, listeners.v6_fd);
+                    match tcp::apply_auth(fd, peer.remote_address, auth) {
+                        Ok(()) => {
+                            listeners
+                                .applied_auth
+                                .insert(peer.remote_address, auth.clone());
+                        }
+                        Err(e) => warn!(
+                            instance = %self.instance, peer = %peer.remote_address, error = %e,
+                            "failed to install bgp listener auth key"
+                        ),
+                    }
+                }
+                None => {
+                    listeners.applied_auth.remove(&peer.remote_address);
+                }
+            }
+        }
+    }
+}
+
+/// Which of a `Listeners`' two raw fds matches `addr`'s IP version —
+/// `TCP_MD5SIG`/TCP-AO keys are scoped to one socket family, so a peer's key
+/// only ever goes on the listener actually reachable by its address.
+fn listener_fd_for(addr: IpAddr, v4_fd: RawFd, v6_fd: RawFd) -> RawFd {
+    if addr.is_ipv4() {
+        v4_fd
+    } else {
+        v6_fd
     }
 }
 
@@ -380,7 +517,14 @@ async fn active_connect_loop(
                 // change) and check again, rather than actually connecting.
             } else if slot.begin(Role::Active).await {
                 let remote = SocketAddr::new(slot.peer.remote_address, BGP_PORT);
-                match tcp::connect(remote, slot.peer.source_address, Some(&vrf_name)).await {
+                match tcp::connect(
+                    remote,
+                    slot.peer.source_address,
+                    Some(&vrf_name),
+                    slot.peer.auth.as_ref(),
+                )
+                .await
+                {
                     Ok(stream) => {
                         info!(
                             instance = %instance, peer = %slot.peer.remote_address,
@@ -435,6 +579,7 @@ mod tests {
             hold_time: 90,
             keepalive_interval: None,
             connect_retry_time: fsm::CONNECT_RETRY_TIME,
+            auth: None,
         }
     }
 
@@ -506,5 +651,53 @@ mod tests {
         let (to_stop, to_spawn) = diff_peers(&current, &desired);
         assert_eq!(to_stop, vec![addr]);
         assert_eq!(to_spawn, vec![changed]);
+    }
+
+    #[test]
+    fn auth_change_triggers_restart() {
+        let addr: IpAddr = "10.0.0.1".parse().unwrap();
+        let current = HashMap::from([(addr, peer("10.0.0.1"))]);
+        let mut changed = peer("10.0.0.1");
+        changed.auth = Some(ResolvedAuth::Md5("secret".to_string()));
+        let desired = HashMap::from([(addr, changed.clone())]);
+        let (to_stop, to_spawn) = diff_peers(&current, &desired);
+        assert_eq!(to_stop, vec![addr]);
+        assert_eq!(to_spawn, vec![changed]);
+    }
+
+    #[test]
+    fn resolved_auth_from_bgp_auth_md5() {
+        let auth = BgpAuth::Md5 {
+            password: "secret".to_string(),
+        };
+        assert_eq!(
+            ResolvedAuth::from(&auth),
+            ResolvedAuth::Md5("secret".to_string())
+        );
+    }
+
+    #[test]
+    fn resolved_auth_from_bgp_auth_ao() {
+        let auth = BgpAuth::Ao {
+            keys: vec![nos_proto::BgpAoKey {
+                send_id: 1,
+                recv_id: 2,
+                algorithm: BgpAoAlgorithm::AesCmac96,
+                key: "secret".to_string(),
+                is_current: true,
+                is_rnext: false,
+            }],
+        };
+        assert_eq!(
+            ResolvedAuth::from(&auth),
+            ResolvedAuth::Ao(vec![nos_tcp_auth::AoKey {
+                send_id: 1,
+                recv_id: 2,
+                algorithm: nos_tcp_auth::AoAlgorithm::AesCmac96,
+                key: b"secret".to_vec(),
+                set_current: true,
+                set_rnext: false,
+            }])
+        );
     }
 }

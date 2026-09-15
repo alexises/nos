@@ -7,6 +7,7 @@ A network operating system built from scratch in Rust.
 | Directory | Crate | Purpose |
 |-----------|-------|---------|
 | `proto/` | `nos-proto` | Shared wire types, IPC codec — single source of truth for all inter-process contracts |
+| `tcp-auth/` | `nos-tcp-auth` | Raw Linux `setsockopt` bindings for TCP session authentication (`TCP_MD5SIG`, TCP-AO) — no NOS dependencies, like `nos-proto` |
 | `config/` | `nos-config` | Configuration store and IPC server |
 | `bgp/` | `nos-bgp` | BGP-4 implementation |
 | `rib/` | `nos-rib` | Routing information base daemon — best-path selection per routing table, applied to the kernel via a Linux driver (VRF device + routes) |
@@ -130,6 +131,10 @@ Because `nos-interfaced` needs to enslave an interface into the VRF device that 
 
 `nos-bgpd` resolves its VRF the same way: a `BgpInstance` carries a reflexive, read-only `routing_table` field (mirrored by `nos-config` from the owning `RoutingTable`'s `bgp_instance` reference on every commit — never independently editable, and never shown in `nos-cli`'s config rendering, since it exists purely for `nos-bgpd` to read over IPC), which it resolves to a VRF name via the same `ServiceRef::RibTable` + `GetVrfName` call `nos-interfaced` uses. A `BgpInstance` with no owning `RoutingTable` is treated as invalid operating state, not a "default VRF" fallback — `nos-bgpd` never opens a session for it, only logging an error and rechecking on every resync in case config is fixed. Once a VRF name is resolved, `nos-bgpd` opens raw, VRF-scoped TCP connectivity to its configured peers (both an active outbound connect per peer and a shared passive listener on port 179, scoped into the VRF via `SO_BINDTODEVICE` rather than `rtnetlink` since no interface/route is being programmed) — the foundation the BGP FSM (OPEN/KEEPALIVE message exchange) will be layered on top of later.
 
+### Session authentication
+
+A `BgpPeerGroup` carries an optional `auth` field (RFC 2385 TCP MD5, or RFC 5925 TCP-AO with key rotation — see `bgp/CLAUDE.md`'s "Session authentication" for the wire-level detail). Neither mechanism has a maintained Rust binding, so the raw `setsockopt(TCP_MD5SIG)`/`setsockopt(TCP_AO_*)` calls live in their own crate, `tcp-auth/` (`nos-tcp-auth`) — no NOS dependencies, like `nos-proto`, and the one crate in the workspace whose whole purpose is `unsafe` FFI (every other crate stays within the workspace's `unsafe_code = "warn"` default). Secrets are stored **clear-text** in config, like every other field — this system has no encryption-at-rest anywhere, and `nos-cli` renders them in the clear too.
+
 ### Log collection
 
 Every daemon (`nos-configd`, each `nos-bgpd`/`nos-ribd` instance, `nos-interfaced`, `nos-watchdogd`) already logs via `tracing`; `nos-log` adds a second `tracing_subscriber::Layer` (`log_client::ForwardingLayer`, reimplemented per-crate like `config_client.rs`/`watchdog_client.rs` rather than shared, per the star dependency graph) alongside each process's existing `fmt` layer, so stdout/`docker logs` output is unaffected. The layer converts every `tracing::Event` into a `nos_proto::log::LogEntry` (timestamp, level, source identity, target, message, structured fields), pushes it onto a small bounded channel (dropping the oldest on backpressure — logging must never block the caller), and a background task drains that channel into one long-lived `LogRequest::Push` connection to `nos-logd`, reconnecting on a fixed 1s delay like every other reconnect loop in this codebase.
@@ -165,7 +170,7 @@ cargo fmt --all
 
 ### Two-router BGP verification
 
-`tools/verify-bgp.sh` stands up two independent `nos-watchdogd` containers on a shared docker network, configures each as a full BGP router peering the other, and checks the logs for a real OPEN/KEEPALIVE handshake reaching `Established`, a hold-timer/reconnect cycle after a peer vanishes, (best-effort, timing-dependent) an RFC 4271 §6.8 collision-resolution event, and (`redistribute`) a static route configured on one router actually being redistributed into BGP, advertised over a real UPDATE message, and learned into the other router's Adj-RIB-In/Loc-RIB:
+`tools/verify-bgp.sh` stands up two independent `nos-watchdogd` containers on a shared docker network, configures each as a full BGP router peering the other, and checks the logs for a real OPEN/KEEPALIVE handshake reaching `Established`, a hold-timer/reconnect cycle after a peer vanishes, (best-effort, timing-dependent) an RFC 4271 §6.8 collision-resolution event, (`redistribute`) a static route configured on one router actually being redistributed into BGP, advertised over a real UPDATE message, and learned into the other router's Adj-RIB-In/Loc-RIB, and (`auth`) that a matching RFC 2385 TCP MD5 password configured on both routers' peer-groups still establishes while a mismatched password on either side does not (verified against the real kernel's `TCP_MD5SIG` enforcement, not simulated):
 
 ```bash
 tools/verify-bgp.sh up            # build image + provisioning tool, start both routers, configure them as peers
@@ -173,9 +178,10 @@ tools/verify-bgp.sh established   # wait for both sides to log "bgp session esta
 tools/verify-bgp.sh reconnect     # kill one side's nos-bgpd, confirm the other detects it and both re-establish
 tools/verify-bgp.sh collision     # restart both nos-bgpd processes at once, check for/report a collision event
 tools/verify-bgp.sh redistribute  # configure a static route + "redistribute from static to bgp" on router-a, confirm router-b learns and installs it
+tools/verify-bgp.sh auth          # configure a matching md5-password on both routers (still establishes), then a mismatched one (does not)
 tools/verify-bgp.sh logs [n]      # tail both containers' logs
 tools/verify-bgp.sh down          # tear down containers, volumes, and the network
-tools/verify-bgp.sh all           # up + established + reconnect + collision + redistribute, in sequence
+tools/verify-bgp.sh all           # up + established + reconnect + collision + redistribute + auth, in sequence
 ```
 
 `nos-cli`'s interactive shell (reedline) can't be scripted over a plain pipe — piped stdin fails with `readline error: No such device or address` — so provisioning goes through `tools/nos-provision`, a small standalone binary that speaks `nos-configd`'s IPC protocol directly (`OpenTransaction`/`ApplyOp`/`CommitTransaction`) using `nos-proto`'s own types, rather than through the shell. It's a workspace member but not meant to be run outside this script; `verify-bgp.sh` builds it via the same `rust:1-slim-bookworm` image the Dockerfile's builder stage uses, into a separate `target/docker-verify/` directory, so its binary's glibc version matches the `debian:bookworm-slim` runtime containers regardless of what the host toolchain would otherwise produce.

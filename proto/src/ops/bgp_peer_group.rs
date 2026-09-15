@@ -2,7 +2,7 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{AddressFamily, BgpPeerGroup, Config};
+use crate::schema::{AddressFamily, BgpAoKey, BgpAuth, BgpPeerGroup, Config};
 
 use super::bgp_instance::find_instance_mut;
 use super::OpError;
@@ -77,6 +77,49 @@ pub enum BgpPeerGroupOp {
         instance: String,
         name: String,
     },
+    /// Sets `auth` to a single MD5 password, replacing any TCP-AO keys
+    /// (the two mechanisms are mutually exclusive — the kernel accepts only
+    /// one per socket).
+    SetMd5Auth {
+        instance: String,
+        name: String,
+        password: String,
+    },
+    /// Upserts one TCP-AO key by `send_id`. If `auth` isn't already `Ao`
+    /// (unset, or `Md5`), starts a fresh key list with just this key.
+    SetAoKey {
+        instance: String,
+        name: String,
+        key: BgpAoKey,
+    },
+    /// Removes one TCP-AO key by `send_id`. No-op if `auth` isn't `Ao` or
+    /// the id isn't present — does not clear `auth` back to `None` even if
+    /// the list becomes empty; commit-time validation rejects an empty
+    /// `Ao` list, so an explicit `ClearAuth` is required for that case.
+    RemoveAoKey {
+        instance: String,
+        name: String,
+        send_id: u8,
+    },
+    /// Marks one existing TCP-AO key as the current key, clearing the flag
+    /// on every other key in the list.
+    SetAoCurrentKey {
+        instance: String,
+        name: String,
+        send_id: u8,
+    },
+    /// Marks one existing TCP-AO key as the rnext key, clearing the flag on
+    /// every other key in the list.
+    SetAoRnextKey {
+        instance: String,
+        name: String,
+        send_id: u8,
+    },
+    /// Unsets `auth` entirely, regardless of which mechanism was set.
+    ClearAuth {
+        instance: String,
+        name: String,
+    },
 }
 
 impl BgpPeerGroupOp {
@@ -93,6 +136,7 @@ impl BgpPeerGroupOp {
                         hold_time: None,
                         keepalive_interval: None,
                         connect_retry_time: None,
+                        auth: None,
                     });
                 }
                 Ok(())
@@ -180,8 +224,102 @@ impl BgpPeerGroupOp {
                 find_group_mut(config, instance, name)?.connect_retry_time = None;
                 Ok(())
             }
+            BgpPeerGroupOp::SetMd5Auth {
+                instance,
+                name,
+                password,
+            } => {
+                find_group_mut(config, instance, name)?.auth = Some(BgpAuth::Md5 {
+                    password: password.clone(),
+                });
+                Ok(())
+            }
+            BgpPeerGroupOp::SetAoKey {
+                instance,
+                name,
+                key,
+            } => {
+                let group = find_group_mut(config, instance, name)?;
+                let keys = match &mut group.auth {
+                    Some(BgpAuth::Ao { keys }) => keys,
+                    Some(BgpAuth::Md5 { .. }) | None => {
+                        group.auth = Some(BgpAuth::Ao { keys: Vec::new() });
+                        let Some(BgpAuth::Ao { keys }) = &mut group.auth else {
+                            unreachable!("just set to Ao above")
+                        };
+                        keys
+                    }
+                };
+                match keys.iter_mut().find(|k| k.send_id == key.send_id) {
+                    Some(existing) => *existing = key.clone(),
+                    None => keys.push(key.clone()),
+                }
+                Ok(())
+            }
+            BgpPeerGroupOp::RemoveAoKey {
+                instance,
+                name,
+                send_id,
+            } => {
+                if let Some(BgpAuth::Ao { keys }) =
+                    &mut find_group_mut(config, instance, name)?.auth
+                {
+                    keys.retain(|k| k.send_id != *send_id);
+                }
+                Ok(())
+            }
+            BgpPeerGroupOp::SetAoCurrentKey {
+                instance,
+                name,
+                send_id,
+            } => set_ao_key_flag(config, instance, name, *send_id, |k, is_target| {
+                k.is_current = is_target;
+            }),
+            BgpPeerGroupOp::SetAoRnextKey {
+                instance,
+                name,
+                send_id,
+            } => set_ao_key_flag(config, instance, name, *send_id, |k, is_target| {
+                k.is_rnext = is_target;
+            }),
+            BgpPeerGroupOp::ClearAuth { instance, name } => {
+                find_group_mut(config, instance, name)?.auth = None;
+                Ok(())
+            }
         }
     }
+}
+
+/// Shared body of `SetAoCurrentKey`/`SetAoRnextKey`: sets `set_flag(key,
+/// true)` on the key matching `send_id` and `set_flag(key, false)` on every
+/// other key in the same `Ao` list, enforcing "at most one key has this
+/// flag" eagerly rather than deferring to commit-time validation.
+fn set_ao_key_flag(
+    config: &mut Config,
+    instance: &str,
+    name: &str,
+    send_id: u8,
+    set_flag: impl Fn(&mut BgpAoKey, bool),
+) -> Result<(), OpError> {
+    let group = find_group_mut(config, instance, name)?;
+    let Some(BgpAuth::Ao { keys }) = &mut group.auth else {
+        return Err(OpError::BgpAoKeyNotFound {
+            instance: instance.to_string(),
+            name: name.to_string(),
+            send_id,
+        });
+    };
+    if !keys.iter().any(|k| k.send_id == send_id) {
+        return Err(OpError::BgpAoKeyNotFound {
+            instance: instance.to_string(),
+            name: name.to_string(),
+            send_id,
+        });
+    }
+    for key in keys.iter_mut() {
+        set_flag(key, key.send_id == send_id);
+    }
+    Ok(())
 }
 
 fn find_group_mut<'a>(
@@ -227,6 +365,7 @@ mod tests {
             hold_time: None,
             keepalive_interval: None,
             connect_retry_time: None,
+            auth: None,
         }
     }
 
@@ -462,5 +601,262 @@ mod tests {
         assert!(
             matches!(err, OpError::BgpPeerGroupNotFound { instance, name } if instance == "r1" && name == "pg1")
         );
+    }
+
+    use crate::schema::BgpAoAlgorithm;
+
+    fn ao_key(send_id: u8) -> BgpAoKey {
+        BgpAoKey {
+            send_id,
+            recv_id: send_id,
+            algorithm: BgpAoAlgorithm::HmacSha1_96,
+            key: "secret".to_string(),
+            is_current: false,
+            is_rnext: false,
+        }
+    }
+
+    #[test]
+    fn set_md5_auth_sets_password() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetMd5Auth {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            password: "secret".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].auth,
+            Some(BgpAuth::Md5 {
+                password: "secret".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn set_md5_auth_replaces_existing_ao_keys() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetAoKey {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            key: ao_key(1),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        BgpPeerGroupOp::SetMd5Auth {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            password: "secret".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].auth,
+            Some(BgpAuth::Md5 {
+                password: "secret".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn set_ao_key_starts_fresh_list_from_none() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetAoKey {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            key: ao_key(1),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].auth,
+            Some(BgpAuth::Ao {
+                keys: vec![ao_key(1)]
+            })
+        );
+    }
+
+    #[test]
+    fn set_ao_key_upserts_by_send_id() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetAoKey {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            key: ao_key(1),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        let mut updated = ao_key(1);
+        updated.key = "new-secret".to_string();
+        BgpPeerGroupOp::SetAoKey {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            key: updated.clone(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].auth,
+            Some(BgpAuth::Ao {
+                keys: vec![updated]
+            })
+        );
+    }
+
+    #[test]
+    fn remove_ao_key_removes_by_send_id() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetAoKey {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            key: ao_key(1),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        BgpPeerGroupOp::SetAoKey {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            key: ao_key(2),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        BgpPeerGroupOp::RemoveAoKey {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            send_id: 1,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].auth,
+            Some(BgpAuth::Ao {
+                keys: vec![ao_key(2)]
+            })
+        );
+    }
+
+    #[test]
+    fn remove_ao_key_is_noop_when_not_ao() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::RemoveAoKey {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            send_id: 1,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].auth, None);
+    }
+
+    #[test]
+    fn set_ao_current_key_sets_only_the_target() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        for id in [1, 2] {
+            BgpPeerGroupOp::SetAoKey {
+                instance: "r1".to_string(),
+                name: "pg1".to_string(),
+                key: ao_key(id),
+            }
+            .apply(&mut cfg)
+            .unwrap();
+        }
+        BgpPeerGroupOp::SetAoCurrentKey {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            send_id: 1,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        BgpPeerGroupOp::SetAoCurrentKey {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            send_id: 2,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        let Some(BgpAuth::Ao { keys }) = &cfg.bgp_instances[0].peer_groups[0].auth else {
+            panic!("expected Ao auth");
+        };
+        assert!(!keys.iter().find(|k| k.send_id == 1).unwrap().is_current);
+        assert!(keys.iter().find(|k| k.send_id == 2).unwrap().is_current);
+    }
+
+    #[test]
+    fn set_ao_current_key_missing_id_errors() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetAoKey {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            key: ao_key(1),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        let err = BgpPeerGroupOp::SetAoCurrentKey {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            send_id: 9,
+        }
+        .apply(&mut cfg)
+        .unwrap_err();
+        assert!(matches!(err, OpError::BgpAoKeyNotFound { send_id, .. } if send_id == 9));
+    }
+
+    #[test]
+    fn set_ao_current_key_when_no_auth_errors() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        let err = BgpPeerGroupOp::SetAoCurrentKey {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            send_id: 1,
+        }
+        .apply(&mut cfg)
+        .unwrap_err();
+        assert!(matches!(err, OpError::BgpAoKeyNotFound { .. }));
+    }
+
+    #[test]
+    fn set_ao_rnext_key_sets_only_the_target() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        for id in [1, 2] {
+            BgpPeerGroupOp::SetAoKey {
+                instance: "r1".to_string(),
+                name: "pg1".to_string(),
+                key: ao_key(id),
+            }
+            .apply(&mut cfg)
+            .unwrap();
+        }
+        BgpPeerGroupOp::SetAoRnextKey {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            send_id: 2,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        let Some(BgpAuth::Ao { keys }) = &cfg.bgp_instances[0].peer_groups[0].auth else {
+            panic!("expected Ao auth");
+        };
+        assert!(!keys.iter().find(|k| k.send_id == 1).unwrap().is_rnext);
+        assert!(keys.iter().find(|k| k.send_id == 2).unwrap().is_rnext);
+    }
+
+    #[test]
+    fn clear_auth_unsets_md5() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetMd5Auth {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            password: "secret".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        BgpPeerGroupOp::ClearAuth {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].auth, None);
     }
 }

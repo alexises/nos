@@ -1,5 +1,5 @@
 [workspace]
-members = ["proto", "config", "bgp", "rib", "interface", "log", "cli", "watchdog", "tools/nos-provision"]
+members = ["proto", "config", "bgp", "rib", "interface", "log", "cli", "watchdog", "tools/nos-provision", "tcp-auth"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -17,6 +17,7 @@ chrono      = { version = "0.4", default-features = false, features = ["std"] }
 tokio-util  = { version = "0.7", features = ["codec"] }
 futures     = "0.3"
 nos-proto          = { path = "proto" }
+nos-tcp-auth       = { path = "tcp-auth" }
 clap               = { version = "4", features = ["derive"] }
 anyhow             = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -26,6 +27,7 @@ async-trait         = "0.1"
 rtnetlink           = "0.23"
 fs2                 = "0.4"
 socket2             = { version = "0.5", features = ["all"] }
+libc                = "0.2"
 
 # test dependencies
 tempfile    = "3"
