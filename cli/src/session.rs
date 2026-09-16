@@ -2561,19 +2561,20 @@ mod tests {
         let redistribute = Redistribute {
             from: RedistributeSource::Static,
             to: RedistributeTarget::Bgp,
+            policy: None,
         };
         assert_eq!(
             resolve(
                 &config_mode("t1", Path::Root, false),
                 Command::Set(SetTarget::RoutingTableRedistribute {
                     name: "rt1".to_string(),
-                    redistribute,
+                    redistribute: redistribute.clone(),
                 })
             ),
             Resolved::ApplyOp {
                 op: ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
                     name: "rt1".to_string(),
-                    redistribute,
+                    redistribute: redistribute.clone(),
                 }),
                 after: PathAfter::Stay,
             }
@@ -2582,7 +2583,9 @@ mod tests {
         assert!(matches!(
             resolve(
                 &config_mode("t1", Path::Root, false),
-                Command::Set(SetTarget::RoutingTableRedistributeRelative { redistribute })
+                Command::Set(SetTarget::RoutingTableRedistributeRelative {
+                    redistribute: redistribute.clone()
+                })
             ),
             Resolved::Error(_)
         ));
@@ -2594,7 +2597,11 @@ mod tests {
             Resolved::ApplyOp {
                 op: ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
                     name: "rt1".to_string(),
-                    redistribute,
+                    redistribute: Redistribute {
+                        from: RedistributeSource::Static,
+                        to: RedistributeTarget::Bgp,
+                        policy: None,
+                    },
                 }),
                 after: PathAfter::Stay,
             }

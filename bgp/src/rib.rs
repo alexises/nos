@@ -1,5 +1,7 @@
 //! The BGP RIB engine: Adj-RIB-In per peer, a locally-redistributed route
-//! set (fed by `nos-ribd` via `nos_proto::RedistributeUpdate`), a cached
+//! set (fed by `nos-ribd` via `nos_proto::RedistributeUpdate`, filtered
+//! through the configured redistribute RPL policy — see
+//! `apply_redistribute_update`/`set_redistribute_policy`), a cached
 //! Loc-RIB best-path per prefix, and per-peer outbound channels used to push
 //! `OutboundUpdate`s out to each `fsm::run` task. Prefixes/next-hops are
 //! `IpNet`/`IpAddr` throughout — v4 and v6 share the same maps, family
@@ -100,11 +102,14 @@ fn to_policy_input(prefix: IpNet, route: &RibRoute) -> nos_rpl::Input<'_> {
     }
 }
 
-/// Runs the source peer's import policy against a freshly-received
-/// candidate. `None` means reject — the caller treats the prefix like an
-/// explicit withdrawal instead of inserting it, since a rejected route must
-/// not linger in `adj_rib_in` from an earlier, now-superseded UPDATE.
-fn apply_import_policy(
+/// Runs a compiled RPL policy against a candidate route — a peer's import
+/// policy against a freshly-received UPDATE, or the redistribute policy
+/// against a locally-redistributed route (see `apply_redistribute_update`).
+/// `None` means reject: for peer import, the caller treats the prefix like
+/// an explicit withdrawal instead of inserting it, since a rejected route
+/// must not linger in `adj_rib_in` from an earlier, now-superseded UPDATE;
+/// for redistribution, the caller simply omits the prefix from `redistributed`.
+fn apply_policy(
     prefix: IpNet,
     mut candidate: RibRoute,
     policy: &CompiledPolicy,
@@ -310,7 +315,18 @@ pub struct BgpRib {
     /// reflection and checked for loop-prevention on receipt.
     cluster_id: Ipv4Addr,
     adj_rib_in: HashMap<IpAddr, HashMap<IpNet, RibRoute>>,
+    /// The unfiltered prefix set as told by `nos-ribd`'s
+    /// `RedistributeUpdate` — the raw truth `redistributed` below is
+    /// filtered from (see `apply_redistribute_update`/`set_redistribute_policy`).
+    redistribute_raw: HashSet<IpNet>,
+    /// `redistribute_raw` filtered through `redistribute_policy` — this is
+    /// what best-path selection (`recompute_and_propagate`) actually reads.
     redistributed: HashMap<IpNet, RibRoute>,
+    /// The compiled RPL policy currently filtering redistribution, resolved
+    /// from `BgpInstance.redistribute_policy` by `reconcile.rs`'s `resync`
+    /// (`None` there means accept-all, unlike peer import/export's
+    /// deny-all default — see `proto`'s `Redistribute.policy` doc comment).
+    redistribute_policy: Arc<CompiledPolicy>,
     loc_rib: HashMap<IpNet, RibRoute>,
     /// What we've last told each peer, for correct withdrawals.
     adj_rib_out: HashMap<IpAddr, HashSet<IpNet>>,
@@ -338,7 +354,9 @@ impl BgpRib {
             local_router_id: Ipv4Addr::UNSPECIFIED,
             cluster_id: Ipv4Addr::UNSPECIFIED,
             adj_rib_in: HashMap::new(),
+            redistribute_raw: HashSet::new(),
             redistributed: HashMap::new(),
+            redistribute_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             loc_rib: HashMap::new(),
             adj_rib_out: HashMap::new(),
             peer_outboxes: HashMap::new(),
@@ -569,7 +587,7 @@ impl BgpRib {
                         next_hop: Some(IpAddr::V4(attrs.next_hop)),
                         ..base_route.clone()
                     };
-                    match apply_import_policy(prefix, candidate, import_policy) {
+                    match apply_policy(prefix, candidate, import_policy) {
                         Some(route) => {
                             info!(peer = %from, "bgp: learned route for {prefix} into adj-rib-in");
                             table.insert(prefix, route);
@@ -586,7 +604,7 @@ impl BgpRib {
                             next_hop: Some(mp.next_hop),
                             ..base_route.clone()
                         };
-                        match apply_import_policy(*prefix, candidate, import_policy) {
+                        match apply_policy(*prefix, candidate, import_policy) {
                             Some(route) => {
                                 info!(peer = %from, "bgp: learned route for {prefix} into adj-rib-in");
                                 table.insert(*prefix, route);
@@ -609,30 +627,77 @@ impl BgpRib {
     /// Applies one `nos_proto::RedistributeUpdate` from `nos-ribd`. `gateway`
     /// on the wire type is never read — a locally-redistributed route always
     /// gets next-hop-self, regardless of the destination peer-group's
-    /// configured mode (see `RibRoute::next_hop`'s doc comment).
+    /// configured mode (see `RibRoute::next_hop`'s doc comment). Updates the
+    /// raw source-of-truth prefix set (`redistribute_raw`) and re-derives
+    /// each touched prefix's policy-filtered entry via `refilter_redistribute`.
     pub fn apply_redistribute_update(&mut self, update: RedistributeUpdate) {
         match update {
             RedistributeUpdate::Full(routes) => {
-                let mut new_redistributed = HashMap::with_capacity(routes.len());
-                for route in routes {
-                    new_redistributed.insert(route.prefix, redistributed_route());
-                }
-                let old_keys: HashSet<IpNet> = self.redistributed.keys().copied().collect();
-                let new_keys: HashSet<IpNet> = new_redistributed.keys().copied().collect();
-                let touched: Vec<IpNet> =
-                    old_keys.symmetric_difference(&new_keys).copied().collect();
-                self.redistributed = new_redistributed;
+                let new_raw: HashSet<IpNet> = routes.iter().map(|r| r.prefix).collect();
+                let touched: Vec<IpNet> = self
+                    .redistribute_raw
+                    .symmetric_difference(&new_raw)
+                    .copied()
+                    .collect();
+                self.redistribute_raw = new_raw;
                 for prefix in touched {
+                    self.refilter_redistribute(prefix);
                     self.recompute_and_propagate(prefix);
                 }
             }
             RedistributeUpdate::Add(route) => {
-                self.redistributed
-                    .insert(route.prefix, redistributed_route());
+                self.redistribute_raw.insert(route.prefix);
+                self.refilter_redistribute(route.prefix);
                 self.recompute_and_propagate(route.prefix);
             }
             RedistributeUpdate::Remove(prefix) => {
+                self.redistribute_raw.remove(&prefix);
+                self.refilter_redistribute(prefix);
+                self.recompute_and_propagate(prefix);
+            }
+        }
+    }
+
+    /// Recomputes `prefix`'s policy-filtered entry in `redistributed` from
+    /// `redistribute_raw` + `redistribute_policy`, inserting or removing it
+    /// as needed. Returns whether the entry actually changed — callers use
+    /// this to decide whether `recompute_and_propagate` is warranted.
+    fn refilter_redistribute(&mut self, prefix: IpNet) -> bool {
+        let new = if self.redistribute_raw.contains(&prefix) {
+            apply_policy(prefix, redistributed_route(), &self.redistribute_policy)
+        } else {
+            None
+        };
+        let changed = match (&new, self.redistributed.get(&prefix)) {
+            (Some(n), Some(o)) => n != o,
+            (None, None) => false,
+            _ => true,
+        };
+        match new {
+            Some(route) => {
+                self.redistributed.insert(prefix, route);
+            }
+            None => {
                 self.redistributed.remove(&prefix);
+            }
+        }
+        changed
+    }
+
+    /// Sets the compiled redistribute policy and re-filters every currently
+    /// raw-redistributed prefix against it — called unconditionally on every
+    /// `reconcile()`, mirroring `set_local_identity`'s existing
+    /// unconditional-call pattern. Unlike peer import/export (which take
+    /// effect via a full peer restart on any policy-name change), there's no
+    /// restart mechanism for redistribution, so a policy edit only takes
+    /// effect promptly because this method actively re-derives the filtered
+    /// set on every call rather than waiting for the next unrelated
+    /// `RedistributeUpdate` from `nos-ribd`.
+    pub fn set_redistribute_policy(&mut self, policy: Arc<CompiledPolicy>) {
+        self.redistribute_policy = policy;
+        let prefixes: Vec<IpNet> = self.redistribute_raw.iter().copied().collect();
+        for prefix in prefixes {
+            if self.refilter_redistribute(prefix) {
                 self.recompute_and_propagate(prefix);
             }
         }
@@ -1456,6 +1521,47 @@ mod tests {
                 origin: message::Origin::Igp,
                 use_mp: false,
             })]
+        );
+    }
+
+    #[test]
+    fn redistributed_route_rejected_by_redistribute_policy_is_not_announced() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let mut rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        rib.set_redistribute_policy(deny_all_policy());
+
+        rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
+
+        assert_eq!(recv_all(&mut rx), vec![]);
+    }
+
+    /// Proves a redistribute-policy change takes effect promptly — the
+    /// current redistributed set is re-filtered when the policy itself
+    /// changes, not just on the next `RedistributeUpdate` from `nos-ribd`.
+    #[test]
+    fn redistribute_policy_change_retroactively_filters_existing_routes() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let mut rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+
+        rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
+        let announced = recv_all(&mut rx);
+        assert!(matches!(
+            announced.as_slice(),
+            [OutboundUpdate::Announce(a)] if a.prefix == prefix("192.168.1.0/24")
+        ));
+
+        rib.set_redistribute_policy(deny_all_policy());
+
+        let updates = recv_all(&mut rx);
+        assert_eq!(
+            updates,
+            vec![OutboundUpdate::Withdraw(
+                prefix("192.168.1.0/24"),
+                false,
+                None
+            )]
         );
     }
 

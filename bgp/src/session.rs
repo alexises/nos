@@ -182,14 +182,16 @@ impl SessionManager {
         vrf: VrfRequirement,
         local: LocalIdentity,
         desired: Vec<ResolvedPeer>,
+        redistribute_policy: Arc<nos_rpl::CompiledPolicy>,
     ) {
         if *self.local.borrow() != local {
             let _ = self.local.send(local);
         }
-        self.bgp_rib
-            .lock()
-            .await
-            .set_local_identity(local.asn, local.router_id, local.cluster_id);
+        {
+            let mut bgp_rib = self.bgp_rib.lock().await;
+            bgp_rib.set_local_identity(local.asn, local.router_id, local.cluster_id);
+            bgp_rib.set_redistribute_policy(redistribute_policy);
+        }
         if *self.vrf.borrow() != vrf {
             let _ = self.vrf.send(vrf.clone());
         }

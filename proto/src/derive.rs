@@ -1,10 +1,11 @@
-use crate::schema::Config;
+use crate::schema::{Config, RedistributeTarget};
 
-/// Recomputes every `BgpInstance.routing_table` from the authoritative
-/// `RoutingTable.bgp_instance` references. Pure and synchronous, like
-/// `ops::apply`/`diff::diff_*` — call this on any `Config` that is about to
-/// become "running" (see `nos-config`'s `ConfigStore::new` and
-/// `commit_transaction`), never on a transaction's in-progress config.
+/// Recomputes every `BgpInstance.routing_table`/`redistribute_policy` from
+/// the authoritative `RoutingTable.bgp_instance`/`redistribute` references.
+/// Pure and synchronous, like `ops::apply`/`diff::diff_*` — call this on any
+/// `Config` that is about to become "running" (see `nos-config`'s
+/// `ConfigStore::new` and `commit_transaction`), never on a transaction's
+/// in-progress config.
 ///
 /// `RoutingTable.bgp_instance`'s own `garde` validation already guarantees
 /// at most one table claims a given instance at commit time, so this never
@@ -13,6 +14,7 @@ use crate::schema::Config;
 pub fn sync_routing_table_refs(config: &mut Config) {
     for instance in &mut config.bgp_instances {
         instance.routing_table = None;
+        instance.redistribute_policy = None;
     }
     for table in &config.routing_tables {
         let Some(bgp_instance) = &table.bgp_instance else {
@@ -24,6 +26,11 @@ pub fn sync_routing_table_refs(config: &mut Config) {
             .find(|i| &i.name == bgp_instance)
         {
             instance.routing_table = Some(table.name.clone());
+            instance.redistribute_policy = table
+                .redistribute
+                .as_ref()
+                .filter(|r| r.to == RedistributeTarget::Bgp)
+                .and_then(|r| r.policy.clone());
         }
     }
 }
@@ -44,6 +51,7 @@ mod tests {
             peers: Vec::new(),
             cluster_id: None,
             routing_table: None,
+            redistribute_policy: None,
         }
     }
 
@@ -53,6 +61,23 @@ mod tests {
             bgp_instance: bgp_instance.map(str::to_string),
             static_routing_instance: None,
             redistribute: None,
+        }
+    }
+
+    fn table_with_redistribute(
+        name: &str,
+        bgp_instance: Option<&str>,
+        policy: Option<&str>,
+    ) -> RoutingTable {
+        use crate::schema::{Redistribute, RedistributeSource};
+
+        RoutingTable {
+            redistribute: Some(Redistribute {
+                from: RedistributeSource::Static,
+                to: RedistributeTarget::Bgp,
+                policy: policy.map(str::to_string),
+            }),
+            ..table(name, bgp_instance)
         }
     }
 
@@ -101,5 +126,44 @@ mod tests {
         };
         sync_routing_table_refs(&mut cfg);
         assert_eq!(cfg.bgp_instances[0].routing_table.as_deref(), Some("rt2"));
+    }
+
+    #[test]
+    fn redistribute_to_bgp_mirrors_policy_name() {
+        let mut cfg = Config {
+            bgp_instances: vec![instance("r1")],
+            routing_tables: vec![table_with_redistribute("rt1", Some("r1"), Some("p1"))],
+            ..Default::default()
+        };
+        sync_routing_table_refs(&mut cfg);
+        assert_eq!(
+            cfg.bgp_instances[0].redistribute_policy.as_deref(),
+            Some("p1")
+        );
+    }
+
+    #[test]
+    fn no_redistribute_rule_stays_none() {
+        let mut cfg = Config {
+            bgp_instances: vec![instance("r1")],
+            routing_tables: vec![table("rt1", Some("r1"))],
+            ..Default::default()
+        };
+        sync_routing_table_refs(&mut cfg);
+        assert_eq!(cfg.bgp_instances[0].redistribute_policy, None);
+    }
+
+    #[test]
+    fn stale_redistribute_policy_is_cleared_when_claim_is_removed() {
+        let mut cfg = Config {
+            bgp_instances: vec![BgpInstance {
+                redistribute_policy: Some("stale".to_string()),
+                ..instance("r1")
+            }],
+            routing_tables: vec![table("rt1", None)],
+            ..Default::default()
+        };
+        sync_routing_table_refs(&mut cfg);
+        assert_eq!(cfg.bgp_instances[0].redistribute_policy, None);
     }
 }

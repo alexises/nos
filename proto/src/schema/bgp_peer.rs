@@ -65,6 +65,7 @@ mod tests {
             peers,
             cluster_id: None,
             routing_table: None,
+            redistribute_policy: None,
         }
     }
 

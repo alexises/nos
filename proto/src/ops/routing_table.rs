@@ -76,7 +76,7 @@ impl RoutingTableOp {
                 Ok(())
             }
             RoutingTableOp::SetRedistribute { name, redistribute } => {
-                find_table_mut(config, name)?.redistribute = Some(*redistribute);
+                find_table_mut(config, name)?.redistribute = Some(redistribute.clone());
                 Ok(())
             }
             RoutingTableOp::ClearRedistribute { name } => {
@@ -212,6 +212,7 @@ mod tests {
             redistribute: Redistribute {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
+                policy: None,
             },
         }
         .apply(&mut cfg)
@@ -221,6 +222,7 @@ mod tests {
             Some(Redistribute {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
+                policy: None,
             })
         );
 
@@ -230,6 +232,33 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.routing_tables[0].redistribute, None);
+    }
+
+    #[test]
+    fn set_redistribute_with_policy() {
+        use crate::schema::{RedistributeSource, RedistributeTarget};
+
+        let mut cfg = Config {
+            routing_tables: vec![table("rt1")],
+            ..Default::default()
+        };
+        RoutingTableOp::SetRedistribute {
+            name: "rt1".to_string(),
+            redistribute: Redistribute {
+                from: RedistributeSource::Static,
+                to: RedistributeTarget::Bgp,
+                policy: Some("p1".to_string()),
+            },
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.routing_tables[0]
+                .redistribute
+                .as_ref()
+                .and_then(|r| r.policy.as_deref()),
+            Some("p1")
+        );
     }
 
     #[test]

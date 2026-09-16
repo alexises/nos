@@ -175,7 +175,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Sets the redistribute field on a routing table (currently only 'from static to \
              bgp' is supported). Both bgp-instance and static-routing-instance must already be \
              set on the table for the rule to be valid — checked at commit time, not when the \
-             rule is set.",
+             rule is set. An optional trailing 'policy <name>' clause names an RPL policy (or \
+             accept-all/deny-all) to filter redistributed routes through before they reach BGP; \
+             omitted, redistribution stays unfiltered (accept-all), unlike a peer-group's \
+             import-policy/export-policy, which default to deny-all.",
         ),
         Topic::ClearRoutingTableRedistribute => (
             "Clear this table's redistribution rule.",

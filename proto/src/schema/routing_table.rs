@@ -55,10 +55,17 @@ impl std::fmt::Display for RedistributeTarget {
 /// `RedistributeSource`/`RedistributeTarget`, not a shape change here.
 /// `Vec<Redistribute>` is the documented follow-up if multiple simultaneous
 /// rules are ever needed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Redistribute {
     pub from: RedistributeSource,
     pub to: RedistributeTarget,
+    /// Names a `PolicyDefinition` (or the built-in `accept-all`/`deny-all`)
+    /// to filter redistributed routes through before they reach BGP.
+    /// Unlike `BgpPeerGroup.import_policy`/`export_policy`, `None` here
+    /// means **accept-all**, not `deny-all` — redistribution has no
+    /// filtering today, and defaulting to deny-all would silently break
+    /// every existing `redistribute from static to bgp` config.
+    pub policy: Option<String>,
 }
 
 /// A named routing table, optionally associated with one BGP instance and
@@ -154,7 +161,7 @@ fn static_routing_instance_reference_valid(
 /// `from: Static` requires `static_routing_instance` to be set; `to: Bgp`
 /// requires `bgp_instance` to be set. Checked only at commit time, never in
 /// `RoutingTableOp::apply`.
-pub(crate) fn valid_redistribute_rules(tables: &[RoutingTable]) -> garde::Result {
+pub(crate) fn valid_redistribute_rules(tables: &[RoutingTable], ctx: &Config) -> garde::Result {
     for table in tables {
         let Some(redistribute) = &table.redistribute else {
             continue;
@@ -171,8 +178,26 @@ pub(crate) fn valid_redistribute_rules(tables: &[RoutingTable]) -> garde::Result
                 "redistribute to bgp requires bgp-instance to be set",
             ));
         }
+        redistribute_policy_reference_valid(redistribute.policy.as_ref(), ctx)?;
     }
     Ok(())
+}
+
+/// Same shape as `bgp_peer_group::policy_reference_valid`: `None` or the
+/// built-in `accept-all`/`deny-all` names are always valid, anything else
+/// must match a real `PolicyDefinition`.
+fn redistribute_policy_reference_valid(name: Option<&String>, ctx: &Config) -> garde::Result {
+    let Some(name) = name else {
+        return Ok(());
+    };
+    if name == nos_rpl::ACCEPT_ALL_NAME || name == nos_rpl::DENY_ALL_NAME {
+        return Ok(());
+    }
+    if ctx.policy_definitions.iter().any(|p| &p.name == name) {
+        Ok(())
+    } else {
+        Err(garde::Error::new("referenced policy does not exist"))
+    }
 }
 
 #[cfg(test)]
@@ -199,6 +224,7 @@ mod tests {
             peers: Vec::new(),
             cluster_id: None,
             routing_table: None,
+            redistribute_policy: None,
         }
     }
 
@@ -311,6 +337,7 @@ mod tests {
         Redistribute {
             from: RedistributeSource::Static,
             to: RedistributeTarget::Bgp,
+            policy: None,
         }
     }
 
@@ -340,5 +367,67 @@ mod tests {
         rt.redistribute = Some(redistribute());
         let cfg = config_with(vec![rt], vec![], vec![static_instance("sri1")]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    fn config_with_policy(
+        rt: RoutingTable,
+        policies: Vec<crate::schema::PolicyDefinition>,
+    ) -> Config {
+        let mut cfg = config_with(
+            vec![rt],
+            vec![instance("r1")],
+            vec![static_instance("sri1")],
+        );
+        cfg.policy_definitions = policies;
+        cfg
+    }
+
+    #[test]
+    fn redistribute_with_no_policy_passes() {
+        let mut rt = table("rt1", Some("r1"), Some("sri1"));
+        rt.redistribute = Some(redistribute());
+        let cfg = config_with_policy(rt, vec![]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn redistribute_with_existing_policy_passes() {
+        let mut rt = table("rt1", Some("r1"), Some("sri1"));
+        rt.redistribute = Some(Redistribute {
+            policy: Some("p1".to_string()),
+            ..redistribute()
+        });
+        let cfg = config_with_policy(
+            rt,
+            vec![crate::schema::PolicyDefinition {
+                name: "p1".to_string(),
+                source: "accept\n".to_string(),
+            }],
+        );
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn redistribute_with_dangling_policy_fails() {
+        let mut rt = table("rt1", Some("r1"), Some("sri1"));
+        rt.redistribute = Some(Redistribute {
+            policy: Some("does-not-exist".to_string()),
+            ..redistribute()
+        });
+        let cfg = config_with_policy(rt, vec![]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn redistribute_with_builtin_policy_names_passes() {
+        for name in [nos_rpl::ACCEPT_ALL_NAME, nos_rpl::DENY_ALL_NAME] {
+            let mut rt = table("rt1", Some("r1"), Some("sri1"));
+            rt.redistribute = Some(Redistribute {
+                policy: Some(name.to_string()),
+                ..redistribute()
+            });
+            let cfg = config_with_policy(rt, vec![]);
+            cfg.validate_with(&cfg).unwrap();
+        }
     }
 }

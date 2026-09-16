@@ -185,7 +185,20 @@ async fn resync(
         cluster_id: own.cluster_id.unwrap_or(own.router_id),
     };
 
-    sessions.reconcile(vrf, local, peers).await;
+    // Unlike `import_policy`/`export_policy`, `None` here means accept-all,
+    // not deny-all — redistribution has no filtering unless a policy is
+    // explicitly configured (see `nos_proto::Redistribute.policy`'s doc
+    // comment), so the default is resolved here rather than by
+    // `PolicyCache::resolve` (whose `None => deny_all` stays correct for its
+    // only other caller, peer import/export).
+    let redistribute_policy = match own.redistribute_policy.as_deref() {
+        None => Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+        Some(name) => policy_cache.resolve(Some(name)),
+    };
+
+    sessions
+        .reconcile(vrf, local, peers, redistribute_policy)
+        .await;
 }
 
 /// Resolves `table`'s Linux VRF interface name by asking the owning

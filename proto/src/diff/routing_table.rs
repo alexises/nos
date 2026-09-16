@@ -53,7 +53,12 @@ fn static_routing_instance_str(t: &RoutingTable) -> String {
 fn redistribute_str(t: &RoutingTable) -> String {
     match &t.redistribute {
         None => "unset".to_string(),
-        Some(r) => format!("from {} to {}", r.from, r.to),
+        Some(r) => format!(
+            "from {} to {}, policy {}",
+            r.from,
+            r.to,
+            r.policy.as_deref().unwrap_or("unset")
+        ),
     }
 }
 
@@ -189,6 +194,7 @@ mod tests {
         candidate_table.redistribute = Some(Redistribute {
             from: RedistributeSource::Static,
             to: RedistributeTarget::Bgp,
+            policy: None,
         });
         let candidate = vec![candidate_table];
         let sections = diff_routing_tables(&base, &candidate);
@@ -198,7 +204,7 @@ mod tests {
         assert_eq!(sections[0].fields[0].old.as_deref(), Some("unset"));
         assert_eq!(
             sections[0].fields[0].new.as_deref(),
-            Some("from static to bgp")
+            Some("from static to bgp, policy unset")
         );
     }
 }

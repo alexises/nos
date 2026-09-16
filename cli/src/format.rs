@@ -118,7 +118,12 @@ pub fn render_routing_table(table: &RoutingTable) -> String {
     let bgp_instance = table.bgp_instance.as_deref().unwrap_or("unset");
     let static_routing_instance = table.static_routing_instance.as_deref().unwrap_or("unset");
     let redistribute_str = match &table.redistribute {
-        Some(r) => format!("from {} to {}", r.from, r.to),
+        Some(r) => format!(
+            "from {} to {}, policy {}",
+            r.from,
+            r.to,
+            r.policy.as_deref().unwrap_or("unset")
+        ),
         None => "unset".to_string(),
     };
     format!(
@@ -707,6 +712,7 @@ mod tests {
             peers: Vec::new(),
             cluster_id: None,
             routing_table: None,
+            redistribute_policy: None,
         }
     }
 

@@ -41,7 +41,7 @@ pub struct Config {
 
     #[garde(
         dive,
-        custom(|tables, _ctx: &Config| routing_table::valid_redistribute_rules(tables))
+        custom(|tables, ctx: &Config| routing_table::valid_redistribute_rules(tables, ctx))
     )]
     pub routing_tables: Vec<RoutingTable>,
 

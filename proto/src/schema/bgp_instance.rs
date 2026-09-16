@@ -51,6 +51,17 @@ pub struct BgpInstance {
     /// routing table. Deliberately not rendered by `nos-cli`.
     #[garde(skip)]
     pub routing_table: Option<String>,
+
+    /// The name of the RPL policy filtering routes redistributed into this
+    /// instance, mirrored from the owning `RoutingTable.redistribute.policy`
+    /// (only when `redistribute.to == Bgp`). Derived and read-only, exactly
+    /// like `routing_table` above: never set by any `BgpInstanceOp`,
+    /// recomputed by `nos-config` (`crate::derive::sync_routing_table_refs`)
+    /// on every commit and on load. `nos-bgpd` reads this directly to
+    /// resolve its own redistribution policy without scanning every routing
+    /// table. Deliberately not rendered by `nos-cli`.
+    #[garde(skip)]
+    pub redistribute_policy: Option<String>,
 }
 
 /// Cross-instance check needing both `BgpInstance.asn` and a sibling
@@ -109,6 +120,7 @@ mod tests {
             peers: Vec::new(),
             cluster_id: None,
             routing_table: None,
+            redistribute_policy: None,
         }
     }
 

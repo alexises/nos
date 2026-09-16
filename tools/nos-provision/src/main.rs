@@ -69,6 +69,13 @@ struct Args {
     #[arg(long)]
     redistribute: bool,
 
+    /// Names an RPL policy (or `accept-all`/`deny-all`) to filter
+    /// redistributed routes through — the redistribute rule's optional
+    /// `policy <name>` clause. Only meaningful with `--redistribute`;
+    /// omitted, redistribution stays unfiltered.
+    #[arg(long)]
+    redistribute_policy: Option<String>,
+
     /// If set, configures an RFC 2385 TCP MD5 password on `--peer-group`
     /// (`BgpPeerGroupOp::SetMd5Auth`) — for verifying session authentication
     /// end to end (matching passwords on both routers establish; a
@@ -101,9 +108,10 @@ struct Args {
 
     /// If set (with `--policy-source-file`), creates/updates a
     /// `PolicyDefinition` named `<policy-name>` from that file's content —
-    /// for verifying RPL import/export policy end to end. Independent of
-    /// `--import-policy`/`--export-policy`, which point a peer-group *at* a
-    /// policy by name; this just defines one.
+    /// for verifying RPL import/export/redistribute policy end to end.
+    /// Independent of `--import-policy`/`--export-policy`/
+    /// `--redistribute-policy`, which point a peer-group or redistribute
+    /// rule *at* a policy by name; this just defines one.
     #[arg(long)]
     policy_name: Option<String>,
     #[arg(long)]
@@ -241,6 +249,7 @@ async fn main() -> anyhow::Result<()> {
             redistribute: Redistribute {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
+                policy: args.redistribute_policy.clone(),
             },
         }));
     }

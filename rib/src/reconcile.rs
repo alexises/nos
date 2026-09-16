@@ -172,11 +172,14 @@ fn compute_redistribute_target(
         return bgp_client::RedistributeTarget::default();
     };
 
-    let active_rule = table.redistribute
-        == Some(Redistribute {
+    let active_rule = matches!(
+        &table.redistribute,
+        Some(Redistribute {
             from: RedistributeSource::Static,
             to: RedistributeTarget::Bgp,
-        });
+            ..
+        })
+    );
 
     let redistributed = if active_rule {
         routes
@@ -260,6 +263,7 @@ mod tests {
             redistribute: Some(Redistribute {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
+                policy: None,
             }),
         };
         let cfg = cfg_with_table(table);
@@ -286,6 +290,7 @@ mod tests {
             redistribute: Some(Redistribute {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
+                policy: None,
             }),
         };
         let cfg = cfg_with_table(table);
@@ -313,6 +318,7 @@ mod tests {
             redistribute: Some(Redistribute {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
+                policy: None,
             }),
         };
         let cfg = cfg_with_table(table);

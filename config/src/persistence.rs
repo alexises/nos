@@ -80,6 +80,7 @@ mod tests {
                 peers: Vec::new(),
                 cluster_id: None,
                 routing_table: None,
+                redistribute_policy: None,
             }],
             ..Default::default()
         }

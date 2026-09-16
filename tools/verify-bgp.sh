@@ -17,7 +17,13 @@
 # and (via the `communities` subcommand) that a real RPL export policy on
 # router-a can `.add()` an RFC 1997 COMMUNITY value that survives wire
 # encoding, the real kernel session, wire decoding, and lands in router-b's
-# loc-rib.
+# loc-rib, and (via the `redistribute-policy` subcommand) that a real RPL
+# policy attached directly to router-a's `redistribute from static to bgp`
+# rule filters a prefix at the redistribution point itself — before it ever
+# enters router-a's own loc-rib, and thus before router-b ever sees it —
+# distinct from the `policy` subcommand above, which filters at the
+# *receiving* peer's import policy after the prefix has already entered the
+# advertiser's loc-rib. Reverting to `accept-all` lets it flow through again.
 #
 # Two further subcommands, `reflector` and `route-server`, stand up a third
 # container ("router-c") and reconfigure all three into a hub-and-spoke
@@ -30,7 +36,7 @@
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|policy|communities|reflector|route-server|logs [n]|down|all}
+# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -628,6 +634,112 @@ cmd_check_policy() {
   fi
 }
 
+# --- RPL redistribute-policy scenario ---
+#
+# Reuses the same two-router topology and $REDISTRIBUTE_PREFIX as the
+# `redistribute`/`policy` scenarios, but the RPL policy is attached directly
+# to router-a's `redistribute from static to bgp` rule (`policy <name>`)
+# instead of to a peer-group's import/export policy. Verifies filtering
+# happens at the redistribution point itself: a rejecting policy here must
+# keep the prefix out of router-a's own loc-rib entirely, not just out of
+# router-b's adj-rib-in.
+
+provision_redistribute_policy() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  local policy_file
+  policy_file=$(mktemp /tmp/nos-verify-policy-XXXXXX.rpl)
+  chmod 644 "$policy_file"
+  cat >"$policy_file" <<EOF
+if this.prefix in $REDISTRIBUTE_PREFIX:
+    reject
+else:
+    accept
+EOF
+  log "provisioning $name with a redistribute policy rejecting $REDISTRIBUTE_PREFIX at the source"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "$policy_file:/tmp/reject-at-redistribute.rpl:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --static-route "$REDISTRIBUTE_PREFIX" \
+    --static-gateway "$REDISTRIBUTE_GATEWAY" \
+    --redistribute \
+    --policy-name reject-at-redistribute \
+    --policy-source-file /tmp/reject-at-redistribute.rpl \
+    --redistribute-policy reject-at-redistribute
+  rm -f "$policy_file"
+}
+
+# Counts (not just checks presence of) "loc-rib best path for
+# $REDISTRIBUTE_PREFIX updated" for $name — mirrors `learned_prefix_count`'s
+# same before/after-count technique, needed for the same reason: this
+# scenario can run against containers other phases already touched.
+loc_rib_prefix_count() {
+  local name=$1
+  docker logs "$name" 2>&1 | grep -c "loc-rib best path for $REDISTRIBUTE_PREFIX updated" || true
+}
+
+cmd_check_redistribute_policy() {
+  local before_a before_b
+  before_a=$(loc_rib_prefix_count router-a)
+  before_b=$(learned_prefix_count router-b)
+
+  provision_redistribute_policy router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+  log "waiting 15s to confirm router-a's redistribute policy filters $REDISTRIBUTE_PREFIX before it reaches router-a's own loc-rib"
+  sleep 15
+  local after_a
+  after_a=$(loc_rib_prefix_count router-a)
+  if [[ "$after_a" -gt "$before_a" ]]; then
+    log "FAILED: router-a installed $REDISTRIBUTE_PREFIX into its own loc-rib despite its redistribute policy rejecting it"
+    return 1
+  fi
+  local after_b
+  after_b=$(learned_prefix_count router-b)
+  if [[ "$after_b" -gt "$before_b" ]]; then
+    log "FAILED: router-b learned $REDISTRIBUTE_PREFIX despite router-a's redistribute policy rejecting it at the source"
+    return 1
+  fi
+  log "confirmed: router-a's redistribute policy rejected $REDISTRIBUTE_PREFIX at the source -- it never entered router-a's loc-rib or router-b's adj-rib-in"
+
+  log "reverting router-a's redistribute rule to the accept-all default (no policy)"
+  provision_redistribute router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+  local ok=1
+  for _ in $(seq 1 60); do
+    if [[ "$(loc_rib_prefix_count router-a)" -gt "$after_a" ]]; then
+      ok=0
+      break
+    fi
+    sleep 1
+  done
+  if [[ $ok -eq 0 ]]; then
+    log "router-a: installed $REDISTRIBUTE_PREFIX into its own loc-rib once its redistribute policy reverted to accept-all"
+  else
+    log "router-a: FAILED to install $REDISTRIBUTE_PREFIX after reverting the redistribute policy"
+    return 1
+  fi
+
+  ok=1
+  for _ in $(seq 1 60); do
+    if [[ "$(learned_prefix_count router-b)" -gt "$after_b" ]]; then
+      ok=0
+      break
+    fi
+    sleep 1
+  done
+  if [[ $ok -eq 0 ]]; then
+    log "router-b: learned $REDISTRIBUTE_PREFIX once router-a's redistribute policy reverted to accept-all"
+  else
+    log "router-b: FAILED to learn $REDISTRIBUTE_PREFIX after router-a reverted its redistribute policy"
+    return 1
+  fi
+}
+
 # --- RPL community scenario ---
 #
 # Reuses the same two-router topology and $REDISTRIBUTE_PREFIX as the
@@ -779,6 +891,7 @@ case "${1:-}" in
   redistribute) cmd_check_redistribute ;;
   auth) cmd_check_auth ;;
   policy) cmd_check_policy ;;
+  redistribute-policy) cmd_check_redistribute_policy ;;
   communities) cmd_check_communities ;;
   reflector) cmd_check_reflector ;;
   route-server) cmd_check_route_server ;;
@@ -792,12 +905,13 @@ case "${1:-}" in
     cmd_check_redistribute
     cmd_check_auth
     cmd_check_policy
+    cmd_check_redistribute_policy
     cmd_check_communities
     cmd_check_reflector
     cmd_check_route_server
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|policy|communities|reflector|route-server|logs [n]|down|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}" >&2
     exit 2
     ;;
 esac

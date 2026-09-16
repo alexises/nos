@@ -850,6 +850,17 @@ impl Command {
                     redistribute: Redistribute {
                         from: RedistributeSource::Static,
                         to: RedistributeTarget::Bgp,
+                        policy: None,
+                    },
+                })
+            }
+            ["set", "routing-table", name, "redistribute", "from", "static", "to", "bgp", "policy", policy] => {
+                Command::Set(SetTarget::RoutingTableRedistribute {
+                    name: (*name).to_string(),
+                    redistribute: Redistribute {
+                        from: RedistributeSource::Static,
+                        to: RedistributeTarget::Bgp,
+                        policy: Some((*policy).to_string()),
                     },
                 })
             }
@@ -858,6 +869,16 @@ impl Command {
                     redistribute: Redistribute {
                         from: RedistributeSource::Static,
                         to: RedistributeTarget::Bgp,
+                        policy: None,
+                    },
+                })
+            }
+            ["set", "redistribute", "from", "static", "to", "bgp", "policy", policy] => {
+                Command::Set(SetTarget::RoutingTableRedistributeRelative {
+                    redistribute: Redistribute {
+                        from: RedistributeSource::Static,
+                        to: RedistributeTarget::Bgp,
+                        policy: Some((*policy).to_string()),
                     },
                 })
             }
@@ -1923,16 +1944,37 @@ mod tests {
         let redistribute = Redistribute {
             from: RedistributeSource::Static,
             to: RedistributeTarget::Bgp,
+            policy: None,
         };
         assert_eq!(
             Command::parse("set routing-table rt1 redistribute from static to bgp"),
             Command::Set(SetTarget::RoutingTableRedistribute {
                 name: "rt1".to_string(),
-                redistribute,
+                redistribute: redistribute.clone(),
             })
         );
         assert_eq!(
             Command::parse("set redistribute from static to bgp"),
+            Command::Set(SetTarget::RoutingTableRedistributeRelative { redistribute })
+        );
+    }
+
+    #[test]
+    fn set_routing_table_redistribute_with_policy_qualified_and_relative() {
+        let redistribute = Redistribute {
+            from: RedistributeSource::Static,
+            to: RedistributeTarget::Bgp,
+            policy: Some("p1".to_string()),
+        };
+        assert_eq!(
+            Command::parse("set routing-table rt1 redistribute from static to bgp policy p1"),
+            Command::Set(SetTarget::RoutingTableRedistribute {
+                name: "rt1".to_string(),
+                redistribute: redistribute.clone(),
+            })
+        );
+        assert_eq!(
+            Command::parse("set redistribute from static to bgp policy p1"),
             Command::Set(SetTarget::RoutingTableRedistributeRelative { redistribute })
         );
     }
