@@ -30,10 +30,16 @@
 # re-advertise pipeline rather than just "bytes arrived".
 #
 # Fairness notes, because the numbers are meaningless without them:
-#   * nos-bgpd never programs the kernel with BGP routes (the BGP->RIB data
-#     plane is future work), so BIRD and FRR are run BGP-only -- no `protocol
-#     kernel`, no zebra -- rather than being charged for netlink work nos
-#     does not do.
+#   * nos-bgpd itself still never touches the kernel directly -- installing
+#     the received routes is nos-ribd's job, over the BGP->RIB push
+#     (RibRequest::PushBgpRoutes, see root CLAUDE.md's "Config plane vs data
+#     plane"). BIRD and FRR are still run BGP-only here -- no `protocol
+#     kernel`, no zebra -- because this benchmark samples the BGP process
+#     alone (nos-bgpd for nos, the equivalent for the other three), and
+#     nos-ribd is a second, unsampled process, not nos-bgpd doing extra work.
+#     `kernel_routes` in the results table confirms the install actually
+#     happened (a real "added route" line per prefix in nos-ribd's own log)
+#     without folding its cost into peak_rss_mb/cpu_s.
 #   * The nos container runs five daemons under the watchdog, so memory/CPU
 #     is sampled per *process* (nos-bgpd only), never per container.
 #   * nos is measured twice: `nos` as it ships (per-route `info!` logging in
@@ -56,6 +62,9 @@
 #                                report is copied to
 #                                target/bench-bgp/dhat-heap-<dut>-<N>.json
 #                                before the DUT container is torn down
+#             KERNEL_DEPLOY_TIMEOUT=<s>  nos/nos-quiet only: cap on waiting
+#                                for nos-ribd to finish installing the DUT's
+#                                routes into the kernel table (default 180)
 #        e.g. PEERS=1 POLICY=0 tools/bench-bgp.sh run nos 1000   # smoke test
 #             CARGO_FEATURES=nos-bgp/dhat-heap tools/bench-bgp.sh up
 #             PROFILE_MEMORY=1 tools/bench-bgp.sh run nos-quiet 100000
@@ -149,6 +158,13 @@ DEFAULT_PREFIXES=100000
 # 200 prefixes/s is a floor none of these daemons should ever approach, so a
 # run that hits this really is stuck rather than merely slow.
 converge_timeout() { echo $(( 60 + $1 / 200 )); }
+# Independent cap on nos/nos-quiet's kernel-deployment wait (see cmd_run's
+# "2b" step) -- deliberately not scaled with N like converge_timeout above,
+# since LinuxRibDriver's un-batched netlink adds are measured far slower
+# than BGP convergence at this table size; a partial kernel_routes count
+# after this many seconds is still a useful rate, so there is no reason to
+# let one slow phase stretch the whole comparison run.
+KERNEL_DEPLOY_TIMEOUT=${KERNEL_DEPLOY_TIMEOUT:-180}
 
 log() { echo "[bench-bgp] $*" >&2; }
 
@@ -276,8 +292,9 @@ gen_dut_configs() {
     cat <<EOF
 router id $DUT_IP;
 log stderr all;
-# No "protocol kernel" on purpose: nos-bgpd does not install BGP routes into
-# the kernel either, so neither does BIRD here.
+# No "protocol kernel" on purpose: this benchmark samples the BGP process
+# alone, and nos's kernel install happens in nos-ribd, a separate process --
+# see this script's "Fairness notes" above.
 protocol device {
 }
 EOF
@@ -587,7 +604,9 @@ start_dut() {
       ;;
     frr)
       docker rm -f "$DUT" >/dev/null 2>&1 || true
-      # bgpd only -- no zebra, so nothing reaches the kernel, matching nos.
+      # bgpd only -- no zebra, matching nos-bgpd (nos's kernel install
+      # happens in the separate, unsampled nos-ribd process -- see this
+      # script's "Fairness notes" above).
       log "starting frr DUT (bgpd only) at $DUT_IP"
       docker run -d --name "$DUT" --network "$NET" --ip "$DUT_IP" \
         --user root \
@@ -685,6 +704,52 @@ wait_for_prefixes() {
   return 1
 }
 
+# Tails the DUT's combined log to a local file for the run's duration, so
+# `wait_for_kernel_routes` below can grep a local, already-fetched file
+# every poll instead of re-running `docker logs $DUT` (which re-reads the
+# *entire* log history from the container's logging driver on every call --
+# fine for the other waiters here, which only ever call it once, but with
+# `nos` (unfiltered RUST_LOG=trace, including rtnetlink's own TRACE dumps
+# from nos-ribd's real netlink work) the log grows fast enough that
+# re-fetching it every second turned an O(n) poll into an O(n^2) one and the
+# wait blew through its own timeout). Same start/stop shape as `sampler_*`.
+dut_log_pid=
+dut_log_start() {
+  : >"$WORKDIR/dut-tail.log"
+  docker logs -f "$DUT" >"$WORKDIR/dut-tail.log" 2>&1 &
+  dut_log_pid=$!
+}
+
+dut_log_stop() {
+  [[ -n "$dut_log_pid" ]] || return 0
+  kill "$dut_log_pid" >/dev/null 2>&1 || true
+  wait "$dut_log_pid" 2>/dev/null || true
+  dut_log_pid=
+}
+
+# Polls the local tail of the DUT's log (see `dut_log_start`) until
+# nos-ribd has logged `count` real "added route" lines (one per prefix
+# actually installed into the kernel routing table via the BGP->RIB push,
+# see bgp/src/rib_push_client.rs) or `timeout` elapses. There is no
+# equivalent one-line counter to ask nos-ribd for instead (see this
+# script's header).
+wait_for_kernel_routes() {
+  local count=$1 timeout=$2
+  local got=0
+  local deadline=$(( $(now_ms) + timeout * 1000 ))
+  while [[ "$(now_ms)" -lt "$deadline" ]]; do
+    got=$(grep -c "added route" "$WORKDIR/dut-tail.log") || true
+    if [[ "${got:-0}" -ge "$count" ]]; then
+      echo "$got"
+      return 0
+    fi
+    sleep 1
+  done
+  log "timed out at ${got:-0}/$count kernel routes installed"
+  echo "${got:-0}"
+  return 1
+}
+
 # One long-lived `docker exec` sampling loop, not one exec per sample. Emits
 # "peak_rss_kb cpu_ticks" per second for the DUT's BGP process; the pid is
 # re-resolved every tick because nos-bgpd is spawned (and respawned) by the
@@ -760,6 +825,7 @@ cmd_run() {
 
   start_dut "$kind"
   sampler_start "$(dut_process "$kind")"
+  [[ "$kind" == nos* ]] && dut_log_start
 
   # 1. Session establishment, timed from the monitor's start: the DUT is
   #    already up and configured, so this is how fast the pair gets to
@@ -789,6 +855,36 @@ cmd_run() {
       'BEGIN { printf("%.0f", s > 0 ? n / s : 0) }')
   fi
   log "$kind: converged to $expected prefixes in ${converge}s ($pps updates/s)"
+
+  # 2b. Kernel deployment: only nos/nos-quiet install anything into a real
+  #     kernel routing table -- nos-bgpd pushes its loc-rib to the owning
+  #     nos-ribd instance (poll interval 1s, see bgp/src/rib_push_client.rs),
+  #     which installs it via LinuxRibDriver (root CLAUDE.md's "Config plane
+  #     vs data plane"). Timed from the same `t0` as convergence above, so
+  #     kernel_deploy_s is directly comparable to converge_s -- the gap
+  #     between them is the extra latency the BGP->RIB push adds on top of
+  #     ordinary BGP convergence. Not a performance number for nos-ribd
+  #     itself (a second, unsampled process, see this script's "Fairness
+  #     notes"), just proof the deployment actually happened during this run.
+  #     BIRD/FRR/GoBGP never touch the kernel in this topology, hence "n/a".
+  #
+  #     Capped independently of `timeout` (which scales with N for BGP
+  #     convergence) at $KERNEL_DEPLOY_TIMEOUT: `LinuxRibDriver::add_route`
+  #     issues one un-batched, awaited netlink call per route, which a smoke
+  #     test measured at roughly 25 routes/s -- installing a full run's
+  #     ~kept_prefixes routes this way would take far longer than BGP
+  #     convergence ever does, so above a few hundred routes this
+  #     legitimately times out with a partial count rather than stalling the
+  #     whole comparison. kernel_routes/kernel_deploy_s at a partial count is
+  #     still a valid rate (kernel_routes / kernel_deploy_s), just not a
+  #     completion time.
+  local kernel_routes=n/a kernel_deploy_s=n/a
+  if [[ "$kind" == nos* ]]; then
+    local kernel_timeout=$(( timeout < KERNEL_DEPLOY_TIMEOUT ? timeout : KERNEL_DEPLOY_TIMEOUT ))
+    kernel_routes=$(wait_for_kernel_routes "$expected" "$kernel_timeout") || true
+    kernel_deploy_s=$(floor_poll "$(since "$t0")")
+    log "$kind: installed $kernel_routes/$expected route(s) into the kernel routing table (rt1) in ${kernel_deploy_s}s"
+  fi
 
   # 3. Churn: drop every injector (closing TCP, so the DUT withdraws
   #    everything) and bring them all back, then re-measure. Dropping a
@@ -822,14 +918,15 @@ cmd_run() {
   fi
 
   sampler_stop
+  dut_log_stop
   local rss cpu
   rss=$(sampler_peak_rss_mb)
   cpu=$(sampler_cpu_secs)
   log "$kind: peak rss ${rss}MB, cpu ${cpu}s"
 
-  [[ -s "$RESULTS" ]] || printf 'daemon\tprefixes\tpeers\tpolicy\tkept_pfx\testablish_s\tconverge_s\tupdates_per_s\tpeak_rss_mb\tcpu_s\treconverge_s\n' >"$RESULTS"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$kind" "$count" "$PEERS" "$POLICY" "${final:-0}/$expected" "$establish" "$converge" "$pps" "$rss" "$cpu" "$churn" >>"$RESULTS"
+  [[ -s "$RESULTS" ]] || printf 'daemon\tprefixes\tpeers\tpolicy\tkept_pfx\testablish_s\tconverge_s\tupdates_per_s\tpeak_rss_mb\tcpu_s\treconverge_s\tkernel_routes\tkernel_deploy_s\n' >"$RESULTS"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$kind" "$count" "$PEERS" "$POLICY" "${final:-0}/$expected" "$establish" "$converge" "$pps" "$rss" "$cpu" "$churn" "$kernel_routes" "$kernel_deploy_s" >>"$RESULTS"
 
   # dhat only writes its report file when nos-bgpd exits -- SIGTERM (docker
   # stop's default) reaches it the same way SIGINT does (see root
@@ -880,6 +977,15 @@ one-prefix-per-UPDATE outbound path.
 kept_pfx is what the monitor actually held at the end over what the policy
 should have let through -- anything other than n/n means that daemon's filter
 did not do what the other three did, and its row is not comparable.
+
+kernel_routes/kernel_deploy_s are nos/nos-quiet only ("n/a" for
+gobgp/bird/frr, which never touch the kernel in this topology): how many
+real kernel routes nos-ribd installed via the BGP->RIB push, and how long
+that took measured from the same t0 as converge_s -- the gap between the two
+is the extra latency the push adds on top of ordinary BGP convergence. Proof
+the deployment actually ran, not a performance number for nos-ribd itself
+(a second, unsampled process, so its own cost is not folded into
+peak_rss_mb/cpu_s above).
 
 updates_per_s counts (prefixes + tail) x peers (every path the DUT had to
 consider),
