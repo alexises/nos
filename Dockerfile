@@ -9,7 +9,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .
-RUN cargo build --release --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-watchdogd --bin nos
+
+# Empty by default (no new deps, no behavior change). Set to
+# "nos-bgp/dhat-heap" to build nos-bgpd with dhat heap profiling — see
+# bgp/CLAUDE.md's "Memory profiling" note.
+ARG CARGO_FEATURES=
+RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-watchdogd --bin nos
 
 FROM debian:bookworm-slim AS runtime
 

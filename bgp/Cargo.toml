@@ -22,6 +22,10 @@ futures            = { workspace = true }
 socket2            = { workspace = true }
 ipnet              = { workspace = true }
 nos-rpl            = { workspace = true }
+dhat               = { version = "0.3", optional = true }
+
+[features]
+dhat-heap = ["dep:dhat"]
 
 [[bin]]
 name = "nos-bgpd"

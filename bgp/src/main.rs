@@ -12,6 +12,10 @@ use tracing::{info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 #[derive(Parser)]
 #[command(name = "nos-bgpd", about = "NOS BGP-4 daemon")]
 struct Args {
@@ -37,11 +41,24 @@ struct Args {
     /// "Process supervision" section).
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
+
+    /// Only present when built with `--features dhat-heap`. Path to write
+    /// the dhat heap-profile report to on exit — load it at
+    /// <https://nnethercote.github.io/dh_view/dh_view.html>.
+    #[cfg(feature = "dhat-heap")]
+    #[arg(long, default_value = "dhat-heap.json")]
+    profile_memory_out: PathBuf,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::builder()
+        .file_name(args.profile_memory_out.clone())
+        .build();
+
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     tracing_subscriber::registry()
         // Without this there's no way to turn the log volume down at all —
@@ -63,6 +80,8 @@ async fn main() -> anyhow::Result<()> {
         ))
         .init();
     info!(instance = %args.instance, "nos-bgpd starting");
+    #[cfg(feature = "dhat-heap")]
+    info!(out = %args.profile_memory_out.display(), "memory profiling enabled (dhat)");
 
     let Some(config_socket) = watchdog_client::resolve_with_retry(
         &args.watchdog_socket,
