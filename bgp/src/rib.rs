@@ -1026,6 +1026,10 @@ fn build_advertisement(
 }
 
 #[cfg(test)]
+// Community/ASN values are conventionally written and read in decimal
+// (`65000:100`) — hex/binary notation would make these test fixtures harder
+// to read, not easier.
+#[allow(clippy::decimal_bitwise_operands)]
 mod tests {
     use std::net::Ipv4Addr;
 
@@ -1246,7 +1250,11 @@ mod tests {
         let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
         let mut observer_rx = register_peer(&mut rib, observer, true, addr("10.0.0.253"));
 
-        let policy = nos_rpl::compile("set this.bgp.local_pref = 500\naccept\n").unwrap();
+        let policy = nos_rpl::compile(
+            "set this.bgp.local_pref = 500\naccept\n",
+            &nos_rpl::Symbols::EMPTY,
+        )
+        .unwrap();
         rib.handle_update(
             source,
             false,
@@ -1274,7 +1282,11 @@ mod tests {
         let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
         let mut observer_rx = register_peer(&mut rib, observer, false, addr("10.0.0.253"));
 
-        let policy = nos_rpl::compile("this.bgp.communities.add(65000:100)\naccept\n").unwrap();
+        let policy = nos_rpl::compile(
+            "this.bgp.communities.add(65000:100)\naccept\n",
+            &nos_rpl::Symbols::EMPTY,
+        )
+        .unwrap();
         rib.handle_update(
             source,
             false,
@@ -1314,12 +1326,21 @@ mod tests {
             false,
             false,
             HashSet::new(),
-            Arc::new(nos_rpl::compile("this.bgp.communities.clear()\naccept\n").unwrap()),
+            Arc::new(
+                nos_rpl::compile(
+                    "this.bgp.communities.clear()\naccept\n",
+                    &nos_rpl::Symbols::EMPTY,
+                )
+                .unwrap(),
+            ),
             tx,
         );
 
-        let import_policy =
-            nos_rpl::compile("this.bgp.communities.add(65000:100)\naccept\n").unwrap();
+        let import_policy = nos_rpl::compile(
+            "this.bgp.communities.add(65000:100)\naccept\n",
+            &nos_rpl::Symbols::EMPTY,
+        )
+        .unwrap();
         rib.handle_update(
             source,
             false,

@@ -75,6 +75,15 @@ pub enum EditTarget {
     PolicyDefinition {
         name: String,
     },
+    CommunityAlias {
+        name: String,
+    },
+    CommunityGroup {
+        name: String,
+    },
+    PrefixList {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +156,25 @@ pub enum SetTarget {
     InterfaceRoutingTable { name: String, routing_table: String },
     /// Context-relative — only valid while navigated into an interface.
     InterfaceRoutingTableRelative { routing_table: String },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    CommunityAliasValue { name: String, value: String },
+    /// Context-relative — only valid while navigated into a community-alias.
+    CommunityAliasValueRelative { value: String },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    CommunityGroupMember { name: String, member: String },
+    /// Context-relative — only valid while navigated into a community-group.
+    CommunityGroupMemberRelative { member: String },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    PrefixListEntry {
+        name: String,
+        cidr: IpNet,
+        range: Option<(u8, u8)>,
+    },
+    /// Context-relative — only valid while navigated into a prefix-list.
+    PrefixListEntryRelative {
+        cidr: IpNet,
+        range: Option<(u8, u8)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,6 +294,38 @@ pub enum DeleteTarget {
     /// `delete routing-table` — relative clear, only valid while navigated
     /// into an interface.
     InterfaceRoutingTableRelative,
+    CommunityAlias {
+        name: String,
+    },
+    CommunityGroup {
+        name: String,
+    },
+    /// `delete community-group <name> member <m>` — qualified.
+    CommunityGroupMember {
+        name: String,
+        member: String,
+    },
+    /// `delete member <m>` — relative, only valid while navigated into a
+    /// community-group.
+    CommunityGroupMemberRelative {
+        member: String,
+    },
+    PrefixList {
+        name: String,
+    },
+    /// `delete prefix-list <name> entry <cidr> [range <min> <max>]` —
+    /// qualified.
+    PrefixListEntry {
+        name: String,
+        cidr: IpNet,
+        range: Option<(u8, u8)>,
+    },
+    /// `delete entry <cidr> [range <min> <max>]` — relative, only valid
+    /// while navigated into a prefix-list.
+    PrefixListEntryRelative {
+        cidr: IpNet,
+        range: Option<(u8, u8)>,
+    },
 }
 
 /// A parsed REPL input line.
@@ -448,6 +508,15 @@ impl Command {
                 name: (*name).to_string(),
             }),
             ["edit", "policy-definition", name] => Command::Edit(EditTarget::PolicyDefinition {
+                name: (*name).to_string(),
+            }),
+            ["edit", "community-alias", name] => Command::Edit(EditTarget::CommunityAlias {
+                name: (*name).to_string(),
+            }),
+            ["edit", "community-group", name] => Command::Edit(EditTarget::CommunityGroup {
+                name: (*name).to_string(),
+            }),
+            ["edit", "prefix-list", name] => Command::Edit(EditTarget::PrefixList {
                 name: (*name).to_string(),
             }),
             ["edit", "source"] => Command::EditSource,
@@ -832,6 +901,57 @@ impl Command {
                     routing_table: (*table).to_string(),
                 })
             }
+            ["set", "community-alias", name, "value", value] => {
+                Command::Set(SetTarget::CommunityAliasValue {
+                    name: (*name).to_string(),
+                    value: (*value).to_string(),
+                })
+            }
+            ["set", "value", value] => Command::Set(SetTarget::CommunityAliasValueRelative {
+                value: (*value).to_string(),
+            }),
+            ["set", "community-group", name, "member", member] => {
+                Command::Set(SetTarget::CommunityGroupMember {
+                    name: (*name).to_string(),
+                    member: (*member).to_string(),
+                })
+            }
+            ["set", "member", member] => Command::Set(SetTarget::CommunityGroupMemberRelative {
+                member: (*member).to_string(),
+            }),
+            ["set", "prefix-list", name, "entry", cidr] => match cidr.parse::<IpNet>() {
+                Ok(cidr) => Command::Set(SetTarget::PrefixListEntry {
+                    name: (*name).to_string(),
+                    cidr,
+                    range: None,
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["set", "prefix-list", name, "entry", cidr, "range", min, max] => {
+                match (cidr.parse::<IpNet>(), min.parse::<u8>(), max.parse::<u8>()) {
+                    (Ok(cidr), Ok(min), Ok(max)) => Command::Set(SetTarget::PrefixListEntry {
+                        name: (*name).to_string(),
+                        cidr,
+                        range: Some((min, max)),
+                    }),
+                    _ => Command::Unknown(trimmed.to_string()),
+                }
+            }
+            ["set", "entry", cidr] => match cidr.parse::<IpNet>() {
+                Ok(cidr) => Command::Set(SetTarget::PrefixListEntryRelative { cidr, range: None }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["set", "entry", cidr, "range", min, max] => {
+                match (cidr.parse::<IpNet>(), min.parse::<u8>(), max.parse::<u8>()) {
+                    (Ok(cidr), Ok(min), Ok(max)) => {
+                        Command::Set(SetTarget::PrefixListEntryRelative {
+                            cidr,
+                            range: Some((min, max)),
+                        })
+                    }
+                    _ => Command::Unknown(trimmed.to_string()),
+                }
+            }
             ["delete"] => Command::Delete(DeleteTarget::Current),
             ["delete", "bgp", "instance", name] => Command::Delete(DeleteTarget::BgpInstance {
                 name: (*name).to_string(),
@@ -952,6 +1072,63 @@ impl Command {
             }
             ["delete", "routing-table"] => {
                 Command::Delete(DeleteTarget::InterfaceRoutingTableRelative)
+            }
+            ["delete", "community-alias", name] => Command::Delete(DeleteTarget::CommunityAlias {
+                name: (*name).to_string(),
+            }),
+            ["delete", "community-group", name] => Command::Delete(DeleteTarget::CommunityGroup {
+                name: (*name).to_string(),
+            }),
+            ["delete", "community-group", name, "member", member] => {
+                Command::Delete(DeleteTarget::CommunityGroupMember {
+                    name: (*name).to_string(),
+                    member: (*member).to_string(),
+                })
+            }
+            ["delete", "member", member] => {
+                Command::Delete(DeleteTarget::CommunityGroupMemberRelative {
+                    member: (*member).to_string(),
+                })
+            }
+            ["delete", "prefix-list", name] => Command::Delete(DeleteTarget::PrefixList {
+                name: (*name).to_string(),
+            }),
+            ["delete", "prefix-list", name, "entry", cidr] => match cidr.parse::<IpNet>() {
+                Ok(cidr) => Command::Delete(DeleteTarget::PrefixListEntry {
+                    name: (*name).to_string(),
+                    cidr,
+                    range: None,
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["delete", "prefix-list", name, "entry", cidr, "range", min, max] => {
+                match (cidr.parse::<IpNet>(), min.parse::<u8>(), max.parse::<u8>()) {
+                    (Ok(cidr), Ok(min), Ok(max)) => {
+                        Command::Delete(DeleteTarget::PrefixListEntry {
+                            name: (*name).to_string(),
+                            cidr,
+                            range: Some((min, max)),
+                        })
+                    }
+                    _ => Command::Unknown(trimmed.to_string()),
+                }
+            }
+            ["delete", "entry", cidr] => match cidr.parse::<IpNet>() {
+                Ok(cidr) => {
+                    Command::Delete(DeleteTarget::PrefixListEntryRelative { cidr, range: None })
+                }
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["delete", "entry", cidr, "range", min, max] => {
+                match (cidr.parse::<IpNet>(), min.parse::<u8>(), max.parse::<u8>()) {
+                    (Ok(cidr), Ok(min), Ok(max)) => {
+                        Command::Delete(DeleteTarget::PrefixListEntryRelative {
+                            cidr,
+                            range: Some((min, max)),
+                        })
+                    }
+                    _ => Command::Unknown(trimmed.to_string()),
+                }
             }
             _ => Command::Unknown(trimmed.to_string()),
         }
@@ -2022,6 +2199,152 @@ mod tests {
         assert_eq!(
             Command::parse("delete routing-table"),
             Command::Delete(DeleteTarget::InterfaceRoutingTableRelative)
+        );
+    }
+
+    #[test]
+    fn edit_community_alias_group_and_prefix_list() {
+        assert_eq!(
+            Command::parse("edit community-alias CUSTOMER_A"),
+            Command::Edit(EditTarget::CommunityAlias {
+                name: "CUSTOMER_A".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("edit community-group CUSTOMERS"),
+            Command::Edit(EditTarget::CommunityGroup {
+                name: "CUSTOMERS".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("edit prefix-list BLOCKS"),
+            Command::Edit(EditTarget::PrefixList {
+                name: "BLOCKS".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn set_community_alias_value_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set community-alias CUSTOMER_A value 65000:100"),
+            Command::Set(SetTarget::CommunityAliasValue {
+                name: "CUSTOMER_A".to_string(),
+                value: "65000:100".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("set value 65000:100"),
+            Command::Set(SetTarget::CommunityAliasValueRelative {
+                value: "65000:100".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn set_community_group_member_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set community-group CUSTOMERS member CUSTOMER_A"),
+            Command::Set(SetTarget::CommunityGroupMember {
+                name: "CUSTOMERS".to_string(),
+                member: "CUSTOMER_A".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("set member 65000:200"),
+            Command::Set(SetTarget::CommunityGroupMemberRelative {
+                member: "65000:200".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn set_prefix_list_entry_with_and_without_range() {
+        assert_eq!(
+            Command::parse("set prefix-list BLOCKS entry 10.0.0.0/8"),
+            Command::Set(SetTarget::PrefixListEntry {
+                name: "BLOCKS".to_string(),
+                cidr: "10.0.0.0/8".parse().unwrap(),
+                range: None,
+            })
+        );
+        assert_eq!(
+            Command::parse("set prefix-list BLOCKS entry 10.0.0.0/8 range 24 32"),
+            Command::Set(SetTarget::PrefixListEntry {
+                name: "BLOCKS".to_string(),
+                cidr: "10.0.0.0/8".parse().unwrap(),
+                range: Some((24, 32)),
+            })
+        );
+        assert_eq!(
+            Command::parse("set entry 10.0.0.0/8"),
+            Command::Set(SetTarget::PrefixListEntryRelative {
+                cidr: "10.0.0.0/8".parse().unwrap(),
+                range: None,
+            })
+        );
+        assert_eq!(
+            Command::parse("set entry 10.0.0.0/8 range 24 32"),
+            Command::Set(SetTarget::PrefixListEntryRelative {
+                cidr: "10.0.0.0/8".parse().unwrap(),
+                range: Some((24, 32)),
+            })
+        );
+    }
+
+    #[test]
+    fn set_prefix_list_entry_malformed_is_unknown() {
+        assert_eq!(
+            Command::parse("set prefix-list BLOCKS entry not-a-cidr"),
+            Command::Unknown("set prefix-list BLOCKS entry not-a-cidr".to_string())
+        );
+        assert_eq!(
+            Command::parse("set entry 10.0.0.0/8 range not-a-number 32"),
+            Command::Unknown("set entry 10.0.0.0/8 range not-a-number 32".to_string())
+        );
+    }
+
+    #[test]
+    fn delete_community_alias_group_member_and_prefix_list_entry() {
+        assert_eq!(
+            Command::parse("delete community-alias CUSTOMER_A"),
+            Command::Delete(DeleteTarget::CommunityAlias {
+                name: "CUSTOMER_A".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete community-group CUSTOMERS member CUSTOMER_A"),
+            Command::Delete(DeleteTarget::CommunityGroupMember {
+                name: "CUSTOMERS".to_string(),
+                member: "CUSTOMER_A".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete member CUSTOMER_A"),
+            Command::Delete(DeleteTarget::CommunityGroupMemberRelative {
+                member: "CUSTOMER_A".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete prefix-list BLOCKS"),
+            Command::Delete(DeleteTarget::PrefixList {
+                name: "BLOCKS".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete prefix-list BLOCKS entry 10.0.0.0/8 range 24 32"),
+            Command::Delete(DeleteTarget::PrefixListEntry {
+                name: "BLOCKS".to_string(),
+                cidr: "10.0.0.0/8".parse().unwrap(),
+                range: Some((24, 32)),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete entry 10.0.0.0/8"),
+            Command::Delete(DeleteTarget::PrefixListEntryRelative {
+                cidr: "10.0.0.0/8".parse().unwrap(),
+                range: None,
+            })
         );
     }
 }

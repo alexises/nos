@@ -1,8 +1,11 @@
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
+pub mod community_alias;
+pub mod community_group;
 pub mod interface;
 pub mod policy_definition;
+pub mod prefix_list;
 pub mod routing_table;
 pub mod static_route;
 pub mod static_routing_instance;
@@ -10,8 +13,11 @@ pub mod static_routing_instance;
 pub use bgp_instance::BgpInstanceOp;
 pub use bgp_peer::BgpPeerOp;
 pub use bgp_peer_group::BgpPeerGroupOp;
+pub use community_alias::CommunityAliasOp;
+pub use community_group::CommunityGroupOp;
 pub use interface::InterfaceOp;
 pub use policy_definition::PolicyDefinitionOp;
+pub use prefix_list::PrefixListOp;
 pub use routing_table::RoutingTableOp;
 pub use static_route::StaticRouteOp;
 pub use static_routing_instance::StaticRoutingInstanceOp;
@@ -22,7 +28,7 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::schema::Config;
+use crate::schema::{Config, PrefixListEntry};
 
 /// A single edit applied to a transaction's in-progress config tree.
 ///
@@ -43,6 +49,9 @@ pub enum ConfigOp {
     StaticRoute(StaticRouteOp),
     Interface(InterfaceOp),
     PolicyDefinition(PolicyDefinitionOp),
+    CommunityAlias(CommunityAliasOp),
+    CommunityGroup(CommunityGroupOp),
+    PrefixList(PrefixListOp),
 }
 
 impl ConfigOp {
@@ -63,6 +72,9 @@ impl ConfigOp {
             ConfigOp::StaticRoute(op) => op.apply(config),
             ConfigOp::Interface(op) => op.apply(config),
             ConfigOp::PolicyDefinition(op) => op.apply(config),
+            ConfigOp::CommunityAlias(op) => op.apply(config),
+            ConfigOp::CommunityGroup(op) => op.apply(config),
+            ConfigOp::PrefixList(op) => op.apply(config),
         }
     }
 }
@@ -96,6 +108,19 @@ pub enum OpError {
     InterfaceAddressNotFound { name: String, address: IpNet },
     #[error("policy definition '{0}' not found")]
     PolicyDefinitionNotFound(String),
+    #[error("community alias '{0}' not found")]
+    CommunityAliasNotFound(String),
+    #[error("community group '{0}' not found")]
+    CommunityGroupNotFound(String),
+    #[error("member '{member}' not found in community group '{name}'")]
+    CommunityGroupMemberNotFound { name: String, member: String },
+    #[error("prefix list '{0}' not found")]
+    PrefixListNotFound(String),
+    #[error("entry '{entry:?}' not found in prefix list '{name}'")]
+    PrefixListEntryNotFound {
+        name: String,
+        entry: PrefixListEntry,
+    },
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use ipnet::IpNet;
 
 use crate::schema::FieldId;
+use crate::symbols::PrefixListEntry;
 
 /// One community value, tagged by kind so `Op::CommunityAdd`/`Remove`/
 /// `ListContainsCommunity` know which of `Input`'s three community slices to
@@ -66,6 +67,11 @@ pub enum Op {
     CmpGt,
     CmpGe,
     PrefixIn,
+    /// `this.prefix in SOME_PREFIX_LIST` — the entry list is resolved and
+    /// compiled in at codegen time (not pushed as a runtime value), unlike
+    /// `PrefixIn`'s plain-literal rhs. See `PrefixListEntry`'s doc comment
+    /// for exact-vs-range matching.
+    PrefixInList(Vec<PrefixListEntry>),
     And,
     Or,
     Not,
@@ -261,6 +267,17 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                 let network = as_prefix(pop!());
                 let candidate = as_prefix(pop!());
                 push!(Value::Bool(network.contains(&candidate)));
+            }
+            Op::PrefixInList(entries) => {
+                let candidate = as_prefix(pop!());
+                let found = entries.iter().any(|entry| match entry.range {
+                    None => candidate == entry.cidr,
+                    Some((min, max)) => {
+                        entry.cidr.contains(&candidate)
+                            && (min..=max).contains(&candidate.prefix_len())
+                    }
+                });
+                push!(Value::Bool(found));
             }
             Op::And => {
                 let b = as_bool(pop!());

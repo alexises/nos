@@ -45,6 +45,12 @@ pub enum ExprKind {
     /// `.remove(..)` on a community-list field; `codegen.rs` decides arity
     /// and packing from the target field's `FieldType`, not this node alone.
     ColonLit(Vec<i64>),
+    /// A bare identifier not followed by `.` (so not an `EnumLit`) —
+    /// referencing a `community-alias`/`community-group`/`prefix-list` by
+    /// name. Only valid as a direct argument to `.contains(..)`/`.add(..)`/
+    /// `.remove(..)`, or as the right-hand side of `in`; `codegen.rs`
+    /// resolves it against the compile-time `Symbols` table.
+    Ident(String),
     /// `this` followed by zero or more postfix segments.
     This(Vec<Postfix>),
     Unary(UnaryOp, Box<Expr>),

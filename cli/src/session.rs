@@ -1,8 +1,9 @@
 use std::net::IpAddr;
 
 use nos_proto::{
-    BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, ConfigOp, InterfaceOp, PolicyDefinitionOp,
-    RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp, TransactionBase,
+    BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, CommunityAliasOp, CommunityGroupOp,
+    ConfigOp, InterfaceOp, PolicyDefinitionOp, PrefixListEntry, PrefixListOp, RoutingTableOp,
+    StaticRouteOp, StaticRoutingInstanceOp, TransactionBase,
 };
 
 use crate::command::{
@@ -19,6 +20,9 @@ pub enum Path {
     StaticRoutingInstance(String),
     Interface(String),
     PolicyDefinition(String),
+    CommunityAlias(String),
+    CommunityGroup(String),
+    PrefixList(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -199,6 +203,9 @@ const NO_CURRENT_PEER_GROUP: &str =
 const NO_CURRENT_ROUTING_TABLE: &str = "no current routing table — use 'edit routing-table <name>' or the fully-qualified 'set routing-table <name> ...' form";
 const NO_CURRENT_STATIC_ROUTING_INSTANCE: &str = "no current static routing instance — use 'edit static-routing-instance <name>' or the fully-qualified 'set static-routing-instance <name> ...' form";
 const NO_CURRENT_INTERFACE: &str = "no current interface — use 'edit interface <name>' or the fully-qualified 'set interface <name> ...' form";
+const NO_CURRENT_COMMUNITY_ALIAS: &str = "no current community-alias — use 'edit community-alias <name>' or the fully-qualified 'set community-alias <name> ...' form";
+const NO_CURRENT_COMMUNITY_GROUP: &str = "no current community-group — use 'edit community-group <name>' or the fully-qualified 'set community-group <name> ...' form";
+const NO_CURRENT_PREFIX_LIST: &str = "no current prefix-list — use 'edit prefix-list <name>' or the fully-qualified 'set prefix-list <name> ...' form";
 
 fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
     match cmd {
@@ -234,7 +241,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Edit(EditTarget::RoutingTable { name }) => Resolved::ApplyOp {
             op: ConfigOp::RoutingTable(RoutingTableOp::Ensure { name: name.clone() }),
@@ -254,6 +264,18 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             op: ConfigOp::PolicyDefinition(PolicyDefinitionOp::Ensure { name: name.clone() }),
             after: PathAfter::To(Path::PolicyDefinition(name)),
         },
+        Command::Edit(EditTarget::CommunityAlias { name }) => Resolved::ApplyOp {
+            op: ConfigOp::CommunityAlias(CommunityAliasOp::Ensure { name: name.clone() }),
+            after: PathAfter::To(Path::CommunityAlias(name)),
+        },
+        Command::Edit(EditTarget::CommunityGroup { name }) => Resolved::ApplyOp {
+            op: ConfigOp::CommunityGroup(CommunityGroupOp::Ensure { name: name.clone() }),
+            after: PathAfter::To(Path::CommunityGroup(name)),
+        },
+        Command::Edit(EditTarget::PrefixList { name }) => Resolved::ApplyOp {
+            op: ConfigOp::PrefixList(PrefixListOp::Ensure { name: name.clone() }),
+            after: PathAfter::To(Path::PrefixList(name)),
+        },
         Command::EditSource => match path {
             Path::PolicyDefinition(name) => Resolved::EditPolicySource { name: name.clone() },
             Path::Root
@@ -261,7 +283,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
+            | Path::Interface(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
         },
         Command::ShowSource => match path {
             Path::PolicyDefinition(name) => Resolved::ShowPolicySource { name: name.clone() },
@@ -270,7 +295,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
+            | Path::Interface(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
         },
         Command::SetSourceLine { line, text } => match path {
             Path::PolicyDefinition(name) => Resolved::SetPolicySourceLine {
@@ -283,7 +311,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
+            | Path::Interface(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
         },
         Command::DeleteSourceLine { line } => match path {
             Path::PolicyDefinition(name) => Resolved::DeletePolicySourceLine {
@@ -295,7 +326,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
+            | Path::Interface(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
         },
 
         Command::Set(SetTarget::BgpInstance { name, field }) => Resolved::ApplyOp {
@@ -318,7 +352,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Set(SetTarget::BgpPeerGroup {
             instance,
@@ -338,7 +375,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Set(SetTarget::BgpPeer {
             instance,
@@ -369,7 +409,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Set(SetTarget::RoutingTable { name, bgp_instance }) => Resolved::ApplyOp {
             op: ConfigOp::RoutingTable(RoutingTableOp::SetBgpInstance { name, bgp_instance }),
@@ -388,7 +431,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Set(SetTarget::RoutingTableStaticRoutingInstance {
             name,
@@ -415,7 +461,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Set(SetTarget::RoutingTableRedistribute { name, redistribute }) => {
             Resolved::ApplyOp {
@@ -436,7 +485,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Set(SetTarget::StaticRoute {
             instance,
@@ -464,7 +516,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => {
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => {
                 Resolved::Error(NO_CURRENT_STATIC_ROUTING_INSTANCE.to_string())
             }
         },
@@ -485,7 +540,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
         },
         Command::Set(SetTarget::InterfaceRoutingTable {
             name,
@@ -510,7 +568,80 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+        },
+
+        Command::Set(SetTarget::CommunityAliasValue { name, value }) => Resolved::ApplyOp {
+            op: ConfigOp::CommunityAlias(CommunityAliasOp::SetValue { name, value }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::CommunityAliasValueRelative { value }) => match path {
+            Path::CommunityAlias(name) => Resolved::ApplyOp {
+                op: ConfigOp::CommunityAlias(CommunityAliasOp::SetValue {
+                    name: name.clone(),
+                    value,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_COMMUNITY_ALIAS.to_string()),
+        },
+        Command::Set(SetTarget::CommunityGroupMember { name, member }) => Resolved::ApplyOp {
+            op: ConfigOp::CommunityGroup(CommunityGroupOp::AddMember { name, member }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::CommunityGroupMemberRelative { member }) => match path {
+            Path::CommunityGroup(name) => Resolved::ApplyOp {
+                op: ConfigOp::CommunityGroup(CommunityGroupOp::AddMember {
+                    name: name.clone(),
+                    member,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_COMMUNITY_GROUP.to_string()),
+        },
+        Command::Set(SetTarget::PrefixListEntry { name, cidr, range }) => Resolved::ApplyOp {
+            op: ConfigOp::PrefixList(PrefixListOp::AddEntry {
+                name,
+                entry: PrefixListEntry { cidr, range },
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::PrefixListEntryRelative { cidr, range }) => match path {
+            Path::PrefixList(name) => Resolved::ApplyOp {
+                op: ConfigOp::PrefixList(PrefixListOp::AddEntry {
+                    name: name.clone(),
+                    entry: PrefixListEntry { cidr, range },
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_) => Resolved::Error(NO_CURRENT_PREFIX_LIST.to_string()),
         },
 
         Command::Delete(DeleteTarget::BgpInstance { name }) => Resolved::ApplyOp {
@@ -547,6 +678,18 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 op: ConfigOp::PolicyDefinition(PolicyDefinitionOp::Delete { name: name.clone() }),
                 after: PathAfter::ToRoot,
             },
+            Path::CommunityAlias(name) => Resolved::ApplyOp {
+                op: ConfigOp::CommunityAlias(CommunityAliasOp::Delete { name: name.clone() }),
+                after: PathAfter::ToRoot,
+            },
+            Path::CommunityGroup(name) => Resolved::ApplyOp {
+                op: ConfigOp::CommunityGroup(CommunityGroupOp::Delete { name: name.clone() }),
+                after: PathAfter::ToRoot,
+            },
+            Path::PrefixList(name) => Resolved::ApplyOp {
+                op: ConfigOp::PrefixList(PrefixListOp::Delete { name: name.clone() }),
+                after: PathAfter::ToRoot,
+            },
             Path::Root => Resolved::Error(
                 "nothing to delete at the top level — use 'delete bgp instance <name>'".to_string(),
             ),
@@ -569,7 +712,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstance { name }) => {
             Resolved::ApplyOp {
@@ -589,7 +735,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Delete(DeleteTarget::RoutingTableRedistribute { name }) => Resolved::ApplyOp {
             op: ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute { name }),
@@ -607,7 +756,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Delete(DeleteTarget::StaticRoutingInstance { name }) => Resolved::ApplyOp {
             op: ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Delete { name }),
@@ -630,7 +782,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => {
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => {
                 Resolved::Error(NO_CURRENT_STATIC_ROUTING_INSTANCE.to_string())
             }
         },
@@ -655,7 +810,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
         },
         Command::Delete(DeleteTarget::InterfaceRoutingTable { name }) => Resolved::ApplyOp {
             op: ConfigOp::Interface(InterfaceOp::ClearRoutingTable { name }),
@@ -671,7 +829,69 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+        },
+        Command::Delete(DeleteTarget::CommunityAlias { name }) => Resolved::ApplyOp {
+            op: ConfigOp::CommunityAlias(CommunityAliasOp::Delete { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::CommunityGroup { name }) => Resolved::ApplyOp {
+            op: ConfigOp::CommunityGroup(CommunityGroupOp::Delete { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::CommunityGroupMember { name, member }) => Resolved::ApplyOp {
+            op: ConfigOp::CommunityGroup(CommunityGroupOp::RemoveMember { name, member }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::CommunityGroupMemberRelative { member }) => match path {
+            Path::CommunityGroup(name) => Resolved::ApplyOp {
+                op: ConfigOp::CommunityGroup(CommunityGroupOp::RemoveMember {
+                    name: name.clone(),
+                    member,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_COMMUNITY_GROUP.to_string()),
+        },
+        Command::Delete(DeleteTarget::PrefixList { name }) => Resolved::ApplyOp {
+            op: ConfigOp::PrefixList(PrefixListOp::Delete { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::PrefixListEntry { name, cidr, range }) => Resolved::ApplyOp {
+            op: ConfigOp::PrefixList(PrefixListOp::RemoveEntry {
+                name,
+                entry: PrefixListEntry { cidr, range },
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::PrefixListEntryRelative { cidr, range }) => match path {
+            Path::PrefixList(name) => Resolved::ApplyOp {
+                op: ConfigOp::PrefixList(PrefixListOp::RemoveEntry {
+                    name: name.clone(),
+                    entry: PrefixListEntry { cidr, range },
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_) => Resolved::Error(NO_CURRENT_PREFIX_LIST.to_string()),
         },
         Command::Delete(DeleteTarget::BgpPeerGroup { instance, name }) => Resolved::ApplyOp {
             op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Delete { instance, name }),
@@ -690,7 +910,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Delete(DeleteTarget::BgpPeer {
             instance,
@@ -715,7 +938,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Delete(DeleteTarget::SourceAddress) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -730,7 +956,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::AddressFamily(af)) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -746,7 +975,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::HoldTime) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -761,7 +993,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::KeepaliveInterval) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -776,7 +1011,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::ConnectRetryTime) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -791,7 +1029,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::Auth) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -806,7 +1047,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::AoKey(send_id)) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -822,7 +1066,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::NextHop) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -837,7 +1084,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::RouteReflectorClient) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -852,7 +1102,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::RouteServerClient) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -867,7 +1120,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::ImportPolicy) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -882,7 +1138,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::ExportPolicy) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -897,7 +1156,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::BgpInstanceClusterId { name }) => Resolved::ApplyOp {
             op: ConfigOp::BgpInstance(BgpInstanceOp::ClearClusterId { name }),
@@ -913,7 +1175,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
 
         // `top` always lands at the root, however deep the current path is.
@@ -924,7 +1189,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::NavigateTop,
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::NavigateTop,
         },
         // `up` moves exactly one level — from an instance that's the root
         // (coinciding with `top`), but from a peer-group it's the owning
@@ -938,7 +1206,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
-            | Path::PolicyDefinition(_) => Resolved::NavigateTop,
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_) => Resolved::NavigateTop,
             Path::BgpPeerGroup { instance, .. } => {
                 Resolved::Navigate(Path::BgpInstance(instance.clone()))
             }
@@ -2850,5 +3121,246 @@ mod tests {
         let mode = config_mode("t1", Path::Interface("eth0".to_string()), false);
         assert_eq!(resolve(&mode, Command::Up), Resolved::NavigateTop);
         assert_eq!(resolve(&mode, Command::Top), Resolved::NavigateTop);
+    }
+
+    #[test]
+    fn edit_community_alias_group_and_prefix_list_navigate() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Edit(EditTarget::CommunityAlias {
+                    name: "a1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::CommunityAlias(CommunityAliasOp::Ensure {
+                    name: "a1".to_string()
+                }),
+                after: PathAfter::To(Path::CommunityAlias("a1".to_string())),
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Edit(EditTarget::CommunityGroup {
+                    name: "g1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::CommunityGroup(CommunityGroupOp::Ensure {
+                    name: "g1".to_string()
+                }),
+                after: PathAfter::To(Path::CommunityGroup("g1".to_string())),
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Edit(EditTarget::PrefixList {
+                    name: "l1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::PrefixList(PrefixListOp::Ensure {
+                    name: "l1".to_string()
+                }),
+                after: PathAfter::To(Path::PrefixList("l1".to_string())),
+            }
+        );
+    }
+
+    #[test]
+    fn set_community_alias_value_qualified_and_relative() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::CommunityAliasValue {
+                    name: "a1".to_string(),
+                    value: "65000:100".to_string(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::CommunityAlias(CommunityAliasOp::SetValue {
+                    name: "a1".to_string(),
+                    value: "65000:100".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::CommunityAliasValueRelative {
+                    value: "65000:100".to_string()
+                })
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::CommunityAlias("a1".to_string()), false),
+                Command::Set(SetTarget::CommunityAliasValueRelative {
+                    value: "65000:100".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::CommunityAlias(CommunityAliasOp::SetValue {
+                    name: "a1".to_string(),
+                    value: "65000:100".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_community_group_member_qualified_and_relative() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::CommunityGroupMember {
+                    name: "g1".to_string(),
+                    member: "a1".to_string(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::CommunityGroup(CommunityGroupOp::AddMember {
+                    name: "g1".to_string(),
+                    member: "a1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::CommunityGroup("g1".to_string()), false),
+                Command::Set(SetTarget::CommunityGroupMemberRelative {
+                    member: "a1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::CommunityGroup(CommunityGroupOp::AddMember {
+                    name: "g1".to_string(),
+                    member: "a1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_prefix_list_entry_qualified_and_relative() {
+        let cidr: ipnet::IpNet = "10.0.0.0/8".parse().unwrap();
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::PrefixListEntry {
+                    name: "l1".to_string(),
+                    cidr,
+                    range: Some((24, 32)),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::PrefixList(PrefixListOp::AddEntry {
+                    name: "l1".to_string(),
+                    entry: PrefixListEntry {
+                        cidr,
+                        range: Some((24, 32)),
+                    },
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::PrefixList("l1".to_string()), false),
+                Command::Set(SetTarget::PrefixListEntryRelative { cidr, range: None })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::PrefixList(PrefixListOp::AddEntry {
+                    name: "l1".to_string(),
+                    entry: PrefixListEntry { cidr, range: None },
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn delete_current_from_community_alias_group_and_prefix_list_go_to_root() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::CommunityAlias("a1".to_string()), false),
+                Command::Delete(DeleteTarget::Current)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::CommunityAlias(CommunityAliasOp::Delete {
+                    name: "a1".to_string()
+                }),
+                after: PathAfter::ToRoot,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::CommunityGroup("g1".to_string()), false),
+                Command::Delete(DeleteTarget::Current)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::CommunityGroup(CommunityGroupOp::Delete {
+                    name: "g1".to_string()
+                }),
+                after: PathAfter::ToRoot,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::PrefixList("l1".to_string()), false),
+                Command::Delete(DeleteTarget::Current)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::PrefixList(PrefixListOp::Delete {
+                    name: "l1".to_string()
+                }),
+                after: PathAfter::ToRoot,
+            }
+        );
+    }
+
+    #[test]
+    fn delete_community_group_member_and_prefix_list_entry() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Delete(DeleteTarget::CommunityGroupMember {
+                    name: "g1".to_string(),
+                    member: "a1".to_string(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::CommunityGroup(CommunityGroupOp::RemoveMember {
+                    name: "g1".to_string(),
+                    member: "a1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        let cidr: ipnet::IpNet = "10.0.0.0/8".parse().unwrap();
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::PrefixList("l1".to_string()), false),
+                Command::Delete(DeleteTarget::PrefixListEntryRelative { cidr, range: None })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::PrefixList(PrefixListOp::RemoveEntry {
+                    name: "l1".to_string(),
+                    entry: PrefixListEntry { cidr, range: None },
+                }),
+                after: PathAfter::Stay,
+            }
+        );
     }
 }

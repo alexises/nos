@@ -327,9 +327,13 @@ impl Parser<'_> {
             }
             Token::Ident(name) if name == "this" => ExprKind::This(Vec::new()),
             Token::Ident(name) => {
-                self.expect(&Token::Dot)?;
-                let variant = self.expect_ident()?;
-                ExprKind::EnumLit(name, variant)
+                if matches!(self.peek(), Token::Dot) {
+                    self.advance();
+                    let variant = self.expect_ident()?;
+                    ExprKind::EnumLit(name, variant)
+                } else {
+                    ExprKind::Ident(name)
+                }
             }
             other => {
                 return Err(CompileError::new(

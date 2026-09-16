@@ -1363,6 +1363,10 @@ fn encode_update(update: &UpdateMessage) -> Vec<u8> {
 }
 
 #[cfg(test)]
+// Community/ASN values are conventionally written and read in decimal
+// (`65000:100`) — hex/binary notation would make these test fixtures harder
+// to read, not easier.
+#[allow(clippy::decimal_bitwise_operands, clippy::identity_op)]
 mod tests {
     use super::*;
 

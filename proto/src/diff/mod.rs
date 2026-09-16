@@ -1,8 +1,11 @@
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
+pub mod community_alias;
+pub mod community_group;
 pub mod interface;
 pub mod policy_definition;
+pub mod prefix_list;
 pub mod routing_table;
 pub mod static_route;
 pub mod static_routing_instance;
@@ -64,6 +67,9 @@ pub struct ConfigDiff {
     pub static_routing_instances: Vec<SectionDiff>,
     pub interfaces: Vec<SectionDiff>,
     pub policy_definitions: Vec<SectionDiff>,
+    pub community_aliases: Vec<SectionDiff>,
+    pub community_groups: Vec<SectionDiff>,
+    pub prefix_lists: Vec<SectionDiff>,
 }
 
 impl ConfigDiff {
@@ -74,6 +80,9 @@ impl ConfigDiff {
             && self.static_routing_instances.is_empty()
             && self.interfaces.is_empty()
             && self.policy_definitions.is_empty()
+            && self.community_aliases.is_empty()
+            && self.community_groups.is_empty()
+            && self.prefix_lists.is_empty()
     }
 
     /// A copy of this diff keeping only the sections/fields covered by
@@ -112,6 +121,21 @@ impl ConfigDiff {
             } else {
                 Vec::new()
             },
+            community_aliases: if scopes.contains(&DiffScope::CommunityAliases) {
+                self.community_aliases.clone()
+            } else {
+                Vec::new()
+            },
+            community_groups: if scopes.contains(&DiffScope::CommunityGroups) {
+                self.community_groups.clone()
+            } else {
+                Vec::new()
+            },
+            prefix_lists: if scopes.contains(&DiffScope::PrefixLists) {
+                self.prefix_lists.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -126,6 +150,9 @@ pub enum DiffScope {
     StaticRoutingInstances,
     Interfaces,
     PolicyDefinitions,
+    CommunityAliases,
+    CommunityGroups,
+    PrefixLists,
 }
 
 /// Computes what changed between `base` (e.g. the running config) and
@@ -156,6 +183,15 @@ pub fn diff_configs(base: &Config, candidate: &Config) -> ConfigDiff {
             &base.policy_definitions,
             &candidate.policy_definitions,
         ),
+        community_aliases: community_alias::diff_community_aliases(
+            &base.community_aliases,
+            &candidate.community_aliases,
+        ),
+        community_groups: community_group::diff_community_groups(
+            &base.community_groups,
+            &candidate.community_groups,
+        ),
+        prefix_lists: prefix_list::diff_prefix_lists(&base.prefix_lists, &candidate.prefix_lists),
     }
 }
 

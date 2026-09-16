@@ -86,6 +86,21 @@ impl NosPrompt {
                 path: session::Path::PolicyDefinition(name),
                 ..
             } => format!("({transaction}/policy-definition:{name})"),
+            Mode::Configuration {
+                transaction,
+                path: session::Path::CommunityAlias(name),
+                ..
+            } => format!("({transaction}/community-alias:{name})"),
+            Mode::Configuration {
+                transaction,
+                path: session::Path::CommunityGroup(name),
+                ..
+            } => format!("({transaction}/community-group:{name})"),
+            Mode::Configuration {
+                transaction,
+                path: session::Path::PrefixList(name),
+                ..
+            } => format!("({transaction}/prefix-list:{name})"),
         };
         Self { hostname, suffix }
     }
@@ -1043,6 +1058,100 @@ fn edit_in_external_editor(source: &str) -> Option<String> {
     result
 }
 
+/// Compiles `source` against the current transaction's `community_aliases`/
+/// `community_groups`/`prefix_lists`, so this advisory client-side check
+/// (see `edit_policy_source`/`edit_policy_source_line`) doesn't spuriously
+/// reject a script that references a real alias/group/prefix-list — the
+/// authoritative gate stays `nos-configd`'s commit-time validation,
+/// unchanged. `None` only on a connection/IPC error (already reported to
+/// stderr), matching `fetch_policy_source`.
+async fn compile_against_transaction(
+    socket: &Path,
+    transaction: &str,
+    source: &str,
+) -> Option<Result<(), nos_rpl::CompileError>> {
+    let snap = match client::get_transaction(socket, transaction).await {
+        Ok(snap) => snap,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return None;
+        }
+    };
+    let cfg = &snap.config;
+
+    // Owned, pre-resolved buffers backing the `nos_rpl::Symbols` view below
+    // — see `nos_proto::schema::policy_definition::valid_source`/
+    // `nos_bgp::policy::PolicyCache::resync` for the same adapter, written
+    // once per consumer per this codebase's usual `to_policy_input`-style
+    // idiom rather than shared.
+    let alias_parts: Vec<(&str, Vec<i64>)> = cfg
+        .community_aliases
+        .iter()
+        .filter_map(|a| {
+            nos_rpl::parse_colon_literal(&a.value).map(|parts| (a.name.as_str(), parts))
+        })
+        .collect();
+    let alias_refs: Vec<(&str, &[i64])> = alias_parts
+        .iter()
+        .map(|(n, p)| (*n, p.as_slice()))
+        .collect();
+
+    let resolve_member = |m: &str| -> Option<Vec<i64>> {
+        cfg.community_aliases
+            .iter()
+            .find(|a| a.name == m)
+            .and_then(|a| nos_rpl::parse_colon_literal(&a.value))
+            .or_else(|| nos_rpl::parse_colon_literal(m))
+    };
+    let group_parts: Vec<(&str, Vec<Vec<i64>>)> = cfg
+        .community_groups
+        .iter()
+        .map(|g| {
+            (
+                g.name.as_str(),
+                g.members.iter().filter_map(|m| resolve_member(m)).collect(),
+            )
+        })
+        .collect();
+    let group_member_slices: Vec<Vec<&[i64]>> = group_parts
+        .iter()
+        .map(|(_, members)| members.iter().map(Vec::as_slice).collect())
+        .collect();
+    let group_refs: Vec<(&str, &[&[i64]])> = group_parts
+        .iter()
+        .zip(&group_member_slices)
+        .map(|((name, _), slices)| (*name, slices.as_slice()))
+        .collect();
+
+    let prefix_list_entries: Vec<(&str, Vec<nos_rpl::PrefixListEntry>)> = cfg
+        .prefix_lists
+        .iter()
+        .map(|pl| {
+            let entries = pl
+                .entries
+                .iter()
+                .map(|e| nos_rpl::PrefixListEntry {
+                    cidr: e.cidr,
+                    range: e.range,
+                })
+                .collect();
+            (pl.name.as_str(), entries)
+        })
+        .collect();
+    let prefix_list_refs: Vec<(&str, &[nos_rpl::PrefixListEntry])> = prefix_list_entries
+        .iter()
+        .map(|(n, e)| (*n, e.as_slice()))
+        .collect();
+
+    let symbols = nos_rpl::Symbols {
+        aliases: &alias_refs,
+        groups: &group_refs,
+        prefix_lists: &prefix_list_refs,
+    };
+
+    Some(nos_rpl::compile(source, &symbols).map(|_| ()))
+}
+
 async fn edit_policy_source(mode: Mode, socket: &Path, name: String) -> Mode {
     let transaction = current_transaction(&mode);
     let Some(current) = fetch_policy_source(socket, &transaction, &name).await else {
@@ -1051,12 +1160,13 @@ async fn edit_policy_source(mode: Mode, socket: &Path, name: String) -> Mode {
     let Some(edited) = edit_in_external_editor(&current) else {
         return mode;
     };
-    match nos_rpl::compile(&edited) {
-        Ok(_) => apply_policy_source(mode, socket, name, edited).await,
-        Err(e) => {
+    match compile_against_transaction(socket, &transaction, &edited).await {
+        Some(Ok(())) => apply_policy_source(mode, socket, name, edited).await,
+        Some(Err(e)) => {
             eprintln!("policy did not compile, edit discarded: {e}");
             mode
         }
+        None => mode,
     }
 }
 
@@ -1091,12 +1201,13 @@ async fn edit_policy_source_line(
     if !new_source.is_empty() {
         new_source.push('\n');
     }
-    match nos_rpl::compile(&new_source) {
-        Ok(_) => apply_policy_source(mode, socket, name, new_source).await,
-        Err(e) => {
+    match compile_against_transaction(socket, &transaction, &new_source).await {
+        Some(Ok(())) => apply_policy_source(mode, socket, name, new_source).await,
+        Some(Err(e)) => {
             eprintln!("policy did not compile, edit discarded: {e}");
             mode
         }
+        None => mode,
     }
 }
 

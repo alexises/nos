@@ -57,6 +57,17 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `set routing-table <table>` / `set interface <name> routing-table <table>` | Associates a routing table (VRF) with an interface (relative / fully-qualified) |
 | `delete routing-table` / `delete interface <name> routing-table` | Clears an interface's routing-table association (relative / fully-qualified) |
 | `delete` / `delete interface <name>` | Deletes the current interface (returns to the transaction root) or a named one |
+| `edit community-alias <name>` | Creates the community-alias in the transaction if missing, then navigates into it |
+| `set value <literal>` / `set community-alias <name> value <literal>` | Sets the alias's community literal (relative / fully-qualified) |
+| `delete` / `delete community-alias <name>` | Deletes the current community-alias (returns to the transaction root) or a named one |
+| `edit community-group <name>` | Creates the community-group in the transaction if missing, then navigates into it |
+| `set member <alias-or-literal>` / `set community-group <name> member <alias-or-literal>` | Adds a member (an existing community-alias's name, or an inline literal) to the group (relative / fully-qualified) |
+| `delete member <m>` / `delete community-group <name> member <m>` | Removes a member from the group (relative / fully-qualified) |
+| `delete` / `delete community-group <name>` | Deletes the current community-group (returns to the transaction root) or a named one |
+| `edit prefix-list <name>` | Creates the prefix-list in the transaction if missing, then navigates into it |
+| `set entry <cidr> [range <min> <max>]` / `set prefix-list <name> entry <cidr> [range <min> <max>]` | Adds an entry (exact-match, or a length range narrowing `<cidr>`) to the list (relative / fully-qualified) |
+| `delete entry <cidr> [range <min> <max>]` / `delete prefix-list <name> entry <cidr> [range <min> <max>]` | Removes an entry from the list (relative / fully-qualified) |
+| `delete` / `delete prefix-list <name>` | Deletes the current prefix-list (returns to the transaction root) or a named one |
 | `up` / `top` | Navigates back to the transaction root |
 | `show this` | Shows the transaction, or just the current BGP instance/routing table/static routing instance if navigated into one |
 | `diff` | Shows what the transaction changes relative to the running config — colored `+`/`-` lines, word-level highlighting of the changed portion of a value, and an unstyled section header shown as context wherever a field inside it changed |
@@ -81,7 +92,7 @@ Each topic is fetched **at most once per session, lazily** — only when somethi
 
 ## Mode and navigation
 
-The shell tracks a local `Mode` (`session.rs`) — `Operational` or `Configuration { transaction, path, dirty }` — purely as client-side UI state; the daemon has no notion of "the current CLI session." `path` supports one level of nesting (`Root`, `BgpInstance(name)`, `BgpPeerGroup{..}`, `RoutingTable(name)`, `StaticRoutingInstance(name)`, or `Interface(name)` — the latter three have no navigable child, since a routing table's associations, a static routing instance's routes, and an interface's addresses/routing-table are all edited without a further navigation step); the prompt reflects it (`<hostname>>`, `<hostname>(<txn>)>`, `<hostname>(<txn>/bgp:<name>)>`, `<hostname>(<txn>/routing-table:<name>)>`, `<hostname>(<txn>/static-routing-instance:<name>)>`, `<hostname>(<txn>/interface:<name>)>`), where `<hostname>` is the config's live `hostname` field (see "Connection behavior"), not a fixed literal. Since named transactions live entirely server-side, an abnormal exit (Ctrl-C, Ctrl-D, kill, dropped connection) never loses or discards one — only the explicit `discard`/`abort` command does, or choosing "discard" at the uncommitted-changes prompt on plain `exit`.
+The shell tracks a local `Mode` (`session.rs`) — `Operational` or `Configuration { transaction, path, dirty }` — purely as client-side UI state; the daemon has no notion of "the current CLI session." `path` supports one level of nesting (`Root`, `BgpInstance(name)`, `BgpPeerGroup{..}`, `RoutingTable(name)`, `StaticRoutingInstance(name)`, `Interface(name)`, `CommunityAlias(name)`, `CommunityGroup(name)`, or `PrefixList(name)` — all but `BgpInstance`/`BgpPeerGroup` have no navigable child, since a routing table's associations, a static routing instance's routes, an interface's addresses/routing-table, a community-alias's value, a community-group's members, and a prefix-list's entries are all edited without a further navigation step); the prompt reflects it (`<hostname>>`, `<hostname>(<txn>)>`, `<hostname>(<txn>/bgp:<name>)>`, `<hostname>(<txn>/routing-table:<name>)>`, `<hostname>(<txn>/static-routing-instance:<name>)>`, `<hostname>(<txn>/interface:<name>)>`, `<hostname>(<txn>/community-alias:<name>)>`, `<hostname>(<txn>/community-group:<name>)>`, `<hostname>(<txn>/prefix-list:<name>)>`), where `<hostname>` is the config's live `hostname` field (see "Connection behavior"), not a fixed literal. Since named transactions live entirely server-side, an abnormal exit (Ctrl-C, Ctrl-D, kill, dropped connection) never loses or discards one — only the explicit `discard`/`abort` command does, or choosing "discard" at the uncommitted-changes prompt on plain `exit`.
 
 ## Connection behavior
 

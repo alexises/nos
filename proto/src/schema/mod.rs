@@ -1,8 +1,11 @@
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
+pub mod community_alias;
+pub mod community_group;
 pub mod interface;
 pub mod policy_definition;
+pub mod prefix_list;
 pub mod routing_table;
 pub mod static_route;
 pub mod static_routing_instance;
@@ -13,8 +16,11 @@ pub use bgp_peer_group::{
     AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpPeerGroup, NextHopMode,
     CONNECT_RETRY_TIME_DEFAULT_SECS, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR,
 };
+pub use community_alias::CommunityAlias;
+pub use community_group::CommunityGroup;
 pub use interface::Interface;
 pub use policy_definition::PolicyDefinition;
+pub use prefix_list::{PrefixList, PrefixListEntry};
 pub use routing_table::{Redistribute, RedistributeSource, RedistributeTarget, RoutingTable};
 pub use static_route::StaticRoute;
 pub use static_routing_instance::StaticRoutingInstance;
@@ -48,6 +54,15 @@ pub struct Config {
     #[garde(dive)]
     pub policy_definitions: Vec<PolicyDefinition>,
 
+    #[garde(dive)]
+    pub community_aliases: Vec<CommunityAlias>,
+
+    #[garde(dive)]
+    pub community_groups: Vec<CommunityGroup>,
+
+    #[garde(dive)]
+    pub prefix_lists: Vec<PrefixList>,
+
     #[serde(default = "default_hostname")]
     #[garde(length(min = 1, max = 253), custom(|h, _ctx: &Config| hostname_charset(h)))]
     pub hostname: String,
@@ -61,6 +76,9 @@ impl Default for Config {
             static_routing_instances: Vec::new(),
             interfaces: Vec::new(),
             policy_definitions: Vec::new(),
+            community_aliases: Vec::new(),
+            community_groups: Vec::new(),
+            prefix_lists: Vec::new(),
             hostname: default_hostname(),
         }
     }

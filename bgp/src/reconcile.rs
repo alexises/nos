@@ -45,6 +45,9 @@ pub async fn run(
                 DiffScope::BgpInstances,
                 DiffScope::RoutingTables,
                 DiffScope::PolicyDefinitions,
+                DiffScope::CommunityAliases,
+                DiffScope::CommunityGroups,
+                DiffScope::PrefixLists,
             ],
         )
         .await
@@ -114,7 +117,12 @@ async fn resync(
         }
     };
 
-    policy_cache.resync(&cfg.policy_definitions);
+    policy_cache.resync(
+        &cfg.policy_definitions,
+        &cfg.community_aliases,
+        &cfg.community_groups,
+        &cfg.prefix_lists,
+    );
 
     let Some(own) = cfg.bgp_instances.iter().find(|i| i.name == instance) else {
         // The watchdog would be tearing this process down anyway if the

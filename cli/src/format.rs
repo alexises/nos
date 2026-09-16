@@ -1,9 +1,10 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
-    Config, ConfigDiff, DiffStatus, FieldDiff, Interface, InterfaceStatus, LogEntry, LogLevel,
-    NextHopMode, PeerSummary, PolicyDefinition, PrefixRoutes, RouteSourceKind, RoutingTable,
-    SectionDiff, StaticRoute, StaticRoutingInstance, TransactionSnapshot,
+    CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus, FieldDiff, Interface,
+    InterfaceStatus, LogEntry, LogLevel, NextHopMode, PeerSummary, PolicyDefinition, PrefixList,
+    PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, StaticRoute,
+    StaticRoutingInstance, TransactionSnapshot,
 };
 
 use crate::session::Path;
@@ -349,6 +350,21 @@ pub fn render_config(config: &Config) -> String {
     } else {
         lines.extend(config.interfaces.iter().map(render_interface));
     }
+    if config.community_aliases.is_empty() {
+        lines.push("no community aliases configured".to_string());
+    } else {
+        lines.extend(config.community_aliases.iter().map(render_community_alias));
+    }
+    if config.community_groups.is_empty() {
+        lines.push("no community groups configured".to_string());
+    } else {
+        lines.extend(config.community_groups.iter().map(render_community_group));
+    }
+    if config.prefix_lists.is_empty() {
+        lines.push("no prefix lists configured".to_string());
+    } else {
+        lines.extend(config.prefix_lists.iter().map(render_prefix_list));
+    }
     lines.join("\n")
 }
 
@@ -425,6 +441,33 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
                 || format!("policy-definition '{name}' not found"),
                 render_policy_definition,
             ),
+        Path::CommunityAlias(name) => snapshot
+            .config
+            .community_aliases
+            .iter()
+            .find(|a| &a.name == name)
+            .map_or_else(
+                || format!("community-alias '{name}' not found"),
+                render_community_alias,
+            ),
+        Path::CommunityGroup(name) => snapshot
+            .config
+            .community_groups
+            .iter()
+            .find(|g| &g.name == name)
+            .map_or_else(
+                || format!("community-group '{name}' not found"),
+                render_community_group,
+            ),
+        Path::PrefixList(name) => snapshot
+            .config
+            .prefix_lists
+            .iter()
+            .find(|p| &p.name == name)
+            .map_or_else(
+                || format!("prefix-list '{name}' not found"),
+                render_prefix_list,
+            ),
     }
 }
 
@@ -452,6 +495,44 @@ pub fn render_policy_source(source: &str) -> String {
         .map(|(i, line)| format!("{:4}  {line}", i + 1))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Render one community-alias as human-readable text.
+pub fn render_community_alias(alias: &CommunityAlias) -> String {
+    format!("community-alias {}: value {}", alias.name, alias.value)
+}
+
+/// Render one community-group as human-readable text.
+pub fn render_community_group(group: &CommunityGroup) -> String {
+    let members = if group.members.is_empty() {
+        "none".to_string()
+    } else {
+        group.members.join(", ")
+    };
+    format!("community-group {}: members [{members}]", group.name)
+}
+
+/// Render one `PrefixListEntry` the same way for every caller — `<cidr>` for
+/// an exact-match entry, `<cidr> range(<min>,<max>)` otherwise.
+pub fn render_prefix_list_entry(entry: &PrefixListEntry) -> String {
+    match entry.range {
+        None => entry.cidr.to_string(),
+        Some((min, max)) => format!("{} range({min},{max})", entry.cidr),
+    }
+}
+
+/// Render one prefix-list as human-readable text.
+pub fn render_prefix_list(list: &PrefixList) -> String {
+    let entries = if list.entries.is_empty() {
+        "none".to_string()
+    } else {
+        list.entries
+            .iter()
+            .map(render_prefix_list_entry)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!("prefix-list {}: entries [{entries}]", list.name)
 }
 
 // ANSI SGR codes for `render_diff`. Hand-rolled rather than pulling in a
@@ -634,7 +715,8 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(
             render_config(&cfg),
-            "hostname: nos\nno BGP instances configured\nno routing tables configured\nno static routing instances configured\nno interfaces configured"
+            "hostname: nos\nno BGP instances configured\nno routing tables configured\nno static routing instances configured\nno interfaces configured\n\
+             no community aliases configured\nno community groups configured\nno prefix lists configured"
         );
     }
 
@@ -648,7 +730,8 @@ mod tests {
             render_config(&cfg),
             "hostname: nos\nbgp instance default: router-id 1.1.1.1, asn 65000, cluster-id default (= router-id)\n\
              no routing tables configured\nno static routing instances configured\n\
-             no interfaces configured"
+             no interfaces configured\n\
+             no community aliases configured\nno community groups configured\nno prefix lists configured"
         );
     }
 
@@ -663,7 +746,8 @@ mod tests {
             "hostname: nos\nbgp instance vrf-a: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)\n\
              bgp instance vrf-b: router-id 1.1.1.1, asn 65002, cluster-id default (= router-id)\n\
              no routing tables configured\nno static routing instances configured\n\
-             no interfaces configured"
+             no interfaces configured\n\
+             no community aliases configured\nno community groups configured\nno prefix lists configured"
         );
     }
 
@@ -686,7 +770,8 @@ mod tests {
             rendered,
             "transaction 'demo':\nhostname: nos\nbgp instance r1: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)\n\
              no routing tables configured\nno static routing instances configured\n\
-             no interfaces configured"
+             no interfaces configured\n\
+             no community aliases configured\nno community groups configured\nno prefix lists configured"
         );
     }
 
