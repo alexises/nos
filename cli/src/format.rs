@@ -4,7 +4,7 @@ use nos_proto::{
     CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus, FieldDiff, Interface,
     InterfaceAddress, InterfaceStatus, LogEntry, LogLevel, NextHopMode, PeerSummary,
     PolicyDefinition, PrefixList, PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable,
-    SectionDiff, StaticRoute, StaticRoutingInstance, TransactionSnapshot,
+    SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance, TransactionSnapshot,
 };
 
 use crate::session::Path;
@@ -15,7 +15,8 @@ use crate::session::Path;
 pub fn render_bgp_peer_group(group: &BgpPeerGroup, local_asn: u32) -> String {
     let source_address = group
         .source_address
-        .map_or_else(|| "unset".to_string(), |a| a.to_string());
+        .as_ref()
+        .map_or_else(|| "unset".to_string(), SourceAddress::to_string);
     let address_families = if group.address_families.is_empty() {
         "none".to_string()
     } else {
@@ -918,7 +919,10 @@ mod tests {
         BgpPeerGroup {
             name: name.to_string(),
             remote_as: 65001,
-            source_address: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            source_address: Some(SourceAddress::Interface {
+                interface: "eth0".to_string(),
+                label: None,
+            }),
             address_families: vec![AddressFamily::Ipv4Unicast],
             hold_time: None,
             keepalive_interval: None,
@@ -936,7 +940,7 @@ mod tests {
     fn render_bgp_peer_group_line() {
         assert_eq!(
             render_bgp_peer_group(&peer_group("pg1"), 65000),
-            "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
+            "peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
              connect-retry-time default (120s), auth none, next-hop default (self, eBGP)"
         );
@@ -962,7 +966,7 @@ mod tests {
         pg.connect_retry_time = Some(45);
         assert_eq!(
             render_bgp_peer_group(&pg, 65000),
-            "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
+            "peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
              hold-time 30, keepalive-interval 10, connect-retry-time 45, auth none, \
              next-hop default (self, eBGP)"
         );
@@ -976,7 +980,7 @@ mod tests {
         });
         assert_eq!(
             render_bgp_peer_group(&pg, 65000),
-            "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
+            "peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
              connect-retry-time default (120s), auth md5-password secret, \
              next-hop default (self, eBGP)"
@@ -1000,7 +1004,7 @@ mod tests {
         });
         assert_eq!(
             render_bgp_peer_group(&pg, 65000),
-            "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
+            "peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
              connect-retry-time default (120s), \
              auth ao-keys [send-id 1 hmac-sha1 secret (current)], \
@@ -1032,7 +1036,7 @@ mod tests {
         assert_eq!(
             render_bgp_instance(&inst),
             "bgp instance r1: router-id 1.1.1.1, asn 65000, cluster-id default (= router-id)\n  \
-             peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
+             peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
              connect-retry-time default (120s), auth none, next-hop default (self, eBGP)\n  \
              peer 192.0.2.1: peer-group pg1"
@@ -1052,7 +1056,7 @@ mod tests {
         );
         assert_eq!(
             rendered,
-            "peer-group pg1: remote-as 65001, source-address 10.0.0.1, address-family [ipv4], \
+            "peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
              connect-retry-time default (120s), auth none, next-hop default (unchanged, iBGP)"
         );

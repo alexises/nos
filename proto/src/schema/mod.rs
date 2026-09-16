@@ -13,7 +13,7 @@ pub mod static_routing_instance;
 pub use bgp_instance::BgpInstance;
 pub use bgp_peer::BgpPeer;
 pub use bgp_peer_group::{
-    AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpPeerGroup, NextHopMode,
+    AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpPeerGroup, NextHopMode, SourceAddress,
     CONNECT_RETRY_TIME_DEFAULT_SECS, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR,
 };
 pub use community_alias::CommunityAlias;

@@ -1260,10 +1260,10 @@ fn peer_group_set_op(instance: String, group: String, field: BgpPeerGroupField) 
             name: group,
             remote_as,
         },
-        BgpPeerGroupField::SourceAddress(address) => BgpPeerGroupOp::SetSourceAddress {
+        BgpPeerGroupField::SourceAddress(source) => BgpPeerGroupOp::SetSourceAddress {
             instance,
             name: group,
-            address,
+            source,
         },
         BgpPeerGroupField::AddressFamily(af) => BgpPeerGroupOp::AddAddressFamily {
             instance,

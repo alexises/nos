@@ -36,6 +36,6 @@ pub use schema::{
     loopback_table_name, AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpInstance, BgpPeer,
     BgpPeerGroup, CommunityAlias, CommunityGroup, Config, Interface, InterfaceAddress, NextHopMode,
     PolicyDefinition, PrefixList, PrefixListEntry, Redistribute, RedistributeSource,
-    RedistributeTarget, RoutingTable, StaticRoute, StaticRoutingInstance,
+    RedistributeTarget, RoutingTable, SourceAddress, StaticRoute, StaticRoutingInstance,
     CONNECT_RETRY_TIME_DEFAULT_SECS, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX,
 };

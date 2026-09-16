@@ -3,6 +3,7 @@
 pub mod collision;
 pub mod config_client;
 pub mod fsm;
+pub mod interface_client;
 pub mod log_client;
 pub mod message;
 pub mod policy;

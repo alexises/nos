@@ -1,14 +1,17 @@
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use nos_proto::{DiffScope, Event, ServiceRef};
+use nos_proto::{DiffScope, Event, ServiceRef, SourceAddress, LOOPBACK_PREFIX};
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 use crate::config_client;
 use crate::fsm;
+use crate::interface_client;
 use crate::policy::PolicyCache;
 use crate::rib_client;
 use crate::session::{LocalIdentity, ResolvedAuth, ResolvedPeer, SessionManager, VrfRequirement};
@@ -151,33 +154,62 @@ async fn resync(
         }
     }
 
-    let peers: Vec<ResolvedPeer> = own
-        .peers
-        .iter()
-        .filter_map(|peer| {
-            let group = own.peer_groups.iter().find(|g| g.name == peer.peer_group)?;
-            Some(ResolvedPeer {
-                remote_address: peer.remote_address,
-                source_address: group.source_address,
-                remote_as: group.remote_as,
-                peer_group: peer.peer_group.clone(),
-                hold_time: group.hold_time.unwrap_or(nos_proto::HOLD_TIME_DEFAULT),
-                keepalive_interval: group.keepalive_interval,
-                connect_retry_time: group
-                    .connect_retry_time
-                    .map_or(fsm::CONNECT_RETRY_TIME, |s| {
-                        Duration::from_secs(u64::from(s))
-                    }),
-                auth: group.auth.as_ref().map(ResolvedAuth::from),
-                next_hop: group.next_hop,
-                address_families: group.address_families.clone(),
-                route_reflector_client: group.route_reflector_client,
-                route_server_client: group.route_server_client,
-                import_policy: policy_cache.resolve(group.import_policy.as_deref()),
-                export_policy: policy_cache.resolve(group.export_policy.as_deref()),
-            })
-        })
-        .collect();
+    // One `nos-interfaced` query per peer-group that configures a
+    // source-address (not per peer) — every peer in the group shares the
+    // same reference, so this avoids a redundant round trip per peer.
+    let mut source_addrs: HashMap<&str, Vec<IpAddr>> = HashMap::new();
+    for group in &own.peer_groups {
+        if let Some(source) = &group.source_address {
+            let addrs =
+                resolve_source_address(watchdog_socket, own.routing_table.as_deref(), source).await;
+            if addrs.is_empty() {
+                debug!(
+                    peer_group = %group.name,
+                    "peer-group source-address not resolvable yet"
+                );
+            } else {
+                info!(
+                    peer_group = %group.name,
+                    addresses = ?addrs,
+                    "resolved peer-group source-address"
+                );
+            }
+            source_addrs.insert(group.name.as_str(), addrs);
+        }
+    }
+
+    let mut peers: Vec<ResolvedPeer> = Vec::new();
+    for peer in &own.peers {
+        let Some(group) = own.peer_groups.iter().find(|g| g.name == peer.peer_group) else {
+            continue;
+        };
+        let source_address = source_addrs.get(group.name.as_str()).and_then(|addrs| {
+            addrs
+                .iter()
+                .find(|a| a.is_ipv4() == peer.remote_address.is_ipv4())
+                .copied()
+        });
+        peers.push(ResolvedPeer {
+            remote_address: peer.remote_address,
+            source_address,
+            remote_as: group.remote_as,
+            peer_group: peer.peer_group.clone(),
+            hold_time: group.hold_time.unwrap_or(nos_proto::HOLD_TIME_DEFAULT),
+            keepalive_interval: group.keepalive_interval,
+            connect_retry_time: group
+                .connect_retry_time
+                .map_or(fsm::CONNECT_RETRY_TIME, |s| {
+                    Duration::from_secs(u64::from(s))
+                }),
+            auth: group.auth.as_ref().map(ResolvedAuth::from),
+            next_hop: group.next_hop,
+            address_families: group.address_families.clone(),
+            route_reflector_client: group.route_reflector_client,
+            route_server_client: group.route_server_client,
+            import_policy: policy_cache.resolve(group.import_policy.as_deref()),
+            export_policy: policy_cache.resolve(group.export_policy.as_deref()),
+        });
+    }
 
     let local = LocalIdentity {
         asn: own.asn,
@@ -212,6 +244,51 @@ async fn resolve_vrf(watchdog_socket: &Path, table: &str) -> Option<String> {
         watchdog_client::resolve_once(watchdog_socket, &ServiceRef::RibTable(table.to_string()))
             .await?;
     rib_client::get_vrf_name(&socket).await
+}
+
+/// Resolves a peer-group's `SourceAddress` reference to every candidate
+/// local address (both families — the caller picks the one matching each
+/// peer's own remote-address family), querying `nos-interfaced` directly
+/// (resolved via the watchdog broker's `ServiceRef::Interfaces`, mirroring
+/// `resolve_vrf`'s `ServiceRef::RibTable` + `nos-ribd` query). An empty
+/// result covers every "not resolvable right now" case uniformly
+/// (`nos-interfaced` unreachable, the referenced interface not configured
+/// yet, no address under the requested label, or — for `Loopback` — this
+/// instance having no owning routing table to derive the loopback's name
+/// from) — retried by the caller's periodic re-apply tick, same as
+/// `resolve_vrf`.
+async fn resolve_source_address(
+    watchdog_socket: &Path,
+    own_routing_table: Option<&str>,
+    source: &SourceAddress,
+) -> Vec<IpAddr> {
+    let (interface, label) = match source {
+        SourceAddress::Interface { interface, label } => (interface.clone(), label.clone()),
+        SourceAddress::Loopback { label } => {
+            let Some(table) = own_routing_table else {
+                warn!(
+                    "peer-group's source-address is loopback but this instance has no owning \
+                     routing table to derive it from"
+                );
+                return Vec::new();
+            };
+            (format!("{LOOPBACK_PREFIX}{table}"), label.clone())
+        }
+    };
+    let Some(socket) =
+        watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await
+    else {
+        return Vec::new();
+    };
+    let Some(status) = interface_client::get_interface(&socket, &interface).await else {
+        return Vec::new();
+    };
+    status
+        .addresses
+        .into_iter()
+        .filter(|a| label.is_none() || a.label == label)
+        .map(|a| a.address.addr())
+        .collect()
 }
 
 /// Pure classification of the three-way VRF requirement (see

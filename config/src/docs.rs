@@ -99,12 +99,15 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::SetBgpPeerGroupSourceAddress => (
             "Set a peer-group's transport source address.",
-            "Sets the source-address field on a peer-group — the local address BGP uses to \
-             establish sessions in this group. This is independent of which address \
-             families the group exchanges: an IPv6 source-address may still carry IPv4 \
-             unicast routes over the session (RFC 8950 extended next-hop encoding), so \
-             source-address and address-family are never cross-validated against each \
-             other.",
+            "Sets the source-address field on a peer-group — referenced by interface name \
+             (plus an optional label, for an interface with more than one address) rather \
+             than a literal address, resolved by nos-bgpd at runtime. `source-address \
+             loopback` refers to this instance's own loopback interface \
+             (loopback-<routing-table>) without needing to spell out its name. This is \
+             independent of which address families the group exchanges: the resolved \
+             source address's family may still differ from an advertised address family \
+             (RFC 8950 extended next-hop encoding), so source-address and address-family \
+             are never cross-validated against each other.",
         ),
         Topic::ClearBgpPeerGroupSourceAddress => (
             "Clear a peer-group's transport source address.",

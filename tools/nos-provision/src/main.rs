@@ -20,7 +20,7 @@ use ipnet::IpNet;
 use nos_proto::{
     AddressFamily, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, ConfigOp, Event, InterfaceOp,
     IpcCodec, PolicyDefinitionOp, Redistribute, RedistributeSource, RedistributeTarget, Request,
-    RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp, TransactionBase,
+    RoutingTableOp, SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, TransactionBase,
 };
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -140,6 +140,32 @@ struct Args {
     /// Mutually exclusive with `--loopback-address`.
     #[arg(long)]
     delete_loopback: bool,
+
+    /// If set, points `--peer-group`'s source-address at this named
+    /// interface (`BgpPeerGroupOp::SetSourceAddress` with
+    /// `SourceAddress::Interface`). Mutually exclusive with
+    /// `--source-address-loopback`/`--clear-source-address`.
+    #[arg(long)]
+    source_address_interface: Option<String>,
+
+    /// If set, points `--peer-group`'s source-address at this instance's own
+    /// loopback interface (`SourceAddress::Loopback`) — no interface name
+    /// needed, derived from `--routing-table` by nos-bgpd itself at
+    /// runtime. Mutually exclusive with
+    /// `--source-address-interface`/`--clear-source-address`.
+    #[arg(long)]
+    source_address_loopback: bool,
+
+    /// Paired with `--source-address-interface`/`--source-address-loopback`
+    /// to disambiguate which of that interface's addresses to use.
+    #[arg(long)]
+    source_address_label: Option<String>,
+
+    /// If set, clears `--peer-group`'s source-address
+    /// (`BgpPeerGroupOp::ClearSourceAddress`). Mutually exclusive with
+    /// `--source-address-interface`/`--source-address-loopback`.
+    #[arg(long)]
+    clear_source_address: bool,
 }
 
 #[tokio::main]
@@ -334,6 +360,41 @@ async fn main() -> anyhow::Result<()> {
     if args.delete_loopback {
         ops.push(ConfigOp::Interface(InterfaceOp::Delete {
             name: loopback_name,
+        }));
+    }
+
+    let source_address_flags = [
+        args.source_address_interface.is_some(),
+        args.source_address_loopback,
+        args.clear_source_address,
+    ];
+    if source_address_flags.iter().filter(|set| **set).count() > 1 {
+        bail!(
+            "--source-address-interface, --source-address-loopback, and \
+             --clear-source-address are mutually exclusive"
+        );
+    }
+    if let Some(interface) = args.source_address_interface.clone() {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetSourceAddress {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            source: SourceAddress::Interface {
+                interface,
+                label: args.source_address_label.clone(),
+            },
+        }));
+    } else if args.source_address_loopback {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetSourceAddress {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            source: SourceAddress::Loopback {
+                label: args.source_address_label.clone(),
+            },
+        }));
+    } else if args.clear_source_address {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearSourceAddress {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
         }));
     }
 

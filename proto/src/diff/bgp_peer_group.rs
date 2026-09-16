@@ -1,4 +1,4 @@
-use crate::schema::{AddressFamily, BgpAoAlgorithm, BgpAuth, BgpPeerGroup};
+use crate::schema::{AddressFamily, BgpAoAlgorithm, BgpAuth, BgpPeerGroup, SourceAddress};
 
 use super::{DiffStatus, FieldDiff, SectionDiff};
 
@@ -40,7 +40,8 @@ fn header_for(name: &str) -> String {
 
 fn source_address_str(pg: &BgpPeerGroup) -> String {
     pg.source_address
-        .map_or_else(|| "unset".to_string(), |a| a.to_string())
+        .as_ref()
+        .map_or_else(|| "unset".to_string(), SourceAddress::to_string)
 }
 
 fn address_families_str(pg: &BgpPeerGroup) -> String {

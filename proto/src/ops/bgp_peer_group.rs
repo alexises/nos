@@ -1,8 +1,8 @@
-use std::net::IpAddr;
-
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{AddressFamily, BgpAoKey, BgpAuth, BgpPeerGroup, Config, NextHopMode};
+use crate::schema::{
+    AddressFamily, BgpAoKey, BgpAuth, BgpPeerGroup, Config, NextHopMode, SourceAddress,
+};
 
 use super::bgp_instance::find_instance_mut;
 use super::OpError;
@@ -28,7 +28,7 @@ pub enum BgpPeerGroupOp {
     SetSourceAddress {
         instance: String,
         name: String,
-        address: IpAddr,
+        source: SourceAddress,
     },
     ClearSourceAddress {
         instance: String,
@@ -200,9 +200,9 @@ impl BgpPeerGroupOp {
             BgpPeerGroupOp::SetSourceAddress {
                 instance,
                 name,
-                address,
+                source,
             } => {
-                find_group_mut(config, instance, name)?.source_address = Some(*address);
+                find_group_mut(config, instance, name)?.source_address = Some(source.clone());
                 Ok(())
             }
             BgpPeerGroupOp::ClearSourceAddress { instance, name } => {
@@ -439,7 +439,7 @@ fn find_group_mut<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::Ipv4Addr;
 
     use crate::schema::BgpInstance;
 
@@ -558,17 +558,20 @@ mod tests {
     #[test]
     fn set_and_clear_source_address() {
         let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
-        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let source = SourceAddress::Interface {
+            interface: "eth0".to_string(),
+            label: None,
+        };
         BgpPeerGroupOp::SetSourceAddress {
             instance: "r1".to_string(),
             name: "pg1".to_string(),
-            address: addr,
+            source: source.clone(),
         }
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(
             cfg.bgp_instances[0].peer_groups[0].source_address,
-            Some(addr)
+            Some(source)
         );
 
         BgpPeerGroupOp::ClearSourceAddress {

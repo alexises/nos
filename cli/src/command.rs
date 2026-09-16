@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use ipnet::IpNet;
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, NextHopMode, Redistribute, RedistributeSource,
-    RedistributeTarget, TransactionBase,
+    RedistributeTarget, SourceAddress, TransactionBase,
 };
 
 /// A single field edit targeting a BGP instance.
@@ -19,7 +19,7 @@ pub enum BgpInstanceField {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BgpPeerGroupField {
     RemoteAs(u32),
-    SourceAddress(IpAddr),
+    SourceAddress(SourceAddress),
     AddressFamily(AddressFamily),
     HoldTime(u16),
     KeepaliveInterval(u16),
@@ -582,15 +582,43 @@ impl Command {
                     Err(_) => Command::Unknown(trimmed.to_string()),
                 }
             }
-            ["set", "bgp", "instance", instance, "peer-group", group, "source-address", addr] => {
-                match addr.parse::<IpAddr>() {
-                    Ok(address) => Command::Set(SetTarget::BgpPeerGroup {
-                        instance: (*instance).to_string(),
-                        group: (*group).to_string(),
-                        field: BgpPeerGroupField::SourceAddress(address),
+            ["set", "bgp", "instance", instance, "peer-group", group, "source-address", "interface", ifname] => {
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: (*instance).to_string(),
+                    group: (*group).to_string(),
+                    field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
+                        interface: (*ifname).to_string(),
+                        label: None,
                     }),
-                    Err(_) => Command::Unknown(trimmed.to_string()),
-                }
+                })
+            }
+            ["set", "bgp", "instance", instance, "peer-group", group, "source-address", "interface", ifname, "label", label] => {
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: (*instance).to_string(),
+                    group: (*group).to_string(),
+                    field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
+                        interface: (*ifname).to_string(),
+                        label: Some((*label).to_string()),
+                    }),
+                })
+            }
+            ["set", "bgp", "instance", instance, "peer-group", group, "source-address", "loopback"] => {
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: (*instance).to_string(),
+                    group: (*group).to_string(),
+                    field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback {
+                        label: None,
+                    }),
+                })
+            }
+            ["set", "bgp", "instance", instance, "peer-group", group, "source-address", "loopback", "label", label] => {
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: (*instance).to_string(),
+                    group: (*group).to_string(),
+                    field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback {
+                        label: Some((*label).to_string()),
+                    }),
+                })
             }
             ["set", "bgp", "instance", instance, "peer-group", group, "address-family", "ipv4"] => {
                 Command::Set(SetTarget::BgpPeerGroup {
@@ -732,12 +760,32 @@ impl Command {
                 }),
                 Err(_) => Command::Unknown(trimmed.to_string()),
             },
-            ["set", "source-address", addr] => match addr.parse::<IpAddr>() {
-                Ok(address) => Command::Set(SetTarget::PeerGroupRelative {
-                    field: BgpPeerGroupField::SourceAddress(address),
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
+            ["set", "source-address", "interface", ifname] => {
+                Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
+                        interface: (*ifname).to_string(),
+                        label: None,
+                    }),
+                })
+            }
+            ["set", "source-address", "interface", ifname, "label", label] => {
+                Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
+                        interface: (*ifname).to_string(),
+                        label: Some((*label).to_string()),
+                    }),
+                })
+            }
+            ["set", "source-address", "loopback"] => Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback { label: None }),
+            }),
+            ["set", "source-address", "loopback", "label", label] => {
+                Command::Set(SetTarget::PeerGroupRelative {
+                    field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback {
+                        label: Some((*label).to_string()),
+                    }),
+                })
+            }
             ["set", "address-family", "ipv4"] => Command::Set(SetTarget::PeerGroupRelative {
                 field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv4Unicast),
             }),
@@ -1548,11 +1596,81 @@ mod tests {
     #[test]
     fn set_bgp_peer_group_source_address_qualified() {
         assert_eq!(
-            Command::parse("set bgp instance R1 peer-group PG1 source-address 2001:db8::1"),
+            Command::parse("set bgp instance R1 peer-group PG1 source-address interface eth0"),
             Command::Set(SetTarget::BgpPeerGroup {
                 instance: "R1".to_string(),
                 group: "PG1".to_string(),
-                field: BgpPeerGroupField::SourceAddress("2001:db8::1".parse::<IpAddr>().unwrap()),
+                field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
+                    interface: "eth0".to_string(),
+                    label: None,
+                }),
+            })
+        );
+        assert_eq!(
+            Command::parse(
+                "set bgp instance R1 peer-group PG1 source-address interface eth0 label mgmt"
+            ),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
+                    interface: "eth0".to_string(),
+                    label: Some("mgmt".to_string()),
+                }),
+            })
+        );
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 source-address loopback"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback { label: None }),
+            })
+        );
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 source-address loopback label mgmt"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback {
+                    label: Some("mgmt".to_string()),
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn set_source_address_relative() {
+        assert_eq!(
+            Command::parse("set source-address interface eth0"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
+                    interface: "eth0".to_string(),
+                    label: None,
+                }),
+            })
+        );
+        assert_eq!(
+            Command::parse("set source-address interface eth0 label mgmt"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
+                    interface: "eth0".to_string(),
+                    label: Some("mgmt".to_string()),
+                }),
+            })
+        );
+        assert_eq!(
+            Command::parse("set source-address loopback"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback { label: None }),
+            })
+        );
+        assert_eq!(
+            Command::parse("set source-address loopback label mgmt"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback {
+                    label: Some("mgmt".to_string()),
+                }),
             })
         );
     }

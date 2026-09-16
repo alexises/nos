@@ -1,15 +1,14 @@
-use std::net::IpAddr;
-
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
 use super::Config;
 
 /// Which NLRI (AFI/SAFI) is exchanged over a peer-group's session —
-/// independent of the IP version of `source_address` or a peer's
-/// `remote_address`. RFC 8950's extended next-hop encoding allows an
-/// IPv6-transport session to carry IPv4 unicast NLRI, so this must never be
-/// derived from, or cross-validated against, either address's IP version.
+/// independent of whatever address family `source_address` resolves to at
+/// runtime, or a peer's `remote_address`. RFC 8950's extended next-hop
+/// encoding allows an IPv6-transport session to carry IPv4 unicast NLRI, so
+/// this must never be derived from, or cross-validated against, either
+/// address's IP version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AddressFamily {
     Ipv4Unicast,
@@ -28,6 +27,49 @@ impl AddressFamily {
 impl std::fmt::Display for AddressFamily {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// A peer-group's transport source address, referenced by interface + label
+/// rather than a literal `IpAddr` — resolved to an actual address by
+/// `nos-bgpd` at runtime (querying `nos-interfaced`, the same way a
+/// `BgpInstance.routing_table` reference resolves to a VRF name via
+/// `nos-ribd`), never here. `label` disambiguates which of an interface's
+/// addresses to use when it carries more than one; `None` requires the
+/// interface to carry exactly one address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceAddress {
+    /// An explicitly named interface.
+    Interface {
+        interface: String,
+        label: Option<String>,
+    },
+    /// This peer-group's owning `BgpInstance`'s own loopback interface
+    /// (`loopback-<table>`, where `<table>` is that instance's
+    /// `routing_table`) — so no interface name needs to be spelled out.
+    /// Invalid (an error, not a fallback) for an instance with no owning
+    /// routing table, exactly like `BgpInstance.routing_table` itself.
+    Loopback { label: Option<String> },
+}
+
+impl std::fmt::Display for SourceAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourceAddress::Interface { interface, label } => {
+                write!(f, "interface {interface}")?;
+                if let Some(label) = label {
+                    write!(f, " label {label}")?;
+                }
+                Ok(())
+            }
+            SourceAddress::Loopback { label } => {
+                write!(f, "loopback")?;
+                if let Some(label) = label {
+                    write!(f, " label {label}")?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -72,9 +114,13 @@ pub struct BgpPeerGroup {
 
     // Transport source address. Deliberately `#[garde(skip)]` and never
     // cross-validated against `address_families` or a peer's
-    // `remote_address` — see `AddressFamily`'s doc comment.
+    // `remote_address` — see `AddressFamily`'s doc comment. Also never
+    // cross-validated against `Config.interfaces` — like
+    // `BgpInstance.routing_table`'s VRF, the referenced interface is
+    // resolved by `nos-bgpd` itself and may not exist yet in this
+    // transaction.
     #[garde(skip)]
-    pub source_address: Option<IpAddr>,
+    pub source_address: Option<SourceAddress>,
 
     #[garde(custom(|afs, _ctx: &Config| non_empty_no_duplicate_afs(afs)))]
     pub address_families: Vec<AddressFamily>,
@@ -327,7 +373,7 @@ pub(crate) fn valid_peer_group_timers(groups: &[BgpPeerGroup]) -> garde::Result 
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::net::Ipv4Addr;
 
     use crate::schema::{BgpInstance, Config};
 
@@ -455,11 +501,25 @@ mod tests {
     }
 
     /// RFC 8950: an IPv6-transport session may carry IPv4 unicast NLRI.
-    /// `source_address`'s IP version must never constrain `address_families`.
+    /// `source_address`'s resolved IP version must never constrain
+    /// `address_families`.
     #[test]
-    fn ipv6_source_address_with_ipv4_address_family_passes() {
+    fn source_address_never_constrains_address_family() {
         let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
-        pg.source_address = Some(IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1)));
+        pg.source_address = Some(SourceAddress::Interface {
+            interface: "eth0".to_string(),
+            label: None,
+        });
+        let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn loopback_source_address_passes() {
+        let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
+        pg.source_address = Some(SourceAddress::Loopback {
+            label: Some("mgmt".to_string()),
+        });
         let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
         cfg.validate_with(&cfg).unwrap();
     }

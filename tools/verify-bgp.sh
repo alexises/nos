@@ -14,8 +14,14 @@
 # `loopback-rt1`, detected purely from that name — no separate config field)
 # actually gets a real dummy kernel device created (named from its routing
 # table's allocated kernel table id), enslaved into that table's VRF, and
-# addressed, then deleted again on removal, and (via the `policy`
-# subcommand) that a real RPL import policy on router-b
+# addressed, then deleted again on removal, (via the `source-address`
+# subcommand) that a peer-group's source-address is resolved by nos-bgpd
+# itself, over a real IPC round trip to nos-interfaced, from an interface
+# name (+ optional label) rather than a literal address, and that
+# `source-address loopback` derives its target interface's name purely from
+# the owning bgp instance's own routing table with no routing-table name
+# given at all, and (via the `policy` subcommand) that a real RPL import
+# policy on router-b
 # actually rejects a specific redistributed prefix from router-a — proving
 # the policy hook against the kernel-real two-container path, not just unit
 # tests — and that reverting to the `accept-all` default lets it back in,
@@ -41,7 +47,7 @@
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|loopback|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}
+# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|loopback|source-address|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -205,6 +211,54 @@ provision_loopback() {
     --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
     --peer "$peer_ip" \
     --loopback-address "$loopback_addr"
+}
+
+provision_source_address_interface() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  log "provisioning $name's peer-group source-address as interface eth0"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --source-address-interface eth0
+}
+
+provision_source_address_loopback() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  log "provisioning $name's peer-group source-address as loopback (no routing-table name given)"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --source-address-loopback
+}
+
+provision_clear_source_address() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  log "clearing $name's peer-group source-address"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --clear-source-address
 }
 
 provision_delete_loopback() {
@@ -620,6 +674,52 @@ cmd_check_loopback() {
     || { log "router-a: FAILED to delete the loopback device"; return 1; }
 }
 
+# --- Peer-group source-address scenario ---
+#
+# Verifies BgpPeerGroup.source_address is resolved by nos-bgpd itself, over a
+# real IPC round trip to nos-interfaced (via the watchdog broker), from an
+# interface name (+ optional label) rather than a literal address -- and
+# that `source-address loopback` derives its target interface
+# (`loopback-rt1`) purely from the owning bgp instance's own routing table,
+# with no routing-table name given at all. Self-contained: creates and
+# removes its own loopback interface rather than depending on the (already
+# torn down) `loopback` scenario above.
+
+cmd_check_source_address() {
+  log "pointing router-a's peer-group source-address at interface eth0 (its own already-established address, $IP_A)"
+  provision_source_address_interface router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+  wait_for_count_increase router-a "resolved peer-group source-address peer_group=pg1 addresses=\[$IP_A\]" 0 60 \
+    && log "router-a: resolved source-address to interface eth0's own address ($IP_A)" \
+    || { log "router-a: FAILED to resolve interface-based source-address"; return 1; }
+  log "confirming the session still establishes bound to the explicit interface source-address"
+  wait_for_log router-a "bgp session established" 60 \
+    && log "router-a: established with interface source-address" \
+    || { log "router-a: FAILED to establish with interface source-address"; return 1; }
+  wait_for_log router-b "bgp session established" 60 \
+    && log "router-b: established" \
+    || { log "router-b: FAILED to establish"; return 1; }
+
+  log "adding a loopback interface to router-a's routing table (rt1) for the loopback source-address check"
+  provision_loopback router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$LOOPBACK_ADDRESS"
+  wait_for_count_increase router-a "added interface address interface=loopback-rt1 address=$LOOPBACK_ADDRESS" 0 60 \
+    && log "router-a: loopback-rt1 addressed" \
+    || { log "router-a: FAILED to address loopback-rt1"; return 1; }
+
+  log "pointing router-a's peer-group source-address at 'loopback' -- no routing-table name given, derived from its own bgp instance's routing table (rt1)"
+  provision_source_address_loopback router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+  local loopback_ip=${LOOPBACK_ADDRESS%/*}
+  wait_for_count_increase router-a "resolved peer-group source-address peer_group=pg1 addresses=\[$loopback_ip\]" 0 60 \
+    && log "router-a: resolved 'source-address loopback' to loopback-rt1's own address ($loopback_ip), with no routing-table name given" \
+    || { log "router-a: FAILED to resolve 'source-address loopback'"; return 1; }
+
+  log "reverting router-a's peer-group source-address and removing the loopback interface"
+  provision_clear_source_address router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+  provision_delete_loopback router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+  wait_for_log router-a "bgp session established" 60 \
+    && log "router-a: still established after reverting source-address" \
+    || { log "router-a: FAILED to remain established after reverting source-address"; return 1; }
+}
+
 # --- RPL import policy scenario ---
 #
 # Reuses the same two-router topology and the same $REDISTRIBUTE_PREFIX as
@@ -980,6 +1080,7 @@ case "${1:-}" in
   redistribute) cmd_check_redistribute ;;
   auth) cmd_check_auth ;;
   loopback) cmd_check_loopback ;;
+  source-address) cmd_check_source_address ;;
   policy) cmd_check_policy ;;
   redistribute-policy) cmd_check_redistribute_policy ;;
   communities) cmd_check_communities ;;
@@ -995,6 +1096,7 @@ case "${1:-}" in
     cmd_check_redistribute
     cmd_check_auth
     cmd_check_loopback
+    cmd_check_source_address
     cmd_check_policy
     cmd_check_redistribute_policy
     cmd_check_communities
@@ -1002,7 +1104,7 @@ case "${1:-}" in
     cmd_check_route_server
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|source-address|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}" >&2
     exit 2
     ;;
 esac
