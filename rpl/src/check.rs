@@ -25,7 +25,10 @@ fn terminates(stmts: &[Stmt]) -> bool {
 fn stmt_terminates(stmt: &Stmt) -> bool {
     match &stmt.kind {
         StmtKind::Accept | StmtKind::Reject => true,
-        StmtKind::Set(..) => false,
+        StmtKind::Set(..)
+        | StmtKind::CommunityAdd(..)
+        | StmtKind::CommunityRemove(..)
+        | StmtKind::CommunityClear(..) => false,
         StmtKind::If {
             branches,
             else_body,
@@ -115,5 +118,16 @@ mod tests {
     fn nested_if_all_branches_terminal_passes() {
         let src = "if this.prefix in 10.0.0.0/8:\n    if this.bgp.local_pref < 50:\n        reject\n    else:\n        accept\nelse:\n    reject\n";
         check_src(src).unwrap();
+    }
+
+    #[test]
+    fn community_add_then_terminal_passes() {
+        check_src("this.bgp.communities.add(65000:100)\naccept\n").unwrap();
+    }
+
+    #[test]
+    fn bare_community_add_with_no_terminal_fails() {
+        let err = check_src("this.bgp.communities.add(65000:100)\n").unwrap_err();
+        assert!(err.to_string().contains("does not terminate"));
     }
 }

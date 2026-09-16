@@ -78,6 +78,12 @@ A `BgpPeerGroup` carries two mutually exclusive bools, `route_reflector_client` 
 
 Two explicit, `ponytail:`-commented ceilings: ADD-PATH is send-only from this NOS's perspective — `adj_rib_in` still stores at most one path per peer per prefix, so a route-server-client that itself submits more than one path for the same prefix only ever contributes its latest one to other clients' views; and path ids are never recycled after a withdrawal (`rs_next_id` only grows), which is fine since realistic per-prefix source churn is nowhere near exhausting `u32`.
 
+### Communities
+
+`message.rs` decodes/encodes all three community attribute types — RFC 1997 `COMMUNITY`, RFC 4360 `EXTENDED_COMMUNITIES`, RFC 8092 `LARGE_COMMUNITY` — each stored on `PathAttributes`/`RibRoute`/`AdvertisedRoute` as a plain `Vec` (`u32` for standard — `AA:NN` packed `(AA << 16) | NN`; `u64` for extended — the 8 raw wire bytes; `(u32, u32, u32)` for large), following `cluster_list`'s existing empty-`Vec`-means-absent convention rather than an `Option` wrapper. All three are optional *transitive* attributes (`ATTR_FLAG_OPTIONAL_TRANSITIVE`, distinct from `cluster_list`/`originator_id`'s optional non-transitive flag) and — unlike `local_pref`/`med`/`AS_PATH`-prepend — `build_advertisement` propagates them to every eligible peer unconditionally, with no eBGP/iBGP split: RFC 1997/4360/8092 default behavior is pass-through, and any peer-specific stripping is left entirely to that peer-group's export policy (see root `CLAUDE.md`'s "Routing policy language (RPL)").
+
+Two explicit simplifications, neither enforced in Rust: well-known standard community values (`NO_EXPORT`/`NO_ADVERTISE`/`NO_EXPORT_SUBCONFED`) get no automatic suppression behavior — they're ordinary `u32` values an operator's own import/export policy can act on; and extended communities' transitive/non-transitive high bit isn't enforced on egress — this NOS has no VPN/MPLS use case driving that distinction, so every extended community propagates uniformly.
+
 ## Modules
 
 | Module | Role |

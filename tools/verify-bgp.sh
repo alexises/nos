@@ -13,7 +13,11 @@
 # the `policy` subcommand) that a real RPL import policy on router-b
 # actually rejects a specific redistributed prefix from router-a — proving
 # the policy hook against the kernel-real two-container path, not just unit
-# tests — and that reverting to the `accept-all` default lets it back in.
+# tests — and that reverting to the `accept-all` default lets it back in,
+# and (via the `communities` subcommand) that a real RPL export policy on
+# router-a can `.add()` an RFC 1997 COMMUNITY value that survives wire
+# encoding, the real kernel session, wire decoding, and lands in router-b's
+# loc-rib.
 #
 # Two further subcommands, `reflector` and `route-server`, stand up a third
 # container ("router-c") and reconfigure all three into a hub-and-spoke
@@ -26,7 +30,7 @@
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|policy|reflector|route-server|logs [n]|down|all}
+# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|policy|communities|reflector|route-server|logs [n]|down|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -361,6 +365,31 @@ established_count() {
   docker logs "$name" 2>&1 | grep -c "bgp session established" || true
 }
 
+# Like `wait_for_log`, but for a re-triggered event on a container whose
+# logs already contain the pattern from an earlier phase -- a bare presence
+# check would false-positive on that stale line, so this polls a log-line
+# *count* past an already-captured baseline instead (same technique as
+# `established_count`/`learned_prefix_count`'s before/after comparisons,
+# just as a polling wait instead of a single check after a fixed sleep).
+wait_for_count_increase() {
+  local name=$1 pattern=$2 baseline=$3 timeout=${4:-60}
+  log "waiting for a new '$pattern' in $name's logs (baseline=$baseline, up to ${timeout}s)"
+  for _ in $(seq 1 "$timeout"); do
+    local count
+    # tracing's colored output interleaves ANSI escape codes between a
+    # structured field's name/separator/value (e.g. "origin" ESC[0m ESC[2m
+    # "=" ESC[0m "Local") -- strip them first, same as the route-server and
+    # communities checks' own log reads, or a pattern spanning a field like
+    # `foo=bar` never matches at all.
+    count=$(docker logs "$name" 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep -c "$pattern") || true
+    if [[ "$count" -gt "$baseline" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 wait_for_log() {
   local name=$1 pattern=$2 timeout=${3:-60}
   log "waiting for '$pattern' in $name's logs (up to ${timeout}s)"
@@ -599,6 +628,131 @@ cmd_check_policy() {
   fi
 }
 
+# --- RPL community scenario ---
+#
+# Reuses the same two-router topology and $REDISTRIBUTE_PREFIX as the
+# `redistribute`/`policy` scenarios, but router-a's peer-group toward
+# router-b gets a real compiled RPL export policy
+# (`tag-redistribute-with-community`) that runs `this.bgp.communities.add(..)`
+# instead of the default `accept-all`. Verifies a real RFC 1997 COMMUNITY
+# value survives RPL mutation -> wire encoding -> the kernel-real two-
+# container path -> wire decoding -> router-b's loc-rib, not just unit tests.
+COMMUNITY_AA=65001
+COMMUNITY_NN=100
+COMMUNITY_PACKED=$(( (COMMUNITY_AA << 16) | COMMUNITY_NN ))
+
+provision_communities_export() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  local policy_file
+  policy_file=$(mktemp /tmp/nos-verify-policy-XXXXXX.rpl)
+  chmod 644 "$policy_file"
+  cat >"$policy_file" <<EOF
+this.bgp.communities.add($COMMUNITY_AA:$COMMUNITY_NN)
+accept
+EOF
+  log "provisioning $name with an export policy tagging $REDISTRIBUTE_PREFIX with community $COMMUNITY_AA:$COMMUNITY_NN"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "$policy_file:/tmp/tag-redistribute-with-community.rpl:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --static-route "$REDISTRIBUTE_PREFIX" \
+    --static-gateway "$REDISTRIBUTE_GATEWAY" \
+    --redistribute \
+    --policy-name tag-redistribute-with-community \
+    --policy-source-file /tmp/tag-redistribute-with-community.rpl \
+    --export-policy tag-redistribute-with-community
+  rm -f "$policy_file"
+}
+
+cmd_check_communities() {
+  local before_a before_b before_listener_a before_listener_b before_local_a
+  before_a=$(established_count router-a)
+  before_b=$(established_count router-b)
+  before_listener_a=$(docker logs router-a 2>&1 | grep -c "bgp listener bound" || true)
+  before_listener_b=$(docker logs router-b 2>&1 | grep -c "bgp listener bound" || true)
+  # Captured here, before any restart, not after: nos-ribd's restart-
+  # triggered resend (see the kill step below) can land within ~100ms of
+  # nos-bgpd's listener coming back up, well before this function would
+  # otherwise get around to checking -- a baseline taken after the restart
+  # can already include that one push, leaving nothing left to wait for.
+  before_local_a=$(docker logs router-a 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep -c "loc-rib best path for $REDISTRIBUTE_PREFIX updated origin=Local" || true)
+
+  # Restart both sides *before* applying the new export policy, not after.
+  # A policy change alone can lose RFC 4271 §6.8 collision resolution against
+  # whichever side already has an Established session from an earlier phase
+  # -- an existing connection always beats a later collision (see
+  # bgp/CLAUDE.md's "Collision resolution") -- and which side that is is
+  # non-deterministic this late in the sequence. Restarting both processes
+  # first means neither side has anything left to collide against by the
+  # time the new policy is applied.
+  # Also kill router-a's nos-ribd (a separate process in the same
+  # container, owning redistribution -- see root CLAUDE.md's "Process
+  # supervision"): nos-ribd's push connection to nos-bgpd is write-only and
+  # fire-and-forget, so it has no passive way to notice the old nos-bgpd
+  # process died (see rib/src/bgp_client.rs's "a fresh connection always
+  # gets a complete update" -- that's the operative word, *connection*, not
+  # *config change*). Without this, nos-ribd would only rediscover the dead
+  # connection on its next write attempt, which never comes unless the
+  # redistributed route set itself changes -- leaving router-a's freshly
+  # restarted nos-bgpd permanently missing the route it's supposed to
+  # advertise. Killing nos-ribd too forces a brand new connection on its
+  # own restart, which unconditionally re-sends the full snapshot.
+  log "restarting both sides' nos-bgpd (and router-a's nos-ribd) for a clean baseline"
+  kill_process_by_name router-a nos-bgpd
+  kill_process_by_name router-a nos-ribd
+  kill_process_by_name router-b nos-bgpd
+  wait_for_count_increase router-a "bgp listener bound" "$before_listener_a" 60 \
+    && log "router-a: nos-bgpd back up" \
+    || { log "router-a: FAILED to come back up"; return 1; }
+  wait_for_count_increase router-b "bgp listener bound" "$before_listener_b" 60 \
+    && log "router-b: nos-bgpd back up" \
+    || { log "router-b: FAILED to come back up"; return 1; }
+
+  # Only now apply the new export policy: router-a's fresh process resolves
+  # it straight from its own startup config fetch, with no established
+  # session yet for a config-diff-triggered restart to race against.
+  provision_communities_export router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+
+  log "waiting for router-a to learn the redistributed route from nos-ribd"
+  wait_for_count_increase router-a "loc-rib best path for $REDISTRIBUTE_PREFIX updated origin=Local" "$before_local_a" 60 \
+    && log "router-a: learned $REDISTRIBUTE_PREFIX from nos-ribd" \
+    || { log "router-a: FAILED to learn $REDISTRIBUTE_PREFIX from nos-ribd"; return 1; }
+
+  log "waiting for both sides to establish with router-a's new export policy"
+  wait_for_count_increase router-a "bgp session established" "$before_a" 60 \
+    && log "router-a: established" \
+    || { log "router-a: FAILED to establish"; return 1; }
+  wait_for_count_increase router-b "bgp session established" "$before_b" 60 \
+    && log "router-b: established" \
+    || { log "router-b: FAILED to establish"; return 1; }
+
+  # Both sides' processes just restarted, so router-b's own loc-rib for this
+  # prefix was wiped along with everything else -- this line is guaranteed
+  # to be a genuinely fresh occurrence, not a stale one from an earlier phase.
+  log "waiting for router-b to have $REDISTRIBUTE_PREFIX with community $COMMUNITY_AA:$COMMUNITY_NN in loc-rib"
+  wait_for_log router-b "loc-rib best path for $REDISTRIBUTE_PREFIX updated" 60 \
+    && log "router-b: has $REDISTRIBUTE_PREFIX installed" \
+    || { log "router-b: FAILED to install $REDISTRIBUTE_PREFIX"; return 1; }
+
+  local logs_b line
+  # Same ANSI-stripping as the route-server scenario's as_path check.
+  logs_b=$(docker logs router-b 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g') || true
+  line=$(grep "loc-rib best path for $REDISTRIBUTE_PREFIX updated" <<<"$logs_b" | tail -n1) || true
+  if [[ -n "$line" ]] && grep -q "communities=\[$COMMUNITY_PACKED\]" <<<"$line"; then
+    log "router-b: learned route carries the RPL-tagged community $COMMUNITY_AA:$COMMUNITY_NN (packed=$COMMUNITY_PACKED)"
+  else
+    log "router-b: FAILED -- expected communities=[$COMMUNITY_PACKED] in: $line"
+    return 1
+  fi
+}
+
 cmd_logs() {
   echo "===== router-a ====="
   docker logs router-a 2>&1 | tail -n "${1:-200}"
@@ -625,6 +779,7 @@ case "${1:-}" in
   redistribute) cmd_check_redistribute ;;
   auth) cmd_check_auth ;;
   policy) cmd_check_policy ;;
+  communities) cmd_check_communities ;;
   reflector) cmd_check_reflector ;;
   route-server) cmd_check_route_server ;;
   logs) shift; cmd_logs "$@" ;;
@@ -637,11 +792,12 @@ case "${1:-}" in
     cmd_check_redistribute
     cmd_check_auth
     cmd_check_policy
+    cmd_check_communities
     cmd_check_reflector
     cmd_check_route_server
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|policy|reflector|route-server|logs [n]|down|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|policy|communities|reflector|route-server|logs [n]|down|all}" >&2
     exit 2
     ;;
 esac

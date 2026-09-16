@@ -93,6 +93,9 @@ fn to_policy_input(prefix: IpNet, route: &RibRoute) -> nos_rpl::Input<'_> {
             router_id: route.router_id,
             originator_id: route.originator_id,
             cluster_list: &route.cluster_list,
+            communities: &route.communities,
+            extended_communities: &route.extended_communities,
+            large_communities: &route.large_communities,
         },
     }
 }
@@ -108,9 +111,18 @@ fn apply_import_policy(
 ) -> Option<RibRoute> {
     match nos_rpl::vm::run(policy, &to_policy_input(prefix, &candidate)) {
         nos_rpl::Verdict::Reject => None,
-        nos_rpl::Verdict::Accept { local_pref, med } => {
+        nos_rpl::Verdict::Accept {
+            local_pref,
+            med,
+            communities,
+            extended_communities,
+            large_communities,
+        } => {
             candidate.local_pref = local_pref;
             candidate.med = med;
+            candidate.communities = communities;
+            candidate.extended_communities = extended_communities;
+            candidate.large_communities = large_communities;
             Some(candidate)
         }
     }
@@ -175,6 +187,15 @@ pub struct RibRoute {
     /// per route reflector this route has already passed through, nearest
     /// first. Always empty for `origin == Local`.
     pub cluster_list: Vec<Ipv4Addr>,
+    /// RFC 1997 `COMMUNITY` values, possibly rewritten by import policy.
+    /// Empty for a fresh `Local` route (no wire attributes to start from).
+    pub communities: Vec<u32>,
+    /// RFC 4360 `EXTENDED_COMMUNITIES` values, possibly rewritten by import
+    /// policy. Empty for a fresh `Local` route.
+    pub extended_communities: Vec<u64>,
+    /// RFC 8092 `LARGE_COMMUNITY` values, possibly rewritten by import
+    /// policy. Empty for a fresh `Local` route.
+    pub large_communities: Vec<(u32, u32, u32)>,
 }
 
 /// One update this instance needs to send out over a specific peer's
@@ -222,6 +243,14 @@ pub struct AdvertisedRoute {
     /// `Some` only when reflecting — the reflected route's `CLUSTER_LIST`
     /// with this instance's own cluster-id prepended. Empty otherwise.
     pub cluster_list: Vec<Ipv4Addr>,
+    /// Optional-transitive by RFC 1997/4360/8092 default, so — unlike
+    /// `local_pref`/`med` — these three propagate to every eligible peer
+    /// unconditionally, regardless of eBGP/iBGP; an export policy's
+    /// `.clear()`/`.remove()` is the only way to strip one toward a
+    /// specific peer.
+    pub communities: Vec<u32>,
+    pub extended_communities: Vec<u64>,
+    pub large_communities: Vec<(u32, u32, u32)>,
     /// RFC 7911 ADD-PATH identifier — `Some` only when
     /// `BgpRib::propagate_rs_view` is sending one of several concurrent
     /// paths for the same prefix to a `route_server_client` peer that
@@ -530,6 +559,9 @@ impl BgpRib {
                     received_at: Instant::now(),
                     originator_id: attrs.originator_id,
                     cluster_list: attrs.cluster_list.clone(),
+                    communities: attrs.communities.clone(),
+                    extended_communities: attrs.extended_communities.clone(),
+                    large_communities: attrs.large_communities.clone(),
                 };
                 for prefix in &update.nlri {
                     let prefix = IpNet::V4(*prefix);
@@ -639,7 +671,7 @@ impl BgpRib {
             return;
         }
         if let Some(route) = &best {
-            info!(origin = ?route.origin, as_path = ?route.as_path, "bgp: loc-rib best path for {prefix} updated");
+            info!(origin = ?route.origin, as_path = ?route.as_path, communities = ?route.communities, "bgp: loc-rib best path for {prefix} updated");
             self.loc_rib.insert(prefix, route.clone());
         } else {
             info!("bgp: loc-rib route for {prefix} withdrawn");
@@ -802,6 +834,9 @@ fn redistributed_route() -> RibRoute {
         received_at: Instant::now(),
         originator_id: None,
         cluster_list: Vec::new(),
+        communities: Vec::new(),
+        extended_communities: Vec::new(),
+        large_communities: Vec::new(),
     }
 }
 
@@ -925,10 +960,19 @@ fn build_advertisement(
     // policy's `local_pref`/`med`, not the pre-policy values.
     let best = match nos_rpl::vm::run(&outbox.export_policy, &to_policy_input(prefix, best)) {
         nos_rpl::Verdict::Reject => return None,
-        nos_rpl::Verdict::Accept { local_pref, med } => {
+        nos_rpl::Verdict::Accept {
+            local_pref,
+            med,
+            communities,
+            extended_communities,
+            large_communities,
+        } => {
             let mut adjusted = best.clone();
             adjusted.local_pref = local_pref;
             adjusted.med = med;
+            adjusted.communities = communities;
+            adjusted.extended_communities = extended_communities;
+            adjusted.large_communities = large_communities;
             adjusted
         }
     };
@@ -974,6 +1018,9 @@ fn build_advertisement(
         use_mp: outbox.mp_bgp_negotiated,
         originator_id,
         cluster_list,
+        communities: best.communities.clone(),
+        extended_communities: best.extended_communities.clone(),
+        large_communities: best.large_communities.clone(),
         path_id: None,
     })
 }
@@ -1146,6 +1193,9 @@ mod tests {
                 med: None,
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
             }),
             mp_reach: vec![],
             mp_unreach: vec![],
@@ -1217,6 +1267,84 @@ mod tests {
     }
 
     #[test]
+    fn import_policy_can_add_community() {
+        let mut rib = new_rib(65000);
+        let source = addr("10.0.0.1");
+        let observer = addr("10.0.0.2");
+        let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
+        let mut observer_rx = register_peer(&mut rib, observer, false, addr("10.0.0.253"));
+
+        let policy = nos_rpl::compile("this.bgp.communities.add(65000:100)\naccept\n").unwrap();
+        rib.handle_update(
+            source,
+            false,
+            v4("192.0.2.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![], "10.0.0.1"),
+            &policy,
+        );
+
+        let updates = recv_all(&mut observer_rx);
+        let adv = updates
+            .into_iter()
+            .find_map(|u| match u {
+                OutboundUpdate::Announce(a) if a.prefix == prefix("1.2.3.0/24") => Some(a),
+                _ => None,
+            })
+            .expect("expected an announcement for 1.2.3.0/24");
+        assert_eq!(adv.communities, vec![(65000 << 16) | 100]);
+    }
+
+    #[test]
+    fn export_policy_can_remove_community_for_one_peer() {
+        let mut rib = new_rib(65000);
+        let source = addr("10.0.0.1");
+        let allowed = addr("10.0.0.2");
+        let stripped = addr("10.0.0.3");
+        let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
+        let mut allowed_rx = register_peer(&mut rib, allowed, false, addr("10.0.0.253"));
+
+        let (tx, mut stripped_rx) = mpsc::unbounded_channel();
+        rib.peer_established(
+            stripped,
+            false,
+            Some(addr("10.0.0.252")),
+            all_afs(),
+            false,
+            None,
+            false,
+            false,
+            HashSet::new(),
+            Arc::new(nos_rpl::compile("this.bgp.communities.clear()\naccept\n").unwrap()),
+            tx,
+        );
+
+        let import_policy =
+            nos_rpl::compile("this.bgp.communities.add(65000:100)\naccept\n").unwrap();
+        rib.handle_update(
+            source,
+            false,
+            v4("192.0.2.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+            &import_policy,
+        );
+
+        let find_adv = |rx: &mut mpsc::UnboundedReceiver<OutboundUpdate>| {
+            recv_all(rx)
+                .into_iter()
+                .find_map(|u| match u {
+                    OutboundUpdate::Announce(a) if a.prefix == prefix("1.2.3.0/24") => Some(a),
+                    _ => None,
+                })
+                .expect("expected an announcement for 1.2.3.0/24")
+        };
+        assert_eq!(
+            find_adv(&mut allowed_rx).communities,
+            vec![(65000 << 16) | 100]
+        );
+        assert!(find_adv(&mut stripped_rx).communities.is_empty());
+    }
+
+    #[test]
     fn export_policy_reject_suppresses_advertisement_to_one_peer() {
         let mut rib = new_rib(65000);
         let source = addr("10.0.0.1");
@@ -1266,6 +1394,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("192.168.1.0/24"),
                 as_path: vec![65000],
@@ -1292,6 +1423,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("192.168.1.0/24"),
                 as_path: vec![],
@@ -1394,6 +1528,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("1.2.3.0/24"),
                 as_path: vec![65000, 65001],
@@ -1447,6 +1584,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("1.2.3.0/24"),
                 as_path: vec![65001],
@@ -1490,6 +1630,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("1.2.3.0/24"),
                 as_path: vec![65001],
@@ -1530,6 +1673,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("1.2.3.0/24"),
                 as_path: vec![65000, 65001],
@@ -1562,6 +1708,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("192.168.1.0/24"),
                 as_path: vec![],
@@ -1622,6 +1771,9 @@ mod tests {
                     med: None,
                     originator_id: None,
                     cluster_list: vec![],
+                    communities: Vec::new(),
+                    extended_communities: Vec::new(),
+                    large_communities: Vec::new(),
                 }),
                 ..empty_update()
             },
@@ -1643,6 +1795,9 @@ mod tests {
                     med: None,
                     originator_id: None,
                     cluster_list: vec![],
+                    communities: Vec::new(),
+                    extended_communities: Vec::new(),
+                    large_communities: Vec::new(),
                 }),
                 ..empty_update()
             },
@@ -1655,6 +1810,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("9.9.9.0/24"),
                 as_path: vec![],
@@ -1695,6 +1853,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("5.5.5.0/24"),
                 as_path: vec![65000],
@@ -1843,6 +2004,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("192.168.1.0/24"),
                 as_path: vec![65000],
@@ -1869,6 +2033,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("2001:db8:1::/48"),
                 as_path: vec![65000],
@@ -1920,6 +2087,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("192.168.1.0/24"),
                 as_path: vec![65000],
@@ -1970,6 +2140,9 @@ mod tests {
                 med,
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
             }),
             ..empty_update()
         }
@@ -2020,6 +2193,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("9.9.9.0/24"),
                 as_path: vec![65001],
@@ -2079,6 +2255,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("9.9.9.0/24"),
                 as_path: vec![65001],
@@ -2126,6 +2305,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("9.9.9.0/24"),
                 as_path: vec![65001],
@@ -2205,6 +2387,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("9.9.9.0/24"),
                 as_path: vec![65000, 65001],
@@ -2269,6 +2454,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("9.9.9.0/24"),
                 // Destination is eBGP, so our own ASN is prepended and
@@ -2317,6 +2505,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("9.9.9.0/24"),
                 as_path: vec![65001],
@@ -2382,6 +2573,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: Some(v4("192.0.2.1")),
                 cluster_list: vec![cluster_id],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("1.2.3.0/24"),
                 as_path: vec![],
@@ -2426,6 +2620,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: Some(v4("192.0.2.2")),
                 cluster_list: vec![cluster_id],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("4.5.6.0/24"),
                 as_path: vec![],
@@ -2498,6 +2695,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("192.168.1.0/24"),
                 as_path: vec![65000],
@@ -2515,6 +2715,9 @@ mod tests {
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
                 cluster_list: vec![],
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("192.168.1.0/24"),
                 as_path: vec![], // route-server-client: transparent, no local-asn prepend

@@ -1,8 +1,23 @@
+use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
 
 use crate::schema::FieldId;
+
+/// One community value, tagged by kind so `Op::CommunityAdd`/`Remove`/
+/// `ListContainsCommunity` know which of `Input`'s three community slices to
+/// operate on without also carrying a redundant `FieldId` match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommunityValue {
+    /// RFC 1997 standard community, packed `(AA << 16) | NN`.
+    Standard(u32),
+    /// RFC 4360 extended community, packed as its 8 raw wire bytes (one
+    /// big-endian `u64`).
+    Extended(u64),
+    /// RFC 8092 large community: global admin, local data 1, local data 2.
+    Large(u32, u32, u32),
+}
 
 /// Mirrors `nos_bgp::message::Origin`'s discriminants exactly (`Igp = 0`,
 /// `Egp = 1`, `Incomplete = 2`) so `Value::Enum(u8)` round-trips without a
@@ -38,6 +53,10 @@ pub enum Op {
     FieldLen(FieldId),
     ListContainsInt(FieldId, u32),
     ListContainsIp(FieldId, Ipv4Addr),
+    ListContainsCommunity(FieldId, CommunityValue),
+    CommunityAdd(FieldId, CommunityValue),
+    CommunityRemove(FieldId, CommunityValue),
+    CommunityClear(FieldId),
     Add,
     Sub,
     CmpEq,
@@ -82,11 +101,20 @@ pub struct BgpInput<'a> {
     pub router_id: Option<Ipv4Addr>,
     pub originator_id: Option<Ipv4Addr>,
     pub cluster_list: &'a [Ipv4Addr],
+    pub communities: &'a [u32],
+    pub extended_communities: &'a [u64],
+    pub large_communities: &'a [(u32, u32, u32)],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-    Accept { local_pref: u32, med: Option<u32> },
+    Accept {
+        local_pref: u32,
+        med: Option<u32>,
+        communities: Vec<u32>,
+        extended_communities: Vec<u64>,
+        large_communities: Vec<(u32, u32, u32)>,
+    },
     Reject,
 }
 
@@ -102,12 +130,21 @@ pub const MAX_STACK_DEPTH: usize = 32;
 /// Executes `policy` against `input`. `local_pref`/`med` start at `input`'s
 /// own values and are only ever changed by a `SetField` the script actually
 /// executes — reading `this.bgp.local_pref` after a `set` sees the updated
-/// value, exactly like a normal imperative variable.
+/// value, exactly like a normal imperative variable. The three community
+/// slices follow the same pattern via `Cow`, the one deliberate exception to
+/// this module's "zero heap allocation on the hot path" stack — a
+/// `CommunityAdd`/`Remove`/`Clear` needs to hand back an owned `Vec` through
+/// `Verdict`, but `Cow::to_mut()` only clones on a script's first actual
+/// write, and `Reject` never pays for it at all.
 pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
     let mut stack = [Value::Int(0); MAX_STACK_DEPTH];
     let mut sp = 0usize;
     let mut cur_local_pref = input.bgp.local_pref;
     let mut cur_med = input.bgp.med;
+    let mut cur_communities: Cow<[u32]> = Cow::Borrowed(input.bgp.communities);
+    let mut cur_extended_communities: Cow<[u64]> = Cow::Borrowed(input.bgp.extended_communities);
+    let mut cur_large_communities: Cow<[(u32, u32, u32)]> =
+        Cow::Borrowed(input.bgp.large_communities);
     let mut pc = 0usize;
 
     macro_rules! push {
@@ -144,6 +181,9 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                     FieldId::Prefix => i64::from(input.prefix.prefix_len()),
                     FieldId::BgpAsPath => len_as_int(input.bgp.as_path.len()),
                     FieldId::BgpClusterList => len_as_int(input.bgp.cluster_list.len()),
+                    FieldId::BgpCommunities => len_as_int(cur_communities.len()),
+                    FieldId::BgpExtCommunities => len_as_int(cur_extended_communities.len()),
+                    FieldId::BgpLargeCommunities => len_as_int(cur_large_communities.len()),
                     _ => unreachable!("check.rs rejects FieldLen for {id:?}"),
                 };
                 push!(Value::Int(n));
@@ -159,6 +199,21 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                 let found = match id {
                     FieldId::BgpClusterList => input.bgp.cluster_list.contains(addr),
                     _ => unreachable!("check.rs rejects ListContainsIp for {id:?}"),
+                };
+                push!(Value::Bool(found));
+            }
+            Op::ListContainsCommunity(id, val) => {
+                let found = match (id, val) {
+                    (FieldId::BgpCommunities, CommunityValue::Standard(n)) => {
+                        cur_communities.contains(n)
+                    }
+                    (FieldId::BgpExtCommunities, CommunityValue::Extended(n)) => {
+                        cur_extended_communities.contains(n)
+                    }
+                    (FieldId::BgpLargeCommunities, CommunityValue::Large(ga, l1, l2)) => {
+                        cur_large_communities.contains(&(*ga, *l1, *l2))
+                    }
+                    _ => unreachable!("codegen.rs pairs FieldId/CommunityValue consistently"),
                 };
                 push!(Value::Bool(found));
             }
@@ -239,10 +294,54 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                     _ => unreachable!("check.rs rejects SetField for {id:?}"),
                 }
             }
+            Op::CommunityAdd(id, val) => match (id, val) {
+                (FieldId::BgpCommunities, CommunityValue::Standard(n)) => {
+                    let list = cur_communities.to_mut();
+                    if !list.contains(n) {
+                        list.push(*n);
+                    }
+                }
+                (FieldId::BgpExtCommunities, CommunityValue::Extended(n)) => {
+                    let list = cur_extended_communities.to_mut();
+                    if !list.contains(n) {
+                        list.push(*n);
+                    }
+                }
+                (FieldId::BgpLargeCommunities, CommunityValue::Large(ga, l1, l2)) => {
+                    let list = cur_large_communities.to_mut();
+                    let v = (*ga, *l1, *l2);
+                    if !list.contains(&v) {
+                        list.push(v);
+                    }
+                }
+                _ => unreachable!("codegen.rs pairs FieldId/CommunityValue consistently"),
+            },
+            Op::CommunityRemove(id, val) => match (id, val) {
+                (FieldId::BgpCommunities, CommunityValue::Standard(n)) => {
+                    cur_communities.to_mut().retain(|c| c != n);
+                }
+                (FieldId::BgpExtCommunities, CommunityValue::Extended(n)) => {
+                    cur_extended_communities.to_mut().retain(|c| c != n);
+                }
+                (FieldId::BgpLargeCommunities, CommunityValue::Large(ga, l1, l2)) => {
+                    let v = (*ga, *l1, *l2);
+                    cur_large_communities.to_mut().retain(|c| *c != v);
+                }
+                _ => unreachable!("codegen.rs pairs FieldId/CommunityValue consistently"),
+            },
+            Op::CommunityClear(id) => match id {
+                FieldId::BgpCommunities => cur_communities.to_mut().clear(),
+                FieldId::BgpExtCommunities => cur_extended_communities.to_mut().clear(),
+                FieldId::BgpLargeCommunities => cur_large_communities.to_mut().clear(),
+                _ => unreachable!("check.rs/codegen.rs reject CommunityClear for {id:?}"),
+            },
             Op::Accept => {
                 return Verdict::Accept {
                     local_pref: cur_local_pref,
                     med: cur_med,
+                    communities: cur_communities.into_owned(),
+                    extended_communities: cur_extended_communities.into_owned(),
+                    large_communities: cur_large_communities.into_owned(),
                 }
             }
             Op::Reject => return Verdict::Reject,

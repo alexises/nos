@@ -107,6 +107,9 @@ mod tests {
                 router_id: None,
                 originator_id: None,
                 cluster_list: &[],
+                communities: &[],
+                extended_communities: &[],
+                large_communities: &[],
             },
         };
         matches!(

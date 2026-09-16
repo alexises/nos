@@ -82,13 +82,19 @@ mod tests {
                 router_id: None,
                 originator_id: None,
                 cluster_list: &[],
+                communities: &[],
+                extended_communities: &[],
+                large_communities: &[],
             },
         };
         assert_eq!(
             vm::run(&ACCEPT_ALL, &input),
             Verdict::Accept {
                 local_pref: 100,
-                med: None
+                med: None,
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
             }
         );
     }
@@ -107,6 +113,9 @@ mod tests {
                 router_id: None,
                 originator_id: None,
                 cluster_list: &[],
+                communities: &[],
+                extended_communities: &[],
+                large_communities: &[],
             },
         };
         assert_eq!(vm::run(&DENY_ALL, &input), Verdict::Reject);

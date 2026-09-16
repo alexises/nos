@@ -19,6 +19,11 @@ impl Parser<'_> {
         &self.tokens[self.pos].token
     }
 
+    fn peek_at(&self, offset: usize) -> &Token {
+        let idx = (self.pos + offset).min(self.tokens.len() - 1);
+        &self.tokens[idx].token
+    }
+
     fn line(&self) -> usize {
         self.tokens[self.pos].line
     }
@@ -78,6 +83,7 @@ impl Parser<'_> {
         let kind = match self.peek() {
             Token::If => self.parse_if()?,
             Token::Set => self.parse_set()?,
+            Token::Ident(name) if name == "this" => self.parse_this_stmt()?,
             Token::Accept => {
                 self.advance();
                 self.expect(&Token::Newline)?;
@@ -96,6 +102,40 @@ impl Parser<'_> {
             }
         };
         Ok(Stmt { kind, line })
+    }
+
+    /// `this.<field>.add(..)` / `.remove(..)` / `.clear()` — parsed by
+    /// reusing `parse_postfix` and then requiring the last segment to be
+    /// exactly one of these three method calls.
+    fn parse_this_stmt(&mut self) -> Result<StmtKind, CompileError> {
+        let line = self.line();
+        let expr = self.parse_postfix()?;
+        let ExprKind::This(mut segments) = expr.kind else {
+            unreachable!("parse_postfix always returns ExprKind::This for a 'this'-led atom");
+        };
+        let Some(Postfix::Call(name, mut args)) = segments.pop() else {
+            return Err(CompileError::new(
+                line,
+                "expected a statement: 'set ... = ...' or 'this.<field>.add(..)'/'.remove(..)'/'.clear()'",
+            ));
+        };
+        let target = Expr {
+            kind: ExprKind::This(segments),
+            line,
+        };
+        let kind = match (name.as_str(), args.len()) {
+            ("add", 1) => StmtKind::CommunityAdd(target, args.remove(0)),
+            ("remove", 1) => StmtKind::CommunityRemove(target, args.remove(0)),
+            ("clear", 0) => StmtKind::CommunityClear(target),
+            _ => {
+                return Err(CompileError::new(
+                    line,
+                    format!("unknown statement '.{name}(..)'"),
+                ))
+            }
+        };
+        self.expect(&Token::Newline)?;
+        Ok(kind)
     }
 
     fn parse_if(&mut self) -> Result<StmtKind, CompileError> {
@@ -257,7 +297,27 @@ impl Parser<'_> {
     fn parse_atom(&mut self) -> Result<Expr, CompileError> {
         let line = self.line();
         let kind = match self.advance() {
-            Token::Int(n) => ExprKind::IntLit(n),
+            Token::Int(n) => {
+                // `65000:100` / `3:2:900` — a colon-literal community value.
+                // Only consume `Colon` here when it's immediately followed by
+                // another `Int`, so the block-starting colon in `if cond:`
+                // (always followed by `Newline`) is left untouched.
+                let mut parts = vec![n];
+                while matches!(self.peek(), Token::Colon)
+                    && matches!(self.peek_at(1), Token::Int(_))
+                {
+                    self.advance(); // Colon
+                    let Token::Int(next) = self.advance() else {
+                        unreachable!("peek_at(1) just confirmed an Int");
+                    };
+                    parts.push(next);
+                }
+                if parts.len() == 1 {
+                    ExprKind::IntLit(parts[0])
+                } else {
+                    ExprKind::ColonLit(parts)
+                }
+            }
             Token::Prefix(p) => ExprKind::PrefixLit(p),
             Token::IpAddr(a) => ExprKind::IpLit(a),
             Token::LParen => {
@@ -364,5 +424,44 @@ mod tests {
             panic!("expected if");
         };
         assert!(else_body.is_none());
+    }
+
+    #[test]
+    fn colon_literal_parses_as_colon_lit() {
+        let policy = parse_src("this.bgp.communities.add(65000:100)\naccept\n");
+        let StmtKind::CommunityAdd(_, value) = &policy[0].kind else {
+            panic!("expected CommunityAdd");
+        };
+        assert_eq!(value.kind, ExprKind::ColonLit(vec![65000, 100]));
+    }
+
+    #[test]
+    fn three_part_colon_literal() {
+        let policy = parse_src("this.bgp.large_communities.add(65000:1:2)\naccept\n");
+        let StmtKind::CommunityAdd(_, value) = &policy[0].kind else {
+            panic!("expected CommunityAdd");
+        };
+        assert_eq!(value.kind, ExprKind::ColonLit(vec![65000, 1, 2]));
+    }
+
+    #[test]
+    fn block_colon_is_not_consumed_as_a_colon_literal() {
+        let policy = parse_src("if this.bgp.local_pref < 100:\n    reject\nelse:\n    accept\n");
+        let StmtKind::If { branches, .. } = &policy[0].kind else {
+            panic!("expected if");
+        };
+        let ExprKind::Binary(BinOp::Lt, _, rhs) = &branches[0].0.kind else {
+            panic!("expected <");
+        };
+        assert_eq!(rhs.kind, ExprKind::IntLit(100));
+    }
+
+    #[test]
+    fn community_remove_and_clear_parse() {
+        let policy = parse_src(
+            "this.bgp.communities.remove(65000:100)\nthis.bgp.communities.clear()\naccept\n",
+        );
+        assert!(matches!(policy[0].kind, StmtKind::CommunityRemove(..)));
+        assert!(matches!(policy[1].kind, StmtKind::CommunityClear(..)));
     }
 }

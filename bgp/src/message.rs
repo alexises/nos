@@ -75,6 +75,13 @@ const ATTR_ORIGINATOR_ID: u8 = 9;
 const ATTR_CLUSTER_LIST: u8 = 10;
 const ATTR_MP_REACH_NLRI: u8 = 14;
 const ATTR_MP_UNREACH_NLRI: u8 = 15;
+/// RFC 1997 §3 standard community — a list of 4-byte values.
+const ATTR_COMMUNITY: u8 = 8;
+/// RFC 4360 §3 extended community — a list of 8-byte (type/subtype/value)
+/// values.
+const ATTR_EXTENDED_COMMUNITIES: u8 = 16;
+/// RFC 8092 §3 large community — a list of 12-byte (3×u32) values.
+const ATTR_LARGE_COMMUNITY: u8 = 32;
 /// RFC 4271 §4.3 attribute flag bit indicating a 2-byte (rather than 1-byte)
 /// attribute length field follows the type byte.
 const ATTR_FLAG_EXTENDED_LENGTH: u8 = 0x10;
@@ -85,6 +92,9 @@ const ATTR_FLAG_WELL_KNOWN_TRANSITIVE: u8 = 0x40;
 /// `MP_UNREACH_NLRI`'s own flag value (unlike the four well-known attributes
 /// above).
 const ATTR_FLAG_OPTIONAL_NON_TRANSITIVE: u8 = 0x80;
+/// Optional transitive, per RFC 1997/4360/8092 §3 — all three community
+/// attribute types' own flag value.
+const ATTR_FLAG_OPTIONAL_TRANSITIVE: u8 = 0xC0;
 const AS_PATH_SEGMENT_SEQUENCE: u8 = 2;
 /// `AS_PATH` segments are encoded as `count: u8`, so a single segment can carry
 /// at most this many ASNs before it must be split into another segment.
@@ -261,6 +271,17 @@ pub struct PathAttributes {
     /// carried no `CLUSTER_LIST` at all (never reflected, or a reflector
     /// omitting it purely because a route with no prior list needed one).
     pub cluster_list: Vec<Ipv4Addr>,
+    /// RFC 1997 `COMMUNITY` — each value packed `(AA << 16) | NN`. Empty iff
+    /// the wire message carried no `COMMUNITY` attribute.
+    pub communities: Vec<u32>,
+    /// RFC 4360 `EXTENDED_COMMUNITIES` — each value is its 8 raw wire bytes
+    /// read as one big-endian `u64` (type octet in the high byte). Empty iff
+    /// the wire message carried no `EXTENDED_COMMUNITIES` attribute.
+    pub extended_communities: Vec<u64>,
+    /// RFC 8092 `LARGE_COMMUNITY` — global administrator, local data 1,
+    /// local data 2. Empty iff the wire message carried no `LARGE_COMMUNITY`
+    /// attribute.
+    pub large_communities: Vec<(u32, u32, u32)>,
 }
 
 /// RFC 4760 `MP_REACH_NLRI`: one AFI/SAFI batch of announced routes sharing
@@ -313,7 +334,11 @@ pub struct UpdateMessage {
 }
 
 /// A decoded BGP message.
+// ponytail: `Update`'s `PathAttributes` (now carrying 3 community `Vec`s)
+// outsizes the other variants; boxing it would touch every construction
+// site for a one-off-per-message decode, not a hot repeated allocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum BgpMessage {
     Open(OpenMessage),
     Update(UpdateMessage),
@@ -785,15 +810,19 @@ struct ParsedAttributes {
     med: Option<u32>,
     originator_id: Option<Ipv4Addr>,
     cluster_list: Vec<Ipv4Addr>,
+    communities: Vec<u32>,
+    extended_communities: Vec<u64>,
+    large_communities: Vec<(u32, u32, u32)>,
     mp_reach: Vec<MpReachNlri>,
     mp_unreach: Vec<MpUnreachNlri>,
 }
 
 /// Walks the TLV path-attribute list, decoding `ORIGIN`/`AS_PATH`/`NEXT_HOP`/
 /// `LOCAL_PREF`/`MULTI_EXIT_DISC`/`ORIGINATOR_ID`/`CLUSTER_LIST`/
-/// `MP_REACH_NLRI`/`MP_UNREACH_NLRI` and skipping anything else by its own
-/// declared length (mirrors `parse_optional_parameters`'s handling of
-/// unknown OPEN capabilities). `add_path_afis` is threaded down into
+/// `COMMUNITY`/`EXTENDED_COMMUNITIES`/`LARGE_COMMUNITY`/`MP_REACH_NLRI`/
+/// `MP_UNREACH_NLRI` and skipping anything else by its own declared length
+/// (mirrors `parse_optional_parameters`'s handling of unknown OPEN
+/// capabilities). `add_path_afis` is threaded down into
 /// `MP_REACH_NLRI`/`MP_UNREACH_NLRI` decoding.
 fn parse_path_attributes(
     mut data: &[u8],
@@ -806,6 +835,9 @@ fn parse_path_attributes(
     let mut med = None;
     let mut originator_id = None;
     let mut cluster_list = Vec::new();
+    let mut communities = Vec::new();
+    let mut extended_communities = Vec::new();
+    let mut large_communities = Vec::new();
     let mut mp_reach = Vec::new();
     let mut mp_unreach = Vec::new();
 
@@ -879,6 +911,45 @@ fn parse_path_attributes(
                     .map(|c| Ipv4Addr::new(c[0], c[1], c[2], c[3]))
                     .collect();
             }
+            ATTR_COMMUNITY => {
+                if !value.len().is_multiple_of(4) {
+                    return Err(WireError::MalformedUpdate);
+                }
+                communities = value
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| u32::from_be_bytes(*c))
+                    .collect();
+            }
+            ATTR_EXTENDED_COMMUNITIES => {
+                if !value.len().is_multiple_of(8) {
+                    return Err(WireError::MalformedUpdate);
+                }
+                extended_communities = value
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|c| u64::from_be_bytes(*c))
+                    .collect();
+            }
+            ATTR_LARGE_COMMUNITY => {
+                if !value.len().is_multiple_of(12) {
+                    return Err(WireError::MalformedUpdate);
+                }
+                large_communities = value
+                    .as_chunks::<12>()
+                    .0
+                    .iter()
+                    .map(|c| {
+                        (
+                            u32::from_be_bytes(c[0..4].try_into().unwrap()),
+                            u32::from_be_bytes(c[4..8].try_into().unwrap()),
+                            u32::from_be_bytes(c[8..12].try_into().unwrap()),
+                        )
+                    })
+                    .collect();
+            }
             ATTR_MP_REACH_NLRI => mp_reach.push(decode_mp_reach(value, add_path_afis)?),
             ATTR_MP_UNREACH_NLRI => mp_unreach.push(decode_mp_unreach(value, add_path_afis)?),
             _ => {
@@ -898,6 +969,9 @@ fn parse_path_attributes(
         med,
         originator_id,
         cluster_list,
+        communities,
+        extended_communities,
+        large_communities,
         mp_reach,
         mp_unreach,
     })
@@ -1083,6 +1157,9 @@ fn parse_update(body: &[u8], add_path_afis: &HashSet<u16>) -> Result<UpdateMessa
             med: parsed.med,
             originator_id: parsed.originator_id,
             cluster_list: parsed.cluster_list,
+            communities: parsed.communities,
+            extended_communities: parsed.extended_communities,
+            large_communities: parsed.large_communities,
         })
     } else {
         None
@@ -1194,6 +1271,50 @@ fn encode_attributes(update: &UpdateMessage) -> Vec<u8> {
                 &mut out,
                 ATTR_FLAG_OPTIONAL_NON_TRANSITIVE,
                 ATTR_CLUSTER_LIST,
+                &value,
+            );
+        }
+        if !attrs.communities.is_empty() {
+            let value: Vec<u8> = attrs
+                .communities
+                .iter()
+                .flat_map(|c| c.to_be_bytes())
+                .collect();
+            encode_attribute(
+                &mut out,
+                ATTR_FLAG_OPTIONAL_TRANSITIVE,
+                ATTR_COMMUNITY,
+                &value,
+            );
+        }
+        if !attrs.extended_communities.is_empty() {
+            let value: Vec<u8> = attrs
+                .extended_communities
+                .iter()
+                .flat_map(|c| c.to_be_bytes())
+                .collect();
+            encode_attribute(
+                &mut out,
+                ATTR_FLAG_OPTIONAL_TRANSITIVE,
+                ATTR_EXTENDED_COMMUNITIES,
+                &value,
+            );
+        }
+        if !attrs.large_communities.is_empty() {
+            let value: Vec<u8> = attrs
+                .large_communities
+                .iter()
+                .flat_map(|(ga, l1, l2)| {
+                    ga.to_be_bytes()
+                        .into_iter()
+                        .chain(l1.to_be_bytes())
+                        .chain(l2.to_be_bytes())
+                })
+                .collect();
+            encode_attribute(
+                &mut out,
+                ATTR_FLAG_OPTIONAL_TRANSITIVE,
+                ATTR_LARGE_COMMUNITY,
                 &value,
             );
         }
@@ -1397,6 +1518,9 @@ mod tests {
             med: None,
             originator_id: None,
             cluster_list: vec![],
+            communities: vec![],
+            extended_communities: vec![],
+            large_communities: vec![],
         }
     }
 
@@ -1420,6 +1544,24 @@ mod tests {
                 "10.2.0.0/16".parse().unwrap(),
             ],
             attributes: Some(attrs(vec![65001, 65002], Some(200))),
+            ..empty_update()
+        };
+        assert_eq!(
+            roundtrip(BgpMessage::Update(update.clone())),
+            BgpMessage::Update(update)
+        );
+    }
+
+    #[test]
+    fn update_with_communities_roundtrips() {
+        let update = UpdateMessage {
+            nlri: vec!["10.1.0.0/24".parse().unwrap()],
+            attributes: Some(PathAttributes {
+                communities: vec![(65000 << 16) | 100, 0xFFFF_FF01],
+                extended_communities: vec![(0u64 << 56) | (2u64 << 48) | 100],
+                large_communities: vec![(65000, 1, 1)],
+                ..attrs(vec![65001], Some(200))
+            }),
             ..empty_update()
         };
         assert_eq!(
@@ -1568,6 +1710,9 @@ mod tests {
                 med: None,
                 originator_id: None,
                 cluster_list: vec![],
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
             })
         );
     }

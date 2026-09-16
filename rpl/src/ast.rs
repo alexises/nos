@@ -40,6 +40,11 @@ pub enum ExprKind {
     IpLit(IpAddr),
     /// `origin.igp` — an enum type name plus a variant name.
     EnumLit(String, String),
+    /// `65000:100` / `3:2:900` — a colon-separated run of integer literals.
+    /// Only valid as a direct argument to `.contains(..)`/`.add(..)`/
+    /// `.remove(..)` on a community-list field; `codegen.rs` decides arity
+    /// and packing from the target field's `FieldType`, not this node alone.
+    ColonLit(Vec<i64>),
     /// `this` followed by zero or more postfix segments.
     This(Vec<Postfix>),
     Unary(UnaryOp, Box<Expr>),
@@ -64,6 +69,15 @@ pub enum StmtKind {
         else_body: Option<Vec<Stmt>>,
     },
     Set(Expr, Expr),
+    /// `this.bgp.communities.add(65000:100)` — adds one value to a settable
+    /// community-list field.
+    CommunityAdd(Expr, Expr),
+    /// `this.bgp.communities.remove(65000:100)` — removes one value, if
+    /// present, from a settable community-list field.
+    CommunityRemove(Expr, Expr),
+    /// `this.bgp.communities.clear()` — empties a settable community-list
+    /// field.
+    CommunityClear(Expr),
     Accept,
     Reject,
 }

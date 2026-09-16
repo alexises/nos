@@ -8,7 +8,7 @@ use std::net::IpAddr;
 
 use crate::ast::{BinOp, Expr, ExprKind, Policy, Postfix, Stmt, StmtKind, UnaryOp};
 use crate::schema::{self, FieldInfo, FieldType};
-use crate::vm::{CompiledPolicy, Op, MAX_STACK_DEPTH};
+use crate::vm::{CommunityValue, CompiledPolicy, Op, MAX_STACK_DEPTH};
 use crate::CompileError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +83,26 @@ impl Codegen {
                 expect_ty(value_ty, Ty::Int, value.line)?;
                 self.emit(Op::SetField(info.id), -1);
             }
+            StmtKind::CommunityAdd(target, value) => {
+                let info = resolve_settable_field(target)?;
+                let val = community_value_for(info.ty, value)?;
+                self.emit(Op::CommunityAdd(info.id, val), 0);
+            }
+            StmtKind::CommunityRemove(target, value) => {
+                let info = resolve_settable_field(target)?;
+                let val = community_value_for(info.ty, value)?;
+                self.emit(Op::CommunityRemove(info.id, val), 0);
+            }
+            StmtKind::CommunityClear(target) => {
+                let info = resolve_settable_field(target)?;
+                if !is_community_list(info.ty) {
+                    return Err(CompileError::new(
+                        target.line,
+                        "'.clear()' is only valid on a community-list field",
+                    ));
+                }
+                self.emit(Op::CommunityClear(info.id), 0);
+            }
             StmtKind::If {
                 branches,
                 else_body,
@@ -152,6 +172,10 @@ impl Codegen {
                 self.emit(Op::LoadConstEnum(discriminant), 1);
                 Ok(Ty::Enum(enum_name))
             }
+            ExprKind::ColonLit(_) => Err(CompileError::new(
+                expr.line,
+                "a colon-separated literal is only valid as an argument to '.contains(..)', '.add(..)', or '.remove(..)'",
+            )),
             ExprKind::This(segments) => self.compile_field_access(segments, expr.line),
             ExprKind::Unary(UnaryOp::Not, inner) => {
                 let ty = self.compile_expr(inner)?;
@@ -305,7 +329,11 @@ impl Codegen {
                 line,
                 "this field may be unset and can't be read directly yet (only 'set' is supported)",
             )),
-            FieldType::ListInt | FieldType::ListIp => Err(CompileError::new(
+            FieldType::ListInt
+            | FieldType::ListIp
+            | FieldType::ListCommunity
+            | FieldType::ListExtCommunity
+            | FieldType::ListLargeCommunity => Err(CompileError::new(
                 line,
                 "this field is a list — use '.length' or '.contains(...)'",
             )),
@@ -318,7 +346,12 @@ impl Codegen {
         line: usize,
     ) -> Result<Ty, CompileError> {
         match info.ty {
-            FieldType::Prefix | FieldType::ListInt | FieldType::ListIp => {
+            FieldType::Prefix
+            | FieldType::ListInt
+            | FieldType::ListIp
+            | FieldType::ListCommunity
+            | FieldType::ListExtCommunity
+            | FieldType::ListLargeCommunity => {
                 self.emit(Op::FieldLen(info.id), 1);
                 Ok(Ty::Int)
             }
@@ -365,11 +398,85 @@ impl Codegen {
                 self.emit(Op::ListContainsIp(info.id, addr), 1);
                 Ok(Ty::Bool)
             }
+            FieldType::ListCommunity
+            | FieldType::ListExtCommunity
+            | FieldType::ListLargeCommunity => {
+                let val = community_value_for(info.ty, &args[0])?;
+                self.emit(Op::ListContainsCommunity(info.id, val), 1);
+                Ok(Ty::Bool)
+            }
             _ => Err(CompileError::new(
                 line,
                 "'.contains(..)' is only valid on a list field",
             )),
         }
+    }
+}
+
+fn is_community_list(ty: FieldType) -> bool {
+    matches!(
+        ty,
+        FieldType::ListCommunity | FieldType::ListExtCommunity | FieldType::ListLargeCommunity
+    )
+}
+
+/// Validates and packs a `.contains(..)`/`.add(..)`/`.remove(..)` argument
+/// against the target field's community kind. Shared by all three call
+/// sites so arity/range checking lives in one place.
+fn community_value_for(ty: FieldType, expr: &Expr) -> Result<CommunityValue, CompileError> {
+    let ExprKind::ColonLit(parts) = &expr.kind else {
+        return Err(CompileError::new(
+            expr.line,
+            "this argument requires a colon-separated community literal, e.g. 65000:100",
+        ));
+    };
+    let range_err = || CompileError::new(expr.line, "community literal part out of range");
+    match ty {
+        FieldType::ListCommunity => {
+            let [aa, nn] = parts.as_slice() else {
+                return Err(CompileError::new(
+                    expr.line,
+                    "a standard community literal takes exactly two parts, e.g. 65000:100",
+                ));
+            };
+            let aa = u16::try_from(*aa).map_err(|_| range_err())?;
+            let nn = u16::try_from(*nn).map_err(|_| range_err())?;
+            Ok(CommunityValue::Standard(
+                (u32::from(aa) << 16) | u32::from(nn),
+            ))
+        }
+        FieldType::ListExtCommunity => {
+            let [ty_octet, subtype, value] = parts.as_slice() else {
+                return Err(CompileError::new(
+                    expr.line,
+                    "an extended community literal takes exactly three parts, e.g. 0:2:100",
+                ));
+            };
+            let ty_octet = u8::try_from(*ty_octet).map_err(|_| range_err())?;
+            let subtype = u8::try_from(*subtype).map_err(|_| range_err())?;
+            let value = u64::try_from(*value)
+                .ok()
+                .filter(|v| *v < (1u64 << 48))
+                .ok_or_else(range_err)?;
+            let packed = (u64::from(ty_octet) << 56) | (u64::from(subtype) << 48) | value;
+            Ok(CommunityValue::Extended(packed))
+        }
+        FieldType::ListLargeCommunity => {
+            let [ga, l1, l2] = parts.as_slice() else {
+                return Err(CompileError::new(
+                    expr.line,
+                    "a large community literal takes exactly three parts, e.g. 65000:1:1",
+                ));
+            };
+            let ga = u32::try_from(*ga).map_err(|_| range_err())?;
+            let l1 = u32::try_from(*l1).map_err(|_| range_err())?;
+            let l2 = u32::try_from(*l2).map_err(|_| range_err())?;
+            Ok(CommunityValue::Large(ga, l1, l2))
+        }
+        _ => Err(CompileError::new(
+            expr.line,
+            "'.add'/'.remove' is only valid on a community-list field",
+        )),
     }
 }
 
@@ -493,6 +600,34 @@ mod tests {
                 router_id: None,
                 originator_id: None,
                 cluster_list,
+                communities: &[],
+                extended_communities: &[],
+                large_communities: &[],
+            },
+        }
+    }
+
+    fn make_community_input<'a>(
+        prefix: ipnet::IpNet,
+        communities: &'a [u32],
+        extended_communities: &'a [u64],
+        large_communities: &'a [(u32, u32, u32)],
+    ) -> Input<'a> {
+        Input {
+            prefix,
+            bgp: BgpInput {
+                origin: Origin::Igp,
+                as_path: &[],
+                local_pref: 100,
+                med: None,
+                next_hop: None,
+                learned_via_ibgp: false,
+                router_id: None,
+                originator_id: None,
+                cluster_list: &[],
+                communities,
+                extended_communities,
+                large_communities,
             },
         }
     }
@@ -530,7 +665,10 @@ mod tests {
             vm::run(&policy, &input),
             Verdict::Accept {
                 local_pref: 200,
-                med: None
+                med: None,
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
             }
         );
     }
@@ -546,7 +684,10 @@ mod tests {
             vm::run(&policy, &input),
             Verdict::Accept {
                 local_pref: 150,
-                med: None
+                med: None,
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
             }
         );
     }
@@ -563,7 +704,10 @@ mod tests {
             vm::run(&policy, &input),
             Verdict::Accept {
                 local_pref: 100,
-                med: Some(50)
+                med: Some(50),
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
             }
         );
     }
@@ -589,7 +733,10 @@ mod tests {
             vm::run(&policy, &input),
             Verdict::Accept {
                 local_pref: 100,
-                med: None
+                med: None,
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
             }
         );
     }
@@ -604,7 +751,10 @@ mod tests {
             vm::run(&policy, &input),
             Verdict::Accept {
                 local_pref: 100,
-                med: None
+                med: None,
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
             }
         );
     }
@@ -618,6 +768,149 @@ mod tests {
         let cluster = vec![Ipv4Addr::new(1, 2, 3, 4)];
         let input = make_input(prefix, &as_path, 100, None, &cluster);
         assert_eq!(vm::run(&policy, &input), Verdict::Reject);
+    }
+
+    #[test]
+    fn standard_community_contains_true_and_false() {
+        let policy = compile_src(
+            "if this.bgp.communities.contains(65000:100):\n    reject\nelse:\n    accept\n",
+        );
+        let prefix: ipnet::IpNet = "10.0.0.0/8".parse().unwrap();
+        let present = make_community_input(prefix, &[(65000 << 16) | 100], &[], &[]);
+        assert_eq!(vm::run(&policy, &present), Verdict::Reject);
+        let absent = make_community_input(prefix, &[(65000 << 16) | 200], &[], &[]);
+        assert_eq!(
+            vm::run(&policy, &absent),
+            Verdict::Accept {
+                local_pref: 100,
+                med: None,
+                communities: vec![(65000 << 16) | 200],
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn community_add_then_contains_sees_own_write() {
+        let policy = compile_src(
+            "this.bgp.communities.add(65000:100)\nif this.bgp.communities.contains(65000:100):\n    accept\nelse:\n    reject\n",
+        );
+        let prefix: ipnet::IpNet = "10.0.0.0/8".parse().unwrap();
+        let input = make_community_input(prefix, &[], &[], &[]);
+        assert_eq!(
+            vm::run(&policy, &input),
+            Verdict::Accept {
+                local_pref: 100,
+                med: None,
+                communities: vec![(65000 << 16) | 100],
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn community_remove_drops_matching_value() {
+        let policy = compile_src("this.bgp.communities.remove(65000:100)\naccept\n");
+        let prefix: ipnet::IpNet = "10.0.0.0/8".parse().unwrap();
+        let input = make_community_input(
+            prefix,
+            &[(65000 << 16) | 100, (65000 << 16) | 200],
+            &[],
+            &[],
+        );
+        assert_eq!(
+            vm::run(&policy, &input),
+            Verdict::Accept {
+                local_pref: 100,
+                med: None,
+                communities: vec![(65000 << 16) | 200],
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn community_clear_empties_length() {
+        let policy = compile_src(
+            "this.bgp.communities.clear()\nif this.bgp.communities.length == 0:\n    accept\nelse:\n    reject\n",
+        );
+        let prefix: ipnet::IpNet = "10.0.0.0/8".parse().unwrap();
+        let input = make_community_input(prefix, &[(65000 << 16) | 100], &[], &[]);
+        assert_eq!(
+            vm::run(&policy, &input),
+            Verdict::Accept {
+                local_pref: 100,
+                med: None,
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn extended_community_contains() {
+        let policy = compile_src(
+            "if this.bgp.extended_communities.contains(0:2:100):\n    accept\nelse:\n    reject\n",
+        );
+        let prefix: ipnet::IpNet = "10.0.0.0/8".parse().unwrap();
+        let packed = (0u64 << 56) | (2u64 << 48) | 100u64;
+        let extended = [packed];
+        let input = make_community_input(prefix, &[], &extended, &[]);
+        assert_eq!(
+            vm::run(&policy, &input),
+            Verdict::Accept {
+                local_pref: 100,
+                med: None,
+                communities: Vec::new(),
+                extended_communities: vec![packed],
+                large_communities: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn large_community_add_then_length() {
+        let policy = compile_src(
+            "this.bgp.large_communities.add(65000:1:1)\nif this.bgp.large_communities.length == 1:\n    accept\nelse:\n    reject\n",
+        );
+        let prefix: ipnet::IpNet = "10.0.0.0/8".parse().unwrap();
+        let input = make_community_input(prefix, &[], &[], &[]);
+        assert_eq!(
+            vm::run(&policy, &input),
+            Verdict::Accept {
+                local_pref: 100,
+                med: None,
+                communities: Vec::new(),
+                extended_communities: Vec::new(),
+                large_communities: vec![(65000, 1, 1)],
+            }
+        );
+    }
+
+    #[test]
+    fn community_literal_wrong_arity_is_a_compile_error() {
+        let err = compile_err(
+            "if this.bgp.communities.contains(65000:100:1):\n    accept\nelse:\n    reject\n",
+        );
+        assert!(err.to_string().contains("exactly two parts"));
+    }
+
+    #[test]
+    fn community_literal_out_of_range_is_a_compile_error() {
+        let err = compile_err(
+            "if this.bgp.communities.contains(999999:100):\n    accept\nelse:\n    reject\n",
+        );
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn adding_to_immutable_list_field_is_a_compile_error() {
+        let err = compile_err("this.bgp.as_path.add(65000:100)\naccept\n");
+        assert!(err.to_string().contains("not settable"));
     }
 
     #[test]
