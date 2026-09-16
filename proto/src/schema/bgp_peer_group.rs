@@ -128,6 +128,35 @@ pub struct BgpPeerGroup {
     /// `route_reflector_client`.
     #[garde(skip)]
     pub route_server_client: bool,
+
+    /// `None` defaults to `deny-all` — this NOS never leaves a direction
+    /// unfiltered, unlike every other `Option` field on this struct, which
+    /// defaults to some permissive/derived behavior. See root `CLAUDE.md`'s
+    /// "Default-deny rollout impact".
+    #[garde(custom(|p: &Option<String>, ctx: &Config| policy_reference_valid(p.as_ref(), ctx)))]
+    pub import_policy: Option<String>,
+
+    /// Same default-deny semantics as `import_policy`, applied on
+    /// advertisement instead of receipt.
+    #[garde(custom(|p: &Option<String>, ctx: &Config| policy_reference_valid(p.as_ref(), ctx)))]
+    pub export_policy: Option<String>,
+}
+
+/// `"accept-all"`/`"deny-all"` are always valid regardless of what's
+/// configured — see `nos_rpl::ACCEPT_ALL_NAME`/`DENY_ALL_NAME`. Any other
+/// name must match a real `PolicyDefinition`.
+fn policy_reference_valid(name: Option<&String>, ctx: &Config) -> garde::Result {
+    let Some(name) = name else {
+        return Ok(());
+    };
+    if name == nos_rpl::ACCEPT_ALL_NAME || name == nos_rpl::DENY_ALL_NAME {
+        return Ok(());
+    }
+    if ctx.policy_definitions.iter().any(|p| &p.name == name) {
+        Ok(())
+    } else {
+        Err(garde::Error::new("referenced policy does not exist"))
+    }
 }
 
 /// Transport authentication for a peer-group's sessions — mutually
@@ -329,6 +358,8 @@ mod tests {
             next_hop: None,
             route_reflector_client: false,
             route_server_client: false,
+            import_policy: None,
+            export_policy: None,
         }
     }
 

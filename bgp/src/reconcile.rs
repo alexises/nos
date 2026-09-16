@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config_client;
 use crate::fsm;
+use crate::policy::PolicyCache;
 use crate::rib_client;
 use crate::session::{LocalIdentity, ResolvedAuth, ResolvedPeer, SessionManager, VrfRequirement};
 use crate::watchdog_client;
@@ -36,10 +37,15 @@ pub async fn run(
     sessions: Arc<SessionManager>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let mut policy_cache = PolicyCache::default();
     while !*shutdown.borrow() {
         match config_client::subscribe_diff(
             &config_socket,
-            vec![DiffScope::BgpInstances, DiffScope::RoutingTables],
+            vec![
+                DiffScope::BgpInstances,
+                DiffScope::RoutingTables,
+                DiffScope::PolicyDefinitions,
+            ],
         )
         .await
         {
@@ -55,7 +61,7 @@ pub async fn run(
                     tokio::select! {
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(_))) => {
-                                resync(&config_socket, &watchdog_socket, &instance, &sessions).await;
+                                resync(&config_socket, &watchdog_socket, &instance, &sessions, &mut policy_cache).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -68,7 +74,7 @@ pub async fn run(
                             }
                         },
                         _ = reapply.tick() => {
-                            resync(&config_socket, &watchdog_socket, &instance, &sessions).await;
+                            resync(&config_socket, &watchdog_socket, &instance, &sessions, &mut policy_cache).await;
                         }
                         _ = shutdown.changed() => break,
                     }
@@ -98,6 +104,7 @@ async fn resync(
     watchdog_socket: &Path,
     instance: &str,
     sessions: &Arc<SessionManager>,
+    policy_cache: &mut PolicyCache,
 ) {
     let cfg = match config_client::fetch_config(config_socket).await {
         Ok(cfg) => cfg,
@@ -106,6 +113,8 @@ async fn resync(
             return;
         }
     };
+
+    policy_cache.resync(&cfg.policy_definitions);
 
     let Some(own) = cfg.bgp_instances.iter().find(|i| i.name == instance) else {
         // The watchdog would be tearing this process down anyway if the
@@ -156,6 +165,8 @@ async fn resync(
                 address_families: group.address_families.clone(),
                 route_reflector_client: group.route_reflector_client,
                 route_server_client: group.route_server_client,
+                import_policy: policy_cache.resolve(group.import_policy.as_deref()),
+                export_policy: policy_cache.resolve(group.export_policy.as_deref()),
             })
         })
         .collect();

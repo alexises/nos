@@ -1,0 +1,653 @@
+//! AST -> bytecode, combined with type checking in a single pass (there's
+//! nothing a separate type-check pass would learn that emission doesn't
+//! already need to know, so keeping them together avoids re-deriving field
+//! resolution twice). `check.rs` handles the one thing this pass doesn't
+//! need: the termination/reachability structure of the statement tree.
+
+use std::net::IpAddr;
+
+use crate::ast::{BinOp, Expr, ExprKind, Policy, Postfix, Stmt, StmtKind, UnaryOp};
+use crate::schema::{self, FieldInfo, FieldType};
+use crate::vm::{CompiledPolicy, Op, MAX_STACK_DEPTH};
+use crate::CompileError;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ty {
+    Int,
+    Bool,
+    Prefix,
+    Ip,
+    Enum(&'static str),
+}
+
+pub fn compile(policy: &Policy) -> Result<CompiledPolicy, CompileError> {
+    let mut cg = Codegen {
+        code: Vec::new(),
+        depth: 0,
+        max_depth: 0,
+    };
+    cg.compile_stmts(policy)?;
+    if cg.max_depth > MAX_STACK_DEPTH {
+        return Err(CompileError::new(
+            policy.first().map_or(1, |s| s.line),
+            "policy expression is too deeply nested to compile",
+        ));
+    }
+    Ok(CompiledPolicy {
+        code: cg.code,
+        max_stack_depth: cg.max_depth,
+    })
+}
+
+struct Codegen {
+    code: Vec<Op>,
+    depth: usize,
+    max_depth: usize,
+}
+
+impl Codegen {
+    fn emit(&mut self, op: Op, delta: isize) -> usize {
+        let idx = self.code.len();
+        self.code.push(op);
+        self.depth = self.depth.saturating_add_signed(delta);
+        self.max_depth = self.max_depth.max(self.depth);
+        idx
+    }
+
+    fn patch_jump(&mut self, idx: usize) {
+        let target = self.code.len();
+        match &mut self.code[idx] {
+            Op::JumpIfFalse(t) | Op::Jump(t) => *t = target,
+            other => unreachable!("patch_jump called on {other:?}"),
+        }
+    }
+
+    fn compile_stmts(&mut self, stmts: &[Stmt]) -> Result<(), CompileError> {
+        for stmt in stmts {
+            self.compile_stmt(stmt)?;
+        }
+        Ok(())
+    }
+
+    fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), CompileError> {
+        match &stmt.kind {
+            StmtKind::Accept => {
+                self.emit(Op::Accept, 0);
+            }
+            StmtKind::Reject => {
+                self.emit(Op::Reject, 0);
+            }
+            StmtKind::Set(target, value) => {
+                let info = resolve_settable_field(target)?;
+                let value_ty = self.compile_expr(value)?;
+                expect_ty(value_ty, Ty::Int, value.line)?;
+                self.emit(Op::SetField(info.id), -1);
+            }
+            StmtKind::If {
+                branches,
+                else_body,
+            } => self.compile_if(branches, else_body.as_ref())?,
+        }
+        Ok(())
+    }
+
+    fn compile_if(
+        &mut self,
+        branches: &[(Expr, Vec<Stmt>)],
+        else_body: Option<&Vec<Stmt>>,
+    ) -> Result<(), CompileError> {
+        let mut end_jumps = Vec::new();
+        let mut prev_jf: Option<usize> = None;
+
+        for (cond, body) in branches {
+            if let Some(jf) = prev_jf.take() {
+                self.patch_jump(jf);
+            }
+            let cond_ty = self.compile_expr(cond)?;
+            expect_ty(cond_ty, Ty::Bool, cond.line)?;
+            let jf = self.emit(Op::JumpIfFalse(0), -1);
+            self.compile_stmts(body)?;
+            if !body_halts(body) {
+                end_jumps.push(self.emit(Op::Jump(0), 0));
+            }
+            prev_jf = Some(jf);
+        }
+
+        match else_body {
+            Some(else_body) => {
+                if let Some(jf) = prev_jf.take() {
+                    self.patch_jump(jf);
+                }
+                self.compile_stmts(else_body)?;
+            }
+            None => {
+                if let Some(jf) = prev_jf.take() {
+                    self.patch_jump(jf);
+                }
+            }
+        }
+
+        for j in end_jumps {
+            self.patch_jump(j);
+        }
+        Ok(())
+    }
+
+    fn compile_expr(&mut self, expr: &Expr) -> Result<Ty, CompileError> {
+        match &expr.kind {
+            ExprKind::IntLit(n) => {
+                self.emit(Op::LoadConstInt(*n), 1);
+                Ok(Ty::Int)
+            }
+            ExprKind::PrefixLit(p) => {
+                self.emit(Op::LoadConstPrefix(*p), 1);
+                Ok(Ty::Prefix)
+            }
+            ExprKind::IpLit(a) => {
+                self.emit(Op::LoadConstIp(*a), 1);
+                Ok(Ty::Ip)
+            }
+            ExprKind::EnumLit(name, variant) => {
+                let (enum_name, discriminant) = resolve_enum_literal(name, variant, expr.line)?;
+                self.emit(Op::LoadConstEnum(discriminant), 1);
+                Ok(Ty::Enum(enum_name))
+            }
+            ExprKind::This(segments) => self.compile_field_access(segments, expr.line),
+            ExprKind::Unary(UnaryOp::Not, inner) => {
+                let ty = self.compile_expr(inner)?;
+                expect_ty(ty, Ty::Bool, inner.line)?;
+                self.emit(Op::Not, 0);
+                Ok(Ty::Bool)
+            }
+            ExprKind::Binary(op, lhs, rhs) => self.compile_binary(*op, lhs, rhs, expr.line),
+        }
+    }
+
+    fn compile_binary(
+        &mut self,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        line: usize,
+    ) -> Result<Ty, CompileError> {
+        match op {
+            BinOp::And | BinOp::Or => {
+                let lt = self.compile_expr(lhs)?;
+                expect_ty(lt, Ty::Bool, lhs.line)?;
+                let rt = self.compile_expr(rhs)?;
+                expect_ty(rt, Ty::Bool, rhs.line)?;
+                self.emit(if op == BinOp::And { Op::And } else { Op::Or }, -1);
+                Ok(Ty::Bool)
+            }
+            BinOp::Add | BinOp::Sub => {
+                let lt = self.compile_expr(lhs)?;
+                expect_ty(lt, Ty::Int, lhs.line)?;
+                let rt = self.compile_expr(rhs)?;
+                expect_ty(rt, Ty::Int, rhs.line)?;
+                self.emit(if op == BinOp::Add { Op::Add } else { Op::Sub }, -1);
+                Ok(Ty::Int)
+            }
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                let lt = self.compile_expr(lhs)?;
+                expect_ty(lt, Ty::Int, lhs.line)?;
+                let rt = self.compile_expr(rhs)?;
+                expect_ty(rt, Ty::Int, rhs.line)?;
+                let cmp_op = match op {
+                    BinOp::Lt => Op::CmpLt,
+                    BinOp::Le => Op::CmpLe,
+                    BinOp::Gt => Op::CmpGt,
+                    BinOp::Ge => Op::CmpGe,
+                    _ => unreachable!(),
+                };
+                self.emit(cmp_op, -1);
+                Ok(Ty::Bool)
+            }
+            BinOp::Eq | BinOp::Ne => {
+                let lt = self.compile_expr(lhs)?;
+                let rt = self.compile_expr(rhs)?;
+                if lt != rt {
+                    return Err(CompileError::new(
+                        line,
+                        format!("cannot compare {lt:?} with {rt:?}"),
+                    ));
+                }
+                self.emit(
+                    if op == BinOp::Eq {
+                        Op::CmpEq
+                    } else {
+                        Op::CmpNe
+                    },
+                    -1,
+                );
+                Ok(Ty::Bool)
+            }
+            BinOp::In => {
+                let lt = self.compile_expr(lhs)?;
+                expect_ty(lt, Ty::Prefix, lhs.line)?;
+                let rt = self.compile_expr(rhs)?;
+                expect_ty(rt, Ty::Prefix, rhs.line)?;
+                self.emit(Op::PrefixIn, -1);
+                Ok(Ty::Bool)
+            }
+        }
+    }
+
+    fn compile_field_access(
+        &mut self,
+        segments: &[Postfix],
+        line: usize,
+    ) -> Result<Ty, CompileError> {
+        if segments.is_empty() {
+            return Err(CompileError::new(line, "'this' cannot be used by itself"));
+        }
+        let mut names = Vec::new();
+        for seg in segments {
+            match seg {
+                Postfix::Field(n) => names.push(n.clone()),
+                Postfix::Call(..) => break,
+            }
+        }
+        let Some((info, consumed)) = schema::resolve_field(&names) else {
+            return Err(CompileError::new(
+                line,
+                format!("unknown field 'this.{}'", names.join(".")),
+            ));
+        };
+        let leftover = &segments[consumed..];
+        if leftover.is_empty() {
+            return self.compile_plain_field(info, line);
+        }
+        if leftover.len() > 1 {
+            return Err(CompileError::new(
+                line,
+                "unsupported field access: at most one property or method may follow a field",
+            ));
+        }
+        match &leftover[0] {
+            Postfix::Field(name) if name == "length" => self.compile_field_len(info, line),
+            Postfix::Field(other) => Err(CompileError::new(
+                line,
+                format!("unknown property '.{other}'"),
+            )),
+            Postfix::Call(name, args) if name == "contains" => {
+                self.compile_contains(info, args, line)
+            }
+            Postfix::Call(other, _) => Err(CompileError::new(
+                line,
+                format!("unknown method '.{other}(..)'"),
+            )),
+        }
+    }
+
+    fn compile_plain_field(
+        &mut self,
+        info: &'static FieldInfo,
+        line: usize,
+    ) -> Result<Ty, CompileError> {
+        match info.ty {
+            FieldType::Int => {
+                self.emit(Op::LoadField(info.id), 1);
+                Ok(Ty::Int)
+            }
+            FieldType::Bool => {
+                self.emit(Op::LoadField(info.id), 1);
+                Ok(Ty::Bool)
+            }
+            FieldType::Prefix => {
+                self.emit(Op::LoadField(info.id), 1);
+                Ok(Ty::Prefix)
+            }
+            FieldType::Enum(name) => {
+                self.emit(Op::LoadField(info.id), 1);
+                Ok(Ty::Enum(name))
+            }
+            FieldType::OptionalInt | FieldType::OptionalIp => Err(CompileError::new(
+                line,
+                "this field may be unset and can't be read directly yet (only 'set' is supported)",
+            )),
+            FieldType::ListInt | FieldType::ListIp => Err(CompileError::new(
+                line,
+                "this field is a list — use '.length' or '.contains(...)'",
+            )),
+        }
+    }
+
+    fn compile_field_len(
+        &mut self,
+        info: &'static FieldInfo,
+        line: usize,
+    ) -> Result<Ty, CompileError> {
+        match info.ty {
+            FieldType::Prefix | FieldType::ListInt | FieldType::ListIp => {
+                self.emit(Op::FieldLen(info.id), 1);
+                Ok(Ty::Int)
+            }
+            _ => Err(CompileError::new(
+                line,
+                "'.length' is only valid on a prefix or list field",
+            )),
+        }
+    }
+
+    fn compile_contains(
+        &mut self,
+        info: &'static FieldInfo,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Ty, CompileError> {
+        if args.len() != 1 {
+            return Err(CompileError::new(
+                line,
+                "'.contains(..)' takes exactly one argument",
+            ));
+        }
+        match info.ty {
+            FieldType::ListInt => {
+                let ExprKind::IntLit(n) = args[0].kind else {
+                    return Err(CompileError::new(
+                        args[0].line,
+                        "'.contains(..)' on this field requires an integer literal",
+                    ));
+                };
+                let n = u32::try_from(n).map_err(|_| {
+                    CompileError::new(args[0].line, "AS number literal out of range")
+                })?;
+                self.emit(Op::ListContainsInt(info.id, n), 1);
+                Ok(Ty::Bool)
+            }
+            FieldType::ListIp => {
+                let ExprKind::IpLit(IpAddr::V4(addr)) = args[0].kind else {
+                    return Err(CompileError::new(
+                        args[0].line,
+                        "'.contains(..)' on this field requires an IPv4 address literal",
+                    ));
+                };
+                self.emit(Op::ListContainsIp(info.id, addr), 1);
+                Ok(Ty::Bool)
+            }
+            _ => Err(CompileError::new(
+                line,
+                "'.contains(..)' is only valid on a list field",
+            )),
+        }
+    }
+}
+
+fn expect_ty(got: Ty, want: Ty, line: usize) -> Result<(), CompileError> {
+    if got == want {
+        Ok(())
+    } else {
+        Err(CompileError::new(
+            line,
+            format!("expected {want:?}, found {got:?}"),
+        ))
+    }
+}
+
+fn body_halts(body: &[Stmt]) -> bool {
+    matches!(
+        body.last().map(|s| &s.kind),
+        Some(StmtKind::Accept | StmtKind::Reject)
+    )
+}
+
+fn resolve_settable_field(expr: &Expr) -> Result<&'static FieldInfo, CompileError> {
+    let ExprKind::This(segments) = &expr.kind else {
+        return Err(CompileError::new(
+            expr.line,
+            "assignment target must be a 'this' field",
+        ));
+    };
+    let mut names = Vec::with_capacity(segments.len());
+    for seg in segments {
+        match seg {
+            Postfix::Field(n) => names.push(n.clone()),
+            Postfix::Call(..) => {
+                return Err(CompileError::new(
+                    expr.line,
+                    "assignment target cannot include a method call",
+                ))
+            }
+        }
+    }
+    let Some((info, consumed)) = schema::resolve_field(&names) else {
+        return Err(CompileError::new(
+            expr.line,
+            format!("unknown field 'this.{}'", names.join(".")),
+        ));
+    };
+    if consumed != names.len() {
+        return Err(CompileError::new(
+            expr.line,
+            "assignment target must name a field exactly, with no suffix",
+        ));
+    }
+    if !info.mutable {
+        return Err(CompileError::new(
+            expr.line,
+            format!("field 'this.{}' is not settable", names.join(".")),
+        ));
+    }
+    Ok(info)
+}
+
+fn resolve_enum_literal(
+    name: &str,
+    variant: &str,
+    line: usize,
+) -> Result<(&'static str, u8), CompileError> {
+    match (name, variant) {
+        ("origin", "igp") => Ok(("origin", 0)),
+        ("origin", "egp") => Ok(("origin", 1)),
+        ("origin", "incomplete") => Ok(("origin", 2)),
+        _ => Err(CompileError::new(
+            line,
+            format!("unknown enum literal '{name}.{variant}'"),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+    use crate::schema::FieldId;
+    use crate::vm::{self, BgpInput, Input, Origin, Verdict};
+    use std::net::Ipv4Addr;
+
+    fn compile_src(src: &str) -> CompiledPolicy {
+        let tokens = lex(src).unwrap();
+        let policy = parse(&tokens).unwrap();
+        crate::check::check_termination(&policy).unwrap();
+        compile(&policy).unwrap()
+    }
+
+    fn compile_err(src: &str) -> CompileError {
+        let tokens = lex(src).unwrap();
+        let policy = parse(&tokens).unwrap();
+        crate::check::check_termination(&policy).unwrap();
+        compile(&policy).unwrap_err()
+    }
+
+    fn default_input(prefix: &str) -> (ipnet::IpNet, Vec<u32>, Vec<Ipv4Addr>) {
+        (prefix.parse().unwrap(), Vec::new(), Vec::new())
+    }
+
+    fn make_input<'a>(
+        prefix: ipnet::IpNet,
+        as_path: &'a [u32],
+        local_pref: u32,
+        med: Option<u32>,
+        cluster_list: &'a [Ipv4Addr],
+    ) -> Input<'a> {
+        Input {
+            prefix,
+            bgp: BgpInput {
+                origin: Origin::Igp,
+                as_path,
+                local_pref,
+                med,
+                next_hop: None,
+                learned_via_ibgp: false,
+                router_id: None,
+                originator_id: None,
+                cluster_list,
+            },
+        }
+    }
+
+    #[test]
+    fn worked_example_matches_plan() {
+        let policy = compile_src("if this.bgp.local_pref < 100:\n    reject\nelse:\n    accept\n");
+        assert_eq!(
+            policy.code,
+            vec![
+                Op::LoadField(FieldId::BgpLocalPref),
+                Op::LoadConstInt(100),
+                Op::CmpLt,
+                Op::JumpIfFalse(5),
+                Op::Reject,
+                Op::Accept,
+            ]
+        );
+    }
+
+    #[test]
+    fn reject_branch_runs_for_low_local_pref() {
+        let policy = compile_src("if this.bgp.local_pref < 100:\n    reject\nelse:\n    accept\n");
+        let (prefix, as_path, cluster) = default_input("10.0.0.0/8");
+        let input = make_input(prefix, &as_path, 50, None, &cluster);
+        assert_eq!(vm::run(&policy, &input), Verdict::Reject);
+    }
+
+    #[test]
+    fn accept_branch_runs_for_high_local_pref() {
+        let policy = compile_src("if this.bgp.local_pref < 100:\n    reject\nelse:\n    accept\n");
+        let (prefix, as_path, cluster) = default_input("10.0.0.0/8");
+        let input = make_input(prefix, &as_path, 200, None, &cluster);
+        assert_eq!(
+            vm::run(&policy, &input),
+            Verdict::Accept {
+                local_pref: 200,
+                med: None
+            }
+        );
+    }
+
+    #[test]
+    fn set_mutates_local_pref_before_accept() {
+        let policy = compile_src(
+            "if this.prefix in 203.0.113.0/16:\n    set this.bgp.local_pref = 150\n    accept\nelse:\n    reject\n",
+        );
+        let (prefix, as_path, cluster) = default_input("203.0.113.0/24");
+        let input = make_input(prefix, &as_path, 100, None, &cluster);
+        assert_eq!(
+            vm::run(&policy, &input),
+            Verdict::Accept {
+                local_pref: 150,
+                med: None
+            }
+        );
+    }
+
+    #[test]
+    fn set_med_wraps_in_some() {
+        let policy = compile_src(
+            "if this.bgp.as_path.contains(65010):\n    set this.bgp.med = 50\n    accept\nelse:\n    accept\n",
+        );
+        let (prefix, _, cluster) = default_input("198.51.100.0/24");
+        let as_path = vec![65010, 65020];
+        let input = make_input(prefix, &as_path, 100, None, &cluster);
+        assert_eq!(
+            vm::run(&policy, &input),
+            Verdict::Accept {
+                local_pref: 100,
+                med: Some(50)
+            }
+        );
+    }
+
+    #[test]
+    fn as_path_length_and_reject() {
+        let policy =
+            compile_src("if this.bgp.as_path.length > 2:\n    reject\nelse:\n    accept\n");
+        let (prefix, _, cluster) = default_input("10.0.0.0/8");
+        let long_path = vec![1, 2, 3, 4];
+        let input = make_input(prefix, &long_path, 100, None, &cluster);
+        assert_eq!(vm::run(&policy, &input), Verdict::Reject);
+    }
+
+    #[test]
+    fn prefix_length_range() {
+        let policy = compile_src(
+            "if this.prefix in 203.0.113.0/16 and this.prefix.length <= 24:\n    accept\nelse:\n    reject\n",
+        );
+        let (prefix, as_path, cluster) = default_input("203.0.113.0/20");
+        let input = make_input(prefix, &as_path, 100, None, &cluster);
+        assert_eq!(
+            vm::run(&policy, &input),
+            Verdict::Accept {
+                local_pref: 100,
+                med: None
+            }
+        );
+    }
+
+    #[test]
+    fn origin_enum_comparison() {
+        let policy =
+            compile_src("if this.bgp.origin == origin.igp:\n    accept\nelse:\n    reject\n");
+        let (prefix, as_path, cluster) = default_input("10.0.0.0/8");
+        let input = make_input(prefix, &as_path, 100, None, &cluster);
+        assert_eq!(
+            vm::run(&policy, &input),
+            Verdict::Accept {
+                local_pref: 100,
+                med: None
+            }
+        );
+    }
+
+    #[test]
+    fn cluster_list_contains() {
+        let policy = compile_src(
+            "if this.bgp.cluster_list.contains(1.2.3.4):\n    reject\nelse:\n    accept\n",
+        );
+        let (prefix, as_path, _) = default_input("10.0.0.0/8");
+        let cluster = vec![Ipv4Addr::new(1, 2, 3, 4)];
+        let input = make_input(prefix, &as_path, 100, None, &cluster);
+        assert_eq!(vm::run(&policy, &input), Verdict::Reject);
+    }
+
+    #[test]
+    fn reading_optional_field_is_a_compile_error() {
+        let err = compile_err("if this.bgp.med == 50:\n    accept\nelse:\n    reject\n");
+        assert!(err.to_string().contains("unset"));
+    }
+
+    #[test]
+    fn reading_list_field_directly_is_a_compile_error() {
+        let err = compile_err("if this.bgp.as_path == 5:\n    accept\nelse:\n    reject\n");
+        assert!(err.to_string().contains("list"));
+    }
+
+    #[test]
+    fn setting_immutable_field_is_a_compile_error() {
+        let err = compile_err("set this.bgp.origin = 1\naccept\n");
+        assert!(err.to_string().contains("not settable"));
+    }
+
+    #[test]
+    fn type_mismatch_in_comparison_is_a_compile_error() {
+        let err =
+            compile_err("if this.bgp.local_pref < this.prefix:\n    accept\nelse:\n    reject\n");
+        assert!(err.to_string().contains("expected Int"));
+    }
+
+    #[test]
+    fn unknown_field_is_a_compile_error() {
+        let err = compile_err("if this.bgp.nonexistent == 1:\n    accept\nelse:\n    reject\n");
+        assert!(err.to_string().contains("unknown field"));
+    }
+}

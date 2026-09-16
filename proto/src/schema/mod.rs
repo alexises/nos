@@ -2,6 +2,7 @@ pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
 pub mod interface;
+pub mod policy_definition;
 pub mod routing_table;
 pub mod static_route;
 pub mod static_routing_instance;
@@ -13,6 +14,7 @@ pub use bgp_peer_group::{
     CONNECT_RETRY_TIME_DEFAULT_SECS, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR,
 };
 pub use interface::Interface;
+pub use policy_definition::PolicyDefinition;
 pub use routing_table::{Redistribute, RedistributeSource, RedistributeTarget, RoutingTable};
 pub use static_route::StaticRoute;
 pub use static_routing_instance::StaticRoutingInstance;
@@ -43,6 +45,9 @@ pub struct Config {
     #[garde(dive)]
     pub interfaces: Vec<Interface>,
 
+    #[garde(dive)]
+    pub policy_definitions: Vec<PolicyDefinition>,
+
     #[serde(default = "default_hostname")]
     #[garde(length(min = 1, max = 253), custom(|h, _ctx: &Config| hostname_charset(h)))]
     pub hostname: String,
@@ -55,6 +60,7 @@ impl Default for Config {
             routing_tables: Vec::new(),
             static_routing_instances: Vec::new(),
             interfaces: Vec::new(),
+            policy_definitions: Vec::new(),
             hostname: default_hostname(),
         }
     }

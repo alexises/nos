@@ -1,8 +1,8 @@
 use std::net::IpAddr;
 
 use nos_proto::{
-    BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, ConfigOp, InterfaceOp, RoutingTableOp,
-    StaticRouteOp, StaticRoutingInstanceOp, TransactionBase,
+    BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, ConfigOp, InterfaceOp, PolicyDefinitionOp,
+    RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp, TransactionBase,
 };
 
 use crate::command::{
@@ -18,6 +18,7 @@ pub enum Path {
     RoutingTable(String),
     StaticRoutingInstance(String),
     Interface(String),
+    PolicyDefinition(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -99,6 +100,30 @@ pub enum Resolved {
     Discard,
     /// `diff` — fetch and render the transaction's diff against running.
     Diff,
+    /// `edit source` — only valid navigated into a policy-definition. Fetches
+    /// the transaction, opens an external editor on the current source,
+    /// compiles the result client-side, and (on success) stages `SetSource`
+    /// — see root `CLAUDE.md`'s "nos-cli editing UX".
+    EditPolicySource {
+        name: String,
+    },
+    /// `show source` — only valid navigated into a policy-definition.
+    ShowPolicySource {
+        name: String,
+    },
+    /// `set source line <n> <text>` — only valid navigated into a
+    /// policy-definition.
+    SetPolicySourceLine {
+        name: String,
+        line: usize,
+        text: String,
+    },
+    /// `delete source line <n>` — only valid navigated into a
+    /// policy-definition.
+    DeletePolicySourceLine {
+        name: String,
+        line: usize,
+    },
     Error(String),
 }
 
@@ -167,6 +192,8 @@ fn not_configuring(cmd: &Command) -> Resolved {
 /// `Help`, `ShowConfig`, `Unknown`, `Exit`, or `Save` — `resolve` handles
 /// those itself before delegating here.
 const NO_CURRENT_INSTANCE: &str = "no current instance — use 'edit bgp instance <name>' or the fully-qualified 'set bgp instance <name> ...' form";
+const NO_CURRENT_POLICY_DEFINITION: &str =
+    "no current policy-definition — use 'edit policy-definition <name>' first";
 const NO_CURRENT_PEER_GROUP: &str =
     "no current peer-group — use 'edit peer-group <name>' or the fully-qualified 'set bgp instance <name> peer-group <group> ...' form";
 const NO_CURRENT_ROUTING_TABLE: &str = "no current routing table — use 'edit routing-table <name>' or the fully-qualified 'set routing-table <name> ...' form";
@@ -206,7 +233,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Edit(EditTarget::RoutingTable { name }) => Resolved::ApplyOp {
             op: ConfigOp::RoutingTable(RoutingTableOp::Ensure { name: name.clone() }),
@@ -221,6 +249,53 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         Command::Edit(EditTarget::Interface { name }) => Resolved::ApplyOp {
             op: ConfigOp::Interface(InterfaceOp::Ensure { name: name.clone() }),
             after: PathAfter::To(Path::Interface(name)),
+        },
+        Command::Edit(EditTarget::PolicyDefinition { name }) => Resolved::ApplyOp {
+            op: ConfigOp::PolicyDefinition(PolicyDefinitionOp::Ensure { name: name.clone() }),
+            after: PathAfter::To(Path::PolicyDefinition(name)),
+        },
+        Command::EditSource => match path {
+            Path::PolicyDefinition(name) => Resolved::EditPolicySource { name: name.clone() },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
+        },
+        Command::ShowSource => match path {
+            Path::PolicyDefinition(name) => Resolved::ShowPolicySource { name: name.clone() },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
+        },
+        Command::SetSourceLine { line, text } => match path {
+            Path::PolicyDefinition(name) => Resolved::SetPolicySourceLine {
+                name: name.clone(),
+                line,
+                text,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
+        },
+        Command::DeleteSourceLine { line } => match path {
+            Path::PolicyDefinition(name) => Resolved::DeletePolicySourceLine {
+                name: name.clone(),
+                line,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
         },
 
         Command::Set(SetTarget::BgpInstance { name, field }) => Resolved::ApplyOp {
@@ -242,7 +317,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Set(SetTarget::BgpPeerGroup {
             instance,
@@ -261,7 +337,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Set(SetTarget::BgpPeer {
             instance,
@@ -291,7 +368,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Set(SetTarget::RoutingTable { name, bgp_instance }) => Resolved::ApplyOp {
             op: ConfigOp::RoutingTable(RoutingTableOp::SetBgpInstance { name, bgp_instance }),
@@ -309,7 +387,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Set(SetTarget::RoutingTableStaticRoutingInstance {
             name,
@@ -335,7 +414,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Set(SetTarget::RoutingTableRedistribute { name, redistribute }) => {
             Resolved::ApplyOp {
@@ -355,7 +435,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Set(SetTarget::StaticRoute {
             instance,
@@ -382,7 +463,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_STATIC_ROUTING_INSTANCE.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => {
+                Resolved::Error(NO_CURRENT_STATIC_ROUTING_INSTANCE.to_string())
+            }
         },
         Command::Set(SetTarget::InterfaceAddress { name, address }) => Resolved::ApplyOp {
             op: ConfigOp::Interface(InterfaceOp::AddAddress { name, address }),
@@ -400,7 +484,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
-            | Path::StaticRoutingInstance(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+            | Path::StaticRoutingInstance(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
         },
         Command::Set(SetTarget::InterfaceRoutingTable {
             name,
@@ -424,7 +509,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
-            | Path::StaticRoutingInstance(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+            | Path::StaticRoutingInstance(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
         },
 
         Command::Delete(DeleteTarget::BgpInstance { name }) => Resolved::ApplyOp {
@@ -457,6 +543,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 op: ConfigOp::Interface(InterfaceOp::Delete { name: name.clone() }),
                 after: PathAfter::ToRoot,
             },
+            Path::PolicyDefinition(name) => Resolved::ApplyOp {
+                op: ConfigOp::PolicyDefinition(PolicyDefinitionOp::Delete { name: name.clone() }),
+                after: PathAfter::ToRoot,
+            },
             Path::Root => Resolved::Error(
                 "nothing to delete at the top level — use 'delete bgp instance <name>'".to_string(),
             ),
@@ -478,7 +568,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstance { name }) => {
             Resolved::ApplyOp {
@@ -497,7 +588,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Delete(DeleteTarget::RoutingTableRedistribute { name }) => Resolved::ApplyOp {
             op: ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute { name }),
@@ -514,7 +606,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Delete(DeleteTarget::StaticRoutingInstance { name }) => Resolved::ApplyOp {
             op: ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Delete { name }),
@@ -536,7 +629,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_STATIC_ROUTING_INSTANCE.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => {
+                Resolved::Error(NO_CURRENT_STATIC_ROUTING_INSTANCE.to_string())
+            }
         },
         Command::Delete(DeleteTarget::Interface { name }) => Resolved::ApplyOp {
             op: ConfigOp::Interface(InterfaceOp::Delete { name }),
@@ -558,7 +654,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
-            | Path::StaticRoutingInstance(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+            | Path::StaticRoutingInstance(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
         },
         Command::Delete(DeleteTarget::InterfaceRoutingTable { name }) => Resolved::ApplyOp {
             op: ConfigOp::Interface(InterfaceOp::ClearRoutingTable { name }),
@@ -573,7 +670,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
-            | Path::StaticRoutingInstance(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+            | Path::StaticRoutingInstance(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
         },
         Command::Delete(DeleteTarget::BgpPeerGroup { instance, name }) => Resolved::ApplyOp {
             op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Delete { instance, name }),
@@ -591,7 +689,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Delete(DeleteTarget::BgpPeer {
             instance,
@@ -615,7 +714,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Delete(DeleteTarget::SourceAddress) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -629,7 +729,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::AddressFamily(af)) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -644,7 +745,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::HoldTime) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -658,7 +760,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::KeepaliveInterval) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -672,7 +775,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::ConnectRetryTime) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -686,7 +790,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::Auth) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -700,7 +805,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::AoKey(send_id)) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -715,7 +821,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::NextHop) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -729,7 +836,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::RouteReflectorClient) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -743,7 +851,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::RouteServerClient) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -757,7 +866,38 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpInstance(_)
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+        },
+        Command::Delete(DeleteTarget::ImportPolicy) => match path {
+            Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearImportPolicy {
+                    instance: instance.clone(),
+                    name: group.clone(),
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+        },
+        Command::Delete(DeleteTarget::ExportPolicy) => match path {
+            Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
+                op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearExportPolicy {
+                    instance: instance.clone(),
+                    name: group.clone(),
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::BgpInstanceClusterId { name }) => Resolved::ApplyOp {
             op: ConfigOp::BgpInstance(BgpInstanceOp::ClearClusterId { name }),
@@ -772,7 +912,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
 
         // `top` always lands at the root, however deep the current path is.
@@ -782,19 +923,22 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::NavigateTop,
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::NavigateTop,
         },
         // `up` moves exactly one level — from an instance that's the root
         // (coinciding with `top`), but from a peer-group it's the owning
         // instance, not the root. Routing tables, static routing instances,
-        // and interfaces have no navigable child (routes/addresses aren't a
-        // `Path` position), so they behave like a BGP instance here.
+        // interfaces, and policy-definitions have no navigable child (routes/
+        // addresses/source aren't a `Path` position), so they behave like a
+        // BGP instance here.
         Command::Up => match path {
             Path::Root => Resolved::Error("already at the top level".to_string()),
             Path::BgpInstance(_)
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
-            | Path::Interface(_) => Resolved::NavigateTop,
+            | Path::Interface(_)
+            | Path::PolicyDefinition(_) => Resolved::NavigateTop,
             Path::BgpPeerGroup { instance, .. } => {
                 Resolved::Navigate(Path::BgpInstance(instance.clone()))
             }
@@ -909,6 +1053,16 @@ fn peer_group_set_op(instance: String, group: String, field: BgpPeerGroupField) 
         BgpPeerGroupField::RouteServerClient => BgpPeerGroupOp::SetRouteServerClient {
             instance,
             name: group,
+        },
+        BgpPeerGroupField::ImportPolicy(import_policy) => BgpPeerGroupOp::SetImportPolicy {
+            instance,
+            name: group,
+            import_policy,
+        },
+        BgpPeerGroupField::ExportPolicy(export_policy) => BgpPeerGroupOp::SetExportPolicy {
+            instance,
+            name: group,
+            export_policy,
         },
     })
 }
@@ -1945,6 +2099,126 @@ mod tests {
                 }),
                 after: PathAfter::To(Path::RoutingTable("rt1".to_string())),
             }
+        );
+    }
+
+    #[test]
+    fn edit_policy_definition_navigates() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Edit(EditTarget::PolicyDefinition {
+                    name: "p1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::PolicyDefinition(PolicyDefinitionOp::Ensure {
+                    name: "p1".to_string()
+                }),
+                after: PathAfter::To(Path::PolicyDefinition("p1".to_string())),
+            }
+        );
+    }
+
+    #[test]
+    fn edit_and_show_source_require_policy_definition_context() {
+        assert!(matches!(
+            resolve(&config_mode("t1", Path::Root, false), Command::EditSource),
+            Resolved::Error(_)
+        ));
+        assert!(matches!(
+            resolve(&config_mode("t1", Path::Root, false), Command::ShowSource),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::PolicyDefinition("p1".to_string()), false),
+                Command::EditSource
+            ),
+            Resolved::EditPolicySource {
+                name: "p1".to_string()
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::PolicyDefinition("p1".to_string()), false),
+                Command::ShowSource
+            ),
+            Resolved::ShowPolicySource {
+                name: "p1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn set_and_delete_source_line_require_policy_definition_context() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::PolicyDefinition("p1".to_string()), false),
+                Command::SetSourceLine {
+                    line: 2,
+                    text: "    accept".to_string()
+                }
+            ),
+            Resolved::SetPolicySourceLine {
+                name: "p1".to_string(),
+                line: 2,
+                text: "    accept".to_string(),
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::PolicyDefinition("p1".to_string()), false),
+                Command::DeleteSourceLine { line: 2 }
+            ),
+            Resolved::DeletePolicySourceLine {
+                name: "p1".to_string(),
+                line: 2,
+            }
+        );
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::SetSourceLine {
+                    line: 1,
+                    text: "accept".to_string()
+                }
+            ),
+            Resolved::Error(_)
+        ));
+    }
+
+    #[test]
+    fn delete_current_at_policy_definition_returns_to_root() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::PolicyDefinition("p1".to_string()), false),
+                Command::Delete(DeleteTarget::Current)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::PolicyDefinition(PolicyDefinitionOp::Delete {
+                    name: "p1".to_string()
+                }),
+                after: PathAfter::ToRoot,
+            }
+        );
+    }
+
+    #[test]
+    fn up_and_top_from_policy_definition_navigate_to_root() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::PolicyDefinition("p1".to_string()), false),
+                Command::Up
+            ),
+            Resolved::NavigateTop
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::PolicyDefinition("p1".to_string()), false),
+                Command::Top
+            ),
+            Resolved::NavigateTop
         );
     }
 

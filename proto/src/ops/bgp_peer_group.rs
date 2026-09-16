@@ -145,6 +145,24 @@ pub enum BgpPeerGroupOp {
         instance: String,
         name: String,
     },
+    SetImportPolicy {
+        instance: String,
+        name: String,
+        import_policy: String,
+    },
+    ClearImportPolicy {
+        instance: String,
+        name: String,
+    },
+    SetExportPolicy {
+        instance: String,
+        name: String,
+        export_policy: String,
+    },
+    ClearExportPolicy {
+        instance: String,
+        name: String,
+    },
 }
 
 impl BgpPeerGroupOp {
@@ -165,6 +183,8 @@ impl BgpPeerGroupOp {
                         next_hop: None,
                         route_reflector_client: false,
                         route_server_client: false,
+                        import_policy: None,
+                        export_policy: None,
                     });
                 }
                 Ok(())
@@ -342,6 +362,30 @@ impl BgpPeerGroupOp {
                 find_group_mut(config, instance, name)?.route_server_client = false;
                 Ok(())
             }
+            BgpPeerGroupOp::SetImportPolicy {
+                instance,
+                name,
+                import_policy,
+            } => {
+                find_group_mut(config, instance, name)?.import_policy = Some(import_policy.clone());
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearImportPolicy { instance, name } => {
+                find_group_mut(config, instance, name)?.import_policy = None;
+                Ok(())
+            }
+            BgpPeerGroupOp::SetExportPolicy {
+                instance,
+                name,
+                export_policy,
+            } => {
+                find_group_mut(config, instance, name)?.export_policy = Some(export_policy.clone());
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearExportPolicy { instance, name } => {
+                find_group_mut(config, instance, name)?.export_policy = None;
+                Ok(())
+            }
         }
     }
 }
@@ -426,6 +470,8 @@ mod tests {
             next_hop: None,
             route_reflector_client: false,
             route_server_client: false,
+            import_policy: None,
+            export_policy: None,
         }
     }
 
@@ -616,6 +662,54 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert!(!cfg.bgp_instances[0].peer_groups[0].route_server_client);
+    }
+
+    #[test]
+    fn set_and_clear_import_policy() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetImportPolicy {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            import_policy: "accept-all".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].import_policy.as_deref(),
+            Some("accept-all")
+        );
+
+        BgpPeerGroupOp::ClearImportPolicy {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].import_policy, None);
+    }
+
+    #[test]
+    fn set_and_clear_export_policy() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetExportPolicy {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+            export_policy: "deny-all".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].export_policy.as_deref(),
+            Some("deny-all")
+        );
+
+        BgpPeerGroupOp::ClearExportPolicy {
+            instance: "r1".to_string(),
+            name: "pg1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].export_policy, None);
     }
 
     #[test]

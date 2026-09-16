@@ -339,6 +339,8 @@ mod tests {
             address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
             route_reflector_client: false,
             route_server_client: false,
+            import_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+            export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
         })
     }
 

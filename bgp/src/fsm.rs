@@ -202,6 +202,14 @@ pub struct PeerContext {
     /// advertises the RFC 7911 ADD-PATH capability at all (see `run`) and is
     /// passed through to `BgpRib::peer_established`.
     pub is_rs_client: bool,
+    /// This peer's resolved import policy — passed straight through to
+    /// every `BgpRib::handle_update` call on this connection, no FSM-level
+    /// effect. `deny-all` by default (see root `CLAUDE.md`'s "Default-deny
+    /// rollout impact").
+    pub import_policy: Arc<nos_rpl::CompiledPolicy>,
+    /// Same default-deny semantics as `import_policy`, passed through to
+    /// `BgpRib::peer_established` for advertisement instead of receipt.
+    pub export_policy: Arc<nos_rpl::CompiledPolicy>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -560,6 +568,7 @@ pub async fn run(
                                         remote_is_ibgp,
                                         remote.bgp_id,
                                         &update,
+                                        &peer.import_policy,
                                     );
                                 } else {
                                     debug!(
@@ -755,6 +764,7 @@ pub async fn run(
                             peer.is_rr_client,
                             peer.is_rs_client,
                             add_path_afs,
+                            peer.export_policy.clone(),
                             outbox_tx.clone(),
                         );
                         slot.status.send_modify(|s| {

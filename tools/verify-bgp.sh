@@ -7,9 +7,13 @@
 # a hold-timer/reconnect cycle, (best-effort) a collision-resolution event,
 # (via the `redistribute` subcommand) a static route configured on router-a
 # actually being redistributed into its bgp instance, advertised over the
-# wire, and learned into router-b's Adj-RIB-In/Loc-RIB, and (via the `auth`
+# wire, and learned into router-b's Adj-RIB-In/Loc-RIB, (via the `auth`
 # subcommand) that matching RFC 2385 TCP MD5 passwords on both routers still
-# establish while a mismatched password on either side does not.
+# establish while a mismatched password on either side does not, and (via
+# the `policy` subcommand) that a real RPL import policy on router-b
+# actually rejects a specific redistributed prefix from router-a — proving
+# the policy hook against the kernel-real two-container path, not just unit
+# tests — and that reverting to the `accept-all` default lets it back in.
 #
 # Two further subcommands, `reflector` and `route-server`, stand up a third
 # container ("router-c") and reconfigure all three into a hub-and-spoke
@@ -22,7 +26,7 @@
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|reflector|route-server|logs [n]|down|all}
+# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|policy|reflector|route-server|logs [n]|down|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -492,6 +496,109 @@ cmd_check_auth() {
     || { log "router-a: FAILED to re-establish after fixing the password"; return 1; }
 }
 
+# --- RPL import policy scenario ---
+#
+# Reuses the same two-router topology and the same $REDISTRIBUTE_PREFIX as
+# the `redistribute` scenario: router-a redistributes it as usual, but
+# router-b's peer-group gets a real compiled RPL policy
+# (`reject-redistribute-prefix`) as its import policy instead of the default
+# `accept-all` every other scenario uses. Verifies the policy hook actually
+# runs against a real received UPDATE over a real kernel socket, not just in
+# unit tests.
+
+provision_policy_reject() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  # Not under target/docker-verify/: that tree is root-owned (created by the
+  # containerized `cargo build` in build_provision_tool), so this host shell
+  # can't write into it.
+  local policy_file
+  policy_file=$(mktemp /tmp/nos-verify-policy-XXXXXX.rpl)
+  # `nos-provision` runs as the container's unprivileged `nos` user, a
+  # different uid than this host shell — mktemp's default 0600 would leave
+  # it unreadable through the bind mount.
+  chmod 644 "$policy_file"
+  cat >"$policy_file" <<EOF
+if this.prefix in $REDISTRIBUTE_PREFIX:
+    reject
+else:
+    accept
+EOF
+  log "provisioning $name with an import policy rejecting $REDISTRIBUTE_PREFIX"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "$policy_file:/tmp/reject-redistribute-prefix.rpl:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --policy-name reject-redistribute-prefix \
+    --policy-source-file /tmp/reject-redistribute-prefix.rpl \
+    --import-policy reject-redistribute-prefix
+  rm -f "$policy_file"
+}
+
+# Counts (not just checks presence of) "learned route ... into adj-rib-in"
+# for $REDISTRIBUTE_PREFIX — this scenario runs against the same long-lived
+# containers other phases (`redistribute`) already ran against, so a bare
+# presence check would false-positive on a stale line from an earlier phase.
+# Mirrors `established_count`'s same before/after-count technique, used by
+# `cmd_check_auth` for exactly this reason.
+learned_prefix_count() {
+  local name=$1
+  docker logs "$name" 2>&1 | grep -c "learned route for $REDISTRIBUTE_PREFIX into adj-rib-in" || true
+}
+
+cmd_check_policy() {
+  local before_reject
+  before_reject=$(learned_prefix_count router-b)
+
+  provision_policy_reject router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A"
+  log "waiting for both sides to (re-)establish after router-b's import-policy change"
+  wait_for_log router-a "bgp session established" 60 \
+    && log "router-a: established" \
+    || { log "router-a: FAILED to establish"; return 1; }
+  wait_for_log router-b "bgp session established" 60 \
+    && log "router-b: established" \
+    || { log "router-b: FAILED to establish"; return 1; }
+
+  provision_redistribute router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+  log "waiting for router-a to redistribute $REDISTRIBUTE_PREFIX into its bgp instance"
+  wait_for_log router-a "loc-rib best path for $REDISTRIBUTE_PREFIX updated" 60 \
+    && log "router-a: installed redistributed static route into its own loc-rib" \
+    || { log "router-a: FAILED to install redistributed route locally"; return 1; }
+
+  log "waiting 15s to confirm router-b's import policy rejects $REDISTRIBUTE_PREFIX (does not re-enter adj-rib-in)"
+  sleep 15
+  local after_reject
+  after_reject=$(learned_prefix_count router-b)
+  if [[ "$after_reject" -gt "$before_reject" ]]; then
+    log "FAILED: router-b learned $REDISTRIBUTE_PREFIX despite its import policy rejecting it"
+    return 1
+  fi
+  log "confirmed: router-b's import policy rejected $REDISTRIBUTE_PREFIX -- it did not re-enter adj-rib-in"
+
+  log "reverting router-b's import policy to the accept-all default"
+  provision router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A"
+  local ok=1
+  for _ in $(seq 1 60); do
+    if [[ "$(learned_prefix_count router-b)" -gt "$after_reject" ]]; then
+      ok=0
+      break
+    fi
+    sleep 1
+  done
+  if [[ $ok -eq 0 ]]; then
+    log "router-b: learned $REDISTRIBUTE_PREFIX once its import policy reverted to accept-all"
+  else
+    log "router-b: FAILED to learn $REDISTRIBUTE_PREFIX after reverting the import policy"
+    return 1
+  fi
+}
+
 cmd_logs() {
   echo "===== router-a ====="
   docker logs router-a 2>&1 | tail -n "${1:-200}"
@@ -517,6 +624,7 @@ case "${1:-}" in
   collision) cmd_check_collision ;;
   redistribute) cmd_check_redistribute ;;
   auth) cmd_check_auth ;;
+  policy) cmd_check_policy ;;
   reflector) cmd_check_reflector ;;
   route-server) cmd_check_route_server ;;
   logs) shift; cmd_logs "$@" ;;
@@ -528,11 +636,12 @@ case "${1:-}" in
     cmd_check_collision
     cmd_check_redistribute
     cmd_check_auth
+    cmd_check_policy
     cmd_check_reflector
     cmd_check_route_server
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|reflector|route-server|logs [n]|down|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|policy|reflector|route-server|logs [n]|down|all}" >&2
     exit 2
     ;;
 esac

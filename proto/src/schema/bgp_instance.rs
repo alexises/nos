@@ -171,6 +171,8 @@ mod tests {
                 next_hop: None,
                 route_reflector_client: false,
                 route_server_client: false,
+                import_policy: None,
+                export_policy: None,
             },
             BgpPeerGroup {
                 name: "invalid".to_string(),
@@ -184,6 +186,8 @@ mod tests {
                 next_hop: None,
                 route_reflector_client: false,
                 route_server_client: false,
+                import_policy: None,
+                export_policy: None,
             },
         ];
         let cfg = config_with(vec![inst]);
@@ -209,6 +213,8 @@ mod tests {
             next_hop: None,
             route_reflector_client,
             route_server_client,
+            import_policy: None,
+            export_policy: None,
         }
     }
 

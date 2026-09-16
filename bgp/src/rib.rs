@@ -61,14 +61,60 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 use std::time::Instant;
 
 use ipnet::IpNet;
 use nos_proto::{AddressFamily, NextHopMode, RedistributeUpdate};
+use nos_rpl::CompiledPolicy;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::message::{self, UpdateMessage};
+
+/// Adapts a `RibRoute` into `nos_rpl`'s input shape — see root `CLAUDE.md`'s
+/// "Execution model". A plain function, not an adapter trait: there is
+/// exactly one producer (`RibRoute`) today, so a trait would add indirection
+/// with nothing to abstract over yet.
+fn to_policy_input(prefix: IpNet, route: &RibRoute) -> nos_rpl::Input<'_> {
+    nos_rpl::Input {
+        prefix,
+        bgp: nos_rpl::BgpInput {
+            origin: match route.bgp_origin {
+                message::Origin::Igp => nos_rpl::Origin::Igp,
+                message::Origin::Egp => nos_rpl::Origin::Egp,
+                message::Origin::Incomplete => nos_rpl::Origin::Incomplete,
+            },
+            as_path: &route.as_path,
+            local_pref: route.local_pref,
+            med: route.med,
+            next_hop: route.next_hop,
+            learned_via_ibgp: route.learned_via_ibgp,
+            router_id: route.router_id,
+            originator_id: route.originator_id,
+            cluster_list: &route.cluster_list,
+        },
+    }
+}
+
+/// Runs the source peer's import policy against a freshly-received
+/// candidate. `None` means reject — the caller treats the prefix like an
+/// explicit withdrawal instead of inserting it, since a rejected route must
+/// not linger in `adj_rib_in` from an earlier, now-superseded UPDATE.
+fn apply_import_policy(
+    prefix: IpNet,
+    mut candidate: RibRoute,
+    policy: &CompiledPolicy,
+) -> Option<RibRoute> {
+    match nos_rpl::vm::run(policy, &to_policy_input(prefix, &candidate)) {
+        nos_rpl::Verdict::Reject => None,
+        nos_rpl::Verdict::Accept { local_pref, med } => {
+            candidate.local_pref = local_pref;
+            candidate.med = med;
+            Some(candidate)
+        }
+    }
+}
 
 /// RFC 4271 §5.1.5's default `LOCAL_PREF`, applied whenever a peer's UPDATE
 /// omits the attribute (or for every locally-redistributed route, which
@@ -217,6 +263,10 @@ struct PeerOutbox {
     /// multi-path fan-out; a family missing here still gets the ordinary
     /// single-best-path advertisement like any other peer.
     add_path_afs: HashSet<AddressFamily>,
+    /// This peer-group's resolved export policy — always present, `deny-all`
+    /// by default (see root `CLAUDE.md`'s "Default-deny rollout impact"),
+    /// consulted by `build_advertisement`.
+    export_policy: Arc<CompiledPolicy>,
 }
 
 /// The BGP RIB engine for one `nos-bgpd` instance. See the module doc
@@ -293,6 +343,7 @@ impl BgpRib {
         is_rr_client: bool,
         is_rs_client: bool,
         add_path_afs: HashSet<AddressFamily>,
+        export_policy: Arc<CompiledPolicy>,
         tx: mpsc::UnboundedSender<OutboundUpdate>,
     ) {
         self.peer_outboxes.insert(
@@ -307,6 +358,7 @@ impl BgpRib {
                 is_rr_client,
                 is_rs_client,
                 add_path_afs,
+                export_policy,
             },
         );
         let outbox = self.peer_outboxes.get(&peer).expect("just inserted");
@@ -404,13 +456,17 @@ impl BgpRib {
     /// `LOCAL_PREF`/`MULTI_EXIT_DISC` are shared across the legacy `nlri`
     /// and every `mp_reach` batch in the same UPDATE (RFC 4760: only the
     /// next-hop is per-batch); each `mp_reach` batch's own `next_hop` is
-    /// used instead of the legacy attribute's.
+    /// used instead of the legacy attribute's. `import_policy` is `from`'s
+    /// peer-group's resolved import policy (`deny-all` by default — see root
+    /// `CLAUDE.md`'s "Default-deny rollout impact"): a rejected prefix is
+    /// treated like an explicit withdrawal rather than inserted.
     pub fn handle_update(
         &mut self,
         from: IpAddr,
         remote_is_ibgp: bool,
         remote_bgp_id: Ipv4Addr,
         update: &UpdateMessage,
+        import_policy: &CompiledPolicy,
     ) {
         let mut touched: HashSet<IpNet> = HashSet::new();
 
@@ -477,26 +533,36 @@ impl BgpRib {
                 };
                 for prefix in &update.nlri {
                     let prefix = IpNet::V4(*prefix);
-                    info!(peer = %from, "bgp: learned route for {prefix} into adj-rib-in");
-                    table.insert(
-                        prefix,
-                        RibRoute {
-                            next_hop: Some(IpAddr::V4(attrs.next_hop)),
-                            ..base_route.clone()
-                        },
-                    );
+                    let candidate = RibRoute {
+                        next_hop: Some(IpAddr::V4(attrs.next_hop)),
+                        ..base_route.clone()
+                    };
+                    match apply_import_policy(prefix, candidate, import_policy) {
+                        Some(route) => {
+                            info!(peer = %from, "bgp: learned route for {prefix} into adj-rib-in");
+                            table.insert(prefix, route);
+                        }
+                        None => {
+                            table.remove(&prefix);
+                        }
+                    }
                     touched.insert(prefix);
                 }
                 for mp in &update.mp_reach {
                     for prefix in &mp.nlri {
-                        info!(peer = %from, "bgp: learned route for {prefix} into adj-rib-in");
-                        table.insert(
-                            *prefix,
-                            RibRoute {
-                                next_hop: Some(mp.next_hop),
-                                ..base_route.clone()
-                            },
-                        );
+                        let candidate = RibRoute {
+                            next_hop: Some(mp.next_hop),
+                            ..base_route.clone()
+                        };
+                        match apply_import_policy(*prefix, candidate, import_policy) {
+                            Some(route) => {
+                                info!(peer = %from, "bgp: learned route for {prefix} into adj-rib-in");
+                                table.insert(*prefix, route);
+                            }
+                            None => {
+                                table.remove(prefix);
+                            }
+                        }
                         touched.insert(*prefix);
                     }
                 }
@@ -851,6 +917,23 @@ fn build_advertisement(
     if ibgp_to_ibgp && !reflecting {
         return None;
     }
+
+    // This destination peer-group's resolved export policy (`deny-all` by
+    // default — see root `CLAUDE.md`'s "Default-deny rollout impact").
+    // `best` is shadowed with a possibly policy-adjusted owned copy so every
+    // rewrite below (`AS_PATH`, `LOCAL_PREF`, `MED`, reflection) sees the
+    // policy's `local_pref`/`med`, not the pre-policy values.
+    let best = match nos_rpl::vm::run(&outbox.export_policy, &to_policy_input(prefix, best)) {
+        nos_rpl::Verdict::Reject => return None,
+        nos_rpl::Verdict::Accept { local_pref, med } => {
+            let mut adjusted = best.clone();
+            adjusted.local_pref = local_pref;
+            adjusted.med = med;
+            adjusted
+        }
+    };
+    let best = &best;
+
     let mode = outbox.next_hop_mode.unwrap_or(if outbox.is_ibgp {
         NextHopMode::Unchanged
     } else {
@@ -958,6 +1041,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
+            accept_all_policy(),
             tx,
         );
         rx
@@ -984,6 +1068,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
+            accept_all_policy(),
             tx,
         );
         rx
@@ -1013,9 +1098,18 @@ mod tests {
             is_rr_client,
             is_rs_client,
             add_path_afs,
+            accept_all_policy(),
             tx,
         );
         rx
+    }
+
+    fn accept_all_policy() -> Arc<CompiledPolicy> {
+        Arc::new(nos_rpl::ACCEPT_ALL.clone())
+    }
+
+    fn deny_all_policy() -> Arc<CompiledPolicy> {
+        Arc::new(nos_rpl::DENY_ALL.clone())
     }
 
     fn full_update(routes: Vec<(&str, &str)>) -> RedistributeUpdate {
@@ -1068,6 +1162,94 @@ mod tests {
             mp_reach: vec![],
             mp_unreach: vec![],
         }
+    }
+
+    #[test]
+    fn import_policy_reject_prevents_route_from_being_learned() {
+        let mut rib = new_rib(65000);
+        let source = addr("10.0.0.1");
+        let observer = addr("10.0.0.2");
+        let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
+        let mut observer_rx = register_peer(&mut rib, observer, false, addr("10.0.0.253"));
+
+        rib.handle_update(
+            source,
+            false,
+            v4("192.0.2.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+            &deny_all_policy(),
+        );
+
+        assert!(recv_all(&mut observer_rx).is_empty());
+    }
+
+    #[test]
+    fn import_policy_can_set_local_pref() {
+        let mut rib = new_rib(65000);
+        let source = addr("10.0.0.1");
+        let observer = addr("10.0.0.2");
+        // Source is eBGP-learned, observer is iBGP — LOCAL_PREF is only ever
+        // forwarded toward an iBGP peer, and standard split-horizon only
+        // suppresses an iBGP-learned route being reflected to another iBGP
+        // peer, so this combination exercises the mutation without either
+        // rule getting in the way.
+        let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
+        let mut observer_rx = register_peer(&mut rib, observer, true, addr("10.0.0.253"));
+
+        let policy = nos_rpl::compile("set this.bgp.local_pref = 500\naccept\n").unwrap();
+        rib.handle_update(
+            source,
+            false,
+            v4("192.0.2.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![], "10.0.0.1"),
+            &policy,
+        );
+
+        let updates = recv_all(&mut observer_rx);
+        let adv = updates
+            .into_iter()
+            .find_map(|u| match u {
+                OutboundUpdate::Announce(a) if a.prefix == prefix("1.2.3.0/24") => Some(a),
+                _ => None,
+            })
+            .expect("expected an announcement for 1.2.3.0/24");
+        assert_eq!(adv.local_pref, Some(500));
+    }
+
+    #[test]
+    fn export_policy_reject_suppresses_advertisement_to_one_peer() {
+        let mut rib = new_rib(65000);
+        let source = addr("10.0.0.1");
+        let allowed = addr("10.0.0.2");
+        let blocked = addr("10.0.0.3");
+        let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
+        let mut allowed_rx = register_peer(&mut rib, allowed, false, addr("10.0.0.253"));
+
+        let (tx, mut blocked_rx) = mpsc::unbounded_channel();
+        rib.peer_established(
+            blocked,
+            false,
+            Some(addr("10.0.0.252")),
+            all_afs(),
+            false,
+            None,
+            false,
+            false,
+            HashSet::new(),
+            deny_all_policy(),
+            tx,
+        );
+
+        rib.handle_update(
+            source,
+            false,
+            v4("192.0.2.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+            &accept_all_policy(),
+        );
+
+        assert!(!recv_all(&mut allowed_rx).is_empty());
+        assert!(recv_all(&mut blocked_rx).is_empty());
     }
 
     #[test]
@@ -1183,6 +1365,7 @@ mod tests {
             false,
             v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         // Never echoed back to the source peer.
@@ -1202,6 +1385,7 @@ mod tests {
             false,
             v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         let updates = recv_all(&mut other_rx);
@@ -1235,6 +1419,7 @@ mod tests {
             true,
             v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         assert!(recv_all(&mut other_rx).is_empty());
@@ -1253,6 +1438,7 @@ mod tests {
             false,
             v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         let updates = recv_all(&mut ibgp_rx);
@@ -1295,6 +1481,7 @@ mod tests {
             false,
             v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         let updates = recv_all(&mut ibgp_rx);
@@ -1334,6 +1521,7 @@ mod tests {
             false,
             v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         let updates = recv_all(&mut other_rx);
@@ -1401,6 +1589,7 @@ mod tests {
             false,
             v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65002, 65000, 65001], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         assert!(recv_all(&mut other_rx).is_empty());
@@ -1436,6 +1625,7 @@ mod tests {
                 }),
                 ..empty_update()
             },
+            &nos_rpl::ACCEPT_ALL,
         );
         let _ = recv_all(&mut observer_rx);
 
@@ -1456,6 +1646,7 @@ mod tests {
                 }),
                 ..empty_update()
             },
+            &nos_rpl::ACCEPT_ALL,
         );
 
         let updates = recv_all(&mut observer_rx);
@@ -1492,6 +1683,7 @@ mod tests {
             false,
             v4("192.0.2.1"),
             &ebgp_update(vec!["5.5.5.0/24"], vec![65099], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
         );
         let _ = recv_all(&mut observer_rx);
 
@@ -1528,6 +1720,7 @@ mod tests {
             false,
             v4("192.0.2.1"),
             &ebgp_update(vec!["5.5.5.0/24"], vec![65099], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
         );
         let _ = recv_all(&mut observer_rx);
 
@@ -1539,6 +1732,7 @@ mod tests {
                 withdrawn_routes: vec!["5.5.5.0/24".parse().unwrap()],
                 ..empty_update()
             },
+            &nos_rpl::ACCEPT_ALL,
         );
 
         let updates = recv_all(&mut observer_rx);
@@ -1561,6 +1755,7 @@ mod tests {
             false,
             v4("192.0.2.1"),
             &ebgp_update(vec!["5.5.5.0/24", "6.6.6.0/24"], vec![65099], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
         );
         let _ = recv_all(&mut observer_rx);
 
@@ -1595,6 +1790,7 @@ mod tests {
             false,
             false,
             HashSet::new(),
+            accept_all_policy(),
             tx,
         );
 
@@ -1800,6 +1996,7 @@ mod tests {
                 message::Origin::Incomplete,
                 None,
             ),
+            &nos_rpl::ACCEPT_ALL,
         );
         let _ = recv_all(&mut observer_rx);
 
@@ -1814,6 +2011,7 @@ mod tests {
                 message::Origin::Igp,
                 None,
             ),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         let updates = recv_all(&mut observer_rx);
@@ -1857,6 +2055,7 @@ mod tests {
                 message::Origin::Igp,
                 Some(200),
             ),
+            &nos_rpl::ACCEPT_ALL,
         );
         let _ = recv_all(&mut observer_rx);
 
@@ -1871,6 +2070,7 @@ mod tests {
                 message::Origin::Igp,
                 Some(100),
             ),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         let updates = recv_all(&mut observer_rx);
@@ -1918,6 +2118,7 @@ mod tests {
                 message::Origin::Igp,
                 Some(999),
             ),
+            &nos_rpl::ACCEPT_ALL,
         );
         let initial = recv_all(&mut observer_rx);
         assert_eq!(
@@ -1947,6 +2148,7 @@ mod tests {
                 message::Origin::Igp,
                 Some(1),
             ),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         // The winner is unchanged (still peer_a), so no new announcement is
@@ -1979,6 +2181,7 @@ mod tests {
                 message::Origin::Igp,
                 None,
             ),
+            &nos_rpl::ACCEPT_ALL,
         );
         let _ = recv_all(&mut observer_rx);
 
@@ -1993,6 +2196,7 @@ mod tests {
                 message::Origin::Igp,
                 None,
             ),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         let updates = recv_all(&mut observer_rx);
@@ -2041,6 +2245,7 @@ mod tests {
                 message::Origin::Igp,
                 None,
             ),
+            &nos_rpl::ACCEPT_ALL,
         );
         let _ = recv_all(&mut observer_rx);
 
@@ -2055,6 +2260,7 @@ mod tests {
                 message::Origin::Igp,
                 None,
             ),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         let updates = recv_all(&mut observer_rx);
@@ -2103,6 +2309,7 @@ mod tests {
                 message::Origin::Igp,
                 None,
             ),
+            &nos_rpl::ACCEPT_ALL,
         );
         let initial = recv_all(&mut observer_rx);
         assert_eq!(
@@ -2132,6 +2339,7 @@ mod tests {
                 message::Origin::Igp,
                 None,
             ),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         // The winner is unchanged (still peer_a), so no new announcement is
@@ -2165,6 +2373,7 @@ mod tests {
             true,
             v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         let updates = recv_all(&mut client_rx);
@@ -2208,6 +2417,7 @@ mod tests {
             true,
             v4("192.0.2.2"),
             &ebgp_update(vec!["4.5.6.0/24"], vec![], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         let updates = recv_all(&mut other_rx);
@@ -2240,7 +2450,7 @@ mod tests {
         let mut update = ebgp_update(vec!["7.8.9.0/24"], vec![], "10.0.0.1");
         update.attributes.as_mut().unwrap().cluster_list = vec![cluster_id];
 
-        rib.handle_update(source, true, v4("192.0.2.1"), &update);
+        rib.handle_update(source, true, v4("192.0.2.1"), &update, &nos_rpl::ACCEPT_ALL);
 
         assert!(recv_all(&mut observer_rx).is_empty());
     }
@@ -2257,7 +2467,7 @@ mod tests {
         let mut update = ebgp_update(vec!["7.8.9.0/24"], vec![], "10.0.0.1");
         update.attributes.as_mut().unwrap().originator_id = Some(router_id);
 
-        rib.handle_update(source, true, v4("192.0.2.1"), &update);
+        rib.handle_update(source, true, v4("192.0.2.1"), &update, &nos_rpl::ACCEPT_ALL);
 
         assert!(recv_all(&mut observer_rx).is_empty());
     }
@@ -2341,12 +2551,14 @@ mod tests {
             false,
             v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
         );
         rib.handle_update(
             peer_b,
             false,
             v4("192.0.2.2"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65002], "10.0.0.2"),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         let updates = recv_all(&mut rs_rx);
@@ -2407,12 +2619,14 @@ mod tests {
             false,
             v4("192.0.2.1"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
         );
         rib.handle_update(
             peer_b,
             false,
             v4("192.0.2.2"),
             &ebgp_update(vec!["1.2.3.0/24"], vec![65002], "10.0.0.2"),
+            &nos_rpl::ACCEPT_ALL,
         );
 
         let updates = recv_all(&mut rs_rx);

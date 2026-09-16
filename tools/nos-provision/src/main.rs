@@ -19,8 +19,8 @@ use futures::{SinkExt, StreamExt};
 use ipnet::IpNet;
 use nos_proto::{
     AddressFamily, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, ConfigOp, Event, InterfaceOp,
-    IpcCodec, Redistribute, RedistributeSource, RedistributeTarget, Request, RoutingTableOp,
-    StaticRouteOp, StaticRoutingInstanceOp, TransactionBase,
+    IpcCodec, PolicyDefinitionOp, Redistribute, RedistributeSource, RedistributeTarget, Request,
+    RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp, TransactionBase,
 };
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -98,6 +98,26 @@ struct Args {
 
     #[arg(long)]
     save: bool,
+
+    /// If set (with `--policy-source-file`), creates/updates a
+    /// `PolicyDefinition` named `<policy-name>` from that file's content —
+    /// for verifying RPL import/export policy end to end. Independent of
+    /// `--import-policy`/`--export-policy`, which point a peer-group *at* a
+    /// policy by name; this just defines one.
+    #[arg(long)]
+    policy_name: Option<String>,
+    #[arg(long)]
+    policy_source_file: Option<PathBuf>,
+
+    /// Overrides `--peer-group`'s import policy (defaults to `accept-all` —
+    /// see root CLAUDE.md's "Default-deny rollout impact": every peer-group
+    /// this tool provisions needs an explicit policy in each direction, or
+    /// the two-router scenarios below would establish sessions but exchange
+    /// zero routes).
+    #[arg(long, default_value = "accept-all")]
+    import_policy: String,
+    #[arg(long, default_value = "accept-all")]
+    export_policy: String,
 }
 
 #[tokio::main]
@@ -166,6 +186,23 @@ async fn main() -> anyhow::Result<()> {
             instance: args.bgp_instance.clone(),
             name: args.peer_group.clone(),
             af: AddressFamily::Ipv4Unicast,
+        }),
+        // `import_policy`/`export_policy` default to `deny-all` (see root
+        // CLAUDE.md's "Default-deny rollout impact") — every router this
+        // tool provisions needs both set explicitly (`accept-all` unless
+        // overridden via `--import-policy`/`--export-policy`), or
+        // verify-bgp.sh's phases (which predate RPL and expect every route
+        // to flow unconditionally) would establish sessions but exchange
+        // zero routes.
+        ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetImportPolicy {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            import_policy: args.import_policy.clone(),
+        }),
+        ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetExportPolicy {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            export_policy: args.export_policy.clone(),
         }),
         ConfigOp::BgpPeer(BgpPeerOp::Set {
             instance: args.bgp_instance.clone(),
@@ -237,6 +274,23 @@ async fn main() -> anyhow::Result<()> {
             name: args.bgp_instance.clone(),
             cluster_id,
         }));
+    }
+
+    if let Some(name) = args.policy_name.clone() {
+        let path = args
+            .policy_source_file
+            .context("--policy-source-file is required when --policy-name is set")?;
+        let source = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        ops.push(ConfigOp::PolicyDefinition(PolicyDefinitionOp::Ensure {
+            name: name.clone(),
+        }));
+        ops.push(ConfigOp::PolicyDefinition(PolicyDefinitionOp::SetSource {
+            name,
+            source,
+        }));
+    } else if args.policy_source_file.is_some() {
+        bail!("--policy-source-file requires --policy-name to also be set");
     }
 
     for op in ops {

@@ -99,6 +99,21 @@ fn auth_str(pg: &BgpPeerGroup) -> String {
     }
 }
 
+/// Renders the effective policy name, not the raw `Option` — `None` really
+/// does mean `deny-all` at runtime (see `BgpPeerGroup.import_policy`'s doc
+/// comment), so the diff should say that rather than "unset".
+fn import_policy_str(pg: &BgpPeerGroup) -> String {
+    pg.import_policy
+        .clone()
+        .unwrap_or_else(|| nos_rpl::DENY_ALL_NAME.to_string())
+}
+
+fn export_policy_str(pg: &BgpPeerGroup) -> String {
+    pg.export_policy
+        .clone()
+        .unwrap_or_else(|| nos_rpl::DENY_ALL_NAME.to_string())
+}
+
 fn changed_fields(base: &BgpPeerGroup, candidate: &BgpPeerGroup) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     if base.remote_as != candidate.remote_as {
@@ -150,6 +165,20 @@ fn changed_fields(base: &BgpPeerGroup, candidate: &BgpPeerGroup) -> Vec<FieldDif
             new: Some(auth_str(candidate)),
         });
     }
+    if base.import_policy != candidate.import_policy {
+        fields.push(FieldDiff {
+            label: "import-policy".to_string(),
+            old: Some(import_policy_str(base)),
+            new: Some(import_policy_str(candidate)),
+        });
+    }
+    if base.export_policy != candidate.export_policy {
+        fields.push(FieldDiff {
+            label: "export-policy".to_string(),
+            old: Some(export_policy_str(base)),
+            new: Some(export_policy_str(candidate)),
+        });
+    }
     fields
 }
 
@@ -192,6 +221,16 @@ fn removed_section(pg: &BgpPeerGroup) -> SectionDiff {
             FieldDiff {
                 label: "auth".to_string(),
                 old: Some(auth_str(pg)),
+                new: None,
+            },
+            FieldDiff {
+                label: "import-policy".to_string(),
+                old: Some(import_policy_str(pg)),
+                new: None,
+            },
+            FieldDiff {
+                label: "export-policy".to_string(),
+                old: Some(export_policy_str(pg)),
                 new: None,
             },
         ],
@@ -240,6 +279,16 @@ fn added_section(pg: &BgpPeerGroup) -> SectionDiff {
                 old: None,
                 new: Some(auth_str(pg)),
             },
+            FieldDiff {
+                label: "import-policy".to_string(),
+                old: None,
+                new: Some(import_policy_str(pg)),
+            },
+            FieldDiff {
+                label: "export-policy".to_string(),
+                old: None,
+                new: Some(export_policy_str(pg)),
+            },
         ],
         subsections: Vec::new(),
     }
@@ -264,6 +313,8 @@ mod tests {
             next_hop: None,
             route_reflector_client: false,
             route_server_client: false,
+            import_policy: None,
+            export_policy: None,
         }
     }
 

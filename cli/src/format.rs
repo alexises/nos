@@ -2,8 +2,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
     Config, ConfigDiff, DiffStatus, FieldDiff, Interface, InterfaceStatus, LogEntry, LogLevel,
-    NextHopMode, PeerSummary, PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff,
-    StaticRoute, StaticRoutingInstance, TransactionSnapshot,
+    NextHopMode, PeerSummary, PolicyDefinition, PrefixRoutes, RouteSourceKind, RoutingTable,
+    SectionDiff, StaticRoute, StaticRoutingInstance, TransactionSnapshot,
 };
 
 use crate::session::Path;
@@ -416,7 +416,42 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
             .iter()
             .find(|i| &i.name == name)
             .map_or_else(|| format!("interface '{name}' not found"), render_interface),
+        Path::PolicyDefinition(name) => snapshot
+            .config
+            .policy_definitions
+            .iter()
+            .find(|p| &p.name == name)
+            .map_or_else(
+                || format!("policy-definition '{name}' not found"),
+                render_policy_definition,
+            ),
     }
+}
+
+/// Render one policy-definition as human-readable text — the name plus its
+/// line-numbered source (see `render_policy_source`), matching `show
+/// source`'s own rendering so the two never drift apart.
+pub fn render_policy_definition(policy: &PolicyDefinition) -> String {
+    format!(
+        "policy-definition {}:\n{}",
+        policy.name,
+        render_policy_source(&policy.source)
+    )
+}
+
+/// Render policy source with `cat -n`-style line numbers, so `set source
+/// line <n> ...`/`delete source line <n>` can be given without re-reading
+/// the source in an editor first.
+pub fn render_policy_source(source: &str) -> String {
+    if source.is_empty() {
+        return "(empty)".to_string();
+    }
+    source
+        .lines()
+        .enumerate()
+        .map(|(i, line)| format!("{:4}  {line}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ANSI SGR codes for `render_diff`. Hand-rolled rather than pulling in a
@@ -794,6 +829,8 @@ mod tests {
             next_hop: None,
             route_reflector_client: false,
             route_server_client: false,
+            import_policy: None,
+            export_policy: None,
         }
     }
 

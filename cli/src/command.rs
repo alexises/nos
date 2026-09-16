@@ -42,6 +42,11 @@ pub enum BgpPeerGroupField {
     /// `route-server-client` — always sets it to `true`; clearing goes
     /// through `DeleteTarget::RouteServerClient`.
     RouteServerClient,
+    /// `import-policy <name>` — `<name>` is any `PolicyDefinition`, or the
+    /// reserved `accept-all`/`deny-all` names; not validated here, only at
+    /// commit time.
+    ImportPolicy(String),
+    ExportPolicy(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +70,9 @@ pub enum EditTarget {
         name: String,
     },
     Interface {
+        name: String,
+    },
+    PolicyDefinition {
         name: String,
     },
 }
@@ -189,6 +197,12 @@ pub enum DeleteTarget {
     /// `delete route-server-client` — only valid while navigated into a
     /// peer-group.
     RouteServerClient,
+    /// `delete import-policy` — only valid while navigated into a
+    /// peer-group.
+    ImportPolicy,
+    /// `delete export-policy` — only valid while navigated into a
+    /// peer-group.
+    ExportPolicy,
     /// `delete bgp instance <name> cluster-id` — qualified clear.
     BgpInstanceClusterId {
         name: String,
@@ -297,6 +311,26 @@ pub enum Command {
     Edit(EditTarget),
     Set(SetTarget),
     Delete(DeleteTarget),
+    /// `edit source` — only valid while navigated into a policy-definition;
+    /// opens `$EDITOR`/`$VISUAL`/`nano` on its current source. See root
+    /// `CLAUDE.md`'s "nos-cli editing UX".
+    EditSource,
+    /// `show source` — only valid while navigated into a policy-definition.
+    ShowSource,
+    /// `set source line <n> <text>` — only valid while navigated into a
+    /// policy-definition. `<text>` is the raw remainder of the line
+    /// (leading whitespace preserved) since RPL's indentation is
+    /// semantically meaningful — parsed outside the generic
+    /// `split_whitespace()` matcher below, see `parse`'s doc comment.
+    SetSourceLine {
+        line: usize,
+        text: String,
+    },
+    /// `delete source line <n>` — only valid while navigated into a
+    /// policy-definition.
+    DeleteSourceLine {
+        line: usize,
+    },
     Up,
     Top,
     Commit,
@@ -311,6 +345,22 @@ pub enum Command {
 impl Command {
     pub fn parse(line: &str) -> Self {
         let trimmed = line.trim();
+        // `set source line <n> <text>` is the one command whose value must
+        // preserve leading whitespace verbatim — RPL's indentation is
+        // semantically meaningful — so it's parsed here, before the generic
+        // `split_whitespace()` matcher below would otherwise collapse it.
+        if let Some(rest) = trimmed.strip_prefix("set source line ") {
+            return match rest.find(' ') {
+                Some(space_idx) => match rest[..space_idx].parse::<usize>() {
+                    Ok(line) => Command::SetSourceLine {
+                        line,
+                        text: rest[space_idx + 1..].to_string(),
+                    },
+                    Err(_) => Command::Unknown(trimmed.to_string()),
+                },
+                None => Command::Unknown(trimmed.to_string()),
+            };
+        }
         match trimmed.split_whitespace().collect::<Vec<_>>().as_slice() {
             [] => Command::Empty,
             ["show", "config"] => Command::ShowConfig,
@@ -397,6 +447,15 @@ impl Command {
             ["edit", "interface", name] => Command::Edit(EditTarget::Interface {
                 name: (*name).to_string(),
             }),
+            ["edit", "policy-definition", name] => Command::Edit(EditTarget::PolicyDefinition {
+                name: (*name).to_string(),
+            }),
+            ["edit", "source"] => Command::EditSource,
+            ["show", "source"] => Command::ShowSource,
+            ["delete", "source", "line", n] => match n.parse::<usize>() {
+                Ok(line) => Command::DeleteSourceLine { line },
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
             ["set", "bgp", "instance", name, "asn", n] => match n.parse::<u32>() {
                 Ok(asn) => Command::Set(SetTarget::BgpInstance {
                     name: (*name).to_string(),
@@ -529,6 +588,20 @@ impl Command {
                     field: BgpPeerGroupField::RouteServerClient,
                 })
             }
+            ["set", "bgp", "instance", instance, "peer-group", group, "import-policy", name] => {
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: (*instance).to_string(),
+                    group: (*group).to_string(),
+                    field: BgpPeerGroupField::ImportPolicy((*name).to_string()),
+                })
+            }
+            ["set", "bgp", "instance", instance, "peer-group", group, "export-policy", name] => {
+                Command::Set(SetTarget::BgpPeerGroup {
+                    instance: (*instance).to_string(),
+                    group: (*group).to_string(),
+                    field: BgpPeerGroupField::ExportPolicy((*name).to_string()),
+                })
+            }
             ["set", "bgp", "instance", instance, "peer-group", group, "md5-password", password] => {
                 Command::Set(SetTarget::BgpPeerGroup {
                     instance: (*instance).to_string(),
@@ -606,6 +679,12 @@ impl Command {
             }),
             ["set", "route-server-client"] => Command::Set(SetTarget::PeerGroupRelative {
                 field: BgpPeerGroupField::RouteServerClient,
+            }),
+            ["set", "import-policy", name] => Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::ImportPolicy((*name).to_string()),
+            }),
+            ["set", "export-policy", name] => Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::ExportPolicy((*name).to_string()),
             }),
             ["set", "hold-time", n] => match n.parse::<u16>() {
                 Ok(hold_time) => Command::Set(SetTarget::PeerGroupRelative {
@@ -797,6 +876,8 @@ impl Command {
                 Command::Delete(DeleteTarget::RouteReflectorClient)
             }
             ["delete", "route-server-client"] => Command::Delete(DeleteTarget::RouteServerClient),
+            ["delete", "import-policy"] => Command::Delete(DeleteTarget::ImportPolicy),
+            ["delete", "export-policy"] => Command::Delete(DeleteTarget::ExportPolicy),
             ["delete", "hold-time"] => Command::Delete(DeleteTarget::HoldTime),
             ["delete", "keepalive-interval"] => Command::Delete(DeleteTarget::KeepaliveInterval),
             ["delete", "connect-retry-time"] => Command::Delete(DeleteTarget::ConnectRetryTime),
@@ -936,6 +1017,92 @@ mod tests {
         assert_eq!(
             Command::parse("show route rt1 not-an-address"),
             Command::Unknown("show route rt1 not-an-address".to_string())
+        );
+    }
+
+    #[test]
+    fn set_source_line_preserves_leading_whitespace() {
+        assert_eq!(
+            Command::parse("set source line 2     accept"),
+            Command::SetSourceLine {
+                line: 2,
+                text: "    accept".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn set_source_line_preserves_deep_indentation() {
+        // The generic split_whitespace() matcher used by every other
+        // command would collapse this to a single space — this command's
+        // whole reason for a dedicated pre-check is that RPL's indentation
+        // is semantically meaningful and must survive verbatim.
+        assert_eq!(
+            Command::parse("set source line 5         set this.bgp.local_pref = 150"),
+            Command::SetSourceLine {
+                line: 5,
+                text: "        set this.bgp.local_pref = 150".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn set_source_line_with_no_text_is_unknown() {
+        assert_eq!(
+            Command::parse("set source line 3"),
+            Command::Unknown("set source line 3".to_string())
+        );
+    }
+
+    #[test]
+    fn set_source_line_with_non_numeric_line_is_unknown() {
+        assert_eq!(
+            Command::parse("set source line abc accept"),
+            Command::Unknown("set source line abc accept".to_string())
+        );
+    }
+
+    #[test]
+    fn delete_source_line() {
+        assert_eq!(
+            Command::parse("delete source line 4"),
+            Command::DeleteSourceLine { line: 4 }
+        );
+    }
+
+    #[test]
+    fn edit_policy_definition_and_source() {
+        assert_eq!(
+            Command::parse("edit policy-definition p1"),
+            Command::Edit(EditTarget::PolicyDefinition {
+                name: "p1".to_string()
+            })
+        );
+        assert_eq!(Command::parse("edit source"), Command::EditSource);
+        assert_eq!(Command::parse("show source"), Command::ShowSource);
+    }
+
+    #[test]
+    fn set_and_delete_import_export_policy_relative() {
+        assert_eq!(
+            Command::parse("set import-policy accept-all"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::ImportPolicy("accept-all".to_string()),
+            })
+        );
+        assert_eq!(
+            Command::parse("set export-policy deny-all"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::ExportPolicy("deny-all".to_string()),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete import-policy"),
+            Command::Delete(DeleteTarget::ImportPolicy)
+        );
+        assert_eq!(
+            Command::parse("delete export-policy"),
+            Command::Delete(DeleteTarget::ExportPolicy)
         );
     }
 

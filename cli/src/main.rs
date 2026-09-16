@@ -15,7 +15,10 @@ use nos_cli::spec::{self, Doc};
 use nos_cli::{
     bgp_client, client, format, interface_client, log_client, rib_client, watchdog_client,
 };
-use nos_proto::{CommandDoc, ConfigOp, Event, LogEvent, ServiceRef, Topic, DEFAULT_CONFIG_SOCKET};
+use nos_proto::{
+    CommandDoc, ConfigOp, Event, LogEvent, PolicyDefinitionOp, ServiceRef, Topic,
+    DEFAULT_CONFIG_SOCKET,
+};
 use reedline::{
     default_emacs_keybindings, ColumnarMenu, Completer, Emacs, KeyCode, KeyModifiers, MenuBuilder,
     Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, Signal,
@@ -78,6 +81,11 @@ impl NosPrompt {
                 path: session::Path::Interface(name),
                 ..
             } => format!("({transaction}/interface:{name})"),
+            Mode::Configuration {
+                transaction,
+                path: session::Path::PolicyDefinition(name),
+                ..
+            } => format!("({transaction}/policy-definition:{name})"),
         };
         Self { hostname, suffix }
     }
@@ -549,6 +557,48 @@ async fn handle_action(
         }
         Resolved::Commit => Outcome::Continue(commit(mode, socket).await),
         Resolved::Discard => Outcome::Continue(discard(mode, socket).await),
+        Resolved::EditPolicySource { name } => {
+            Outcome::Continue(edit_policy_source(mode, socket, name).await)
+        }
+        Resolved::ShowPolicySource { name } => {
+            show_policy_source(&mode, socket, &name).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::SetPolicySourceLine { name, line, text } => {
+            let mode = edit_policy_source_line(mode, socket, name, |lines| {
+                if line == 0 {
+                    return Err("line numbers start at 1".to_string());
+                }
+                if line <= lines.len() {
+                    lines[line - 1] = text;
+                } else if line == lines.len() + 1 {
+                    lines.push(text);
+                } else {
+                    return Err(format!(
+                        "line {line} is out of range (source has {} lines; use {} to append)",
+                        lines.len(),
+                        lines.len() + 1
+                    ));
+                }
+                Ok(())
+            })
+            .await;
+            Outcome::Continue(mode)
+        }
+        Resolved::DeletePolicySourceLine { name, line } => {
+            let mode = edit_policy_source_line(mode, socket, name, |lines| {
+                if line == 0 || line > lines.len() {
+                    return Err(format!(
+                        "line {line} is out of range (source has {} lines)",
+                        lines.len()
+                    ));
+                }
+                lines.remove(line - 1);
+                Ok(())
+            })
+            .await;
+            Outcome::Continue(mode)
+        }
         Resolved::Diff => {
             diff(&mode, socket).await;
             Outcome::Continue(mode)
@@ -924,6 +974,127 @@ async fn apply_op(mode: Mode, socket: &Path, op: ConfigOp, after: PathAfter) -> 
         }
         Err(e) => {
             eprintln!("error: {e}");
+            mode
+        }
+    }
+}
+
+/// Fetches the current transaction's source for `name` — `None` only on a
+/// connection/IPC error (already reported to stderr), not on the policy
+/// merely not existing (its source is just `""` then, since this is only
+/// ever called while navigated into it, which requires it to exist).
+async fn fetch_policy_source(socket: &Path, transaction: &str, name: &str) -> Option<String> {
+    match client::get_transaction(socket, transaction).await {
+        Ok(snap) => Some(
+            snap.config
+                .policy_definitions
+                .iter()
+                .find(|p| p.name == name)
+                .map_or_else(String::new, |p| p.source.clone()),
+        ),
+        Err(e) => {
+            eprintln!("error: {e}");
+            None
+        }
+    }
+}
+
+/// Stages a new, already-compile-checked source for `name` — the check that
+/// ran before this call is advisory/fast-feedback only; `nos-configd`'s
+/// commit-time validation (via `PolicyDefinition`'s garde validator) stays
+/// the authoritative gate, unchanged.
+async fn apply_policy_source(mode: Mode, socket: &Path, name: String, source: String) -> Mode {
+    apply_op(
+        mode,
+        socket,
+        ConfigOp::PolicyDefinition(PolicyDefinitionOp::SetSource { name, source }),
+        PathAfter::Stay,
+    )
+    .await
+}
+
+/// Opens `$EDITOR`/`$VISUAL`/`nano` on a temp file pre-filled with `source`
+/// — see root `CLAUDE.md`'s "nos-cli editing UX". `None` means no editor
+/// could be spawned at all (already reported to stderr); the caller should
+/// point the user at `show source`/`set source line <n> <text>` instead.
+fn edit_in_external_editor(source: &str) -> Option<String> {
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| "nano".to_string());
+    let path = std::env::temp_dir().join(format!("nos-policy-{}.rpl", std::process::id()));
+    if std::fs::write(&path, source).is_err() {
+        eprintln!("error: could not create a temp file for editing");
+        return None;
+    }
+    let result = match std::process::Command::new(&editor).arg(&path).status() {
+        Ok(status) if status.success() => std::fs::read_to_string(&path).ok(),
+        Ok(_) => {
+            eprintln!("editor '{editor}' exited with an error; edit discarded");
+            None
+        }
+        Err(e) => {
+            eprintln!(
+                "error: could not run editor '{editor}' ({e}) — use 'show source' and 'set source line <n> <text>' instead"
+            );
+            None
+        }
+    };
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
+async fn edit_policy_source(mode: Mode, socket: &Path, name: String) -> Mode {
+    let transaction = current_transaction(&mode);
+    let Some(current) = fetch_policy_source(socket, &transaction, &name).await else {
+        return mode;
+    };
+    let Some(edited) = edit_in_external_editor(&current) else {
+        return mode;
+    };
+    match nos_rpl::compile(&edited) {
+        Ok(_) => apply_policy_source(mode, socket, name, edited).await,
+        Err(e) => {
+            eprintln!("policy did not compile, edit discarded: {e}");
+            mode
+        }
+    }
+}
+
+async fn show_policy_source(mode: &Mode, socket: &Path, name: &str) {
+    let transaction = current_transaction(mode);
+    if let Some(source) = fetch_policy_source(socket, &transaction, name).await {
+        println!("{}", format::render_policy_source(&source));
+    }
+}
+
+/// Shared by `set source line <n> <text>`/`delete source line <n>`: applies
+/// `edit` to the current source's lines (1-indexed, matching `show
+/// source`'s display), then runs the same client-side compile check `edit
+/// source` does before staging it. `edit` reports an out-of-range line
+/// itself, so both callers can just describe their own bounds rule.
+async fn edit_policy_source_line(
+    mode: Mode,
+    socket: &Path,
+    name: String,
+    edit: impl FnOnce(&mut Vec<String>) -> Result<(), String>,
+) -> Mode {
+    let transaction = current_transaction(&mode);
+    let Some(current) = fetch_policy_source(socket, &transaction, &name).await else {
+        return mode;
+    };
+    let mut lines: Vec<String> = current.lines().map(str::to_string).collect();
+    if let Err(e) = edit(&mut lines) {
+        eprintln!("error: {e}");
+        return mode;
+    }
+    let mut new_source = lines.join("\n");
+    if !new_source.is_empty() {
+        new_source.push('\n');
+    }
+    match nos_rpl::compile(&new_source) {
+        Ok(_) => apply_policy_source(mode, socket, name, new_source).await,
+        Err(e) => {
+            eprintln!("policy did not compile, edit discarded: {e}");
             mode
         }
     }

@@ -5,6 +5,7 @@ pub mod config_client;
 pub mod fsm;
 pub mod log_client;
 pub mod message;
+pub mod policy;
 pub mod reconcile;
 pub mod rib;
 pub mod rib_client;

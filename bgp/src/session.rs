@@ -79,6 +79,12 @@ pub struct ResolvedPeer {
     /// — threaded straight through to `fsm::PeerContext`.
     pub route_reflector_client: bool,
     pub route_server_client: bool,
+    /// The owning peer-group's resolved import/export policy — always
+    /// present, `deny-all` by default (see root `CLAUDE.md`'s "Default-deny
+    /// rollout impact"), resolved by `reconcile::resync` from the
+    /// peer-group's `import_policy`/`export_policy` names.
+    pub import_policy: Arc<nos_rpl::CompiledPolicy>,
+    pub export_policy: Arc<nos_rpl::CompiledPolicy>,
 }
 
 /// A peer-group's `BgpAuth` translated into `nos-tcp-auth`'s wire-level
@@ -356,6 +362,8 @@ impl SessionManager {
         let address_families = slot.peer.address_families.clone();
         let is_rr_client = slot.peer.route_reflector_client;
         let is_rs_client = slot.peer.route_server_client;
+        let import_policy = slot.peer.import_policy.clone();
+        let export_policy = slot.peer.export_policy.clone();
         let bgp_rib = self.bgp_rib.clone();
         tokio::spawn(async move {
             let outcome = fsm::run(
@@ -371,6 +379,8 @@ impl SessionManager {
                     address_families,
                     is_rr_client,
                     is_rs_client,
+                    import_policy,
+                    export_policy,
                 },
                 slot.clone(),
                 bgp_rib,
@@ -589,6 +599,8 @@ async fn active_connect_loop(
                                 address_families: slot.peer.address_families.clone(),
                                 is_rr_client: slot.peer.route_reflector_client,
                                 is_rs_client: slot.peer.route_server_client,
+                                import_policy: slot.peer.import_policy.clone(),
+                                export_policy: slot.peer.export_policy.clone(),
                             },
                             slot.clone(),
                             bgp_rib.clone(),
@@ -633,6 +645,8 @@ mod tests {
             address_families: vec![AddressFamily::Ipv4Unicast],
             route_reflector_client: false,
             route_server_client: false,
+            import_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+            export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
         }
     }
 

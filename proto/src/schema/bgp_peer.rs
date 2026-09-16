@@ -81,6 +81,8 @@ mod tests {
             next_hop: None,
             route_reflector_client: false,
             route_server_client: false,
+            import_policy: None,
+            export_policy: None,
         }
     }
 

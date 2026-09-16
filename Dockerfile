@@ -42,5 +42,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get purge -y --auto-remove libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
+# `nos`'s `edit source` (policy-definition editing, see root CLAUDE.md's
+# "nos-cli editing UX") shells out to $EDITOR/$VISUAL, falling back to nano
+# — kept installed (unlike libcap2-bin above) since it's a runtime tool, not
+# a build-time one.
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        nano \
+    && rm -rf /var/lib/apt/lists/*
+
 USER nos
 ENTRYPOINT ["nos-watchdogd"]
