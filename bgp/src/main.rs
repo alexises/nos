@@ -44,6 +44,17 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     tracing_subscriber::registry()
+        // Without this there's no way to turn the log volume down at all —
+        // and `rib.rs` emits an `info!` per learned route, each costing a
+        // `format!` plus a synchronous `ForwardingLayer::on_event` in the
+        // peer's FSM task, which dominates any high-route-count run (see
+        // `tools/bench-bgp.sh`). Defaults to `trace`, i.e. exactly the
+        // unfiltered behavior this process had before, so an unset
+        // `RUST_LOG` changes nothing.
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("trace")),
+        )
         .with(tracing_subscriber::fmt::layer())
         .with(ForwardingLayer::install(
             format!("nos-bgpd[{}]", args.instance),

@@ -87,6 +87,14 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     tracing_subscriber::registry()
+        // `RUST_LOG` support: defaults to `trace`, i.e. exactly the
+        // unfiltered behavior this process had before, so an unset
+        // `RUST_LOG` changes nothing. Added so `tools/bench-bgp.sh` can run
+        // the stack quietly enough to measure BGP rather than logging.
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("trace")),
+        )
         .with(tracing_subscriber::fmt::layer())
         .with(ForwardingLayer::install(
             format!("nos-ribd[{}]", args.table),

@@ -84,6 +84,10 @@ Two explicit, `ponytail:`-commented ceilings: ADD-PATH is send-only from this NO
 
 Two explicit simplifications, neither enforced in Rust: well-known standard community values (`NO_EXPORT`/`NO_ADVERTISE`/`NO_EXPORT_SUBCONFED`) get no automatic suppression behavior — they're ordinary `u32` values an operator's own import/export policy can act on; and extended communities' transitive/non-transitive high bit isn't enforced on egress — this NOS has no VPN/MPLS use case driving that distinction, so every extended community propagates uniformly.
 
+### Performance
+
+`tools/bench-bgp.sh` (see root `CLAUDE.md`) benchmarks this crate against GoBGP, BIRD and FRR on the same injected table, which is the only place the ceilings `rib.rs` documents get quantified rather than just noted: the single per-instance `Mutex<BgpRib>`, one prefix per outbound UPDATE (`OutboundUpdate` is per-prefix, so N prefixes to M peers means N×M framed writes where the others pack hundreds per PDU), the O(num_peers) `adj_rib_in` rescan per touched prefix in `recompute_and_propagate`, and the `info!` per learned route. Run it before and after anything that touches the RIB hot path, and with `RUST_LOG=info,nos_bgp::rib=warn` when the per-route logging would otherwise be what's being measured.
+
 ## Modules
 
 | Module | Role |
