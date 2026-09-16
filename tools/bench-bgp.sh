@@ -30,16 +30,34 @@
 # re-advertise pipeline rather than just "bytes arrived".
 #
 # Fairness notes, because the numbers are meaningless without them:
-#   * nos-bgpd itself still never touches the kernel directly -- installing
-#     the received routes is nos-ribd's job, over the BGP->RIB push
-#     (RibRequest::PushBgpRoutes, see root CLAUDE.md's "Config plane vs data
-#     plane"). BIRD and FRR are still run BGP-only here -- no `protocol
-#     kernel`, no zebra -- because this benchmark samples the BGP process
-#     alone (nos-bgpd for nos, the equivalent for the other three), and
-#     nos-ribd is a second, unsampled process, not nos-bgpd doing extra work.
-#     `kernel_routes` in the results table confirms the install actually
-#     happened (a real "added route" line per prefix in nos-ribd's own log)
-#     without folding its cost into peak_rss_mb/cpu_s.
+#   * All five rows now install their received best paths into a real
+#     kernel routing table, not just three of the previous four:
+#       - nos/nos-quiet: nos-bgpd pushes its loc-rib to the owning nos-ribd
+#         instance (RibRequest::PushBgpRoutes, root CLAUDE.md's "Config
+#         plane vs data plane"), which installs it via LinuxRibDriver into
+#         a VRF-scoped table.
+#       - gobgp: bundled with a real zebra (a second process in the same
+#         container, see $GOBGP_ZEBRA_IMAGE) and its own [zebra.config],
+#         since gobgpd has no kernel installer of its own.
+#       - frr: run with zebra enabled alongside bgpd (see
+#         $WORKDIR/frr-daemons), not bgpd alone as before.
+#       - bird: `protocol kernel { ipv4 { export all; }; }` (see
+#         gen_dut_configs), in-process -- no second daemon involved.
+#     This benchmark still samples the BGP decision process alone
+#     (nos-bgpd/gobgpd/bgpd), never the container as a whole -- so for
+#     nos/gobgp/frr, the second process actually doing the kernel work
+#     (nos-ribd/zebra) is NOT folded into peak_rss_mb/cpu_s. BIRD is the
+#     one exception: its kernel sync runs in the same process being
+#     sampled, so its numbers already include that cost -- not a bug, just
+#     a real structural difference between "kernel install is a separate
+#     process" (nos, frr, gobgp) and "kernel install is the same process"
+#     (bird) that no amount of container-level sampling can paper over.
+#     `kernel_routes`/`kernel_deploy_s` in the results table are what
+#     confirm the install actually happened and how long it took -- see
+#     wait_for_kernel_routes (nos, via a log line) and
+#     wait_for_main_table_routes (gobgp/bird/frr, via /proc/net/route,
+#     since they install into their container's ordinary main table rather
+#     than a VRF-scoped one).
 #   * The nos container runs five daemons under the watchdog, so memory/CPU
 #     is sampled per *process* (nos-bgpd only), never per container.
 #   * nos is measured twice: `nos` as it ships (per-route `info!` logging in
@@ -62,9 +80,9 @@
 #                                report is copied to
 #                                target/bench-bgp/dhat-heap-<dut>-<N>.json
 #                                before the DUT container is torn down
-#             KERNEL_DEPLOY_TIMEOUT=<s>  nos/nos-quiet only: cap on waiting
-#                                for nos-ribd to finish installing the DUT's
-#                                routes into the kernel table (default 180)
+#             KERNEL_DEPLOY_TIMEOUT=<s>  cap on waiting for the DUT to
+#                                finish installing its routes into the
+#                                kernel table (default 180; all five duts)
 #        e.g. PEERS=1 POLICY=0 tools/bench-bgp.sh run nos 1000   # smoke test
 #             CARGO_FEATURES=nos-bgp/dhat-heap tools/bench-bgp.sh up
 #             PROFILE_MEMORY=1 tools/bench-bgp.sh run nos-quiet 100000
@@ -80,6 +98,21 @@ RESULTS="$WORKDIR/results.tsv"
 NOS_IMAGE=${NOS_IMAGE:-nos:local}
 GOBGP_IMAGE=${GOBGP_IMAGE:-nos-bench-gobgp:local}
 GOBGP_VERSION=${GOBGP_VERSION:-4.9.0}
+# GoBGP has no built-in kernel installer of its own -- only a real zebra,
+# spoken to over FRR's zapi protocol, can get its routes into the kernel.
+# This second image bundles gobgpd with zebra itself (see
+# build_gobgp_zebra_image), used only for the gobgp DUT; $GOBGP_IMAGE (no
+# zebra) is still used for the monitor, which only ever reads gobgpd's own
+# RIB over its API and never touches a kernel table.
+GOBGP_ZEBRA_IMAGE=${GOBGP_ZEBRA_IMAGE:-nos-bench-gobgp-zebra:local}
+# Deliberately pinned independently of $FRR_IMAGE below (the FRR DUT's own
+# version): GoBGP 4.9.0's bundled zapi v6 client (pkg/zebra/zapi.go) is a
+# static struct-offset implementation written against a specific FRR
+# release (its own `MaxSoftware = NewSoftware(MaxZapiVer, "frr8.2")`) --
+# newer zebra releases have since drifted the zapi6 wire format enough to
+# break decoding (confirmed empirically against 8.5.4 and 10.7.1 while
+# adding this). 8.2.2 is the exact version its comments target.
+GOBGP_ZEBRA_FRR_IMAGE=${GOBGP_ZEBRA_FRR_IMAGE:-quay.io/frrouting/frr:8.2.2}
 BIRD_IMAGE=${BIRD_IMAGE:-pierky/bird:2.17.1}
 # quay.io, not docker.io: FRR's Docker Hub mirror stopped at v8.4.1 in 2022.
 FRR_IMAGE=${FRR_IMAGE:-quay.io/frrouting/frr:10.7.1}
@@ -158,12 +191,14 @@ DEFAULT_PREFIXES=100000
 # 200 prefixes/s is a floor none of these daemons should ever approach, so a
 # run that hits this really is stuck rather than merely slow.
 converge_timeout() { echo $(( 60 + $1 / 200 )); }
-# Independent cap on nos/nos-quiet's kernel-deployment wait (see cmd_run's
-# "2b" step) -- deliberately not scaled with N like converge_timeout above,
-# since LinuxRibDriver's un-batched netlink adds are measured far slower
-# than BGP convergence at this table size; a partial kernel_routes count
-# after this many seconds is still a useful rate, so there is no reason to
-# let one slow phase stretch the whole comparison run.
+# Independent cap on every dut's kernel-deployment wait (see cmd_run's "2b"
+# step) -- deliberately not scaled with N like converge_timeout above,
+# since nos's un-batched netlink adds are measured far slower than BGP
+# convergence at this table size (the other three have not been measured
+# as thoroughly, but there is no reason to assume they are immune); a
+# partial kernel_routes count after this many seconds is still a useful
+# rate, so there is no reason to let one slow phase stretch the whole
+# comparison run.
 KERNEL_DEPLOY_TIMEOUT=${KERNEL_DEPLOY_TIMEOUT:-180}
 
 log() { echo "[bench-bgp] $*" >&2; }
@@ -206,8 +241,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 EOF
 }
 
+# See $GOBGP_ZEBRA_IMAGE/$GOBGP_ZEBRA_FRR_IMAGE above for why this exists
+# and why it is pinned to a specific old FRR release rather than reusing
+# $FRR_IMAGE. Built the same way build_gobgp_image is (curl -> tar into
+# /usr/local/bin), just FROM the FRR image instead of debian:bookworm-slim
+# -- that gets zebra, watchfrr and /proc/net/route-readable capability
+# plumbing for free, and keeps gobgpd a plain static-linked drop-in
+# regardless of base distro (musl here, glibc in $GOBGP_IMAGE).
+build_gobgp_zebra_image() {
+  if docker image inspect "$GOBGP_ZEBRA_IMAGE" >/dev/null 2>&1; then
+    return 0
+  fi
+  log "building $GOBGP_ZEBRA_IMAGE ($GOBGP_ZEBRA_FRR_IMAGE + gobgp $GOBGP_VERSION)"
+  docker build -t "$GOBGP_ZEBRA_IMAGE" - <<EOF
+FROM $GOBGP_ZEBRA_FRR_IMAGE
+RUN wget -q -O /tmp/gobgp.tar.gz \\
+      https://github.com/osrg/gobgp/releases/download/v$GOBGP_VERSION/gobgp_${GOBGP_VERSION}_linux_amd64.tar.gz \\
+    && tar -xz -C /usr/local/bin gobgp gobgpd -f /tmp/gobgp.tar.gz \\
+    && rm -f /tmp/gobgp.tar.gz
+EOF
+}
+
 pull_images() {
-  for image in "$BIRD_IMAGE" "$FRR_IMAGE" "$EXABGP_IMAGE"; do
+  for image in "$BIRD_IMAGE" "$FRR_IMAGE" "$GOBGP_ZEBRA_FRR_IMAGE" "$EXABGP_IMAGE"; do
     log "pulling $image"
     docker pull -q "$image" >/dev/null
   done
@@ -292,10 +348,14 @@ gen_dut_configs() {
     cat <<EOF
 router id $DUT_IP;
 log stderr all;
-# No "protocol kernel" on purpose: this benchmark samples the BGP process
-# alone, and nos's kernel install happens in nos-ribd, a separate process --
-# see this script's "Fairness notes" above.
 protocol device {
+}
+# Installs every accepted route into the container's real (main) kernel
+# routing table -- BIRD's kernel-sync runs in this same process, unlike
+# nos-ribd/zebra for the other DUTs, so (unlike them) its cost is NOT a
+# separate, unsampled process here; see this script's "Fairness notes".
+protocol kernel {
+    ipv4 { export all; };
 }
 EOF
     if [[ "$POLICY" == 1 ]]; then
@@ -354,6 +414,28 @@ EOF
     echo "  neighbor $MON_IP activate"
     echo " exit-address-family"
   } >"$WORKDIR/bgpd.conf"
+  chmod 644 "$WORKDIR/bgpd.conf"
+
+  # The image's own default /etc/frr/daemons ships bgpd=no -- flip it on.
+  # zebra/staticd/mgmtd are forced on by frrcommon.sh's daemon_list()
+  # regardless of what is written here (they are always started), so this
+  # only needs to actually toggle bgpd; started via the image's normal
+  # tini/docker-start/watchfrr entrypoint (see start_dut) rather than
+  # invoking bgpd directly, since bgpd on its own has no path to zebra and
+  # a hand-rolled `zebra & bgpd` pairing (tried while developing this)
+  # breaks mgmtd's northbound plumbing that modern FRR expects present.
+  cat >"$WORKDIR/frr-daemons" <<'EOF'
+bgpd=yes
+zebra=yes
+staticd=yes
+mgmtd=yes
+vtysh_enable=yes
+zebra_options="  -A 127.0.0.1 -s 90000000"
+mgmtd_options="  -A 127.0.0.1"
+bgpd_options="   -A 127.0.0.1"
+staticd_options="-A 127.0.0.1"
+EOF
+  chmod 644 "$WORKDIR/frr-daemons"
 
   # --- GoBGP --------------------------------------------------------------
   {
@@ -361,6 +443,12 @@ EOF
 [global.config]
   as = $DUT_AS
   router-id = "$DUT_IP"
+
+[zebra.config]
+  enabled = true
+  url = "unix:/var/run/frr/zserv.api"
+  version = 6
+  redistribute-route-type-list = []
 EOF
     # GoBGP attaches import policy *globally* for ordinary peers -- a
     # per-neighbour `apply-policy` is only honoured for route-server clients
@@ -589,31 +677,49 @@ start_dut() {
     nos-quiet) start_nos_dut "info,nos_bgp::rib=warn" ;;
     gobgp)
       docker rm -f "$DUT" >/dev/null 2>&1 || true
-      log "starting gobgp DUT at $DUT_IP"
+      # $GOBGP_ZEBRA_IMAGE (gobgpd + a compatible zebra, see that var's
+      # comment) started by a small wrapper: the image's own tini/
+      # docker-start/watchfrr entrypoint brings zebra (+staticd/mgmtd,
+      # always forced on) up in the background, then gobgpd is exec'd once
+      # its zapi socket exists -- gobgpd's own [zebra.config] (see
+      # gen_dut_configs) is what actually pushes its routes into it.
+      log "starting gobgp DUT (+ zebra for kernel install) at $DUT_IP"
       docker run -d --name "$DUT" --network "$NET" --ip "$DUT_IP" \
+        --cap-add NET_ADMIN --cap-add SYS_ADMIN \
         -v "$WORKDIR/gobgpd.conf:/etc/gobgpd.conf:ro,z" \
-        "$GOBGP_IMAGE" gobgpd -f /etc/gobgpd.conf -t toml >/dev/null
+        --entrypoint sh \
+        "$GOBGP_ZEBRA_IMAGE" -c '
+          /usr/lib/frr/docker-start &
+          for _ in $(seq 1 30); do
+            [ -S /var/run/frr/zserv.api ] && break
+            sleep 1
+          done
+          exec /usr/local/bin/gobgpd -f /etc/gobgpd.conf -t toml
+        ' >/dev/null
       ;;
     bird)
       docker rm -f "$DUT" >/dev/null 2>&1 || true
       log "starting bird DUT at $DUT_IP"
       docker run -d --name "$DUT" --network "$NET" --ip "$DUT_IP" \
+        --cap-add NET_ADMIN \
         --entrypoint /usr/local/sbin/bird \
         -v "$WORKDIR/bird.conf:/etc/bird/bird.conf:ro,z" \
         "$BIRD_IMAGE" -f -c /etc/bird/bird.conf >/dev/null
       ;;
     frr)
       docker rm -f "$DUT" >/dev/null 2>&1 || true
-      # bgpd only -- no zebra, matching nos-bgpd (nos's kernel install
-      # happens in the separate, unsampled nos-ribd process -- see this
-      # script's "Fairness notes" above).
-      log "starting frr DUT (bgpd only) at $DUT_IP"
+      # Default tini/docker-start/watchfrr entrypoint (not a direct `bgpd`
+      # invocation): zebra/staticd/mgmtd are always started regardless of
+      # $WORKDIR/frr-daemons's content, this just flips bgpd=yes -- see
+      # that file's own generation comment in gen_dut_configs for why a
+      # hand-rolled `zebra & bgpd` pairing doesn't work on its own.
+      log "starting frr DUT (+ zebra for kernel install) at $DUT_IP"
       docker run -d --name "$DUT" --network "$NET" --ip "$DUT_IP" \
         --user root \
         --cap-add NET_ADMIN --cap-add SYS_ADMIN \
-        --entrypoint /usr/lib/frr/bgpd \
+        -v "$WORKDIR/frr-daemons:/etc/frr/daemons:ro,z" \
         -v "$WORKDIR/bgpd.conf:/etc/frr/bgpd.conf:ro,z" \
-        "$FRR_IMAGE" -f /etc/frr/bgpd.conf --log stdout >/dev/null
+        "$FRR_IMAGE" >/dev/null
       ;;
     *) log "unknown dut '$kind'"; return 2 ;;
   esac
@@ -750,6 +856,39 @@ wait_for_kernel_routes() {
   return 1
 }
 
+# gobgp/bird/frr all install straight into their container's real *main*
+# kernel table (table 254) rather than a VRF-scoped one like nos -- so
+# unlike nos (see wait_for_kernel_routes above), their install can be read
+# directly with no daemon-specific log parsing at all: /proc/net/route is a
+# kernel-provided pseudo-file, one line per route plus a header, readable
+# in any Linux container with a plain `cat`/`wc`, no `ip`/iproute2 needed.
+main_table_route_count() {
+  docker exec "$DUT" sh -c 'wc -l < /proc/net/route' 2>/dev/null | tr -d '[:space:]'
+}
+
+# Same shape as wait_for_kernel_routes, but counting real kernel-table
+# lines above `baseline` (the container's own default+connected routes,
+# captured right after start_dut, before any injector has announced
+# anything) instead of grepping a log for a fixed string.
+wait_for_main_table_routes() {
+  local baseline=$1 count=$2 timeout=$3
+  local got=0 raw
+  local deadline=$(( $(now_ms) + timeout * 1000 ))
+  while [[ "$(now_ms)" -lt "$deadline" ]]; do
+    raw=$(main_table_route_count) || raw=0
+    got=$(( ${raw:-0} - baseline ))
+    [[ "$got" -lt 0 ]] && got=0
+    if [[ "$got" -ge "$count" ]]; then
+      echo "$got"
+      return 0
+    fi
+    sleep 1
+  done
+  log "timed out at ${got:-0}/$count kernel routes installed"
+  echo "${got:-0}"
+  return 1
+}
+
 # One long-lived `docker exec` sampling loop, not one exec per sample. Emits
 # "peak_rss_kb cpu_ticks" per second for the DUT's BGP process; the pid is
 # re-resolved every tick because nos-bgpd is spawned (and respawned) by the
@@ -801,6 +940,7 @@ cmd_up() {
   build_provision_tool
   build_gobgp_image
   pull_images
+  build_gobgp_zebra_image
   ensure_network
   gen_dut_configs
   log "ready -- run 'tools/bench-bgp.sh all' or 'run <dut>'"
@@ -826,6 +966,11 @@ cmd_run() {
   start_dut "$kind"
   sampler_start "$(dut_process "$kind")"
   [[ "$kind" == nos* ]] && dut_log_start
+  # Baseline main-table route count (default + connected routes already
+  # present before any injector announces anything) for gobgp/bird/frr's
+  # kernel_routes measurement below -- see main_table_route_count.
+  local main_table_baseline=0
+  [[ "$kind" == gobgp || "$kind" == bird || "$kind" == frr ]] && main_table_baseline=$(main_table_route_count)
 
   # 1. Session establishment, timed from the monitor's start: the DUT is
   #    already up and configured, so this is how fast the pair gets to
@@ -856,34 +1001,52 @@ cmd_run() {
   fi
   log "$kind: converged to $expected prefixes in ${converge}s ($pps updates/s)"
 
-  # 2b. Kernel deployment: only nos/nos-quiet install anything into a real
-  #     kernel routing table -- nos-bgpd pushes its loc-rib to the owning
-  #     nos-ribd instance (poll interval 1s, see bgp/src/rib_push_client.rs),
-  #     which installs it via LinuxRibDriver (root CLAUDE.md's "Config plane
-  #     vs data plane"). Timed from the same `t0` as convergence above, so
-  #     kernel_deploy_s is directly comparable to converge_s -- the gap
-  #     between them is the extra latency the BGP->RIB push adds on top of
-  #     ordinary BGP convergence. Not a performance number for nos-ribd
-  #     itself (a second, unsampled process, see this script's "Fairness
-  #     notes"), just proof the deployment actually happened during this run.
-  #     BIRD/FRR/GoBGP never touch the kernel in this topology, hence "n/a".
+  # 2b. Kernel deployment: every daemon now installs its received best
+  #     paths into a real kernel routing table --
+  #       nos/nos-quiet: nos-bgpd pushes its loc-rib to the owning
+  #         nos-ribd instance (poll interval 1s, see
+  #         bgp/src/rib_push_client.rs), which installs it via
+  #         LinuxRibDriver into a VRF-scoped table (root CLAUDE.md's
+  #         "Config plane vs data plane") -- counted via a log line (see
+  #         wait_for_kernel_routes), since that table isn't the container's
+  #         main one.
+  #       gobgp/frr: a real zebra (bundled alongside gobgpd for gobgp, see
+  #         $GOBGP_ZEBRA_IMAGE; always-on alongside bgpd for frr, see
+  #         $WORKDIR/frr-daemons) installs into the container's main table.
+  #       bird: its own in-process `protocol kernel` (see gen_dut_configs)
+  #         installs into the container's main table directly.
+  #     gobgp/frr/bird are counted via /proc/net/route (see
+  #     wait_for_main_table_routes) -- no daemon-specific log parsing
+  #     needed, since they all use the same real (main) kernel table.
+  #
+  #     Timed from the same `t0` as convergence above, so kernel_deploy_s
+  #     is directly comparable to converge_s -- the gap between them is
+  #     the extra latency each daemon's kernel install adds on top of
+  #     ordinary BGP convergence. For nos/gobgp/frr this is NOT a
+  #     performance number for the process actually doing the kernel work
+  #     (nos-ribd/zebra are second, unsampled processes, see this script's
+  #     "Fairness notes") -- only for bird, whose kernel sync runs
+  #     in-process, does peak_rss_mb/cpu_s above already include it.
   #
   #     Capped independently of `timeout` (which scales with N for BGP
-  #     convergence) at $KERNEL_DEPLOY_TIMEOUT: `LinuxRibDriver::add_route`
-  #     issues one un-batched, awaited netlink call per route, which a smoke
-  #     test measured at roughly 25 routes/s -- installing a full run's
-  #     ~kept_prefixes routes this way would take far longer than BGP
-  #     convergence ever does, so above a few hundred routes this
-  #     legitimately times out with a partial count rather than stalling the
-  #     whole comparison. kernel_routes/kernel_deploy_s at a partial count is
-  #     still a valid rate (kernel_routes / kernel_deploy_s), just not a
-  #     completion time.
+  #     convergence) at $KERNEL_DEPLOY_TIMEOUT: nos's `LinuxRibDriver::add_route`
+  #     issues one un-batched, awaited netlink call per route, measured at
+  #     roughly 25-450 routes/s depending on RUST_LOG volume -- installing
+  #     a full run's ~kept_prefixes routes this way can take far longer
+  #     than BGP convergence ever does, so above a few hundred routes this
+  #     can legitimately time out with a partial count rather than
+  #     stalling the whole comparison. A partial count is still a valid
+  #     rate (kernel_routes / kernel_deploy_s), just not a completion time.
   local kernel_routes=n/a kernel_deploy_s=n/a
+  local kernel_timeout=$(( timeout < KERNEL_DEPLOY_TIMEOUT ? timeout : KERNEL_DEPLOY_TIMEOUT ))
   if [[ "$kind" == nos* ]]; then
-    local kernel_timeout=$(( timeout < KERNEL_DEPLOY_TIMEOUT ? timeout : KERNEL_DEPLOY_TIMEOUT ))
     kernel_routes=$(wait_for_kernel_routes "$expected" "$kernel_timeout") || true
     kernel_deploy_s=$(floor_poll "$(since "$t0")")
     log "$kind: installed $kernel_routes/$expected route(s) into the kernel routing table (rt1) in ${kernel_deploy_s}s"
+  elif [[ "$kind" == gobgp || "$kind" == bird || "$kind" == frr ]]; then
+    kernel_routes=$(wait_for_main_table_routes "$main_table_baseline" "$expected" "$kernel_timeout") || true
+    kernel_deploy_s=$(floor_poll "$(since "$t0")")
+    log "$kind: installed $kernel_routes/$expected route(s) into the kernel routing table in ${kernel_deploy_s}s"
   fi
 
   # 3. Churn: drop every injector (closing TCP, so the DUT withdraws
@@ -966,8 +1129,13 @@ cmd_report() {
   column -t -s $'\t' "$RESULTS"
   cat <<'EOF'
 
-Read these with the caveats in this script's header: bird/frr run BGP-only
-(no kernel install, matching nos); memory/cpu is the BGP process alone;
+Read these with the caveats in this script's header: all five rows now
+install into a real kernel routing table, but memory/cpu is still the BGP
+decision process alone (nos-bgpd/gobgpd/bgpd) -- for nos/gobgp/frr the
+process actually doing the kernel work (nos-ribd/zebra) is a second,
+unsampled process, so its cost is NOT in peak_rss_mb/cpu_s below; bird is
+the one exception, since its kernel sync runs in-process (see the header's
+"Fairness notes" for why that is a real asymmetry, not an oversight).
 `nos` is the shipping default (an info! per learned route, plus rtnetlink
 TRACE from the other daemons) and `nos-quiet` is the row comparable to the
 other three. converge_s and reconverge_s measure receive -> best-path ->
@@ -978,14 +1146,16 @@ kept_pfx is what the monitor actually held at the end over what the policy
 should have let through -- anything other than n/n means that daemon's filter
 did not do what the other three did, and its row is not comparable.
 
-kernel_routes/kernel_deploy_s are nos/nos-quiet only ("n/a" for
-gobgp/bird/frr, which never touch the kernel in this topology): how many
-real kernel routes nos-ribd installed via the BGP->RIB push, and how long
-that took measured from the same t0 as converge_s -- the gap between the two
-is the extra latency the push adds on top of ordinary BGP convergence. Proof
-the deployment actually ran, not a performance number for nos-ribd itself
-(a second, unsampled process, so its own cost is not folded into
-peak_rss_mb/cpu_s above).
+kernel_routes/kernel_deploy_s: how many real kernel routes each dut
+installed, and how long that took measured from the same t0 as converge_s --
+the gap between the two is the extra latency each daemon's kernel install
+adds on top of ordinary BGP convergence. nos/nos-quiet are counted via a log
+line (nos-ribd's own VRF-scoped table isn't visible from the container's
+main routing table); gobgp/bird/frr are counted directly from
+/proc/net/route, since they all install into their container's ordinary
+main table. A partial count below the expected total means
+KERNEL_DEPLOY_TIMEOUT was hit -- see this script's header for why that is
+expected at full scale, not a failure.
 
 updates_per_s counts (prefixes + tail) x peers (every path the DUT had to
 consider),
