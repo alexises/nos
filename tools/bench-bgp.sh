@@ -47,9 +47,18 @@
 # Usage: tools/bench-bgp.sh {up|run <dut> [N]|all [N]|report|logs [n]|down}
 #        dut = nos | nos-quiet | gobgp | bird | frr
 #        N   = prefixes announced *per peer*
-#        env: PEERS=<n>   how many full views to take (default 4)
-#             POLICY=0|1  apply the import policy above (default 1)
+#        env: PEERS=<n>          how many full views to take (default 4)
+#             POLICY=0|1         apply the import policy above (default 1)
+#             PROFILE_MEMORY=1   nos/nos-quiet only: pass --profile-memory-out
+#                                to the DUT's nos-bgpd (needs an image built
+#                                with CARGO_FEATURES=nos-bgp/dhat-heap, see
+#                                bgp/CLAUDE.md's "Memory profiling"); the
+#                                report is copied to
+#                                target/bench-bgp/dhat-heap-<dut>-<N>.json
+#                                before the DUT container is torn down
 #        e.g. PEERS=1 POLICY=0 tools/bench-bgp.sh run nos 1000   # smoke test
+#             CARGO_FEATURES=nos-bgp/dhat-heap tools/bench-bgp.sh up
+#             PROFILE_MEMORY=1 tools/bench-bgp.sh run nos-quiet 100000
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -472,7 +481,7 @@ start_nos_dut() {
     ${rust_log:+-e "RUST_LOG=$rust_log"} \
     -v "${DUT}-run:/run/nos" \
     -v "${DUT}-data:/var/lib/nos" \
-    "$NOS_IMAGE" >/dev/null
+    "$NOS_IMAGE" ${PROFILE_MEMORY:+--bgpd-arg --profile-memory-out=/var/lib/nos/dhat-heap.json} >/dev/null
 
   log "waiting for the nos DUT's nos-configd socket"
   local ready=1
@@ -821,6 +830,21 @@ cmd_run() {
   [[ -s "$RESULTS" ]] || printf 'daemon\tprefixes\tpeers\tpolicy\tkept_pfx\testablish_s\tconverge_s\tupdates_per_s\tpeak_rss_mb\tcpu_s\treconverge_s\n' >"$RESULTS"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$kind" "$count" "$PEERS" "$POLICY" "${final:-0}/$expected" "$establish" "$converge" "$pps" "$rss" "$cpu" "$churn" >>"$RESULTS"
+
+  # dhat only writes its report file when nos-bgpd exits -- SIGTERM (docker
+  # stop's default) reaches it the same way SIGINT does (see root
+  # CLAUDE.md's "Process supervision"), so this has to happen before the
+  # unconditional `docker rm -f` below, not after.
+  if [[ -n "${PROFILE_MEMORY:-}" && "$kind" == nos* ]]; then
+    local profile_out="$WORKDIR/dhat-heap-$kind-$count.json"
+    log "$kind: stopping DUT to flush the dhat heap-profile report"
+    docker stop "$DUT" >/dev/null 2>&1 || true
+    if docker cp "$DUT:/var/lib/nos/dhat-heap.json" "$profile_out" >/dev/null 2>&1; then
+      log "$kind: wrote heap-profile report to $profile_out"
+    else
+      log "$kind: WARNING: could not extract dhat-heap.json -- was \$NOS_IMAGE built with CARGO_FEATURES=nos-bgp/dhat-heap?"
+    fi
+  fi
 
   docker rm -f "$DUT" "$MON" >/dev/null 2>&1 || true
   stop_injectors

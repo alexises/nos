@@ -2,6 +2,9 @@
 export RUSTFLAGS ?= -D warnings
 
 IMAGE ?= nos:local
+# e.g. CARGO_FEATURES=nos-bgp/dhat-heap make docker-build — see bgp/CLAUDE.md's
+# "Memory profiling" note. Empty by default: no behavior change.
+CARGO_FEATURES ?=
 
 .PHONY: help build fmt fmt-fix clippy clippy-fix fix test test-plain \
         deny audit geiger miri mutants check ci tools docker-lint docker-build
@@ -67,4 +70,4 @@ docker-lint: ## Lint the Dockerfile with hadolint
 	hadolint Dockerfile
 
 docker-build: docker-lint ## Lint, then build the nos Docker image (nos-watchdogd + nos-configd + nos-bgpd + nos-ribd + nos-interfaced + nos-logd + nos)
-	docker build -t $(IMAGE) .
+	docker build --build-arg CARGO_FEATURES=$(CARGO_FEATURES) -t $(IMAGE) .

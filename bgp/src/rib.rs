@@ -159,7 +159,10 @@ pub enum RouteOrigin {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RibRoute {
     pub origin: RouteOrigin,
-    pub as_path: Vec<u32>,
+    /// Never mutated in place by RPL (`as_path` is a read-only policy input)
+    /// — shared via `Arc` so cloning a `RibRoute` (candidate collection,
+    /// `loc_rib`/`adj_rib_in` storage) never deep-copies this list.
+    pub as_path: Arc<Vec<u32>>,
     pub bgp_origin: message::Origin,
     /// Always the effective value — defaulted to `DEFAULT_LOCAL_PREF` when
     /// the peer's UPDATE omitted `LOCAL_PREF`, or for a `Local` route.
@@ -190,8 +193,9 @@ pub struct RibRoute {
     pub originator_id: Option<Ipv4Addr>,
     /// RFC 4456 §5 `CLUSTER_LIST`, for `origin == Peer(_)` — one cluster-id
     /// per route reflector this route has already passed through, nearest
-    /// first. Always empty for `origin == Local`.
-    pub cluster_list: Vec<Ipv4Addr>,
+    /// first. Always empty for `origin == Local`. Never mutated in place by
+    /// RPL, like `as_path` — shared via `Arc` for the same reason.
+    pub cluster_list: Arc<Vec<Ipv4Addr>>,
     /// RFC 1997 `COMMUNITY` values, possibly rewritten by import policy.
     /// Empty for a fresh `Local` route (no wire attributes to start from).
     pub communities: Vec<u32>,
@@ -339,6 +343,11 @@ pub struct BgpRib {
     /// allocate — monotonic, never recycled (see `propagate_rs_view`'s doc
     /// comment).
     rs_next_id: HashMap<(IpAddr, IpNet), u32>,
+    /// Reusable scratch buffer for `recompute_and_propagate`'s peer list —
+    /// swapped out via `mem::take` and refilled each call instead of
+    /// collecting a fresh `Vec` on every touched prefix, so its capacity is
+    /// retained across calls once it reaches the peer count.
+    peer_scratch: Vec<IpAddr>,
 }
 
 impl Default for BgpRib {
@@ -362,6 +371,7 @@ impl BgpRib {
             peer_outboxes: HashMap::new(),
             rs_sent: HashMap::new(),
             rs_next_id: HashMap::new(),
+            peer_scratch: Vec::new(),
         }
     }
 
@@ -515,7 +525,14 @@ impl BgpRib {
         update: &UpdateMessage,
         import_policy: &CompiledPolicy,
     ) {
-        let mut touched: HashSet<IpNet> = HashSet::new();
+        // Sized from the message's own known counts so this doesn't rehash
+        // its way up on every insert — bounded by the total NLRI/withdrawn
+        // entries this one UPDATE could possibly touch.
+        let touched_capacity = update.nlri.len()
+            + update.mp_reach.iter().map(|m| m.nlri.len()).sum::<usize>()
+            + update.withdrawn_routes.len()
+            + update.mp_unreach.iter().map(|u| u.withdrawn.len()).sum::<usize>();
+        let mut touched: HashSet<IpNet> = HashSet::with_capacity(touched_capacity);
 
         let withdrawn: Vec<IpNet> = update
             .withdrawn_routes
@@ -565,9 +582,14 @@ impl BgpRib {
                 );
             } else {
                 let table = self.adj_rib_in.entry(from).or_default();
+                // This UPDATE adds at most this many entries — reserving
+                // once lets the per-peer table grow in fewer, larger steps
+                // on the way up to a full table, instead of rehashing on
+                // every insert-triggered doubling.
+                table.reserve(update.nlri.len() + update.mp_reach.iter().map(|m| m.nlri.len()).sum::<usize>());
                 let base_route = RibRoute {
                     origin: RouteOrigin::Peer(from),
-                    as_path: attrs.as_path.clone(),
+                    as_path: attrs.as_path.clone().into(),
                     bgp_origin: attrs.origin,
                     local_pref: attrs.local_pref.unwrap_or(DEFAULT_LOCAL_PREF),
                     med: attrs.med,
@@ -576,7 +598,7 @@ impl BgpRib {
                     next_hop: None,
                     received_at: Instant::now(),
                     originator_id: attrs.originator_id,
-                    cluster_list: attrs.cluster_list.clone(),
+                    cluster_list: attrs.cluster_list.clone().into(),
                     communities: attrs.communities.clone(),
                     extended_communities: attrs.extended_communities.clone(),
                     large_communities: attrs.large_communities.clone(),
@@ -715,7 +737,11 @@ impl BgpRib {
         // `best_path`'s pick doesn't change.
         self.propagate_rs_view(prefix);
 
-        let mut candidates: Vec<(RibRoute, Option<IpAddr>)> = Vec::new();
+        // Bounded by one redistributed candidate plus at most one per peer
+        // — sizing this avoids the reallocate-on-every-push churn this
+        // always-tiny, rebuilt-per-touched-prefix scratch Vec used to pay.
+        let mut candidates: Vec<(RibRoute, Option<IpAddr>)> =
+            Vec::with_capacity(1 + self.adj_rib_in.len());
         if let Some(route) = self.redistributed.get(&prefix) {
             candidates.push((route.clone(), None));
         }
@@ -744,8 +770,12 @@ impl BgpRib {
         }
 
         let source_is_rr_client = best.as_ref().is_some_and(|r| self.source_is_rr_client(r));
-        let peers: Vec<IpAddr> = self.peer_outboxes.keys().copied().collect();
-        for peer in peers {
+        // Reused across calls (see `peer_scratch`'s doc comment) instead of
+        // collecting a fresh Vec on every touched prefix.
+        let mut peers = std::mem::take(&mut self.peer_scratch);
+        peers.clear();
+        peers.extend(self.peer_outboxes.keys().copied());
+        for &peer in &peers {
             let outbox = self.peer_outboxes.get(&peer).expect("just listed");
             let advertisement = best.as_ref().and_then(|route| {
                 build_advertisement(
@@ -779,6 +809,7 @@ impl BgpRib {
                 }
             }
         }
+        self.peer_scratch = peers;
     }
 
     /// RFC 7947 route-server multi-path fan-out: for every `route_server_client`
@@ -889,7 +920,7 @@ impl BgpRib {
 fn redistributed_route() -> RibRoute {
     RibRoute {
         origin: RouteOrigin::Local,
-        as_path: Vec::new(),
+        as_path: Vec::new().into(),
         bgp_origin: message::Origin::Igp,
         local_pref: DEFAULT_LOCAL_PREF,
         med: None,
@@ -898,7 +929,7 @@ fn redistributed_route() -> RibRoute {
         next_hop: None,
         received_at: Instant::now(),
         originator_id: None,
-        cluster_list: Vec::new(),
+        cluster_list: Vec::new().into(),
         communities: Vec::new(),
         extended_communities: Vec::new(),
         large_communities: Vec::new(),
@@ -1053,20 +1084,29 @@ fn build_advertisement(
         NextHopMode::Unchanged => best.next_hop.or(outbox.local_addr)?,
     };
 
-    let mut as_path = best.as_path.clone();
+    // `as_path` is never mutated by RPL (read-only policy input), so it's
+    // still shared with whatever's stored in loc_rib/adj_rib_in at this
+    // point — `Arc::clone` is a refcount bump, not a deep copy. The one
+    // real content copy this function can't avoid is the eBGP prepend
+    // case, where the result genuinely differs per destination peer;
+    // `Arc::make_mut` does that copy directly into an owned buffer instead
+    // of cloning twice (once wastefully inside `adjusted = best.clone()`
+    // above, once again here) like the pre-Arc version of this code did.
+    let mut as_path = Arc::clone(&best.as_path);
     // RFC 7947 route-server clients get a fully transparent AS_PATH: no
     // local-ASN prepend, even though they're always eBGP (enforced at
     // config-validation time — see `bgp_instance::valid_route_reflection_and_server`).
     if !outbox.is_ibgp && !outbox.is_rs_client {
-        as_path.insert(0, local_asn);
+        Arc::make_mut(&mut as_path).insert(0, local_asn);
     }
+    let as_path: Vec<u32> = Arc::try_unwrap(as_path).unwrap_or_else(|arc| (*arc).clone());
     let local_pref = outbox.is_ibgp.then_some(best.local_pref);
     // MED is meant for use between adjacent ASes, so it's never forwarded
     // on to a further eBGP peer, only preserved toward iBGP peers.
     let med = if outbox.is_ibgp { best.med } else { None };
 
     let (originator_id, cluster_list) = if reflecting {
-        let mut clusters = best.cluster_list.clone();
+        let mut clusters = (*best.cluster_list).clone();
         clusters.insert(0, cluster_id);
         (best.originator_id.or(best.router_id), clusters)
     } else {
