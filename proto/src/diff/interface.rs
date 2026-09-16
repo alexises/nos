@@ -1,4 +1,4 @@
-use crate::schema::Interface;
+use crate::schema::{Interface, InterfaceAddress};
 
 use super::{DiffStatus, FieldDiff, SectionDiff};
 
@@ -38,11 +38,18 @@ fn header_for(name: &str) -> String {
     format!("interface {name}")
 }
 
+fn format_address(addr: &InterfaceAddress) -> String {
+    match &addr.label {
+        Some(label) => format!("{} (label {label})", addr.address),
+        None => addr.address.to_string(),
+    }
+}
+
 fn addresses_str(iface: &Interface) -> String {
     if iface.addresses.is_empty() {
         return "none".to_string();
     }
-    let mut addrs: Vec<String> = iface.addresses.iter().map(ToString::to_string).collect();
+    let mut addrs: Vec<String> = iface.addresses.iter().map(format_address).collect();
     addrs.sort();
     addrs.join(", ")
 }
@@ -126,7 +133,13 @@ mod tests {
     fn interface(name: &str, addresses: &[&str], routing_table: Option<&str>) -> Interface {
         Interface {
             name: name.to_string(),
-            addresses: addresses.iter().map(|a| a.parse().unwrap()).collect(),
+            addresses: addresses
+                .iter()
+                .map(|a| InterfaceAddress {
+                    address: a.parse().unwrap(),
+                    label: None,
+                })
+                .collect(),
             routing_table: routing_table.map(str::to_string),
         }
     }
@@ -178,5 +191,29 @@ mod tests {
         let base = vec![interface("eth0", &["10.0.0.1/24", "10.0.0.2/24"], None)];
         let candidate = vec![interface("eth0", &["10.0.0.2/24", "10.0.0.1/24"], None)];
         assert!(diff_interfaces(&base, &candidate).is_empty());
+    }
+
+    #[test]
+    fn modified_label_only_lists_addresses_field() {
+        let base = vec![Interface {
+            name: "eth0".to_string(),
+            addresses: vec![InterfaceAddress {
+                address: "10.0.0.1/24".parse().unwrap(),
+                label: None,
+            }],
+            routing_table: None,
+        }];
+        let candidate = vec![Interface {
+            name: "eth0".to_string(),
+            addresses: vec![InterfaceAddress {
+                address: "10.0.0.1/24".parse().unwrap(),
+                label: Some("mgmt".to_string()),
+            }],
+            routing_table: None,
+        }];
+        let sections = diff_interfaces(&base, &candidate);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].fields.len(), 1);
+        assert_eq!(sections[0].fields[0].label, "addresses");
     }
 }

@@ -523,15 +523,24 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 Resolved::Error(NO_CURRENT_STATIC_ROUTING_INSTANCE.to_string())
             }
         },
-        Command::Set(SetTarget::InterfaceAddress { name, address }) => Resolved::ApplyOp {
-            op: ConfigOp::Interface(InterfaceOp::AddAddress { name, address }),
+        Command::Set(SetTarget::InterfaceAddress {
+            name,
+            address,
+            label,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::Interface(InterfaceOp::AddAddress {
+                name,
+                address,
+                label,
+            }),
             after: PathAfter::Stay,
         },
-        Command::Set(SetTarget::InterfaceAddressRelative { address }) => match path {
+        Command::Set(SetTarget::InterfaceAddressRelative { address, label }) => match path {
             Path::Interface(name) => Resolved::ApplyOp {
                 op: ConfigOp::Interface(InterfaceOp::AddAddress {
                     name: name.clone(),
                     address,
+                    label,
                 }),
                 after: PathAfter::Stay,
             },
@@ -2947,12 +2956,14 @@ mod tests {
                 Command::Set(SetTarget::InterfaceAddress {
                     name: "eth0".to_string(),
                     address,
+                    label: None,
                 })
             ),
             Resolved::ApplyOp {
                 op: ConfigOp::Interface(InterfaceOp::AddAddress {
                     name: "eth0".to_string(),
                     address,
+                    label: None,
                 }),
                 after: PathAfter::Stay,
             }
@@ -2961,19 +2972,26 @@ mod tests {
         assert!(matches!(
             resolve(
                 &config_mode("t1", Path::Root, false),
-                Command::Set(SetTarget::InterfaceAddressRelative { address })
+                Command::Set(SetTarget::InterfaceAddressRelative {
+                    address,
+                    label: None
+                })
             ),
             Resolved::Error(_)
         ));
         assert_eq!(
             resolve(
                 &config_mode("t1", Path::Interface("eth0".to_string()), false),
-                Command::Set(SetTarget::InterfaceAddressRelative { address })
+                Command::Set(SetTarget::InterfaceAddressRelative {
+                    address,
+                    label: None
+                })
             ),
             Resolved::ApplyOp {
                 op: ConfigOp::Interface(InterfaceOp::AddAddress {
                     name: "eth0".to_string(),
                     address,
+                    label: None,
                 }),
                 after: PathAfter::Stay,
             }

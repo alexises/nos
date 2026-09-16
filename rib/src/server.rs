@@ -96,6 +96,7 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> RibEvent {
             }
         }
         RibRequest::GetVrfName => RibEvent::VrfName(ctx.driver.vrf_name(&ctx.table).await),
+        RibRequest::GetTableId => RibEvent::TableId(ctx.driver.table_id(&ctx.table).await),
     }
 }
 

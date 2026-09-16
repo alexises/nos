@@ -26,6 +26,8 @@ pub enum DriverError {
     Netlink(#[from] rtnetlink::Error),
     #[error("i/o error opening netlink connection: {0}")]
     Io(#[from] std::io::Error),
+    #[error("created loopback device {0} but could not find it afterwards")]
+    LoopbackNotFound(String),
 }
 
 /// One instance lives for the process lifetime, constructed in `main.rs`
@@ -51,6 +53,9 @@ pub trait InterfaceDriver: Send + Sync {
     /// *previous* resync's `Interfaces` but absent from the current one
     /// (removed from config outright). Un-enslaves from any VRF and
     /// removes any addresses previously applied; a no-op if the interface
-    /// no longer exists in the netns.
+    /// no longer exists in the netns. For a loopback name (see
+    /// `nos_proto::loopback_table_name`), also deletes the kernel device
+    /// this driver created for it — `name` alone is always sufficient to
+    /// recompute what that device is.
     async fn remove(&self, name: &str) -> Result<(), DriverError>;
 }

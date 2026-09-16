@@ -2,9 +2,9 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
     CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus, FieldDiff, Interface,
-    InterfaceStatus, LogEntry, LogLevel, NextHopMode, PeerSummary, PolicyDefinition, PrefixList,
-    PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, StaticRoute,
-    StaticRoutingInstance, TransactionSnapshot,
+    InterfaceAddress, InterfaceStatus, LogEntry, LogLevel, NextHopMode, PeerSummary,
+    PolicyDefinition, PrefixList, PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable,
+    SectionDiff, StaticRoute, StaticRoutingInstance, TransactionSnapshot,
 };
 
 use crate::session::Path;
@@ -137,6 +137,13 @@ pub fn render_static_route(route: &StaticRoute) -> String {
     format!("route {}: gateway {}", route.subnet, route.gateway)
 }
 
+fn format_address(addr: &InterfaceAddress) -> String {
+    match &addr.label {
+        Some(label) => format!("{} (label {label})", addr.address),
+        None => addr.address.to_string(),
+    }
+}
+
 /// Render one interface's config as human-readable text.
 pub fn render_interface(iface: &Interface) -> String {
     let addresses = if iface.addresses.is_empty() {
@@ -145,7 +152,7 @@ pub fn render_interface(iface: &Interface) -> String {
         iface
             .addresses
             .iter()
-            .map(ToString::to_string)
+            .map(format_address)
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -167,7 +174,7 @@ pub fn render_interface_status(status: &InterfaceStatus) -> String {
         status
             .addresses
             .iter()
-            .map(ToString::to_string)
+            .map(format_address)
             .collect::<Vec<_>>()
             .join(", ")
     };

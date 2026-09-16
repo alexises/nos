@@ -149,9 +149,16 @@ pub enum SetTarget {
     /// instance.
     StaticRouteRelative { subnet: IpNet, gateway: IpAddr },
     /// Fully-qualified — works from anywhere in configuration mode.
-    InterfaceAddress { name: String, address: IpNet },
+    InterfaceAddress {
+        name: String,
+        address: IpNet,
+        label: Option<String>,
+    },
     /// Context-relative — only valid while navigated into an interface.
-    InterfaceAddressRelative { address: IpNet },
+    InterfaceAddressRelative {
+        address: IpNet,
+        label: Option<String>,
+    },
     /// Fully-qualified — works from anywhere in configuration mode.
     InterfaceRoutingTable { name: String, routing_table: String },
     /// Context-relative — only valid while navigated into an interface.
@@ -904,11 +911,32 @@ impl Command {
                 Ok(address) => Command::Set(SetTarget::InterfaceAddress {
                     name: (*name).to_string(),
                     address,
+                    label: None,
                 }),
                 Err(_) => Command::Unknown(trimmed.to_string()),
             },
+            ["set", "interface", name, "address", addr, "label", label] => {
+                match addr.parse::<IpNet>() {
+                    Ok(address) => Command::Set(SetTarget::InterfaceAddress {
+                        name: (*name).to_string(),
+                        address,
+                        label: Some((*label).to_string()),
+                    }),
+                    Err(_) => Command::Unknown(trimmed.to_string()),
+                }
+            }
             ["set", "address", addr] => match addr.parse::<IpNet>() {
-                Ok(address) => Command::Set(SetTarget::InterfaceAddressRelative { address }),
+                Ok(address) => Command::Set(SetTarget::InterfaceAddressRelative {
+                    address,
+                    label: None,
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["set", "address", addr, "label", label] => match addr.parse::<IpNet>() {
+                Ok(address) => Command::Set(SetTarget::InterfaceAddressRelative {
+                    address,
+                    label: Some((*label).to_string()),
+                }),
                 Err(_) => Command::Unknown(trimmed.to_string()),
             },
             ["set", "interface", name, "routing-table", table] => {
@@ -2168,12 +2196,33 @@ mod tests {
             Command::Set(SetTarget::InterfaceAddress {
                 name: "eth0".to_string(),
                 address: "10.0.0.1/24".parse().unwrap(),
+                label: None,
             })
         );
         assert_eq!(
             Command::parse("set address 10.0.0.1/24"),
             Command::Set(SetTarget::InterfaceAddressRelative {
                 address: "10.0.0.1/24".parse().unwrap(),
+                label: None,
+            })
+        );
+    }
+
+    #[test]
+    fn set_interface_address_with_label_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set interface eth0 address 10.0.0.1/24 label mgmt"),
+            Command::Set(SetTarget::InterfaceAddress {
+                name: "eth0".to_string(),
+                address: "10.0.0.1/24".parse().unwrap(),
+                label: Some("mgmt".to_string()),
+            })
+        );
+        assert_eq!(
+            Command::parse("set address 10.0.0.1/24 label mgmt"),
+            Command::Set(SetTarget::InterfaceAddressRelative {
+                address: "10.0.0.1/24".parse().unwrap(),
+                label: Some("mgmt".to_string()),
             })
         );
     }

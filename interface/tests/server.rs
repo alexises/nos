@@ -3,10 +3,17 @@ use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
 use nos_interface::driver::NoopInterfaceDriver;
 use nos_interface::{server, InterfaceState, Interfaces};
-use nos_proto::{InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec};
+use nos_proto::{InterfaceAddress, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec};
 use tokio::net::UnixStream;
 use tokio::sync::RwLock;
 use tokio_util::codec::{FramedRead, FramedWrite};
+
+fn sample_address() -> InterfaceAddress {
+    InterfaceAddress {
+        address: "10.0.0.1/24".parse().unwrap(),
+        label: None,
+    }
+}
 
 async fn sample_interfaces() -> Interfaces {
     let mut by_name = std::collections::HashMap::new();
@@ -14,7 +21,7 @@ async fn sample_interfaces() -> Interfaces {
         "eth0".to_string(),
         InterfaceState {
             name: "eth0".to_string(),
-            addresses: vec!["10.0.0.1/24".parse().unwrap()],
+            addresses: vec![sample_address()],
             routing_table: Some("rt1".to_string()),
         },
     );
@@ -101,7 +108,7 @@ async fn get_interface_returns_matching_status() {
         panic!("expected Interface, got {event:?}");
     };
     assert_eq!(name, "eth0");
-    assert_eq!(addresses, vec!["10.0.0.1/24".parse().unwrap()]);
+    assert_eq!(addresses, vec![sample_address()]);
     assert_eq!(routing_table.as_deref(), Some("rt1"));
 }
 

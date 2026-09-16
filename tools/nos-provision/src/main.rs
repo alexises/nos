@@ -126,6 +126,20 @@ struct Args {
     import_policy: String,
     #[arg(long, default_value = "accept-all")]
     export_policy: String,
+
+    /// If set, ensures a loopback interface for `--routing-table` (named
+    /// `loopback-<routing-table>`, per `nos_proto::LOOPBACK_PREFIX` — the
+    /// naming convention alone marks it as a loopback, no separate flag)
+    /// and adds this address to it. Mutually exclusive with
+    /// `--delete-loopback`.
+    #[arg(long)]
+    loopback_address: Option<IpNet>,
+
+    /// If set, deletes `--routing-table`'s loopback interface
+    /// (`loopback-<routing-table>`) instead of creating/updating one.
+    /// Mutually exclusive with `--loopback-address`.
+    #[arg(long)]
+    delete_loopback: bool,
 }
 
 #[tokio::main]
@@ -158,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
         ConfigOp::Interface(InterfaceOp::AddAddress {
             name: args.interface.clone(),
             address: args.address,
+            label: None,
         }),
         ConfigOp::Interface(InterfaceOp::SetRoutingTable {
             name: args.interface.clone(),
@@ -300,6 +315,26 @@ async fn main() -> anyhow::Result<()> {
         }));
     } else if args.policy_source_file.is_some() {
         bail!("--policy-source-file requires --policy-name to also be set");
+    }
+
+    if args.loopback_address.is_some() && args.delete_loopback {
+        bail!("--loopback-address and --delete-loopback are mutually exclusive");
+    }
+    let loopback_name = format!("loopback-{}", args.routing_table);
+    if let Some(address) = args.loopback_address {
+        ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
+            name: loopback_name.clone(),
+        }));
+        ops.push(ConfigOp::Interface(InterfaceOp::AddAddress {
+            name: loopback_name.clone(),
+            address,
+            label: None,
+        }));
+    }
+    if args.delete_loopback {
+        ops.push(ConfigOp::Interface(InterfaceOp::Delete {
+            name: loopback_name,
+        }));
     }
 
     for op in ops {

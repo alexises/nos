@@ -58,4 +58,10 @@ pub trait RibDriver: Send + Sync {
     /// `NoopRibDriver` (no real VRF ever exists), or if `apply` hasn't
     /// successfully run yet. Read-only — never allocates.
     async fn vrf_name(&self, table_name: &str) -> Option<String>;
+
+    /// Current kernel table id for `table_name`, if one has been
+    /// allocated — backs `RibRequest::GetTableId`. `None` for
+    /// `NoopRibDriver`, or if `apply` hasn't successfully run yet.
+    /// Read-only — never allocates.
+    async fn table_id(&self, table_name: &str) -> Option<u32>;
 }

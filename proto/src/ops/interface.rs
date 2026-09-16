@@ -1,7 +1,7 @@
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Config, Interface};
+use crate::schema::{Config, Interface, InterfaceAddress};
 
 use super::OpError;
 
@@ -14,13 +14,20 @@ use super::OpError;
 pub enum InterfaceOp {
     /// Creates the interface if it doesn't already exist; no-op if it does.
     /// Backs `edit interface <name>`'s "create if missing, else navigate to
-    /// it" semantics.
+    /// it" semantics. A loopback interface is created the same way, simply
+    /// by using a `loopback-<table>`-prefixed name (see
+    /// `schema::LOOPBACK_PREFIX`) — there is no separate op for it.
     Ensure {
         name: String,
     },
+    /// Upserts by address: if `address` is already present on the
+    /// interface, this replaces its label rather than adding a duplicate —
+    /// re-running `set interface <name> address <addr> label <label>` is
+    /// how a label is changed or cleared.
     AddAddress {
         name: String,
         address: IpNet,
+        label: Option<String>,
     },
     RemoveAddress {
         name: String,
@@ -51,17 +58,25 @@ impl InterfaceOp {
                 }
                 Ok(())
             }
-            InterfaceOp::AddAddress { name, address } => {
+            InterfaceOp::AddAddress {
+                name,
+                address,
+                label,
+            } => {
                 let iface = find_interface_mut(config, name)?;
-                if !iface.addresses.contains(address) {
-                    iface.addresses.push(*address);
+                match iface.addresses.iter_mut().find(|a| &a.address == address) {
+                    Some(existing) => existing.label.clone_from(label),
+                    None => iface.addresses.push(InterfaceAddress {
+                        address: *address,
+                        label: label.clone(),
+                    }),
                 }
                 Ok(())
             }
             InterfaceOp::RemoveAddress { name, address } => {
                 let iface = find_interface_mut(config, name)?;
                 let before = iface.addresses.len();
-                iface.addresses.retain(|a| a != address);
+                iface.addresses.retain(|a| &a.address != address);
                 if iface.addresses.len() == before {
                     return Err(OpError::InterfaceAddressNotFound {
                         name: name.clone(),
@@ -120,6 +135,13 @@ mod tests {
         s.parse().unwrap()
     }
 
+    fn iface_addr(s: &str) -> InterfaceAddress {
+        InterfaceAddress {
+            address: addr(s),
+            label: None,
+        }
+    }
+
     #[test]
     fn ensure_creates_when_missing() {
         let mut cfg = Config::default();
@@ -138,7 +160,7 @@ mod tests {
         let mut cfg = Config {
             interfaces: vec![Interface {
                 name: "eth0".to_string(),
-                addresses: vec![addr("10.0.0.1/24")],
+                addresses: vec![iface_addr("10.0.0.1/24")],
                 routing_table: None,
             }],
             ..Default::default()
@@ -161,10 +183,11 @@ mod tests {
         InterfaceOp::AddAddress {
             name: "eth0".to_string(),
             address: addr("10.0.0.1/24"),
+            label: None,
         }
         .apply(&mut cfg)
         .unwrap();
-        assert_eq!(cfg.interfaces[0].addresses, vec![addr("10.0.0.1/24")]);
+        assert_eq!(cfg.interfaces[0].addresses, vec![iface_addr("10.0.0.1/24")]);
 
         InterfaceOp::RemoveAddress {
             name: "eth0".to_string(),
@@ -185,11 +208,55 @@ mod tests {
             InterfaceOp::AddAddress {
                 name: "eth0".to_string(),
                 address: addr("10.0.0.1/24"),
+                label: None,
             }
             .apply(&mut cfg)
             .unwrap();
         }
         assert_eq!(cfg.interfaces[0].addresses.len(), 1);
+    }
+
+    #[test]
+    fn add_address_with_label() {
+        let mut cfg = Config {
+            interfaces: vec![interface("eth0")],
+            ..Default::default()
+        };
+        InterfaceOp::AddAddress {
+            name: "eth0".to_string(),
+            address: addr("10.0.0.1/24"),
+            label: Some("mgmt".to_string()),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.interfaces[0].addresses[0].label.as_deref(),
+            Some("mgmt")
+        );
+    }
+
+    #[test]
+    fn add_address_upserts_label_on_existing_address() {
+        let mut cfg = Config {
+            interfaces: vec![interface("eth0")],
+            ..Default::default()
+        };
+        InterfaceOp::AddAddress {
+            name: "eth0".to_string(),
+            address: addr("10.0.0.1/24"),
+            label: Some("a".to_string()),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        InterfaceOp::AddAddress {
+            name: "eth0".to_string(),
+            address: addr("10.0.0.1/24"),
+            label: Some("b".to_string()),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].addresses.len(), 1);
+        assert_eq!(cfg.interfaces[0].addresses[0].label.as_deref(), Some("b"));
     }
 
     #[test]

@@ -107,6 +107,34 @@ async fn lookup_with_no_covering_prefix_returns_no_match() {
 #[derive(Debug)]
 struct FakeVrfDriver(Option<String>);
 
+/// A driver that reports a canned table id, so `GetTableId`'s dispatch can
+/// be tested the same way.
+#[derive(Debug)]
+struct FakeTableIdDriver(Option<u32>);
+
+#[async_trait::async_trait]
+impl nos_rib::RibDriver for FakeTableIdDriver {
+    async fn apply(
+        &self,
+        _table_name: &str,
+        _best_routes: &std::collections::HashMap<nos_proto::IpNet, RibEntry>,
+    ) -> Result<(), nos_rib::DriverError> {
+        Ok(())
+    }
+
+    async fn teardown(&self, _table_name: &str) -> Result<(), nos_rib::DriverError> {
+        Ok(())
+    }
+
+    async fn vrf_name(&self, _table_name: &str) -> Option<String> {
+        None
+    }
+
+    async fn table_id(&self, _table_name: &str) -> Option<u32> {
+        self.0
+    }
+}
+
 #[async_trait::async_trait]
 impl nos_rib::RibDriver for FakeVrfDriver {
     async fn apply(
@@ -123,6 +151,10 @@ impl nos_rib::RibDriver for FakeVrfDriver {
 
     async fn vrf_name(&self, _table_name: &str) -> Option<String> {
         self.0.clone()
+    }
+
+    async fn table_id(&self, _table_name: &str) -> Option<u32> {
+        None
     }
 }
 
@@ -154,4 +186,34 @@ async fn get_vrf_name_is_none_when_the_driver_has_no_vrf_yet() {
     let event = reader.next().await.unwrap().unwrap();
 
     assert!(matches!(event, RibEvent::VrfName(None)));
+}
+
+#[tokio::test]
+async fn get_table_id_returns_the_drivers_answer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rib.sock");
+    let rib = Arc::new(RwLock::new(sample_rib()));
+    let driver: Arc<dyn nos_rib::RibDriver> = Arc::new(FakeTableIdDriver(Some(100)));
+    let _server = server::start(&path, "rt1".to_string(), rib, driver).unwrap();
+
+    let (mut reader, mut writer) = connect(&path).await;
+    writer.send(RibRequest::GetTableId).await.unwrap();
+    let event = reader.next().await.unwrap().unwrap();
+
+    assert!(matches!(event, RibEvent::TableId(Some(100))));
+}
+
+#[tokio::test]
+async fn get_table_id_is_none_when_the_driver_has_no_id_yet() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rib.sock");
+    let rib = Arc::new(RwLock::new(sample_rib()));
+    let driver: Arc<dyn nos_rib::RibDriver> = Arc::new(FakeTableIdDriver(None));
+    let _server = server::start(&path, "rt1".to_string(), rib, driver).unwrap();
+
+    let (mut reader, mut writer) = connect(&path).await;
+    writer.send(RibRequest::GetTableId).await.unwrap();
+    let event = reader.next().await.unwrap().unwrap();
+
+    assert!(matches!(event, RibEvent::TableId(None)));
 }

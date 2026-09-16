@@ -49,6 +49,11 @@ pub enum RibRequest {
     /// `nos-ribd` socket you connected to, exactly like `GetRoutes`/
     /// `Lookup` above.
     GetVrfName,
+    /// One-shot: this table's allocated kernel table id, if any — backs
+    /// loopback kernel device naming (`lo<table_id>`) in `nos-interfaced`'s
+    /// Linux driver. Symmetric to `GetVrfName`; no table name carried, same
+    /// reasoning.
+    GetTableId,
 }
 
 /// Messages sent from a `nos-ribd` instance to a client.
@@ -68,4 +73,7 @@ pub enum RibEvent {
     /// all, e.g. a no-op driver) — a normal, expected transient state, not
     /// an error.
     VrfName(Option<String>),
+    /// Reply to `GetTableId`. `None` under the same conditions as
+    /// `VrfName(None)` — normal/transient, never an error.
+    TableId(Option<u32>),
 }

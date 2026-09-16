@@ -39,4 +39,8 @@ impl RibDriver for NoopRibDriver {
     async fn vrf_name(&self, _table_name: &str) -> Option<String> {
         None
     }
+
+    async fn table_id(&self, _table_name: &str) -> Option<u32> {
+        None
+    }
 }

@@ -9,8 +9,13 @@
 # actually being redistributed into its bgp instance, advertised over the
 # wire, and learned into router-b's Adj-RIB-In/Loc-RIB, (via the `auth`
 # subcommand) that matching RFC 2385 TCP MD5 passwords on both routers still
-# establish while a mismatched password on either side does not, and (via
-# the `policy` subcommand) that a real RPL import policy on router-b
+# establish while a mismatched password on either side does not, (via the
+# `loopback` subcommand) that a real loopback interface (named
+# `loopback-rt1`, detected purely from that name — no separate config field)
+# actually gets a real dummy kernel device created (named from its routing
+# table's allocated kernel table id), enslaved into that table's VRF, and
+# addressed, then deleted again on removal, and (via the `policy`
+# subcommand) that a real RPL import policy on router-b
 # actually rejects a specific redistributed prefix from router-a — proving
 # the policy hook against the kernel-real two-container path, not just unit
 # tests — and that reverting to the `accept-all` default lets it back in,
@@ -36,7 +41,7 @@
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}
+# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|loopback|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -64,6 +69,17 @@ RID_C=3.3.3.3
 # fake redistributed prefix without colliding with anything real.
 REDISTRIBUTE_PREFIX=198.51.100.0/24
 REDISTRIBUTE_GATEWAY=10.50.0.99
+# TEST-NET-3 (RFC 5737) — used for the loopback scenario's address, a
+# separate reserved block from REDISTRIBUTE_PREFIX so the two scenarios'
+# log lines are never confusable with each other.
+LOOPBACK_ADDRESS=203.0.113.1/32
+# router-a's table-id registry (`--table-registry-path`, per-container,
+# starts empty) allocates ids starting at MIN_TABLE_ID=100 — "rt1" is the
+# only routing table any scenario in this script ever configures, so it's
+# always the first (and only) table allocated, deterministically getting id
+# 100 and kernel device name `lo100` for the loopback scenario below.
+LOOPBACK_TABLE_ID=100
+LOOPBACK_DEVICE="lo$LOOPBACK_TABLE_ID"
 
 log() { echo "[verify-bgp] $*" >&2; }
 
@@ -163,6 +179,48 @@ provision_auth() {
     --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
     --peer "$peer_ip" \
     --md5-password "$password"
+}
+
+# --- Loopback interface scenario ---
+#
+# Adds a loopback interface (`loopback-rt1`, per nos_proto::LOOPBACK_PREFIX
+# — the naming convention alone marks it as a loopback) to router-a's
+# already-established "rt1" routing table, verifying nos-interfaced's Linux
+# driver actually creates a real dummy kernel device named from rt1's
+# allocated table id (`lo100`), enslaves it into the table's VRF, and
+# applies the configured address — over a real kernel, not a unit test.
+# Then removes it and confirms the device is deleted again.
+
+provision_loopback() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 loopback_addr=$6
+  log "provisioning $name with a loopback interface (address=$loopback_addr)"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --loopback-address "$loopback_addr"
+}
+
+provision_delete_loopback() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  log "provisioning $name with its loopback interface removed"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --delete-loopback
 }
 
 # --- RFC 4456 route reflector scenario ---
@@ -531,6 +589,37 @@ cmd_check_auth() {
     || { log "router-a: FAILED to re-establish after fixing the password"; return 1; }
 }
 
+cmd_check_loopback() {
+  provision_loopback router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$LOOPBACK_ADDRESS"
+
+  # `wait_for_count_increase` strips tracing's ANSI color codes before
+  # matching (see its own comment) -- needed here since every pattern below
+  # spans a `field=value` boundary that colored output splits with escape
+  # codes; a baseline of 0 makes it behave as a first-occurrence wait.
+  log "waiting for router-a to create the loopback device ($LOOPBACK_DEVICE, rt1's allocated table id)"
+  wait_for_count_increase router-a "created loopback device device=$LOOPBACK_DEVICE" 0 60 \
+    && log "router-a: created $LOOPBACK_DEVICE" \
+    || { log "router-a: FAILED to create the loopback device"; return 1; }
+
+  log "waiting for router-a to enslave the loopback interface into rt1's vrf"
+  wait_for_count_increase router-a "enslaved interface to vrf interface=loopback-rt1" 0 60 \
+    && log "router-a: enslaved loopback-rt1 into its vrf" \
+    || { log "router-a: FAILED to enslave the loopback interface"; return 1; }
+
+  log "waiting for router-a to apply $LOOPBACK_ADDRESS to the loopback interface"
+  wait_for_count_increase router-a "added interface address interface=loopback-rt1 address=$LOOPBACK_ADDRESS" 0 60 \
+    && log "router-a: applied $LOOPBACK_ADDRESS to loopback-rt1" \
+    || { log "router-a: FAILED to apply the loopback address"; return 1; }
+
+  log "removing router-a's loopback interface"
+  provision_delete_loopback router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+
+  log "waiting for router-a to delete the loopback device"
+  wait_for_count_increase router-a "deleted loopback device interface=loopback-rt1 device=$LOOPBACK_DEVICE" 0 60 \
+    && log "router-a: deleted $LOOPBACK_DEVICE" \
+    || { log "router-a: FAILED to delete the loopback device"; return 1; }
+}
+
 # --- RPL import policy scenario ---
 #
 # Reuses the same two-router topology and the same $REDISTRIBUTE_PREFIX as
@@ -890,6 +979,7 @@ case "${1:-}" in
   collision) cmd_check_collision ;;
   redistribute) cmd_check_redistribute ;;
   auth) cmd_check_auth ;;
+  loopback) cmd_check_loopback ;;
   policy) cmd_check_policy ;;
   redistribute-policy) cmd_check_redistribute_policy ;;
   communities) cmd_check_communities ;;
@@ -904,6 +994,7 @@ case "${1:-}" in
     cmd_check_collision
     cmd_check_redistribute
     cmd_check_auth
+    cmd_check_loopback
     cmd_check_policy
     cmd_check_redistribute_policy
     cmd_check_communities
@@ -911,7 +1002,7 @@ case "${1:-}" in
     cmd_check_route_server
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}" >&2
     exit 2
     ;;
 esac

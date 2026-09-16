@@ -1309,6 +1309,32 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         tokens: &[
+            Token::Literal("set"),
+            Token::Literal("interface"),
+            Token::Arg(ArgKind::InterfaceName),
+            Token::Literal("address"),
+            Token::Arg(ArgKind::Plain),
+            Token::Literal("label"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set interface <name> address <cidr> label <label>",
+        doc: Doc::FromConfig(Topic::AddInterfaceAddress),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("address"),
+            Token::Arg(ArgKind::Plain),
+            Token::Literal("label"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set address <cidr> label <label>",
+        doc: Doc::FromConfig(Topic::AddInterfaceAddress),
+        availability: Availability::ConfigurationInterface,
+    },
+    CommandSpec {
+        tokens: &[
             Token::Literal("delete"),
             Token::Literal("interface"),
             Token::Arg(ArgKind::InterfaceName),

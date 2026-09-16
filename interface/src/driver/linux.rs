@@ -2,10 +2,10 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use futures::TryStreamExt;
-use nos_proto::{IpNet, ServiceRef};
+use nos_proto::{loopback_table_name, InterfaceAddress, IpNet, ServiceRef};
 use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage, AddressScope};
 use rtnetlink::packet_route::link::{LinkAttribute, LinkMessage};
-use rtnetlink::{Handle, LinkUnspec};
+use rtnetlink::{Handle, LinkDummy, LinkUnspec};
 use tracing::{debug, info, trace};
 
 use super::{rib_client, DriverError, InterfaceDriver};
@@ -16,9 +16,21 @@ use crate::watchdog_client;
 /// lookup (`match_name`/`match_index`) for a link that doesn't exist.
 const ENODEV: i32 = 19;
 
-/// Real `rtnetlink`-backed driver. `nos-interfaced` never creates
+/// Kernel device name for a loopback interface's routing table, mirroring
+/// `nos-ribd`'s `vrf<table_id>` VRF naming — the loopback's own config name
+/// (`loopback-<table>`) is never used as the kernel name, same reasoning.
+fn loopback_ifname(table_id: u32) -> String {
+    format!("lo{table_id}")
+}
+
+/// Real `rtnetlink`-backed driver. `nos-interfaced` never creates ordinary
 /// interfaces (see `CLAUDE.md`'s scope section) — every operation here
-/// configures an interface that must already exist in the netns.
+/// configures an interface that must already exist in the netns. The one
+/// deliberate, narrow exception is a loopback interface (an `Interface`
+/// named `loopback-<table>`, see `nos_proto::loopback_table_name`): its
+/// kernel device (a `dummy` link named `lo<table_id>`, since Linux only
+/// ever has one real `lo` per netns) is created and destroyed by this
+/// driver.
 pub struct LinuxInterfaceDriver {
     handle: Handle,
     watchdog_socket: PathBuf,
@@ -78,12 +90,55 @@ impl LinuxInterfaceDriver {
         name
     }
 
+    /// Resolves `table_name`'s allocated kernel table id, symmetric to
+    /// `resolve_vrf_name` — same broker-resolve-then-query pattern, same
+    /// "`None` is normal/transient" contract.
+    async fn resolve_table_id(&self, table_name: &str) -> Option<u32> {
+        let socket = watchdog_client::resolve_once(
+            &self.watchdog_socket,
+            &ServiceRef::RibTable(table_name.to_string()),
+        )
+        .await;
+        let Some(socket) = socket else {
+            debug!(table = %table_name, "routing table's nos-ribd instance not resolvable yet");
+            return None;
+        };
+        let id = rib_client::get_table_id(&socket).await;
+        if id.is_none() {
+            debug!(table = %table_name, "routing table's nos-ribd has no table id allocated yet");
+        }
+        id
+    }
+
+    /// Ensures a `dummy` kernel device named `name` exists (creating it if
+    /// missing) — the only place this driver ever creates a link, scoped
+    /// strictly to loopback interfaces (see the struct doc comment).
+    async fn ensure_loopback_link(&self, name: &str) -> Result<LinkMessage, DriverError> {
+        if let Some(link) = self.find_link(name).await? {
+            return Ok(link);
+        }
+        self.handle
+            .link()
+            .add(LinkDummy::new(name).build())
+            .execute()
+            .await?;
+        info!(device = %name, "created loopback device");
+        self.find_link(name)
+            .await?
+            .ok_or_else(|| DriverError::LoopbackNotFound(name.to_string()))
+    }
+
     async fn reconcile_addresses(
         &self,
         interface: &str,
         index: u32,
-        desired: &[IpNet],
+        desired: &[InterfaceAddress],
     ) -> Result<(), DriverError> {
+        // ponytail: label is stored in config but never applied to the
+        // kernel (no `ip addr ... label` call) — upgrade when a consumer
+        // needs it.
+        let desired: Vec<IpNet> = desired.iter().map(|a| a.address).collect();
+        let desired = &desired[..];
         let mut observed: Vec<(IpNet, AddressMessage)> = Vec::new();
         let mut addrs = self
             .handle
@@ -192,20 +247,35 @@ impl LinuxInterfaceDriver {
 #[async_trait]
 impl InterfaceDriver for LinuxInterfaceDriver {
     async fn apply(&self, desired: &InterfaceState) -> Result<(), DriverError> {
-        let Some(link) = self.find_link(&desired.name).await? else {
-            // nos-interfaced never creates interfaces — this is a normal,
-            // expected condition for a not-yet-present interface, not an
-            // error.
-            debug!(interface = %desired.name, "interface not present in netns yet");
-            return Ok(());
+        let loopback_table = loopback_table_name(&desired.name);
+
+        let link = if let Some(table_name) = loopback_table {
+            let Some(table_id) = self.resolve_table_id(table_name).await else {
+                debug!(interface = %desired.name, table = %table_name, "table id not resolvable yet");
+                return Ok(());
+            };
+            self.ensure_loopback_link(&loopback_ifname(table_id))
+                .await?
+        } else {
+            let Some(link) = self.find_link(&desired.name).await? else {
+                // nos-interfaced never creates ordinary interfaces — this
+                // is a normal, expected condition for a not-yet-present
+                // interface, not an error.
+                debug!(interface = %desired.name, "interface not present in netns yet");
+                return Ok(());
+            };
+            link
         };
         let index = link.header.index;
 
         self.reconcile_addresses(&desired.name, index, &desired.addresses)
             .await?;
 
-        let vrf_ifname = match &desired.routing_table {
-            Some(table_name) => self.resolve_vrf_name(table_name).await,
+        let vrf_table = loopback_table
+            .map(str::to_string)
+            .or_else(|| desired.routing_table.clone());
+        let vrf_ifname = match vrf_table {
+            Some(table_name) => self.resolve_vrf_name(&table_name).await,
             None => None,
         };
         self.reconcile_master(&desired.name, &link, vrf_ifname.as_deref())
@@ -221,6 +291,23 @@ impl InterfaceDriver for LinuxInterfaceDriver {
     }
 
     async fn remove(&self, name: &str) -> Result<(), DriverError> {
+        if let Some(table_name) = loopback_table_name(name) {
+            let Some(table_id) = self.resolve_table_id(table_name).await else {
+                debug!(interface = %name, table = %table_name, "table id not resolvable yet, nothing to remove");
+                return Ok(());
+            };
+            let kernel_name = loopback_ifname(table_id);
+            let Some(link) = self.find_link(&kernel_name).await? else {
+                debug!(interface = %name, device = %kernel_name, "loopback device not present, nothing to remove");
+                return Ok(());
+            };
+            self.reconcile_addresses(&kernel_name, link.header.index, &[])
+                .await?;
+            self.handle.link().del(link.header.index).execute().await?;
+            info!(interface = %name, device = %kernel_name, "deleted loopback device");
+            return Ok(());
+        }
+
         let Some(link) = self.find_link(name).await? else {
             debug!(interface = %name, "interface not present in netns, nothing to remove");
             return Ok(());
@@ -251,6 +338,11 @@ fn diff_addresses(observed: &[IpNet], desired: &[IpNet]) -> (Vec<IpNet>, Vec<IpN
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loopback_ifname_formats_from_id() {
+        assert_eq!(loopback_ifname(100), "lo100");
+    }
 
     #[test]
     fn diff_addresses_computes_add_and_remove() {

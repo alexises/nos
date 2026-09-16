@@ -1,5 +1,6 @@
-use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
+
+use crate::schema::InterfaceAddress;
 
 /// One interface's current desired state, as reconciled by `nos-interfaced`
 /// from the running config. This reflects *desired* state — `nos-interfaced`
@@ -8,7 +9,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InterfaceStatus {
     pub name: String,
-    pub addresses: Vec<IpNet>,
+    pub addresses: Vec<InterfaceAddress>,
     pub routing_table: Option<String>,
 }
 

@@ -259,6 +259,10 @@ impl RibDriver for LinuxRibDriver {
         table_registry::lookup_table_id(&self.registry_path, table_name)
             .map(table_registry::vrf_ifname)
     }
+
+    async fn table_id(&self, table_name: &str) -> Option<u32> {
+        table_registry::lookup_table_id(&self.registry_path, table_name)
+    }
 }
 
 /// Extracts `(prefix, gateway)` from a dumped `RouteMessage`, or `None` for

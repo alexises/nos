@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use nos_proto::{Config, IpNet};
+use nos_proto::{Config, InterfaceAddress};
 use tracing::{debug, trace, warn};
 
 use crate::driver::InterfaceDriver;
@@ -9,7 +9,7 @@ use crate::driver::InterfaceDriver;
 #[derive(Debug, Clone, PartialEq)]
 pub struct InterfaceState {
     pub name: String,
-    pub addresses: Vec<IpNet>,
+    pub addresses: Vec<InterfaceAddress>,
     pub routing_table: Option<String>,
 }
 
@@ -144,10 +144,14 @@ mod tests {
 
     #[tokio::test]
     async fn build_from_config_maps_each_interface() {
+        let iface_addr = InterfaceAddress {
+            address: "10.0.0.1/24".parse().unwrap(),
+            label: None,
+        };
         let interfaces = build_from_config(
             &cfg(vec![Interface {
                 name: "eth0".to_string(),
-                addresses: vec!["10.0.0.1/24".parse().unwrap()],
+                addresses: vec![iface_addr.clone()],
                 routing_table: Some("rt1".to_string()),
             }]),
             &NoopInterfaceDriver,
@@ -155,7 +159,7 @@ mod tests {
         )
         .await;
         let iface = interfaces.get("eth0").unwrap();
-        assert_eq!(iface.addresses, vec!["10.0.0.1/24".parse().unwrap()]);
+        assert_eq!(iface.addresses, vec![iface_addr]);
         assert_eq!(iface.routing_table.as_deref(), Some("rt1"));
     }
 

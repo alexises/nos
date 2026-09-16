@@ -18,7 +18,7 @@ pub use bgp_peer_group::{
 };
 pub use community_alias::CommunityAlias;
 pub use community_group::CommunityGroup;
-pub use interface::Interface;
+pub use interface::{loopback_table_name, Interface, InterfaceAddress, LOOPBACK_PREFIX};
 pub use policy_definition::PolicyDefinition;
 pub use prefix_list::{PrefixList, PrefixListEntry};
 pub use routing_table::{Redistribute, RedistributeSource, RedistributeTarget, RoutingTable};

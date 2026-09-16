@@ -1,13 +1,16 @@
 use futures::{SinkExt, StreamExt};
 use nos_cli::interface_client::{get_interface, get_interfaces};
-use nos_proto::{InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec};
+use nos_proto::{InterfaceAddress, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec};
 use tokio::net::UnixListener;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 fn sample_status() -> InterfaceStatus {
     InterfaceStatus {
         name: "eth0".to_string(),
-        addresses: vec!["10.0.0.1/24".parse().unwrap()],
+        addresses: vec![InterfaceAddress {
+            address: "10.0.0.1/24".parse().unwrap(),
+            label: None,
+        }],
         routing_table: Some("rt1".to_string()),
     }
 }
