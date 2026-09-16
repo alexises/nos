@@ -4,7 +4,7 @@ use anyhow::Context;
 use clap::Parser;
 use nos_bgp::log_client::ForwardingLayer;
 use nos_bgp::session::SessionManager;
-use nos_bgp::{reconcile, server, watchdog_client};
+use nos_bgp::{reconcile, rib_push_client, server, watchdog_client};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
@@ -99,6 +99,11 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from(format!("/run/nos/bgp-{}.sock", args.instance)));
 
     let sessions = SessionManager::new(args.instance.clone());
+    let rib_push_task = rib_push_client::spawn(
+        args.watchdog_socket.clone(),
+        sessions.clone(),
+        shutdown_rx.clone(),
+    );
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),
@@ -120,6 +125,9 @@ async fn main() -> anyhow::Result<()> {
     let _ = shutdown_tx.send(true);
     if let Err(e) = reconcile_task.await {
         warn!(instance = %args.instance, error = %e, "reconcile task ended abnormally");
+    }
+    if let Err(e) = rib_push_task.await {
+        warn!(instance = %args.instance, error = %e, "rib push task ended abnormally");
     }
     server_task.abort();
 

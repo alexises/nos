@@ -34,10 +34,12 @@ const REAPPLY_INTERVAL: Duration = Duration::from_secs(10);
 /// Runs until `shutdown` fires. Subscribes to `RoutingTables` and
 /// `StaticRoutingInstances` diffs purely as an edge trigger: every
 /// `Event::Diff` received (including the first, synthesized one) causes a
-/// full `resync` — a fresh `Request::Get` plus a from-scratch `Rib` rebuild
-/// — rather than incremental diff application, since `SectionDiff`/
-/// `FieldDiff` only carry pre-formatted display strings, not structured
-/// route data (see `nos_proto::diff::routing_table`/`static_routing_instance`).
+/// full `resync` — a fresh `Request::Get` plus a from-scratch rebuild of
+/// this table's `Static` candidates (via `Rib::replace_source`, leaving any
+/// `Bgp`-sourced candidates pushed by `crate::server::apply_bgp_route_update`
+/// untouched) — rather than incremental diff application, since
+/// `SectionDiff`/`FieldDiff` only carry pre-formatted display strings, not
+/// structured route data (see `nos_proto::diff::routing_table`/`static_routing_instance`).
 ///
 /// On exit, tears down this table's kernel VRF/routes via `driver` (see
 /// `RibDriver::teardown`) — the same SIGINT `nos-watchdog` sends both for
@@ -123,31 +125,39 @@ async fn resync(
 ) {
     match config_client::fetch_config(config_socket).await {
         Ok(cfg) => {
-            if let Some(new_rib) = build_from_config(&cfg, table) {
-                let routes = new_rib.best_routes();
-                debug!(table = %table, prefixes = routes.len(), "recomputed RIB");
-                for (prefix, entry) in &routes {
-                    trace!(
-                        table = %table,
-                        %prefix,
-                        gateway = %entry.gateway,
-                        source = ?entry.source,
-                        "best route"
-                    );
-                }
-                if let Err(e) = driver.apply(table, &routes).await {
-                    error!(table = %table, error = %e, "failed to apply routes to kernel");
-                }
-                let _ = redistribute_tx.send(compute_redistribute_target(&cfg, table, &routes));
-                *rib.write().await = new_rib;
+            let static_entries = if let Some(new_rib) = build_from_config(&cfg, table) {
+                new_rib
+                    .all_routes()
+                    .into_iter()
+                    .flat_map(|(_, candidates)| candidates)
+                    .collect::<Vec<_>>()
             } else {
                 warn!(
                     table = %table,
-                    "routing table not found in running config; RIB left empty until it appears"
+                    "routing table not found in running config; static routes cleared until it reappears"
                 );
-                let _ = redistribute_tx.send(bgp_client::RedistributeTarget::default());
-                *rib.write().await = Rib::new();
+                Vec::new()
+            };
+
+            let mut guard = rib.write().await;
+            guard.replace_source(RouteSource::Static, static_entries);
+            let routes = guard.best_routes();
+            drop(guard);
+
+            debug!(table = %table, prefixes = routes.len(), "recomputed RIB");
+            for (prefix, entry) in &routes {
+                trace!(
+                    table = %table,
+                    %prefix,
+                    gateway = %entry.gateway,
+                    source = ?entry.source,
+                    "best route"
+                );
             }
+            if let Err(e) = driver.apply(table, &routes).await {
+                error!(table = %table, error = %e, "failed to apply routes to kernel");
+            }
+            let _ = redistribute_tx.send(compute_redistribute_target(&cfg, table, &routes));
         }
         Err(e) => {
             warn!(table = %table, error = %e, "failed to fetch running config, keeping previous RIB");

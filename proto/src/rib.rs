@@ -27,6 +27,28 @@ pub struct PrefixRoutes {
     pub candidates: Vec<RouteEntry>,
 }
 
+/// One BGP-learned best-path route, pushed by the owning `nos-bgpd`
+/// instance for kernel installation. Always peer-learned — a `Local`-origin
+/// (redistributed-from-static) loc-rib entry has no real next-hop and is
+/// never pushed at all, to avoid a pointless static→bgp→rib→kernel round
+/// trip on the same table it came from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BgpRoute {
+    pub prefix: IpNet,
+    pub next_hop: IpAddr,
+}
+
+/// Sent by the owning `nos-bgpd` instance to `nos-ribd` over a persistent,
+/// long-lived connection (mirroring `RedistributeUpdate`'s pattern for the
+/// opposite direction): a `Full` snapshot on connect, then incremental
+/// `Add`/`Remove` for each subsequent change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum BgpRouteUpdate {
+    Full(Vec<BgpRoute>),
+    Add(BgpRoute),
+    Remove(IpNet),
+}
+
 /// Messages sent from a client to a `nos-ribd` instance's IPC socket.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -54,6 +76,11 @@ pub enum RibRequest {
     /// Linux driver. Symmetric to `GetVrfName`; no table name carried, same
     /// reasoning.
     GetTableId,
+    /// Fire-and-forget, no reply — sent continuously by the owning
+    /// `nos-bgpd` instance over one long-lived connection, mirroring
+    /// `BgpRequest::RedistributeRoutes`'s pattern for the opposite
+    /// direction.
+    PushBgpRoutes(BgpRouteUpdate),
 }
 
 /// Messages sent from a `nos-ribd` instance to a client.

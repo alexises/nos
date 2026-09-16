@@ -348,6 +348,11 @@ pub struct BgpRib {
     /// collecting a fresh `Vec` on every touched prefix, so its capacity is
     /// retained across calls once it reaches the peer count.
     peer_scratch: Vec<IpAddr>,
+    /// This instance's owning `RoutingTable` name (`BgpInstance.routing_table`),
+    /// set by `session::SessionManager::reconcile`. Read by `push_snapshot`
+    /// to resolve which `nos-ribd` instance, if any, this instance's best
+    /// routes should be pushed to.
+    owning_routing_table: Option<String>,
 }
 
 impl Default for BgpRib {
@@ -372,6 +377,7 @@ impl BgpRib {
             rs_sent: HashMap::new(),
             rs_next_id: HashMap::new(),
             peer_scratch: Vec::new(),
+            owning_routing_table: None,
         }
     }
 
@@ -382,6 +388,26 @@ impl BgpRib {
         self.local_asn = asn;
         self.local_router_id = router_id;
         self.cluster_id = cluster_id;
+    }
+
+    /// Sets this instance's owning `RoutingTable` name (`BgpInstance.routing_table`).
+    pub fn set_routing_table(&mut self, table: Option<String>) {
+        self.owning_routing_table = table;
+    }
+
+    /// Snapshot for `rib_push_client`: this instance's owning routing table
+    /// name, and every loc-rib prefix whose winner has a real next-hop. A
+    /// `Local`-origin (redistributed-from-static) loc-rib entry always has
+    /// `next_hop: None` (see `redistributed_route`) and is excluded — there's
+    /// no real gateway to install, and pushing it would round-trip
+    /// static→bgp→rib→kernel pointlessly on the same table it came from.
+    pub fn push_snapshot(&self) -> (Option<String>, HashMap<IpNet, IpAddr>) {
+        let routes = self
+            .loc_rib
+            .iter()
+            .filter_map(|(prefix, route)| route.next_hop.map(|next_hop| (*prefix, next_hop)))
+            .collect();
+        (self.owning_routing_table.clone(), routes)
     }
 
     /// Registers a newly-`Established` peer's outbound channel and does an
@@ -531,7 +557,11 @@ impl BgpRib {
         let touched_capacity = update.nlri.len()
             + update.mp_reach.iter().map(|m| m.nlri.len()).sum::<usize>()
             + update.withdrawn_routes.len()
-            + update.mp_unreach.iter().map(|u| u.withdrawn.len()).sum::<usize>();
+            + update
+                .mp_unreach
+                .iter()
+                .map(|u| u.withdrawn.len())
+                .sum::<usize>();
         let mut touched: HashSet<IpNet> = HashSet::with_capacity(touched_capacity);
 
         let withdrawn: Vec<IpNet> = update
@@ -586,7 +616,9 @@ impl BgpRib {
                 // once lets the per-peer table grow in fewer, larger steps
                 // on the way up to a full table, instead of rehashing on
                 // every insert-triggered doubling.
-                table.reserve(update.nlri.len() + update.mp_reach.iter().map(|m| m.nlri.len()).sum::<usize>());
+                table.reserve(
+                    update.nlri.len() + update.mp_reach.iter().map(|m| m.nlri.len()).sum::<usize>(),
+                );
                 let base_route = RibRoute {
                     origin: RouteOrigin::Peer(from),
                     as_path: attrs.as_path.clone().into(),
@@ -3015,5 +3047,39 @@ mod tests {
             u,
             OutboundUpdate::Announce(r) if r.as_path == vec![65001]
         )));
+    }
+
+    #[test]
+    fn push_snapshot_includes_peer_learned_route_with_next_hop() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        rib.handle_update(
+            peer,
+            false,
+            v4("192.0.2.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.9"),
+            &nos_rpl::ACCEPT_ALL,
+        );
+
+        let (_, routes) = rib.push_snapshot();
+        assert_eq!(routes.get(&prefix("1.2.3.0/24")), Some(&addr("10.0.0.9")));
+    }
+
+    #[test]
+    fn push_snapshot_excludes_local_origin_redistributed_route() {
+        let mut rib = new_rib(65000);
+        rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
+
+        let (_, routes) = rib.push_snapshot();
+        assert!(!routes.contains_key(&prefix("192.168.1.0/24")));
+    }
+
+    #[test]
+    fn push_snapshot_reflects_routing_table_after_set() {
+        let mut rib = new_rib(65000);
+        assert_eq!(rib.push_snapshot().0, None);
+
+        rib.set_routing_table(Some("rt1".to_string()));
+        assert_eq!(rib.push_snapshot().0, Some("rt1".to_string()));
     }
 }

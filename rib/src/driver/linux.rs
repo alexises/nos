@@ -12,7 +12,7 @@ use rtnetlink::{Handle, LinkUnspec, LinkVrf, RouteMessageBuilder};
 use tracing::{debug, info, trace, warn};
 
 use super::{table_registry, DriverError, RibDriver};
-use crate::rib::RibEntry;
+use crate::rib::{RibEntry, RouteSource};
 
 /// errno(3) `ENODEV` — the kernel's reply to a targeted `RTM_GETLINK`
 /// lookup (`match_name`/`match_index`) for a link that doesn't exist.
@@ -132,6 +132,7 @@ impl LinuxRibDriver {
         table_id: u32,
         prefix: IpNet,
         gateway: IpAddr,
+        source: Option<RouteSource>,
     ) -> Result<(), DriverError> {
         match (prefix, gateway) {
             (IpNet::V4(prefix), IpAddr::V4(gateway)) => {
@@ -148,7 +149,7 @@ impl LinuxRibDriver {
                     .inspect_err(|e| {
                         warn!(%prefix, %gateway, table_id, error = %e, "failed to add route");
                     })?;
-                info!(%prefix, %gateway, table_id, "added route");
+                info!(%prefix, %gateway, table_id, source = ?source, "added route");
             }
             (IpNet::V6(prefix), IpAddr::V6(gateway)) => {
                 let route = RouteMessageBuilder::<Ipv6Addr>::new()
@@ -164,7 +165,7 @@ impl LinuxRibDriver {
                     .inspect_err(|e| {
                         warn!(%prefix, %gateway, table_id, error = %e, "failed to add route");
                     })?;
-                info!(%prefix, %gateway, table_id, "added route");
+                info!(%prefix, %gateway, table_id, source = ?source, "added route");
             }
             _ => {
                 warn!(%prefix, %gateway, table_id, "route prefix/gateway address family mismatch, skipping");
@@ -219,7 +220,8 @@ impl LinuxRibDriver {
             }
         }
         for (prefix, gateway) in to_add {
-            self.add_route(table_id, prefix, gateway).await?;
+            let source = best_routes.get(&prefix).map(|e| e.source);
+            self.add_route(table_id, prefix, gateway, source).await?;
         }
         Ok(())
     }

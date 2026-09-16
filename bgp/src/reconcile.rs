@@ -229,7 +229,13 @@ async fn resync(
     };
 
     sessions
-        .reconcile(vrf, local, peers, redistribute_policy)
+        .reconcile(
+            vrf,
+            own.routing_table.clone(),
+            local,
+            peers,
+            redistribute_policy,
+        )
         .await;
 }
 

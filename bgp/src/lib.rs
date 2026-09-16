@@ -10,6 +10,7 @@ pub mod policy;
 pub mod reconcile;
 pub mod rib;
 pub mod rib_client;
+pub mod rib_push_client;
 pub mod server;
 pub mod session;
 pub mod status;

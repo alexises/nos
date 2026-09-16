@@ -4,18 +4,15 @@ use std::net::IpAddr;
 use nos_proto::{Config, IpNet};
 use tracing::warn;
 
-/// Where a route came from. New sources are appended as new variants — see
-/// the doc comment on `Bgp` for the seam this leaves for later.
+/// Where a route came from. New sources are appended as new variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RouteSource {
-    /// From a `StaticRoutingInstance` in the running config. The only
-    /// source any code path constructs today.
+    /// From a `StaticRoutingInstance` in the running config. Populated
+    /// wholesale by `build_from_config` on every resync.
     Static,
-    /// Reserved for a future BGP→RIB data-plane feed. No process
-    /// constructs this variant yet — this is the documented extensibility
-    /// seam, not live plumbing: a future BGP feed would populate `Rib`
-    /// entries with this source the same way `build_from_config` populates
-    /// `Static` ones today, without any change to `Rib`'s public shape.
+    /// Pushed by the owning `nos-bgpd` instance over `RibRequest::PushBgpRoutes`
+    /// (see `crate::server::apply_bgp_route_update`) — its per-prefix best
+    /// path, peer-learned routes only.
     Bgp,
 }
 
@@ -39,10 +36,13 @@ pub struct RibEntry {
 }
 
 /// One routing table's candidate routes, keyed by prefix, potentially with
-/// more than one source contending for a prefix. Rebuilt wholesale on every
-/// resync (see `crate::reconcile`) — never mutated incrementally — so
-/// there is no cache-invalidation concern and no separate "recompute" step
-/// distinct from `best_routes()`.
+/// more than one source contending for a prefix. Two independent writers
+/// mutate this: `crate::reconcile::resync` (config-driven, rebuilds the
+/// whole `Static` side from scratch on every resync) and
+/// `crate::server::apply_bgp_route_update` (BGP-push-driven, incremental).
+/// Each writer only ever touches its own `RouteSource`'s candidates via
+/// `replace_source`/`upsert`/`remove`, so neither can clobber the other's
+/// state.
 #[derive(Debug, Clone, Default)]
 pub struct Rib {
     entries: HashMap<IpNet, Vec<RibEntry>>,
@@ -55,6 +55,45 @@ impl Rib {
 
     pub fn insert(&mut self, entry: RibEntry) {
         self.entries.entry(entry.prefix).or_default().push(entry);
+    }
+
+    /// Replaces every `source`-sourced candidate across the whole table with
+    /// `entries`, leaving every other source's candidates untouched. Used
+    /// for a config resync's wholesale `Static` rebuild and a BGP push's
+    /// `Full` snapshot (on connect/reconnect) alike.
+    pub fn replace_source(
+        &mut self,
+        source: RouteSource,
+        entries: impl IntoIterator<Item = RibEntry>,
+    ) {
+        for candidates in self.entries.values_mut() {
+            candidates.retain(|e| e.source != source);
+        }
+        for entry in entries {
+            debug_assert_eq!(entry.source, source);
+            self.entries.entry(entry.prefix).or_default().push(entry);
+        }
+        self.entries.retain(|_, c| !c.is_empty());
+    }
+
+    /// Upserts one `source`-sourced candidate for `entry.prefix` — used for
+    /// a BGP push's incremental `Add`.
+    pub fn upsert(&mut self, entry: RibEntry) {
+        let candidates = self.entries.entry(entry.prefix).or_default();
+        candidates.retain(|e| e.source != entry.source);
+        candidates.push(entry);
+    }
+
+    /// Removes `source`'s candidate for `prefix`, if any — used for a BGP
+    /// push's incremental `Remove`. Prunes the prefix entirely if that was
+    /// its last remaining candidate.
+    pub fn remove(&mut self, prefix: &IpNet, source: RouteSource) {
+        if let Some(candidates) = self.entries.get_mut(prefix) {
+            candidates.retain(|e| e.source != source);
+            if candidates.is_empty() {
+                self.entries.remove(prefix);
+            }
+        }
     }
 
     /// The winning candidate for one prefix, if any exist.
@@ -123,8 +162,9 @@ fn sorted_by_preference(candidates: &[RibEntry]) -> Vec<RibEntry> {
 /// recoverable, possibly-transient condition, not fatal.
 ///
 /// Only resolves `table.static_routing_instance` — `table.bgp_instance` is
-/// intentionally not read here: no BGP→RIB feed exists yet (see
-/// `RouteSource::Bgp`'s doc comment for the seam this leaves).
+/// intentionally not read here: `RouteSource::Bgp` entries never come from
+/// config, only from the owning `nos-bgpd` instance's own IPC push (see
+/// `crate::server::apply_bgp_route_update`).
 pub fn build_from_config(cfg: &Config, table_name: &str) -> Option<Rib> {
     let table = cfg.routing_tables.iter().find(|t| t.name == table_name)?;
     let mut rib = Rib::new();
@@ -299,6 +339,108 @@ mod tests {
             redistribute: None,
         }];
         let rib = build_from_config(&cfg(tables, vec![]), "rt1").unwrap();
+        assert!(rib.is_empty());
+    }
+
+    #[test]
+    fn replace_source_leaves_other_sources_untouched() {
+        let mut rib = Rib::new();
+        let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
+        rib.insert(RibEntry {
+            prefix,
+            gateway: "10.0.0.9".parse().unwrap(),
+            source: RouteSource::Bgp,
+        });
+        rib.replace_source(
+            RouteSource::Static,
+            vec![RibEntry {
+                prefix,
+                gateway: "10.0.0.1".parse().unwrap(),
+                source: RouteSource::Static,
+            }],
+        );
+        let candidates = rib
+            .all_routes()
+            .into_iter()
+            .find(|(p, _)| *p == prefix)
+            .unwrap()
+            .1;
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|e| e.source == RouteSource::Bgp));
+        assert!(candidates.iter().any(|e| e.source == RouteSource::Static));
+    }
+
+    #[test]
+    fn replace_source_with_empty_clears_only_that_source_and_prunes() {
+        let mut rib = Rib::new();
+        let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
+        rib.insert(RibEntry {
+            prefix,
+            gateway: "10.0.0.1".parse().unwrap(),
+            source: RouteSource::Static,
+        });
+        rib.replace_source(RouteSource::Static, Vec::new());
+        assert!(rib.is_empty());
+    }
+
+    #[test]
+    fn upsert_replaces_prior_same_source_candidate_only() {
+        let mut rib = Rib::new();
+        let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
+        rib.insert(RibEntry {
+            prefix,
+            gateway: "10.0.0.1".parse().unwrap(),
+            source: RouteSource::Static,
+        });
+        rib.upsert(RibEntry {
+            prefix,
+            gateway: "10.0.0.9".parse().unwrap(),
+            source: RouteSource::Bgp,
+        });
+        rib.upsert(RibEntry {
+            prefix,
+            gateway: "10.0.0.99".parse().unwrap(),
+            source: RouteSource::Bgp,
+        });
+        let candidates = rib
+            .all_routes()
+            .into_iter()
+            .find(|(p, _)| *p == prefix)
+            .unwrap()
+            .1;
+        assert_eq!(candidates.len(), 2);
+        let bgp = candidates
+            .iter()
+            .find(|e| e.source == RouteSource::Bgp)
+            .unwrap();
+        assert_eq!(bgp.gateway, "10.0.0.99".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn remove_drops_only_named_source_and_prunes_if_last() {
+        let mut rib = Rib::new();
+        let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
+        rib.insert(RibEntry {
+            prefix,
+            gateway: "10.0.0.1".parse().unwrap(),
+            source: RouteSource::Static,
+        });
+        rib.insert(RibEntry {
+            prefix,
+            gateway: "10.0.0.9".parse().unwrap(),
+            source: RouteSource::Bgp,
+        });
+        rib.remove(&prefix, RouteSource::Bgp);
+        let candidates = rib
+            .all_routes()
+            .into_iter()
+            .find(|(p, _)| *p == prefix)
+            .unwrap()
+            .1;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].source, RouteSource::Static);
+
+        rib.remove(&prefix, RouteSource::Static);
         assert!(rib.is_empty());
     }
 

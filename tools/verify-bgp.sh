@@ -592,6 +592,13 @@ cmd_check_collision() {
 }
 
 cmd_check_redistribute() {
+  # Baseline before router-b learns anything: router-b has no static routes
+  # of its own in this scenario, so any later "added route" line on it can
+  # only come from installing this newly-learned BGP route into its own
+  # kernel routing table (rt1) — see the bgp-push check below.
+  local kernel_route_baseline
+  kernel_route_baseline=$(docker logs router-b 2>&1 | grep -c "added route" || true)
+
   provision_redistribute router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
   log "waiting for router-a to redistribute $REDISTRIBUTE_PREFIX into its bgp instance"
   wait_for_log router-a "loc-rib best path for $REDISTRIBUTE_PREFIX updated" 60 \
@@ -604,6 +611,10 @@ cmd_check_redistribute() {
   wait_for_log router-b "loc-rib best path for $REDISTRIBUTE_PREFIX updated" 60 \
     && log "router-b: installed redistributed prefix as its loc-rib best path" \
     || { log "router-b: FAILED to install redistributed prefix into loc-rib"; return 1; }
+  log "waiting for router-b to push $REDISTRIBUTE_PREFIX to nos-ribd and install it into its own kernel routing table (rt1)"
+  wait_for_count_increase router-b "added route" "$kernel_route_baseline" 60 \
+    && log "router-b: installed the bgp-learned route into the real kernel routing table" \
+    || { log "router-b: FAILED to install the bgp-learned route into the kernel"; return 1; }
 }
 
 cmd_check_auth() {

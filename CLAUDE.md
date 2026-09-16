@@ -2,6 +2,13 @@
 
 A network operating system built from scratch in Rust.
 
+## Agent tooling requirements
+
+Every agent working in this repo — the main session and any subagent spawned via the Agent tool (Explore, general-purpose, fork, etc.) — MUST always use:
+
+- **`rtk`** for shell command output, per the "Command output" conventions at the bottom of this file. Subagents don't inherit the user's global CLAUDE.md, so this rule is restated here.
+- **CodeGraph** (`codegraph_explore` MCP tool, or `codegraph explore "<query>"` from the shell) before grep/find or reading files, to locate or understand code — this repo has a `.codegraph/` index at its root.
+
 ## Components
 
 | Directory | Crate | Purpose |
@@ -95,10 +102,10 @@ Editing the config happens inside a **named transaction**, held server-side in `
 
 | Plane | Transport | Pattern |
 |-------|-----------|---------|
-| Config (this work) | Unix socket + postcard | Request/subscribe |
-| Data (future, e.g. BGP→RIB routes) | Unix socket + postcard | High-frequency streaming |
+| Config | Unix socket + postcard | Request/subscribe |
+| Data (e.g. BGP→RIB routes) | Unix socket + postcard | Fire-and-forget push over a persistent connection |
 
-Both planes use the same transport stack. The data plane will use a separate socket path and separate message types defined in `nos-proto`.
+Both planes use the same transport stack. In practice the data plane so far reuses each target daemon's existing per-instance socket and request/event enum (e.g. `nos-ribd`'s `RibRequest::PushBgpRoutes`, `nos-bgpd`'s `BgpRequest::RedistributeRoutes`) rather than a dedicated separate socket/message-type pair — a fire-and-forget variant appended to the same `Request`-style enum the config plane already frames with `IpcCodec`, sent over one long-lived connection (`Full` snapshot on connect, incremental `Add`/`Remove` after), same pattern as `nos-logd`'s `LogRequest::Push`. A future high-enough-volume feed could still justify a dedicated socket/message-type pair instead.
 
 ### Process supervision
 
@@ -189,14 +196,14 @@ cargo fmt --all
 
 ### Two-router BGP verification
 
-`tools/verify-bgp.sh` stands up two independent `nos-watchdogd` containers on a shared docker network, configures each as a full BGP router peering the other, and checks the logs for a real OPEN/KEEPALIVE handshake reaching `Established`, a hold-timer/reconnect cycle after a peer vanishes, (best-effort, timing-dependent) an RFC 4271 §6.8 collision-resolution event, (`redistribute`) a static route configured on one router actually being redistributed into BGP, advertised over a real UPDATE message, and learned into the other router's Adj-RIB-In/Loc-RIB, (`auth`) that a matching RFC 2385 TCP MD5 password configured on both routers' peer-groups still establishes while a mismatched password on either side does not (verified against the real kernel's `TCP_MD5SIG` enforcement, not simulated), (`loopback`) that a loopback interface (named `loopback-<table>` — the name alone marks it as a loopback, no separate config field) actually gets a real dummy kernel device created (named from its routing table's allocated kernel table id, e.g. `lo100`), enslaved into that table's VRF, and addressed, then deleted again on removal, (`source-address`) that a `BgpPeerGroup`'s `source-address` is resolved by `nos-bgpd` itself, over a real IPC round trip to `nos-interfaced`, from an interface name (+ optional label) rather than a literal address, and that `source-address loopback` derives its target interface's name purely from the owning BGP instance's own routing table with no routing-table name given at all, (`policy`) that a real RPL import policy on one router actually rejects a specific redistributed prefix and that reverting to `accept-all` lets it back in, (`redistribute-policy`) that a real RPL policy attached directly to one router's `redistribute from static to bgp` rule filters a prefix at the redistribution point itself — before it ever enters that router's own Loc-RIB, distinct from `policy`'s receiving-side import-policy filtering — and that reverting to `accept-all` lets it back in, (`communities`) that a real RPL export policy's `.add(..)` tags a redistributed prefix with an RFC 1997 `COMMUNITY` value that survives wire encoding/decoding into the other router's Loc-RIB, and (`reflector`/`route-server`) that a third container in a hub-and-spoke topology actually exercises RFC 4456 route reflection / RFC 7947 route-server transparency over real sessions:
+`tools/verify-bgp.sh` stands up two independent `nos-watchdogd` containers on a shared docker network, configures each as a full BGP router peering the other, and checks the logs for a real OPEN/KEEPALIVE handshake reaching `Established`, a hold-timer/reconnect cycle after a peer vanishes, (best-effort, timing-dependent) an RFC 4271 §6.8 collision-resolution event, (`redistribute`) a static route configured on one router actually being redistributed into BGP, advertised over a real UPDATE message, learned into the other router's Adj-RIB-In/Loc-RIB, and — the BGP→RIB leg — pushed by that other router's own `nos-bgpd` to its `nos-ribd` and installed as a real kernel route in its own routing table, (`auth`) that a matching RFC 2385 TCP MD5 password configured on both routers' peer-groups still establishes while a mismatched password on either side does not (verified against the real kernel's `TCP_MD5SIG` enforcement, not simulated), (`loopback`) that a loopback interface (named `loopback-<table>` — the name alone marks it as a loopback, no separate config field) actually gets a real dummy kernel device created (named from its routing table's allocated kernel table id, e.g. `lo100`), enslaved into that table's VRF, and addressed, then deleted again on removal, (`source-address`) that a `BgpPeerGroup`'s `source-address` is resolved by `nos-bgpd` itself, over a real IPC round trip to `nos-interfaced`, from an interface name (+ optional label) rather than a literal address, and that `source-address loopback` derives its target interface's name purely from the owning BGP instance's own routing table with no routing-table name given at all, (`policy`) that a real RPL import policy on one router actually rejects a specific redistributed prefix and that reverting to `accept-all` lets it back in, (`redistribute-policy`) that a real RPL policy attached directly to one router's `redistribute from static to bgp` rule filters a prefix at the redistribution point itself — before it ever enters that router's own Loc-RIB, distinct from `policy`'s receiving-side import-policy filtering — and that reverting to `accept-all` lets it back in, (`communities`) that a real RPL export policy's `.add(..)` tags a redistributed prefix with an RFC 1997 `COMMUNITY` value that survives wire encoding/decoding into the other router's Loc-RIB, and (`reflector`/`route-server`) that a third container in a hub-and-spoke topology actually exercises RFC 4456 route reflection / RFC 7947 route-server transparency over real sessions:
 
 ```bash
 tools/verify-bgp.sh up            # build image + provisioning tool, start both routers, configure them as peers
 tools/verify-bgp.sh established   # wait for both sides to log "bgp session established"
 tools/verify-bgp.sh reconnect     # kill one side's nos-bgpd, confirm the other detects it and both re-establish
 tools/verify-bgp.sh collision     # restart both nos-bgpd processes at once, check for/report a collision event
-tools/verify-bgp.sh redistribute  # configure a static route + "redistribute from static to bgp" on router-a, confirm router-b learns and installs it
+tools/verify-bgp.sh redistribute  # configure a static route + "redistribute from static to bgp" on router-a, confirm router-b learns it, pushes it to its own nos-ribd, and installs it as a real kernel route
 tools/verify-bgp.sh auth          # configure a matching md5-password on both routers (still establishes), then a mismatched one (does not)
 tools/verify-bgp.sh loopback      # configure a loopback interface on router-a, confirm its kernel device/VRF enslavement/address, then remove it
 tools/verify-bgp.sh source-address  # point router-a's peer-group source-address at an interface, then at "loopback" with no routing-table name, confirm nos-bgpd resolves both via nos-interfaced

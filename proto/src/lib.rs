@@ -31,7 +31,9 @@ pub use ops::{
     StaticRoutingInstanceOp,
 };
 pub use paths::{DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
-pub use rib::{PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind};
+pub use rib::{
+    BgpRoute, BgpRouteUpdate, PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind,
+};
 pub use schema::{
     loopback_table_name, AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpInstance, BgpPeer,
     BgpPeerGroup, CommunityAlias, CommunityGroup, Config, Interface, InterfaceAddress, NextHopMode,

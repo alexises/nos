@@ -2,7 +2,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind};
+use nos_proto::{
+    BgpRouteUpdate, IpcCodec, PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind,
+};
 use tokio::net::UnixListener;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -67,36 +69,77 @@ async fn handle_connection(stream: tokio::net::UnixStream, ctx: Arc<Context>) {
                 break;
             }
         };
-        if writer.send(event).await.is_err() {
-            break;
+        if let Some(event) = event {
+            if writer.send(event).await.is_err() {
+                break;
+            }
         }
     }
 }
 
-async fn dispatch(ctx: &Context, req: RibRequest) -> RibEvent {
+async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
     trace!(table = %ctx.table, request = ?req, "serving RIB query");
     match req {
         RibRequest::GetRoutes => {
             let guard = ctx.rib.read().await;
-            RibEvent::Routes(
+            Some(RibEvent::Routes(
                 guard
                     .all_routes()
                     .into_iter()
                     .map(|(prefix, candidates)| to_prefix_routes(prefix, &candidates))
                     .collect(),
-            )
+            ))
         }
         RibRequest::Lookup { addr } => {
             let guard = ctx.rib.read().await;
-            match guard.lookup(addr) {
+            Some(match guard.lookup(addr) {
                 Some((prefix, candidates)) => {
                     RibEvent::Match(to_prefix_routes(prefix, &candidates))
                 }
                 None => RibEvent::NoMatch,
-            }
+            })
         }
-        RibRequest::GetVrfName => RibEvent::VrfName(ctx.driver.vrf_name(&ctx.table).await),
-        RibRequest::GetTableId => RibEvent::TableId(ctx.driver.table_id(&ctx.table).await),
+        RibRequest::GetVrfName => Some(RibEvent::VrfName(ctx.driver.vrf_name(&ctx.table).await)),
+        RibRequest::GetTableId => Some(RibEvent::TableId(ctx.driver.table_id(&ctx.table).await)),
+        RibRequest::PushBgpRoutes(update) => {
+            apply_bgp_route_update(ctx, update).await;
+            None
+        }
+    }
+}
+
+/// Applies one BGP-pushed route update to the shared `Rib` and re-applies
+/// the table's recomputed best routes to the kernel driver, independent of
+/// `crate::reconcile::resync`'s own periodic apply — safe because `apply`
+/// is already an idempotent dump-diff-converge operation, and the two
+/// writers only ever touch disjoint `RouteSource` candidates (see
+/// `Rib::replace_source`'s doc comment).
+async fn apply_bgp_route_update(ctx: &Context, update: BgpRouteUpdate) {
+    let mut guard = ctx.rib.write().await;
+    match update {
+        BgpRouteUpdate::Full(routes) => {
+            guard.replace_source(
+                RouteSource::Bgp,
+                routes.into_iter().map(|r| RibEntry {
+                    prefix: r.prefix,
+                    gateway: r.next_hop,
+                    source: RouteSource::Bgp,
+                }),
+            );
+        }
+        BgpRouteUpdate::Add(r) => guard.upsert(RibEntry {
+            prefix: r.prefix,
+            gateway: r.next_hop,
+            source: RouteSource::Bgp,
+        }),
+        BgpRouteUpdate::Remove(prefix) => guard.remove(&prefix, RouteSource::Bgp),
+    }
+    let routes = guard.best_routes();
+    drop(guard);
+
+    info!(table = %ctx.table, prefixes = routes.len(), "applying bgp-pushed routes to kernel");
+    if let Err(e) = ctx.driver.apply(&ctx.table, &routes).await {
+        error!(table = %ctx.table, error = %e, "failed to apply bgp-pushed routes to kernel");
     }
 }
 

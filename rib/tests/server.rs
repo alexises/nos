@@ -217,3 +217,65 @@ async fn get_table_id_is_none_when_the_driver_has_no_id_yet() {
 
     assert!(matches!(event, RibEvent::TableId(None)));
 }
+
+/// A driver that records every `apply` call's `best_routes` and notifies a
+/// waiter, so `PushBgpRoutes`'s fire-and-forget dispatch (no reply on the
+/// wire) can still be observed synchronizing with the test.
+#[derive(Debug, Default)]
+struct RecordingDriver {
+    applied: tokio::sync::Mutex<Vec<std::collections::HashMap<nos_proto::IpNet, RibEntry>>>,
+    notify: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl nos_rib::RibDriver for RecordingDriver {
+    async fn apply(
+        &self,
+        _table_name: &str,
+        best_routes: &std::collections::HashMap<nos_proto::IpNet, RibEntry>,
+    ) -> Result<(), nos_rib::DriverError> {
+        self.applied.lock().await.push(best_routes.clone());
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    async fn teardown(&self, _table_name: &str) -> Result<(), nos_rib::DriverError> {
+        Ok(())
+    }
+
+    async fn vrf_name(&self, _table_name: &str) -> Option<String> {
+        None
+    }
+
+    async fn table_id(&self, _table_name: &str) -> Option<u32> {
+        None
+    }
+}
+
+#[tokio::test]
+async fn push_bgp_routes_full_inserts_into_shared_rib_and_applies_to_driver() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rib.sock");
+    let rib = Arc::new(RwLock::new(Rib::new()));
+    let driver = Arc::new(RecordingDriver::default());
+    let _server = server::start(&path, "rt1".to_string(), rib.clone(), driver.clone()).unwrap();
+
+    let (_reader, mut writer) = connect(&path).await;
+    let prefix: nos_proto::IpNet = "203.0.113.0/24".parse().unwrap();
+    let next_hop: IpAddr = "203.0.113.1".parse().unwrap();
+    writer
+        .send(RibRequest::PushBgpRoutes(nos_proto::BgpRouteUpdate::Full(
+            vec![nos_proto::BgpRoute { prefix, next_hop }],
+        )))
+        .await
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), driver.notify.notified())
+        .await
+        .expect("driver.apply was not called");
+
+    let guard = rib.read().await;
+    let best = guard.best_route(&prefix).unwrap();
+    assert_eq!(best.gateway, next_hop);
+    assert_eq!(best.source, RouteSource::Bgp);
+}

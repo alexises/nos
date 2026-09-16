@@ -5,6 +5,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ipnet::IpNet;
 use nos_proto::bgp::{BgpSessionState, PeerSummary};
 use nos_proto::{AddressFamily, BgpAoAlgorithm, BgpAuth, NextHopMode};
 use tokio::net::{TcpListener, TcpStream};
@@ -180,6 +181,7 @@ impl SessionManager {
     pub async fn reconcile(
         self: &Arc<Self>,
         vrf: VrfRequirement,
+        routing_table: Option<String>,
         local: LocalIdentity,
         desired: Vec<ResolvedPeer>,
         redistribute_policy: Arc<nos_rpl::CompiledPolicy>,
@@ -190,6 +192,7 @@ impl SessionManager {
         {
             let mut bgp_rib = self.bgp_rib.lock().await;
             bgp_rib.set_local_identity(local.asn, local.router_id, local.cluster_id);
+            bgp_rib.set_routing_table(routing_table);
             bgp_rib.set_redistribute_policy(redistribute_policy);
         }
         if *self.vrf.borrow() != vrf {
@@ -203,6 +206,12 @@ impl SessionManager {
     /// `server.rs`'s fire-and-forget `BgpRequest::RedistributeRoutes` handler.
     pub async fn apply_redistribute_update(&self, update: nos_proto::RedistributeUpdate) {
         self.bgp_rib.lock().await.apply_redistribute_update(update);
+    }
+
+    /// This instance's owning routing table name and current best-path
+    /// snapshot, for `rib_push_client`'s poll loop.
+    pub async fn bgp_push_snapshot(&self) -> (Option<String>, HashMap<IpNet, IpAddr>) {
+        self.bgp_rib.lock().await.push_snapshot()
     }
 
     /// Delivers an operator-triggered `FsmCommand` to `peer`'s live session,
