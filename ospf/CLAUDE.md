@@ -14,4 +14,3 @@ This is a **config-only skeleton today** — no OSPF wire protocol (Hello, LSAs,
 | `config_client.rs` | Own `fetch_config` (`Request::Get`) / `subscribe_diff` (`Request::SubscribeDiff`) — reimplemented rather than shared with the other component crates, per the root `CLAUDE.md`'s star dependency graph |
 | `watchdog_client.rs` | `resolve_with_retry` (used once at startup for `ServiceRef::Config`) |
 | `reconcile.rs` | Steady-state loop: subscribes to `OspfInstances` diffs purely as a resync trigger, always re-fetching the whole config and logging this instance's `router_id`/`routing_table` |
-| `log_client.rs` | `ForwardingLayer` — the `tracing` → `nos-logd` forwarder, reimplemented per-crate like every other daemon's |

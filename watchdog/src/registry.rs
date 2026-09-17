@@ -8,9 +8,9 @@ use tracing::debug;
 
 /// Cheap-`Clone` handle (like `nos-config`'s `ConfigStore`) over the live
 /// mapping from routing-table/BGP-instance name to its `nos-ribd`/`nos-bgpd`
-/// instance's IPC socket. Updated by `routing_tables::manage`/
-/// `bgp_instances::manage` as instances are spawned/stopped, and read by
-/// `broker::start` to answer `ResolveEndpoint` requests.
+/// instance's IPC socket. Updated by `instances::manage` as instances are
+/// spawned/stopped, and read by `broker::start` to answer `ResolveEndpoint`
+/// requests.
 #[derive(Clone, Default)]
 pub struct EndpointRegistry {
     rib_tables: Arc<RwLock<HashMap<String, PathBuf>>>,
@@ -18,44 +18,48 @@ pub struct EndpointRegistry {
     ospf_instances: Arc<RwLock<HashMap<String, PathBuf>>>,
 }
 
+/// Which of the registry's per-name maps an endpoint belongs to — one per
+/// daemon family that `instances::manage` spawns per named config object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointKind {
+    RibTable,
+    BgpInstance,
+    OspfInstance,
+}
+
+impl EndpointKind {
+    fn label(self) -> &'static str {
+        match self {
+            EndpointKind::RibTable => "rib table",
+            EndpointKind::BgpInstance => "bgp instance",
+            EndpointKind::OspfInstance => "ospf instance",
+        }
+    }
+}
+
 impl EndpointRegistry {
-    pub async fn set_rib_table(&self, name: &str, socket: PathBuf) {
-        debug!(table = %name, socket = %socket.display(), "registered rib table endpoint");
-        self.rib_tables
+    fn map(&self, kind: EndpointKind) -> &RwLock<HashMap<String, PathBuf>> {
+        match kind {
+            EndpointKind::RibTable => &self.rib_tables,
+            EndpointKind::BgpInstance => &self.bgp_instances,
+            EndpointKind::OspfInstance => &self.ospf_instances,
+        }
+    }
+
+    pub async fn set(&self, kind: EndpointKind, name: &str, socket: PathBuf) {
+        debug!(
+            kind = kind.label(), name = %name, socket = %socket.display(),
+            "registered endpoint"
+        );
+        self.map(kind)
             .write()
             .await
             .insert(name.to_string(), socket);
     }
 
-    pub async fn remove_rib_table(&self, name: &str) {
-        debug!(table = %name, "removed rib table endpoint");
-        self.rib_tables.write().await.remove(name);
-    }
-
-    pub async fn set_bgp_instance(&self, name: &str, socket: PathBuf) {
-        debug!(instance = %name, socket = %socket.display(), "registered bgp instance endpoint");
-        self.bgp_instances
-            .write()
-            .await
-            .insert(name.to_string(), socket);
-    }
-
-    pub async fn remove_bgp_instance(&self, name: &str) {
-        debug!(instance = %name, "removed bgp instance endpoint");
-        self.bgp_instances.write().await.remove(name);
-    }
-
-    pub async fn set_ospf_instance(&self, name: &str, socket: PathBuf) {
-        debug!(instance = %name, socket = %socket.display(), "registered ospf instance endpoint");
-        self.ospf_instances
-            .write()
-            .await
-            .insert(name.to_string(), socket);
-    }
-
-    pub async fn remove_ospf_instance(&self, name: &str) {
-        debug!(instance = %name, "removed ospf instance endpoint");
-        self.ospf_instances.write().await.remove(name);
+    pub async fn remove(&self, kind: EndpointKind, name: &str) {
+        debug!(kind = kind.label(), name = %name, "removed endpoint");
+        self.map(kind).write().await.remove(name);
     }
 
     /// Resolves `service` to its current socket path, if known.
@@ -73,14 +77,15 @@ impl EndpointRegistry {
         interfaces_socket: &Path,
         log_socket: &Path,
     ) -> Option<PathBuf> {
-        match service {
-            ServiceRef::Config => Some(config_socket.to_path_buf()),
-            ServiceRef::RibTable(name) => self.rib_tables.read().await.get(name).cloned(),
-            ServiceRef::Interfaces => Some(interfaces_socket.to_path_buf()),
-            ServiceRef::Log => Some(log_socket.to_path_buf()),
-            ServiceRef::BgpInstance(name) => self.bgp_instances.read().await.get(name).cloned(),
-            ServiceRef::OspfInstance(name) => self.ospf_instances.read().await.get(name).cloned(),
-        }
+        let (kind, name) = match service {
+            ServiceRef::Config => return Some(config_socket.to_path_buf()),
+            ServiceRef::Interfaces => return Some(interfaces_socket.to_path_buf()),
+            ServiceRef::Log => return Some(log_socket.to_path_buf()),
+            ServiceRef::RibTable(name) => (EndpointKind::RibTable, name),
+            ServiceRef::BgpInstance(name) => (EndpointKind::BgpInstance, name),
+            ServiceRef::OspfInstance(name) => (EndpointKind::OspfInstance, name),
+        };
+        self.map(kind).read().await.get(name).cloned()
     }
 }
 
@@ -165,7 +170,11 @@ mod tests {
         );
 
         registry
-            .set_rib_table("rt1", PathBuf::from("/run/nos/rib-rt1.sock"))
+            .set(
+                EndpointKind::RibTable,
+                "rt1",
+                PathBuf::from("/run/nos/rib-rt1.sock"),
+            )
             .await;
         assert_eq!(
             registry
@@ -174,7 +183,7 @@ mod tests {
             Some(PathBuf::from("/run/nos/rib-rt1.sock"))
         );
 
-        registry.remove_rib_table("rt1").await;
+        registry.remove(EndpointKind::RibTable, "rt1").await;
         assert_eq!(
             registry
                 .resolve(&service, config_socket, interfaces_socket, log_socket)
@@ -199,7 +208,11 @@ mod tests {
         );
 
         registry
-            .set_bgp_instance("r1", PathBuf::from("/run/nos/bgp-r1.sock"))
+            .set(
+                EndpointKind::BgpInstance,
+                "r1",
+                PathBuf::from("/run/nos/bgp-r1.sock"),
+            )
             .await;
         assert_eq!(
             registry
@@ -208,7 +221,7 @@ mod tests {
             Some(PathBuf::from("/run/nos/bgp-r1.sock"))
         );
 
-        registry.remove_bgp_instance("r1").await;
+        registry.remove(EndpointKind::BgpInstance, "r1").await;
         assert_eq!(
             registry
                 .resolve(&service, config_socket, interfaces_socket, log_socket)
@@ -233,7 +246,11 @@ mod tests {
         );
 
         registry
-            .set_ospf_instance("o1", PathBuf::from("/run/nos/ospf-o1.sock"))
+            .set(
+                EndpointKind::OspfInstance,
+                "o1",
+                PathBuf::from("/run/nos/ospf-o1.sock"),
+            )
             .await;
         assert_eq!(
             registry
@@ -242,7 +259,7 @@ mod tests {
             Some(PathBuf::from("/run/nos/ospf-o1.sock"))
         );
 
-        registry.remove_ospf_instance("o1").await;
+        registry.remove(EndpointKind::OspfInstance, "o1").await;
         assert_eq!(
             registry
                 .resolve(&service, config_socket, interfaces_socket, log_socket)

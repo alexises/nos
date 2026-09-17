@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_bgp::log_client::ForwardingLayer;
 use nos_bgp::session::SessionManager;
 use nos_bgp::{reconcile, rib_push_client, server, watchdog_client};
+use nos_log_client::ForwardingLayer;
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;

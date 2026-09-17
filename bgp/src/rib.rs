@@ -133,6 +133,33 @@ fn apply_policy(
     }
 }
 
+/// Applies one learned NLRI to a peer's Adj-RIB-In, shared by an UPDATE's
+/// plain IPv4 NLRI and its RFC 4760 `MP_REACH_NLRI`, which differ only in
+/// where the next-hop comes from.
+///
+/// A rejected prefix is *removed* rather than skipped — a policy that now
+/// rejects it must not leave an earlier, now-superseded copy behind — and is
+/// `touched` either way so best-path selection re-runs for it.
+fn learn_prefix(
+    table: &mut HashMap<IpNet, RibRoute>,
+    touched: &mut HashSet<IpNet>,
+    from: IpAddr,
+    prefix: IpNet,
+    candidate: RibRoute,
+    import_policy: &CompiledPolicy,
+) {
+    match apply_policy(prefix, candidate, import_policy) {
+        Some(route) => {
+            info!(peer = %from, "bgp: learned route for {prefix} into adj-rib-in");
+            table.insert(prefix, route);
+        }
+        None => {
+            table.remove(&prefix);
+        }
+    }
+    touched.insert(prefix);
+}
+
 /// RFC 4271 §5.1.5's default `LOCAL_PREF`, applied whenever a peer's UPDATE
 /// omits the attribute (or for every locally-redistributed route, which
 /// carries no wire attributes at all).
@@ -636,21 +663,18 @@ impl BgpRib {
                     large_communities: attrs.large_communities.clone(),
                 };
                 for prefix in &update.nlri {
-                    let prefix = IpNet::V4(*prefix);
                     let candidate = RibRoute {
                         next_hop: Some(IpAddr::V4(attrs.next_hop)),
                         ..base_route.clone()
                     };
-                    match apply_policy(prefix, candidate, import_policy) {
-                        Some(route) => {
-                            info!(peer = %from, "bgp: learned route for {prefix} into adj-rib-in");
-                            table.insert(prefix, route);
-                        }
-                        None => {
-                            table.remove(&prefix);
-                        }
-                    }
-                    touched.insert(prefix);
+                    learn_prefix(
+                        table,
+                        &mut touched,
+                        from,
+                        IpNet::V4(*prefix),
+                        candidate,
+                        import_policy,
+                    );
                 }
                 for mp in &update.mp_reach {
                     for prefix in &mp.nlri {
@@ -658,16 +682,7 @@ impl BgpRib {
                             next_hop: Some(mp.next_hop),
                             ..base_route.clone()
                         };
-                        match apply_policy(*prefix, candidate, import_policy) {
-                            Some(route) => {
-                                info!(peer = %from, "bgp: learned route for {prefix} into adj-rib-in");
-                                table.insert(*prefix, route);
-                            }
-                            None => {
-                                table.remove(prefix);
-                            }
-                        }
-                        touched.insert(*prefix);
+                        learn_prefix(table, &mut touched, from, *prefix, candidate, import_policy);
                     }
                 }
             }

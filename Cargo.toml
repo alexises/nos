@@ -1,5 +1,5 @@
 [workspace]
-members = ["proto", "config", "bgp", "rib", "interface", "log", "ospf", "cli", "watchdog", "tools/nos-provision", "tcp-auth", "rpl"]
+members = ["proto", "config", "bgp", "rib", "interface", "log", "ospf", "cli", "watchdog", "tools/nos-provision", "tcp-auth", "rpl", "log-client"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -19,6 +19,7 @@ futures     = "0.3"
 nos-proto          = { path = "proto" }
 nos-tcp-auth       = { path = "tcp-auth" }
 nos-rpl            = { path = "rpl" }
+nos-log-client     = { path = "log-client" }
 clap               = { version = "4", features = ["derive"] }
 anyhow             = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -48,6 +49,10 @@ must_use_candidate        = "allow"
 module_name_repetitions   = "allow"
 missing_errors_doc        = "allow"
 missing_panics_doc        = "allow"
-# flat one-arm-per-command/topic tables (Command::parse, resolve_in_transaction,
-# command_doc) are meant to read as a table, not be split up to dodge a line count
+# Length is fine here; depth is not. The flat one-arm-per-command/topic tables
+# (Command::parse, resolve_table, command_doc) are meant to read as a table and
+# must not be split up to dodge a line count — but an arm that nests deeply has
+# stopped being a table row, so excessive_nesting stays on. Threshold lives in
+# clippy.toml.
 too_many_lines             = "allow"
+excessive_nesting          = "warn"

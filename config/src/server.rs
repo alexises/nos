@@ -1,5 +1,6 @@
 use std::fmt;
 use std::net::SocketAddr;
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -11,7 +12,7 @@ use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, error, info, warn};
 
-use crate::store::ConfigStore;
+use crate::store::{CommitUpdate, ConfigStore};
 
 /// Where the IPC server binds.
 ///
@@ -187,92 +188,27 @@ where
     let mut reader_open = true;
 
     loop {
+        // Each arm only decides *what* happened; the work of acting on it
+        // lives in `on_request` below, so this stays a two-line dispatch.
         tokio::select! {
             msg = reader.next(), if reader_open => {
-                match msg {
-                    Some(Ok(Request::Subscribe)) => {
-                        if let Some(h) = sub_task.take() { h.abort(); }
-
-                        let mut bcast_rx = store.subscribe();
-                        let forward_tx = sub_tx.clone();
-                        sub_task = Some(tokio::spawn(async move {
-                            loop {
-                                match bcast_rx.recv().await {
-                                    Ok(update) => {
-                                        let event = Event::Config(update.config.clone());
-                                        if forward_tx.send(event).await.is_err() {
-                                            break;
-                                        }
-                                    }
-                                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                                        warn!(lagged = n, "IPC subscriber lagged, dropped messages");
-                                    }
-                                    Err(broadcast::error::RecvError::Closed) => break,
-                                }
-                            }
-                        }));
-
-                        let cfg = store.running_snapshot().await;
-                        if writer.send(Event::Config(cfg)).await.is_err() {
-                            break;
+                let req = match msg {
+                    Some(Ok(req)) => req,
+                    other => {
+                        if let Some(Err(e)) = other {
+                            warn!(error = %e, "IPC read error");
                         }
-                        debug!("IPC client subscribed");
-                    }
-                    Some(Ok(Request::SubscribeDiff { scopes })) => {
-                        if let Some(h) = sub_task.take() { h.abort(); }
-
-                        let mut bcast_rx = store.subscribe();
-                        let forward_tx = sub_tx.clone();
-                        let task_scopes = scopes.clone();
-                        sub_task = Some(tokio::spawn(async move {
-                            loop {
-                                match bcast_rx.recv().await {
-                                    Ok(update) => {
-                                        let scoped = update.diff.scoped(&task_scopes);
-                                        if !scoped.is_empty()
-                                            && forward_tx.send(Event::Diff(scoped)).await.is_err()
-                                        {
-                                            break;
-                                        }
-                                    }
-                                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                                        warn!(lagged = n, "IPC subscriber lagged, dropped messages");
-                                    }
-                                    Err(broadcast::error::RecvError::Closed) => break,
-                                }
-                            }
-                        }));
-
-                        let initial = store.initial_diff().await.scoped(&scopes);
-                        if writer.send(Event::Diff(initial)).await.is_err() {
-                            break;
-                        }
-                        debug!(?scopes, "IPC client subscribed to diff");
-                    }
-                    Some(Ok(Request::Unsubscribe)) => {
-                        if let Some(h) = sub_task.take() { h.abort(); }
-                        debug!("IPC client unsubscribed");
-                    }
-                    Some(Ok(req)) => {
-                        if let Some(event) = dispatch_request(&store, req).await {
-                            if writer.send(event).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    Some(Err(e)) => {
-                        warn!(error = %e, "IPC read error");
                         if sub_task.is_none() {
                             break;
                         }
                         reader_open = false;
+                        continue;
                     }
-                    None => {
-                        if sub_task.is_none() {
-                            break;
-                        }
-                        reader_open = false;
-                    }
+                };
+                let flow =
+                    on_request(req, &store, &mut writer, &sub_tx, &mut sub_task).await;
+                if flow.is_break() {
+                    break;
                 }
             }
             Some(event) = sub_rx.recv() => {
@@ -283,7 +219,91 @@ where
         }
     }
 
-    if let Some(h) = sub_task {
-        h.abort();
+    set_forwarder(&mut sub_task, None);
+}
+
+/// Handles one request, replying on `writer`. `Break` means the client is
+/// gone (a write failed) and the connection should close.
+async fn on_request<S>(
+    req: Request,
+    store: &ConfigStore,
+    writer: &mut FramedWrite<tokio::io::WriteHalf<S>, IpcCodec<Event>>,
+    sub_tx: &mpsc::Sender<Event>,
+    sub_task: &mut Option<JoinHandle<()>>,
+) -> ControlFlow<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let reply = match req {
+        Request::Subscribe => {
+            let forwarder = spawn_forwarder(store, sub_tx.clone(), |u| {
+                Some(Event::Config(u.config.clone()))
+            });
+            set_forwarder(sub_task, Some(forwarder));
+            debug!("IPC client subscribed");
+            Event::Config(store.running_snapshot().await)
+        }
+        Request::SubscribeDiff { scopes } => {
+            let task_scopes = scopes.clone();
+            let forwarder = spawn_forwarder(store, sub_tx.clone(), move |u| {
+                let scoped = u.diff.scoped(&task_scopes);
+                (!scoped.is_empty()).then_some(Event::Diff(scoped))
+            });
+            set_forwarder(sub_task, Some(forwarder));
+            debug!(?scopes, "IPC client subscribed to diff");
+            Event::Diff(store.initial_diff().await.scoped(&scopes))
+        }
+        Request::Unsubscribe => {
+            set_forwarder(sub_task, None);
+            debug!("IPC client unsubscribed");
+            return ControlFlow::Continue(());
+        }
+        req => match dispatch_request(store, req).await {
+            Some(reply) => reply,
+            None => return ControlFlow::Continue(()),
+        },
+    };
+    match writer.send(reply).await {
+        Ok(()) => ControlFlow::Continue(()),
+        Err(_) => ControlFlow::Break(()),
     }
+}
+
+/// Installs this connection's forwarder task, aborting whichever one it
+/// replaces — `None` both unsubscribes and tears the connection down.
+fn set_forwarder(slot: &mut Option<JoinHandle<()>>, next: Option<JoinHandle<()>>) {
+    if let Some(previous) = std::mem::replace(slot, next) {
+        previous.abort();
+    }
+}
+
+/// Bridges the store's commit broadcast to one connection's `mpsc`, so the
+/// connection loop never holds a `&mut` borrow across `select!` arms.
+/// `to_event` builds the event this subscriber wants from each commit, and
+/// returning `None` skips it — which is how a `SubscribeDiff` subscriber is
+/// never woken for a commit outside its scopes.
+fn spawn_forwarder(
+    store: &ConfigStore,
+    tx: mpsc::Sender<Event>,
+    to_event: impl Fn(&CommitUpdate) -> Option<Event> + Send + 'static,
+) -> JoinHandle<()> {
+    let mut bcast_rx = store.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match bcast_rx.recv().await {
+                Ok(update) => {
+                    let Some(event) = to_event(&update) else {
+                        continue;
+                    };
+                    if tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(lagged = n, "IPC subscriber lagged, dropped messages");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }

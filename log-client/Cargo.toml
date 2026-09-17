@@ -1,0 +1,15 @@
+[package]
+name = "nos-log-client"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+nos-proto          = { workspace = true }
+futures            = { workspace = true }
+tokio              = { workspace = true }
+tokio-util         = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }

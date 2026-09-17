@@ -1076,6 +1076,7 @@ dependencies = [
  "dhat",
  "futures",
  "ipnet",
+ "nos-log-client",
  "nos-proto",
  "nos-rpl",
  "nos-tcp-auth",
@@ -1117,6 +1118,7 @@ dependencies = [
  "futures",
  "garde",
  "insta",
+ "nos-log-client",
  "nos-proto",
  "proptest",
  "serde",
@@ -1140,6 +1142,7 @@ dependencies = [
  "clap",
  "fs2",
  "futures",
+ "nos-log-client",
  "nos-proto",
  "proptest",
  "rtnetlink",
@@ -1173,12 +1176,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nos-log-client"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "nos-proto",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nos-ospf"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "nos-log-client",
  "nos-proto",
  "serde",
  "thiserror 1.0.69",
@@ -1230,6 +1246,7 @@ dependencies = [
  "netlink-packet-core",
  "netlink-packet-route",
  "netlink-sys",
+ "nos-log-client",
  "nos-proto",
  "proptest",
  "rtnetlink",
@@ -1266,6 +1283,7 @@ dependencies = [
  "clap",
  "futures",
  "nix 0.29.0",
+ "nos-log-client",
  "nos-proto",
  "proptest",
  "tempfile",

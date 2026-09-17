@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::Instant;
@@ -442,6 +443,152 @@ pub enum FsmOutcome {
     CollisionLost,
 }
 
+/// Turns one inbound message into the `Event` to feed `step`, or handles it
+/// here and returns `None`.
+///
+/// UPDATE and `ROUTE_REFRESH` bypass `step`'s transition table entirely — they
+/// aren't part of the OpenSent/OpenConfirm/Established table and are
+/// meaningful only once `Established` — so they are consumed here rather than
+/// inside `run`'s `select!`, which only ever yields a value.
+async fn classify_inbound(
+    msg: BgpMessage,
+    state: &State,
+    peer: &PeerContext,
+    remote_is_ibgp: bool,
+    bgp_rib: &Mutex<BgpRib>,
+) -> Option<Event> {
+    match msg {
+        BgpMessage::Open(open) => Some(Event::OpenReceived(open)),
+        BgpMessage::Keepalive => Some(Event::KeepaliveReceived),
+        BgpMessage::Notification(n) => Some(Event::NotificationReceived(n)),
+        BgpMessage::Update(update) => {
+            if let State::Established(remote) = state {
+                bgp_rib.lock().await.handle_update(
+                    peer.remote_address,
+                    remote_is_ibgp,
+                    remote.bgp_id,
+                    &update,
+                    &peer.import_policy,
+                );
+            } else {
+                debug!(
+                    peer = %peer.remote_address,
+                    "ignoring bgp update received before session established"
+                );
+            }
+            None
+        }
+        BgpMessage::RouteRefresh(rr) => {
+            resend_loc_rib(rr, state, peer, bgp_rib).await;
+            None
+        }
+        BgpMessage::Unhandled { message_type, .. } => {
+            debug!(
+                peer = %peer.remote_address, message_type,
+                "ignoring unrecognized bgp message type"
+            );
+            None
+        }
+    }
+}
+
+/// RFC 2918 inbound: re-send the Loc-RIB for the requested address family.
+async fn resend_loc_rib(
+    rr: RouteRefreshMessage,
+    state: &State,
+    peer: &PeerContext,
+    bgp_rib: &Mutex<BgpRib>,
+) {
+    if !matches!(state, State::Established(_)) {
+        debug!(
+            peer = %peer.remote_address,
+            "ignoring route refresh received before session established"
+        );
+        return;
+    }
+    let Some(family) = family_of_afi(rr.afi) else {
+        debug!(
+            peer = %peer.remote_address, afi = rr.afi,
+            "ignoring route-refresh for unrecognized afi"
+        );
+        return;
+    };
+    bgp_rib.lock().await.resend_all(peer.remote_address, family);
+    info!(
+        peer = %peer.remote_address, afi = rr.afi,
+        "bgp: received route refresh, resending loc-rib"
+    );
+}
+
+/// RFC 2918 outbound: request a refresh for every address family this
+/// session actually negotiated.
+async fn send_route_refresh(
+    writer: &mut FramedWrite<OwnedWriteHalf, BgpCodec>,
+    state: &State,
+    peer: &PeerContext,
+) {
+    let State::Established(remote) = state else {
+        return;
+    };
+    let afis = [
+        remote.negotiated_ipv4_unicast.then_some(AFI_IPV4),
+        remote.negotiated_ipv6_unicast.then_some(AFI_IPV6),
+    ];
+    for afi in afis.into_iter().flatten() {
+        let _ = writer
+            .send(BgpMessage::RouteRefresh(RouteRefreshMessage {
+                afi,
+                safi: 1,
+            }))
+            .await;
+    }
+    info!(peer = %peer.remote_address, "bgp: sent route refresh request to peer");
+}
+
+/// RFC 4271 §6.8: an OPEN has just moved this connection to `OpenConfirm`,
+/// so register its BGP Identifier with the peer's shared `PeerSlot` and apply
+/// the verdict.
+///
+/// Returns `Some` replacement `(next_state, actions)` when this connection
+/// *lost* — rewriting the transition into "send Cease, then close" — and
+/// `None` when it may proceed, having published its newly-known remote
+/// identity to the peer's status.
+async fn apply_collision_verdict(
+    remote: RemoteInfo,
+    role: collision::Role,
+    local: &LocalIdentity,
+    slot: &PeerSlot,
+    cease: Arc<Notify>,
+) -> Option<(Option<State>, Vec<Action>)> {
+    match slot
+        .on_open(role, local.router_id, remote.bgp_id, cease)
+        .await
+    {
+        collision::Decision::Lose => Some((
+            None,
+            vec![
+                Action::SendNotification(
+                    ErrorCode::Cease as u8,
+                    CeaseSubcode::ConnectionCollisionResolution as u8,
+                ),
+                Action::Close,
+            ],
+        )),
+        // `on_open` only returns `Proceed` when no other connection for this
+        // peer is already `Established` (see `collision::PeerSlot::on_open`),
+        // so this is safe to write without an extra `is_established` race
+        // check.
+        collision::Decision::Proceed => {
+            slot.status.send_modify(|s| {
+                s.state = PeerState::OpenConfirm;
+                s.remote_asn = Some(remote.asn);
+                s.remote_bgp_id = Some(remote.bgp_id);
+            });
+            None
+        }
+    }
+}
+
 /// Drives one session's `OpenSent` -> `OpenConfirm` -> `Established` FSM
 /// over an already-connected `stream`. The caller is responsible for
 /// `PeerSlot::begin`/`clear` around this call — `run` only touches
@@ -554,59 +701,9 @@ pub async fn run(
                         if let Some(period) = hold_period {
                             hold_deadline = Some(Instant::now() + period);
                         }
-                        match bgp_msg {
-                            BgpMessage::Open(open) => Event::OpenReceived(open),
-                            BgpMessage::Keepalive => Event::KeepaliveReceived,
-                            BgpMessage::Notification(n) => Event::NotificationReceived(n),
-                            BgpMessage::Update(update) => {
-                                // Route exchange bypasses `step` entirely —
-                                // it isn't part of the OpenSent/OpenConfirm/
-                                // Established transition table.
-                                if let State::Established(remote) = &state {
-                                    bgp_rib.lock().await.handle_update(
-                                        peer.remote_address,
-                                        remote_is_ibgp,
-                                        remote.bgp_id,
-                                        &update,
-                                        &peer.import_policy,
-                                    );
-                                } else {
-                                    debug!(
-                                        peer = %peer.remote_address,
-                                        "ignoring bgp update received before session established"
-                                    );
-                                }
-                                continue;
-                            }
-                            BgpMessage::RouteRefresh(rr) => {
-                                if let State::Established(_) = &state {
-                                    if let Some(family) = family_of_afi(rr.afi) {
-                                        bgp_rib.lock().await.resend_all(peer.remote_address, family);
-                                        info!(
-                                            peer = %peer.remote_address, afi = rr.afi,
-                                            "bgp: received route refresh, resending loc-rib"
-                                        );
-                                    } else {
-                                        debug!(
-                                            peer = %peer.remote_address, afi = rr.afi,
-                                            "ignoring route-refresh for unrecognized afi"
-                                        );
-                                    }
-                                } else {
-                                    debug!(
-                                        peer = %peer.remote_address,
-                                        "ignoring route refresh received before session established"
-                                    );
-                                }
-                                continue;
-                            }
-                            BgpMessage::Unhandled { message_type, .. } => {
-                                debug!(
-                                    peer = %peer.remote_address, message_type,
-                                    "ignoring unrecognized bgp message type"
-                                );
-                                continue;
-                            }
+                        match classify_inbound(bgp_msg, &state, &peer, remote_is_ibgp, &bgp_rib).await {
+                            Some(event) => event,
+                            None => continue,
                         }
                     }
                     Some(Err(WireError::Io(_))) => break 'session FsmOutcome::TcpError,
@@ -633,19 +730,7 @@ pub async fn run(
                 Some(cmd) = slot.recv_command(), if matches!(state, State::Established(_)) => {
                     match cmd {
                         FsmCommand::SendRouteRefresh => {
-                            if let State::Established(remote) = &state {
-                                if remote.negotiated_ipv4_unicast {
-                                    let _ = writer.send(BgpMessage::RouteRefresh(
-                                        RouteRefreshMessage { afi: AFI_IPV4, safi: 1 },
-                                    )).await;
-                                }
-                                if remote.negotiated_ipv6_unicast {
-                                    let _ = writer.send(BgpMessage::RouteRefresh(
-                                        RouteRefreshMessage { afi: AFI_IPV6, safi: 1 },
-                                    )).await;
-                                }
-                                info!(peer = %peer.remote_address, "bgp: sent route refresh request to peer");
-                            }
+                            send_route_refresh(&mut writer, &state, &peer).await;
                         }
                     }
                     continue;
@@ -659,34 +744,17 @@ pub async fn run(
             };
             let (mut next_state, mut actions) = step(state, event, &ctx);
 
-            if is_open_event {
-                if let Some(State::OpenConfirm(remote)) = next_state {
-                    let decision = slot
-                        .on_open(role, local.router_id, remote.bgp_id, cease.clone())
-                        .await;
-                    match decision {
-                        collision::Decision::Lose => {
-                            next_state = None;
-                            actions = vec![
-                                Action::SendNotification(
-                                    ErrorCode::Cease as u8,
-                                    CeaseSubcode::ConnectionCollisionResolution as u8,
-                                ),
-                                Action::Close,
-                            ];
-                        }
-                        // `on_open` only returns `Proceed` when no other
-                        // connection for this peer is already `Established` (see
-                        // `collision::PeerSlot::on_open`), so this is safe to
-                        // write without an extra `is_established` race check.
-                        collision::Decision::Proceed => {
-                            slot.status.send_modify(|s| {
-                                s.state = PeerState::OpenConfirm;
-                                s.remote_asn = Some(remote.asn);
-                                s.remote_bgp_id = Some(remote.bgp_id);
-                            });
-                        }
-                    }
+            // Only an OPEN can produce a collision (RFC 4271 §6.8).
+            let reached_open_confirm = match (is_open_event, &next_state) {
+                (true, Some(State::OpenConfirm(remote))) => Some(*remote),
+                _ => None,
+            };
+            if let Some(remote) = reached_open_confirm {
+                if let Some((state, lost)) =
+                    apply_collision_verdict(remote, role, &local, &slot, cease.clone()).await
+                {
+                    next_state = state;
+                    actions = lost;
                 }
             }
 

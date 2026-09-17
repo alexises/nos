@@ -2,11 +2,11 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_proto::{DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
-use nos_watchdog::log_client::ForwardingLayer;
+use nos_log_client::ForwardingLayer;
+use nos_proto::{DiffScope, DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use nos_watchdog::{
-    bgp_instances, broker, ospf_instances, routing_tables, supervise_one, BackoffPolicy,
-    EndpointRegistry, ProcessSpec,
+    broker, instances, supervise_one, BackoffPolicy, Endpoint, EndpointKind, EndpointRegistry,
+    Managed, ProcessSpec,
 };
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
@@ -133,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
     // nos-logd is spawned first (still just one more supervised process,
     // with no ordering guarantee enforced) so the window in which every
     // other process's own forwarder has nothing to connect to is as short
-    // as possible — a fixed 1s retry (see `log_client::run`) covers the
+    // as possible — a fixed 1s retry (see `nos_log_client`) covers the
     // rest.
     let logd_args = std::iter::once("--listen-socket".to_string())
         .chain(std::iter::once(args.log_socket.display().to_string()))
@@ -156,35 +156,65 @@ async fn main() -> anyhow::Result<()> {
         policy,
         shutdown_rx.clone(),
     )));
-    tasks.push(tokio::spawn(bgp_instances::manage(
-        args.config_socket.clone(),
-        args.bgpd_bin,
-        args.bgpd_flags,
-        args.log_socket.clone(),
-        policy,
-        registry.clone(),
-        args.listen_socket.clone(),
-        shutdown_rx.clone(),
-    )));
-    tasks.push(tokio::spawn(routing_tables::manage(
-        args.config_socket.clone(),
-        args.ribd_bin,
-        args.ribd_flags,
-        args.log_socket.clone(),
-        policy,
-        registry.clone(),
-        args.listen_socket.clone(),
-        shutdown_rx.clone(),
-    )));
-    tasks.push(tokio::spawn(ospf_instances::manage(
-        args.config_socket.clone(),
-        args.ospfd_bin,
-        args.ospfd_flags,
-        args.log_socket.clone(),
-        policy,
-        args.listen_socket.clone(),
-        shutdown_rx.clone(),
-    )));
+    // The three dynamically-spawned daemon families: one process per named
+    // config object, all supervised by the same `instances::manage`.
+    let managed = [
+        Managed {
+            scope: DiffScope::BgpInstances,
+            section: |d| &d.bgp_instances,
+            bin: args.bgpd_bin,
+            flags: args.bgpd_flags,
+            name_flag: "--instance",
+            daemon: "nos-bgpd",
+            noun: "BGP instance",
+            endpoint: Some(Endpoint {
+                kind: EndpointKind::BgpInstance,
+                socket_prefix: "bgp",
+            }),
+            config_socket: args.config_socket.clone(),
+            log_socket: args.log_socket.clone(),
+            watchdog_listen_socket: args.listen_socket.clone(),
+            policy,
+            registry: registry.clone(),
+        },
+        Managed {
+            scope: DiffScope::RoutingTables,
+            section: |d| &d.routing_tables,
+            bin: args.ribd_bin,
+            flags: args.ribd_flags,
+            name_flag: "--table",
+            daemon: "nos-ribd",
+            noun: "routing table",
+            endpoint: Some(Endpoint {
+                kind: EndpointKind::RibTable,
+                socket_prefix: "rib",
+            }),
+            config_socket: args.config_socket.clone(),
+            log_socket: args.log_socket.clone(),
+            watchdog_listen_socket: args.listen_socket.clone(),
+            policy,
+            registry: registry.clone(),
+        },
+        Managed {
+            scope: DiffScope::OspfInstances,
+            section: |d| &d.ospf_instances,
+            bin: args.ospfd_bin,
+            flags: args.ospfd_flags,
+            name_flag: "--instance",
+            daemon: "nos-ospfd",
+            noun: "OSPF instance",
+            // No IPC query listener yet — see `ospf/CLAUDE.md`.
+            endpoint: None,
+            config_socket: args.config_socket.clone(),
+            log_socket: args.log_socket.clone(),
+            watchdog_listen_socket: args.listen_socket.clone(),
+            policy,
+            registry: registry.clone(),
+        },
+    ];
+    for m in managed {
+        tasks.push(tokio::spawn(instances::manage(m, shutdown_rx.clone())));
+    }
 
     let interfaced_args = std::iter::once("--listen-socket".to_string())
         .chain(std::iter::once(

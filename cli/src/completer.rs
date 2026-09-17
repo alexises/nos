@@ -81,6 +81,22 @@ impl NosCompleter {
             }
         }
     }
+
+    /// The live-name source backing one argument slot, or `None` when the
+    /// slot takes an arbitrary value there is no way to complete.
+    fn name_source(&mut self, kind: ArgKind) -> Option<&mut (dyn FnMut() -> Vec<String> + Send)> {
+        Some(match kind {
+            ArgKind::Plain => return None,
+            ArgKind::BgpInstanceName => &mut *self.instance_name_source,
+            ArgKind::BgpPeerGroupName => &mut *self.peer_group_name_source,
+            ArgKind::RoutingTableName => &mut *self.routing_table_name_source,
+            ArgKind::OspfInstanceName => &mut *self.ospf_instance_name_source,
+            ArgKind::StaticRoutingInstanceName => &mut *self.static_routing_instance_name_source,
+            ArgKind::InterfaceName => &mut *self.interface_name_source,
+            ArgKind::BroadcastDomainName => &mut *self.broadcast_domain_name_source,
+            ArgKind::SwitchingProfileName => &mut *self.switching_profile_name_source,
+        })
+    }
 }
 
 /// One whitespace-delimited token in the buffer, with its start byte offset.
@@ -155,8 +171,14 @@ impl Completer for NosCompleter {
                         });
                     }
                 }
-                Token::Arg(ArgKind::BgpInstanceName) => {
-                    for name in (self.instance_name_source)() {
+                // Every name-completed slot differs only in where its
+                // candidates come from; `name_source` is the one place that
+                // decides, so a new `ArgKind` has exactly one arm to add.
+                Token::Arg(kind) => {
+                    let Some(source) = self.name_source(kind) else {
+                        continue;
+                    };
+                    for name in source() {
                         if name.starts_with(partial) && !suggestions.iter().any(|s| s.value == name)
                         {
                             suggestions.push(Suggestion {
@@ -168,107 +190,6 @@ impl Completer for NosCompleter {
                             });
                         }
                     }
-                }
-                Token::Arg(ArgKind::BgpPeerGroupName) => {
-                    for name in (self.peer_group_name_source)() {
-                        if name.starts_with(partial) && !suggestions.iter().any(|s| s.value == name)
-                        {
-                            suggestions.push(Suggestion {
-                                value: name,
-                                description: None,
-                                span: Span::new(partial_start, line.len()),
-                                append_whitespace: true,
-                                ..Default::default()
-                            });
-                        }
-                    }
-                }
-                Token::Arg(ArgKind::RoutingTableName) => {
-                    for name in (self.routing_table_name_source)() {
-                        if name.starts_with(partial) && !suggestions.iter().any(|s| s.value == name)
-                        {
-                            suggestions.push(Suggestion {
-                                value: name,
-                                description: None,
-                                span: Span::new(partial_start, line.len()),
-                                append_whitespace: true,
-                                ..Default::default()
-                            });
-                        }
-                    }
-                }
-                Token::Arg(ArgKind::OspfInstanceName) => {
-                    for name in (self.ospf_instance_name_source)() {
-                        if name.starts_with(partial) && !suggestions.iter().any(|s| s.value == name)
-                        {
-                            suggestions.push(Suggestion {
-                                value: name,
-                                description: None,
-                                span: Span::new(partial_start, line.len()),
-                                append_whitespace: true,
-                                ..Default::default()
-                            });
-                        }
-                    }
-                }
-                Token::Arg(ArgKind::StaticRoutingInstanceName) => {
-                    for name in (self.static_routing_instance_name_source)() {
-                        if name.starts_with(partial) && !suggestions.iter().any(|s| s.value == name)
-                        {
-                            suggestions.push(Suggestion {
-                                value: name,
-                                description: None,
-                                span: Span::new(partial_start, line.len()),
-                                append_whitespace: true,
-                                ..Default::default()
-                            });
-                        }
-                    }
-                }
-                Token::Arg(ArgKind::InterfaceName) => {
-                    for name in (self.interface_name_source)() {
-                        if name.starts_with(partial) && !suggestions.iter().any(|s| s.value == name)
-                        {
-                            suggestions.push(Suggestion {
-                                value: name,
-                                description: None,
-                                span: Span::new(partial_start, line.len()),
-                                append_whitespace: true,
-                                ..Default::default()
-                            });
-                        }
-                    }
-                }
-                Token::Arg(ArgKind::BroadcastDomainName) => {
-                    for name in (self.broadcast_domain_name_source)() {
-                        if name.starts_with(partial) && !suggestions.iter().any(|s| s.value == name)
-                        {
-                            suggestions.push(Suggestion {
-                                value: name,
-                                description: None,
-                                span: Span::new(partial_start, line.len()),
-                                append_whitespace: true,
-                                ..Default::default()
-                            });
-                        }
-                    }
-                }
-                Token::Arg(ArgKind::SwitchingProfileName) => {
-                    for name in (self.switching_profile_name_source)() {
-                        if name.starts_with(partial) && !suggestions.iter().any(|s| s.value == name)
-                        {
-                            suggestions.push(Suggestion {
-                                value: name,
-                                description: None,
-                                span: Span::new(partial_start, line.len()),
-                                append_whitespace: true,
-                                ..Default::default()
-                            });
-                        }
-                    }
-                }
-                Token::Arg(ArgKind::Plain) => {
-                    // No way to complete an arbitrary value.
                 }
             }
         }

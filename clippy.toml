@@ -1,0 +1,4 @@
+# Depth, not length: see Cargo.toml's excessive_nesting/too_many_lines pair.
+# 5 is reachable with ~6 more small extractions (rpl/parser, bgp/rib,
+# rib/driver/linux, nos-provision) if this is ever worth tightening.
+excessive-nesting-threshold = 6

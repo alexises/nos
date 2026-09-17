@@ -1,3 +1,10 @@
+//! The `tracing` → `nos-logd` forwarding layer, shared by every NOS daemon.
+//!
+//! This is a leaf crate: it depends only on `nos-proto` (for `LogEntry`/
+//! `LogRequest`), never on another component crate, so the star dependency
+//! graph in the root `CLAUDE.md` still holds — no daemon gains a dependency
+//! on another daemon by using it.
+
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -9,17 +16,13 @@ use tokio_util::codec::FramedWrite;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
 
-/// Own forwarder to `nos-logd` — reimplemented rather than shared, per the
-/// root `CLAUDE.md`'s star dependency graph (every component depends only on
-/// `nos-proto`, never on another component crate).
-///
 /// Bounded so a burst of events can never build unbounded memory while
 /// `nos-logd` is unreachable; a full channel means "drop the oldest queued
 /// entry, never block the caller emitting a `tracing` event."
 const CHANNEL_CAPACITY: usize = 1024;
 
-/// Fixed reconnect delay, matching every other reconnect loop in this crate
-/// (`watchdog_client::RETRY_DELAY`, `reconcile::RECONNECT_DELAY`).
+/// Fixed reconnect delay, matching every other reconnect loop in this
+/// codebase (`watchdog_client::RETRY_DELAY`, `reconcile::RECONNECT_DELAY`).
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// A `tracing_subscriber::Layer` that forwards every event to `nos-logd`,
@@ -110,27 +113,22 @@ async fn run(
     mut shutdown: watch::Receiver<bool>,
 ) {
     while !*shutdown.borrow() {
-        match UnixStream::connect(&log_socket).await {
-            Ok(stream) => {
-                let mut writer = FramedWrite::new(stream, IpcCodec::<LogRequest>::default());
-                loop {
-                    tokio::select! {
-                        entry = rx.recv() => match entry {
-                            Some(entry) => {
-                                if writer.send(LogRequest::Push(entry)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            None => return, // sender dropped: process is exiting
-                        },
-                        _ = shutdown.changed() => return,
-                    }
-                }
+        let Ok(stream) = UnixStream::connect(&log_socket).await else {
+            if wait_or_shutdown(RETRY_DELAY, &mut shutdown).await {
+                return;
             }
-            Err(_) => {
-                if wait_or_shutdown(RETRY_DELAY, &mut shutdown).await {
-                    return;
-                }
+            continue;
+        };
+        let mut writer = FramedWrite::new(stream, IpcCodec::<LogRequest>::default());
+        loop {
+            let entry = tokio::select! {
+                entry = rx.recv() => entry,
+                _ = shutdown.changed() => return,
+            };
+            // A dropped sender means the process is exiting.
+            let Some(entry) = entry else { return };
+            if writer.send(LogRequest::Push(entry)).await.is_err() {
+                break;
             }
         }
     }

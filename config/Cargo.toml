@@ -15,6 +15,7 @@ tracing    = { workspace = true }
 thiserror  = { workspace = true }
 garde      = { workspace = true }
 nos-proto  = { workspace = true }
+nos-log-client     = { workspace = true }
 tokio-util = { workspace = true }
 futures            = { workspace = true }
 clap               = { workspace = true }

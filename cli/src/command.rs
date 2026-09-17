@@ -511,970 +511,819 @@ pub enum Command {
 impl Command {
     pub fn parse(line: &str) -> Self {
         let trimmed = line.trim();
-        // `set source line <n> <text>` is the one command whose value must
-        // preserve leading whitespace verbatim — RPL's indentation is
-        // semantically meaningful — so it's parsed here, before the generic
-        // `split_whitespace()` matcher below would otherwise collapse it.
-        if let Some(rest) = trimmed.strip_prefix("set source line ") {
-            return match rest.find(' ') {
-                Some(space_idx) => match rest[..space_idx].parse::<usize>() {
-                    Ok(line) => Command::SetSourceLine {
-                        line,
-                        text: rest[space_idx + 1..].to_string(),
-                    },
-                    Err(_) => Command::Unknown(trimmed.to_string()),
-                },
-                None => Command::Unknown(trimmed.to_string()),
-            };
-        }
-        match trimmed.split_whitespace().collect::<Vec<_>>().as_slice() {
-            [] => Command::Empty,
-            ["show", "config"] => Command::ShowConfig,
-            ["show", "this"] => Command::Show,
-            ["show", "route", table] => Command::ShowRoute {
-                table: (*table).to_string(),
-                address: None,
-            },
-            ["show", "route", table, addr] => match addr.parse::<IpAddr>() {
-                Ok(address) => Command::ShowRoute {
-                    table: (*table).to_string(),
-                    address: Some(address),
-                },
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["show", "interface"] => Command::ShowInterface { name: None },
-            ["show", "interface", name] => Command::ShowInterface {
-                name: Some((*name).to_string()),
-            },
-            ["show", "log"] => Command::ShowLog {
-                source: None,
-                follow: false,
-            },
-            ["show", "log", "--follow"] => Command::ShowLog {
-                source: None,
-                follow: true,
-            },
-            ["show", "log", source] => Command::ShowLog {
-                source: Some((*source).to_string()),
-                follow: false,
-            },
-            ["show", "log", source, "--follow"] => Command::ShowLog {
-                source: Some((*source).to_string()),
-                follow: true,
-            },
-            ["show", "bgp", "brief"] => Command::ShowBgpBrief,
-            ["clear", "bgp", instance, peer, "soft-in"] => match peer.parse::<IpAddr>() {
-                Ok(peer) => Command::ClearBgpSoftIn {
-                    instance: (*instance).to_string(),
-                    peer,
-                },
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["save"] => Command::Save,
-            ["help"] => Command::Help,
-            ["exit" | "quit" | "end"] => Command::Exit,
-            ["commit"] => Command::Commit,
-            ["discard" | "abort"] => Command::Discard,
-            ["diff"] => Command::Diff,
-            ["up"] => Command::Up,
-            ["top"] => Command::Top,
-            ["configure", name] => Command::Configure {
-                name: (*name).to_string(),
-                base: None,
-            },
-            ["configure", name, "from", "blank"] => Command::Configure {
-                name: (*name).to_string(),
-                base: Some(TransactionBase::Blank),
-            },
-            ["configure", name, "from", "current"] => Command::Configure {
-                name: (*name).to_string(),
-                base: Some(TransactionBase::Current),
-            },
-            ["edit", "bgp", "instance", name] => Command::Edit(EditTarget::BgpInstance {
-                name: (*name).to_string(),
-            }),
-            ["edit", "bgp", "instance", instance, "peer-group", group] => {
-                Command::Edit(EditTarget::BgpPeerGroup {
-                    instance: (*instance).to_string(),
-                    name: (*group).to_string(),
-                })
-            }
-            ["edit", "peer-group", group] => Command::Edit(EditTarget::PeerGroupRelative {
+        parse_inner(trimmed).unwrap_or_else(|| Command::Unknown(trimmed.to_string()))
+    }
+}
+
+/// The command table. Anything that doesn't match a row — an unknown token
+/// sequence, or an argument that fails to parse — returns `None`, which
+/// `Command::parse` turns into the one `Command::Unknown`. That is why no row
+/// here spells out its own failure case.
+fn parse_inner(trimmed: &str) -> Option<Command> {
+    // `set source line <n> <text>` is the one command whose value must
+    // preserve leading whitespace verbatim — RPL's indentation is
+    // semantically meaningful — so it's parsed here, before the generic
+    // `split_whitespace()` matcher below would otherwise collapse it.
+    if let Some(rest) = trimmed.strip_prefix("set source line ") {
+        let space_idx = rest.find(' ')?;
+        return Some(Command::SetSourceLine {
+            line: rest[..space_idx].parse::<usize>().ok()?,
+            text: rest[space_idx + 1..].to_string(),
+        });
+    }
+    match trimmed.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["show", rest @ ..] => parse_show(rest),
+        ["edit", rest @ ..] => parse_edit(rest),
+        ["set", rest @ ..] => parse_set(rest),
+        ["delete", rest @ ..] => parse_delete(rest),
+        rest => parse_bare(rest),
+    }
+}
+
+/// Read-only `show` commands. Valid in any mode; none of them touch a transaction.
+fn parse_show(t: &[&str]) -> Option<Command> {
+    Some(match t {
+        ["config"] => Command::ShowConfig,
+        ["this"] => Command::Show,
+        ["route", table] => Command::ShowRoute {
+            table: (*table).to_string(),
+            address: None,
+        },
+        ["route", table, addr] => Command::ShowRoute {
+            table: (*table).to_string(),
+            address: Some(addr.parse::<IpAddr>().ok()?),
+        },
+        ["interface"] => Command::ShowInterface { name: None },
+        ["interface", name] => Command::ShowInterface {
+            name: Some((*name).to_string()),
+        },
+        ["log"] => Command::ShowLog {
+            source: None,
+            follow: false,
+        },
+        ["log", "--follow"] => Command::ShowLog {
+            source: None,
+            follow: true,
+        },
+        ["log", source] => Command::ShowLog {
+            source: Some((*source).to_string()),
+            follow: false,
+        },
+        ["log", source, "--follow"] => Command::ShowLog {
+            source: Some((*source).to_string()),
+            follow: true,
+        },
+        ["bgp", "brief"] => Command::ShowBgpBrief,
+        ["source"] => Command::ShowSource,
+        _ => return None,
+    })
+}
+
+/// `edit` — create-if-missing, then navigate into the object.
+fn parse_edit(t: &[&str]) -> Option<Command> {
+    Some(match t {
+        ["bgp", "instance", name] => Command::Edit(EditTarget::BgpInstance {
+            name: (*name).to_string(),
+        }),
+        ["bgp", "instance", instance, "peer-group", group] => {
+            Command::Edit(EditTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
                 name: (*group).to_string(),
-            }),
-            ["edit", "routing-table", name] => Command::Edit(EditTarget::RoutingTable {
-                name: (*name).to_string(),
-            }),
-            ["edit", "ospf", "instance", name] => Command::Edit(EditTarget::OspfInstance {
-                name: (*name).to_string(),
-            }),
-            ["edit", "static-routing-instance", name] => {
-                Command::Edit(EditTarget::StaticRoutingInstance {
-                    name: (*name).to_string(),
-                })
-            }
-            ["edit", "interface", name] => Command::Edit(EditTarget::Interface {
-                name: (*name).to_string(),
-            }),
-            ["edit", "policy-definition", name] => Command::Edit(EditTarget::PolicyDefinition {
-                name: (*name).to_string(),
-            }),
-            ["edit", "community-alias", name] => Command::Edit(EditTarget::CommunityAlias {
-                name: (*name).to_string(),
-            }),
-            ["edit", "community-group", name] => Command::Edit(EditTarget::CommunityGroup {
-                name: (*name).to_string(),
-            }),
-            ["edit", "prefix-list", name] => Command::Edit(EditTarget::PrefixList {
-                name: (*name).to_string(),
-            }),
-            ["edit", "broadcast", "domain", name] => Command::Edit(EditTarget::BroadcastDomain {
-                name: (*name).to_string(),
-            }),
-            ["edit", "switching-profile", name] => Command::Edit(EditTarget::SwitchingProfile {
-                name: (*name).to_string(),
-            }),
-            ["edit", "source"] => Command::EditSource,
-            ["show", "source"] => Command::ShowSource,
-            ["delete", "source", "line", n] => match n.parse::<usize>() {
-                Ok(line) => Command::DeleteSourceLine { line },
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "bgp", "instance", name, "asn", n] => match n.parse::<u32>() {
-                Ok(asn) => Command::Set(SetTarget::BgpInstance {
-                    name: (*name).to_string(),
-                    field: BgpInstanceField::Asn(asn),
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "bgp", "instance", name, "router-id", ip] => match ip.parse::<Ipv4Addr>() {
-                Ok(router_id) => Command::Set(SetTarget::BgpInstance {
-                    name: (*name).to_string(),
-                    field: BgpInstanceField::RouterId(router_id),
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "bgp", "instance", name, "cluster-id", ip] => match ip.parse::<Ipv4Addr>() {
-                Ok(cluster_id) => Command::Set(SetTarget::BgpInstance {
-                    name: (*name).to_string(),
-                    field: BgpInstanceField::ClusterId(cluster_id),
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "asn", n] => match n.parse::<u32>() {
-                Ok(asn) => Command::Set(SetTarget::Relative {
-                    field: BgpInstanceField::Asn(asn),
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "router-id", ip] => match ip.parse::<Ipv4Addr>() {
-                Ok(router_id) => Command::Set(SetTarget::Relative {
-                    field: BgpInstanceField::RouterId(router_id),
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "cluster-id", ip] => match ip.parse::<Ipv4Addr>() {
-                Ok(cluster_id) => Command::Set(SetTarget::Relative {
-                    field: BgpInstanceField::ClusterId(cluster_id),
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "hostname", name] => Command::Set(SetTarget::Hostname((*name).to_string())),
-            ["set", "bgp", "instance", instance, "peer-group", group, "remote-as", n] => {
-                match n.parse::<u32>() {
-                    Ok(remote_as) => Command::Set(SetTarget::BgpPeerGroup {
-                        instance: (*instance).to_string(),
-                        group: (*group).to_string(),
-                        field: BgpPeerGroupField::RemoteAs(remote_as),
-                    }),
-                    Err(_) => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "source-address", "interface", ifname] => {
-                Command::Set(SetTarget::BgpPeerGroup {
-                    instance: (*instance).to_string(),
-                    group: (*group).to_string(),
-                    field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
-                        interface: (*ifname).to_string(),
-                        label: None,
-                    }),
-                })
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "source-address", "interface", ifname, "label", label] => {
-                Command::Set(SetTarget::BgpPeerGroup {
-                    instance: (*instance).to_string(),
-                    group: (*group).to_string(),
-                    field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
-                        interface: (*ifname).to_string(),
-                        label: Some((*label).to_string()),
-                    }),
-                })
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "source-address", "loopback"] => {
-                Command::Set(SetTarget::BgpPeerGroup {
-                    instance: (*instance).to_string(),
-                    group: (*group).to_string(),
-                    field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback {
-                        label: None,
-                    }),
-                })
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "source-address", "loopback", "label", label] => {
-                Command::Set(SetTarget::BgpPeerGroup {
-                    instance: (*instance).to_string(),
-                    group: (*group).to_string(),
-                    field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback {
-                        label: Some((*label).to_string()),
-                    }),
-                })
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "address-family", "ipv4"] => {
-                Command::Set(SetTarget::BgpPeerGroup {
-                    instance: (*instance).to_string(),
-                    group: (*group).to_string(),
-                    field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv4Unicast),
-                })
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "address-family", "ipv6"] => {
-                Command::Set(SetTarget::BgpPeerGroup {
-                    instance: (*instance).to_string(),
-                    group: (*group).to_string(),
-                    field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv6Unicast),
-                })
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "hold-time", n] => {
-                match n.parse::<u16>() {
-                    Ok(hold_time) => Command::Set(SetTarget::BgpPeerGroup {
-                        instance: (*instance).to_string(),
-                        group: (*group).to_string(),
-                        field: BgpPeerGroupField::HoldTime(hold_time),
-                    }),
-                    Err(_) => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "keepalive-interval", n] => {
-                match n.parse::<u16>() {
-                    Ok(keepalive_interval) => Command::Set(SetTarget::BgpPeerGroup {
-                        instance: (*instance).to_string(),
-                        group: (*group).to_string(),
-                        field: BgpPeerGroupField::KeepaliveInterval(keepalive_interval),
-                    }),
-                    Err(_) => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "connect-retry-time", n] => {
-                match n.parse::<u16>() {
-                    Ok(connect_retry_time) => Command::Set(SetTarget::BgpPeerGroup {
-                        instance: (*instance).to_string(),
-                        group: (*group).to_string(),
-                        field: BgpPeerGroupField::ConnectRetryTime(connect_retry_time),
-                    }),
-                    Err(_) => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "next-hop", "self"] => {
-                Command::Set(SetTarget::BgpPeerGroup {
-                    instance: (*instance).to_string(),
-                    group: (*group).to_string(),
-                    field: BgpPeerGroupField::NextHop(NextHopMode::SelfAddress),
-                })
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "next-hop", "unchanged"] => {
-                Command::Set(SetTarget::BgpPeerGroup {
-                    instance: (*instance).to_string(),
-                    group: (*group).to_string(),
-                    field: BgpPeerGroupField::NextHop(NextHopMode::Unchanged),
-                })
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "route-reflector-client"] => {
-                Command::Set(SetTarget::BgpPeerGroup {
-                    instance: (*instance).to_string(),
-                    group: (*group).to_string(),
-                    field: BgpPeerGroupField::RouteReflectorClient,
-                })
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "route-server-client"] => {
-                Command::Set(SetTarget::BgpPeerGroup {
-                    instance: (*instance).to_string(),
-                    group: (*group).to_string(),
-                    field: BgpPeerGroupField::RouteServerClient,
-                })
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "import-policy", name] => {
-                Command::Set(SetTarget::BgpPeerGroup {
-                    instance: (*instance).to_string(),
-                    group: (*group).to_string(),
-                    field: BgpPeerGroupField::ImportPolicy((*name).to_string()),
-                })
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "export-policy", name] => {
-                Command::Set(SetTarget::BgpPeerGroup {
-                    instance: (*instance).to_string(),
-                    group: (*group).to_string(),
-                    field: BgpPeerGroupField::ExportPolicy((*name).to_string()),
-                })
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "md5-password", password] => {
-                Command::Set(SetTarget::BgpPeerGroup {
-                    instance: (*instance).to_string(),
-                    group: (*group).to_string(),
-                    field: BgpPeerGroupField::Md5Password((*password).to_string()),
-                })
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "ao-key", send_id, recv_id, algorithm, key] => {
-                match (
-                    send_id.parse::<u8>(),
-                    recv_id.parse::<u8>(),
-                    parse_ao_algorithm(algorithm),
-                ) {
-                    (Ok(send_id), Ok(recv_id), Some(algorithm)) => {
-                        Command::Set(SetTarget::BgpPeerGroup {
-                            instance: (*instance).to_string(),
-                            group: (*group).to_string(),
-                            field: BgpPeerGroupField::AoKey {
-                                send_id,
-                                recv_id,
-                                algorithm,
-                                key: (*key).to_string(),
-                            },
-                        })
-                    }
-                    _ => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "ao-key", send_id, "current"] => {
-                match send_id.parse::<u8>() {
-                    Ok(send_id) => Command::Set(SetTarget::BgpPeerGroup {
-                        instance: (*instance).to_string(),
-                        group: (*group).to_string(),
-                        field: BgpPeerGroupField::AoCurrentKey(send_id),
-                    }),
-                    Err(_) => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "bgp", "instance", instance, "peer-group", group, "ao-key", send_id, "rnext"] => {
-                match send_id.parse::<u8>() {
-                    Ok(send_id) => Command::Set(SetTarget::BgpPeerGroup {
-                        instance: (*instance).to_string(),
-                        group: (*group).to_string(),
-                        field: BgpPeerGroupField::AoRnextKey(send_id),
-                    }),
-                    Err(_) => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "remote-as", n] => match n.parse::<u32>() {
-                Ok(remote_as) => Command::Set(SetTarget::PeerGroupRelative {
-                    field: BgpPeerGroupField::RemoteAs(remote_as),
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "source-address", "interface", ifname] => {
-                Command::Set(SetTarget::PeerGroupRelative {
-                    field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
-                        interface: (*ifname).to_string(),
-                        label: None,
-                    }),
-                })
-            }
-            ["set", "source-address", "interface", ifname, "label", label] => {
-                Command::Set(SetTarget::PeerGroupRelative {
-                    field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
-                        interface: (*ifname).to_string(),
-                        label: Some((*label).to_string()),
-                    }),
-                })
-            }
-            ["set", "source-address", "loopback"] => Command::Set(SetTarget::PeerGroupRelative {
-                field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback { label: None }),
-            }),
-            ["set", "source-address", "loopback", "label", label] => {
-                Command::Set(SetTarget::PeerGroupRelative {
-                    field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback {
-                        label: Some((*label).to_string()),
-                    }),
-                })
-            }
-            ["set", "address-family", "ipv4"] => Command::Set(SetTarget::PeerGroupRelative {
-                field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv4Unicast),
-            }),
-            ["set", "address-family", "ipv6"] => Command::Set(SetTarget::PeerGroupRelative {
-                field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv6Unicast),
-            }),
-            ["set", "next-hop", "self"] => Command::Set(SetTarget::PeerGroupRelative {
-                field: BgpPeerGroupField::NextHop(NextHopMode::SelfAddress),
-            }),
-            ["set", "next-hop", "unchanged"] => Command::Set(SetTarget::PeerGroupRelative {
-                field: BgpPeerGroupField::NextHop(NextHopMode::Unchanged),
-            }),
-            ["set", "route-reflector-client"] => Command::Set(SetTarget::PeerGroupRelative {
-                field: BgpPeerGroupField::RouteReflectorClient,
-            }),
-            ["set", "route-server-client"] => Command::Set(SetTarget::PeerGroupRelative {
-                field: BgpPeerGroupField::RouteServerClient,
-            }),
-            ["set", "import-policy", name] => Command::Set(SetTarget::PeerGroupRelative {
-                field: BgpPeerGroupField::ImportPolicy((*name).to_string()),
-            }),
-            ["set", "export-policy", name] => Command::Set(SetTarget::PeerGroupRelative {
-                field: BgpPeerGroupField::ExportPolicy((*name).to_string()),
-            }),
-            ["set", "hold-time", n] => match n.parse::<u16>() {
-                Ok(hold_time) => Command::Set(SetTarget::PeerGroupRelative {
-                    field: BgpPeerGroupField::HoldTime(hold_time),
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "keepalive-interval", n] => match n.parse::<u16>() {
-                Ok(keepalive_interval) => Command::Set(SetTarget::PeerGroupRelative {
-                    field: BgpPeerGroupField::KeepaliveInterval(keepalive_interval),
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "connect-retry-time", n] => match n.parse::<u16>() {
-                Ok(connect_retry_time) => Command::Set(SetTarget::PeerGroupRelative {
-                    field: BgpPeerGroupField::ConnectRetryTime(connect_retry_time),
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "md5-password", password] => Command::Set(SetTarget::PeerGroupRelative {
-                field: BgpPeerGroupField::Md5Password((*password).to_string()),
-            }),
-            ["set", "ao-key", send_id, recv_id, algorithm, key] => {
-                match (
-                    send_id.parse::<u8>(),
-                    recv_id.parse::<u8>(),
-                    parse_ao_algorithm(algorithm),
-                ) {
-                    (Ok(send_id), Ok(recv_id), Some(algorithm)) => {
-                        Command::Set(SetTarget::PeerGroupRelative {
-                            field: BgpPeerGroupField::AoKey {
-                                send_id,
-                                recv_id,
-                                algorithm,
-                                key: (*key).to_string(),
-                            },
-                        })
-                    }
-                    _ => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "ao-key", send_id, "current"] => match send_id.parse::<u8>() {
-                Ok(send_id) => Command::Set(SetTarget::PeerGroupRelative {
-                    field: BgpPeerGroupField::AoCurrentKey(send_id),
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "ao-key", send_id, "rnext"] => match send_id.parse::<u8>() {
-                Ok(send_id) => Command::Set(SetTarget::PeerGroupRelative {
-                    field: BgpPeerGroupField::AoRnextKey(send_id),
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "bgp", "instance", instance, "peer", ip, "peer-group", group] => {
-                match ip.parse::<IpAddr>() {
-                    Ok(remote_address) => Command::Set(SetTarget::BgpPeer {
-                        instance: (*instance).to_string(),
-                        remote_address,
-                        peer_group: (*group).to_string(),
-                    }),
-                    Err(_) => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "peer", ip, "peer-group", group] => match ip.parse::<IpAddr>() {
-                Ok(remote_address) => Command::Set(SetTarget::PeerRelative {
-                    remote_address,
-                    peer_group: (*group).to_string(),
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "routing-table", name, "bgp-instance", instance] => {
-                Command::Set(SetTarget::RoutingTable {
-                    name: (*name).to_string(),
-                    bgp_instance: (*instance).to_string(),
-                })
-            }
-            ["set", "bgp-instance", instance] => Command::Set(SetTarget::RoutingTableRelative {
-                bgp_instance: (*instance).to_string(),
-            }),
-            ["set", "routing-table", name, "static-routing-instance", instance] => {
-                Command::Set(SetTarget::RoutingTableStaticRoutingInstance {
-                    name: (*name).to_string(),
-                    static_routing_instance: (*instance).to_string(),
-                })
-            }
-            ["set", "static-routing-instance", instance] => {
-                Command::Set(SetTarget::RoutingTableStaticRoutingInstanceRelative {
-                    static_routing_instance: (*instance).to_string(),
-                })
-            }
-            ["set", "routing-table", name, "ospf-instance", instance] => {
-                Command::Set(SetTarget::RoutingTableOspfInstance {
-                    name: (*name).to_string(),
-                    ospf_instance: (*instance).to_string(),
-                })
-            }
-            ["set", "ospf-instance", instance] => {
-                Command::Set(SetTarget::RoutingTableOspfInstanceRelative {
-                    ospf_instance: (*instance).to_string(),
-                })
-            }
-            ["set", "ospf", "instance", name, "router-id", ip] => match ip.parse::<Ipv4Addr>() {
-                Ok(router_id) => Command::Set(SetTarget::OspfInstance {
-                    name: (*name).to_string(),
-                    router_id,
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "routing-table", name, "redistribute", "from", "static", "to", "bgp"] => {
-                Command::Set(SetTarget::RoutingTableRedistribute {
-                    name: (*name).to_string(),
-                    redistribute: Redistribute {
-                        from: RedistributeSource::Static,
-                        to: RedistributeTarget::Bgp,
-                        policy: None,
-                    },
-                })
-            }
-            ["set", "routing-table", name, "redistribute", "from", "static", "to", "bgp", "policy", policy] => {
-                Command::Set(SetTarget::RoutingTableRedistribute {
-                    name: (*name).to_string(),
-                    redistribute: Redistribute {
-                        from: RedistributeSource::Static,
-                        to: RedistributeTarget::Bgp,
-                        policy: Some((*policy).to_string()),
-                    },
-                })
-            }
-            ["set", "redistribute", "from", "static", "to", "bgp"] => {
-                Command::Set(SetTarget::RoutingTableRedistributeRelative {
-                    redistribute: Redistribute {
-                        from: RedistributeSource::Static,
-                        to: RedistributeTarget::Bgp,
-                        policy: None,
-                    },
-                })
-            }
-            ["set", "redistribute", "from", "static", "to", "bgp", "policy", policy] => {
-                Command::Set(SetTarget::RoutingTableRedistributeRelative {
-                    redistribute: Redistribute {
-                        from: RedistributeSource::Static,
-                        to: RedistributeTarget::Bgp,
-                        policy: Some((*policy).to_string()),
-                    },
-                })
-            }
-            ["set", "static-routing-instance", name, "route", subnet, "gateway", addr] => {
-                match (subnet.parse::<IpNet>(), addr.parse::<IpAddr>()) {
-                    (Ok(subnet), Ok(gateway)) => Command::Set(SetTarget::StaticRoute {
-                        instance: (*name).to_string(),
-                        subnet,
-                        gateway,
-                    }),
-                    _ => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "route", subnet, "gateway", addr] => {
-                match (subnet.parse::<IpNet>(), addr.parse::<IpAddr>()) {
-                    (Ok(subnet), Ok(gateway)) => {
-                        Command::Set(SetTarget::StaticRouteRelative { subnet, gateway })
-                    }
-                    _ => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "interface", name, "address", addr] => match addr.parse::<IpNet>() {
-                Ok(address) => Command::Set(SetTarget::InterfaceAddress {
-                    name: (*name).to_string(),
-                    address,
+            })
+        }
+        ["peer-group", group] => Command::Edit(EditTarget::PeerGroupRelative {
+            name: (*group).to_string(),
+        }),
+        ["routing-table", name] => Command::Edit(EditTarget::RoutingTable {
+            name: (*name).to_string(),
+        }),
+        ["ospf", "instance", name] => Command::Edit(EditTarget::OspfInstance {
+            name: (*name).to_string(),
+        }),
+        ["static-routing-instance", name] => Command::Edit(EditTarget::StaticRoutingInstance {
+            name: (*name).to_string(),
+        }),
+        ["interface", name] => Command::Edit(EditTarget::Interface {
+            name: (*name).to_string(),
+        }),
+        ["policy-definition", name] => Command::Edit(EditTarget::PolicyDefinition {
+            name: (*name).to_string(),
+        }),
+        ["community-alias", name] => Command::Edit(EditTarget::CommunityAlias {
+            name: (*name).to_string(),
+        }),
+        ["community-group", name] => Command::Edit(EditTarget::CommunityGroup {
+            name: (*name).to_string(),
+        }),
+        ["prefix-list", name] => Command::Edit(EditTarget::PrefixList {
+            name: (*name).to_string(),
+        }),
+        ["broadcast", "domain", name] => Command::Edit(EditTarget::BroadcastDomain {
+            name: (*name).to_string(),
+        }),
+        ["switching-profile", name] => Command::Edit(EditTarget::SwitchingProfile {
+            name: (*name).to_string(),
+        }),
+        ["source"] => Command::EditSource,
+        _ => return None,
+    })
+}
+
+/// `set` — every field assignment, in both its fully-qualified and its
+/// path-relative form.
+fn parse_set(t: &[&str]) -> Option<Command> {
+    Some(match t {
+        ["bgp", "instance", name, "asn", n] => Command::Set(SetTarget::BgpInstance {
+            name: (*name).to_string(),
+            field: BgpInstanceField::Asn(n.parse::<u32>().ok()?),
+        }),
+        ["bgp", "instance", name, "router-id", ip] => Command::Set(SetTarget::BgpInstance {
+            name: (*name).to_string(),
+            field: BgpInstanceField::RouterId(ip.parse::<Ipv4Addr>().ok()?),
+        }),
+        ["bgp", "instance", name, "cluster-id", ip] => Command::Set(SetTarget::BgpInstance {
+            name: (*name).to_string(),
+            field: BgpInstanceField::ClusterId(ip.parse::<Ipv4Addr>().ok()?),
+        }),
+        ["asn", n] => Command::Set(SetTarget::Relative {
+            field: BgpInstanceField::Asn(n.parse::<u32>().ok()?),
+        }),
+        ["router-id", ip] => Command::Set(SetTarget::Relative {
+            field: BgpInstanceField::RouterId(ip.parse::<Ipv4Addr>().ok()?),
+        }),
+        ["cluster-id", ip] => Command::Set(SetTarget::Relative {
+            field: BgpInstanceField::ClusterId(ip.parse::<Ipv4Addr>().ok()?),
+        }),
+        ["hostname", name] => Command::Set(SetTarget::Hostname((*name).to_string())),
+        ["bgp", "instance", instance, "peer-group", group, "remote-as", n] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::RemoteAs(n.parse::<u32>().ok()?),
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "source-address", "interface", ifname] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
+                    interface: (*ifname).to_string(),
                     label: None,
                 }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "interface", name, "address", addr, "label", label] => {
-                match addr.parse::<IpNet>() {
-                    Ok(address) => Command::Set(SetTarget::InterfaceAddress {
-                        name: (*name).to_string(),
-                        address,
-                        label: Some((*label).to_string()),
-                    }),
-                    Err(_) => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "address", addr] => match addr.parse::<IpNet>() {
-                Ok(address) => Command::Set(SetTarget::InterfaceAddressRelative {
-                    address,
-                    label: None,
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "address", addr, "label", label] => match addr.parse::<IpNet>() {
-                Ok(address) => Command::Set(SetTarget::InterfaceAddressRelative {
-                    address,
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "source-address", "interface", ifname, "label", label] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
+                    interface: (*ifname).to_string(),
                     label: Some((*label).to_string()),
                 }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "interface", name, "routing-table", table] => {
-                Command::Set(SetTarget::InterfaceRoutingTable {
-                    name: (*name).to_string(),
-                    routing_table: (*table).to_string(),
-                })
-            }
-            ["set", "routing-table", table] => {
-                Command::Set(SetTarget::InterfaceRoutingTableRelative {
-                    routing_table: (*table).to_string(),
-                })
-            }
-            ["set", "interface", name, "switching-profile", profile] => {
-                Command::Set(SetTarget::InterfaceSwitchingProfile {
-                    name: (*name).to_string(),
-                    switching_profile: (*profile).to_string(),
-                })
-            }
-            ["set", "switching-profile", profile] => {
-                Command::Set(SetTarget::InterfaceSwitchingProfileRelative {
-                    switching_profile: (*profile).to_string(),
-                })
-            }
-            ["set", "broadcast", "domain", name, "address", addr] => match addr.parse::<IpNet>() {
-                Ok(address) => Command::Set(SetTarget::BroadcastDomainAddress {
-                    name: (*name).to_string(),
-                    address,
-                    label: None,
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "broadcast", "domain", name, "address", addr, "label", label] => {
-                match addr.parse::<IpNet>() {
-                    Ok(address) => Command::Set(SetTarget::BroadcastDomainAddress {
-                        name: (*name).to_string(),
-                        address,
-                        label: Some((*label).to_string()),
-                    }),
-                    Err(_) => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "broadcast", "domain", name, "routing-table", table] => {
-                Command::Set(SetTarget::BroadcastDomainRoutingTable {
-                    name: (*name).to_string(),
-                    routing_table: (*table).to_string(),
-                })
-            }
-            ["set", "community-alias", name, "value", value] => {
-                Command::Set(SetTarget::CommunityAliasValue {
-                    name: (*name).to_string(),
-                    value: (*value).to_string(),
-                })
-            }
-            ["set", "value", value] => Command::Set(SetTarget::CommunityAliasValueRelative {
-                value: (*value).to_string(),
-            }),
-            ["set", "community-group", name, "member", member] => {
-                Command::Set(SetTarget::CommunityGroupMember {
-                    name: (*name).to_string(),
-                    member: (*member).to_string(),
-                })
-            }
-            ["set", "member", member] => Command::Set(SetTarget::CommunityGroupMemberRelative {
-                member: (*member).to_string(),
-            }),
-            ["set", "prefix-list", name, "entry", cidr] => match cidr.parse::<IpNet>() {
-                Ok(cidr) => Command::Set(SetTarget::PrefixListEntry {
-                    name: (*name).to_string(),
-                    cidr,
-                    range: None,
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "prefix-list", name, "entry", cidr, "range", min, max] => {
-                match (cidr.parse::<IpNet>(), min.parse::<u8>(), max.parse::<u8>()) {
-                    (Ok(cidr), Ok(min), Ok(max)) => Command::Set(SetTarget::PrefixListEntry {
-                        name: (*name).to_string(),
-                        cidr,
-                        range: Some((min, max)),
-                    }),
-                    _ => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "entry", cidr] => match cidr.parse::<IpNet>() {
-                Ok(cidr) => Command::Set(SetTarget::PrefixListEntryRelative { cidr, range: None }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "entry", cidr, "range", min, max] => {
-                match (cidr.parse::<IpNet>(), min.parse::<u8>(), max.parse::<u8>()) {
-                    (Ok(cidr), Ok(min), Ok(max)) => {
-                        Command::Set(SetTarget::PrefixListEntryRelative {
-                            cidr,
-                            range: Some((min, max)),
-                        })
-                    }
-                    _ => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "switching-profile", name, "broadcast-domain", domain, "tag", "dot1q", id] => {
-                match id.parse::<u16>() {
-                    Ok(id) => Command::Set(SetTarget::SwitchingProfileMember {
-                        name: (*name).to_string(),
-                        broadcast_domain: (*domain).to_string(),
-                        tag: VlanTag::Dot1q(id),
-                    }),
-                    Err(_) => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["set", "switching-profile", name, "broadcast-domain", domain, "tag", "untagged"] => {
-                Command::Set(SetTarget::SwitchingProfileMember {
-                    name: (*name).to_string(),
-                    broadcast_domain: (*domain).to_string(),
-                    tag: VlanTag::Untagged,
-                })
-            }
-            ["set", "broadcast-domain", domain, "tag", "dot1q", id] => match id.parse::<u16>() {
-                Ok(id) => Command::Set(SetTarget::SwitchingProfileMemberRelative {
-                    broadcast_domain: (*domain).to_string(),
-                    tag: VlanTag::Dot1q(id),
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["set", "broadcast-domain", domain, "tag", "untagged"] => {
-                Command::Set(SetTarget::SwitchingProfileMemberRelative {
-                    broadcast_domain: (*domain).to_string(),
-                    tag: VlanTag::Untagged,
-                })
-            }
-            ["delete"] => Command::Delete(DeleteTarget::Current),
-            ["delete", "bgp", "instance", name] => Command::Delete(DeleteTarget::BgpInstance {
-                name: (*name).to_string(),
-            }),
-            ["delete", "bgp", "instance", instance, "peer-group", group] => {
-                Command::Delete(DeleteTarget::BgpPeerGroup {
-                    instance: (*instance).to_string(),
-                    name: (*group).to_string(),
-                })
-            }
-            ["delete", "peer-group", group] => Command::Delete(DeleteTarget::PeerGroupRelative {
-                name: (*group).to_string(),
-            }),
-            ["delete", "bgp", "instance", name, "cluster-id"] => {
-                Command::Delete(DeleteTarget::BgpInstanceClusterId {
-                    name: (*name).to_string(),
-                })
-            }
-            ["delete", "cluster-id"] => Command::Delete(DeleteTarget::BgpInstanceClusterIdRelative),
-            ["delete", "bgp", "instance", instance, "peer", ip] => match ip.parse::<IpAddr>() {
-                Ok(remote_address) => Command::Delete(DeleteTarget::BgpPeer {
-                    instance: (*instance).to_string(),
-                    remote_address,
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["delete", "peer", ip] => match ip.parse::<IpAddr>() {
-                Ok(remote_address) => {
-                    Command::Delete(DeleteTarget::PeerRelative { remote_address })
-                }
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["delete", "source-address"] => Command::Delete(DeleteTarget::SourceAddress),
-            ["delete", "address-family", "ipv4"] => {
-                Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv4Unicast))
-            }
-            ["delete", "address-family", "ipv6"] => {
-                Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv6Unicast))
-            }
-            ["delete", "next-hop"] => Command::Delete(DeleteTarget::NextHop),
-            ["delete", "route-reflector-client"] => {
-                Command::Delete(DeleteTarget::RouteReflectorClient)
-            }
-            ["delete", "route-server-client"] => Command::Delete(DeleteTarget::RouteServerClient),
-            ["delete", "import-policy"] => Command::Delete(DeleteTarget::ImportPolicy),
-            ["delete", "export-policy"] => Command::Delete(DeleteTarget::ExportPolicy),
-            ["delete", "hold-time"] => Command::Delete(DeleteTarget::HoldTime),
-            ["delete", "keepalive-interval"] => Command::Delete(DeleteTarget::KeepaliveInterval),
-            ["delete", "connect-retry-time"] => Command::Delete(DeleteTarget::ConnectRetryTime),
-            ["delete", "auth"] => Command::Delete(DeleteTarget::Auth),
-            ["delete", "ao-key", send_id] => match send_id.parse::<u8>() {
-                Ok(send_id) => Command::Delete(DeleteTarget::AoKey(send_id)),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["delete", "routing-table", name] => Command::Delete(DeleteTarget::RoutingTable {
-                name: (*name).to_string(),
-            }),
-            ["delete", "routing-table", name, "bgp-instance"] => {
-                Command::Delete(DeleteTarget::RoutingTableBgpInstance {
-                    name: (*name).to_string(),
-                })
-            }
-            ["delete", "bgp-instance"] => {
-                Command::Delete(DeleteTarget::RoutingTableBgpInstanceRelative)
-            }
-            ["delete", "routing-table", name, "static-routing-instance"] => {
-                Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstance {
-                    name: (*name).to_string(),
-                })
-            }
-            ["delete", "static-routing-instance"] => {
-                Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstanceRelative)
-            }
-            ["delete", "routing-table", name, "ospf-instance"] => {
-                Command::Delete(DeleteTarget::RoutingTableOspfInstance {
-                    name: (*name).to_string(),
-                })
-            }
-            ["delete", "ospf-instance"] => {
-                Command::Delete(DeleteTarget::RoutingTableOspfInstanceRelative)
-            }
-            ["delete", "ospf", "instance", name] => Command::Delete(DeleteTarget::OspfInstance {
-                name: (*name).to_string(),
-            }),
-            ["delete", "routing-table", name, "redistribute"] => {
-                Command::Delete(DeleteTarget::RoutingTableRedistribute {
-                    name: (*name).to_string(),
-                })
-            }
-            ["delete", "redistribute"] => {
-                Command::Delete(DeleteTarget::RoutingTableRedistributeRelative)
-            }
-            ["delete", "static-routing-instance", name] => {
-                Command::Delete(DeleteTarget::StaticRoutingInstance {
-                    name: (*name).to_string(),
-                })
-            }
-            ["delete", "static-routing-instance", name, "route", subnet] => {
-                match subnet.parse::<IpNet>() {
-                    Ok(subnet) => Command::Delete(DeleteTarget::StaticRoute {
-                        instance: (*name).to_string(),
-                        subnet,
-                    }),
-                    Err(_) => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["delete", "route", subnet] => match subnet.parse::<IpNet>() {
-                Ok(subnet) => Command::Delete(DeleteTarget::StaticRouteRelative { subnet }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["delete", "interface", name] => Command::Delete(DeleteTarget::Interface {
-                name: (*name).to_string(),
-            }),
-            ["delete", "interface", name, "address", addr] => match addr.parse::<IpNet>() {
-                Ok(address) => Command::Delete(DeleteTarget::InterfaceAddress {
-                    name: (*name).to_string(),
-                    address,
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["delete", "address", addr] => match addr.parse::<IpNet>() {
-                Ok(address) => Command::Delete(DeleteTarget::InterfaceAddressRelative { address }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["delete", "interface", name, "routing-table"] => {
-                Command::Delete(DeleteTarget::InterfaceRoutingTable {
-                    name: (*name).to_string(),
-                })
-            }
-            ["delete", "routing-table"] => {
-                Command::Delete(DeleteTarget::InterfaceRoutingTableRelative)
-            }
-            ["delete", "interface", name, "switching-profile"] => {
-                Command::Delete(DeleteTarget::InterfaceSwitchingProfile {
-                    name: (*name).to_string(),
-                })
-            }
-            ["delete", "switching-profile"] => {
-                Command::Delete(DeleteTarget::InterfaceSwitchingProfileRelative)
-            }
-            ["delete", "community-alias", name] => Command::Delete(DeleteTarget::CommunityAlias {
-                name: (*name).to_string(),
-            }),
-            ["delete", "community-group", name] => Command::Delete(DeleteTarget::CommunityGroup {
-                name: (*name).to_string(),
-            }),
-            ["delete", "community-group", name, "member", member] => {
-                Command::Delete(DeleteTarget::CommunityGroupMember {
-                    name: (*name).to_string(),
-                    member: (*member).to_string(),
-                })
-            }
-            ["delete", "member", member] => {
-                Command::Delete(DeleteTarget::CommunityGroupMemberRelative {
-                    member: (*member).to_string(),
-                })
-            }
-            ["delete", "prefix-list", name] => Command::Delete(DeleteTarget::PrefixList {
-                name: (*name).to_string(),
-            }),
-            ["delete", "prefix-list", name, "entry", cidr] => match cidr.parse::<IpNet>() {
-                Ok(cidr) => Command::Delete(DeleteTarget::PrefixListEntry {
-                    name: (*name).to_string(),
-                    cidr,
-                    range: None,
-                }),
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["delete", "prefix-list", name, "entry", cidr, "range", min, max] => {
-                match (cidr.parse::<IpNet>(), min.parse::<u8>(), max.parse::<u8>()) {
-                    (Ok(cidr), Ok(min), Ok(max)) => {
-                        Command::Delete(DeleteTarget::PrefixListEntry {
-                            name: (*name).to_string(),
-                            cidr,
-                            range: Some((min, max)),
-                        })
-                    }
-                    _ => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["delete", "entry", cidr] => match cidr.parse::<IpNet>() {
-                Ok(cidr) => {
-                    Command::Delete(DeleteTarget::PrefixListEntryRelative { cidr, range: None })
-                }
-                Err(_) => Command::Unknown(trimmed.to_string()),
-            },
-            ["delete", "entry", cidr, "range", min, max] => {
-                match (cidr.parse::<IpNet>(), min.parse::<u8>(), max.parse::<u8>()) {
-                    (Ok(cidr), Ok(min), Ok(max)) => {
-                        Command::Delete(DeleteTarget::PrefixListEntryRelative {
-                            cidr,
-                            range: Some((min, max)),
-                        })
-                    }
-                    _ => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["delete", "broadcast", "domain", name] => {
-                Command::Delete(DeleteTarget::BroadcastDomain {
-                    name: (*name).to_string(),
-                })
-            }
-            ["delete", "broadcast", "domain", name, "address", addr] => {
-                match addr.parse::<IpNet>() {
-                    Ok(address) => Command::Delete(DeleteTarget::BroadcastDomainAddress {
-                        name: (*name).to_string(),
-                        address,
-                    }),
-                    Err(_) => Command::Unknown(trimmed.to_string()),
-                }
-            }
-            ["delete", "broadcast", "domain", name, "routing-table"] => {
-                Command::Delete(DeleteTarget::BroadcastDomainRoutingTable {
-                    name: (*name).to_string(),
-                })
-            }
-            ["delete", "switching-profile", name] => {
-                Command::Delete(DeleteTarget::SwitchingProfile {
-                    name: (*name).to_string(),
-                })
-            }
-            ["delete", "switching-profile", name, "broadcast-domain", domain] => {
-                Command::Delete(DeleteTarget::SwitchingProfileMember {
-                    name: (*name).to_string(),
-                    broadcast_domain: (*domain).to_string(),
-                })
-            }
-            ["delete", "broadcast-domain", domain] => {
-                Command::Delete(DeleteTarget::SwitchingProfileMemberRelative {
-                    broadcast_domain: (*domain).to_string(),
-                })
-            }
-            _ => Command::Unknown(trimmed.to_string()),
+            })
         }
-    }
+        ["bgp", "instance", instance, "peer-group", group, "source-address", "loopback"] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback { label: None }),
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "source-address", "loopback", "label", label] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback {
+                    label: Some((*label).to_string()),
+                }),
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "address-family", "ipv4"] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv4Unicast),
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "address-family", "ipv6"] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv6Unicast),
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "hold-time", n] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::HoldTime(n.parse::<u16>().ok()?),
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "keepalive-interval", n] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::KeepaliveInterval(n.parse::<u16>().ok()?),
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "connect-retry-time", n] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::ConnectRetryTime(n.parse::<u16>().ok()?),
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "next-hop", "self"] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::NextHop(NextHopMode::SelfAddress),
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "next-hop", "unchanged"] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::NextHop(NextHopMode::Unchanged),
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "route-reflector-client"] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::RouteReflectorClient,
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "route-server-client"] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::RouteServerClient,
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "import-policy", name] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::ImportPolicy((*name).to_string()),
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "export-policy", name] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::ExportPolicy((*name).to_string()),
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "md5-password", password] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::Md5Password((*password).to_string()),
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "ao-key", send_id, recv_id, algorithm, key] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::AoKey {
+                    send_id: send_id.parse::<u8>().ok()?,
+                    recv_id: recv_id.parse::<u8>().ok()?,
+                    algorithm: parse_ao_algorithm(algorithm)?,
+                    key: (*key).to_string(),
+                },
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "ao-key", send_id, "current"] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::AoCurrentKey(send_id.parse::<u8>().ok()?),
+            })
+        }
+        ["bgp", "instance", instance, "peer-group", group, "ao-key", send_id, "rnext"] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::AoRnextKey(send_id.parse::<u8>().ok()?),
+            })
+        }
+        ["remote-as", n] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::RemoteAs(n.parse::<u32>().ok()?),
+        }),
+        ["source-address", "interface", ifname] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
+                interface: (*ifname).to_string(),
+                label: None,
+            }),
+        }),
+        ["source-address", "interface", ifname, "label", label] => {
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::SourceAddress(SourceAddress::Interface {
+                    interface: (*ifname).to_string(),
+                    label: Some((*label).to_string()),
+                }),
+            })
+        }
+        ["source-address", "loopback"] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback { label: None }),
+        }),
+        ["source-address", "loopback", "label", label] => {
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::SourceAddress(SourceAddress::Loopback {
+                    label: Some((*label).to_string()),
+                }),
+            })
+        }
+        ["address-family", "ipv4"] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv4Unicast),
+        }),
+        ["address-family", "ipv6"] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv6Unicast),
+        }),
+        ["next-hop", "self"] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::NextHop(NextHopMode::SelfAddress),
+        }),
+        ["next-hop", "unchanged"] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::NextHop(NextHopMode::Unchanged),
+        }),
+        ["route-reflector-client"] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::RouteReflectorClient,
+        }),
+        ["route-server-client"] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::RouteServerClient,
+        }),
+        ["import-policy", name] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::ImportPolicy((*name).to_string()),
+        }),
+        ["export-policy", name] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::ExportPolicy((*name).to_string()),
+        }),
+        ["hold-time", n] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::HoldTime(n.parse::<u16>().ok()?),
+        }),
+        ["keepalive-interval", n] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::KeepaliveInterval(n.parse::<u16>().ok()?),
+        }),
+        ["connect-retry-time", n] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::ConnectRetryTime(n.parse::<u16>().ok()?),
+        }),
+        ["md5-password", password] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::Md5Password((*password).to_string()),
+        }),
+        ["ao-key", send_id, recv_id, algorithm, key] => {
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::AoKey {
+                    send_id: send_id.parse::<u8>().ok()?,
+                    recv_id: recv_id.parse::<u8>().ok()?,
+                    algorithm: parse_ao_algorithm(algorithm)?,
+                    key: (*key).to_string(),
+                },
+            })
+        }
+        ["ao-key", send_id, "current"] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::AoCurrentKey(send_id.parse::<u8>().ok()?),
+        }),
+        ["ao-key", send_id, "rnext"] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::AoRnextKey(send_id.parse::<u8>().ok()?),
+        }),
+        ["bgp", "instance", instance, "peer", ip, "peer-group", group] => {
+            Command::Set(SetTarget::BgpPeer {
+                instance: (*instance).to_string(),
+                remote_address: ip.parse::<IpAddr>().ok()?,
+                peer_group: (*group).to_string(),
+            })
+        }
+        ["peer", ip, "peer-group", group] => Command::Set(SetTarget::PeerRelative {
+            remote_address: ip.parse::<IpAddr>().ok()?,
+            peer_group: (*group).to_string(),
+        }),
+        ["routing-table", name, "bgp-instance", instance] => {
+            Command::Set(SetTarget::RoutingTable {
+                name: (*name).to_string(),
+                bgp_instance: (*instance).to_string(),
+            })
+        }
+        ["bgp-instance", instance] => Command::Set(SetTarget::RoutingTableRelative {
+            bgp_instance: (*instance).to_string(),
+        }),
+        ["routing-table", name, "static-routing-instance", instance] => {
+            Command::Set(SetTarget::RoutingTableStaticRoutingInstance {
+                name: (*name).to_string(),
+                static_routing_instance: (*instance).to_string(),
+            })
+        }
+        ["static-routing-instance", instance] => {
+            Command::Set(SetTarget::RoutingTableStaticRoutingInstanceRelative {
+                static_routing_instance: (*instance).to_string(),
+            })
+        }
+        ["routing-table", name, "ospf-instance", instance] => {
+            Command::Set(SetTarget::RoutingTableOspfInstance {
+                name: (*name).to_string(),
+                ospf_instance: (*instance).to_string(),
+            })
+        }
+        ["ospf-instance", instance] => Command::Set(SetTarget::RoutingTableOspfInstanceRelative {
+            ospf_instance: (*instance).to_string(),
+        }),
+        ["ospf", "instance", name, "router-id", ip] => Command::Set(SetTarget::OspfInstance {
+            name: (*name).to_string(),
+            router_id: ip.parse::<Ipv4Addr>().ok()?,
+        }),
+        ["routing-table", name, "redistribute", "from", "static", "to", "bgp"] => {
+            Command::Set(SetTarget::RoutingTableRedistribute {
+                name: (*name).to_string(),
+                redistribute: Redistribute {
+                    from: RedistributeSource::Static,
+                    to: RedistributeTarget::Bgp,
+                    policy: None,
+                },
+            })
+        }
+        ["routing-table", name, "redistribute", "from", "static", "to", "bgp", "policy", policy] => {
+            Command::Set(SetTarget::RoutingTableRedistribute {
+                name: (*name).to_string(),
+                redistribute: Redistribute {
+                    from: RedistributeSource::Static,
+                    to: RedistributeTarget::Bgp,
+                    policy: Some((*policy).to_string()),
+                },
+            })
+        }
+        ["redistribute", "from", "static", "to", "bgp"] => {
+            Command::Set(SetTarget::RoutingTableRedistributeRelative {
+                redistribute: Redistribute {
+                    from: RedistributeSource::Static,
+                    to: RedistributeTarget::Bgp,
+                    policy: None,
+                },
+            })
+        }
+        ["redistribute", "from", "static", "to", "bgp", "policy", policy] => {
+            Command::Set(SetTarget::RoutingTableRedistributeRelative {
+                redistribute: Redistribute {
+                    from: RedistributeSource::Static,
+                    to: RedistributeTarget::Bgp,
+                    policy: Some((*policy).to_string()),
+                },
+            })
+        }
+        ["static-routing-instance", name, "route", subnet, "gateway", addr] => {
+            Command::Set(SetTarget::StaticRoute {
+                instance: (*name).to_string(),
+                subnet: subnet.parse::<IpNet>().ok()?,
+                gateway: addr.parse::<IpAddr>().ok()?,
+            })
+        }
+        ["route", subnet, "gateway", addr] => Command::Set(SetTarget::StaticRouteRelative {
+            subnet: subnet.parse::<IpNet>().ok()?,
+            gateway: addr.parse::<IpAddr>().ok()?,
+        }),
+        ["interface", name, "address", addr] => Command::Set(SetTarget::InterfaceAddress {
+            name: (*name).to_string(),
+            address: addr.parse::<IpNet>().ok()?,
+            label: None,
+        }),
+        ["interface", name, "address", addr, "label", label] => {
+            Command::Set(SetTarget::InterfaceAddress {
+                name: (*name).to_string(),
+                address: addr.parse::<IpNet>().ok()?,
+                label: Some((*label).to_string()),
+            })
+        }
+        ["address", addr] => Command::Set(SetTarget::InterfaceAddressRelative {
+            address: addr.parse::<IpNet>().ok()?,
+            label: None,
+        }),
+        ["address", addr, "label", label] => Command::Set(SetTarget::InterfaceAddressRelative {
+            address: addr.parse::<IpNet>().ok()?,
+            label: Some((*label).to_string()),
+        }),
+        ["interface", name, "routing-table", table] => {
+            Command::Set(SetTarget::InterfaceRoutingTable {
+                name: (*name).to_string(),
+                routing_table: (*table).to_string(),
+            })
+        }
+        ["routing-table", table] => Command::Set(SetTarget::InterfaceRoutingTableRelative {
+            routing_table: (*table).to_string(),
+        }),
+        ["interface", name, "switching-profile", profile] => {
+            Command::Set(SetTarget::InterfaceSwitchingProfile {
+                name: (*name).to_string(),
+                switching_profile: (*profile).to_string(),
+            })
+        }
+        ["switching-profile", profile] => {
+            Command::Set(SetTarget::InterfaceSwitchingProfileRelative {
+                switching_profile: (*profile).to_string(),
+            })
+        }
+        ["broadcast", "domain", name, "address", addr] => {
+            Command::Set(SetTarget::BroadcastDomainAddress {
+                name: (*name).to_string(),
+                address: addr.parse::<IpNet>().ok()?,
+                label: None,
+            })
+        }
+        ["broadcast", "domain", name, "address", addr, "label", label] => {
+            Command::Set(SetTarget::BroadcastDomainAddress {
+                name: (*name).to_string(),
+                address: addr.parse::<IpNet>().ok()?,
+                label: Some((*label).to_string()),
+            })
+        }
+        ["broadcast", "domain", name, "routing-table", table] => {
+            Command::Set(SetTarget::BroadcastDomainRoutingTable {
+                name: (*name).to_string(),
+                routing_table: (*table).to_string(),
+            })
+        }
+        ["community-alias", name, "value", value] => Command::Set(SetTarget::CommunityAliasValue {
+            name: (*name).to_string(),
+            value: (*value).to_string(),
+        }),
+        ["value", value] => Command::Set(SetTarget::CommunityAliasValueRelative {
+            value: (*value).to_string(),
+        }),
+        ["community-group", name, "member", member] => {
+            Command::Set(SetTarget::CommunityGroupMember {
+                name: (*name).to_string(),
+                member: (*member).to_string(),
+            })
+        }
+        ["member", member] => Command::Set(SetTarget::CommunityGroupMemberRelative {
+            member: (*member).to_string(),
+        }),
+        ["prefix-list", name, "entry", cidr] => Command::Set(SetTarget::PrefixListEntry {
+            name: (*name).to_string(),
+            cidr: cidr.parse::<IpNet>().ok()?,
+            range: None,
+        }),
+        ["prefix-list", name, "entry", cidr, "range", min, max] => {
+            Command::Set(SetTarget::PrefixListEntry {
+                name: (*name).to_string(),
+                cidr: cidr.parse::<IpNet>().ok()?,
+                range: Some((min.parse::<u8>().ok()?, max.parse::<u8>().ok()?)),
+            })
+        }
+        ["entry", cidr] => Command::Set(SetTarget::PrefixListEntryRelative {
+            cidr: cidr.parse::<IpNet>().ok()?,
+            range: None,
+        }),
+        ["entry", cidr, "range", min, max] => Command::Set(SetTarget::PrefixListEntryRelative {
+            cidr: cidr.parse::<IpNet>().ok()?,
+            range: Some((min.parse::<u8>().ok()?, max.parse::<u8>().ok()?)),
+        }),
+        ["switching-profile", name, "broadcast-domain", domain, "tag", "dot1q", id] => {
+            Command::Set(SetTarget::SwitchingProfileMember {
+                name: (*name).to_string(),
+                broadcast_domain: (*domain).to_string(),
+                tag: VlanTag::Dot1q(id.parse::<u16>().ok()?),
+            })
+        }
+        ["switching-profile", name, "broadcast-domain", domain, "tag", "untagged"] => {
+            Command::Set(SetTarget::SwitchingProfileMember {
+                name: (*name).to_string(),
+                broadcast_domain: (*domain).to_string(),
+                tag: VlanTag::Untagged,
+            })
+        }
+        ["broadcast-domain", domain, "tag", "dot1q", id] => {
+            Command::Set(SetTarget::SwitchingProfileMemberRelative {
+                broadcast_domain: (*domain).to_string(),
+                tag: VlanTag::Dot1q(id.parse::<u16>().ok()?),
+            })
+        }
+        ["broadcast-domain", domain, "tag", "untagged"] => {
+            Command::Set(SetTarget::SwitchingProfileMemberRelative {
+                broadcast_domain: (*domain).to_string(),
+                tag: VlanTag::Untagged,
+            })
+        }
+        _ => return None,
+    })
+}
+
+/// `delete` — the mirror of [`parse_set`], plus whole-object deletion.
+fn parse_delete(t: &[&str]) -> Option<Command> {
+    Some(match t {
+        ["source", "line", n] => Command::DeleteSourceLine {
+            line: n.parse::<usize>().ok()?,
+        },
+        [] => Command::Delete(DeleteTarget::Current),
+        ["bgp", "instance", name] => Command::Delete(DeleteTarget::BgpInstance {
+            name: (*name).to_string(),
+        }),
+        ["bgp", "instance", instance, "peer-group", group] => {
+            Command::Delete(DeleteTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                name: (*group).to_string(),
+            })
+        }
+        ["peer-group", group] => Command::Delete(DeleteTarget::PeerGroupRelative {
+            name: (*group).to_string(),
+        }),
+        ["bgp", "instance", name, "cluster-id"] => {
+            Command::Delete(DeleteTarget::BgpInstanceClusterId {
+                name: (*name).to_string(),
+            })
+        }
+        ["cluster-id"] => Command::Delete(DeleteTarget::BgpInstanceClusterIdRelative),
+        ["bgp", "instance", instance, "peer", ip] => Command::Delete(DeleteTarget::BgpPeer {
+            instance: (*instance).to_string(),
+            remote_address: ip.parse::<IpAddr>().ok()?,
+        }),
+        ["peer", ip] => Command::Delete(DeleteTarget::PeerRelative {
+            remote_address: ip.parse::<IpAddr>().ok()?,
+        }),
+        ["source-address"] => Command::Delete(DeleteTarget::SourceAddress),
+        ["address-family", "ipv4"] => {
+            Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv4Unicast))
+        }
+        ["address-family", "ipv6"] => {
+            Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv6Unicast))
+        }
+        ["next-hop"] => Command::Delete(DeleteTarget::NextHop),
+        ["route-reflector-client"] => Command::Delete(DeleteTarget::RouteReflectorClient),
+        ["route-server-client"] => Command::Delete(DeleteTarget::RouteServerClient),
+        ["import-policy"] => Command::Delete(DeleteTarget::ImportPolicy),
+        ["export-policy"] => Command::Delete(DeleteTarget::ExportPolicy),
+        ["hold-time"] => Command::Delete(DeleteTarget::HoldTime),
+        ["keepalive-interval"] => Command::Delete(DeleteTarget::KeepaliveInterval),
+        ["connect-retry-time"] => Command::Delete(DeleteTarget::ConnectRetryTime),
+        ["auth"] => Command::Delete(DeleteTarget::Auth),
+        ["ao-key", send_id] => Command::Delete(DeleteTarget::AoKey(send_id.parse::<u8>().ok()?)),
+        ["routing-table", name] => Command::Delete(DeleteTarget::RoutingTable {
+            name: (*name).to_string(),
+        }),
+        ["routing-table", name, "bgp-instance"] => {
+            Command::Delete(DeleteTarget::RoutingTableBgpInstance {
+                name: (*name).to_string(),
+            })
+        }
+        ["bgp-instance"] => Command::Delete(DeleteTarget::RoutingTableBgpInstanceRelative),
+        ["routing-table", name, "static-routing-instance"] => {
+            Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstance {
+                name: (*name).to_string(),
+            })
+        }
+        ["static-routing-instance"] => {
+            Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstanceRelative)
+        }
+        ["routing-table", name, "ospf-instance"] => {
+            Command::Delete(DeleteTarget::RoutingTableOspfInstance {
+                name: (*name).to_string(),
+            })
+        }
+        ["ospf-instance"] => Command::Delete(DeleteTarget::RoutingTableOspfInstanceRelative),
+        ["ospf", "instance", name] => Command::Delete(DeleteTarget::OspfInstance {
+            name: (*name).to_string(),
+        }),
+        ["routing-table", name, "redistribute"] => {
+            Command::Delete(DeleteTarget::RoutingTableRedistribute {
+                name: (*name).to_string(),
+            })
+        }
+        ["redistribute"] => Command::Delete(DeleteTarget::RoutingTableRedistributeRelative),
+        ["static-routing-instance", name] => Command::Delete(DeleteTarget::StaticRoutingInstance {
+            name: (*name).to_string(),
+        }),
+        ["static-routing-instance", name, "route", subnet] => {
+            Command::Delete(DeleteTarget::StaticRoute {
+                instance: (*name).to_string(),
+                subnet: subnet.parse::<IpNet>().ok()?,
+            })
+        }
+        ["route", subnet] => Command::Delete(DeleteTarget::StaticRouteRelative {
+            subnet: subnet.parse::<IpNet>().ok()?,
+        }),
+        ["interface", name] => Command::Delete(DeleteTarget::Interface {
+            name: (*name).to_string(),
+        }),
+        ["interface", name, "address", addr] => Command::Delete(DeleteTarget::InterfaceAddress {
+            name: (*name).to_string(),
+            address: addr.parse::<IpNet>().ok()?,
+        }),
+        ["address", addr] => Command::Delete(DeleteTarget::InterfaceAddressRelative {
+            address: addr.parse::<IpNet>().ok()?,
+        }),
+        ["interface", name, "routing-table"] => {
+            Command::Delete(DeleteTarget::InterfaceRoutingTable {
+                name: (*name).to_string(),
+            })
+        }
+        ["routing-table"] => Command::Delete(DeleteTarget::InterfaceRoutingTableRelative),
+        ["interface", name, "switching-profile"] => {
+            Command::Delete(DeleteTarget::InterfaceSwitchingProfile {
+                name: (*name).to_string(),
+            })
+        }
+        ["switching-profile"] => Command::Delete(DeleteTarget::InterfaceSwitchingProfileRelative),
+        ["community-alias", name] => Command::Delete(DeleteTarget::CommunityAlias {
+            name: (*name).to_string(),
+        }),
+        ["community-group", name] => Command::Delete(DeleteTarget::CommunityGroup {
+            name: (*name).to_string(),
+        }),
+        ["community-group", name, "member", member] => {
+            Command::Delete(DeleteTarget::CommunityGroupMember {
+                name: (*name).to_string(),
+                member: (*member).to_string(),
+            })
+        }
+        ["member", member] => Command::Delete(DeleteTarget::CommunityGroupMemberRelative {
+            member: (*member).to_string(),
+        }),
+        ["prefix-list", name] => Command::Delete(DeleteTarget::PrefixList {
+            name: (*name).to_string(),
+        }),
+        ["prefix-list", name, "entry", cidr] => Command::Delete(DeleteTarget::PrefixListEntry {
+            name: (*name).to_string(),
+            cidr: cidr.parse::<IpNet>().ok()?,
+            range: None,
+        }),
+        ["prefix-list", name, "entry", cidr, "range", min, max] => {
+            Command::Delete(DeleteTarget::PrefixListEntry {
+                name: (*name).to_string(),
+                cidr: cidr.parse::<IpNet>().ok()?,
+                range: Some((min.parse::<u8>().ok()?, max.parse::<u8>().ok()?)),
+            })
+        }
+        ["entry", cidr] => Command::Delete(DeleteTarget::PrefixListEntryRelative {
+            cidr: cidr.parse::<IpNet>().ok()?,
+            range: None,
+        }),
+        ["entry", cidr, "range", min, max] => {
+            Command::Delete(DeleteTarget::PrefixListEntryRelative {
+                cidr: cidr.parse::<IpNet>().ok()?,
+                range: Some((min.parse::<u8>().ok()?, max.parse::<u8>().ok()?)),
+            })
+        }
+        ["broadcast", "domain", name] => Command::Delete(DeleteTarget::BroadcastDomain {
+            name: (*name).to_string(),
+        }),
+        ["broadcast", "domain", name, "address", addr] => {
+            Command::Delete(DeleteTarget::BroadcastDomainAddress {
+                name: (*name).to_string(),
+                address: addr.parse::<IpNet>().ok()?,
+            })
+        }
+        ["broadcast", "domain", name, "routing-table"] => {
+            Command::Delete(DeleteTarget::BroadcastDomainRoutingTable {
+                name: (*name).to_string(),
+            })
+        }
+        ["switching-profile", name] => Command::Delete(DeleteTarget::SwitchingProfile {
+            name: (*name).to_string(),
+        }),
+        ["switching-profile", name, "broadcast-domain", domain] => {
+            Command::Delete(DeleteTarget::SwitchingProfileMember {
+                name: (*name).to_string(),
+                broadcast_domain: (*domain).to_string(),
+            })
+        }
+        ["broadcast-domain", domain] => {
+            Command::Delete(DeleteTarget::SwitchingProfileMemberRelative {
+                broadcast_domain: (*domain).to_string(),
+            })
+        }
+        _ => return None,
+    })
+}
+
+/// Everything with no object verb in front of it: shell mechanics
+/// (`help`, `exit`, `up`), transaction control, and `clear`.
+fn parse_bare(t: &[&str]) -> Option<Command> {
+    Some(match t {
+        [] => Command::Empty,
+        ["clear", "bgp", instance, peer, "soft-in"] => Command::ClearBgpSoftIn {
+            instance: (*instance).to_string(),
+            peer: peer.parse::<IpAddr>().ok()?,
+        },
+        ["save"] => Command::Save,
+        ["help"] => Command::Help,
+        ["exit" | "quit" | "end"] => Command::Exit,
+        ["commit"] => Command::Commit,
+        ["discard" | "abort"] => Command::Discard,
+        ["diff"] => Command::Diff,
+        ["up"] => Command::Up,
+        ["top"] => Command::Top,
+        ["configure", name] => Command::Configure {
+            name: (*name).to_string(),
+            base: None,
+        },
+        ["configure", name, "from", "blank"] => Command::Configure {
+            name: (*name).to_string(),
+            base: Some(TransactionBase::Blank),
+        },
+        ["configure", name, "from", "current"] => Command::Configure {
+            name: (*name).to_string(),
+            base: Some(TransactionBase::Current),
+        },
+        _ => return None,
+    })
 }
 
 fn parse_ao_algorithm(token: &str) -> Option<BgpAoAlgorithm> {

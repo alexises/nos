@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_ospf::log_client::ForwardingLayer;
+use nos_log_client::ForwardingLayer;
 use nos_ospf::{reconcile, watchdog_client};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};

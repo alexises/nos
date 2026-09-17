@@ -1,6 +1,5 @@
 pub mod docs;
 pub mod error;
-pub mod log_client;
 pub mod persistence;
 pub mod server;
 pub mod store;

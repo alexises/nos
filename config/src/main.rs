@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_config::log_client::ForwardingLayer;
 use nos_config::{persistence, ConfigStore, ListenAddr};
+use nos_log_client::ForwardingLayer;
 use nos_proto::DEFAULT_LOG_SOCKET;
 use tokio::sync::watch;
 use tracing_subscriber::layer::SubscriberExt;

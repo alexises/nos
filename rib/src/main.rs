@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
+use nos_log_client::ForwardingLayer;
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
-use nos_rib::log_client::ForwardingLayer;
 use nos_rib::{
     bgp_client, reconcile, server, watchdog_client, LinuxRibDriver, NoopRibDriver, Rib, RibDriver,
 };

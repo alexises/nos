@@ -16,6 +16,7 @@ clap               = { workspace = true }
 anyhow             = { workspace = true }
 tracing-subscriber = { workspace = true }
 nos-proto          = { workspace = true }
+nos-log-client     = { workspace = true }
 nos-tcp-auth       = { workspace = true }
 tokio-util         = { workspace = true }
 futures            = { workspace = true }

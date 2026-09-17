@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use futures::{SinkExt, StreamExt};
 use nos_proto::{IpcCodec, ServiceRef, WatchdogEvent, WatchdogRequest};
-use nos_watchdog::{broker, EndpointRegistry};
+use nos_watchdog::{broker, EndpointKind, EndpointRegistry};
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -16,7 +16,11 @@ async fn resolves_config_and_registered_rib_table() {
 
     let registry = EndpointRegistry::default();
     registry
-        .set_rib_table("rt1", PathBuf::from("/run/nos/rib-rt1.sock"))
+        .set(
+            EndpointKind::RibTable,
+            "rt1",
+            PathBuf::from("/run/nos/rib-rt1.sock"),
+        )
         .await;
 
     let _server = broker::start(

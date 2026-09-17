@@ -1,11 +1,9 @@
-pub mod bgp_instances;
 pub mod broker;
 pub mod config_client;
-pub mod log_client;
-pub mod ospf_instances;
+pub mod instances;
 pub mod registry;
-pub mod routing_tables;
 pub mod supervisor;
 
-pub use registry::EndpointRegistry;
+pub use instances::{Endpoint, Managed};
+pub use registry::{EndpointKind, EndpointRegistry};
 pub use supervisor::{supervise_one, BackoffPolicy, ProcessSpec};
