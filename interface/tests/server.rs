@@ -23,6 +23,8 @@ async fn sample_interfaces() -> Interfaces {
             name: "eth0".to_string(),
             addresses: vec![sample_address()],
             routing_table: Some("rt1".to_string()),
+            switching_profile: None,
+            switching_profile_members: vec![],
         },
     );
     by_name.insert(
@@ -31,6 +33,8 @@ async fn sample_interfaces() -> Interfaces {
             name: "eth1".to_string(),
             addresses: vec![],
             routing_table: None,
+            switching_profile: None,
+            switching_profile_members: vec![],
         },
     );
     // `Interfaces` has no public constructor from a map, so build it through
@@ -43,6 +47,7 @@ async fn sample_interfaces() -> Interfaces {
                 name: s.name,
                 addresses: s.addresses,
                 routing_table: s.routing_table,
+                switching_profile: None,
             })
             .collect(),
         ..Default::default()
@@ -103,6 +108,7 @@ async fn get_interface_returns_matching_status() {
         name,
         addresses,
         routing_table,
+        ..
     }) = event
     else {
         panic!("expected Interface, got {event:?}");

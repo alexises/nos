@@ -1611,6 +1611,48 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         tokens: &[
+            Token::Literal("set"),
+            Token::Literal("interface"),
+            Token::Arg(ArgKind::InterfaceName),
+            Token::Literal("switching-profile"),
+            Token::Arg(ArgKind::SwitchingProfileName),
+        ],
+        usage: "set interface <name> switching-profile <profile>",
+        doc: Doc::FromConfig(Topic::SetInterfaceSwitchingProfile),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("switching-profile"),
+            Token::Arg(ArgKind::SwitchingProfileName),
+        ],
+        usage: "set switching-profile <profile>",
+        doc: Doc::FromConfig(Topic::SetInterfaceSwitchingProfile),
+        availability: Availability::ConfigurationInterface,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("interface"),
+            Token::Arg(ArgKind::InterfaceName),
+            Token::Literal("switching-profile"),
+        ],
+        usage: "delete interface <name> switching-profile",
+        doc: Doc::FromConfig(Topic::ClearInterfaceSwitchingProfile),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("switching-profile"),
+        ],
+        usage: "delete switching-profile",
+        doc: Doc::FromConfig(Topic::ClearInterfaceSwitchingProfile),
+        availability: Availability::ConfigurationInterface,
+    },
+    CommandSpec {
+        tokens: &[
             Token::Literal("delete"),
             Token::Literal("interface"),
             Token::Arg(ArgKind::InterfaceName),

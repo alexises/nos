@@ -8,6 +8,7 @@
 //! so a future non-Linux/hardware backend can be added without touching
 //! `state.rs`/`reconcile.rs`.
 
+pub mod bridge_registry;
 pub mod linux;
 pub mod noop;
 pub mod rib_client;
@@ -28,6 +29,8 @@ pub enum DriverError {
     Io(#[from] std::io::Error),
     #[error("created loopback device {0} but could not find it afterwards")]
     LoopbackNotFound(String),
+    #[error("created link {0} but could not find it afterwards")]
+    LinkNotFoundAfterCreate(String),
 }
 
 /// One instance lives for the process lifetime, constructed in `main.rs`
@@ -58,4 +61,19 @@ pub trait InterfaceDriver: Send + Sync {
     /// this driver created for it — `name` alone is always sufficient to
     /// recompute what that device is.
     async fn remove(&self, name: &str) -> Result<(), DriverError>;
+
+    /// Ensures a bridge device exists for `domain` (a `BroadcastDomain`
+    /// name), creating it if missing. Called once per configured
+    /// `BroadcastDomain` on every resync, independent of whether any
+    /// interface currently references it — same "create eagerly from
+    /// config" pattern as `nos-ribd`'s VRF-per-`RoutingTable`. Must
+    /// complete (or at least be attempted) before any interface's `apply`
+    /// in the same resync, since `apply` enslaves into this bridge by name.
+    async fn ensure_broadcast_domain(&self, domain: &str) -> Result<(), DriverError>;
+
+    /// Called once per resync for every `BroadcastDomain` name present in
+    /// the previous resync but absent from the current one (removed from
+    /// config outright) - deletes the bridge device. A no-op if no bridge
+    /// was ever created for `domain`.
+    async fn remove_broadcast_domain(&self, domain: &str) -> Result<(), DriverError>;
 }

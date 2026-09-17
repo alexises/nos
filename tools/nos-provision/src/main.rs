@@ -18,9 +18,10 @@ use clap::Parser;
 use futures::{SinkExt, StreamExt};
 use ipnet::IpNet;
 use nos_proto::{
-    AddressFamily, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, ConfigOp, Event, InterfaceOp,
-    IpcCodec, PolicyDefinitionOp, Redistribute, RedistributeSource, RedistributeTarget, Request,
-    RoutingTableOp, SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, TransactionBase,
+    AddressFamily, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, ConfigOp, Event,
+    InterfaceOp, IpcCodec, PolicyDefinitionOp, Redistribute, RedistributeSource,
+    RedistributeTarget, Request, RoutingTableOp, SourceAddress, StaticRouteOp,
+    StaticRoutingInstanceOp, SwitchingProfileOp, TransactionBase, VlanTag,
 };
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -166,6 +167,26 @@ struct Args {
     /// `--source-address-interface`/`--source-address-loopback`.
     #[arg(long)]
     clear_source_address: bool,
+
+    /// If set, creates this switching profile (if missing), populates it
+    /// from `--switching-profile-member`, and assigns it to `--interface`
+    /// (`InterfaceOp::SetSwitchingProfile`). Mutually exclusive with
+    /// `--delete-switching-profile`.
+    #[arg(long)]
+    switching_profile: Option<String>,
+
+    /// One `DOMAIN:TAG` pair per repetition (`TAG` is `untagged` or a
+    /// dot1q id `1..=4094`), added as a member of `--switching-profile`
+    /// (creating the named broadcast domain if missing). Only meaningful
+    /// with `--switching-profile` also set.
+    #[arg(long = "switching-profile-member")]
+    switching_profile_members: Vec<String>,
+
+    /// If set, clears `--interface`'s switching-profile assignment
+    /// instead of setting one. Mutually exclusive with
+    /// `--switching-profile`.
+    #[arg(long)]
+    delete_switching_profile: bool,
 }
 
 #[tokio::main]
@@ -395,6 +416,46 @@ async fn main() -> anyhow::Result<()> {
         ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearSourceAddress {
             instance: args.bgp_instance.clone(),
             name: args.peer_group.clone(),
+        }));
+    }
+
+    if args.switching_profile.is_some() && args.delete_switching_profile {
+        bail!("--switching-profile and --delete-switching-profile are mutually exclusive");
+    }
+    if let Some(profile) = args.switching_profile.clone() {
+        ops.push(ConfigOp::SwitchingProfile(SwitchingProfileOp::Ensure {
+            name: profile.clone(),
+        }));
+        for member in &args.switching_profile_members {
+            let (domain, tag) = member.split_once(':').with_context(|| {
+                format!("--switching-profile-member {member} must be DOMAIN:TAG")
+            })?;
+            let tag = if tag.eq_ignore_ascii_case("untagged") {
+                VlanTag::Untagged
+            } else {
+                VlanTag::Dot1q(tag.parse().with_context(|| {
+                    format!("invalid vlan tag '{tag}' in --switching-profile-member {member}")
+                })?)
+            };
+            ops.push(ConfigOp::BroadcastDomain(BroadcastDomainOp::Ensure {
+                name: domain.to_string(),
+            }));
+            ops.push(ConfigOp::SwitchingProfile(SwitchingProfileOp::AddMember {
+                name: profile.clone(),
+                broadcast_domain: domain.to_string(),
+                tag,
+            }));
+        }
+        ops.push(ConfigOp::Interface(InterfaceOp::SetSwitchingProfile {
+            name: args.interface.clone(),
+            switching_profile: profile,
+        }));
+    } else if !args.switching_profile_members.is_empty() {
+        bail!("--switching-profile-member requires --switching-profile to also be set");
+    }
+    if args.delete_switching_profile {
+        ops.push(ConfigOp::Interface(InterfaceOp::ClearSwitchingProfile {
+            name: args.interface.clone(),
         }));
     }
 

@@ -2,13 +2,13 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use futures::TryStreamExt;
-use nos_proto::{loopback_table_name, InterfaceAddress, IpNet, ServiceRef};
+use nos_proto::{loopback_table_name, InterfaceAddress, IpNet, ServiceRef, VlanTag};
 use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage, AddressScope};
 use rtnetlink::packet_route::link::{LinkAttribute, LinkMessage};
-use rtnetlink::{Handle, LinkDummy, LinkUnspec};
+use rtnetlink::{Handle, LinkBridge, LinkDummy, LinkUnspec, LinkVlan};
 use tracing::{debug, info, trace};
 
-use super::{rib_client, DriverError, InterfaceDriver};
+use super::{bridge_registry, rib_client, DriverError, InterfaceDriver};
 use crate::state::InterfaceState;
 use crate::watchdog_client;
 
@@ -16,11 +16,28 @@ use crate::watchdog_client;
 /// lookup (`match_name`/`match_index`) for a link that doesn't exist.
 const ENODEV: i32 = 19;
 
+/// Which kind of thing `reconcile_master` is enslaving a link into — picks
+/// only the log wording, see its doc comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MasterKind {
+    Vrf,
+    Bridge,
+}
+
 /// Kernel device name for a loopback interface's routing table, mirroring
 /// `nos-ribd`'s `vrf<table_id>` VRF naming — the loopback's own config name
 /// (`loopback-<table>`) is never used as the kernel name, same reasoning.
 fn loopback_ifname(table_id: u32) -> String {
     format!("lo{table_id}")
+}
+
+/// Extracts a link's kernel interface name, if it has one (every real link
+/// does; this is just the `Option` `find_map` requires).
+fn link_name(link: &LinkMessage) -> Option<&str> {
+    link.attributes.iter().find_map(|a| match a {
+        LinkAttribute::IfName(name) => Some(name.as_str()),
+        _ => None,
+    })
 }
 
 /// Real `rtnetlink`-backed driver. `nos-interfaced` never creates ordinary
@@ -34,15 +51,22 @@ fn loopback_ifname(table_id: u32) -> String {
 pub struct LinuxInterfaceDriver {
     handle: Handle,
     watchdog_socket: PathBuf,
+    /// This driver's own private persisted domain-name -> bridge-id map —
+    /// see `bridge_registry` module docs. Never read by any other process.
+    bridge_registry_path: PathBuf,
 }
 
 impl LinuxInterfaceDriver {
-    pub fn new(watchdog_socket: PathBuf) -> Result<Self, DriverError> {
+    pub fn new(
+        watchdog_socket: PathBuf,
+        bridge_registry_path: PathBuf,
+    ) -> Result<Self, DriverError> {
         let (connection, handle, _) = rtnetlink::new_connection()?;
         tokio::spawn(connection);
         Ok(Self {
             handle,
             watchdog_socket,
+            bridge_registry_path,
         })
     }
 
@@ -185,15 +209,23 @@ impl LinuxInterfaceDriver {
         Ok(())
     }
 
-    /// `vrf_ifname` is looked up purely by name — never by any numeric id
+    /// `master_ifname` is looked up purely by name — never by any numeric id
     /// — matching the correction to this plan: nos-interfaced is only ever
-    /// told a VRF interface *name* over IPC, and links to it by finding a
-    /// kernel link with that exact name.
+    /// told a master interface (VRF or broadcast-domain bridge) *name* over
+    /// IPC or local lookup, and links to it by finding a kernel link with
+    /// that exact name. Shared by both VRF enslavement (`apply`) and
+    /// broadcast-domain bridge enslavement (`apply`'s untagged case,
+    /// `reconcile_vlan_members`'s tagged sub-interfaces) — the underlying
+    /// Linux operation (`IFLA_MASTER`) is identical either way. `kind`
+    /// picks the log wording only (`"vrf"` preserves
+    /// `tools/verify-bgp.sh`'s existing "enslaved interface to vrf" grep
+    /// exactly; `"bridge"` is the new broadcast-domain case).
     async fn reconcile_master(
         &self,
         interface: &str,
         link: &LinkMessage,
-        vrf_ifname: Option<&str>,
+        master_ifname: Option<&str>,
+        kind: MasterKind,
     ) -> Result<(), DriverError> {
         let index = link.header.index;
         let current_master = link.attributes.iter().find_map(|a| match a {
@@ -201,17 +233,17 @@ impl LinuxInterfaceDriver {
             _ => None,
         });
 
-        let desired_master = match vrf_ifname {
+        let desired_master = match master_ifname {
             Some(name) => {
-                let Some(vrf_link) = self.find_link(name).await? else {
-                    // Expected/transient: the table's nos-ribd hasn't
-                    // created its VRF yet (or it was just torn down).
-                    // Leave enslavement untouched; the periodic re-apply
-                    // tick retries.
-                    debug!(vrf = %name, "vrf interface not present yet, leaving enslavement unchanged");
+                let Some(master_link) = self.find_link(name).await? else {
+                    // Expected/transient: the target VRF/bridge hasn't been
+                    // created yet (or it was just torn down). Leave
+                    // enslavement untouched; the periodic re-apply tick
+                    // retries.
+                    debug!(master = %name, "master interface not present yet, leaving enslavement unchanged");
                     return Ok(());
                 };
-                Some(vrf_link.header.index)
+                Some(master_link.header.index)
             }
             None => None,
         };
@@ -225,11 +257,18 @@ impl LinuxInterfaceDriver {
                     .set(LinkUnspec::new_with_index(index).controller(want).build())
                     .execute()
                     .await?;
-                info!(
-                    interface = %interface,
-                    vrf = %vrf_ifname.unwrap_or_default(),
-                    "enslaved interface to vrf"
-                );
+                match kind {
+                    MasterKind::Vrf => info!(
+                        interface = %interface,
+                        vrf = %master_ifname.unwrap_or_default(),
+                        "enslaved interface to vrf"
+                    ),
+                    MasterKind::Bridge => info!(
+                        interface = %interface,
+                        bridge = %master_ifname.unwrap_or_default(),
+                        "enslaved interface to bridge"
+                    ),
+                }
             }
             (Some(_), None) => {
                 self.handle
@@ -237,8 +276,81 @@ impl LinuxInterfaceDriver {
                     .set(LinkUnspec::new_with_index(index).nocontroller().build())
                     .execute()
                     .await?;
-                info!(interface = %interface, "removed interface from vrf enslavement");
+                info!(interface = %interface, "removed interface from master enslavement");
             }
+        }
+        Ok(())
+    }
+
+    /// Reconciles `interface`'s 802.1q sub-interfaces (one per `Dot1q`
+    /// switching-profile member) against `desired` — creates missing ones,
+    /// deletes stale ones (a tag no longer desired, or the whole profile
+    /// cleared away, in which case `desired` is empty), and enslaves each
+    /// into its broadcast domain's bridge. Sub-interface naming:
+    /// `<interface>.<tag>`, the standard Linux VLAN sub-interface
+    /// convention — found on relist by matching that prefix rather than a
+    /// targeted lookup, since there's no single kernel call for "every link
+    /// whose name starts with X".
+    async fn reconcile_vlan_members(
+        &self,
+        interface: &str,
+        physical_index: u32,
+        desired: &[(String, u16)],
+    ) -> Result<(), DriverError> {
+        let prefix = format!("{interface}.");
+        let desired_tags: Vec<u16> = desired.iter().map(|(_, tag)| *tag).collect();
+
+        let mut links = self.handle.link().get().execute();
+        while let Some(link) = links.try_next().await? {
+            let Some(name) = link_name(&link) else {
+                continue;
+            };
+            let Some(tag) = name
+                .strip_prefix(&prefix)
+                .and_then(|t| t.parse::<u16>().ok())
+            else {
+                continue;
+            };
+            if !desired_tags.contains(&tag) {
+                self.handle.link().del(link.header.index).execute().await?;
+                info!(interface = %interface, sub_interface = %name, "deleted vlan sub-interface");
+            }
+        }
+
+        for (domain, tag) in desired {
+            let subname = format!("{prefix}{tag}");
+            let sub_link = if let Some(link) = self.find_link(&subname).await? {
+                link
+            } else {
+                self.handle
+                    .link()
+                    .add(LinkVlan::new(&subname, physical_index, *tag).build())
+                    .execute()
+                    .await?;
+                info!(interface = %interface, sub_interface = %subname, tag, "created vlan sub-interface");
+                self.find_link(&subname)
+                    .await?
+                    .ok_or_else(|| DriverError::LinkNotFoundAfterCreate(subname.clone()))?
+            };
+            let bridge_ifname =
+                bridge_registry::lookup_bridge_id(&self.bridge_registry_path, domain)
+                    .map(bridge_registry::bridge_ifname);
+            self.reconcile_master(
+                &subname,
+                &sub_link,
+                bridge_ifname.as_deref(),
+                MasterKind::Bridge,
+            )
+            .await?;
+            self.handle
+                .link()
+                .set(
+                    LinkUnspec::new_with_index(sub_link.header.index)
+                        .up()
+                        .build(),
+                )
+                .execute()
+                .await?;
         }
         Ok(())
     }
@@ -278,7 +390,35 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             Some(table_name) => self.resolve_vrf_name(&table_name).await,
             None => None,
         };
-        self.reconcile_master(&desired.name, &link, vrf_ifname.as_deref())
+        // At most one of `vrf_ifname`/an `Untagged` member can apply to the
+        // same interface — commit-time validation
+        // (`valid_routing_table_and_switching_profile`) rejects the
+        // combination of `routing_table` and an `Untagged` switching-profile
+        // member, since the physical link has only one master.
+        let untagged_bridge = desired
+            .switching_profile_members
+            .iter()
+            .find(|(_, tag)| *tag == VlanTag::Untagged)
+            .and_then(|(domain, _)| {
+                bridge_registry::lookup_bridge_id(&self.bridge_registry_path, domain)
+            })
+            .map(bridge_registry::bridge_ifname);
+        let (master_ifname, master_kind) = match vrf_ifname {
+            Some(name) => (Some(name), MasterKind::Vrf),
+            None => (untagged_bridge, MasterKind::Bridge),
+        };
+        self.reconcile_master(&desired.name, &link, master_ifname.as_deref(), master_kind)
+            .await?;
+
+        let dot1q_members: Vec<(String, u16)> = desired
+            .switching_profile_members
+            .iter()
+            .filter_map(|(domain, tag)| match tag {
+                VlanTag::Dot1q(id) => Some((domain.clone(), *id)),
+                VlanTag::Untagged => None,
+            })
+            .collect();
+        self.reconcile_vlan_members(&desired.name, index, &dot1q_members)
             .await?;
 
         self.handle
@@ -312,9 +452,57 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             debug!(interface = %name, "interface not present in netns, nothing to remove");
             return Ok(());
         };
+        self.reconcile_vlan_members(name, link.header.index, &[])
+            .await?;
         self.reconcile_addresses(name, link.header.index, &[])
             .await?;
-        self.reconcile_master(name, &link, None).await?;
+        self.reconcile_master(name, &link, None, MasterKind::Vrf)
+            .await?;
+        Ok(())
+    }
+
+    /// Ensures a bridge device named from `domain`'s persisted bridge id
+    /// (see `bridge_registry`) exists and is up — find-or-create, same
+    /// shape as `ensure_loopback_link`/`nos-ribd`'s `ensure_vrf`.
+    async fn ensure_broadcast_domain(&self, domain: &str) -> Result<(), DriverError> {
+        let bridge_id = bridge_registry::ensure_bridge_id(&self.bridge_registry_path, domain)?;
+        let ifname = bridge_registry::bridge_ifname(bridge_id);
+        let link = if let Some(link) = self.find_link(&ifname).await? {
+            link
+        } else {
+            self.handle
+                .link()
+                .add(LinkBridge::new(&ifname).build())
+                .execute()
+                .await?;
+            info!(domain = %domain, bridge = %ifname, "created broadcast domain bridge");
+            self.find_link(&ifname)
+                .await?
+                .ok_or_else(|| DriverError::LinkNotFoundAfterCreate(ifname.clone()))?
+        };
+        self.handle
+            .link()
+            .set(LinkUnspec::new_with_index(link.header.index).up().build())
+            .execute()
+            .await?;
+        Ok(())
+    }
+
+    /// Deletes `domain`'s bridge device, if one was ever created for it.
+    /// Never touches the bridge-id registry entry — same reasoning as
+    /// `nos-ribd`'s VRF teardown: a later restart (or the domain being
+    /// re-added) recreates the identically-named bridge.
+    async fn remove_broadcast_domain(&self, domain: &str) -> Result<(), DriverError> {
+        let Some(bridge_id) = bridge_registry::lookup_bridge_id(&self.bridge_registry_path, domain)
+        else {
+            debug!(domain = %domain, "no bridge id allocated, nothing to tear down");
+            return Ok(());
+        };
+        let ifname = bridge_registry::bridge_ifname(bridge_id);
+        if let Some(link) = self.find_link(&ifname).await? {
+            self.handle.link().del(link.header.index).execute().await?;
+            info!(domain = %domain, bridge = %ifname, "deleted broadcast domain bridge");
+        }
         Ok(())
     }
 }

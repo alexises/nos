@@ -58,6 +58,14 @@ struct Args {
     #[arg(long, value_enum, default_value_t = default_driver_kind())]
     driver: DriverKind,
 
+    /// Path to this driver's own private persisted broadcast-domain-name ->
+    /// bridge-id map (`--driver linux` only) — mirrors `nos-ribd`'s
+    /// `--table-registry-path`, living in the same `linux-driver/`
+    /// directory since every daemon here runs inside one watchdog
+    /// container/shared `nos-data` volume.
+    #[arg(long, default_value = "/var/lib/nos/linux-driver/bridge-ids.yaml")]
+    bridge_registry_path: PathBuf,
+
     /// Unix socket to forward this process's log events to. Passed directly
     /// by nos-watchdog to every process it spawns (see root `CLAUDE.md`'s
     /// "Process supervision" section), the same way `--config-socket` is.
@@ -106,11 +114,14 @@ async fn main() -> anyhow::Result<()> {
         DriverKind::Linux => {
             info!("using linux interface driver (rtnetlink)");
             Arc::new(
-                LinuxInterfaceDriver::new(args.watchdog_socket.clone())
-                    .inspect_err(|e| {
-                        tracing::error!(error = %e, "failed to initialize linux interface driver");
-                    })
-                    .context("initializing linux interface driver")?,
+                LinuxInterfaceDriver::new(
+                    args.watchdog_socket.clone(),
+                    args.bridge_registry_path.clone(),
+                )
+                .inspect_err(|e| {
+                    tracing::error!(error = %e, "failed to initialize linux interface driver");
+                })
+                .context("initializing linux interface driver")?,
             )
         }
     };

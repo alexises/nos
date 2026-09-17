@@ -138,6 +138,10 @@ pub enum Topic {
     RemoveSwitchingProfileMember,
     /// `ConfigOp::SwitchingProfile(SwitchingProfileOp::Delete)`
     DeleteSwitchingProfile,
+    /// `ConfigOp::Interface(InterfaceOp::SetSwitchingProfile)`
+    SetInterfaceSwitchingProfile,
+    /// `ConfigOp::Interface(InterfaceOp::ClearSwitchingProfile)`
+    ClearInterfaceSwitchingProfile,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

@@ -52,7 +52,10 @@ pub struct Config {
     #[garde(dive)]
     pub static_routing_instances: Vec<StaticRoutingInstance>,
 
-    #[garde(dive)]
+    #[garde(
+        dive,
+        custom(|interfaces, ctx: &Config| interface::valid_routing_table_and_switching_profile(interfaces, ctx))
+    )]
     pub interfaces: Vec<Interface>,
 
     #[garde(dive)]

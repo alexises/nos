@@ -56,6 +56,8 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `delete address <cidr>` / `delete interface <name> address <cidr>` | Removes an IP address from the interface's address list (relative / fully-qualified) |
 | `set routing-table <table>` / `set interface <name> routing-table <table>` | Associates a routing table (VRF) with an interface (relative / fully-qualified) |
 | `delete routing-table` / `delete interface <name> routing-table` | Clears an interface's routing-table association (relative / fully-qualified) |
+| `set switching-profile <profile>` / `set interface <name> switching-profile <profile>` | Associates a switching profile with an interface, trunking it into one or more broadcast domains (relative / fully-qualified) |
+| `delete switching-profile` / `delete interface <name> switching-profile` | Clears an interface's switching-profile association (relative / fully-qualified) |
 | `delete` / `delete interface <name>` | Deletes the current interface (returns to the transaction root) or a named one |
 | `edit community-alias <name>` | Creates the community-alias in the transaction if missing, then navigates into it |
 | `set value <literal>` / `set community-alias <name> value <literal>` | Sets the alias's community literal (relative / fully-qualified) |

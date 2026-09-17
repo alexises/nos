@@ -170,6 +170,13 @@ pub enum SetTarget {
     /// Context-relative — only valid while navigated into an interface.
     InterfaceRoutingTableRelative { routing_table: String },
     /// Fully-qualified — works from anywhere in configuration mode.
+    InterfaceSwitchingProfile {
+        name: String,
+        switching_profile: String,
+    },
+    /// Context-relative — only valid while navigated into an interface.
+    InterfaceSwitchingProfileRelative { switching_profile: String },
+    /// Fully-qualified — works from anywhere in configuration mode.
     CommunityAliasValue { name: String, value: String },
     /// Context-relative — only valid while navigated into a community-alias.
     CommunityAliasValueRelative { value: String },
@@ -320,6 +327,13 @@ pub enum DeleteTarget {
     /// `delete routing-table` — relative clear, only valid while navigated
     /// into an interface.
     InterfaceRoutingTableRelative,
+    /// `delete interface <name> switching-profile` — qualified clear.
+    InterfaceSwitchingProfile {
+        name: String,
+    },
+    /// `delete switching-profile` — relative clear, only valid while
+    /// navigated into an interface.
+    InterfaceSwitchingProfileRelative,
     CommunityAlias {
         name: String,
     },
@@ -1040,6 +1054,17 @@ impl Command {
                     routing_table: (*table).to_string(),
                 })
             }
+            ["set", "interface", name, "switching-profile", profile] => {
+                Command::Set(SetTarget::InterfaceSwitchingProfile {
+                    name: (*name).to_string(),
+                    switching_profile: (*profile).to_string(),
+                })
+            }
+            ["set", "switching-profile", profile] => {
+                Command::Set(SetTarget::InterfaceSwitchingProfileRelative {
+                    switching_profile: (*profile).to_string(),
+                })
+            }
             ["set", "community-alias", name, "value", value] => {
                 Command::Set(SetTarget::CommunityAliasValue {
                     name: (*name).to_string(),
@@ -1241,6 +1266,14 @@ impl Command {
             }
             ["delete", "routing-table"] => {
                 Command::Delete(DeleteTarget::InterfaceRoutingTableRelative)
+            }
+            ["delete", "interface", name, "switching-profile"] => {
+                Command::Delete(DeleteTarget::InterfaceSwitchingProfile {
+                    name: (*name).to_string(),
+                })
+            }
+            ["delete", "switching-profile"] => {
+                Command::Delete(DeleteTarget::InterfaceSwitchingProfileRelative)
             }
             ["delete", "community-alias", name] => Command::Delete(DeleteTarget::CommunityAlias {
                 name: (*name).to_string(),
@@ -2464,6 +2497,23 @@ mod tests {
     }
 
     #[test]
+    fn set_interface_switching_profile_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set interface eth0 switching-profile sp1"),
+            Command::Set(SetTarget::InterfaceSwitchingProfile {
+                name: "eth0".to_string(),
+                switching_profile: "sp1".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("set switching-profile sp1"),
+            Command::Set(SetTarget::InterfaceSwitchingProfileRelative {
+                switching_profile: "sp1".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn delete_interface_qualified() {
         assert_eq!(
             Command::parse("delete interface eth0"),
@@ -2501,6 +2551,20 @@ mod tests {
         assert_eq!(
             Command::parse("delete routing-table"),
             Command::Delete(DeleteTarget::InterfaceRoutingTableRelative)
+        );
+    }
+
+    #[test]
+    fn delete_interface_switching_profile_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("delete interface eth0 switching-profile"),
+            Command::Delete(DeleteTarget::InterfaceSwitchingProfile {
+                name: "eth0".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete switching-profile"),
+            Command::Delete(DeleteTarget::InterfaceSwitchingProfileRelative)
         );
     }
 

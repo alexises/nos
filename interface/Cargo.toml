@@ -20,6 +20,9 @@ tokio-util         = { workspace = true }
 futures            = { workspace = true }
 async-trait        = { workspace = true }
 rtnetlink          = { workspace = true }
+fs2                = { workspace = true }
+serde_yaml         = { workspace = true }
+tempfile           = { workspace = true }
 
 [[bin]]
 name = "nos-interfaced"
@@ -27,4 +30,3 @@ path = "src/main.rs"
 
 [dev-dependencies]
 proptest = { workspace = true }
-tempfile = { workspace = true }

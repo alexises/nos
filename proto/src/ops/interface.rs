@@ -40,6 +40,13 @@ pub enum InterfaceOp {
     ClearRoutingTable {
         name: String,
     },
+    SetSwitchingProfile {
+        name: String,
+        switching_profile: String,
+    },
+    ClearSwitchingProfile {
+        name: String,
+    },
     Delete {
         name: String,
     },
@@ -54,6 +61,7 @@ impl InterfaceOp {
                         name: name.clone(),
                         addresses: Vec::new(),
                         routing_table: None,
+                        switching_profile: None,
                     });
                 }
                 Ok(())
@@ -96,6 +104,18 @@ impl InterfaceOp {
                 find_interface_mut(config, name)?.routing_table = None;
                 Ok(())
             }
+            InterfaceOp::SetSwitchingProfile {
+                name,
+                switching_profile,
+            } => {
+                find_interface_mut(config, name)?.switching_profile =
+                    Some(switching_profile.clone());
+                Ok(())
+            }
+            InterfaceOp::ClearSwitchingProfile { name } => {
+                find_interface_mut(config, name)?.switching_profile = None;
+                Ok(())
+            }
             InterfaceOp::Delete { name } => {
                 let before = config.interfaces.len();
                 config.interfaces.retain(|i| &i.name != name);
@@ -128,6 +148,7 @@ mod tests {
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
+            switching_profile: None,
         }
     }
 
@@ -162,6 +183,7 @@ mod tests {
                 name: "eth0".to_string(),
                 addresses: vec![iface_addr("10.0.0.1/24")],
                 routing_table: None,
+                switching_profile: None,
             }],
             ..Default::default()
         };
@@ -298,6 +320,28 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.interfaces[0].routing_table, None);
+    }
+
+    #[test]
+    fn set_and_clear_switching_profile() {
+        let mut cfg = Config {
+            interfaces: vec![interface("eth0")],
+            ..Default::default()
+        };
+        InterfaceOp::SetSwitchingProfile {
+            name: "eth0".to_string(),
+            switching_profile: "sp1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].switching_profile.as_deref(), Some("sp1"));
+
+        InterfaceOp::ClearSwitchingProfile {
+            name: "eth0".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].switching_profile, None);
     }
 
     #[test]

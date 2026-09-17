@@ -28,4 +28,20 @@ impl InterfaceDriver for NoopInterfaceDriver {
         );
         Ok(())
     }
+
+    async fn ensure_broadcast_domain(&self, domain: &str) -> Result<(), DriverError> {
+        debug!(
+            domain = %domain,
+            "would ensure broadcast domain bridge (noop driver — no OS effect)"
+        );
+        Ok(())
+    }
+
+    async fn remove_broadcast_domain(&self, domain: &str) -> Result<(), DriverError> {
+        debug!(
+            domain = %domain,
+            "would remove broadcast domain bridge (noop driver — no OS effect)"
+        );
+        Ok(())
+    }
 }

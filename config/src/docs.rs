@@ -430,6 +430,21 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Removes a switching profile and all of its broadcast-domain memberships from the \
              transaction's in-progress config.",
         ),
+        Topic::SetInterfaceSwitchingProfile => (
+            "Associate a switching profile with an interface.",
+            "Points an interface at a switching profile by name, trunking it into one or more \
+             broadcast domains. The switching profile must exist, checked at commit time. An \
+             interface's routing-table and a switching profile with an untagged member are \
+             mutually exclusive — the interface's physical link has only one master device — \
+             also checked at commit time; a switching profile whose members are all tagged \
+             (dot1q) never conflicts, since each is realized as its own independent \
+             sub-interface.",
+        ),
+        Topic::ClearInterfaceSwitchingProfile => (
+            "Remove an interface's switching-profile association.",
+            "Unsets the switching-profile field on an interface, reverting to no explicit \
+             association.",
+        ),
     };
     CommandDoc {
         topic,
@@ -512,6 +527,8 @@ mod tests {
         Topic::AddSwitchingProfileMember,
         Topic::RemoveSwitchingProfileMember,
         Topic::DeleteSwitchingProfile,
+        Topic::SetInterfaceSwitchingProfile,
+        Topic::ClearInterfaceSwitchingProfile,
     ];
 
     #[test]

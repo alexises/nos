@@ -25,23 +25,32 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// ever signals; this is what makes that dependency eventually converge.
 const REAPPLY_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Runs until `shutdown` fires. Subscribes to `Interfaces` diffs purely as
-/// an edge trigger: every `Event::Diff` received (including the first,
-/// synthesized one) causes a full `resync` — a fresh `Request::Get` plus a
-/// from-scratch `Interfaces` rebuild — rather than incremental diff
-/// application, since `SectionDiff`/`FieldDiff` only carry pre-formatted
-/// display strings, not structured data (mirrors `nos-rib`'s
-/// `reconcile::run`). A periodic tick alongside the diff stream also
-/// triggers `resync`, independent of any config change — see
-/// `REAPPLY_INTERVAL`.
+/// Runs until `shutdown` fires. Subscribes to `Interfaces`, `BroadcastDomains`,
+/// and `SwitchingProfiles` diffs purely as an edge trigger: every
+/// `Event::Diff` received (including the first, synthesized one) causes a
+/// full `resync` — a fresh `Request::Get` plus a from-scratch `Interfaces`
+/// rebuild — rather than incremental diff application, since
+/// `SectionDiff`/`FieldDiff` only carry pre-formatted display strings, not
+/// structured data (mirrors `nos-rib`'s `reconcile::run`). `BroadcastDomains`/
+/// `SwitchingProfiles` are included so a domain/profile-only edit (no
+/// `Interface` object itself touched) still triggers a resync — otherwise a
+/// newly added `BroadcastDomain` wouldn't get its bridge created until some
+/// unrelated interface change happened to resync anyway. A periodic tick
+/// alongside the diff stream also triggers `resync`, independent of any
+/// config change — see `REAPPLY_INTERVAL`.
 pub async fn run(
     config_socket: PathBuf,
     interfaces: Arc<RwLock<Interfaces>>,
     driver: Arc<dyn InterfaceDriver>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let scopes = vec![
+        DiffScope::Interfaces,
+        DiffScope::BroadcastDomains,
+        DiffScope::SwitchingProfiles,
+    ];
     while !*shutdown.borrow() {
-        match config_client::subscribe_diff(&config_socket, vec![DiffScope::Interfaces]).await {
+        match config_client::subscribe_diff(&config_socket, scopes.clone()).await {
             Ok(mut reader) => {
                 info!(socket = %config_socket.display(), "connected to nos-configd diff stream");
                 let mut reapply = tokio::time::interval(REAPPLY_INTERVAL);

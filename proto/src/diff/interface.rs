@@ -61,6 +61,13 @@ fn routing_table_str(iface: &Interface) -> String {
         .unwrap_or_else(|| "unset".to_string())
 }
 
+fn switching_profile_str(iface: &Interface) -> String {
+    iface
+        .switching_profile
+        .clone()
+        .unwrap_or_else(|| "unset".to_string())
+}
+
 fn changed_fields(base: &Interface, candidate: &Interface) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     let mut base_addrs = base.addresses.clone();
@@ -81,6 +88,13 @@ fn changed_fields(base: &Interface, candidate: &Interface) -> Vec<FieldDiff> {
             new: Some(routing_table_str(candidate)),
         });
     }
+    if base.switching_profile != candidate.switching_profile {
+        fields.push(FieldDiff {
+            label: "switching-profile".to_string(),
+            old: Some(switching_profile_str(base)),
+            new: Some(switching_profile_str(candidate)),
+        });
+    }
     fields
 }
 
@@ -98,6 +112,11 @@ fn removed_section(iface: &Interface) -> SectionDiff {
             FieldDiff {
                 label: "routing-table".to_string(),
                 old: Some(routing_table_str(iface)),
+                new: None,
+            },
+            FieldDiff {
+                label: "switching-profile".to_string(),
+                old: Some(switching_profile_str(iface)),
                 new: None,
             },
         ],
@@ -121,6 +140,11 @@ fn added_section(iface: &Interface) -> SectionDiff {
                 old: None,
                 new: Some(routing_table_str(iface)),
             },
+            FieldDiff {
+                label: "switching-profile".to_string(),
+                old: None,
+                new: Some(switching_profile_str(iface)),
+            },
         ],
         subsections: Vec::new(),
     }
@@ -141,6 +165,7 @@ mod tests {
                 })
                 .collect(),
             routing_table: routing_table.map(str::to_string),
+            switching_profile: None,
         }
     }
 
@@ -177,6 +202,18 @@ mod tests {
     }
 
     #[test]
+    fn modified_switching_profile_only_lists_that_field() {
+        let mut base_iface = interface("eth0", &[], None);
+        let mut candidate_iface = base_iface.clone();
+        candidate_iface.switching_profile = Some("sp1".to_string());
+        base_iface.switching_profile = None;
+        let sections = diff_interfaces(&[base_iface], &[candidate_iface]);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].fields.len(), 1);
+        assert_eq!(sections[0].fields[0].label, "switching-profile");
+    }
+
+    #[test]
     fn modified_addresses_only_lists_that_field() {
         let base = vec![interface("eth0", &["10.0.0.1/24"], None)];
         let candidate = vec![interface("eth0", &["10.0.0.2/24"], None)];
@@ -202,6 +239,7 @@ mod tests {
                 label: None,
             }],
             routing_table: None,
+            switching_profile: None,
         }];
         let candidate = vec![Interface {
             name: "eth0".to_string(),
@@ -210,6 +248,7 @@ mod tests {
                 label: Some("mgmt".to_string()),
             }],
             routing_table: None,
+            switching_profile: None,
         }];
         let sections = diff_interfaces(&base, &candidate);
         assert_eq!(sections.len(), 1);

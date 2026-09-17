@@ -629,6 +629,38 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BroadcastDomain(_)
             | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
         },
+        Command::Set(SetTarget::InterfaceSwitchingProfile {
+            name,
+            switching_profile,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::Interface(InterfaceOp::SetSwitchingProfile {
+                name,
+                switching_profile,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::InterfaceSwitchingProfileRelative { switching_profile }) => {
+            match path {
+                Path::Interface(name) => Resolved::ApplyOp {
+                    op: ConfigOp::Interface(InterfaceOp::SetSwitchingProfile {
+                        name: name.clone(),
+                        switching_profile,
+                    }),
+                    after: PathAfter::Stay,
+                },
+                Path::Root
+                | Path::BgpInstance(_)
+                | Path::BgpPeerGroup { .. }
+                | Path::RoutingTable(_)
+                | Path::StaticRoutingInstance(_)
+                | Path::PolicyDefinition(_)
+                | Path::CommunityAlias(_)
+                | Path::CommunityGroup(_)
+                | Path::PrefixList(_)
+                | Path::BroadcastDomain(_)
+                | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+            }
+        }
 
         Command::Set(SetTarget::CommunityAliasValue { name, value }) => Resolved::ApplyOp {
             op: ConfigOp::CommunityAlias(CommunityAliasOp::SetValue { name, value }),
@@ -938,6 +970,27 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         Command::Delete(DeleteTarget::InterfaceRoutingTableRelative) => match path {
             Path::Interface(name) => Resolved::ApplyOp {
                 op: ConfigOp::Interface(InterfaceOp::ClearRoutingTable { name: name.clone() }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::RoutingTable(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_)
+            | Path::BroadcastDomain(_)
+            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+        },
+        Command::Delete(DeleteTarget::InterfaceSwitchingProfile { name }) => Resolved::ApplyOp {
+            op: ConfigOp::Interface(InterfaceOp::ClearSwitchingProfile { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::InterfaceSwitchingProfileRelative) => match path {
+            Path::Interface(name) => Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::ClearSwitchingProfile { name: name.clone() }),
                 after: PathAfter::Stay,
             },
             Path::Root
@@ -3233,6 +3286,51 @@ mod tests {
     }
 
     #[test]
+    fn set_interface_switching_profile_qualified_and_relative() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::InterfaceSwitchingProfile {
+                    name: "eth0".to_string(),
+                    switching_profile: "sp1".to_string(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::SetSwitchingProfile {
+                    name: "eth0".to_string(),
+                    switching_profile: "sp1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::InterfaceSwitchingProfileRelative {
+                    switching_profile: "sp1".to_string()
+                })
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Interface("eth0".to_string()), false),
+                Command::Set(SetTarget::InterfaceSwitchingProfileRelative {
+                    switching_profile: "sp1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::SetSwitchingProfile {
+                    name: "eth0".to_string(),
+                    switching_profile: "sp1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
     fn delete_current_at_interface_returns_to_root() {
         assert_eq!(
             resolve(
@@ -3323,6 +3421,36 @@ mod tests {
             ),
             Resolved::ApplyOp {
                 op: ConfigOp::Interface(InterfaceOp::ClearRoutingTable {
+                    name: "eth0".to_string()
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn delete_interface_switching_profile_qualified_and_relative() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Delete(DeleteTarget::InterfaceSwitchingProfile {
+                    name: "eth0".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::ClearSwitchingProfile {
+                    name: "eth0".to_string()
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Interface("eth0".to_string()), false),
+                Command::Delete(DeleteTarget::InterfaceSwitchingProfileRelative)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::ClearSwitchingProfile {
                     name: "eth0".to_string()
                 }),
                 after: PathAfter::Stay,

@@ -78,6 +78,7 @@ mod tests {
                     label: None,
                 }],
                 routing_table: None,
+                switching_profile: None,
             }))
         });
 

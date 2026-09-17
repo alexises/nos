@@ -79,5 +79,6 @@ fn to_status(iface: InterfaceState) -> InterfaceStatus {
         name: iface.name,
         addresses: iface.addresses,
         routing_table: iface.routing_table,
+        switching_profile: iface.switching_profile,
     }
 }

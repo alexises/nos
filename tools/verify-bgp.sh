@@ -14,7 +14,12 @@
 # `loopback-rt1`, detected purely from that name — no separate config field)
 # actually gets a real dummy kernel device created (named from its routing
 # table's allocated kernel table id), enslaved into that table's VRF, and
-# addressed, then deleted again on removal, (via the `source-address`
+# addressed, then deleted again on removal, (via the `switching` subcommand)
+# that a real L2 switching profile trunking an interface into two broadcast
+# domains at two different local dot1q tags actually gets one real Linux
+# bridge device created per domain and one real 802.1q sub-interface per
+# tagged member, each enslaved into its own domain's bridge, then deleted
+# again on removal, (via the `source-address`
 # subcommand) that a peer-group's source-address is resolved by nos-bgpd
 # itself, over a real IPC round trip to nos-interfaced, from an interface
 # name (+ optional label) rather than a literal address, and that
@@ -47,7 +52,7 @@
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|loopback|source-address|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}
+# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|source-address|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -275,6 +280,53 @@ provision_delete_loopback() {
     --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
     --peer "$peer_ip" \
     --delete-loopback
+}
+
+# --- L2 switching-profile scenario ---
+#
+# Trunks router-a's own eth0 (already addressed/vrf-enslaved for the BGP
+# session above -- untouched by this scenario, since both switching-profile
+# members below are dot1q-tagged, not untagged, so they never conflict with
+# eth0's own routing-table master) into two broadcast domains (bd1/bd2) at
+# two different local dot1q tags (100/200), verifying nos-interfaced's Linux
+# driver actually creates one real bridge device per domain, one real 802.1q
+# sub-interface per tagged member (eth0.100/eth0.200), and enslaves each
+# sub-interface into its own domain's bridge -- over a real kernel, not a
+# unit test. Then clears the assignment and confirms both sub-interfaces are
+# deleted again.
+
+provision_switching() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  log "provisioning $name with a switching profile trunking eth0 into bd1 (dot1q 100) and bd2 (dot1q 200)"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --switching-profile sp1 \
+    --switching-profile-member bd1:100 \
+    --switching-profile-member bd2:200
+}
+
+provision_clear_switching_profile() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  log "clearing $name's interface switching-profile assignment"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --delete-switching-profile
 }
 
 # --- RFC 4456 route reflector scenario ---
@@ -685,6 +737,45 @@ cmd_check_loopback() {
     || { log "router-a: FAILED to delete the loopback device"; return 1; }
 }
 
+cmd_check_switching() {
+  provision_switching router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+
+  log "waiting for router-a to create bridges for bd1 and bd2"
+  wait_for_count_increase router-a "created broadcast domain bridge domain=bd1 bridge=br1" 0 60 \
+    && log "router-a: created br1 for bd1" \
+    || { log "router-a: FAILED to create br1"; return 1; }
+  wait_for_count_increase router-a "created broadcast domain bridge domain=bd2 bridge=br2" 0 60 \
+    && log "router-a: created br2 for bd2" \
+    || { log "router-a: FAILED to create br2"; return 1; }
+
+  log "waiting for router-a to create eth0's 802.1q sub-interfaces"
+  wait_for_count_increase router-a "created vlan sub-interface interface=eth0 sub_interface=eth0.100 tag=100" 0 60 \
+    && log "router-a: created eth0.100" \
+    || { log "router-a: FAILED to create eth0.100"; return 1; }
+  wait_for_count_increase router-a "created vlan sub-interface interface=eth0 sub_interface=eth0.200 tag=200" 0 60 \
+    && log "router-a: created eth0.200" \
+    || { log "router-a: FAILED to create eth0.200"; return 1; }
+
+  log "waiting for router-a to enslave each sub-interface into its own domain's bridge"
+  wait_for_count_increase router-a "enslaved interface to bridge interface=eth0.100 bridge=br1" 0 60 \
+    && log "router-a: enslaved eth0.100 into br1" \
+    || { log "router-a: FAILED to enslave eth0.100"; return 1; }
+  wait_for_count_increase router-a "enslaved interface to bridge interface=eth0.200 bridge=br2" 0 60 \
+    && log "router-a: enslaved eth0.200 into br2" \
+    || { log "router-a: FAILED to enslave eth0.200"; return 1; }
+
+  log "clearing router-a's interface switching-profile assignment"
+  provision_clear_switching_profile router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+
+  log "waiting for router-a to delete eth0's 802.1q sub-interfaces"
+  wait_for_count_increase router-a "deleted vlan sub-interface interface=eth0 sub_interface=eth0.100" 0 60 \
+    && log "router-a: deleted eth0.100" \
+    || { log "router-a: FAILED to delete eth0.100"; return 1; }
+  wait_for_count_increase router-a "deleted vlan sub-interface interface=eth0 sub_interface=eth0.200" 0 60 \
+    && log "router-a: deleted eth0.200" \
+    || { log "router-a: FAILED to delete eth0.200"; return 1; }
+}
+
 # --- Peer-group source-address scenario ---
 #
 # Verifies BgpPeerGroup.source_address is resolved by nos-bgpd itself, over a
@@ -1091,6 +1182,7 @@ case "${1:-}" in
   redistribute) cmd_check_redistribute ;;
   auth) cmd_check_auth ;;
   loopback) cmd_check_loopback ;;
+  switching) cmd_check_switching ;;
   source-address) cmd_check_source_address ;;
   policy) cmd_check_policy ;;
   redistribute-policy) cmd_check_redistribute_policy ;;
@@ -1107,6 +1199,7 @@ case "${1:-}" in
     cmd_check_redistribute
     cmd_check_auth
     cmd_check_loopback
+    cmd_check_switching
     cmd_check_source_address
     cmd_check_policy
     cmd_check_redistribute_policy
@@ -1115,7 +1208,7 @@ case "${1:-}" in
     cmd_check_route_server
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|source-address|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|source-address|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}" >&2
     exit 2
     ;;
 esac

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::validators::unique_in;
 
-use super::Config;
+use super::{Config, VlanTag};
 
 /// Any `Interface.name` starting with this prefix is a loopback interface
 /// for the routing table named by the rest of the string (e.g.
@@ -40,6 +40,19 @@ pub struct InterfaceAddress {
 /// role, and a VRF naturally has more than one interface in it. Not
 /// consulted for a loopback interface (see `LOOPBACK_PREFIX`) — its target
 /// table comes from its name instead.
+///
+/// `switching_profile`, if set, names a `SwitchingProfile` trunking this
+/// interface into one or more `BroadcastDomain`s. An `Untagged` member of
+/// that profile and `routing_table` are mutually exclusive on the same
+/// interface — Linux only allows one master device on the physical link,
+/// and an `Untagged` member wants that master to be the domain's bridge
+/// while `routing_table` wants it to be the VRF. A `Dot1q` member doesn't
+/// conflict: it's realized as its own 802.1q sub-interface with an
+/// independent master. This constraint can't live in a per-field `custom`
+/// closure — garde's per-field closures can't see a sibling field — so it's
+/// wired one level up, on `Config.interfaces`
+/// (`valid_routing_table_and_switching_profile`), the same reason
+/// `RoutingTable`'s redistribute rule is wired on `Config.routing_tables`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct Interface {
@@ -54,6 +67,9 @@ pub struct Interface {
 
     #[garde(custom(|rt: &Option<String>, ctx: &Config| routing_table_reference_valid(rt.as_ref(), ctx)))]
     pub routing_table: Option<String>,
+
+    #[garde(custom(|sp: &Option<String>, ctx: &Config| switching_profile_reference_valid(sp.as_ref(), ctx)))]
+    pub switching_profile: Option<String>,
 }
 
 /// Combines interface-name uniqueness (existing) with, for a loopback name,
@@ -105,6 +121,51 @@ fn routing_table_reference_valid(routing_table: Option<&String>, ctx: &Config) -
     Ok(())
 }
 
+/// If set, `switching_profile` must name an existing `SwitchingProfile`.
+fn switching_profile_reference_valid(
+    switching_profile: Option<&String>,
+    ctx: &Config,
+) -> garde::Result {
+    let Some(name) = switching_profile else {
+        return Ok(());
+    };
+    if !ctx.switching_profiles.iter().any(|p| &p.name == name) {
+        return Err(garde::Error::new(
+            "referenced switching profile does not exist",
+        ));
+    }
+    Ok(())
+}
+
+/// `routing_table` and a `switching_profile` with an `Untagged` member are
+/// mutually exclusive on the same interface — see `Interface`'s doc comment.
+/// Wired on `Config.interfaces` rather than a per-field closure, since this
+/// needs to see two sibling fields of the same `Interface` at once.
+pub(crate) fn valid_routing_table_and_switching_profile(
+    interfaces: &[Interface],
+    ctx: &Config,
+) -> garde::Result {
+    for iface in interfaces {
+        if iface.routing_table.is_none() {
+            continue;
+        }
+        let Some(profile_name) = &iface.switching_profile else {
+            continue;
+        };
+        let has_untagged = ctx
+            .switching_profiles
+            .iter()
+            .find(|p| &p.name == profile_name)
+            .is_some_and(|p| p.members.iter().any(|m| m.tag == VlanTag::Untagged));
+        if has_untagged {
+            return Err(garde::Error::new(
+                "routing-table and a switching-profile with an untagged member are mutually exclusive on the same interface",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::schema::{Config, RoutingTable};
@@ -122,6 +183,7 @@ mod tests {
                 })
                 .collect(),
             routing_table: routing_table.map(str::to_string),
+            switching_profile: None,
         }
     }
 
@@ -278,9 +340,70 @@ mod tests {
                     },
                 ],
                 routing_table: None,
+                switching_profile: None,
             }],
             vec![],
         );
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    fn profile(
+        name: &str,
+        members: Vec<crate::schema::SwitchingProfileMember>,
+    ) -> crate::schema::SwitchingProfile {
+        crate::schema::SwitchingProfile {
+            name: name.to_string(),
+            members,
+        }
+    }
+
+    fn member(broadcast_domain: &str, tag: VlanTag) -> crate::schema::SwitchingProfileMember {
+        crate::schema::SwitchingProfileMember {
+            broadcast_domain: broadcast_domain.to_string(),
+            tag,
+        }
+    }
+
+    fn domain(name: &str) -> crate::schema::BroadcastDomain {
+        crate::schema::BroadcastDomain {
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn valid_switching_profile_reference_passes() {
+        let mut iface = interface("eth0", &[], None);
+        iface.switching_profile = Some("sp1".to_string());
+        let mut cfg = config_with(vec![iface], vec![]);
+        cfg.switching_profiles = vec![profile("sp1", vec![])];
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn dangling_switching_profile_reference_fails() {
+        let mut iface = interface("eth0", &[], None);
+        iface.switching_profile = Some("does-not-exist".to_string());
+        let cfg = config_with(vec![iface], vec![]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn routing_table_with_untagged_switching_profile_member_fails() {
+        let mut iface = interface("eth0", &[], Some("rt1"));
+        iface.switching_profile = Some("sp1".to_string());
+        let mut cfg = config_with(vec![iface], vec![table("rt1")]);
+        cfg.broadcast_domains = vec![domain("bd1")];
+        cfg.switching_profiles = vec![profile("sp1", vec![member("bd1", VlanTag::Untagged)])];
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn routing_table_with_dot1q_only_switching_profile_passes() {
+        let mut iface = interface("eth0", &[], Some("rt1"));
+        iface.switching_profile = Some("sp1".to_string());
+        let mut cfg = config_with(vec![iface], vec![table("rt1")]);
+        cfg.broadcast_domains = vec![domain("bd1")];
+        cfg.switching_profiles = vec![profile("sp1", vec![member("bd1", VlanTag::Dot1q(100))])];
+        cfg.validate_with(&cfg).unwrap();
     }
 }

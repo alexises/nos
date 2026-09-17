@@ -159,8 +159,9 @@ pub fn render_interface(iface: &Interface) -> String {
             .join(", ")
     };
     let routing_table = iface.routing_table.as_deref().unwrap_or("unset");
+    let switching_profile = iface.switching_profile.as_deref().unwrap_or("unset");
     format!(
-        "interface {}: address [{addresses}], routing-table {routing_table}",
+        "interface {}: address [{addresses}], routing-table {routing_table}, switching-profile {switching_profile}",
         iface.name
     )
 }
@@ -181,8 +182,9 @@ pub fn render_interface_status(status: &InterfaceStatus) -> String {
             .join(", ")
     };
     let routing_table = status.routing_table.as_deref().unwrap_or("unset");
+    let switching_profile = status.switching_profile.as_deref().unwrap_or("unset");
     format!(
-        "interface {}: address [{addresses}], routing-table {routing_table}",
+        "interface {}: address [{addresses}], routing-table {routing_table}, switching-profile {switching_profile}",
         status.name
     )
 }

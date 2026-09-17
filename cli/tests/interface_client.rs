@@ -12,6 +12,7 @@ fn sample_status() -> InterfaceStatus {
             label: None,
         }],
         routing_table: Some("rt1".to_string()),
+        switching_profile: None,
     }
 }
 

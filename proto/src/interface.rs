@@ -11,6 +11,7 @@ pub struct InterfaceStatus {
     pub name: String,
     pub addresses: Vec<InterfaceAddress>,
     pub routing_table: Option<String>,
+    pub switching_profile: Option<String>,
 }
 
 /// Messages sent from a client to `nos-interfaced`'s IPC socket.
