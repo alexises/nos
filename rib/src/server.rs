@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
 use nos_proto::{
-    BgpRouteUpdate, IpcCodec, PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind,
+    BgpRouteUpdate, IpNet, IpcCodec, PrefixRoutes, RibEvent, RibRequest, RouteEntry,
+    RouteSourceKind,
 };
 use tokio::net::UnixListener;
 use tokio::sync::RwLock;
@@ -12,7 +14,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{error, info, trace, warn};
 
 use crate::driver::RibDriver;
-use crate::rib::{Rib, RibEntry, RouteSource};
+use crate::rib::{BestPathChange, Rib, RibEntry, RouteSource};
 
 /// Shared, read-only context every connection dispatches against: the
 /// table's in-memory `Rib` (for `GetRoutes`/`Lookup`) and the driver
@@ -101,45 +103,88 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
         }
         RibRequest::GetVrfName => Some(RibEvent::VrfName(ctx.driver.vrf_name(&ctx.table).await)),
         RibRequest::GetTableId => Some(RibEvent::TableId(ctx.driver.table_id(&ctx.table).await)),
-        RibRequest::PushBgpRoutes(update) => {
-            apply_bgp_route_update(ctx, update).await;
+        RibRequest::PushBgpRoutes(updates) => {
+            apply_bgp_route_update(ctx, updates).await;
             None
         }
     }
 }
 
-/// Applies one BGP-pushed route update to the shared `Rib` and re-applies
-/// the table's recomputed best routes to the kernel driver, independent of
-/// `crate::reconcile::resync`'s own periodic apply — safe because `apply`
-/// is already an idempotent dump-diff-converge operation, and the two
-/// writers only ever touch disjoint `RouteSource` candidates (see
-/// `Rib::replace_source`'s doc comment).
-async fn apply_bgp_route_update(ctx: &Context, update: BgpRouteUpdate) {
+/// Applies one batch of BGP-pushed route updates (one poll tick's worth,
+/// see `nos_proto::rib::RibRequest::PushBgpRoutes`) to the shared `Rib`,
+/// independent of `crate::reconcile::resync`'s own periodic apply — safe
+/// because the two writers only ever touch disjoint `RouteSource`
+/// candidates (see `Rib::replace_source`'s doc comment). `Full` (rare —
+/// only on BGP connect/reconnect/withdraw) goes through the driver's full
+/// dump-diff-converge `apply`, since it replaces the whole `Bgp`-sourced
+/// set at once. `Add`/`Remove` (the frequent per-route hot path) instead
+/// recompute only the touched prefix's winning route (`Rib::upsert_and_diff`/
+/// `remove_and_diff`) and, only for a prefix whose winner actually changed,
+/// queue a delta applied directly via `apply_delta` — never a whole-table
+/// recompute or a fresh kernel dump for an incremental push.
+async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
     let mut guard = ctx.rib.write().await;
-    match update {
-        BgpRouteUpdate::Full(routes) => {
-            guard.replace_source(
-                RouteSource::Bgp,
-                routes.into_iter().map(|r| RibEntry {
+    let mut deltas: HashMap<IpNet, Option<RibEntry>> = HashMap::new();
+    let mut full_replace = false;
+
+    for update in updates {
+        match update {
+            BgpRouteUpdate::Full(routes) => {
+                guard.replace_source(
+                    RouteSource::Bgp,
+                    routes.into_iter().map(|r| RibEntry {
+                        prefix: r.prefix,
+                        gateway: r.next_hop,
+                        source: RouteSource::Bgp,
+                    }),
+                );
+                full_replace = true;
+            }
+            BgpRouteUpdate::Add(r) => {
+                let entry = RibEntry {
                     prefix: r.prefix,
                     gateway: r.next_hop,
                     source: RouteSource::Bgp,
-                }),
-            );
+                };
+                match guard.upsert_and_diff(entry) {
+                    BestPathChange::Unchanged => {}
+                    BestPathChange::Installed(e) => {
+                        deltas.insert(r.prefix, Some(e));
+                    }
+                    BestPathChange::Removed => {
+                        deltas.insert(r.prefix, None);
+                    }
+                }
+            }
+            BgpRouteUpdate::Remove(prefix) => {
+                match guard.remove_and_diff(&prefix, RouteSource::Bgp) {
+                    BestPathChange::Unchanged => {}
+                    BestPathChange::Installed(e) => {
+                        deltas.insert(prefix, Some(e));
+                    }
+                    BestPathChange::Removed => {
+                        deltas.insert(prefix, None);
+                    }
+                }
+            }
         }
-        BgpRouteUpdate::Add(r) => guard.upsert(RibEntry {
-            prefix: r.prefix,
-            gateway: r.next_hop,
-            source: RouteSource::Bgp,
-        }),
-        BgpRouteUpdate::Remove(prefix) => guard.remove(&prefix, RouteSource::Bgp),
     }
-    let routes = guard.best_routes();
-    drop(guard);
 
-    info!(table = %ctx.table, prefixes = routes.len(), "applying bgp-pushed routes to kernel");
-    if let Err(e) = ctx.driver.apply(&ctx.table, &routes).await {
-        error!(table = %ctx.table, error = %e, "failed to apply bgp-pushed routes to kernel");
+    if full_replace {
+        let routes = guard.best_routes();
+        drop(guard);
+        info!(table = %ctx.table, prefixes = routes.len(), "applying bgp-pushed routes to kernel");
+        if let Err(e) = ctx.driver.apply(&ctx.table, &routes).await {
+            error!(table = %ctx.table, error = %e, "failed to apply bgp-pushed routes to kernel");
+        }
+    } else {
+        drop(guard);
+        if !deltas.is_empty() {
+            info!(table = %ctx.table, changed = deltas.len(), "applying bgp route deltas to kernel");
+            if let Err(e) = ctx.driver.apply_delta(&ctx.table, &deltas).await {
+                error!(table = %ctx.table, error = %e, "failed to apply bgp route deltas to kernel");
+            }
+        }
     }
 }
 

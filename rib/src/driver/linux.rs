@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use futures::{stream, StreamExt as _, TryStreamExt as _};
@@ -36,6 +37,15 @@ pub struct LinuxRibDriver {
     /// route dumps stay on `handle`.
     route_channel: RouteChannel,
     registry_path: PathBuf,
+    /// This driver's own record of what it last installed per table id —
+    /// lets `apply_delta` add/remove exactly what changed without a fresh
+    /// kernel dump. Kept honest by `reconcile_routes` (used by `apply`/
+    /// `teardown`), which always sets it to the just-converged desired
+    /// state; `apply_delta` is the only other writer, and only for
+    /// prefixes it just itself installed/removed. A `std::sync::Mutex`,
+    /// since every critical section here is a quick synchronous map
+    /// read/write, never held across an `.await`.
+    installed: Mutex<HashMap<u32, HashMap<IpNet, IpAddr>>>,
 }
 
 impl LinuxRibDriver {
@@ -47,6 +57,7 @@ impl LinuxRibDriver {
             handle,
             route_channel,
             registry_path,
+            installed: Mutex::new(HashMap::new()),
         })
     }
 
@@ -178,6 +189,103 @@ impl LinuxRibDriver {
         Ok(())
     }
 
+    /// Deletes one prefix's route directly from `(prefix, gateway,
+    /// table_id)`, without a kernel dump — the standard, sufficient way to
+    /// identify a route for `RTM_DELROUTE` (the same key fields `ip route
+    /// del ... table ...` uses), safe here because this driver only ever
+    /// installs one route per prefix per table (no ECMP). Used by
+    /// `apply_delta`'s shadow-state-driven fast path; `reconcile_routes`'s
+    /// full dump-diff path still reuses the exact dumped `RouteMessage`
+    /// instead, since it already has it on hand.
+    async fn remove_route(
+        &self,
+        table_id: u32,
+        prefix: IpNet,
+        gateway: IpAddr,
+    ) -> Result<(), DriverError> {
+        match (prefix, gateway) {
+            (IpNet::V4(prefix), IpAddr::V4(gateway)) => {
+                let route = RouteMessageBuilder::<Ipv4Addr>::new()
+                    .destination_prefix(prefix.addr(), prefix.prefix_len())
+                    .gateway(gateway)
+                    .table_id(table_id)
+                    .build();
+                self.route_channel.del(route).await.inspect_err(|e| {
+                    warn!(%prefix, %gateway, table_id, error = %e, "failed to remove route");
+                })?;
+                info!(%prefix, %gateway, table_id, "removed route");
+            }
+            (IpNet::V6(prefix), IpAddr::V6(gateway)) => {
+                let route = RouteMessageBuilder::<Ipv6Addr>::new()
+                    .destination_prefix(prefix.addr(), prefix.prefix_len())
+                    .gateway(gateway)
+                    .table_id(table_id)
+                    .build();
+                self.route_channel.del(route).await.inspect_err(|e| {
+                    warn!(%prefix, %gateway, table_id, error = %e, "failed to remove route");
+                })?;
+                info!(%prefix, %gateway, table_id, "removed route");
+            }
+            _ => {
+                warn!(%prefix, %gateway, table_id, "route prefix/gateway address family mismatch, skipping");
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies only `changes` directly against the kernel, using
+    /// `self.installed` (not a kernel dump) to know each prefix's previous
+    /// gateway — the hot path for incremental per-prefix BGP pushes. See
+    /// `RibDriver::apply_delta`'s doc comment.
+    async fn apply_delta_impl(
+        &self,
+        table_id: u32,
+        changes: &HashMap<IpNet, Option<RibEntry>>,
+    ) -> Result<(), DriverError> {
+        let items: Vec<(IpNet, Option<IpAddr>, Option<RibEntry>)> = {
+            let installed = self.installed.lock().unwrap();
+            let table_installed = installed.get(&table_id);
+            changes
+                .iter()
+                .map(|(prefix, new)| {
+                    let old = table_installed.and_then(|m| m.get(prefix)).copied();
+                    (*prefix, old, new.clone())
+                })
+                .collect()
+        };
+
+        stream::iter(items)
+            .map(|(prefix, old_gateway, new)| async move {
+                let new_gateway = new.as_ref().map(|e| e.gateway);
+                if let Some(old_gw) = old_gateway {
+                    if Some(old_gw) != new_gateway {
+                        self.remove_route(table_id, prefix, old_gw).await?;
+                    }
+                }
+                if let Some(entry) = &new {
+                    if Some(entry.gateway) != old_gateway {
+                        self.add_route(table_id, prefix, entry.gateway, Some(entry.source))
+                            .await?;
+                    }
+                }
+
+                let mut installed = self.installed.lock().unwrap();
+                let table_installed = installed.entry(table_id).or_default();
+                match new_gateway {
+                    Some(gateway) => {
+                        table_installed.insert(prefix, gateway);
+                    }
+                    None => {
+                        table_installed.remove(&prefix);
+                    }
+                }
+                Ok::<(), DriverError>(())
+            })
+            .buffer_unordered(MAX_CONCURRENT_ROUTE_OPS)
+            .try_for_each(|()| async { Ok(()) })
+            .await
+    }
+
     /// Diffs `best_routes` against what's actually installed in
     /// `table_id`'s kernel table and adds/removes to converge, reusing the
     /// exact dumped `RouteMessage` for any removal.
@@ -244,6 +352,11 @@ impl LinuxRibDriver {
             .buffer_unordered(MAX_CONCURRENT_ROUTE_OPS)
             .try_for_each(|()| async { Ok(()) })
             .await?;
+
+        // The kernel now matches `desired` exactly — seed/correct
+        // `apply_delta`'s shadow state from this ground truth, including on
+        // `teardown` (an empty `desired` correctly clears it).
+        self.installed.lock().unwrap().insert(table_id, desired);
         Ok(())
     }
 }
@@ -260,6 +373,18 @@ impl RibDriver for LinuxRibDriver {
         let vrf_ifname = table_registry::vrf_ifname(table_id);
         self.ensure_vrf(&vrf_ifname, table_id).await?;
         self.reconcile_routes(table_id, best_routes).await
+    }
+
+    async fn apply_delta(
+        &self,
+        table_name: &str,
+        changes: &HashMap<IpNet, Option<RibEntry>>,
+    ) -> Result<(), DriverError> {
+        debug!(table = %table_name, changed = changes.len(), "applying route deltas to kernel");
+        let table_id = table_registry::ensure_table_id(&self.registry_path, table_name)?;
+        let vrf_ifname = table_registry::vrf_ifname(table_id);
+        self.ensure_vrf(&vrf_ifname, table_id).await?;
+        self.apply_delta_impl(table_id, changes).await
     }
 
     async fn teardown(&self, table_name: &str) -> Result<(), DriverError> {

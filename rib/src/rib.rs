@@ -35,6 +35,30 @@ pub struct RibEntry {
     pub source: RouteSource,
 }
 
+/// Whether a mutation actually changed a prefix's *winning* candidate —
+/// see `Rib::upsert_and_diff`/`remove_and_diff`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BestPathChange {
+    /// The winner is the same as before this mutation (a losing candidate
+    /// churned, or the value re-sent was identical) — nothing to do.
+    Unchanged,
+    /// The prefix now has no winner at all (its last candidate was removed).
+    Removed,
+    /// The prefix has a new (or first) winner.
+    Installed(RibEntry),
+}
+
+fn diff_best(before: Option<&RibEntry>, after: Option<RibEntry>) -> BestPathChange {
+    if before == after.as_ref() {
+        BestPathChange::Unchanged
+    } else {
+        match after {
+            Some(entry) => BestPathChange::Installed(entry),
+            None => BestPathChange::Removed,
+        }
+    }
+}
+
 /// One routing table's candidate routes, keyed by prefix, potentially with
 /// more than one source contending for a prefix. Two independent writers
 /// mutate this: `crate::reconcile::resync` (config-driven, rebuilds the
@@ -94,6 +118,27 @@ impl Rib {
                 self.entries.remove(prefix);
             }
         }
+    }
+
+    /// Same as `upsert`, but reports whether the prefix's *winning*
+    /// candidate changed as a result — a caller that only cares about
+    /// kernel-visible state (e.g. `crate::server::apply_bgp_route_update`)
+    /// can then skip pushing anything for a losing candidate's churn or a
+    /// re-sent identical route, instead of recomputing/reinstalling the
+    /// whole table on every single update.
+    pub fn upsert_and_diff(&mut self, entry: RibEntry) -> BestPathChange {
+        let prefix = entry.prefix;
+        let before = self.best_route(&prefix).cloned();
+        self.upsert(entry);
+        diff_best(before.as_ref(), self.best_route(&prefix).cloned())
+    }
+
+    /// Same as `remove`, but reports whether the prefix's winning candidate
+    /// changed — see `upsert_and_diff`.
+    pub fn remove_and_diff(&mut self, prefix: &IpNet, source: RouteSource) -> BestPathChange {
+        let before = self.best_route(prefix).cloned();
+        self.remove(prefix, source);
+        diff_best(before.as_ref(), self.best_route(prefix).cloned())
     }
 
     /// The winning candidate for one prefix, if any exist.
@@ -414,6 +459,131 @@ mod tests {
             .find(|e| e.source == RouteSource::Bgp)
             .unwrap();
         assert_eq!(bgp.gateway, "10.0.0.99".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn upsert_and_diff_reports_unchanged_for_an_identical_resend() {
+        let mut rib = Rib::new();
+        let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
+        let entry = RibEntry {
+            prefix,
+            gateway: "10.0.0.9".parse().unwrap(),
+            source: RouteSource::Bgp,
+        };
+        assert_eq!(
+            rib.upsert_and_diff(entry.clone()),
+            BestPathChange::Installed(entry.clone())
+        );
+        assert_eq!(rib.upsert_and_diff(entry), BestPathChange::Unchanged);
+    }
+
+    #[test]
+    fn upsert_and_diff_reports_unchanged_when_a_losing_candidate_churns() {
+        let mut rib = Rib::new();
+        let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
+        rib.insert(RibEntry {
+            prefix,
+            gateway: "10.0.0.1".parse().unwrap(),
+            source: RouteSource::Static,
+        });
+        // Static already wins this prefix, so a new/changed Bgp candidate
+        // never becomes the winner — no kernel-visible change.
+        assert_eq!(
+            rib.upsert_and_diff(RibEntry {
+                prefix,
+                gateway: "10.0.0.9".parse().unwrap(),
+                source: RouteSource::Bgp,
+            }),
+            BestPathChange::Unchanged
+        );
+    }
+
+    #[test]
+    fn upsert_and_diff_reports_installed_when_a_better_candidate_arrives() {
+        let mut rib = Rib::new();
+        let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
+        let bgp_entry = RibEntry {
+            prefix,
+            gateway: "10.0.0.9".parse().unwrap(),
+            source: RouteSource::Bgp,
+        };
+        assert_eq!(
+            rib.upsert_and_diff(bgp_entry),
+            BestPathChange::Installed(RibEntry {
+                prefix,
+                gateway: "10.0.0.9".parse().unwrap(),
+                source: RouteSource::Bgp,
+            })
+        );
+        let static_entry = RibEntry {
+            prefix,
+            gateway: "10.0.0.1".parse().unwrap(),
+            source: RouteSource::Static,
+        };
+        assert_eq!(
+            rib.upsert_and_diff(static_entry.clone()),
+            BestPathChange::Installed(static_entry)
+        );
+    }
+
+    #[test]
+    fn remove_and_diff_reports_removed_when_the_last_candidate_goes() {
+        let mut rib = Rib::new();
+        let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
+        rib.insert(RibEntry {
+            prefix,
+            gateway: "10.0.0.9".parse().unwrap(),
+            source: RouteSource::Bgp,
+        });
+        assert_eq!(
+            rib.remove_and_diff(&prefix, RouteSource::Bgp),
+            BestPathChange::Removed
+        );
+    }
+
+    #[test]
+    fn remove_and_diff_reports_unchanged_when_a_losing_candidate_is_removed() {
+        let mut rib = Rib::new();
+        let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
+        rib.insert(RibEntry {
+            prefix,
+            gateway: "10.0.0.1".parse().unwrap(),
+            source: RouteSource::Static,
+        });
+        rib.insert(RibEntry {
+            prefix,
+            gateway: "10.0.0.9".parse().unwrap(),
+            source: RouteSource::Bgp,
+        });
+        // Static still wins after Bgp's candidate is removed.
+        assert_eq!(
+            rib.remove_and_diff(&prefix, RouteSource::Bgp),
+            BestPathChange::Unchanged
+        );
+    }
+
+    #[test]
+    fn remove_and_diff_reports_installed_when_the_winner_falls_back() {
+        let mut rib = Rib::new();
+        let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
+        rib.insert(RibEntry {
+            prefix,
+            gateway: "10.0.0.1".parse().unwrap(),
+            source: RouteSource::Static,
+        });
+        rib.insert(RibEntry {
+            prefix,
+            gateway: "10.0.0.9".parse().unwrap(),
+            source: RouteSource::Bgp,
+        });
+        assert_eq!(
+            rib.remove_and_diff(&prefix, RouteSource::Static),
+            BestPathChange::Installed(RibEntry {
+                prefix,
+                gateway: "10.0.0.9".parse().unwrap(),
+                source: RouteSource::Bgp,
+            })
+        );
     }
 
     #[test]

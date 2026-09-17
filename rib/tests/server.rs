@@ -122,6 +122,14 @@ impl nos_rib::RibDriver for FakeTableIdDriver {
         Ok(())
     }
 
+    async fn apply_delta(
+        &self,
+        _table_name: &str,
+        _changes: &std::collections::HashMap<nos_proto::IpNet, Option<RibEntry>>,
+    ) -> Result<(), nos_rib::DriverError> {
+        Ok(())
+    }
+
     async fn teardown(&self, _table_name: &str) -> Result<(), nos_rib::DriverError> {
         Ok(())
     }
@@ -141,6 +149,14 @@ impl nos_rib::RibDriver for FakeVrfDriver {
         &self,
         _table_name: &str,
         _best_routes: &std::collections::HashMap<nos_proto::IpNet, RibEntry>,
+    ) -> Result<(), nos_rib::DriverError> {
+        Ok(())
+    }
+
+    async fn apply_delta(
+        &self,
+        _table_name: &str,
+        _changes: &std::collections::HashMap<nos_proto::IpNet, Option<RibEntry>>,
     ) -> Result<(), nos_rib::DriverError> {
         Ok(())
     }
@@ -218,12 +234,14 @@ async fn get_table_id_is_none_when_the_driver_has_no_id_yet() {
     assert!(matches!(event, RibEvent::TableId(None)));
 }
 
-/// A driver that records every `apply` call's `best_routes` and notifies a
+/// A driver that records every `apply`/`apply_delta` call and notifies a
 /// waiter, so `PushBgpRoutes`'s fire-and-forget dispatch (no reply on the
 /// wire) can still be observed synchronizing with the test.
 #[derive(Debug, Default)]
 struct RecordingDriver {
     applied: tokio::sync::Mutex<Vec<std::collections::HashMap<nos_proto::IpNet, RibEntry>>>,
+    applied_delta:
+        tokio::sync::Mutex<Vec<std::collections::HashMap<nos_proto::IpNet, Option<RibEntry>>>>,
     notify: tokio::sync::Notify,
 }
 
@@ -235,6 +253,16 @@ impl nos_rib::RibDriver for RecordingDriver {
         best_routes: &std::collections::HashMap<nos_proto::IpNet, RibEntry>,
     ) -> Result<(), nos_rib::DriverError> {
         self.applied.lock().await.push(best_routes.clone());
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    async fn apply_delta(
+        &self,
+        _table_name: &str,
+        changes: &std::collections::HashMap<nos_proto::IpNet, Option<RibEntry>>,
+    ) -> Result<(), nos_rib::DriverError> {
+        self.applied_delta.lock().await.push(changes.clone());
         self.notify.notify_one();
         Ok(())
     }
@@ -264,9 +292,9 @@ async fn push_bgp_routes_full_inserts_into_shared_rib_and_applies_to_driver() {
     let prefix: nos_proto::IpNet = "203.0.113.0/24".parse().unwrap();
     let next_hop: IpAddr = "203.0.113.1".parse().unwrap();
     writer
-        .send(RibRequest::PushBgpRoutes(nos_proto::BgpRouteUpdate::Full(
-            vec![nos_proto::BgpRoute { prefix, next_hop }],
-        )))
+        .send(RibRequest::PushBgpRoutes(vec![
+            nos_proto::BgpRouteUpdate::Full(vec![nos_proto::BgpRoute { prefix, next_hop }]),
+        ]))
         .await
         .unwrap();
 
@@ -278,4 +306,64 @@ async fn push_bgp_routes_full_inserts_into_shared_rib_and_applies_to_driver() {
     let best = guard.best_route(&prefix).unwrap();
     assert_eq!(best.gateway, next_hop);
     assert_eq!(best.source, RouteSource::Bgp);
+}
+
+#[tokio::test]
+async fn push_bgp_routes_add_only_calls_apply_delta_when_the_winner_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rib.sock");
+    let rib = Arc::new(RwLock::new(Rib::new()));
+    let driver = Arc::new(RecordingDriver::default());
+    let _server = server::start(&path, "rt1".to_string(), rib.clone(), driver.clone()).unwrap();
+
+    let (_reader, mut writer) = connect(&path).await;
+    let prefix: nos_proto::IpNet = "203.0.113.0/24".parse().unwrap();
+    let next_hop: IpAddr = "203.0.113.1".parse().unwrap();
+    let route = nos_proto::BgpRoute { prefix, next_hop };
+
+    // A genuinely new prefix triggers apply_delta.
+    writer
+        .send(RibRequest::PushBgpRoutes(vec![
+            nos_proto::BgpRouteUpdate::Add(route.clone()),
+        ]))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), driver.notify.notified())
+        .await
+        .expect("driver.apply_delta was not called for a new route");
+    assert_eq!(driver.applied_delta.lock().await.len(), 1);
+
+    // The identical route re-sent doesn't change the winner, so this must
+    // not trigger apply_delta at all.
+    writer
+        .send(RibRequest::PushBgpRoutes(vec![
+            nos_proto::BgpRouteUpdate::Add(route),
+        ]))
+        .await
+        .unwrap();
+
+    // A different prefix's genuine change, on the same connection, proves
+    // the server has already processed the no-op push sent just before it
+    // (a single connection processes requests in order) — if that no-op had
+    // wrongly triggered a call, it would show up as an extra entry below.
+    let other_prefix: nos_proto::IpNet = "203.0.114.0/24".parse().unwrap();
+    writer
+        .send(RibRequest::PushBgpRoutes(vec![
+            nos_proto::BgpRouteUpdate::Add(nos_proto::BgpRoute {
+                prefix: other_prefix,
+                next_hop,
+            }),
+        ]))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), driver.notify.notified())
+        .await
+        .expect("driver.apply_delta was not called for the second new route");
+
+    let applied = driver.applied_delta.lock().await;
+    assert_eq!(
+        applied.len(),
+        2,
+        "the unchanged re-send must not have triggered apply_delta"
+    );
 }

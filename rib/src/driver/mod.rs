@@ -47,6 +47,21 @@ pub trait RibDriver: Send + Sync {
         best_routes: &HashMap<IpNet, RibEntry>,
     ) -> Result<(), DriverError>;
 
+    /// Applies only these per-prefix deltas directly — `Some(entry)`
+    /// installs/replaces that prefix's kernel route, `None` removes it —
+    /// using the driver's own record of what it last installed rather than
+    /// a fresh kernel dump. Callers only ever include a prefix here when
+    /// its *winner* actually changed (see `Rib::upsert_and_diff`/
+    /// `remove_and_diff`). This is the hot path for incremental BGP
+    /// pushes; `apply`'s full dump-diff-converge remains the correctness
+    /// backstop that keeps a driver's internal bookkeeping honest
+    /// (periodic reconcile, initial apply, and any `Full` snapshot).
+    async fn apply_delta(
+        &self,
+        table_name: &str,
+        changes: &HashMap<IpNet, Option<RibEntry>>,
+    ) -> Result<(), DriverError>;
+
     /// Deletes every route in `table_name`'s kernel table and the VRF
     /// device itself. Leaves any persisted table-id registry entry
     /// untouched, so a later `apply` for the same `table_name` (an

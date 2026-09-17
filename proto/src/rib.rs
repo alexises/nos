@@ -79,8 +79,12 @@ pub enum RibRequest {
     /// Fire-and-forget, no reply — sent continuously by the owning
     /// `nos-bgpd` instance over one long-lived connection, mirroring
     /// `BgpRequest::RedistributeRoutes`'s pattern for the opposite
-    /// direction.
-    PushBgpRoutes(BgpRouteUpdate),
+    /// direction. One or more updates from a single poll tick, batched
+    /// into one message rather than one `PushBgpRoutes` per update — the
+    /// receiving `nos-ribd` applies the whole batch to its in-memory `Rib`
+    /// first, then touches the kernel once for the prefixes whose winning
+    /// route actually changed, never once per update.
+    PushBgpRoutes(Vec<BgpRouteUpdate>),
 }
 
 /// Messages sent from a `nos-ribd` instance to a client.

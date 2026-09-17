@@ -91,9 +91,9 @@ async fn run(
 
         let mut writer = FramedWrite::new(stream, IpcCodec::<RibRequest>::default());
         if writer
-            .send(RibRequest::PushBgpRoutes(BgpRouteUpdate::Full(to_routes(
-                &routes,
-            ))))
+            .send(RibRequest::PushBgpRoutes(vec![BgpRouteUpdate::Full(
+                to_routes(&routes),
+            )]))
             .await
             .is_err()
         {
@@ -118,23 +118,19 @@ async fn run(
                 // away — best-effort, we're tearing this connection down
                 // regardless of the outcome.
                 let _ = writer
-                    .send(RibRequest::PushBgpRoutes(BgpRouteUpdate::Full(Vec::new())))
+                    .send(RibRequest::PushBgpRoutes(vec![BgpRouteUpdate::Full(
+                        Vec::new(),
+                    )]))
                     .await;
                 break;
             }
             let updates = diff_routes(&last_sent, &new_routes);
-            let mut write_failed = false;
-            for update in updates {
-                if writer
-                    .send(RibRequest::PushBgpRoutes(update))
+            if !updates.is_empty()
+                && writer
+                    .send(RibRequest::PushBgpRoutes(updates))
                     .await
                     .is_err()
-                {
-                    write_failed = true;
-                    break;
-                }
-            }
-            if write_failed {
+            {
                 warn!(table = %table, "write failure sending bgp route update, reconnecting");
                 break;
             }

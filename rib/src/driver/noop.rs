@@ -28,6 +28,19 @@ impl RibDriver for NoopRibDriver {
         Ok(())
     }
 
+    async fn apply_delta(
+        &self,
+        table_name: &str,
+        changes: &HashMap<IpNet, Option<RibEntry>>,
+    ) -> Result<(), DriverError> {
+        debug!(
+            table = %table_name,
+            changed = changes.len(),
+            "would apply route deltas to a kernel VRF/table (noop driver — no OS effect)"
+        );
+        Ok(())
+    }
+
     async fn teardown(&self, table_name: &str) -> Result<(), DriverError> {
         debug!(
             table = %table_name,
