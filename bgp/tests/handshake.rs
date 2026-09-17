@@ -416,6 +416,17 @@ async fn collision_leaves_exactly_one_side_running() {
         "passive side neither lost the collision nor stayed running: {passive_result:?}"
     );
 
+    // RFC 4271 §6.8 regression: `BgpRib` is keyed by peer address, not by
+    // connection, so the loser's teardown must not deregister the peer the
+    // winner just registered. Before this was fixed the loser's
+    // `peer_disconnected` wiped the winner's `adj_rib_in` *and* its outbox,
+    // leaving a session that stayed up but could never advertise again —
+    // which is what made tools/verify-bgp.sh's `communities` phase fail.
+    assert!(
+        bgp_rib.lock().await.has_peer("10.0.0.2".parse().unwrap()),
+        "collision loser's teardown deregistered the winning session's outbox"
+    );
+
     fake_active.abort();
     fake_passive.abort();
 }

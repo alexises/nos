@@ -597,8 +597,10 @@ async fn apply_collision_verdict(
 /// `bgp_rib` is registered with a fresh outbound channel once the session
 /// reaches `Established` (`Action::ReportEstablished`), fed real
 /// `BgpMessage::Update`s back onto the wire from a dedicated `select!` arm,
-/// and unconditionally deregistered (`peer_disconnected`) at this function's
-/// single exit point — whatever the reason this session ended.
+/// and deregistered (`peer_disconnected`) at this function's single exit
+/// point — but only if it actually registered, since `BgpRib` is keyed by
+/// peer address and a collision loser shares one with its winner (see
+/// `registered` below).
 #[allow(clippy::similar_names)] // add_path_afis (wire AFI ints) vs. add_path_afs (AddressFamily)
 pub async fn run(
     stream: TcpStream,
@@ -662,10 +664,21 @@ pub async fn run(
         });
     }
 
+    // Whether this connection ever registered itself with `bgp_rib`, i.e.
+    // reached `Established` and ran `Action::ReportEstablished`.
+    //
+    // `BgpRib` is keyed by peer *address*, not by connection, so the exit
+    // path below must not deregister a peer this connection never
+    // registered: a collision loser (RFC 4271 §6.8) shares its peer address
+    // with the connection that beat it, and tearing down the loser would
+    // otherwise wipe the *winner's* `adj_rib_in` and — worse — its
+    // `peer_outbox`, leaving a session that is still up but can never
+    // advertise to that peer again.
+    let mut registered = false;
+
     // Single exit point: every early-return case below (`break 'session
     // ...`) funnels through the same `bgp_rib.peer_disconnected` call after
-    // this block, rather than returning directly — a session that never
-    // reached `Established` makes that call a safe no-op.
+    // this block, rather than returning directly.
     let outcome = 'session: {
         let mut open = message::build_open(local.asn, local.router_id, peer.local_hold_time);
         open.capabilities.extend(build_mp_capabilities(
@@ -835,6 +848,7 @@ pub async fn run(
                             peer.export_policy.clone(),
                             outbox_tx.clone(),
                         );
+                        registered = true;
                         slot.status.send_modify(|s| {
                             s.state = PeerState::Established;
                             s.remote_asn = Some(*remote_asn);
@@ -866,7 +880,9 @@ pub async fn run(
         }
     };
 
-    bgp_rib.lock().await.peer_disconnected(peer.remote_address);
+    if registered {
+        bgp_rib.lock().await.peer_disconnected(peer.remote_address);
+    }
     outcome
 }
 

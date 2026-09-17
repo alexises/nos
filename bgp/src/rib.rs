@@ -543,6 +543,13 @@ impl BgpRib {
     /// Deregisters a peer's outbox and Adj-RIB-In, then re-decides every
     /// prefix that peer had contributed — the implicit withdraw-everything
     /// path for a session ending, whatever the reason.
+    /// Whether `peer` currently has a registered outbound channel — i.e. an
+    /// `Established` session that route propagation can actually reach.
+    /// `false` while only a losing/collided connection exists for it.
+    pub fn has_peer(&self, peer: IpAddr) -> bool {
+        self.peer_outboxes.contains_key(&peer)
+    }
+
     pub fn peer_disconnected(&mut self, peer: IpAddr) {
         self.peer_outboxes.remove(&peer);
         self.adj_rib_out.remove(&peer);
@@ -1515,6 +1522,49 @@ mod tests {
             vec![(65000 << 16) | 100]
         );
         assert!(find_adv(&mut stripped_rx).communities.is_empty());
+    }
+
+    /// The `communities` phase of `tools/verify-bgp.sh`, in miniature: a
+    /// *locally redistributed* route (no wire attributes of its own) tagged
+    /// by the destination peer-group's own *export* policy. Distinct from
+    /// `import_policy_can_add_community` (peer-learned, import side) and
+    /// `export_policy_can_remove_community_for_one_peer` (peer-learned,
+    /// export side, removal).
+    #[test]
+    fn export_policy_can_add_community_to_a_redistributed_route() {
+        let mut rib = new_rib(65001);
+        let peer = addr("10.0.0.1");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        rib.peer_established(
+            peer,
+            false,
+            Some(addr("10.0.0.254")),
+            all_afs(),
+            false,
+            None,
+            false,
+            false,
+            HashSet::new(),
+            Arc::new(
+                nos_rpl::compile(
+                    "this.bgp.communities.add(65001:100)\naccept\n",
+                    &nos_rpl::Symbols::EMPTY,
+                )
+                .unwrap(),
+            ),
+            tx,
+        );
+
+        rib.apply_redistribute_update(full_update(vec![("198.51.100.0/24", "10.9.9.9")]));
+
+        let adv = recv_all(&mut rx)
+            .into_iter()
+            .find_map(|u| match u {
+                OutboundUpdate::Announce(a) if a.prefix == prefix("198.51.100.0/24") => Some(a),
+                _ => None,
+            })
+            .expect("expected an announcement for 198.51.100.0/24");
+        assert_eq!(adv.communities, vec![(65001 << 16) | 100]);
     }
 
     #[test]

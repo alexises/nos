@@ -21,6 +21,8 @@ Once resolved, `session::SessionManager` maintains, per configured peer, both si
 - **Active**: a per-peer retry loop attempts an outbound connect (`fsm::CONNECT_RETRY_TIME`, RFC 4271's own suggested `ConnectRetryTimer` default) to the peer's `remote_address:179`, optionally bound to its peer-group's `source_address` — but skips dialing out entirely whenever `PeerSlot::is_established` is already true (in either role), so a session held open by the passive side doesn't see a redundant, pointless outbound attempt (and the collision it would otherwise trigger) every `CONNECT_RETRY_TIME`. Found via real two-container verification — see "Verification" below.
 - **Passive**: one shared listener (`0.0.0.0:179` + `[::]:179`) accepts inbound connections, matching the remote IP against the configured peer set; an unconfigured remote is rejected.
 
+**Both roles must be stopped when a peer is reconciled away or respawned.** `SessionManager::peer_tasks` owns only the *active*-connect loop; a passive session is spawned per accepted connection by `handle_inbound`, so it is tracked on its `collision::PeerSlot` (`set_passive_task`/`stop_passive`) — otherwise `reconcile_peers` has nothing to abort and an established passive session keeps serving the `ResolvedPeer` it was accepted with (stale policies, auth and timers) for as long as it stays up, while the active side restarts normally. Which side that is depends on who won the collision, so the symptom is non-deterministic. Because both stops are `abort()`s, the cancelled tasks never reach `fsm::run`'s own exit path, so `reconcile_peers` also calls `BgpRib::peer_disconnected` itself — without it the peer's `adj_rib_in`/`peer_outbox` outlive the sessions that owned them and its routes stay in the Loc-RIB.
+
 Once a `TcpStream` exists (either side), `fsm::run` takes over — see "BGP finite state machine" below.
 
 ### Session authentication
@@ -54,6 +56,8 @@ Every well-formed inbound message (not just KEEPALIVE) resets the hold timer, pe
 - a tie (duplicate/misconfigured router-id) keeps whichever connection registered first and logs a warning.
 
 The loser is torn down with `NOTIFICATION(Cease, ConnectionCollisionResolution)` (RFC 4486 §7), signaled via a `tokio::sync::Notify` handle so its own `fsm::run` task sends the notification itself before closing — never a bare socket drop.
+
+Because `BgpRib` is keyed by peer **address** rather than by connection, both connections for a peer share one set of RIB state, so `fsm::run` deregisters (`BgpRib::peer_disconnected`) on its way out **only if it registered** — i.e. only if it reached `Established` and ran `Action::ReportEstablished` (`fsm::run`'s own `registered` flag). A collision loser never registers, and tearing one down used to wipe the *winner's* `adj_rib_in` and, worse, its `peer_outbox` — leaving a session that stayed `Established` but could never advertise to that peer again, with no event that would ever restore it short of a session flap. Guarded by `handshake.rs`'s `collision_leaves_exactly_one_side_running`, which asserts the shared `BgpRib` still has the peer (`BgpRib::has_peer`) after the collision resolves.
 
 ### Route refresh (RFC 2918)
 

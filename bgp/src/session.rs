@@ -376,7 +376,8 @@ impl SessionManager {
         let import_policy = slot.peer.import_policy.clone();
         let export_policy = slot.peer.export_policy.clone();
         let bgp_rib = self.bgp_rib.clone();
-        tokio::spawn(async move {
+        let task_slot = slot.clone();
+        let task = tokio::spawn(async move {
             let outcome = fsm::run(
                 stream,
                 Role::Passive,
@@ -401,6 +402,7 @@ impl SessionManager {
             reset_status_if_not_established(&slot).await;
             info!(instance = %instance, peer = %remote, outcome = ?outcome, "inbound bgp session ended");
         });
+        task_slot.set_passive_task(task).await;
     }
 
     async fn reconcile_peers(self: &Arc<Self>, desired: Vec<ResolvedPeer>) {
@@ -417,10 +419,28 @@ impl SessionManager {
         self.sync_listener_auth(&to_stop, &to_spawn).await;
 
         for addr in &to_stop {
+            // Both roles must stop: the active-connect loop owned here, and
+            // any passively-accepted session, which is spawned per accepted
+            // connection and tracked on the slot. Missing the passive one
+            // left an established session running with the `ResolvedPeer` it
+            // was accepted with — stale policies, auth and timers — for as
+            // long as the session stayed up.
             if let Some(task) = tasks.remove(addr) {
                 task.task.abort();
             }
-            self.peers.write().await.remove(addr);
+            let slot = self.peers.write().await.remove(addr);
+            if let Some(slot) = slot {
+                slot.stop_passive().await;
+            }
+            // Aborting cancels each task at whatever await point it was
+            // parked on, so `fsm::run`'s own exit path — and with it its
+            // `peer_disconnected` — never runs. Deregister here instead, or
+            // the peer's `adj_rib_in`/`peer_outbox` would outlive the
+            // sessions that owned them: the routes would stay in the Loc-RIB
+            // (and keep being advertised) until something else happened to
+            // evict them, which is exactly what a changed import policy must
+            // not do.
+            self.bgp_rib.lock().await.peer_disconnected(*addr);
         }
         for peer in to_spawn {
             let slot = PeerSlot::new(peer.clone());

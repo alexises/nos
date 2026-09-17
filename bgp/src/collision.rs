@@ -26,6 +26,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch, Mutex, Notify};
+use tokio::task::JoinHandle;
 use tracing::warn;
 
 use crate::session::ResolvedPeer;
@@ -96,6 +97,17 @@ pub struct PeerSlot {
     /// here (peer lifetime, not per-connection), so no take/hand-off dance is
     /// needed across a peer's active/passive reconnects.
     command_rx: Mutex<mpsc::UnboundedReceiver<FsmCommand>>,
+    /// The currently-running passively-accepted session's task, if any.
+    ///
+    /// The active side's task is owned by `SessionManager::peer_tasks`, but a
+    /// passive session is spawned per accepted connection
+    /// (`SessionManager::handle_inbound`) and would otherwise be tracked
+    /// nowhere — so reconciliation had no way to stop it, and a peer whose
+    /// config changed kept serving an established *passive* session with the
+    /// `ResolvedPeer` it was accepted with: stale policies, auth and timers,
+    /// indefinitely. Parked here because the slot is already the one
+    /// per-peer object shared across both roles.
+    passive_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl PeerSlot {
@@ -108,7 +120,25 @@ impl PeerSlot {
             status,
             command_tx,
             command_rx: Mutex::new(command_rx),
+            passive_task: Mutex::new(None),
         })
+    }
+
+    /// Records the task running this peer's passively-accepted session,
+    /// replacing (and aborting) any previous one.
+    pub async fn set_passive_task(&self, task: JoinHandle<()>) {
+        if let Some(previous) = self.passive_task.lock().await.replace(task) {
+            previous.abort();
+        }
+    }
+
+    /// Stops this peer's passively-accepted session, if one is running —
+    /// called when the peer is being torn down or respawned with a changed
+    /// `ResolvedPeer`.
+    pub async fn stop_passive(&self) {
+        if let Some(task) = self.passive_task.lock().await.take() {
+            task.abort();
+        }
     }
 
     /// A snapshot receiver for `session::SessionManager::peer_summaries` to
