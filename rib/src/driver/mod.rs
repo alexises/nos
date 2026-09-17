@@ -8,6 +8,7 @@ use crate::rib::RibEntry;
 
 pub mod linux;
 pub mod noop;
+pub mod route_channel;
 pub mod table_registry;
 
 pub use linux::LinuxRibDriver;

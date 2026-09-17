@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use futures::TryStreamExt as _;
+use futures::{stream, StreamExt as _, TryStreamExt as _};
 use nos_proto::IpNet;
 use rtnetlink::packet_route::link::LinkMessage;
 use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage};
@@ -11,6 +11,7 @@ use rtnetlink::packet_route::AddressFamily;
 use rtnetlink::{Handle, LinkUnspec, LinkVrf, RouteMessageBuilder};
 use tracing::{debug, info, trace, warn};
 
+use super::route_channel::RouteChannel;
 use super::{table_registry, DriverError, RibDriver};
 use crate::rib::{RibEntry, RouteSource};
 
@@ -18,11 +19,22 @@ use crate::rib::{RibEntry, RouteSource};
 /// lookup (`match_name`/`match_index`) for a link that doesn't exist.
 const ENODEV: i32 = 19;
 
+// ponytail: fixed fan-out bound rather than a `--driver` flag — nothing in
+// the bench-bgp kernel-install report suggests 64 is the wrong number.
+// Upgrade to real rtnetlink-level batching if concurrency alone stops
+// closing the gap to BIRD/FRR/GoBGP.
+const MAX_CONCURRENT_ROUTE_OPS: usize = 64;
+
 /// Real Linux backend: creates a VRF device + kernel routing table per
 /// routing table name (via `table_registry`'s persisted id allocation) and
 /// installs the winning route per prefix into it.
 pub struct LinuxRibDriver {
     handle: Handle,
+    /// Dedicated, genuinely pipelined channel for route add/del — see
+    /// `route_channel` module docs for why `handle` above (an ordinary
+    /// `rtnetlink::Handle`) isn't used for this. Link/VRF management and
+    /// route dumps stay on `handle`.
+    route_channel: RouteChannel,
     registry_path: PathBuf,
 }
 
@@ -30,8 +42,10 @@ impl LinuxRibDriver {
     pub fn new(registry_path: PathBuf) -> Result<Self, DriverError> {
         let (connection, handle, _) = rtnetlink::new_connection()?;
         tokio::spawn(connection);
+        let route_channel = RouteChannel::new()?;
         Ok(Self {
             handle,
+            route_channel,
             registry_path,
         })
     }
@@ -141,14 +155,9 @@ impl LinuxRibDriver {
                     .gateway(gateway)
                     .table_id(table_id)
                     .build();
-                self.handle
-                    .route()
-                    .add(route)
-                    .execute()
-                    .await
-                    .inspect_err(|e| {
-                        warn!(%prefix, %gateway, table_id, error = %e, "failed to add route");
-                    })?;
+                self.route_channel.add(route).await.inspect_err(|e| {
+                    warn!(%prefix, %gateway, table_id, error = %e, "failed to add route");
+                })?;
                 info!(%prefix, %gateway, table_id, source = ?source, "added route");
             }
             (IpNet::V6(prefix), IpAddr::V6(gateway)) => {
@@ -157,14 +166,9 @@ impl LinuxRibDriver {
                     .gateway(gateway)
                     .table_id(table_id)
                     .build();
-                self.handle
-                    .route()
-                    .add(route)
-                    .execute()
-                    .await
-                    .inspect_err(|e| {
-                        warn!(%prefix, %gateway, table_id, error = %e, "failed to add route");
-                    })?;
+                self.route_channel.add(route).await.inspect_err(|e| {
+                    warn!(%prefix, %gateway, table_id, error = %e, "failed to add route");
+                })?;
                 info!(%prefix, %gateway, table_id, source = ?source, "added route");
             }
             _ => {
@@ -192,6 +196,11 @@ impl LinuxRibDriver {
             .map(|(prefix, entry)| (*prefix, entry.gateway))
             .collect();
 
+        let observed_by_prefix: HashMap<IpNet, RouteMessage> = observed
+            .iter()
+            .map(|(prefix, _, message)| (*prefix, message.clone()))
+            .collect();
+
         let (to_add, to_remove) = diff_routes(&observed_map, &desired);
         debug!(
             table_id,
@@ -205,24 +214,36 @@ impl LinuxRibDriver {
         // next hop) — adding the new route while the kernel still has the
         // old one for that exact prefix fails with EEXIST (`rtnetlink`'s
         // route add uses NLM_F_CREATE | NLM_F_EXCL), so the stale entry
-        // must be gone first.
-        for (prefix, gateway) in to_remove {
-            if let Some((_, _, message)) = observed.iter().find(|(p, _, _)| *p == prefix) {
-                self.handle
-                    .route()
-                    .del(message.clone())
-                    .execute()
-                    .await
-                    .inspect_err(|e| {
-                        warn!(%prefix, %gateway, table_id, error = %e, "failed to remove route");
-                    })?;
-                info!(%prefix, %gateway, table_id, "removed route");
-            }
-        }
-        for (prefix, gateway) in to_add {
-            let source = best_routes.get(&prefix).map(|e| e.source);
-            self.add_route(table_id, prefix, gateway, source).await?;
-        }
+        // must be gone first. Within each phase, up to
+        // MAX_CONCURRENT_ROUTE_OPS requests are in flight at once, sent
+        // over the dedicated `route_channel` (see its module docs) — a
+        // plain `rtnetlink::Handle` dispatches one request at a time
+        // regardless of client-side concurrency, so it isn't used here.
+        stream::iter(to_remove)
+            .map(|(prefix, gateway)| {
+                let message = observed_by_prefix.get(&prefix).cloned();
+                async move {
+                    if let Some(message) = message {
+                        self.route_channel.del(message).await.inspect_err(|e| {
+                            warn!(%prefix, %gateway, table_id, error = %e, "failed to remove route");
+                        })?;
+                        info!(%prefix, %gateway, table_id, "removed route");
+                    }
+                    Ok::<(), DriverError>(())
+                }
+            })
+            .buffer_unordered(MAX_CONCURRENT_ROUTE_OPS)
+            .try_for_each(|()| async { Ok(()) })
+            .await?;
+
+        stream::iter(to_add)
+            .map(|(prefix, gateway)| {
+                let source = best_routes.get(&prefix).map(|e| e.source);
+                async move { self.add_route(table_id, prefix, gateway, source).await }
+            })
+            .buffer_unordered(MAX_CONCURRENT_ROUTE_OPS)
+            .try_for_each(|()| async { Ok(()) })
+            .await?;
         Ok(())
     }
 }
