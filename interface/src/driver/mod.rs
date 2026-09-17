@@ -19,7 +19,7 @@ use thiserror::Error;
 pub use linux::LinuxInterfaceDriver;
 pub use noop::NoopInterfaceDriver;
 
-use crate::state::InterfaceState;
+use crate::state::{BroadcastDomainState, InterfaceState};
 
 #[derive(Debug, Error)]
 pub enum DriverError {
@@ -62,14 +62,21 @@ pub trait InterfaceDriver: Send + Sync {
     /// recompute what that device is.
     async fn remove(&self, name: &str) -> Result<(), DriverError>;
 
-    /// Ensures a bridge device exists for `domain` (a `BroadcastDomain`
-    /// name), creating it if missing. Called once per configured
-    /// `BroadcastDomain` on every resync, independent of whether any
-    /// interface currently references it — same "create eagerly from
-    /// config" pattern as `nos-ribd`'s VRF-per-`RoutingTable`. Must
-    /// complete (or at least be attempted) before any interface's `apply`
-    /// in the same resync, since `apply` enslaves into this bridge by name.
-    async fn ensure_broadcast_domain(&self, domain: &str) -> Result<(), DriverError>;
+    /// Ensures a bridge device exists for `desired.name` (a `BroadcastDomain`
+    /// name), creating it if missing, then reconciles `desired.addresses`
+    /// and (if `desired.routing_table` is set) VRF enslavement onto the
+    /// bridge device itself — the same two-step reconciliation `apply` does
+    /// for a physical/loopback link, making the bridge an SVI (switch
+    /// virtual interface). Called once per configured `BroadcastDomain` on
+    /// every resync, independent of whether any interface currently
+    /// references it — same "create eagerly from config" pattern as
+    /// `nos-ribd`'s VRF-per-`RoutingTable`. Must complete (or at least be
+    /// attempted) before any interface's `apply` in the same resync, since
+    /// `apply` enslaves into this bridge by name.
+    async fn ensure_broadcast_domain(
+        &self,
+        desired: &BroadcastDomainState,
+    ) -> Result<(), DriverError>;
 
     /// Called once per resync for every `BroadcastDomain` name present in
     /// the previous resync but absent from the current one (removed from

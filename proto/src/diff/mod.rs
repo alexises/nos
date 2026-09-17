@@ -10,6 +10,7 @@ pub mod prefix_list;
 pub mod routing_table;
 pub mod static_route;
 pub mod static_routing_instance;
+pub mod subinterface;
 pub mod switching_profile;
 
 use serde::{Deserialize, Serialize};

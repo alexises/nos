@@ -268,8 +268,8 @@ async fn resolve_source_address(
     own_routing_table: Option<&str>,
     source: &SourceAddress,
 ) -> Vec<IpAddr> {
-    let (interface, label) = match source {
-        SourceAddress::Interface { interface, label } => (interface.clone(), label.clone()),
+    let (interface, label, is_loopback) = match source {
+        SourceAddress::Interface { interface, label } => (interface.clone(), label.clone(), false),
         SourceAddress::Loopback { label } => {
             let Some(table) = own_routing_table else {
                 warn!(
@@ -278,7 +278,7 @@ async fn resolve_source_address(
                 );
                 return Vec::new();
             };
-            (format!("{LOOPBACK_PREFIX}{table}"), label.clone())
+            (format!("{LOOPBACK_PREFIX}{table}"), label.clone(), true)
         }
     };
     let Some(socket) =
@@ -289,8 +289,21 @@ async fn resolve_source_address(
     let Some(status) = interface_client::get_interface(&socket, &interface).await else {
         return Vec::new();
     };
-    status
-        .addresses
+    // A loopback interface still carries its addresses flat (`status.addresses`,
+    // unchanged); every other interface's addresses live under its tag-0
+    // (untagged/native) subinterface instead — see
+    // `schema::valid_addressing_split`.
+    let addresses = if is_loopback {
+        status.addresses
+    } else {
+        status
+            .subinterfaces
+            .into_iter()
+            .find(|s| s.tag == 0)
+            .map(|s| s.addresses)
+            .unwrap_or_default()
+    };
+    addresses
         .into_iter()
         .filter(|a| label.is_none() || a.label == label)
         .map(|a| a.address.addr())

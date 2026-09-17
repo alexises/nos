@@ -195,6 +195,14 @@ pub enum SetTarget {
         cidr: IpNet,
         range: Option<(u8, u8)>,
     },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    BroadcastDomainAddress {
+        name: String,
+        address: IpNet,
+        label: Option<String>,
+    },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    BroadcastDomainRoutingTable { name: String, routing_table: String },
     /// Fully-qualified — works from anywhere in configuration mode. Upserts
     /// by `broadcast_domain` within the named switching profile.
     SwitchingProfileMember {
@@ -367,6 +375,15 @@ pub enum DeleteTarget {
         range: Option<(u8, u8)>,
     },
     BroadcastDomain {
+        name: String,
+    },
+    /// `delete broadcast domain <name> address <cidr>` — qualified.
+    BroadcastDomainAddress {
+        name: String,
+        address: IpNet,
+    },
+    /// `delete broadcast domain <name> routing-table` — qualified clear.
+    BroadcastDomainRoutingTable {
         name: String,
     },
     SwitchingProfile {
@@ -1065,6 +1082,30 @@ impl Command {
                     switching_profile: (*profile).to_string(),
                 })
             }
+            ["set", "broadcast", "domain", name, "address", addr] => match addr.parse::<IpNet>() {
+                Ok(address) => Command::Set(SetTarget::BroadcastDomainAddress {
+                    name: (*name).to_string(),
+                    address,
+                    label: None,
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["set", "broadcast", "domain", name, "address", addr, "label", label] => {
+                match addr.parse::<IpNet>() {
+                    Ok(address) => Command::Set(SetTarget::BroadcastDomainAddress {
+                        name: (*name).to_string(),
+                        address,
+                        label: Some((*label).to_string()),
+                    }),
+                    Err(_) => Command::Unknown(trimmed.to_string()),
+                }
+            }
+            ["set", "broadcast", "domain", name, "routing-table", table] => {
+                Command::Set(SetTarget::BroadcastDomainRoutingTable {
+                    name: (*name).to_string(),
+                    routing_table: (*table).to_string(),
+                })
+            }
             ["set", "community-alias", name, "value", value] => {
                 Command::Set(SetTarget::CommunityAliasValue {
                     name: (*name).to_string(),
@@ -1334,6 +1375,20 @@ impl Command {
             }
             ["delete", "broadcast", "domain", name] => {
                 Command::Delete(DeleteTarget::BroadcastDomain {
+                    name: (*name).to_string(),
+                })
+            }
+            ["delete", "broadcast", "domain", name, "address", addr] => {
+                match addr.parse::<IpNet>() {
+                    Ok(address) => Command::Delete(DeleteTarget::BroadcastDomainAddress {
+                        name: (*name).to_string(),
+                        address,
+                    }),
+                    Err(_) => Command::Unknown(trimmed.to_string()),
+                }
+            }
+            ["delete", "broadcast", "domain", name, "routing-table"] => {
+                Command::Delete(DeleteTarget::BroadcastDomainRoutingTable {
                     name: (*name).to_string(),
                 })
             }

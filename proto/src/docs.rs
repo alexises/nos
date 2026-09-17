@@ -130,6 +130,14 @@ pub enum Topic {
     EnsureBroadcastDomain,
     /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::Delete)`
     DeleteBroadcastDomain,
+    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::AddAddress)`
+    AddBroadcastDomainAddress,
+    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::RemoveAddress)`
+    RemoveBroadcastDomainAddress,
+    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetRoutingTable)`
+    SetBroadcastDomainRoutingTable,
+    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::ClearRoutingTable)`
+    ClearBroadcastDomainRoutingTable,
     /// `ConfigOp::SwitchingProfile(SwitchingProfileOp::Ensure)`
     EnsureSwitchingProfile,
     /// `ConfigOp::SwitchingProfile(SwitchingProfileOp::AddMember)`

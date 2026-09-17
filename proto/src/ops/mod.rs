@@ -10,6 +10,7 @@ pub mod prefix_list;
 pub mod routing_table;
 pub mod static_route;
 pub mod static_routing_instance;
+pub mod subinterface;
 pub mod switching_profile;
 
 pub use bgp_instance::BgpInstanceOp;
@@ -24,6 +25,7 @@ pub use prefix_list::PrefixListOp;
 pub use routing_table::RoutingTableOp;
 pub use static_route::StaticRouteOp;
 pub use static_routing_instance::StaticRoutingInstanceOp;
+pub use subinterface::SubinterfaceOp;
 pub use switching_profile::SwitchingProfileOp;
 
 use std::net::IpAddr;
@@ -58,6 +60,7 @@ pub enum ConfigOp {
     PrefixList(PrefixListOp),
     BroadcastDomain(BroadcastDomainOp),
     SwitchingProfile(SwitchingProfileOp),
+    Subinterface(SubinterfaceOp),
 }
 
 impl ConfigOp {
@@ -83,6 +86,7 @@ impl ConfigOp {
             ConfigOp::PrefixList(op) => op.apply(config),
             ConfigOp::BroadcastDomain(op) => op.apply(config),
             ConfigOp::SwitchingProfile(op) => op.apply(config),
+            ConfigOp::Subinterface(op) => op.apply(config),
         }
     }
 }
@@ -131,12 +135,22 @@ pub enum OpError {
     },
     #[error("broadcast domain '{0}' not found")]
     BroadcastDomainNotFound(String),
+    #[error("address '{address}' not found on broadcast domain '{name}'")]
+    BroadcastDomainAddressNotFound { name: String, address: IpNet },
     #[error("switching profile '{0}' not found")]
     SwitchingProfileNotFound(String),
     #[error("broadcast domain '{broadcast_domain}' not found in switching profile '{name}'")]
     SwitchingProfileMemberNotFound {
         name: String,
         broadcast_domain: String,
+    },
+    #[error("subinterface with tag '{tag}' not found on interface '{interface}'")]
+    SubinterfaceNotFound { interface: String, tag: u16 },
+    #[error("address '{address}' not found on subinterface '{interface}.{tag}'")]
+    SubinterfaceAddressNotFound {
+        interface: String,
+        tag: u16,
+        address: IpNet,
     },
 }
 

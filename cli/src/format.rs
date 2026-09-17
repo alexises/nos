@@ -4,8 +4,8 @@ use nos_proto::{
     BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
     Interface, InterfaceAddress, InterfaceStatus, LogEntry, LogLevel, NextHopMode, PeerSummary,
     PolicyDefinition, PrefixList, PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable,
-    SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance, SwitchingProfile,
-    TransactionSnapshot, VlanTag,
+    SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface,
+    SubinterfaceStatus, SwitchingProfile, TransactionSnapshot, VlanTag,
 };
 
 use crate::session::Path;
@@ -146,7 +146,32 @@ fn format_address(addr: &InterfaceAddress) -> String {
     }
 }
 
-/// Render one interface's config as human-readable text.
+/// Render one subinterface as human-readable text — `tag 0` is the
+/// untagged/native case (what used to be a physical interface's own flat
+/// `addresses`/`routing_table`).
+pub fn render_subinterface(sub: &Subinterface) -> String {
+    let addresses = if sub.addresses.is_empty() {
+        "none".to_string()
+    } else {
+        sub.addresses
+            .iter()
+            .map(format_address)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let routing_table = sub.routing_table.as_deref().unwrap_or("unset");
+    format!(
+        "subinterface {}: address [{addresses}], routing-table {routing_table}",
+        sub.tag
+    )
+}
+
+/// Render one interface's config as human-readable text, including any
+/// (physical-interface-only) subinterfaces, each indented one level under
+/// the interface line — mirrors `render_bgp_instance`'s nested peer-groups.
+/// `iface.addresses`/`routing_table` are meaningful only for a loopback
+/// interface (unchanged flat rendering); every other interface's L3 config
+/// lives entirely in the nested subinterface lines instead.
 pub fn render_interface(iface: &Interface) -> String {
     let addresses = if iface.addresses.is_empty() {
         "none".to_string()
@@ -160,9 +185,33 @@ pub fn render_interface(iface: &Interface) -> String {
     };
     let routing_table = iface.routing_table.as_deref().unwrap_or("unset");
     let switching_profile = iface.switching_profile.as_deref().unwrap_or("unset");
-    format!(
+    let mut lines = vec![format!(
         "interface {}: address [{addresses}], routing-table {routing_table}, switching-profile {switching_profile}",
         iface.name
+    )];
+    for sub in &iface.subinterfaces {
+        lines.push(format!("  {}", render_subinterface(sub)));
+    }
+    lines.join("\n")
+}
+
+/// Render one subinterface's daemon-reported status — the wire twin of
+/// `render_subinterface`.
+pub fn render_subinterface_status(status: &SubinterfaceStatus) -> String {
+    let addresses = if status.addresses.is_empty() {
+        "none".to_string()
+    } else {
+        status
+            .addresses
+            .iter()
+            .map(format_address)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let routing_table = status.routing_table.as_deref().unwrap_or("unset");
+    format!(
+        "subinterface {}: address [{addresses}], routing-table {routing_table}",
+        status.tag
     )
 }
 
@@ -183,10 +232,14 @@ pub fn render_interface_status(status: &InterfaceStatus) -> String {
     };
     let routing_table = status.routing_table.as_deref().unwrap_or("unset");
     let switching_profile = status.switching_profile.as_deref().unwrap_or("unset");
-    format!(
+    let mut lines = vec![format!(
         "interface {}: address [{addresses}], routing-table {routing_table}, switching-profile {switching_profile}",
         status.name
-    )
+    )];
+    for sub in &status.subinterfaces {
+        lines.push(format!("  {}", render_subinterface_status(sub)));
+    }
+    lines.join("\n")
 }
 
 /// Render every interface's daemon-reported status, one per line — used for
@@ -463,6 +516,16 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
             .iter()
             .find(|i| &i.name == name)
             .map_or_else(|| format!("interface '{name}' not found"), render_interface),
+        Path::Subinterface { interface, tag } => snapshot
+            .config
+            .interfaces
+            .iter()
+            .find(|i| &i.name == interface)
+            .and_then(|i| i.subinterfaces.iter().find(|s| s.tag == *tag))
+            .map_or_else(
+                || format!("subinterface '{interface}.{tag}' not found"),
+                render_subinterface,
+            ),
         Path::PolicyDefinition(name) => snapshot
             .config
             .policy_definitions
@@ -584,9 +647,25 @@ pub fn render_prefix_list(list: &PrefixList) -> String {
     format!("prefix-list {}: entries [{entries}]", list.name)
 }
 
-/// Render one broadcast domain as human-readable text.
+/// Render one broadcast domain as human-readable text, including its own
+/// SVI (address/routing-table) config — mirrors `render_interface`'s flat
+/// loopback rendering, since a domain's bridge has the same flat L3 shape.
 pub fn render_broadcast_domain(domain: &BroadcastDomain) -> String {
-    format!("broadcast-domain {}", domain.name)
+    let addresses = if domain.addresses.is_empty() {
+        "none".to_string()
+    } else {
+        domain
+            .addresses
+            .iter()
+            .map(format_address)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let routing_table = domain.routing_table.as_deref().unwrap_or("unset");
+    format!(
+        "broadcast-domain {}: address [{addresses}], routing-table {routing_table}",
+        domain.name
+    )
 }
 
 /// Render one `VlanTag` the same way for every caller.
@@ -832,6 +911,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn render_interface_with_subinterfaces() {
+        let iface = Interface {
+            name: "eth0".to_string(),
+            addresses: Vec::new(),
+            routing_table: None,
+            switching_profile: None,
+            subinterfaces: vec![
+                Subinterface {
+                    tag: 0,
+                    addresses: vec![InterfaceAddress {
+                        address: "10.0.0.1/24".parse().unwrap(),
+                        label: None,
+                    }],
+                    routing_table: Some("rt1".to_string()),
+                },
+                Subinterface {
+                    tag: 100,
+                    addresses: Vec::new(),
+                    routing_table: None,
+                },
+            ],
+        };
+        assert_eq!(
+            render_interface(&iface),
+            "interface eth0: address [none], routing-table unset, switching-profile unset\n\
+             \x20 subinterface 0: address [10.0.0.1/24], routing-table rt1\n\
+             \x20 subinterface 100: address [none], routing-table unset"
+        );
+    }
+
+    /// A loopback interface's flat `addresses`/`routing_table` still render
+    /// on the interface's own line, unaffected by the addressing split — it
+    /// never has `subinterfaces`, so no nested lines are added.
+    #[test]
+    fn render_loopback_interface_stays_flat() {
+        let iface = Interface {
+            name: "loopback-rt1".to_string(),
+            addresses: vec![InterfaceAddress {
+                address: "10.0.0.1/32".parse().unwrap(),
+                label: None,
+            }],
+            routing_table: Some("rt1".to_string()),
+            switching_profile: None,
+            subinterfaces: Vec::new(),
+        };
+        assert_eq!(
+            render_interface(&iface),
+            "interface loopback-rt1: address [10.0.0.1/32], routing-table rt1, switching-profile unset"
+        );
+    }
+
     fn snapshot(dirty: bool) -> TransactionSnapshot {
         TransactionSnapshot {
             name: "demo".to_string(),
@@ -876,6 +1007,45 @@ mod tests {
     fn render_transaction_at_bgp_instance_not_found() {
         let rendered = render_transaction(&snapshot(false), &Path::BgpInstance("r2".to_string()));
         assert_eq!(rendered, "bgp instance 'r2' not found");
+    }
+
+    #[test]
+    fn render_transaction_at_subinterface_found() {
+        let mut snap = snapshot(false);
+        snap.config.interfaces = vec![Interface {
+            name: "eth0".to_string(),
+            addresses: Vec::new(),
+            routing_table: None,
+            switching_profile: None,
+            subinterfaces: vec![Subinterface {
+                tag: 100,
+                addresses: Vec::new(),
+                routing_table: Some("rt1".to_string()),
+            }],
+        }];
+        let rendered = render_transaction(
+            &snap,
+            &Path::Subinterface {
+                interface: "eth0".to_string(),
+                tag: 100,
+            },
+        );
+        assert_eq!(
+            rendered,
+            "subinterface 100: address [none], routing-table rt1"
+        );
+    }
+
+    #[test]
+    fn render_transaction_at_subinterface_not_found() {
+        let rendered = render_transaction(
+            &snapshot(false),
+            &Path::Subinterface {
+                interface: "eth0".to_string(),
+                tag: 100,
+            },
+        );
+        assert_eq!(rendered, "subinterface 'eth0.100' not found");
     }
 
     fn field(label: &str, old: Option<&str>, new: Option<&str>) -> FieldDiff {

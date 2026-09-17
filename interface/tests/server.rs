@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
 use nos_interface::driver::NoopInterfaceDriver;
-use nos_interface::{server, InterfaceState, Interfaces};
+use nos_interface::{server, Interfaces};
 use nos_proto::{InterfaceAddress, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec};
 use tokio::net::UnixStream;
 use tokio::sync::RwLock;
@@ -16,40 +16,29 @@ fn sample_address() -> InterfaceAddress {
 }
 
 async fn sample_interfaces() -> Interfaces {
-    let mut by_name = std::collections::HashMap::new();
-    by_name.insert(
-        "eth0".to_string(),
-        InterfaceState {
-            name: "eth0".to_string(),
-            addresses: vec![sample_address()],
-            routing_table: Some("rt1".to_string()),
-            switching_profile: None,
-            switching_profile_members: vec![],
-        },
-    );
-    by_name.insert(
-        "eth1".to_string(),
-        InterfaceState {
-            name: "eth1".to_string(),
-            addresses: vec![],
-            routing_table: None,
-            switching_profile: None,
-            switching_profile_members: vec![],
-        },
-    );
     // `Interfaces` has no public constructor from a map, so build it through
     // the same path production code uses.
     let cfg = nos_proto::Config {
-        interfaces: by_name
-            .values()
-            .cloned()
-            .map(|s| nos_proto::Interface {
-                name: s.name,
-                addresses: s.addresses,
-                routing_table: s.routing_table,
+        interfaces: vec![
+            nos_proto::Interface {
+                name: "eth0".to_string(),
+                addresses: vec![],
+                routing_table: None,
                 switching_profile: None,
-            })
-            .collect(),
+                subinterfaces: vec![nos_proto::Subinterface {
+                    tag: 0,
+                    addresses: vec![sample_address()],
+                    routing_table: Some("rt1".to_string()),
+                }],
+            },
+            nos_proto::Interface {
+                name: "eth1".to_string(),
+                addresses: vec![],
+                routing_table: None,
+                switching_profile: None,
+                subinterfaces: vec![],
+            },
+        ],
         ..Default::default()
     };
     nos_interface::state::build_from_config(&cfg, &NoopInterfaceDriver, &Interfaces::new()).await
@@ -106,16 +95,16 @@ async fn get_interface_returns_matching_status() {
 
     let InterfaceEvent::Interface(InterfaceStatus {
         name,
-        addresses,
-        routing_table,
+        subinterfaces,
         ..
     }) = event
     else {
         panic!("expected Interface, got {event:?}");
     };
     assert_eq!(name, "eth0");
-    assert_eq!(addresses, vec![sample_address()]);
-    assert_eq!(routing_table.as_deref(), Some("rt1"));
+    let tag0 = subinterfaces.iter().find(|s| s.tag == 0).unwrap();
+    assert_eq!(tag0.addresses, vec![sample_address()]);
+    assert_eq!(tag0.routing_table.as_deref(), Some("rt1"));
 }
 
 #[tokio::test]

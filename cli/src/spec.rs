@@ -57,9 +57,18 @@ pub enum Availability {
     ConfigurationRoutingTable,
     ConfigurationStaticRoutingInstance,
     ConfigurationInterface,
+    /// `Path::Interface`, `Path::Subinterface`, or `Path::BroadcastDomain` —
+    /// for address/routing-table commands, valid on a loopback interface
+    /// (flat L3 config), a physical interface's subinterface (per-tag L3
+    /// config), or a broadcast domain's own SVI (its bridge device's flat L3
+    /// config). Distinct from `ConfigurationInterface`, which
+    /// switching-profile commands still use since that field stays
+    /// interface-only.
+    ConfigurationInterfaceOrSubinterface,
     ConfigurationSwitchingProfile,
     /// Any non-root navigation position — `BgpInstance`, `BgpPeerGroup`,
-    /// `RoutingTable`, `StaticRoutingInstance`, or `Interface`.
+    /// `RoutingTable`, `StaticRoutingInstance`, `Interface`, or
+    /// `Subinterface`.
     ConfigurationNested,
 }
 
@@ -103,6 +112,13 @@ pub fn availability_matches(availability: Availability, mode: &Mode) -> bool {
                 ..
             }
         ),
+        Availability::ConfigurationInterfaceOrSubinterface => matches!(
+            mode,
+            Mode::Configuration {
+                path: Path::Interface(_) | Path::Subinterface { .. } | Path::BroadcastDomain(_),
+                ..
+            }
+        ),
         Availability::ConfigurationSwitchingProfile => matches!(
             mode,
             Mode::Configuration {
@@ -117,7 +133,8 @@ pub fn availability_matches(availability: Availability, mode: &Mode) -> bool {
                     | Path::BgpPeerGroup { .. }
                     | Path::RoutingTable(_)
                     | Path::StaticRoutingInstance(_)
-                    | Path::Interface(_),
+                    | Path::Interface(_)
+                    | Path::Subinterface { .. },
                 ..
             }
         ),
@@ -1520,7 +1537,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         ],
         usage: "set address <cidr>",
         doc: Doc::FromConfig(Topic::AddInterfaceAddress),
-        availability: Availability::ConfigurationInterface,
+        availability: Availability::ConfigurationInterfaceOrSubinterface,
     },
     CommandSpec {
         tokens: &[
@@ -1546,7 +1563,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         ],
         usage: "set address <cidr> label <label>",
         doc: Doc::FromConfig(Topic::AddInterfaceAddress),
-        availability: Availability::ConfigurationInterface,
+        availability: Availability::ConfigurationInterfaceOrSubinterface,
     },
     CommandSpec {
         tokens: &[
@@ -1568,7 +1585,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         ],
         usage: "delete address <cidr>",
         doc: Doc::FromConfig(Topic::RemoveInterfaceAddress),
-        availability: Availability::ConfigurationInterface,
+        availability: Availability::ConfigurationInterfaceOrSubinterface,
     },
     CommandSpec {
         tokens: &[
@@ -1590,7 +1607,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         ],
         usage: "set routing-table <table>",
         doc: Doc::FromConfig(Topic::SetInterfaceRoutingTable),
-        availability: Availability::ConfigurationInterface,
+        availability: Availability::ConfigurationInterfaceOrSubinterface,
     },
     CommandSpec {
         tokens: &[
@@ -1607,7 +1624,73 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         tokens: &[Token::Literal("delete"), Token::Literal("routing-table")],
         usage: "delete routing-table",
         doc: Doc::FromConfig(Topic::ClearInterfaceRoutingTable),
-        availability: Availability::ConfigurationInterface,
+        availability: Availability::ConfigurationInterfaceOrSubinterface,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("broadcast"),
+            Token::Literal("domain"),
+            Token::Arg(ArgKind::BroadcastDomainName),
+            Token::Literal("address"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set broadcast domain <name> address <cidr>",
+        doc: Doc::FromConfig(Topic::AddBroadcastDomainAddress),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("broadcast"),
+            Token::Literal("domain"),
+            Token::Arg(ArgKind::BroadcastDomainName),
+            Token::Literal("address"),
+            Token::Arg(ArgKind::Plain),
+            Token::Literal("label"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set broadcast domain <name> address <cidr> label <label>",
+        doc: Doc::FromConfig(Topic::AddBroadcastDomainAddress),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("broadcast"),
+            Token::Literal("domain"),
+            Token::Arg(ArgKind::BroadcastDomainName),
+            Token::Literal("address"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "delete broadcast domain <name> address <cidr>",
+        doc: Doc::FromConfig(Topic::RemoveBroadcastDomainAddress),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("broadcast"),
+            Token::Literal("domain"),
+            Token::Arg(ArgKind::BroadcastDomainName),
+            Token::Literal("routing-table"),
+            Token::Arg(ArgKind::RoutingTableName),
+        ],
+        usage: "set broadcast domain <name> routing-table <table>",
+        doc: Doc::FromConfig(Topic::SetBroadcastDomainRoutingTable),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("broadcast"),
+            Token::Literal("domain"),
+            Token::Arg(ArgKind::BroadcastDomainName),
+            Token::Literal("routing-table"),
+        ],
+        usage: "delete broadcast domain <name> routing-table",
+        doc: Doc::FromConfig(Topic::ClearBroadcastDomainRoutingTable),
+        availability: Availability::Configuration,
     },
     CommandSpec {
         tokens: &[
@@ -1780,6 +1863,36 @@ mod tests {
         assert!(availability_matches(
             Availability::ConfigurationNested,
             &config_mode(peer_group_path())
+        ));
+    }
+
+    #[test]
+    fn configuration_nested_matches_subinterface() {
+        assert!(availability_matches(
+            Availability::ConfigurationNested,
+            &config_mode(Path::Subinterface {
+                interface: "eth0".to_string(),
+                tag: 100,
+            })
+        ));
+    }
+
+    #[test]
+    fn configuration_interface_or_subinterface_matches_both_but_not_root() {
+        assert!(!availability_matches(
+            Availability::ConfigurationInterfaceOrSubinterface,
+            &config_mode(Path::Root)
+        ));
+        assert!(availability_matches(
+            Availability::ConfigurationInterfaceOrSubinterface,
+            &config_mode(Path::Interface("eth0".to_string()))
+        ));
+        assert!(availability_matches(
+            Availability::ConfigurationInterfaceOrSubinterface,
+            &config_mode(Path::Subinterface {
+                interface: "eth0".to_string(),
+                tag: 100,
+            })
         ));
     }
 

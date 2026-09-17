@@ -21,7 +21,7 @@ use nos_proto::{
     AddressFamily, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, ConfigOp, Event,
     InterfaceOp, IpcCodec, PolicyDefinitionOp, Redistribute, RedistributeSource,
     RedistributeTarget, Request, RoutingTableOp, SourceAddress, StaticRouteOp,
-    StaticRoutingInstanceOp, SwitchingProfileOp, TransactionBase, VlanTag,
+    StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase, VlanTag,
 };
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -36,6 +36,18 @@ struct Args {
     interface: String,
     #[arg(long)]
     address: IpNet,
+
+    /// Which of `--interface`'s subinterfaces `--address`/`--routing-table`
+    /// target — `0` (default) for the untagged/native subinterface,
+    /// matching a bare `set interface <name> address ...` in nos-cli.
+    /// `1..=4094` targets a real 802.1q VLAN subinterface instead.
+    #[arg(long, default_value_t = 0)]
+    subinterface_tag: u16,
+
+    /// If set, deletes `--interface`'s `--subinterface-tag` subinterface
+    /// instead of setting its address/routing-table.
+    #[arg(long)]
+    delete_subinterface: bool,
 
     #[arg(long, default_value = "rt1")]
     routing_table: String,
@@ -142,6 +154,24 @@ struct Args {
     #[arg(long)]
     delete_loopback: bool,
 
+    /// Which broadcast domain `--broadcast-domain-svi-address`/
+    /// `--delete-broadcast-domain-svi` target.
+    #[arg(long, default_value = "bd-svi")]
+    broadcast_domain: String,
+
+    /// If set, ensures `--broadcast-domain` and adds this address to it,
+    /// associating it with `--routing-table` (its VRF) — making the
+    /// domain's own bridge device an SVI (switch virtual interface).
+    /// Mutually exclusive with `--delete-broadcast-domain-svi`.
+    #[arg(long)]
+    broadcast_domain_svi_address: Option<IpNet>,
+
+    /// If set, deletes `--broadcast-domain` outright instead of
+    /// creating/updating its SVI. Mutually exclusive with
+    /// `--broadcast-domain-svi-address`.
+    #[arg(long)]
+    delete_broadcast_domain_svi: bool,
+
     /// If set, points `--peer-group`'s source-address at this named
     /// interface (`BgpPeerGroupOp::SetSourceAddress` with
     /// `SourceAddress::Interface`). Mutually exclusive with
@@ -212,19 +242,28 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    let mut ops = vec![
-        ConfigOp::Interface(InterfaceOp::Ensure {
-            name: args.interface.clone(),
-        }),
-        ConfigOp::Interface(InterfaceOp::AddAddress {
-            name: args.interface.clone(),
+    let mut ops = vec![ConfigOp::Interface(InterfaceOp::Ensure {
+        name: args.interface.clone(),
+    })];
+    if args.delete_subinterface {
+        ops.push(ConfigOp::Subinterface(SubinterfaceOp::Delete {
+            interface: args.interface.clone(),
+            tag: args.subinterface_tag,
+        }));
+    } else {
+        ops.push(ConfigOp::Subinterface(SubinterfaceOp::AddAddress {
+            interface: args.interface.clone(),
+            tag: args.subinterface_tag,
             address: args.address,
             label: None,
-        }),
-        ConfigOp::Interface(InterfaceOp::SetRoutingTable {
-            name: args.interface.clone(),
+        }));
+        ops.push(ConfigOp::Subinterface(SubinterfaceOp::SetRoutingTable {
+            interface: args.interface.clone(),
+            tag: args.subinterface_tag,
             routing_table: args.routing_table.clone(),
-        }),
+        }));
+    }
+    ops.extend([
         ConfigOp::RoutingTable(RoutingTableOp::Ensure {
             name: args.routing_table.clone(),
         }),
@@ -279,7 +318,7 @@ async fn main() -> anyhow::Result<()> {
             remote_address: args.peer,
             peer_group: args.peer_group.clone(),
         }),
-    ];
+    ]);
 
     if let Some(subnet) = args.static_route {
         let gateway = args
@@ -381,6 +420,34 @@ async fn main() -> anyhow::Result<()> {
     if args.delete_loopback {
         ops.push(ConfigOp::Interface(InterfaceOp::Delete {
             name: loopback_name,
+        }));
+    }
+
+    if args.broadcast_domain_svi_address.is_some() && args.delete_broadcast_domain_svi {
+        bail!(
+            "--broadcast-domain-svi-address and --delete-broadcast-domain-svi are mutually \
+             exclusive"
+        );
+    }
+    if let Some(address) = args.broadcast_domain_svi_address {
+        ops.push(ConfigOp::BroadcastDomain(BroadcastDomainOp::Ensure {
+            name: args.broadcast_domain.clone(),
+        }));
+        ops.push(ConfigOp::BroadcastDomain(BroadcastDomainOp::AddAddress {
+            name: args.broadcast_domain.clone(),
+            address,
+            label: None,
+        }));
+        ops.push(ConfigOp::BroadcastDomain(
+            BroadcastDomainOp::SetRoutingTable {
+                name: args.broadcast_domain.clone(),
+                routing_table: args.routing_table.clone(),
+            },
+        ));
+    }
+    if args.delete_broadcast_domain_svi {
+        ops.push(ConfigOp::BroadcastDomain(BroadcastDomainOp::Delete {
+            name: args.broadcast_domain.clone(),
         }));
     }
 

@@ -21,7 +21,9 @@ pub use bgp_peer_group::{
 pub use broadcast_domain::BroadcastDomain;
 pub use community_alias::CommunityAlias;
 pub use community_group::CommunityGroup;
-pub use interface::{loopback_table_name, Interface, InterfaceAddress, LOOPBACK_PREFIX};
+pub use interface::{
+    loopback_table_name, Interface, InterfaceAddress, Subinterface, LOOPBACK_PREFIX,
+};
 pub use policy_definition::PolicyDefinition;
 pub use prefix_list::{PrefixList, PrefixListEntry};
 pub use routing_table::{Redistribute, RedistributeSource, RedistributeTarget, RoutingTable};
@@ -54,7 +56,7 @@ pub struct Config {
 
     #[garde(
         dive,
-        custom(|interfaces, ctx: &Config| interface::valid_routing_table_and_switching_profile(interfaces, ctx))
+        custom(|interfaces, ctx: &Config| interface::valid_interfaces(interfaces, ctx))
     )]
     pub interfaces: Vec<Interface>,
 

@@ -224,38 +224,47 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Create an interface in the transaction if it doesn't already exist.",
             "Adds a new interface with the given name to the transaction's in-progress config \
              if none exists with that name yet; if one already exists, this is a no-op. Does \
-             not itself set any addresses or a routing table.",
+             not itself set any addresses or a routing table. For a physical (non-loopback) \
+             interface, L3 config lives on a subinterface addressed as '<name>.<tag>' — '.0' \
+             for the untagged/native case, '.1'-'.4094' for a real 802.1q VLAN — rather than \
+             directly on the interface; a loopback interface (name 'loopback-<table>') is the \
+             one exception and keeps its addresses/routing-table flat, unchanged.",
         ),
         Topic::AddInterfaceAddress => (
             "Add an IP address to an interface.",
-            "Adds an address to the interface's address list if it isn't already present — a \
-             no-op if it is. An interface may carry any number of addresses, including a mix \
-             of IPv4 and IPv6; a given address must not repeat on the same interface, checked \
-             at commit time.",
+            "Adds an address to an interface's (or, for a physical interface, a subinterface's \
+             — see 'edit interface') address list if it isn't already present — a no-op if it \
+             is. Any number of addresses may be carried, including a mix of IPv4 and IPv6; a \
+             given address must not repeat on the same interface/subinterface, checked at \
+             commit time. Addressing a bare non-loopback interface name (no '.tag' suffix) \
+             implicitly targets its tag-0 (untagged/native) subinterface.",
         ),
         Topic::RemoveInterfaceAddress => (
             "Remove an IP address from an interface.",
-            "Removes an address from the interface's address list in the transaction's \
-             in-progress config.",
+            "Removes an address from an interface's (or subinterface's) address list in the \
+             transaction's in-progress config.",
         ),
         Topic::SetInterfaceRoutingTable => (
             "Associate a routing table with an interface.",
-            "Points an interface at a routing table by name — the routing table doubles as \
-             the interface's VRF assignment. The routing table must exist, checked at commit \
-             time; unlike a routing table's own bgp-instance/static-routing-instance \
-             associations, more than one interface may be associated with the same routing \
-             table.",
+            "Points an interface — or, for a physical interface, one of its subinterfaces — at \
+             a routing table by name, which doubles as its VRF assignment. The routing table \
+             must exist, checked at commit time; unlike a routing table's own \
+             bgp-instance/static-routing-instance associations, more than one \
+             interface/subinterface may be associated with the same routing table. Addressing \
+             a bare non-loopback interface name (no '.tag' suffix) implicitly targets its \
+             tag-0 (untagged/native) subinterface.",
         ),
         Topic::ClearInterfaceRoutingTable => (
             "Remove an interface's routing table association.",
-            "Unsets the routing-table field on an interface, reverting to no explicit \
-             association.",
+            "Unsets the routing-table field on an interface (or subinterface), reverting to no \
+             explicit association.",
         ),
         Topic::DeleteInterface => (
             "Delete an interface from the transaction.",
-            "Removes an interface and all of its addresses from the transaction's in-progress \
-             config. This only clears the interface's own configuration — it does not delete \
-             the routing table it referenced.",
+            "Removes an interface and all of its addresses/subinterfaces from the \
+             transaction's in-progress config, or — when the name carries a '.tag' suffix — \
+             just that one subinterface. This only clears the interface's own configuration — \
+             it does not delete the routing table it referenced.",
         ),
         Topic::SetBgpPeerGroupHoldTime => (
             "Set a peer-group's BGP hold-time.",
@@ -397,14 +406,42 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Create a broadcast domain in the transaction if it doesn't already exist.",
             "Adds a new broadcast domain with the given name to the transaction's in-progress \
              config if none exists with that name yet; if one already exists, this is a \
-             no-op. A broadcast domain carries no fields beyond its name — only a switching \
-             profile's members reference it.",
+             no-op. Does not itself set any addresses or a routing table — a switching \
+             profile's members reference the domain for L2 membership, while its own \
+             addresses/routing-table (set separately) make its bridge device an SVI (switch \
+             virtual interface), a routed L3 attachment point for the domain as a whole.",
         ),
         Topic::DeleteBroadcastDomain => (
             "Delete a broadcast domain from the transaction.",
-            "Removes a broadcast domain from the transaction's in-progress config. Any \
-             switching profile still referencing it becomes invalid — checked at commit time, \
-             not when the broadcast domain is deleted.",
+            "Removes a broadcast domain, along with any addresses/routing-table association it \
+             carries, from the transaction's in-progress config. Any switching profile still \
+             referencing it becomes invalid — checked at commit time, not when the broadcast \
+             domain is deleted.",
+        ),
+        Topic::AddBroadcastDomainAddress => (
+            "Add an IP address to a broadcast domain's SVI.",
+            "Adds an address to a broadcast domain's own address list if it isn't already \
+             present — a no-op if it is. Any number of addresses may be carried, including a \
+             mix of IPv4 and IPv6; a given address must not repeat on the same domain, checked \
+             at commit time. This addresses the domain's own bridge device (its SVI), not any \
+             interface enslaved into it as an L2 member.",
+        ),
+        Topic::RemoveBroadcastDomainAddress => (
+            "Remove an IP address from a broadcast domain's SVI.",
+            "Removes an address from a broadcast domain's address list in the transaction's \
+             in-progress config.",
+        ),
+        Topic::SetBroadcastDomainRoutingTable => (
+            "Associate a routing table with a broadcast domain's SVI.",
+            "Points a broadcast domain's own bridge device at a routing table by name, which \
+             doubles as its VRF assignment. The routing table must exist, checked at commit \
+             time; as with an interface, more than one broadcast domain (or interface) may be \
+             associated with the same routing table.",
+        ),
+        Topic::ClearBroadcastDomainRoutingTable => (
+            "Remove a broadcast domain's routing table association.",
+            "Unsets the routing-table field on a broadcast domain, reverting to no explicit \
+             association.",
         ),
         Topic::EnsureSwitchingProfile => (
             "Create a switching profile in the transaction if it doesn't already exist.",
@@ -433,12 +470,12 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         Topic::SetInterfaceSwitchingProfile => (
             "Associate a switching profile with an interface.",
             "Points an interface at a switching profile by name, trunking it into one or more \
-             broadcast domains. The switching profile must exist, checked at commit time. An \
-             interface's routing-table and a switching profile with an untagged member are \
-             mutually exclusive — the interface's physical link has only one master device — \
-             also checked at commit time; a switching profile whose members are all tagged \
-             (dot1q) never conflicts, since each is realized as its own independent \
-             sub-interface.",
+             broadcast domains. The switching profile must exist, checked at commit time. A \
+             tag claimed by one of the interface's own subinterfaces (an untagged/'.0' one \
+             claims tag 0, a '.<n>' one claims tag n) and a tag claimed by a switching-profile \
+             member (an untagged member claims tag 0, a dot1q member claims its tag) are \
+             mutually exclusive on the same interface — each tag's link has only one master \
+             device — checked at commit time.",
         ),
         Topic::ClearInterfaceSwitchingProfile => (
             "Remove an interface's switching-profile association.",
@@ -523,6 +560,10 @@ mod tests {
         Topic::ClearBgpInstanceClusterId,
         Topic::EnsureBroadcastDomain,
         Topic::DeleteBroadcastDomain,
+        Topic::AddBroadcastDomainAddress,
+        Topic::RemoveBroadcastDomainAddress,
+        Topic::SetBroadcastDomainRoutingTable,
+        Topic::ClearBroadcastDomainRoutingTable,
         Topic::EnsureSwitchingProfile,
         Topic::AddSwitchingProfileMember,
         Topic::RemoveSwitchingProfileMember,

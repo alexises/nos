@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec};
+use nos_proto::{InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec, SubinterfaceStatus};
 use tokio::net::UnixListener;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -80,5 +80,14 @@ fn to_status(iface: InterfaceState) -> InterfaceStatus {
         addresses: iface.addresses,
         routing_table: iface.routing_table,
         switching_profile: iface.switching_profile,
+        subinterfaces: iface
+            .subinterfaces
+            .into_iter()
+            .map(|s| SubinterfaceStatus {
+                tag: s.tag,
+                addresses: s.addresses,
+                routing_table: s.routing_table,
+            })
+            .collect(),
     }
 }

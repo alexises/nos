@@ -83,6 +83,11 @@ impl NosPrompt {
             } => format!("({transaction}/interface:{name})"),
             Mode::Configuration {
                 transaction,
+                path: session::Path::Subinterface { interface, tag },
+                ..
+            } => format!("({transaction}/interface:{interface}.{tag})"),
+            Mode::Configuration {
+                transaction,
                 path: session::Path::PolicyDefinition(name),
                 ..
             } => format!("({transaction}/policy-definition:{name})"),

@@ -62,6 +62,7 @@ impl InterfaceOp {
                         addresses: Vec::new(),
                         routing_table: None,
                         switching_profile: None,
+                        subinterfaces: Vec::new(),
                     });
                 }
                 Ok(())
@@ -149,6 +150,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             switching_profile: None,
+            subinterfaces: Vec::new(),
         }
     }
 
@@ -184,6 +186,7 @@ mod tests {
                 addresses: vec![iface_addr("10.0.0.1/24")],
                 routing_table: None,
                 switching_profile: None,
+                subinterfaces: Vec::new(),
             }],
             ..Default::default()
         };

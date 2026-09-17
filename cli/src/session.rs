@@ -1,9 +1,10 @@
 use std::net::IpAddr;
 
 use nos_proto::{
-    BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, CommunityAliasOp,
-    CommunityGroupOp, ConfigOp, InterfaceOp, PolicyDefinitionOp, PrefixListEntry, PrefixListOp,
-    RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp, SwitchingProfileOp, TransactionBase,
+    loopback_table_name, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp,
+    CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, PolicyDefinitionOp, PrefixListEntry,
+    PrefixListOp, RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp,
+    SwitchingProfileOp, TransactionBase,
 };
 
 use crate::command::{
@@ -15,16 +16,152 @@ use crate::command::{
 pub enum Path {
     Root,
     BgpInstance(String),
-    BgpPeerGroup { instance: String, group: String },
+    BgpPeerGroup {
+        instance: String,
+        group: String,
+    },
     RoutingTable(String),
     StaticRoutingInstance(String),
     Interface(String),
+    /// A physical interface's tag-scoped L3 attachment point, navigated to
+    /// by `edit interface <name>.<tag>` — see `split_subinterface`. Never
+    /// reached for a loopback interface, which keeps its flat L3 config
+    /// under plain `Path::Interface` navigation.
+    Subinterface {
+        interface: String,
+        tag: u16,
+    },
     PolicyDefinition(String),
     CommunityAlias(String),
     CommunityGroup(String),
     PrefixList(String),
     BroadcastDomain(String),
     SwitchingProfile(String),
+}
+
+/// Splits `"eth0.100"` into `("eth0", 100)` when the suffix after the LAST
+/// `.` parses as a valid subinterface tag (`0..=4094`); `None` otherwise, so
+/// a loopback name or any interface name with no numeric dot-suffix parses
+/// as a plain (non-dotted) interface reference. Mirrors
+/// `nos_proto::schema::interface`'s own tag bound.
+fn split_subinterface(name: &str) -> Option<(String, u16)> {
+    let (base, suffix) = name.rsplit_once('.')?;
+    let tag: u16 = suffix.parse().ok()?;
+    (tag <= 4094).then(|| (base.to_string(), tag))
+}
+
+/// Builds the `ConfigOp` for adding/upserting an address on `name`: a
+/// loopback interface keeps its flat `InterfaceOp::AddAddress`; a dotted
+/// non-loopback name (`"eth0.100"`) targets that tag's subinterface; a bare
+/// non-loopback name implicitly targets its tag-0 (untagged/native)
+/// subinterface, preserving the pre-subinterface "just works" UX.
+fn interface_add_address_op(name: &str, address: ipnet::IpNet, label: Option<String>) -> ConfigOp {
+    if let Some((interface, tag)) = split_subinterface(name) {
+        return ConfigOp::Subinterface(SubinterfaceOp::AddAddress {
+            interface,
+            tag,
+            address,
+            label,
+        });
+    }
+    match loopback_table_name(name) {
+        Some(_) => ConfigOp::Interface(InterfaceOp::AddAddress {
+            name: name.to_string(),
+            address,
+            label,
+        }),
+        None => ConfigOp::Subinterface(SubinterfaceOp::AddAddress {
+            interface: name.to_string(),
+            tag: 0,
+            address,
+            label,
+        }),
+    }
+}
+
+fn interface_remove_address_op(name: &str, address: ipnet::IpNet) -> ConfigOp {
+    if let Some((interface, tag)) = split_subinterface(name) {
+        return ConfigOp::Subinterface(SubinterfaceOp::RemoveAddress {
+            interface,
+            tag,
+            address,
+        });
+    }
+    match loopback_table_name(name) {
+        Some(_) => ConfigOp::Interface(InterfaceOp::RemoveAddress {
+            name: name.to_string(),
+            address,
+        }),
+        None => ConfigOp::Subinterface(SubinterfaceOp::RemoveAddress {
+            interface: name.to_string(),
+            tag: 0,
+            address,
+        }),
+    }
+}
+
+fn interface_set_routing_table_op(name: &str, routing_table: String) -> ConfigOp {
+    if let Some((interface, tag)) = split_subinterface(name) {
+        return ConfigOp::Subinterface(SubinterfaceOp::SetRoutingTable {
+            interface,
+            tag,
+            routing_table,
+        });
+    }
+    match loopback_table_name(name) {
+        Some(_) => ConfigOp::Interface(InterfaceOp::SetRoutingTable {
+            name: name.to_string(),
+            routing_table,
+        }),
+        None => ConfigOp::Subinterface(SubinterfaceOp::SetRoutingTable {
+            interface: name.to_string(),
+            tag: 0,
+            routing_table,
+        }),
+    }
+}
+
+fn interface_clear_routing_table_op(name: &str) -> ConfigOp {
+    if let Some((interface, tag)) = split_subinterface(name) {
+        return ConfigOp::Subinterface(SubinterfaceOp::ClearRoutingTable { interface, tag });
+    }
+    match loopback_table_name(name) {
+        Some(_) => ConfigOp::Interface(InterfaceOp::ClearRoutingTable {
+            name: name.to_string(),
+        }),
+        None => ConfigOp::Subinterface(SubinterfaceOp::ClearRoutingTable {
+            interface: name.to_string(),
+            tag: 0,
+        }),
+    }
+}
+
+/// Builds the `ConfigOp` (and its `Path`/error) for `edit interface <name>`:
+/// a dotted non-loopback name ensures the subinterface (cascading its
+/// parent interface); a bare name ensures the physical interface, unchanged.
+fn interface_ensure_op_and_path(name: String) -> (ConfigOp, Path) {
+    match split_subinterface(&name) {
+        Some((interface, tag)) => (
+            ConfigOp::Subinterface(SubinterfaceOp::Ensure {
+                interface: interface.clone(),
+                tag,
+            }),
+            Path::Subinterface { interface, tag },
+        ),
+        None => (
+            ConfigOp::Interface(InterfaceOp::Ensure { name: name.clone() }),
+            Path::Interface(name),
+        ),
+    }
+}
+
+/// Builds the `ConfigOp` for `delete interface <name>`: a dotted name
+/// deletes just that subinterface; a bare name deletes the whole interface.
+fn interface_delete_op(name: String) -> ConfigOp {
+    match split_subinterface(&name) {
+        Some((interface, tag)) => ConfigOp::Subinterface(SubinterfaceOp::Delete { interface, tag }),
+        None => ConfigOp::Interface(InterfaceOp::Delete { name }),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -244,6 +381,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -261,10 +399,13 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             }),
             after: PathAfter::To(Path::StaticRoutingInstance(name)),
         },
-        Command::Edit(EditTarget::Interface { name }) => Resolved::ApplyOp {
-            op: ConfigOp::Interface(InterfaceOp::Ensure { name: name.clone() }),
-            after: PathAfter::To(Path::Interface(name)),
-        },
+        Command::Edit(EditTarget::Interface { name }) => {
+            let (op, path) = interface_ensure_op_and_path(name);
+            Resolved::ApplyOp {
+                op,
+                after: PathAfter::To(path),
+            }
+        }
         Command::Edit(EditTarget::PolicyDefinition { name }) => Resolved::ApplyOp {
             op: ConfigOp::PolicyDefinition(PolicyDefinitionOp::Ensure { name: name.clone() }),
             after: PathAfter::To(Path::PolicyDefinition(name)),
@@ -297,6 +438,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
@@ -313,6 +455,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
@@ -333,6 +476,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
@@ -352,6 +496,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
@@ -381,6 +526,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -406,6 +552,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -442,6 +589,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -466,6 +614,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -498,6 +647,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -524,6 +674,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -557,6 +708,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -571,16 +723,25 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             address,
             label,
         }) => Resolved::ApplyOp {
-            op: ConfigOp::Interface(InterfaceOp::AddAddress {
-                name,
-                address,
-                label,
-            }),
+            op: interface_add_address_op(&name, address, label),
             after: PathAfter::Stay,
         },
         Command::Set(SetTarget::InterfaceAddressRelative { address, label }) => match path {
             Path::Interface(name) => Resolved::ApplyOp {
-                op: ConfigOp::Interface(InterfaceOp::AddAddress {
+                op: interface_add_address_op(name, address, label),
+                after: PathAfter::Stay,
+            },
+            Path::Subinterface { interface, tag } => Resolved::ApplyOp {
+                op: ConfigOp::Subinterface(SubinterfaceOp::AddAddress {
+                    interface: interface.clone(),
+                    tag: *tag,
+                    address,
+                    label,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::BroadcastDomain(name) => Resolved::ApplyOp {
+                op: ConfigOp::BroadcastDomain(BroadcastDomainOp::AddAddress {
                     name: name.clone(),
                     address,
                     label,
@@ -596,22 +757,30 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
-            | Path::BroadcastDomain(_)
             | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
         },
         Command::Set(SetTarget::InterfaceRoutingTable {
             name,
             routing_table,
         }) => Resolved::ApplyOp {
-            op: ConfigOp::Interface(InterfaceOp::SetRoutingTable {
-                name,
-                routing_table,
-            }),
+            op: interface_set_routing_table_op(&name, routing_table),
             after: PathAfter::Stay,
         },
         Command::Set(SetTarget::InterfaceRoutingTableRelative { routing_table }) => match path {
             Path::Interface(name) => Resolved::ApplyOp {
-                op: ConfigOp::Interface(InterfaceOp::SetRoutingTable {
+                op: interface_set_routing_table_op(name, routing_table),
+                after: PathAfter::Stay,
+            },
+            Path::Subinterface { interface, tag } => Resolved::ApplyOp {
+                op: ConfigOp::Subinterface(SubinterfaceOp::SetRoutingTable {
+                    interface: interface.clone(),
+                    tag: *tag,
+                    routing_table,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::BroadcastDomain(name) => Resolved::ApplyOp {
+                op: ConfigOp::BroadcastDomain(BroadcastDomainOp::SetRoutingTable {
                     name: name.clone(),
                     routing_table,
                 }),
@@ -626,8 +795,29 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
-            | Path::BroadcastDomain(_)
             | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+        },
+        Command::Set(SetTarget::BroadcastDomainAddress {
+            name,
+            address,
+            label,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::BroadcastDomain(BroadcastDomainOp::AddAddress {
+                name,
+                address,
+                label,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::BroadcastDomainRoutingTable {
+            name,
+            routing_table,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::BroadcastDomain(BroadcastDomainOp::SetRoutingTable {
+                name,
+                routing_table,
+            }),
+            after: PathAfter::Stay,
         },
         Command::Set(SetTarget::InterfaceSwitchingProfile {
             name,
@@ -653,6 +843,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 | Path::BgpPeerGroup { .. }
                 | Path::RoutingTable(_)
                 | Path::StaticRoutingInstance(_)
+                | Path::Subinterface { .. }
                 | Path::PolicyDefinition(_)
                 | Path::CommunityAlias(_)
                 | Path::CommunityGroup(_)
@@ -680,6 +871,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
@@ -704,6 +896,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::PrefixList(_)
@@ -731,6 +924,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -767,6 +961,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -803,6 +998,13 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             Path::Interface(name) => Resolved::ApplyOp {
                 op: ConfigOp::Interface(InterfaceOp::Delete { name: name.clone() }),
                 after: PathAfter::ToRoot,
+            },
+            Path::Subinterface { interface, tag } => Resolved::ApplyOp {
+                op: ConfigOp::Subinterface(SubinterfaceOp::Delete {
+                    interface: interface.clone(),
+                    tag: *tag,
+                }),
+                after: PathAfter::To(Path::Interface(interface.clone())),
             },
             Path::PolicyDefinition(name) => Resolved::ApplyOp {
                 op: ConfigOp::PolicyDefinition(PolicyDefinitionOp::Delete { name: name.clone() }),
@@ -850,6 +1052,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -875,6 +1078,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -898,6 +1102,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -926,6 +1131,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -936,16 +1142,28 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             }
         },
         Command::Delete(DeleteTarget::Interface { name }) => Resolved::ApplyOp {
-            op: ConfigOp::Interface(InterfaceOp::Delete { name }),
+            op: interface_delete_op(name),
             after: PathAfter::Stay,
         },
         Command::Delete(DeleteTarget::InterfaceAddress { name, address }) => Resolved::ApplyOp {
-            op: ConfigOp::Interface(InterfaceOp::RemoveAddress { name, address }),
+            op: interface_remove_address_op(&name, address),
             after: PathAfter::Stay,
         },
         Command::Delete(DeleteTarget::InterfaceAddressRelative { address }) => match path {
             Path::Interface(name) => Resolved::ApplyOp {
-                op: ConfigOp::Interface(InterfaceOp::RemoveAddress {
+                op: interface_remove_address_op(name, address),
+                after: PathAfter::Stay,
+            },
+            Path::Subinterface { interface, tag } => Resolved::ApplyOp {
+                op: ConfigOp::Subinterface(SubinterfaceOp::RemoveAddress {
+                    interface: interface.clone(),
+                    tag: *tag,
+                    address,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::BroadcastDomain(name) => Resolved::ApplyOp {
+                op: ConfigOp::BroadcastDomain(BroadcastDomainOp::RemoveAddress {
                     name: name.clone(),
                     address,
                 }),
@@ -960,16 +1178,28 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
-            | Path::BroadcastDomain(_)
             | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
         },
         Command::Delete(DeleteTarget::InterfaceRoutingTable { name }) => Resolved::ApplyOp {
-            op: ConfigOp::Interface(InterfaceOp::ClearRoutingTable { name }),
+            op: interface_clear_routing_table_op(&name),
             after: PathAfter::Stay,
         },
         Command::Delete(DeleteTarget::InterfaceRoutingTableRelative) => match path {
             Path::Interface(name) => Resolved::ApplyOp {
-                op: ConfigOp::Interface(InterfaceOp::ClearRoutingTable { name: name.clone() }),
+                op: interface_clear_routing_table_op(name),
+                after: PathAfter::Stay,
+            },
+            Path::Subinterface { interface, tag } => Resolved::ApplyOp {
+                op: ConfigOp::Subinterface(SubinterfaceOp::ClearRoutingTable {
+                    interface: interface.clone(),
+                    tag: *tag,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::BroadcastDomain(name) => Resolved::ApplyOp {
+                op: ConfigOp::BroadcastDomain(BroadcastDomainOp::ClearRoutingTable {
+                    name: name.clone(),
+                }),
                 after: PathAfter::Stay,
             },
             Path::Root
@@ -981,8 +1211,17 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
-            | Path::BroadcastDomain(_)
             | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+        },
+        Command::Delete(DeleteTarget::BroadcastDomainAddress { name, address }) => {
+            Resolved::ApplyOp {
+                op: ConfigOp::BroadcastDomain(BroadcastDomainOp::RemoveAddress { name, address }),
+                after: PathAfter::Stay,
+            }
+        }
+        Command::Delete(DeleteTarget::BroadcastDomainRoutingTable { name }) => Resolved::ApplyOp {
+            op: ConfigOp::BroadcastDomain(BroadcastDomainOp::ClearRoutingTable { name }),
+            after: PathAfter::Stay,
         },
         Command::Delete(DeleteTarget::InterfaceSwitchingProfile { name }) => Resolved::ApplyOp {
             op: ConfigOp::Interface(InterfaceOp::ClearSwitchingProfile { name }),
@@ -998,6 +1237,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1031,6 +1271,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::PrefixList(_)
@@ -1062,6 +1303,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1101,6 +1343,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 | Path::RoutingTable(_)
                 | Path::StaticRoutingInstance(_)
                 | Path::Interface(_)
+                | Path::Subinterface { .. }
                 | Path::PolicyDefinition(_)
                 | Path::CommunityAlias(_)
                 | Path::CommunityGroup(_)
@@ -1127,6 +1370,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1157,6 +1401,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1177,6 +1422,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1198,6 +1444,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1218,6 +1465,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1238,6 +1486,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1258,6 +1507,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1278,6 +1528,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1299,6 +1550,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1319,6 +1571,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1339,6 +1592,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1359,6 +1613,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1379,6 +1634,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1399,6 +1655,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1420,6 +1677,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1436,6 +1694,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -1455,6 +1714,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::RoutingTable(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
+            | Path::Subinterface { .. }
             | Path::PolicyDefinition(_)
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
@@ -3189,9 +3449,85 @@ mod tests {
         );
     }
 
+    /// `edit interface eth0.100` ensures the subinterface (cascading its
+    /// parent interface) and navigates into `Path::Subinterface`, rather
+    /// than the plain `Path::Interface` a bare (undotted) name gets.
+    #[test]
+    fn edit_dotted_interface_navigates_to_subinterface() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Edit(EditTarget::Interface {
+                    name: "eth0.100".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Subinterface(SubinterfaceOp::Ensure {
+                    interface: "eth0".to_string(),
+                    tag: 100,
+                }),
+                after: PathAfter::To(Path::Subinterface {
+                    interface: "eth0".to_string(),
+                    tag: 100,
+                }),
+            }
+        );
+    }
+
+    /// `.0` is the explicit, canonical way to reach the untagged/native
+    /// subinterface — same target a bare non-loopback name implicitly
+    /// resolves to.
+    #[test]
+    fn edit_dot_zero_navigates_to_tag_zero_subinterface() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Edit(EditTarget::Interface {
+                    name: "eth0.0".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Subinterface(SubinterfaceOp::Ensure {
+                    interface: "eth0".to_string(),
+                    tag: 0,
+                }),
+                after: PathAfter::To(Path::Subinterface {
+                    interface: "eth0".to_string(),
+                    tag: 0,
+                }),
+            }
+        );
+    }
+
+    /// A loopback name is never split, even with a trailing numeric suffix
+    /// that happens to look like a tag — loopback names are excluded from
+    /// this feature entirely, so `loopback-rt1` (no dot at all) stays a
+    /// plain interface reference. This test only guards the no-dot case;
+    /// a dotted loopback name is rejected by commit-time validation
+    /// (`interface_name_valid`'s '.'-rejection), not by CLI-side parsing.
+    #[test]
+    fn edit_loopback_interface_navigates_unsplit() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Edit(EditTarget::Interface {
+                    name: "loopback-rt1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::Ensure {
+                    name: "loopback-rt1".to_string()
+                }),
+                after: PathAfter::To(Path::Interface("loopback-rt1".to_string())),
+            }
+        );
+    }
+
     #[test]
     fn set_interface_address_qualified_and_relative() {
         let address: ipnet::IpNet = "10.0.0.1/24".parse().unwrap();
+        // A bare (undotted) non-loopback interface name implicitly targets
+        // its tag-0 (untagged/native) subinterface.
         assert_eq!(
             resolve(
                 &config_mode("t1", Path::Root, false),
@@ -3202,8 +3538,9 @@ mod tests {
                 })
             ),
             Resolved::ApplyOp {
-                op: ConfigOp::Interface(InterfaceOp::AddAddress {
-                    name: "eth0".to_string(),
+                op: ConfigOp::Subinterface(SubinterfaceOp::AddAddress {
+                    interface: "eth0".to_string(),
+                    tag: 0,
                     address,
                     label: None,
                 }),
@@ -3230,8 +3567,85 @@ mod tests {
                 })
             ),
             Resolved::ApplyOp {
+                op: ConfigOp::Subinterface(SubinterfaceOp::AddAddress {
+                    interface: "eth0".to_string(),
+                    tag: 0,
+                    address,
+                    label: None,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_interface_address_dotted_name_targets_subinterface() {
+        let address: ipnet::IpNet = "10.0.0.1/24".parse().unwrap();
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::InterfaceAddress {
+                    name: "eth0.100".to_string(),
+                    address,
+                    label: None,
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Subinterface(SubinterfaceOp::AddAddress {
+                    interface: "eth0".to_string(),
+                    tag: 100,
+                    address,
+                    label: None,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        assert_eq!(
+            resolve(
+                &config_mode(
+                    "t1",
+                    Path::Subinterface {
+                        interface: "eth0".to_string(),
+                        tag: 100
+                    },
+                    false
+                ),
+                Command::Set(SetTarget::InterfaceAddressRelative {
+                    address,
+                    label: None
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Subinterface(SubinterfaceOp::AddAddress {
+                    interface: "eth0".to_string(),
+                    tag: 100,
+                    address,
+                    label: None,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    /// A loopback interface name is unaffected by the addressing split —
+    /// its L3 config stays on the flat `InterfaceOp`, regardless of the
+    /// bare-name-implies-tag-0 rule that applies to every other interface.
+    #[test]
+    fn set_interface_address_loopback_stays_flat() {
+        let address: ipnet::IpNet = "10.0.0.1/24".parse().unwrap();
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::InterfaceAddress {
+                    name: "loopback-rt1".to_string(),
+                    address,
+                    label: None,
+                })
+            ),
+            Resolved::ApplyOp {
                 op: ConfigOp::Interface(InterfaceOp::AddAddress {
-                    name: "eth0".to_string(),
+                    name: "loopback-rt1".to_string(),
                     address,
                     label: None,
                 }),
@@ -3251,8 +3665,9 @@ mod tests {
                 })
             ),
             Resolved::ApplyOp {
-                op: ConfigOp::Interface(InterfaceOp::SetRoutingTable {
-                    name: "eth0".to_string(),
+                op: ConfigOp::Subinterface(SubinterfaceOp::SetRoutingTable {
+                    interface: "eth0".to_string(),
+                    tag: 0,
                     routing_table: "rt1".to_string(),
                 }),
                 after: PathAfter::Stay,
@@ -3276,8 +3691,33 @@ mod tests {
                 })
             ),
             Resolved::ApplyOp {
-                op: ConfigOp::Interface(InterfaceOp::SetRoutingTable {
-                    name: "eth0".to_string(),
+                op: ConfigOp::Subinterface(SubinterfaceOp::SetRoutingTable {
+                    interface: "eth0".to_string(),
+                    tag: 0,
+                    routing_table: "rt1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+
+        assert_eq!(
+            resolve(
+                &config_mode(
+                    "t1",
+                    Path::Subinterface {
+                        interface: "eth0".to_string(),
+                        tag: 300
+                    },
+                    false
+                ),
+                Command::Set(SetTarget::InterfaceRoutingTableRelative {
+                    routing_table: "rt1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Subinterface(SubinterfaceOp::SetRoutingTable {
+                    interface: "eth0".to_string(),
+                    tag: 300,
                     routing_table: "rt1".to_string(),
                 }),
                 after: PathAfter::Stay,
@@ -3376,8 +3816,9 @@ mod tests {
                 })
             ),
             Resolved::ApplyOp {
-                op: ConfigOp::Interface(InterfaceOp::RemoveAddress {
-                    name: "eth0".to_string(),
+                op: ConfigOp::Subinterface(SubinterfaceOp::RemoveAddress {
+                    interface: "eth0".to_string(),
+                    tag: 0,
                     address,
                 }),
                 after: PathAfter::Stay,
@@ -3389,8 +3830,30 @@ mod tests {
                 Command::Delete(DeleteTarget::InterfaceAddressRelative { address })
             ),
             Resolved::ApplyOp {
-                op: ConfigOp::Interface(InterfaceOp::RemoveAddress {
-                    name: "eth0".to_string(),
+                op: ConfigOp::Subinterface(SubinterfaceOp::RemoveAddress {
+                    interface: "eth0".to_string(),
+                    tag: 0,
+                    address,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode(
+                    "t1",
+                    Path::Subinterface {
+                        interface: "eth0".to_string(),
+                        tag: 100
+                    },
+                    false
+                ),
+                Command::Delete(DeleteTarget::InterfaceAddressRelative { address })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Subinterface(SubinterfaceOp::RemoveAddress {
+                    interface: "eth0".to_string(),
+                    tag: 100,
                     address,
                 }),
                 after: PathAfter::Stay,
@@ -3408,8 +3871,9 @@ mod tests {
                 })
             ),
             Resolved::ApplyOp {
-                op: ConfigOp::Interface(InterfaceOp::ClearRoutingTable {
-                    name: "eth0".to_string()
+                op: ConfigOp::Subinterface(SubinterfaceOp::ClearRoutingTable {
+                    interface: "eth0".to_string(),
+                    tag: 0,
                 }),
                 after: PathAfter::Stay,
             }
@@ -3420,10 +3884,53 @@ mod tests {
                 Command::Delete(DeleteTarget::InterfaceRoutingTableRelative)
             ),
             Resolved::ApplyOp {
-                op: ConfigOp::Interface(InterfaceOp::ClearRoutingTable {
-                    name: "eth0".to_string()
+                op: ConfigOp::Subinterface(SubinterfaceOp::ClearRoutingTable {
+                    interface: "eth0".to_string(),
+                    tag: 0,
                 }),
                 after: PathAfter::Stay,
+            }
+        );
+    }
+
+    /// `delete interface <name>.<tag>` deletes just that subinterface;
+    /// `DeleteTarget::Current` from inside `Path::Subinterface` does the
+    /// same and returns to the owning physical interface's path (not root).
+    #[test]
+    fn delete_subinterface_qualified_and_current() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Delete(DeleteTarget::Interface {
+                    name: "eth0.100".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Subinterface(SubinterfaceOp::Delete {
+                    interface: "eth0".to_string(),
+                    tag: 100,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode(
+                    "t1",
+                    Path::Subinterface {
+                        interface: "eth0".to_string(),
+                        tag: 100
+                    },
+                    false
+                ),
+                Command::Delete(DeleteTarget::Current)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Subinterface(SubinterfaceOp::Delete {
+                    interface: "eth0".to_string(),
+                    tag: 100,
+                }),
+                after: PathAfter::To(Path::Interface("eth0".to_string())),
             }
         );
     }

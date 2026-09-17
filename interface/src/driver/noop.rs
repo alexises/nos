@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use tracing::debug;
 
 use super::{DriverError, InterfaceDriver};
-use crate::state::InterfaceState;
+use crate::state::{BroadcastDomainState, InterfaceState};
 
 /// Platform-agnostic default: logs the state that would be applied but
 /// never touches the OS network stack. Preserves today's placeholder
@@ -16,6 +16,7 @@ impl InterfaceDriver for NoopInterfaceDriver {
             interface = %desired.name,
             addresses = ?desired.addresses,
             routing_table = ?desired.routing_table,
+            subinterfaces = ?desired.subinterfaces,
             "would apply interface configuration (noop driver — no OS effect)"
         );
         Ok(())
@@ -29,9 +30,14 @@ impl InterfaceDriver for NoopInterfaceDriver {
         Ok(())
     }
 
-    async fn ensure_broadcast_domain(&self, domain: &str) -> Result<(), DriverError> {
+    async fn ensure_broadcast_domain(
+        &self,
+        desired: &BroadcastDomainState,
+    ) -> Result<(), DriverError> {
         debug!(
-            domain = %domain,
+            domain = %desired.name,
+            addresses = ?desired.addresses,
+            routing_table = ?desired.routing_table,
             "would ensure broadcast domain bridge (noop driver — no OS effect)"
         );
         Ok(())

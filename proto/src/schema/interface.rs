@@ -2,7 +2,7 @@ use garde::Validate;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
-use crate::validators::unique_in;
+use crate::validators::{routing_table_reference_valid, unique_addresses, unique_in};
 
 use super::{Config, VlanTag};
 
@@ -33,26 +33,76 @@ pub struct InterfaceAddress {
     pub label: Option<String>,
 }
 
-/// A named network interface, with zero or more IP addresses and an
-/// optional routing table (VRF) assignment. Unlike `RoutingTable`'s
-/// `bgp_instance`/`static_routing_instance` references, many interfaces may
-/// share the same `routing_table` — a routing table already plays the VRF
-/// role, and a VRF naturally has more than one interface in it. Not
-/// consulted for a loopback interface (see `LOOPBACK_PREFIX`) — its target
-/// table comes from its name instead.
+/// One VLAN-scoped L3 attachment point on a physical `Interface`. `tag == 0`
+/// is the untagged/native case — what used to be `Interface.addresses`/
+/// `routing_table` directly, before L3 config moved under per-tag
+/// subinterfaces. `1..=4094` is a real 802.1q tag, realized by
+/// `nos-interfaced`'s Linux driver as its own `<interface>.<tag>` kernel
+/// sub-interface (the same convention already used for a `Dot1q`
+/// switching-profile member). A tag used by a `Subinterface` here and a tag
+/// used by the same interface's `switching_profile` (an `Untagged` member
+/// claims tag 0, a `Dot1q(n)` member claims tag `n`) must be disjoint — see
+/// `valid_subinterface_and_switching_profile_tags`. Loopback interfaces
+/// never have any `Subinterface`s — see `valid_addressing_split`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[garde(context(Config as ctx))]
+pub struct Subinterface {
+    #[garde(custom(|t: &u16, _ctx: &Config| valid_subinterface_tag(*t)))]
+    pub tag: u16,
+
+    #[garde(custom(|addrs, _ctx: &Config| unique_addresses(addrs)))]
+    pub addresses: Vec<InterfaceAddress>,
+
+    #[garde(custom(|rt: &Option<String>, ctx: &Config| routing_table_reference_valid(rt.as_ref(), ctx)))]
+    pub routing_table: Option<String>,
+}
+
+fn valid_subinterface_tag(tag: u16) -> garde::Result {
+    if tag > 4094 {
+        return Err(garde::Error::new(
+            "subinterface tag must be between 0 and 4094",
+        ));
+    }
+    Ok(())
+}
+
+/// No two subinterfaces of the same physical interface may share a tag —
+/// mirrors `switching_profile::unique_broadcast_domains`. Scoped to
+/// `self.subinterfaces` only.
+fn unique_subinterface_tags(subinterfaces: &[Subinterface]) -> garde::Result {
+    let mut seen: Vec<u16> = Vec::new();
+    for sub in subinterfaces {
+        if seen.contains(&sub.tag) {
+            return Err(garde::Error::new(
+                "must not repeat a tag among the same interface's subinterfaces",
+            ));
+        }
+        seen.push(sub.tag);
+    }
+    Ok(())
+}
+
+/// A named network interface. For a loopback interface (see
+/// `LOOPBACK_PREFIX`), `addresses`/`routing_table` carry its (flat) L3
+/// config directly, exactly as before this type gained subinterfaces — a
+/// loopback has no VLAN/dot1q concept, so there's nothing for per-tag
+/// addressing to buy it. For every other (physical) interface, `addresses`
+/// must be empty and `routing_table` must be unset: all of its L3 config
+/// lives under `subinterfaces` instead, tag 0 for the untagged/native case
+/// (what used to be these same flat fields) — see `valid_addressing_split`.
 ///
 /// `switching_profile`, if set, names a `SwitchingProfile` trunking this
-/// interface into one or more `BroadcastDomain`s. An `Untagged` member of
-/// that profile and `routing_table` are mutually exclusive on the same
-/// interface — Linux only allows one master device on the physical link,
-/// and an `Untagged` member wants that master to be the domain's bridge
-/// while `routing_table` wants it to be the VRF. A `Dot1q` member doesn't
-/// conflict: it's realized as its own 802.1q sub-interface with an
-/// independent master. This constraint can't live in a per-field `custom`
-/// closure — garde's per-field closures can't see a sibling field — so it's
-/// wired one level up, on `Config.interfaces`
-/// (`valid_routing_table_and_switching_profile`), the same reason
-/// `RoutingTable`'s redistribute rule is wired on `Config.routing_tables`.
+/// interface into one or more `BroadcastDomain`s — unchanged, still a
+/// physical-interface-level field regardless of `subinterfaces`. A tag
+/// claimed by an L2 `switching_profile` member and a tag claimed by an L3
+/// `Subinterface` are mutually exclusive on the same interface: Linux only
+/// allows one master device per link (physical or per-tag sub-link), and an
+/// L2 member wants that link's master to be the domain's bridge while an L3
+/// subinterface wants it to be a VRF. See
+/// `valid_subinterface_and_switching_profile_tags`, wired one level up on
+/// `Config.interfaces` (`valid_interfaces`) since it needs to see sibling
+/// fields — the same reason `RoutingTable`'s redistribute rule is wired on
+/// `Config.routing_tables`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct Interface {
@@ -70,53 +120,30 @@ pub struct Interface {
 
     #[garde(custom(|sp: &Option<String>, ctx: &Config| switching_profile_reference_valid(sp.as_ref(), ctx)))]
     pub switching_profile: Option<String>,
+
+    #[garde(dive, custom(|subs, _ctx: &Config| unique_subinterface_tags(subs)))]
+    pub subinterfaces: Vec<Subinterface>,
 }
 
-/// Combines interface-name uniqueness (existing) with, for a loopback name,
-/// checking its target routing table actually exists — one closure rather
-/// than stacking two `custom(...)` attributes, matching the pattern used
-/// where a field needs more than one rule (e.g. `BgpPeerGroup.auth`'s
-/// `valid_auth`).
+/// Combines interface-name uniqueness (existing) with rejecting a literal
+/// `.` (reserved for `<interface>.<tag>` subinterface addressing) and, for a
+/// loopback name, checking its target routing table actually exists — one
+/// closure rather than stacking three `custom(...)` attributes, matching the
+/// pattern used where a field needs more than one rule (e.g.
+/// `BgpPeerGroup.auth`'s `valid_auth`).
 fn interface_name_valid(name: &String, ctx: &Config) -> garde::Result {
     unique_in(name, &ctx.interfaces, |i| &i.name)?;
+    if name.contains('.') {
+        return Err(garde::Error::new(
+            "interface name must not contain '.' (reserved for subinterface addressing, e.g. eth0.100)",
+        ));
+    }
     if let Some(table) = loopback_table_name(name) {
         if !ctx.routing_tables.iter().any(|t| t.name == table) {
             return Err(garde::Error::new(
                 "loopback interface's routing table does not exist",
             ));
         }
-    }
-    Ok(())
-}
-
-/// No two addresses on the same interface may repeat, mirroring
-/// `static_routing_instance::unique_subnets`. Scoped to `self.addresses`
-/// only, since this uniqueness is per-interface, not global. Compares
-/// `.address` only — two entries can't have the same address with
-/// different labels either, since `AddAddress` upserts by address.
-fn unique_addresses(addresses: &[InterfaceAddress]) -> garde::Result {
-    let mut seen: Vec<IpNet> = Vec::new();
-    for addr in addresses {
-        if seen.contains(&addr.address) {
-            return Err(garde::Error::new(
-                "must not repeat an address on the same interface",
-            ));
-        }
-        seen.push(addr.address);
-    }
-    Ok(())
-}
-
-/// If set, `routing_table` must name an existing `RoutingTable`. Unlike
-/// `RoutingTable.bgp_instance`/`static_routing_instance`, there is no
-/// single-owner constraint here — many interfaces may be assigned to the
-/// same routing table/VRF.
-fn routing_table_reference_valid(routing_table: Option<&String>, ctx: &Config) -> garde::Result {
-    let Some(name) = routing_table else {
-        return Ok(());
-    };
-    if !ctx.routing_tables.iter().any(|t| &t.name == name) {
-        return Err(garde::Error::new("referenced routing table does not exist"));
     }
     Ok(())
 }
@@ -137,32 +164,75 @@ fn switching_profile_reference_valid(
     Ok(())
 }
 
-/// `routing_table` and a `switching_profile` with an `Untagged` member are
-/// mutually exclusive on the same interface — see `Interface`'s doc comment.
-/// Wired on `Config.interfaces` rather than a per-field closure, since this
-/// needs to see two sibling fields of the same `Interface` at once.
-pub(crate) fn valid_routing_table_and_switching_profile(
+/// Enforces the split between loopback and physical interfaces described on
+/// `Interface`'s doc comment: a loopback interface must have no
+/// `subinterfaces` (its L3 config stays flat), while a physical interface
+/// must have empty `addresses` and no `routing_table` (its L3 config must
+/// live under `subinterfaces` instead, tag 0 for the untagged/native case).
+fn valid_addressing_split(interfaces: &[Interface]) -> garde::Result {
+    for iface in interfaces {
+        if loopback_table_name(&iface.name).is_some() {
+            if !iface.subinterfaces.is_empty() {
+                return Err(garde::Error::new(
+                    "loopback interface must not have subinterfaces",
+                ));
+            }
+        } else if !iface.addresses.is_empty() || iface.routing_table.is_some() {
+            return Err(garde::Error::new(
+                "physical interface must configure addresses/routing-table on a subinterface (e.g. '.0'), not directly on the interface",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A tag claimed by a `Subinterface` (L3) and a tag claimed by the same
+/// interface's `switching_profile` (L2 — an `Untagged` member claims tag 0,
+/// a `Dot1q(n)` member claims tag `n`) are mutually exclusive on the same
+/// interface — see `Interface`'s doc comment. Generalizes the previous
+/// `routing_table` + `Untagged`-member-only rule to every tag, now that L3
+/// config lives per-subinterface rather than flat on `Interface`. Wired on
+/// `Config.interfaces` rather than a per-field closure, since this needs to
+/// see two sibling fields of the same `Interface` at once.
+pub(crate) fn valid_subinterface_and_switching_profile_tags(
     interfaces: &[Interface],
     ctx: &Config,
 ) -> garde::Result {
     for iface in interfaces {
-        if iface.routing_table.is_none() {
+        if iface.subinterfaces.is_empty() {
             continue;
         }
         let Some(profile_name) = &iface.switching_profile else {
             continue;
         };
-        let has_untagged = ctx
+        let Some(profile) = ctx
             .switching_profiles
             .iter()
             .find(|p| &p.name == profile_name)
-            .is_some_and(|p| p.members.iter().any(|m| m.tag == VlanTag::Untagged));
-        if has_untagged {
-            return Err(garde::Error::new(
-                "routing-table and a switching-profile with an untagged member are mutually exclusive on the same interface",
-            ));
+        else {
+            continue;
+        };
+        for sub in &iface.subinterfaces {
+            let collides = profile.members.iter().any(|m| match m.tag {
+                VlanTag::Untagged => sub.tag == 0,
+                VlanTag::Dot1q(n) => sub.tag == n,
+            });
+            if collides {
+                return Err(garde::Error::new(format!(
+                    "subinterface tag {} conflicts with a switching-profile member using the same tag",
+                    sub.tag
+                )));
+            }
         }
     }
+    Ok(())
+}
+
+/// Umbrella `Config.interfaces`-level validator combining the two
+/// cross-field checks above — see each for details.
+pub(crate) fn valid_interfaces(interfaces: &[Interface], ctx: &Config) -> garde::Result {
+    valid_addressing_split(interfaces)?;
+    valid_subinterface_and_switching_profile_tags(interfaces, ctx)?;
     Ok(())
 }
 
@@ -184,7 +254,27 @@ mod tests {
                 .collect(),
             routing_table: routing_table.map(str::to_string),
             switching_profile: None,
+            subinterfaces: Vec::new(),
         }
+    }
+
+    /// A physical (non-loopback) interface with L3 config on its tag-0
+    /// subinterface, mirroring what `interface(...)` used to build directly
+    /// on `Interface` before the addressing split.
+    fn physical_with_l3(name: &str, addresses: &[&str], routing_table: Option<&str>) -> Interface {
+        let mut iface = interface(name, &[], None);
+        iface.subinterfaces = vec![Subinterface {
+            tag: 0,
+            addresses: addresses
+                .iter()
+                .map(|a| InterfaceAddress {
+                    address: a.parse().unwrap(),
+                    label: None,
+                })
+                .collect(),
+            routing_table: routing_table.map(str::to_string),
+        }];
+        iface
     }
 
     fn table(name: &str) -> RoutingTable {
@@ -211,9 +301,9 @@ mod tests {
     }
 
     #[test]
-    fn valid_interface_with_addresses_and_routing_table_passes() {
+    fn valid_physical_interface_with_addresses_and_routing_table_passes() {
         let cfg = config_with(
-            vec![interface(
+            vec![physical_with_l3(
                 "eth0",
                 &["10.0.0.1/24", "2001:db8::1/64"],
                 Some("rt1"),
@@ -233,9 +323,19 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_address_on_same_interface_fails() {
+    fn dotted_interface_name_fails() {
+        let cfg = config_with(vec![interface("eth0.100", &[], None)], vec![]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn duplicate_address_on_same_subinterface_fails() {
         let cfg = config_with(
-            vec![interface("eth0", &["10.0.0.1/24", "10.0.0.1/24"], None)],
+            vec![physical_with_l3(
+                "eth0",
+                &["10.0.0.1/24", "10.0.0.1/24"],
+                None,
+            )],
             vec![],
         );
         assert!(cfg.validate_with(&cfg).is_err());
@@ -245,8 +345,8 @@ mod tests {
     fn same_address_on_different_interfaces_passes() {
         let cfg = config_with(
             vec![
-                interface("eth0", &["10.0.0.1/24"], None),
-                interface("eth1", &["10.0.0.1/24"], None),
+                physical_with_l3("eth0", &["10.0.0.1/24"], None),
+                physical_with_l3("eth1", &["10.0.0.1/24"], None),
             ],
             vec![],
         );
@@ -254,8 +354,11 @@ mod tests {
     }
 
     #[test]
-    fn dangling_routing_table_reference_fails() {
-        let cfg = config_with(vec![interface("eth0", &[], Some("does-not-exist"))], vec![]);
+    fn dangling_routing_table_reference_on_subinterface_fails() {
+        let cfg = config_with(
+            vec![physical_with_l3("eth0", &[], Some("does-not-exist"))],
+            vec![],
+        );
         assert!(cfg.validate_with(&cfg).is_err());
     }
 
@@ -263,8 +366,8 @@ mod tests {
     fn multiple_interfaces_may_share_a_routing_table() {
         let cfg = config_with(
             vec![
-                interface("eth0", &[], Some("rt1")),
-                interface("eth1", &[], Some("rt1")),
+                physical_with_l3("eth0", &[], Some("rt1")),
+                physical_with_l3("eth1", &[], Some("rt1")),
             ],
             vec![table("rt1")],
         );
@@ -326,25 +429,100 @@ mod tests {
 
     #[test]
     fn duplicate_address_different_label_still_conflicts() {
+        let mut iface = interface("eth0", &[], None);
+        iface.subinterfaces = vec![Subinterface {
+            tag: 0,
+            addresses: vec![
+                InterfaceAddress {
+                    address: "10.0.0.1/24".parse().unwrap(),
+                    label: Some("a".to_string()),
+                },
+                InterfaceAddress {
+                    address: "10.0.0.1/24".parse().unwrap(),
+                    label: Some("b".to_string()),
+                },
+            ],
+            routing_table: None,
+        }];
+        let cfg = config_with(vec![iface], vec![]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn loopback_with_subinterfaces_fails() {
+        let mut iface = interface("loopback-rt1", &[], None);
+        iface.subinterfaces = vec![Subinterface {
+            tag: 100,
+            addresses: Vec::new(),
+            routing_table: None,
+        }];
+        let cfg = config_with(vec![iface], vec![table("rt1")]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn physical_interface_with_flat_address_fails() {
+        let cfg = config_with(vec![interface("eth0", &["10.0.0.1/24"], None)], vec![]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn physical_interface_with_flat_routing_table_fails() {
         let cfg = config_with(
-            vec![Interface {
-                name: "eth0".to_string(),
-                addresses: vec![
-                    InterfaceAddress {
-                        address: "10.0.0.1/24".parse().unwrap(),
-                        label: Some("a".to_string()),
-                    },
-                    InterfaceAddress {
-                        address: "10.0.0.1/24".parse().unwrap(),
-                        label: Some("b".to_string()),
-                    },
-                ],
-                routing_table: None,
-                switching_profile: None,
-            }],
-            vec![],
+            vec![interface("eth0", &[], Some("rt1"))],
+            vec![table("rt1")],
         );
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn duplicate_subinterface_tag_fails() {
+        let mut iface = interface("eth0", &[], None);
+        iface.subinterfaces = vec![
+            Subinterface {
+                tag: 100,
+                addresses: Vec::new(),
+                routing_table: None,
+            },
+            Subinterface {
+                tag: 100,
+                addresses: Vec::new(),
+                routing_table: None,
+            },
+        ];
+        let cfg = config_with(vec![iface], vec![]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn subinterface_tag_4095_fails() {
+        let mut iface = interface("eth0", &[], None);
+        iface.subinterfaces = vec![Subinterface {
+            tag: 4095,
+            addresses: Vec::new(),
+            routing_table: None,
+        }];
+        let cfg = config_with(vec![iface], vec![]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn subinterface_tag_boundary_values_pass() {
+        let mut iface = interface("eth0", &[], None);
+        iface.subinterfaces = vec![
+            Subinterface {
+                tag: 0,
+                addresses: Vec::new(),
+                routing_table: None,
+            },
+            Subinterface {
+                tag: 4094,
+                addresses: Vec::new(),
+                routing_table: None,
+            },
+        ];
+        let cfg = config_with(vec![iface], vec![]);
+        cfg.validate_with(&cfg).unwrap();
     }
 
     fn profile(
@@ -367,6 +545,8 @@ mod tests {
     fn domain(name: &str) -> crate::schema::BroadcastDomain {
         crate::schema::BroadcastDomain {
             name: name.to_string(),
+            addresses: Vec::new(),
+            routing_table: None,
         }
     }
 
@@ -388,8 +568,8 @@ mod tests {
     }
 
     #[test]
-    fn routing_table_with_untagged_switching_profile_member_fails() {
-        let mut iface = interface("eth0", &[], Some("rt1"));
+    fn subinterface_tag_0_with_untagged_switching_profile_member_fails() {
+        let mut iface = physical_with_l3("eth0", &[], Some("rt1"));
         iface.switching_profile = Some("sp1".to_string());
         let mut cfg = config_with(vec![iface], vec![table("rt1")]);
         cfg.broadcast_domains = vec![domain("bd1")];
@@ -398,8 +578,19 @@ mod tests {
     }
 
     #[test]
-    fn routing_table_with_dot1q_only_switching_profile_passes() {
-        let mut iface = interface("eth0", &[], Some("rt1"));
+    fn subinterface_tag_matching_dot1q_member_fails() {
+        let mut iface = physical_with_l3("eth0", &[], Some("rt1"));
+        iface.switching_profile = Some("sp1".to_string());
+        iface.subinterfaces[0].tag = 100;
+        let mut cfg = config_with(vec![iface], vec![table("rt1")]);
+        cfg.broadcast_domains = vec![domain("bd1")];
+        cfg.switching_profiles = vec![profile("sp1", vec![member("bd1", VlanTag::Dot1q(100))])];
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn subinterface_tag_0_with_dot1q_only_switching_profile_passes() {
+        let mut iface = physical_with_l3("eth0", &[], Some("rt1"));
         iface.switching_profile = Some("sp1".to_string());
         let mut cfg = config_with(vec![iface], vec![table("rt1")]);
         cfg.broadcast_domains = vec![domain("bd1")];

@@ -12,6 +12,39 @@ where
     Ok(())
 }
 
+/// No two addresses in the same list may repeat, mirroring
+/// `static_routing_instance::unique_subnets`. Scoped to the owning list
+/// only, since this uniqueness is per-parent (an `Interface`, a
+/// `Subinterface`, a `BroadcastDomain`), not global. Compares `.address`
+/// only — two entries can't have the same address with different labels
+/// either, since `AddAddress` upserts by address.
+pub fn unique_addresses(addresses: &[crate::schema::InterfaceAddress]) -> garde::Result {
+    let mut seen: Vec<ipnet::IpNet> = Vec::new();
+    for addr in addresses {
+        if seen.contains(&addr.address) {
+            return Err(garde::Error::new("must not repeat an address"));
+        }
+        seen.push(addr.address);
+    }
+    Ok(())
+}
+
+/// If set, `routing_table` must name an existing `RoutingTable`. There is no
+/// single-owner constraint here — many interfaces/subinterfaces/broadcast
+/// domains may be assigned to the same routing table/VRF.
+pub fn routing_table_reference_valid(
+    routing_table: Option<&String>,
+    ctx: &crate::schema::Config,
+) -> garde::Result {
+    let Some(name) = routing_table else {
+        return Ok(());
+    };
+    if !ctx.routing_tables.iter().any(|t| &t.name == name) {
+        return Err(garde::Error::new("referenced routing table does not exist"));
+    }
+    Ok(())
+}
+
 /// Returns a `garde` error unless `value` is composed only of ASCII
 /// letters, digits, and hyphens, with no leading or trailing hyphen.
 ///

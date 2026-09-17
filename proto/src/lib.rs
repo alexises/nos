@@ -21,14 +21,14 @@ pub use codec::IpcCodec;
 pub use derive::sync_routing_table_refs;
 pub use diff::{diff_configs, ConfigDiff, DiffScope, DiffStatus, FieldDiff, SectionDiff};
 pub use docs::{CommandDoc, Topic};
-pub use interface::{InterfaceEvent, InterfaceRequest, InterfaceStatus};
+pub use interface::{InterfaceEvent, InterfaceRequest, InterfaceStatus, SubinterfaceStatus};
 pub use ipc::{Event, Request, TransactionBase, TransactionSnapshot};
 pub use ipnet::IpNet;
 pub use log::{LogEntry, LogEvent, LogLevel, LogRequest};
 pub use ops::{
     BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, CommunityAliasOp,
     CommunityGroupOp, ConfigOp, InterfaceOp, OpError, PolicyDefinitionOp, PrefixListOp,
-    RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp, SwitchingProfileOp,
+    RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp,
 };
 pub use paths::{DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 pub use rib::{
@@ -39,6 +39,6 @@ pub use schema::{
     BgpPeerGroup, BroadcastDomain, CommunityAlias, CommunityGroup, Config, Interface,
     InterfaceAddress, NextHopMode, PolicyDefinition, PrefixList, PrefixListEntry, Redistribute,
     RedistributeSource, RedistributeTarget, RoutingTable, SourceAddress, StaticRoute,
-    StaticRoutingInstance, SwitchingProfile, SwitchingProfileMember, VlanTag,
+    StaticRoutingInstance, Subinterface, SwitchingProfile, SwitchingProfileMember, VlanTag,
     CONNECT_RETRY_TIME_DEFAULT_SECS, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX,
 };

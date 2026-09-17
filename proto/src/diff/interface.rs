@@ -1,9 +1,13 @@
 use crate::schema::{Interface, InterfaceAddress};
 
-use super::{DiffStatus, FieldDiff, SectionDiff};
+use super::{subinterface, DiffStatus, FieldDiff, SectionDiff};
 
 /// Diffs two lists of `Interface`s, matched by `name` (the field `garde`'s
-/// `unique_in` validator already treats as each interface's key).
+/// `unique_in` validator already treats as each interface's key). A
+/// modified interface is reported when either its own flat fields (loopback
+/// L3 config, switching-profile) or its `subinterfaces` (physical L3
+/// config) changed — mirroring `diff_static_routing_instances`' combined
+/// fields+subsections emptiness check.
 pub fn diff_interfaces(base: &[Interface], candidate: &[Interface]) -> Vec<SectionDiff> {
     let mut sections = Vec::new();
 
@@ -12,13 +16,15 @@ pub fn diff_interfaces(base: &[Interface], candidate: &[Interface]) -> Vec<Secti
             None => sections.push(removed_section(b)),
             Some(c) => {
                 let fields = changed_fields(b, c);
-                if !fields.is_empty() {
+                let subsections =
+                    subinterface::diff_subinterfaces(&b.subinterfaces, &c.subinterfaces);
+                if !fields.is_empty() || !subsections.is_empty() {
                     sections.push(SectionDiff {
                         header: header_for(&b.name),
                         name: b.name.clone(),
                         status: DiffStatus::Modified,
                         fields,
-                        subsections: Vec::new(),
+                        subsections,
                     });
                 }
             }
@@ -120,7 +126,7 @@ fn removed_section(iface: &Interface) -> SectionDiff {
                 new: None,
             },
         ],
-        subsections: Vec::new(),
+        subsections: subinterface::diff_subinterfaces(&iface.subinterfaces, &[]),
     }
 }
 
@@ -146,7 +152,7 @@ fn added_section(iface: &Interface) -> SectionDiff {
                 new: Some(switching_profile_str(iface)),
             },
         ],
-        subsections: Vec::new(),
+        subsections: subinterface::diff_subinterfaces(&[], &iface.subinterfaces),
     }
 }
 
@@ -166,6 +172,7 @@ mod tests {
                 .collect(),
             routing_table: routing_table.map(str::to_string),
             switching_profile: None,
+            subinterfaces: Vec::new(),
         }
     }
 
@@ -240,6 +247,7 @@ mod tests {
             }],
             routing_table: None,
             switching_profile: None,
+            subinterfaces: Vec::new(),
         }];
         let candidate = vec![Interface {
             name: "eth0".to_string(),
@@ -249,10 +257,36 @@ mod tests {
             }],
             routing_table: None,
             switching_profile: None,
+            subinterfaces: Vec::new(),
         }];
         let sections = diff_interfaces(&base, &candidate);
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].fields.len(), 1);
         assert_eq!(sections[0].fields[0].label, "addresses");
+    }
+
+    /// An interface with no changed flat fields must still surface as
+    /// `Modified`, with empty `fields` and the change nested in
+    /// `subsections`, when only its subinterfaces changed — mirrors
+    /// `diff_static_routing_instances`' equivalent test.
+    #[test]
+    fn changed_subinterface_is_modified_with_empty_fields() {
+        use crate::schema::Subinterface;
+
+        let mut base_iface = interface("eth0", &[], None);
+        base_iface.subinterfaces = vec![Subinterface {
+            tag: 100,
+            addresses: Vec::new(),
+            routing_table: None,
+        }];
+        let mut candidate_iface = base_iface.clone();
+        candidate_iface.subinterfaces[0].routing_table = Some("rt1".to_string());
+
+        let sections = diff_interfaces(&[base_iface], &[candidate_iface]);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].status, DiffStatus::Modified);
+        assert!(sections[0].fields.is_empty());
+        assert_eq!(sections[0].subsections.len(), 1);
+        assert_eq!(sections[0].subsections[0].header, "subinterface 100");
     }
 }

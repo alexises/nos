@@ -19,7 +19,16 @@
 # domains at two different local dot1q tags actually gets one real Linux
 # bridge device created per domain and one real 802.1q sub-interface per
 # tagged member, each enslaved into its own domain's bridge, then deleted
-# again on removal, (via the `source-address`
+# again on removal, (via the `svi` subcommand) that a broadcast domain's own
+# address/routing-table config actually addresses its bridge device and
+# enslaves it into a VRF -- an SVI (switch virtual interface) -- over a real
+# kernel, then clears both and confirms the bridge itself is untouched,
+# (via the `routed-subinterface` subcommand) that a real
+# L3 routed subinterface (a second, tagged `<interface>.<tag>` VLAN
+# sub-interface on the same physical interface eth0 already uses for its
+# untagged/tag-0 BGP session address, assigned to the same "rt1" VRF)
+# actually gets a real 802.1q VLAN sub-interface created, enslaved into that
+# VRF, and addressed, then deleted again on removal, (via the `source-address`
 # subcommand) that a peer-group's source-address is resolved by nos-bgpd
 # itself, over a real IPC round trip to nos-interfaced, from an interface
 # name (+ optional label) rather than a literal address, and that
@@ -52,7 +61,7 @@
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|source-address|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}
+# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -84,6 +93,14 @@ REDISTRIBUTE_GATEWAY=10.50.0.99
 # separate reserved block from REDISTRIBUTE_PREFIX so the two scenarios'
 # log lines are never confusable with each other.
 LOOPBACK_ADDRESS=203.0.113.1/32
+# TEST-NET-1 (RFC 5737) — used for the routed-subinterface scenario's
+# address, a third reserved block distinct from REDISTRIBUTE_PREFIX/
+# LOOPBACK_ADDRESS. SUBINTERFACE_TAG is an arbitrary dot1q id distinct from
+# the `switching` scenario's own 100/200 (so a run of `all` never confuses
+# the two scenarios' log lines with each other, even though each tears its
+# own sub-interfaces down before the next phase runs).
+SUBINTERFACE_TAG=300
+SUBINTERFACE_ADDRESS=192.0.2.1/24
 # router-a's table-id registry (`--table-registry-path`, per-container,
 # starts empty) allocates ids starting at MIN_TABLE_ID=100 — "rt1" is the
 # only routing table any scenario in this script ever configures, so it's
@@ -91,6 +108,11 @@ LOOPBACK_ADDRESS=203.0.113.1/32
 # 100 and kernel device name `lo100` for the loopback scenario below.
 LOOPBACK_TABLE_ID=100
 LOOPBACK_DEVICE="lo$LOOPBACK_TABLE_ID"
+# TEST-NET-3 (RFC 5737) — used for the svi scenario's address, a distinct
+# host address within the same block the loopback scenario already uses (the
+# differing interface name in each grepped log line keeps the two scenarios'
+# lines unambiguous even so).
+SVI_ADDRESS=203.0.113.9/32
 
 log() { echo "[verify-bgp] $*" >&2; }
 
@@ -327,6 +349,100 @@ provision_clear_switching_profile() {
     --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
     --peer "$peer_ip" \
     --delete-switching-profile
+}
+
+# --- Broadcast-domain SVI scenario ---
+#
+# Configures an address and routing-table (VRF) directly on a broadcast
+# domain ("bd-svi", distinct from bd1/bd2 above) rather than on any member
+# interface, verifying nos-interfaced's Linux driver applies that L3 config
+# straight onto the domain's own bridge device -- an SVI (switch virtual
+# interface) -- over a real kernel: the bridge itself gets addressed and
+# enslaved into rt1's VRF, the same reconciliation an ordinary interface's
+# own L3 config already gets. Then deletes the domain outright and confirms
+# its bridge is deleted, the same teardown the `loopback` scenario already
+# proves for a dummy device -- proving the address/VRF enslavement this
+# scenario added doesn't leave the bridge in a state deletion can't clean up.
+
+provision_svi() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 svi_addr=$6
+  log "provisioning $name with an SVI on broadcast domain bd-svi (address=$svi_addr, routing-table=rt1)"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --routing-table rt1 \
+    --broadcast-domain bd-svi \
+    --broadcast-domain-svi-address "$svi_addr"
+}
+
+provision_delete_svi() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  log "provisioning $name with bd-svi's SVI removed"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --broadcast-domain bd-svi \
+    --delete-broadcast-domain-svi
+}
+
+# --- L3 routed subinterface scenario ---
+#
+# Adds a second, routed subinterface (eth0.$SUBINTERFACE_TAG) to router-a's
+# eth0 -- already addressed/vrf-enslaved on its tag-0 (untagged/native)
+# subinterface for the BGP session above, untouched by this scenario -- and
+# assigns it to the same "rt1" routing table/VRF, verifying nos-interfaced's
+# Linux driver actually creates a real 802.1q VLAN sub-interface, enslaves it
+# into rt1's VRF (the same VRF eth0 itself is already a member of -- a VRF
+# legitimately has more than one member interface), and applies the
+# configured address -- over a real kernel, not a unit test. Then removes it
+# and confirms the sub-interface is deleted again.
+
+provision_routed_subinterface() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  log "provisioning $name with a routed subinterface eth0.$SUBINTERFACE_TAG (address=$SUBINTERFACE_ADDRESS, routing-table=rt1)"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "$SUBINTERFACE_ADDRESS" \
+    --subinterface-tag "$SUBINTERFACE_TAG" \
+    --routing-table rt1 \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip"
+}
+
+provision_delete_routed_subinterface() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  log "removing $name's eth0.$SUBINTERFACE_TAG routed subinterface"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "$SUBINTERFACE_ADDRESS" \
+    --subinterface-tag "$SUBINTERFACE_TAG" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --delete-subinterface
 }
 
 # --- RFC 4456 route reflector scenario ---
@@ -776,6 +892,72 @@ cmd_check_switching() {
     || { log "router-a: FAILED to delete eth0.200"; return 1; }
 }
 
+cmd_check_svi() {
+  provision_svi router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$SVI_ADDRESS"
+
+  # Unlike rt1's kernel table id (always 100, since it's the only routing
+  # table any scenario configures), bd-svi's bridge id depends on how many
+  # other broadcast domains this container has already allocated one for
+  # before this phase ran (e.g. bd1/bd2 if `switching` ran first as part of
+  # `all`, or none at all if `svi` is run standalone right after
+  # `established`) — so its bridge name isn't known ahead of time and is
+  # extracted from the log line the driver itself just emitted instead.
+  log "waiting for router-a to create bd-svi's bridge"
+  wait_for_count_increase router-a "created broadcast domain bridge domain=bd-svi" 0 60 \
+    || { log "router-a: FAILED to create bd-svi's bridge"; return 1; }
+  local svi_bridge
+  svi_bridge=$(docker logs router-a 2>&1 \
+    | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
+    | grep -o "created broadcast domain bridge domain=bd-svi bridge=br[0-9]*" \
+    | tail -1 | grep -o 'br[0-9]*$')
+  log "router-a: created $svi_bridge for bd-svi"
+
+  log "waiting for router-a to enslave $svi_bridge into rt1's vrf"
+  wait_for_count_increase router-a "enslaved interface to vrf interface=$svi_bridge" 0 60 \
+    && log "router-a: enslaved $svi_bridge into its vrf" \
+    || { log "router-a: FAILED to enslave $svi_bridge"; return 1; }
+
+  log "waiting for router-a to apply $SVI_ADDRESS to $svi_bridge"
+  wait_for_count_increase router-a "added interface address interface=$svi_bridge address=$SVI_ADDRESS" 0 60 \
+    && log "router-a: applied $SVI_ADDRESS to $svi_bridge" \
+    || { log "router-a: FAILED to apply the svi address"; return 1; }
+
+  log "deleting router-a's bd-svi broadcast domain"
+  provision_delete_svi router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+
+  log "waiting for router-a to delete $svi_bridge"
+  wait_for_count_increase router-a "deleted broadcast domain bridge domain=bd-svi bridge=$svi_bridge" 0 60 \
+    && log "router-a: deleted $svi_bridge" \
+    || { log "router-a: FAILED to delete $svi_bridge"; return 1; }
+}
+
+cmd_check_routed_subinterface() {
+  provision_routed_subinterface router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+
+  log "waiting for router-a to create eth0's routed subinterface (eth0.$SUBINTERFACE_TAG)"
+  wait_for_count_increase router-a "created vlan sub-interface interface=eth0 sub_interface=eth0.$SUBINTERFACE_TAG tag=$SUBINTERFACE_TAG" 0 60 \
+    && log "router-a: created eth0.$SUBINTERFACE_TAG" \
+    || { log "router-a: FAILED to create eth0.$SUBINTERFACE_TAG"; return 1; }
+
+  log "waiting for router-a to enslave eth0.$SUBINTERFACE_TAG into rt1's vrf (the same vrf eth0 itself is already a member of)"
+  wait_for_count_increase router-a "enslaved interface to vrf interface=eth0.$SUBINTERFACE_TAG" 0 60 \
+    && log "router-a: enslaved eth0.$SUBINTERFACE_TAG into its vrf" \
+    || { log "router-a: FAILED to enslave eth0.$SUBINTERFACE_TAG"; return 1; }
+
+  log "waiting for router-a to apply $SUBINTERFACE_ADDRESS to eth0.$SUBINTERFACE_TAG"
+  wait_for_count_increase router-a "added interface address interface=eth0.$SUBINTERFACE_TAG address=$SUBINTERFACE_ADDRESS" 0 60 \
+    && log "router-a: applied $SUBINTERFACE_ADDRESS to eth0.$SUBINTERFACE_TAG" \
+    || { log "router-a: FAILED to apply the subinterface address"; return 1; }
+
+  log "removing router-a's routed subinterface"
+  provision_delete_routed_subinterface router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+
+  log "waiting for router-a to delete eth0.$SUBINTERFACE_TAG"
+  wait_for_count_increase router-a "deleted vlan sub-interface interface=eth0 sub_interface=eth0.$SUBINTERFACE_TAG" 0 60 \
+    && log "router-a: deleted eth0.$SUBINTERFACE_TAG" \
+    || { log "router-a: FAILED to delete eth0.$SUBINTERFACE_TAG"; return 1; }
+}
+
 # --- Peer-group source-address scenario ---
 #
 # Verifies BgpPeerGroup.source_address is resolved by nos-bgpd itself, over a
@@ -1183,6 +1365,8 @@ case "${1:-}" in
   auth) cmd_check_auth ;;
   loopback) cmd_check_loopback ;;
   switching) cmd_check_switching ;;
+  svi) cmd_check_svi ;;
+  routed-subinterface) cmd_check_routed_subinterface ;;
   source-address) cmd_check_source_address ;;
   policy) cmd_check_policy ;;
   redistribute-policy) cmd_check_redistribute_policy ;;
@@ -1200,6 +1384,8 @@ case "${1:-}" in
     cmd_check_auth
     cmd_check_loopback
     cmd_check_switching
+    cmd_check_svi
+    cmd_check_routed_subinterface
     cmd_check_source_address
     cmd_check_policy
     cmd_check_redistribute_policy
@@ -1208,7 +1394,7 @@ case "${1:-}" in
     cmd_check_route_server
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|source-address|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}" >&2
     exit 2
     ;;
 esac
