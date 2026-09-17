@@ -32,6 +32,10 @@ pub struct NosCompleter {
     static_routing_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
     /// Live interface names for `ArgKind::InterfaceName` slots.
     interface_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
+    /// Live broadcast domain names for `ArgKind::BroadcastDomainName` slots.
+    broadcast_domain_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
+    /// Live switching profile names for `ArgKind::SwitchingProfileName` slots.
+    switching_profile_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
 }
 
 impl NosCompleter {
@@ -44,6 +48,8 @@ impl NosCompleter {
         routing_table_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
         static_routing_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
         interface_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
+        broadcast_domain_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
+        switching_profile_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
     ) -> Self {
         Self {
             mode,
@@ -53,6 +59,8 @@ impl NosCompleter {
             routing_table_name_source,
             static_routing_instance_name_source,
             interface_name_source,
+            broadcast_domain_name_source,
+            switching_profile_name_source,
         }
     }
 
@@ -213,6 +221,34 @@ impl Completer for NosCompleter {
                         }
                     }
                 }
+                Token::Arg(ArgKind::BroadcastDomainName) => {
+                    for name in (self.broadcast_domain_name_source)() {
+                        if name.starts_with(partial) && !suggestions.iter().any(|s| s.value == name)
+                        {
+                            suggestions.push(Suggestion {
+                                value: name,
+                                description: None,
+                                span: Span::new(partial_start, line.len()),
+                                append_whitespace: true,
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+                Token::Arg(ArgKind::SwitchingProfileName) => {
+                    for name in (self.switching_profile_name_source)() {
+                        if name.starts_with(partial) && !suggestions.iter().any(|s| s.value == name)
+                        {
+                            suggestions.push(Suggestion {
+                                value: name,
+                                description: None,
+                                span: Span::new(partial_start, line.len()),
+                                append_whitespace: true,
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
                 Token::Arg(ArgKind::Plain) => {
                     // No way to complete an arbitrary value.
                 }
@@ -255,6 +291,14 @@ mod tests {
         Box::new(Vec::new)
     }
 
+    fn no_broadcast_domains() -> Box<dyn FnMut() -> Vec<String> + Send> {
+        Box::new(Vec::new)
+    }
+
+    fn no_switching_profiles() -> Box<dyn FnMut() -> Vec<String> + Send> {
+        Box::new(Vec::new)
+    }
+
     fn values(result: &CompletionResult) -> Vec<String> {
         let mut v: Vec<String> = result
             .suggestions()
@@ -275,6 +319,8 @@ mod tests {
             no_routing_tables(),
             no_static_routing_instances(),
             no_interfaces(),
+            no_broadcast_domains(),
+            no_switching_profiles(),
         );
         let result = completer.complete("sh", 2);
         assert_eq!(values(&result), vec!["show".to_string()]);
@@ -290,6 +336,8 @@ mod tests {
             no_routing_tables(),
             no_static_routing_instances(),
             no_interfaces(),
+            no_broadcast_domains(),
+            no_switching_profiles(),
         );
         let result = completer.complete("com", 3);
         assert!(
@@ -313,6 +361,8 @@ mod tests {
             no_routing_tables(),
             no_static_routing_instances(),
             no_interfaces(),
+            no_broadcast_domains(),
+            no_switching_profiles(),
         );
         let result = completer.complete("com", 3);
         assert_eq!(values(&result), vec!["commit".to_string()]);
@@ -328,6 +378,8 @@ mod tests {
             no_routing_tables(),
             no_static_routing_instances(),
             no_interfaces(),
+            no_broadcast_domains(),
+            no_switching_profiles(),
         );
         let result = completer.complete("", 0);
         let vals = values(&result);
@@ -353,6 +405,8 @@ mod tests {
             no_routing_tables(),
             no_static_routing_instances(),
             no_interfaces(),
+            no_broadcast_domains(),
+            no_switching_profiles(),
         );
         let result = completer.complete("edit bgp instance r", 19);
         assert_eq!(values(&result), vec!["r1".to_string(), "r2".to_string()]);
@@ -375,6 +429,8 @@ mod tests {
             no_routing_tables(),
             no_static_routing_instances(),
             no_interfaces(),
+            no_broadcast_domains(),
+            no_switching_profiles(),
         );
         let result = completer.complete("edit peer-group p", 17);
         assert_eq!(values(&result), vec!["pg1".to_string(), "pg2".to_string()]);
@@ -397,6 +453,8 @@ mod tests {
             tables,
             no_static_routing_instances(),
             no_interfaces(),
+            no_broadcast_domains(),
+            no_switching_profiles(),
         );
         let result = completer.complete("edit routing-table r", 20);
         assert_eq!(values(&result), vec!["rt1".to_string(), "rt2".to_string()]);
@@ -419,6 +477,8 @@ mod tests {
             no_routing_tables(),
             instances,
             no_interfaces(),
+            no_broadcast_domains(),
+            no_switching_profiles(),
         );
         let result = completer.complete("edit static-routing-instance s", 30);
         assert_eq!(
@@ -437,6 +497,8 @@ mod tests {
             no_routing_tables(),
             no_static_routing_instances(),
             no_interfaces(),
+            no_broadcast_domains(),
+            no_switching_profiles(),
         );
         let result = completer.complete("show conf", 9);
         let suggestion = result
@@ -462,6 +524,8 @@ mod tests {
             no_routing_tables(),
             no_static_routing_instances(),
             no_interfaces(),
+            no_broadcast_domains(),
+            no_switching_profiles(),
         );
         let result = completer.complete("show config", 11);
         // Not a completion candidate (already fully typed) — use a partial instead.

@@ -393,6 +393,43 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Unsets the cluster-id field, reverting to the default: this instance's own \
              router-id.",
         ),
+        Topic::EnsureBroadcastDomain => (
+            "Create a broadcast domain in the transaction if it doesn't already exist.",
+            "Adds a new broadcast domain with the given name to the transaction's in-progress \
+             config if none exists with that name yet; if one already exists, this is a \
+             no-op. A broadcast domain carries no fields beyond its name — only a switching \
+             profile's members reference it.",
+        ),
+        Topic::DeleteBroadcastDomain => (
+            "Delete a broadcast domain from the transaction.",
+            "Removes a broadcast domain from the transaction's in-progress config. Any \
+             switching profile still referencing it becomes invalid — checked at commit time, \
+             not when the broadcast domain is deleted.",
+        ),
+        Topic::EnsureSwitchingProfile => (
+            "Create a switching profile in the transaction if it doesn't already exist.",
+            "Adds a new switching profile with the given name to the transaction's \
+             in-progress config if none exists with that name yet; if one already exists, \
+             this is a no-op. A switching profile is a trunk-style container — it maps \
+             multiple broadcast domains to their dot1q tagging, added via a separate op.",
+        ),
+        Topic::AddSwitchingProfileMember => (
+            "Add or retag a broadcast domain within a switching profile.",
+            "Associates a broadcast domain with the given tag (a dot1q VLAN, or untagged) \
+             within a switching profile — if the domain is already a member, its tag is \
+             replaced. The referenced broadcast domain must exist, and no broadcast domain \
+             may appear twice within the same profile; both are checked at commit time.",
+        ),
+        Topic::RemoveSwitchingProfileMember => (
+            "Remove a broadcast domain from a switching profile.",
+            "Removes the named broadcast domain's membership from the switching profile in \
+             the transaction's in-progress config.",
+        ),
+        Topic::DeleteSwitchingProfile => (
+            "Delete a switching profile from the transaction.",
+            "Removes a switching profile and all of its broadcast-domain memberships from the \
+             transaction's in-progress config.",
+        ),
     };
     CommandDoc {
         topic,
@@ -469,6 +506,12 @@ mod tests {
         Topic::ClearBgpPeerGroupRouteServerClient,
         Topic::SetBgpInstanceClusterId,
         Topic::ClearBgpInstanceClusterId,
+        Topic::EnsureBroadcastDomain,
+        Topic::DeleteBroadcastDomain,
+        Topic::EnsureSwitchingProfile,
+        Topic::AddSwitchingProfileMember,
+        Topic::RemoveSwitchingProfileMember,
+        Topic::DeleteSwitchingProfile,
     ];
 
     #[test]

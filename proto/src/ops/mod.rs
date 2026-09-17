@@ -1,6 +1,7 @@
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
+pub mod broadcast_domain;
 pub mod community_alias;
 pub mod community_group;
 pub mod interface;
@@ -9,10 +10,12 @@ pub mod prefix_list;
 pub mod routing_table;
 pub mod static_route;
 pub mod static_routing_instance;
+pub mod switching_profile;
 
 pub use bgp_instance::BgpInstanceOp;
 pub use bgp_peer::BgpPeerOp;
 pub use bgp_peer_group::BgpPeerGroupOp;
+pub use broadcast_domain::BroadcastDomainOp;
 pub use community_alias::CommunityAliasOp;
 pub use community_group::CommunityGroupOp;
 pub use interface::InterfaceOp;
@@ -21,6 +24,7 @@ pub use prefix_list::PrefixListOp;
 pub use routing_table::RoutingTableOp;
 pub use static_route::StaticRouteOp;
 pub use static_routing_instance::StaticRoutingInstanceOp;
+pub use switching_profile::SwitchingProfileOp;
 
 use std::net::IpAddr;
 
@@ -52,6 +56,8 @@ pub enum ConfigOp {
     CommunityAlias(CommunityAliasOp),
     CommunityGroup(CommunityGroupOp),
     PrefixList(PrefixListOp),
+    BroadcastDomain(BroadcastDomainOp),
+    SwitchingProfile(SwitchingProfileOp),
 }
 
 impl ConfigOp {
@@ -75,6 +81,8 @@ impl ConfigOp {
             ConfigOp::CommunityAlias(op) => op.apply(config),
             ConfigOp::CommunityGroup(op) => op.apply(config),
             ConfigOp::PrefixList(op) => op.apply(config),
+            ConfigOp::BroadcastDomain(op) => op.apply(config),
+            ConfigOp::SwitchingProfile(op) => op.apply(config),
         }
     }
 }
@@ -120,6 +128,15 @@ pub enum OpError {
     PrefixListEntryNotFound {
         name: String,
         entry: PrefixListEntry,
+    },
+    #[error("broadcast domain '{0}' not found")]
+    BroadcastDomainNotFound(String),
+    #[error("switching profile '{0}' not found")]
+    SwitchingProfileNotFound(String),
+    #[error("broadcast domain '{broadcast_domain}' not found in switching profile '{name}'")]
+    SwitchingProfileMemberNotFound {
+        name: String,
+        broadcast_domain: String,
     },
 }
 

@@ -1,6 +1,7 @@
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
+pub mod broadcast_domain;
 pub mod community_alias;
 pub mod community_group;
 pub mod interface;
@@ -9,6 +10,7 @@ pub mod prefix_list;
 pub mod routing_table;
 pub mod static_route;
 pub mod static_routing_instance;
+pub mod switching_profile;
 
 pub use bgp_instance::BgpInstance;
 pub use bgp_peer::BgpPeer;
@@ -16,6 +18,7 @@ pub use bgp_peer_group::{
     AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpPeerGroup, NextHopMode, SourceAddress,
     CONNECT_RETRY_TIME_DEFAULT_SECS, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR,
 };
+pub use broadcast_domain::BroadcastDomain;
 pub use community_alias::CommunityAlias;
 pub use community_group::CommunityGroup;
 pub use interface::{loopback_table_name, Interface, InterfaceAddress, LOOPBACK_PREFIX};
@@ -24,6 +27,7 @@ pub use prefix_list::{PrefixList, PrefixListEntry};
 pub use routing_table::{Redistribute, RedistributeSource, RedistributeTarget, RoutingTable};
 pub use static_route::StaticRoute;
 pub use static_routing_instance::StaticRoutingInstance;
+pub use switching_profile::{SwitchingProfile, SwitchingProfileMember, VlanTag};
 
 use garde::Validate;
 use serde::{Deserialize, Serialize};
@@ -63,6 +67,12 @@ pub struct Config {
     #[garde(dive)]
     pub prefix_lists: Vec<PrefixList>,
 
+    #[garde(dive)]
+    pub broadcast_domains: Vec<BroadcastDomain>,
+
+    #[garde(dive)]
+    pub switching_profiles: Vec<SwitchingProfile>,
+
     #[serde(default = "default_hostname")]
     #[garde(length(min = 1, max = 253), custom(|h, _ctx: &Config| hostname_charset(h)))]
     pub hostname: String,
@@ -79,6 +89,8 @@ impl Default for Config {
             community_aliases: Vec::new(),
             community_groups: Vec::new(),
             prefix_lists: Vec::new(),
+            broadcast_domains: Vec::new(),
+            switching_profiles: Vec::new(),
             hostname: default_hostname(),
         }
     }

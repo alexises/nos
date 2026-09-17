@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use ipnet::IpNet;
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, NextHopMode, Redistribute, RedistributeSource,
-    RedistributeTarget, SourceAddress, TransactionBase,
+    RedistributeTarget, SourceAddress, TransactionBase, VlanTag,
 };
 
 /// A single field edit targeting a BGP instance.
@@ -82,6 +82,12 @@ pub enum EditTarget {
         name: String,
     },
     PrefixList {
+        name: String,
+    },
+    BroadcastDomain {
+        name: String,
+    },
+    SwitchingProfile {
         name: String,
     },
 }
@@ -181,6 +187,19 @@ pub enum SetTarget {
     PrefixListEntryRelative {
         cidr: IpNet,
         range: Option<(u8, u8)>,
+    },
+    /// Fully-qualified — works from anywhere in configuration mode. Upserts
+    /// by `broadcast_domain` within the named switching profile.
+    SwitchingProfileMember {
+        name: String,
+        broadcast_domain: String,
+        tag: VlanTag,
+    },
+    /// Context-relative — only valid while navigated into a switching
+    /// profile.
+    SwitchingProfileMemberRelative {
+        broadcast_domain: String,
+        tag: VlanTag,
     },
 }
 
@@ -332,6 +351,23 @@ pub enum DeleteTarget {
     PrefixListEntryRelative {
         cidr: IpNet,
         range: Option<(u8, u8)>,
+    },
+    BroadcastDomain {
+        name: String,
+    },
+    SwitchingProfile {
+        name: String,
+    },
+    /// `delete switching-profile <name> broadcast-domain <domain>` —
+    /// qualified.
+    SwitchingProfileMember {
+        name: String,
+        broadcast_domain: String,
+    },
+    /// `delete broadcast-domain <domain>` — relative, only valid while
+    /// navigated into a switching profile.
+    SwitchingProfileMemberRelative {
+        broadcast_domain: String,
     },
 }
 
@@ -524,6 +560,12 @@ impl Command {
                 name: (*name).to_string(),
             }),
             ["edit", "prefix-list", name] => Command::Edit(EditTarget::PrefixList {
+                name: (*name).to_string(),
+            }),
+            ["edit", "broadcast", "domain", name] => Command::Edit(EditTarget::BroadcastDomain {
+                name: (*name).to_string(),
+            }),
+            ["edit", "switching-profile", name] => Command::Edit(EditTarget::SwitchingProfile {
                 name: (*name).to_string(),
             }),
             ["edit", "source"] => Command::EditSource,
@@ -1049,6 +1091,36 @@ impl Command {
                     _ => Command::Unknown(trimmed.to_string()),
                 }
             }
+            ["set", "switching-profile", name, "broadcast-domain", domain, "tag", "dot1q", id] => {
+                match id.parse::<u16>() {
+                    Ok(id) => Command::Set(SetTarget::SwitchingProfileMember {
+                        name: (*name).to_string(),
+                        broadcast_domain: (*domain).to_string(),
+                        tag: VlanTag::Dot1q(id),
+                    }),
+                    Err(_) => Command::Unknown(trimmed.to_string()),
+                }
+            }
+            ["set", "switching-profile", name, "broadcast-domain", domain, "tag", "untagged"] => {
+                Command::Set(SetTarget::SwitchingProfileMember {
+                    name: (*name).to_string(),
+                    broadcast_domain: (*domain).to_string(),
+                    tag: VlanTag::Untagged,
+                })
+            }
+            ["set", "broadcast-domain", domain, "tag", "dot1q", id] => match id.parse::<u16>() {
+                Ok(id) => Command::Set(SetTarget::SwitchingProfileMemberRelative {
+                    broadcast_domain: (*domain).to_string(),
+                    tag: VlanTag::Dot1q(id),
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
+            ["set", "broadcast-domain", domain, "tag", "untagged"] => {
+                Command::Set(SetTarget::SwitchingProfileMemberRelative {
+                    broadcast_domain: (*domain).to_string(),
+                    tag: VlanTag::Untagged,
+                })
+            }
             ["delete"] => Command::Delete(DeleteTarget::Current),
             ["delete", "bgp", "instance", name] => Command::Delete(DeleteTarget::BgpInstance {
                 name: (*name).to_string(),
@@ -1226,6 +1298,27 @@ impl Command {
                     }
                     _ => Command::Unknown(trimmed.to_string()),
                 }
+            }
+            ["delete", "broadcast", "domain", name] => {
+                Command::Delete(DeleteTarget::BroadcastDomain {
+                    name: (*name).to_string(),
+                })
+            }
+            ["delete", "switching-profile", name] => {
+                Command::Delete(DeleteTarget::SwitchingProfile {
+                    name: (*name).to_string(),
+                })
+            }
+            ["delete", "switching-profile", name, "broadcast-domain", domain] => {
+                Command::Delete(DeleteTarget::SwitchingProfileMember {
+                    name: (*name).to_string(),
+                    broadcast_domain: (*domain).to_string(),
+                })
+            }
+            ["delete", "broadcast-domain", domain] => {
+                Command::Delete(DeleteTarget::SwitchingProfileMemberRelative {
+                    broadcast_domain: (*domain).to_string(),
+                })
             }
             _ => Command::Unknown(trimmed.to_string()),
         }

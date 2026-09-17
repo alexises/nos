@@ -1,10 +1,11 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
-    CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus, FieldDiff, Interface,
-    InterfaceAddress, InterfaceStatus, LogEntry, LogLevel, NextHopMode, PeerSummary,
+    BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
+    Interface, InterfaceAddress, InterfaceStatus, LogEntry, LogLevel, NextHopMode, PeerSummary,
     PolicyDefinition, PrefixList, PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable,
-    SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance, TransactionSnapshot,
+    SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance, SwitchingProfile,
+    TransactionSnapshot, VlanTag,
 };
 
 use crate::session::Path;
@@ -378,6 +379,21 @@ pub fn render_config(config: &Config) -> String {
     } else {
         lines.extend(config.prefix_lists.iter().map(render_prefix_list));
     }
+    if config.broadcast_domains.is_empty() {
+        lines.push("no broadcast domains configured".to_string());
+    } else {
+        lines.extend(config.broadcast_domains.iter().map(render_broadcast_domain));
+    }
+    if config.switching_profiles.is_empty() {
+        lines.push("no switching profiles configured".to_string());
+    } else {
+        lines.extend(
+            config
+                .switching_profiles
+                .iter()
+                .map(render_switching_profile),
+        );
+    }
     lines.join("\n")
 }
 
@@ -481,6 +497,24 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
                 || format!("prefix-list '{name}' not found"),
                 render_prefix_list,
             ),
+        Path::BroadcastDomain(name) => snapshot
+            .config
+            .broadcast_domains
+            .iter()
+            .find(|d| &d.name == name)
+            .map_or_else(
+                || format!("broadcast-domain '{name}' not found"),
+                render_broadcast_domain,
+            ),
+        Path::SwitchingProfile(name) => snapshot
+            .config
+            .switching_profiles
+            .iter()
+            .find(|p| &p.name == name)
+            .map_or_else(
+                || format!("switching-profile '{name}' not found"),
+                render_switching_profile,
+            ),
     }
 }
 
@@ -546,6 +580,34 @@ pub fn render_prefix_list(list: &PrefixList) -> String {
             .join(", ")
     };
     format!("prefix-list {}: entries [{entries}]", list.name)
+}
+
+/// Render one broadcast domain as human-readable text.
+pub fn render_broadcast_domain(domain: &BroadcastDomain) -> String {
+    format!("broadcast-domain {}", domain.name)
+}
+
+/// Render one `VlanTag` the same way for every caller.
+pub fn render_vlan_tag(tag: VlanTag) -> String {
+    match tag {
+        VlanTag::Untagged => "untagged".to_string(),
+        VlanTag::Dot1q(id) => format!("dot1q {id}"),
+    }
+}
+
+/// Render one switching profile as human-readable text.
+pub fn render_switching_profile(profile: &SwitchingProfile) -> String {
+    let members = if profile.members.is_empty() {
+        "none".to_string()
+    } else {
+        profile
+            .members
+            .iter()
+            .map(|m| format!("{}: {}", m.broadcast_domain, render_vlan_tag(m.tag)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!("switching-profile {}: members [{members}]", profile.name)
 }
 
 // ANSI SGR codes for `render_diff`. Hand-rolled rather than pulling in a
@@ -730,7 +792,8 @@ mod tests {
         assert_eq!(
             render_config(&cfg),
             "hostname: nos\nno BGP instances configured\nno routing tables configured\nno static routing instances configured\nno interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno prefix lists configured"
+             no community aliases configured\nno community groups configured\nno prefix lists configured\n\
+             no broadcast domains configured\nno switching profiles configured"
         );
     }
 
@@ -745,7 +808,8 @@ mod tests {
             "hostname: nos\nbgp instance default: router-id 1.1.1.1, asn 65000, cluster-id default (= router-id)\n\
              no routing tables configured\nno static routing instances configured\n\
              no interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno prefix lists configured"
+             no community aliases configured\nno community groups configured\nno prefix lists configured\n\
+             no broadcast domains configured\nno switching profiles configured"
         );
     }
 
@@ -761,7 +825,8 @@ mod tests {
              bgp instance vrf-b: router-id 1.1.1.1, asn 65002, cluster-id default (= router-id)\n\
              no routing tables configured\nno static routing instances configured\n\
              no interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno prefix lists configured"
+             no community aliases configured\nno community groups configured\nno prefix lists configured\n\
+             no broadcast domains configured\nno switching profiles configured"
         );
     }
 
@@ -785,7 +850,8 @@ mod tests {
             "transaction 'demo':\nhostname: nos\nbgp instance r1: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)\n\
              no routing tables configured\nno static routing instances configured\n\
              no interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno prefix lists configured"
+             no community aliases configured\nno community groups configured\nno prefix lists configured\n\
+             no broadcast domains configured\nno switching profiles configured"
         );
     }
 

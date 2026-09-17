@@ -30,6 +30,8 @@ pub enum ArgKind {
     RoutingTableName,
     StaticRoutingInstanceName,
     InterfaceName,
+    BroadcastDomainName,
+    SwitchingProfileName,
 }
 
 /// Where a command's summary/detail text comes from.
@@ -55,6 +57,7 @@ pub enum Availability {
     ConfigurationRoutingTable,
     ConfigurationStaticRoutingInstance,
     ConfigurationInterface,
+    ConfigurationSwitchingProfile,
     /// Any non-root navigation position — `BgpInstance`, `BgpPeerGroup`,
     /// `RoutingTable`, `StaticRoutingInstance`, or `Interface`.
     ConfigurationNested,
@@ -97,6 +100,13 @@ pub fn availability_matches(availability: Availability, mode: &Mode) -> bool {
             mode,
             Mode::Configuration {
                 path: Path::Interface(_),
+                ..
+            }
+        ),
+        Availability::ConfigurationSwitchingProfile => matches!(
+            mode,
+            Mode::Configuration {
+                path: Path::SwitchingProfile(_),
                 ..
             }
         ),
@@ -1250,6 +1260,124 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         usage: "delete route <subnet>",
         doc: Doc::FromConfig(Topic::DeleteStaticRoute),
         availability: Availability::ConfigurationStaticRoutingInstance,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("edit"),
+            Token::Literal("broadcast"),
+            Token::Literal("domain"),
+            Token::Arg(ArgKind::BroadcastDomainName),
+        ],
+        usage: "edit broadcast domain <name>",
+        doc: Doc::FromConfig(Topic::EnsureBroadcastDomain),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("broadcast"),
+            Token::Literal("domain"),
+            Token::Arg(ArgKind::BroadcastDomainName),
+        ],
+        usage: "delete broadcast domain <name>",
+        doc: Doc::FromConfig(Topic::DeleteBroadcastDomain),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("edit"),
+            Token::Literal("switching-profile"),
+            Token::Arg(ArgKind::SwitchingProfileName),
+        ],
+        usage: "edit switching-profile <name>",
+        doc: Doc::FromConfig(Topic::EnsureSwitchingProfile),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("switching-profile"),
+            Token::Arg(ArgKind::SwitchingProfileName),
+        ],
+        usage: "delete switching-profile <name>",
+        doc: Doc::FromConfig(Topic::DeleteSwitchingProfile),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("switching-profile"),
+            Token::Arg(ArgKind::SwitchingProfileName),
+            Token::Literal("broadcast-domain"),
+            Token::Arg(ArgKind::BroadcastDomainName),
+            Token::Literal("tag"),
+            Token::Literal("dot1q"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set switching-profile <name> broadcast-domain <domain> tag dot1q <n>",
+        doc: Doc::FromConfig(Topic::AddSwitchingProfileMember),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("switching-profile"),
+            Token::Arg(ArgKind::SwitchingProfileName),
+            Token::Literal("broadcast-domain"),
+            Token::Arg(ArgKind::BroadcastDomainName),
+            Token::Literal("tag"),
+            Token::Literal("untagged"),
+        ],
+        usage: "set switching-profile <name> broadcast-domain <domain> tag untagged",
+        doc: Doc::FromConfig(Topic::AddSwitchingProfileMember),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("broadcast-domain"),
+            Token::Arg(ArgKind::BroadcastDomainName),
+            Token::Literal("tag"),
+            Token::Literal("dot1q"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set broadcast-domain <domain> tag dot1q <n>",
+        doc: Doc::FromConfig(Topic::AddSwitchingProfileMember),
+        availability: Availability::ConfigurationSwitchingProfile,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("broadcast-domain"),
+            Token::Arg(ArgKind::BroadcastDomainName),
+            Token::Literal("tag"),
+            Token::Literal("untagged"),
+        ],
+        usage: "set broadcast-domain <domain> tag untagged",
+        doc: Doc::FromConfig(Topic::AddSwitchingProfileMember),
+        availability: Availability::ConfigurationSwitchingProfile,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("switching-profile"),
+            Token::Arg(ArgKind::SwitchingProfileName),
+            Token::Literal("broadcast-domain"),
+            Token::Arg(ArgKind::BroadcastDomainName),
+        ],
+        usage: "delete switching-profile <name> broadcast-domain <domain>",
+        doc: Doc::FromConfig(Topic::RemoveSwitchingProfileMember),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("broadcast-domain"),
+            Token::Arg(ArgKind::BroadcastDomainName),
+        ],
+        usage: "delete broadcast-domain <domain>",
+        doc: Doc::FromConfig(Topic::RemoveSwitchingProfileMember),
+        availability: Availability::ConfigurationSwitchingProfile,
     },
     CommandSpec {
         tokens: &[Token::Literal("show"), Token::Literal("interface")],

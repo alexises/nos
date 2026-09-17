@@ -126,6 +126,18 @@ pub enum Topic {
     SetBgpInstanceClusterId,
     /// `ConfigOp::BgpInstance(BgpInstanceOp::ClearClusterId)`
     ClearBgpInstanceClusterId,
+    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::Ensure)`
+    EnsureBroadcastDomain,
+    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::Delete)`
+    DeleteBroadcastDomain,
+    /// `ConfigOp::SwitchingProfile(SwitchingProfileOp::Ensure)`
+    EnsureSwitchingProfile,
+    /// `ConfigOp::SwitchingProfile(SwitchingProfileOp::AddMember)`
+    AddSwitchingProfileMember,
+    /// `ConfigOp::SwitchingProfile(SwitchingProfileOp::RemoveMember)`
+    RemoveSwitchingProfileMember,
+    /// `ConfigOp::SwitchingProfile(SwitchingProfileOp::Delete)`
+    DeleteSwitchingProfile,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

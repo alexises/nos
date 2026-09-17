@@ -1,0 +1,237 @@
+use garde::Validate;
+use serde::{Deserialize, Serialize};
+
+use crate::validators::unique_in;
+
+use super::Config;
+
+/// A dot1q tag, or the absence of one. `Dot1q`'s value is restricted to
+/// `1..=4094` — 802.1Q reserves 0 and 4095.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VlanTag {
+    Untagged,
+    Dot1q(u16),
+}
+
+/// One broadcast domain's membership in a `SwitchingProfile`, tagged as
+/// either a specific dot1q VLAN or untagged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[garde(context(Config as ctx))]
+pub struct SwitchingProfileMember {
+    #[garde(custom(|bd: &String, ctx: &Config| broadcast_domain_reference_valid(bd, ctx)))]
+    pub broadcast_domain: String,
+
+    #[garde(custom(|t: &VlanTag, _ctx: &Config| valid_vlan_tag(*t)))]
+    pub tag: VlanTag,
+}
+
+fn broadcast_domain_reference_valid(broadcast_domain: &str, ctx: &Config) -> garde::Result {
+    if ctx
+        .broadcast_domains
+        .iter()
+        .any(|d| d.name == broadcast_domain)
+    {
+        Ok(())
+    } else {
+        Err(garde::Error::new(
+            "referenced broadcast domain does not exist",
+        ))
+    }
+}
+
+fn valid_vlan_tag(tag: VlanTag) -> garde::Result {
+    match tag {
+        VlanTag::Untagged => Ok(()),
+        VlanTag::Dot1q(id) if (1..=4094).contains(&id) => Ok(()),
+        VlanTag::Dot1q(_) => Err(garde::Error::new("dot1q tag must be between 1 and 4094")),
+    }
+}
+
+/// A named, trunk-style container mapping multiple broadcast domains to
+/// their dot1q tagging. Will be assigned to a future "switched interface"
+/// config object — not modeled yet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[garde(context(Config as ctx))]
+pub struct SwitchingProfile {
+    #[garde(
+        length(min = 1, max = 64),
+        custom(|n, ctx: &Config| unique_in(n, &ctx.switching_profiles, |p| &p.name))
+    )]
+    pub name: String,
+
+    #[garde(dive, custom(|members, _ctx: &Config| unique_broadcast_domains(members)))]
+    pub members: Vec<SwitchingProfileMember>,
+}
+
+/// No two members of the same profile may reference the same broadcast
+/// domain — a domain either participates in a profile once or not at all.
+/// Scoped to `self.members` only, same as
+/// `static_routing_instance::unique_subnets`.
+fn unique_broadcast_domains(members: &[SwitchingProfileMember]) -> garde::Result {
+    let mut seen: Vec<&str> = Vec::new();
+    for m in members {
+        if seen.contains(&m.broadcast_domain.as_str()) {
+            return Err(garde::Error::new(
+                "must not repeat a broadcast domain within the same switching profile",
+            ));
+        }
+        seen.push(&m.broadcast_domain);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::BroadcastDomain;
+
+    fn member(broadcast_domain: &str, tag: VlanTag) -> SwitchingProfileMember {
+        SwitchingProfileMember {
+            broadcast_domain: broadcast_domain.to_string(),
+            tag,
+        }
+    }
+
+    fn config_with(profiles: Vec<SwitchingProfile>, domains: Vec<BroadcastDomain>) -> Config {
+        Config {
+            switching_profiles: profiles,
+            broadcast_domains: domains,
+            ..Default::default()
+        }
+    }
+
+    fn domain(name: &str) -> BroadcastDomain {
+        BroadcastDomain {
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn valid_profile_with_no_members_passes() {
+        let cfg = config_with(
+            vec![SwitchingProfile {
+                name: "sp1".to_string(),
+                members: Vec::new(),
+            }],
+            vec![],
+        );
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn valid_profile_with_multiple_members_passes() {
+        let cfg = config_with(
+            vec![SwitchingProfile {
+                name: "sp1".to_string(),
+                members: vec![
+                    member("bd1", VlanTag::Dot1q(100)),
+                    member("bd2", VlanTag::Untagged),
+                ],
+            }],
+            vec![domain("bd1"), domain("bd2")],
+        );
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn duplicate_profile_name_fails() {
+        let cfg = config_with(
+            vec![
+                SwitchingProfile {
+                    name: "sp1".to_string(),
+                    members: Vec::new(),
+                },
+                SwitchingProfile {
+                    name: "sp1".to_string(),
+                    members: Vec::new(),
+                },
+            ],
+            vec![],
+        );
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn dangling_broadcast_domain_reference_fails() {
+        let cfg = config_with(
+            vec![SwitchingProfile {
+                name: "sp1".to_string(),
+                members: vec![member("does-not-exist", VlanTag::Untagged)],
+            }],
+            vec![],
+        );
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn duplicate_broadcast_domain_within_profile_fails() {
+        let cfg = config_with(
+            vec![SwitchingProfile {
+                name: "sp1".to_string(),
+                members: vec![
+                    member("bd1", VlanTag::Dot1q(100)),
+                    member("bd1", VlanTag::Dot1q(200)),
+                ],
+            }],
+            vec![domain("bd1")],
+        );
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn same_broadcast_domain_across_different_profiles_passes() {
+        let cfg = config_with(
+            vec![
+                SwitchingProfile {
+                    name: "sp1".to_string(),
+                    members: vec![member("bd1", VlanTag::Dot1q(100))],
+                },
+                SwitchingProfile {
+                    name: "sp2".to_string(),
+                    members: vec![member("bd1", VlanTag::Dot1q(100))],
+                },
+            ],
+            vec![domain("bd1")],
+        );
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn dot1q_tag_zero_fails() {
+        let cfg = config_with(
+            vec![SwitchingProfile {
+                name: "sp1".to_string(),
+                members: vec![member("bd1", VlanTag::Dot1q(0))],
+            }],
+            vec![domain("bd1")],
+        );
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn dot1q_tag_4095_fails() {
+        let cfg = config_with(
+            vec![SwitchingProfile {
+                name: "sp1".to_string(),
+                members: vec![member("bd1", VlanTag::Dot1q(4095))],
+            }],
+            vec![domain("bd1")],
+        );
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn dot1q_tag_boundary_values_pass() {
+        let cfg = config_with(
+            vec![SwitchingProfile {
+                name: "sp1".to_string(),
+                members: vec![
+                    member("bd1", VlanTag::Dot1q(1)),
+                    member("bd2", VlanTag::Dot1q(4094)),
+                ],
+            }],
+            vec![domain("bd1"), domain("bd2")],
+        );
+        cfg.validate_with(&cfg).unwrap();
+    }
+}

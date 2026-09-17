@@ -1,6 +1,7 @@
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
+pub mod broadcast_domain;
 pub mod community_alias;
 pub mod community_group;
 pub mod interface;
@@ -9,6 +10,7 @@ pub mod prefix_list;
 pub mod routing_table;
 pub mod static_route;
 pub mod static_routing_instance;
+pub mod switching_profile;
 
 use serde::{Deserialize, Serialize};
 
@@ -70,6 +72,8 @@ pub struct ConfigDiff {
     pub community_aliases: Vec<SectionDiff>,
     pub community_groups: Vec<SectionDiff>,
     pub prefix_lists: Vec<SectionDiff>,
+    pub broadcast_domains: Vec<SectionDiff>,
+    pub switching_profiles: Vec<SectionDiff>,
 }
 
 impl ConfigDiff {
@@ -83,6 +87,8 @@ impl ConfigDiff {
             && self.community_aliases.is_empty()
             && self.community_groups.is_empty()
             && self.prefix_lists.is_empty()
+            && self.broadcast_domains.is_empty()
+            && self.switching_profiles.is_empty()
     }
 
     /// A copy of this diff keeping only the sections/fields covered by
@@ -136,6 +142,16 @@ impl ConfigDiff {
             } else {
                 Vec::new()
             },
+            broadcast_domains: if scopes.contains(&DiffScope::BroadcastDomains) {
+                self.broadcast_domains.clone()
+            } else {
+                Vec::new()
+            },
+            switching_profiles: if scopes.contains(&DiffScope::SwitchingProfiles) {
+                self.switching_profiles.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -153,6 +169,8 @@ pub enum DiffScope {
     CommunityAliases,
     CommunityGroups,
     PrefixLists,
+    BroadcastDomains,
+    SwitchingProfiles,
 }
 
 /// Computes what changed between `base` (e.g. the running config) and
@@ -192,6 +210,14 @@ pub fn diff_configs(base: &Config, candidate: &Config) -> ConfigDiff {
             &candidate.community_groups,
         ),
         prefix_lists: prefix_list::diff_prefix_lists(&base.prefix_lists, &candidate.prefix_lists),
+        broadcast_domains: broadcast_domain::diff_broadcast_domains(
+            &base.broadcast_domains,
+            &candidate.broadcast_domains,
+        ),
+        switching_profiles: switching_profile::diff_switching_profiles(
+            &base.switching_profiles,
+            &candidate.switching_profiles,
+        ),
     }
 }
 

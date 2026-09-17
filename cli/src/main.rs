@@ -101,6 +101,16 @@ impl NosPrompt {
                 path: session::Path::PrefixList(name),
                 ..
             } => format!("({transaction}/prefix-list:{name})"),
+            Mode::Configuration {
+                transaction,
+                path: session::Path::BroadcastDomain(name),
+                ..
+            } => format!("({transaction}/broadcast-domain:{name})"),
+            Mode::Configuration {
+                transaction,
+                path: session::Path::SwitchingProfile(name),
+                ..
+            } => format!("({transaction}/switching-profile:{name})"),
         };
         Self { hostname, suffix }
     }
@@ -188,15 +198,15 @@ fn keybindings() -> reedline::Keybindings {
 /// iteration (mirroring `NosPrompt::for_mode`, already rebuilt every
 /// iteration) so completions/`?`/`help` always reflect the mode the last
 /// command actually landed in.
-fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Completer + Send> {
-    let doc_socket = socket.clone();
+fn completer_for(socket: &Path, cache: DocCache, mode: &Mode) -> Box<dyn Completer + Send> {
+    let doc_socket = socket.to_path_buf();
     let doc_source: Box<dyn FnMut(Topic) -> CommandDoc + Send> =
         Box::new(move |topic| doc_for_blocking(&doc_socket, &cache, topic));
 
     let instance_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
         Mode::Configuration { transaction, .. } => {
             let transaction = transaction.clone();
-            let socket = socket.clone();
+            let socket = socket.to_path_buf();
             Box::new(move || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current()
@@ -222,7 +232,7 @@ fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Compl
     let peer_group_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
         Mode::Configuration { transaction, .. } => {
             let transaction = transaction.clone();
-            let socket = socket.clone();
+            let socket = socket.to_path_buf();
             Box::new(move || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current()
@@ -245,7 +255,7 @@ fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Compl
     let routing_table_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
         Mode::Configuration { transaction, .. } => {
             let transaction = transaction.clone();
-            let socket = socket.clone();
+            let socket = socket.to_path_buf();
             Box::new(move || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current()
@@ -265,7 +275,7 @@ fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Compl
         // mode too, where there's no open transaction to read from — fall
         // back to the running config instead.
         Mode::Operational => {
-            let socket = socket.clone();
+            let socket = socket.to_path_buf();
             Box::new(move || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current()
@@ -280,7 +290,7 @@ fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Compl
     let static_routing_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
         Mode::Configuration { transaction, .. } => {
             let transaction = transaction.clone();
-            let socket = socket.clone();
+            let socket = socket.to_path_buf();
             Box::new(move || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current()
@@ -302,7 +312,7 @@ fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Compl
     let interface_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
         Mode::Configuration { transaction, .. } => {
             let transaction = transaction.clone();
-            let socket = socket.clone();
+            let socket = socket.to_path_buf();
             Box::new(move || {
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current()
@@ -315,13 +325,61 @@ fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Compl
         // `show interface <name>` needs name completion in operational mode
         // too, where there's no open transaction to read from — fall back
         // to the running config instead, mirroring `routing_table_name_source`.
-        Mode::Operational => Box::new(move || {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(client::fetch_running_config(&socket))
+        Mode::Operational => {
+            let socket = socket.to_path_buf();
+            Box::new(move || {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(client::fetch_running_config(&socket))
+                })
+                .map(|cfg| cfg.interfaces.into_iter().map(|i| i.name).collect())
+                .unwrap_or_default()
             })
-            .map(|cfg| cfg.interfaces.into_iter().map(|i| i.name).collect())
-            .unwrap_or_default()
-        }),
+        }
+    };
+
+    let broadcast_domain_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
+        Mode::Configuration { transaction, .. } => {
+            let transaction = transaction.clone();
+            let socket = socket.to_path_buf();
+            Box::new(move || {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(client::get_transaction(&socket, &transaction))
+                })
+                .map(|snap| {
+                    snap.config
+                        .broadcast_domains
+                        .into_iter()
+                        .map(|d| d.name)
+                        .collect()
+                })
+                .unwrap_or_default()
+            })
+        }
+        Mode::Operational => Box::new(Vec::new),
+    };
+
+    let switching_profile_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
+        Mode::Configuration { transaction, .. } => {
+            let transaction = transaction.clone();
+            let socket = socket.to_path_buf();
+            Box::new(move || {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(client::get_transaction(&socket, &transaction))
+                })
+                .map(|snap| {
+                    snap.config
+                        .switching_profiles
+                        .into_iter()
+                        .map(|p| p.name)
+                        .collect()
+                })
+                .unwrap_or_default()
+            })
+        }
+        Mode::Operational => Box::new(Vec::new),
     };
 
     Box::new(NosCompleter::new(
@@ -332,6 +390,8 @@ fn completer_for(socket: PathBuf, cache: DocCache, mode: &Mode) -> Box<dyn Compl
         routing_table_name_source,
         static_routing_instance_name_source,
         interface_name_source,
+        broadcast_domain_name_source,
+        switching_profile_name_source,
     ))
 }
 
@@ -388,11 +448,7 @@ async fn main() -> anyhow::Result<()> {
 
     let completion_menu = ColumnarMenu::default().with_name("completion_menu");
     let mut line_editor = Reedline::create()
-        .with_completer(completer_for(
-            config_socket.clone(),
-            doc_cache.clone(),
-            &mode,
-        ))
+        .with_completer(completer_for(&config_socket, doc_cache.clone(), &mode))
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(completion_menu)))
         .with_menu(ReedlineMenu::EngineCompleter(Box::new(HelpMenu::new())))
         .with_edit_mode(Box::new(Emacs::new(keybindings())));
@@ -437,7 +493,7 @@ async fn main() -> anyhow::Result<()> {
                     Outcome::Exit => break,
                 }
                 line_editor = line_editor.with_completer(completer_for(
-                    config_socket.clone(),
+                    &config_socket,
                     doc_cache.clone(),
                     &mode,
                 ));
