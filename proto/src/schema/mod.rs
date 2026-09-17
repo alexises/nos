@@ -5,6 +5,7 @@ pub mod broadcast_domain;
 pub mod community_alias;
 pub mod community_group;
 pub mod interface;
+pub mod ospf_instance;
 pub mod policy_definition;
 pub mod prefix_list;
 pub mod routing_table;
@@ -24,6 +25,7 @@ pub use community_group::CommunityGroup;
 pub use interface::{
     loopback_table_name, Interface, InterfaceAddress, Subinterface, LOOPBACK_PREFIX,
 };
+pub use ospf_instance::OspfInstance;
 pub use policy_definition::PolicyDefinition;
 pub use prefix_list::{PrefixList, PrefixListEntry};
 pub use routing_table::{Redistribute, RedistributeSource, RedistributeTarget, RoutingTable};
@@ -50,6 +52,9 @@ pub struct Config {
         custom(|tables, ctx: &Config| routing_table::valid_redistribute_rules(tables, ctx))
     )]
     pub routing_tables: Vec<RoutingTable>,
+
+    #[garde(dive)]
+    pub ospf_instances: Vec<OspfInstance>,
 
     #[garde(dive)]
     pub static_routing_instances: Vec<StaticRoutingInstance>,
@@ -88,6 +93,7 @@ impl Default for Config {
         Config {
             bgp_instances: Vec::new(),
             routing_tables: Vec::new(),
+            ospf_instances: Vec::new(),
             static_routing_instances: Vec::new(),
             interfaces: Vec::new(),
             policy_definitions: Vec::new(),

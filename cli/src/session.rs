@@ -2,9 +2,9 @@ use std::net::IpAddr;
 
 use nos_proto::{
     loopback_table_name, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp,
-    CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, PolicyDefinitionOp, PrefixListEntry,
-    PrefixListOp, RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp,
-    SwitchingProfileOp, TransactionBase,
+    CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, OspfInstanceOp, PolicyDefinitionOp,
+    PrefixListEntry, PrefixListOp, RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp,
+    SubinterfaceOp, SwitchingProfileOp, TransactionBase,
 };
 
 use crate::command::{
@@ -21,6 +21,7 @@ pub enum Path {
         group: String,
     },
     RoutingTable(String),
+    OspfInstance(String),
     StaticRoutingInstance(String),
     Interface(String),
     /// A physical interface's tag-scoped L3 attachment point, navigated to
@@ -387,11 +388,16 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Edit(EditTarget::RoutingTable { name }) => Resolved::ApplyOp {
             op: ConfigOp::RoutingTable(RoutingTableOp::Ensure { name: name.clone() }),
             after: PathAfter::To(Path::RoutingTable(name)),
+        },
+        Command::Edit(EditTarget::OspfInstance { name }) => Resolved::ApplyOp {
+            op: ConfigOp::OspfInstance(OspfInstanceOp::Ensure { name: name.clone() }),
+            after: PathAfter::To(Path::OspfInstance(name)),
         },
         Command::Edit(EditTarget::StaticRoutingInstance { name }) => Resolved::ApplyOp {
             op: ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Ensure {
@@ -443,9 +449,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => {
-                Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string())
-            }
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
         },
         Command::ShowSource => match path {
             Path::PolicyDefinition(name) => Resolved::ShowPolicySource { name: name.clone() },
@@ -460,9 +465,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => {
-                Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string())
-            }
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
         },
         Command::SetSourceLine { line, text } => match path {
             Path::PolicyDefinition(name) => Resolved::SetPolicySourceLine {
@@ -481,9 +485,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => {
-                Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string())
-            }
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
         },
         Command::DeleteSourceLine { line } => match path {
             Path::PolicyDefinition(name) => Resolved::DeletePolicySourceLine {
@@ -501,9 +504,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => {
-                Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string())
-            }
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_POLICY_DEFINITION.to_string()),
         },
 
         Command::Set(SetTarget::BgpInstance { name, field }) => Resolved::ApplyOp {
@@ -520,6 +522,24 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             Path::BgpInstance(name) => Resolved::ApplyOp {
                 op: set_op(name.clone(), field),
                 after: PathAfter::Stay,
+            },
+            // `set router-id <ip>`'s literal token sequence is already
+            // claimed by `BgpInstanceField::RouterId` at parse time (see its
+            // doc comment) — an `OspfInstance` has no field enum of its own,
+            // so this is where the shared relative command is retargeted by
+            // `path` instead. Any other `BgpInstanceField` variant has no
+            // meaning on an OSPF instance.
+            Path::OspfInstance(name) => match field {
+                BgpInstanceField::RouterId(router_id) => Resolved::ApplyOp {
+                    op: ConfigOp::OspfInstance(OspfInstanceOp::SetRouterId {
+                        name: name.clone(),
+                        router_id,
+                    }),
+                    after: PathAfter::Stay,
+                },
+                BgpInstanceField::Asn(_) | BgpInstanceField::ClusterId(_) => Resolved::Error(
+                    "only 'set router-id <ip>' is valid on an ospf instance".to_string(),
+                ),
             },
             Path::Root
             | Path::BgpPeerGroup { .. }
@@ -558,7 +578,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Set(SetTarget::BgpPeer {
             instance,
@@ -595,7 +616,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Set(SetTarget::RoutingTable { name, bgp_instance }) => Resolved::ApplyOp {
             op: ConfigOp::RoutingTable(RoutingTableOp::SetBgpInstance { name, bgp_instance }),
@@ -620,7 +642,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Set(SetTarget::RoutingTableStaticRoutingInstance {
             name,
@@ -645,6 +668,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             Path::Root
             | Path::BgpInstance(_)
             | Path::BgpPeerGroup { .. }
+            | Path::OspfInstance(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
             | Path::Subinterface { .. }
@@ -654,6 +678,42 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
             | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+        },
+        Command::Set(SetTarget::RoutingTableOspfInstance {
+            name,
+            ospf_instance,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::RoutingTable(RoutingTableOp::SetOspfInstance {
+                name,
+                ospf_instance,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::RoutingTableOspfInstanceRelative { ospf_instance }) => match path {
+            Path::RoutingTable(name) => Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::SetOspfInstance {
+                    name: name.clone(),
+                    ospf_instance,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::OspfInstance(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_)
+            | Path::Subinterface { .. }
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_)
+            | Path::BroadcastDomain(_)
+            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+        },
+        Command::Set(SetTarget::OspfInstance { name, router_id }) => Resolved::ApplyOp {
+            op: ConfigOp::OspfInstance(OspfInstanceOp::SetRouterId { name, router_id }),
+            after: PathAfter::Stay,
         },
         Command::Set(SetTarget::RoutingTableRedistribute { name, redistribute }) => {
             Resolved::ApplyOp {
@@ -680,7 +740,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Set(SetTarget::StaticRoute {
             instance,
@@ -714,7 +775,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => {
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => {
                 Resolved::Error(NO_CURRENT_STATIC_ROUTING_INSTANCE.to_string())
             }
         },
@@ -757,7 +819,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
         },
         Command::Set(SetTarget::InterfaceRoutingTable {
             name,
@@ -795,7 +858,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
         },
         Command::Set(SetTarget::BroadcastDomainAddress {
             name,
@@ -849,7 +913,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 | Path::CommunityGroup(_)
                 | Path::PrefixList(_)
                 | Path::BroadcastDomain(_)
-                | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+                | Path::SwitchingProfile(_)
+                | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
             }
         }
 
@@ -876,7 +941,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_COMMUNITY_ALIAS.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_COMMUNITY_ALIAS.to_string()),
         },
         Command::Set(SetTarget::CommunityGroupMember { name, member }) => Resolved::ApplyOp {
             op: ConfigOp::CommunityGroup(CommunityGroupOp::AddMember { name, member }),
@@ -901,7 +967,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityAlias(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_COMMUNITY_GROUP.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_COMMUNITY_GROUP.to_string()),
         },
         Command::Set(SetTarget::PrefixListEntry { name, cidr, range }) => Resolved::ApplyOp {
             op: ConfigOp::PrefixList(PrefixListOp::AddEntry {
@@ -929,7 +996,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_PREFIX_LIST.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_PREFIX_LIST.to_string()),
         },
         Command::Set(SetTarget::SwitchingProfileMember {
             name,
@@ -966,11 +1034,16 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
-            | Path::BroadcastDomain(_) => Resolved::Error(NO_CURRENT_SWITCHING_PROFILE.to_string()),
+            | Path::BroadcastDomain(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_SWITCHING_PROFILE.to_string()),
         },
 
         Command::Delete(DeleteTarget::BgpInstance { name }) => Resolved::ApplyOp {
             op: ConfigOp::BgpInstance(BgpInstanceOp::Delete { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::OspfInstance { name }) => Resolved::ApplyOp {
+            op: ConfigOp::OspfInstance(OspfInstanceOp::Delete { name }),
             after: PathAfter::Stay,
         },
         Command::Delete(DeleteTarget::Current) => match path {
@@ -987,6 +1060,10 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             },
             Path::RoutingTable(name) => Resolved::ApplyOp {
                 op: ConfigOp::RoutingTable(RoutingTableOp::Delete { name: name.clone() }),
+                after: PathAfter::ToRoot,
+            },
+            Path::OspfInstance(name) => Resolved::ApplyOp {
+                op: ConfigOp::OspfInstance(OspfInstanceOp::Delete { name: name.clone() }),
                 after: PathAfter::ToRoot,
             },
             Path::StaticRoutingInstance(name) => Resolved::ApplyOp {
@@ -1058,6 +1135,32 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+        },
+        Command::Delete(DeleteTarget::RoutingTableOspfInstance { name }) => Resolved::ApplyOp {
+            op: ConfigOp::RoutingTable(RoutingTableOp::ClearOspfInstance { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::RoutingTableOspfInstanceRelative) => match path {
+            Path::RoutingTable(name) => Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::ClearOspfInstance {
+                    name: name.clone(),
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Root
+            | Path::BgpInstance(_)
+            | Path::BgpPeerGroup { .. }
+            | Path::OspfInstance(_)
+            | Path::StaticRoutingInstance(_)
+            | Path::Interface(_)
+            | Path::Subinterface { .. }
+            | Path::PolicyDefinition(_)
+            | Path::CommunityAlias(_)
+            | Path::CommunityGroup(_)
+            | Path::PrefixList(_)
+            | Path::BroadcastDomain(_)
             | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstance { name }) => {
@@ -1084,7 +1187,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Delete(DeleteTarget::RoutingTableRedistribute { name }) => Resolved::ApplyOp {
             op: ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute { name }),
@@ -1108,7 +1212,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_ROUTING_TABLE.to_string()),
         },
         Command::Delete(DeleteTarget::StaticRoutingInstance { name }) => Resolved::ApplyOp {
             op: ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Delete { name }),
@@ -1137,7 +1242,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => {
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => {
                 Resolved::Error(NO_CURRENT_STATIC_ROUTING_INSTANCE.to_string())
             }
         },
@@ -1178,7 +1284,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
         },
         Command::Delete(DeleteTarget::InterfaceRoutingTable { name }) => Resolved::ApplyOp {
             op: interface_clear_routing_table_op(&name),
@@ -1211,7 +1318,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
         },
         Command::Delete(DeleteTarget::BroadcastDomainAddress { name, address }) => {
             Resolved::ApplyOp {
@@ -1243,7 +1351,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_INTERFACE.to_string()),
         },
         Command::Delete(DeleteTarget::CommunityAlias { name }) => Resolved::ApplyOp {
             op: ConfigOp::CommunityAlias(CommunityAliasOp::Delete { name }),
@@ -1276,7 +1385,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityAlias(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_COMMUNITY_GROUP.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_COMMUNITY_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::PrefixList { name }) => Resolved::ApplyOp {
             op: ConfigOp::PrefixList(PrefixListOp::Delete { name }),
@@ -1308,7 +1418,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityAlias(_)
             | Path::CommunityGroup(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_PREFIX_LIST.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_PREFIX_LIST.to_string()),
         },
         Command::Delete(DeleteTarget::BroadcastDomain { name }) => Resolved::ApplyOp {
             op: ConfigOp::BroadcastDomain(BroadcastDomainOp::Delete { name }),
@@ -1348,7 +1459,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
                 | Path::CommunityAlias(_)
                 | Path::CommunityGroup(_)
                 | Path::PrefixList(_)
-                | Path::BroadcastDomain(_) => {
+                | Path::BroadcastDomain(_)
+                | Path::OspfInstance(_) => {
                     Resolved::Error(NO_CURRENT_SWITCHING_PROFILE.to_string())
                 }
             }
@@ -1376,7 +1488,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Delete(DeleteTarget::BgpPeer {
             instance,
@@ -1407,7 +1520,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
         Command::Delete(DeleteTarget::SourceAddress) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -1428,7 +1542,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::AddressFamily(af)) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -1450,7 +1565,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::HoldTime) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -1471,7 +1587,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::KeepaliveInterval) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -1492,7 +1609,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::ConnectRetryTime) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -1513,7 +1631,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::Auth) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -1534,7 +1653,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::AoKey(send_id)) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -1556,7 +1676,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::NextHop) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -1577,7 +1698,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::RouteReflectorClient) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -1598,7 +1720,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::RouteServerClient) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -1619,7 +1742,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::ImportPolicy) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -1640,7 +1764,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::ExportPolicy) => match path {
             Path::BgpPeerGroup { instance, group } => Resolved::ApplyOp {
@@ -1661,7 +1786,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_PEER_GROUP.to_string()),
         },
         Command::Delete(DeleteTarget::BgpInstanceClusterId { name }) => Resolved::ApplyOp {
             op: ConfigOp::BgpInstance(BgpInstanceOp::ClearClusterId { name }),
@@ -1683,7 +1809,8 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             | Path::CommunityGroup(_)
             | Path::PrefixList(_)
             | Path::BroadcastDomain(_)
-            | Path::SwitchingProfile(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
+            | Path::SwitchingProfile(_)
+            | Path::OspfInstance(_) => Resolved::Error(NO_CURRENT_INSTANCE.to_string()),
         },
 
         // `top` always lands at the root, however deep the current path is.
@@ -1692,6 +1819,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             Path::BgpInstance(_)
             | Path::BgpPeerGroup { .. }
             | Path::RoutingTable(_)
+            | Path::OspfInstance(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
             | Path::Subinterface { .. }
@@ -1712,6 +1840,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
             Path::Root => Resolved::Error("already at the top level".to_string()),
             Path::BgpInstance(_)
             | Path::RoutingTable(_)
+            | Path::OspfInstance(_)
             | Path::StaticRoutingInstance(_)
             | Path::Interface(_)
             | Path::Subinterface { .. }

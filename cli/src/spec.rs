@@ -28,6 +28,7 @@ pub enum ArgKind {
     BgpInstanceName,
     BgpPeerGroupName,
     RoutingTableName,
+    OspfInstanceName,
     StaticRoutingInstanceName,
     InterfaceName,
     BroadcastDomainName,
@@ -55,6 +56,7 @@ pub enum Availability {
     ConfigurationInstance,
     ConfigurationPeerGroup,
     ConfigurationRoutingTable,
+    ConfigurationOspfInstance,
     ConfigurationStaticRoutingInstance,
     ConfigurationInterface,
     /// `Path::Interface`, `Path::Subinterface`, or `Path::BroadcastDomain` —
@@ -98,6 +100,13 @@ pub fn availability_matches(availability: Availability, mode: &Mode) -> bool {
                 ..
             }
         ),
+        Availability::ConfigurationOspfInstance => matches!(
+            mode,
+            Mode::Configuration {
+                path: Path::OspfInstance(_),
+                ..
+            }
+        ),
         Availability::ConfigurationStaticRoutingInstance => matches!(
             mode,
             Mode::Configuration {
@@ -132,6 +141,7 @@ pub fn availability_matches(availability: Availability, mode: &Mode) -> bool {
                 path: Path::BgpInstance(_)
                     | Path::BgpPeerGroup { .. }
                     | Path::RoutingTable(_)
+                    | Path::OspfInstance(_)
                     | Path::StaticRoutingInstance(_)
                     | Path::Interface(_)
                     | Path::Subinterface { .. },
@@ -1076,6 +1086,51 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         tokens: &[
+            Token::Literal("edit"),
+            Token::Literal("ospf"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::OspfInstanceName),
+        ],
+        usage: "edit ospf instance <name>",
+        doc: Doc::FromConfig(Topic::EnsureOspfInstance),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("ospf"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::OspfInstanceName),
+            Token::Literal("router-id"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set ospf instance <name> router-id <router-id>",
+        doc: Doc::FromConfig(Topic::SetOspfInstanceRouterId),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("router-id"),
+            Token::Arg(ArgKind::Plain),
+        ],
+        usage: "set router-id <router-id>",
+        doc: Doc::FromConfig(Topic::SetOspfInstanceRouterId),
+        availability: Availability::ConfigurationOspfInstance,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("ospf"),
+            Token::Literal("instance"),
+            Token::Arg(ArgKind::OspfInstanceName),
+        ],
+        usage: "delete ospf instance <name>",
+        doc: Doc::FromConfig(Topic::DeleteOspfInstance),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
             Token::Literal("set"),
             Token::Literal("routing-table"),
             Token::Arg(ArgKind::RoutingTableName),
@@ -1111,6 +1166,45 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         tokens: &[Token::Literal("delete"), Token::Literal("bgp-instance")],
         usage: "delete bgp-instance",
         doc: Doc::FromConfig(Topic::ClearRoutingTableBgpInstance),
+        availability: Availability::ConfigurationRoutingTable,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("routing-table"),
+            Token::Arg(ArgKind::RoutingTableName),
+            Token::Literal("ospf-instance"),
+            Token::Arg(ArgKind::OspfInstanceName),
+        ],
+        usage: "set routing-table <name> ospf-instance <instance>",
+        doc: Doc::FromConfig(Topic::SetRoutingTableOspfInstance),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("set"),
+            Token::Literal("ospf-instance"),
+            Token::Arg(ArgKind::OspfInstanceName),
+        ],
+        usage: "set ospf-instance <instance>",
+        doc: Doc::FromConfig(Topic::SetRoutingTableOspfInstance),
+        availability: Availability::ConfigurationRoutingTable,
+    },
+    CommandSpec {
+        tokens: &[
+            Token::Literal("delete"),
+            Token::Literal("routing-table"),
+            Token::Arg(ArgKind::RoutingTableName),
+            Token::Literal("ospf-instance"),
+        ],
+        usage: "delete routing-table <name> ospf-instance",
+        doc: Doc::FromConfig(Topic::ClearRoutingTableOspfInstance),
+        availability: Availability::Configuration,
+    },
+    CommandSpec {
+        tokens: &[Token::Literal("delete"), Token::Literal("ospf-instance")],
+        usage: "delete ospf-instance",
+        doc: Doc::FromConfig(Topic::ClearRoutingTableOspfInstance),
         availability: Availability::ConfigurationRoutingTable,
     },
     CommandSpec {

@@ -5,8 +5,8 @@ use clap::Parser;
 use nos_proto::{DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use nos_watchdog::log_client::ForwardingLayer;
 use nos_watchdog::{
-    bgp_instances, broker, routing_tables, supervise_one, BackoffPolicy, EndpointRegistry,
-    ProcessSpec,
+    bgp_instances, broker, ospf_instances, routing_tables, supervise_one, BackoffPolicy,
+    EndpointRegistry, ProcessSpec,
 };
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
@@ -42,6 +42,15 @@ struct Args {
     /// Extra arguments forwarded to every nos-ribd instance.
     #[arg(long = "ribd-arg", allow_hyphen_values = true)]
     ribd_flags: Vec<String>,
+
+    /// Path to the nos-ospfd binary to supervise (one instance is spawned
+    /// per OSPF instance in the running config).
+    #[arg(long, default_value = "/usr/local/bin/nos-ospfd")]
+    ospfd_bin: PathBuf,
+
+    /// Extra arguments forwarded to every nos-ospfd instance.
+    #[arg(long = "ospfd-arg", allow_hyphen_values = true)]
+    ospfd_flags: Vec<String>,
 
     /// Path to the nos-interfaced binary to supervise. Unlike nos-bgpd/
     /// nos-ribd, exactly one instance is always supervised regardless of how
@@ -164,6 +173,15 @@ async fn main() -> anyhow::Result<()> {
         args.log_socket.clone(),
         policy,
         registry.clone(),
+        args.listen_socket.clone(),
+        shutdown_rx.clone(),
+    )));
+    tasks.push(tokio::spawn(ospf_instances::manage(
+        args.config_socket.clone(),
+        args.ospfd_bin,
+        args.ospfd_flags,
+        args.log_socket.clone(),
+        policy,
         args.listen_socket.clone(),
         shutdown_rx.clone(),
     )));

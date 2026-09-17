@@ -482,6 +482,32 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Unsets the switching-profile field on an interface, reverting to no explicit \
              association.",
         ),
+        Topic::EnsureOspfInstance => (
+            "Create an OSPF instance in the transaction if it doesn't already exist.",
+            "Adds a new OSPF instance with the given name to the transaction's in-progress \
+             config if none exists with that name yet; if one already exists, this is a \
+             no-op. Does not itself set any fields on the instance.",
+        ),
+        Topic::SetOspfInstanceRouterId => (
+            "Set an OSPF instance's router id.",
+            "Updates the router-id field on the named OSPF instance in the transaction's \
+             in-progress config. The instance must already exist.",
+        ),
+        Topic::DeleteOspfInstance => (
+            "Delete an OSPF instance from the transaction.",
+            "Removes the named OSPF instance from the transaction's in-progress config.",
+        ),
+        Topic::SetRoutingTableOspfInstance => (
+            "Associate an OSPF instance with a routing table.",
+            "Points a routing table at an OSPF instance by name (the VRF that instance \
+             belongs to). The OSPF instance must exist, and at most one routing table may \
+             claim a given instance at a time — both checked at commit time.",
+        ),
+        Topic::ClearRoutingTableOspfInstance => (
+            "Remove a routing table's OSPF instance association.",
+            "Unsets the ospf-instance field on a routing table, reverting to no explicit \
+             association.",
+        ),
     };
     CommandDoc {
         topic,
@@ -570,6 +596,11 @@ mod tests {
         Topic::DeleteSwitchingProfile,
         Topic::SetInterfaceSwitchingProfile,
         Topic::ClearInterfaceSwitchingProfile,
+        Topic::EnsureOspfInstance,
+        Topic::SetOspfInstanceRouterId,
+        Topic::DeleteOspfInstance,
+        Topic::SetRoutingTableOspfInstance,
+        Topic::ClearRoutingTableOspfInstance,
     ];
 
     #[test]

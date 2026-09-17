@@ -285,6 +285,7 @@ mod tests {
                 routing_tables: vec![nos_proto::RoutingTable {
                     name: "rt1".to_string(),
                     bgp_instance: Some("r1".to_string()),
+                    ospf_instance: None,
                     static_routing_instance: None,
                     redistribute: None,
                 }],

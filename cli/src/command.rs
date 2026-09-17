@@ -14,6 +14,16 @@ pub enum BgpInstanceField {
     ClusterId(Ipv4Addr),
 }
 
+// `OspfInstance` has exactly one editable field today, so — unlike
+// `BgpInstance`/`BgpPeerGroup` — it has no `Field` enum of its own; the
+// fully-qualified `SetTarget::OspfInstance` carries `router_id` directly.
+// The context-relative `set router-id <ip>` form is shared with
+// `BgpInstanceField::RouterId` instead of getting a parallel variant here —
+// `Command::parse` is mode-unaware (see `cli/CLAUDE.md`) and can't emit two
+// different `Command`s for the same literal token sequence, so
+// `session::resolve_in_transaction` disambiguates by `path` at resolve
+// time.
+
 /// A single field edit targeting a BGP peer-group. Not `Copy` — the auth
 /// variants carry owned `String` key material.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +74,9 @@ pub enum EditTarget {
         name: String,
     },
     RoutingTable {
+        name: String,
+    },
+    OspfInstance {
         name: String,
     },
     StaticRoutingInstance {
@@ -137,6 +150,15 @@ pub enum SetTarget {
     },
     /// Context-relative — only valid while navigated into a routing table.
     RoutingTableStaticRoutingInstanceRelative { static_routing_instance: String },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    RoutingTableOspfInstance { name: String, ospf_instance: String },
+    /// Context-relative — only valid while navigated into a routing table.
+    RoutingTableOspfInstanceRelative { ospf_instance: String },
+    /// Fully-qualified — works from anywhere in configuration mode. No
+    /// context-relative form — see `BgpInstanceField`'s doc comment on why
+    /// `set router-id <ip>` while navigated into an `OspfInstance` reuses
+    /// `SetTarget::Relative { field: BgpInstanceField::RouterId }` instead.
+    OspfInstance { name: String, router_id: Ipv4Addr },
     /// Fully-qualified — works from anywhere in configuration mode.
     RoutingTableRedistribute {
         name: String,
@@ -297,6 +319,16 @@ pub enum DeleteTarget {
     /// `delete static-routing-instance` — relative clear, only valid while
     /// navigated into a routing table.
     RoutingTableStaticRoutingInstanceRelative,
+    /// `delete routing-table <name> ospf-instance` — qualified clear.
+    RoutingTableOspfInstance {
+        name: String,
+    },
+    /// `delete ospf-instance` — relative clear, only valid while navigated
+    /// into a routing table.
+    RoutingTableOspfInstanceRelative,
+    OspfInstance {
+        name: String,
+    },
     /// `delete routing-table <name> redistribute` — qualified clear.
     RoutingTableRedistribute {
         name: String,
@@ -571,6 +603,9 @@ impl Command {
                 name: (*group).to_string(),
             }),
             ["edit", "routing-table", name] => Command::Edit(EditTarget::RoutingTable {
+                name: (*name).to_string(),
+            }),
+            ["edit", "ospf", "instance", name] => Command::Edit(EditTarget::OspfInstance {
                 name: (*name).to_string(),
             }),
             ["edit", "static-routing-instance", name] => {
@@ -972,6 +1007,24 @@ impl Command {
                     static_routing_instance: (*instance).to_string(),
                 })
             }
+            ["set", "routing-table", name, "ospf-instance", instance] => {
+                Command::Set(SetTarget::RoutingTableOspfInstance {
+                    name: (*name).to_string(),
+                    ospf_instance: (*instance).to_string(),
+                })
+            }
+            ["set", "ospf-instance", instance] => {
+                Command::Set(SetTarget::RoutingTableOspfInstanceRelative {
+                    ospf_instance: (*instance).to_string(),
+                })
+            }
+            ["set", "ospf", "instance", name, "router-id", ip] => match ip.parse::<Ipv4Addr>() {
+                Ok(router_id) => Command::Set(SetTarget::OspfInstance {
+                    name: (*name).to_string(),
+                    router_id,
+                }),
+                Err(_) => Command::Unknown(trimmed.to_string()),
+            },
             ["set", "routing-table", name, "redistribute", "from", "static", "to", "bgp"] => {
                 Command::Set(SetTarget::RoutingTableRedistribute {
                     name: (*name).to_string(),
@@ -1260,6 +1313,17 @@ impl Command {
             ["delete", "static-routing-instance"] => {
                 Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstanceRelative)
             }
+            ["delete", "routing-table", name, "ospf-instance"] => {
+                Command::Delete(DeleteTarget::RoutingTableOspfInstance {
+                    name: (*name).to_string(),
+                })
+            }
+            ["delete", "ospf-instance"] => {
+                Command::Delete(DeleteTarget::RoutingTableOspfInstanceRelative)
+            }
+            ["delete", "ospf", "instance", name] => Command::Delete(DeleteTarget::OspfInstance {
+                name: (*name).to_string(),
+            }),
             ["delete", "routing-table", name, "redistribute"] => {
                 Command::Delete(DeleteTarget::RoutingTableRedistribute {
                     name: (*name).to_string(),

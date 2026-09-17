@@ -73,6 +73,11 @@ impl NosPrompt {
             } => format!("({transaction}/routing-table:{name})"),
             Mode::Configuration {
                 transaction,
+                path: session::Path::OspfInstance(name),
+                ..
+            } => format!("({transaction}/ospf:{name})"),
+            Mode::Configuration {
+                transaction,
                 path: session::Path::StaticRoutingInstance(name),
                 ..
             } => format!("({transaction}/static-routing-instance:{name})"),
@@ -292,6 +297,28 @@ fn completer_for(socket: &Path, cache: DocCache, mode: &Mode) -> Box<dyn Complet
         }
     };
 
+    let ospf_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
+        Mode::Configuration { transaction, .. } => {
+            let transaction = transaction.clone();
+            let socket = socket.to_path_buf();
+            Box::new(move || {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(client::get_transaction(&socket, &transaction))
+                })
+                .map(|snap| {
+                    snap.config
+                        .ospf_instances
+                        .into_iter()
+                        .map(|i| i.name)
+                        .collect()
+                })
+                .unwrap_or_default()
+            })
+        }
+        Mode::Operational => Box::new(Vec::new),
+    };
+
     let static_routing_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
         Mode::Configuration { transaction, .. } => {
             let transaction = transaction.clone();
@@ -393,6 +420,7 @@ fn completer_for(socket: &Path, cache: DocCache, mode: &Mode) -> Box<dyn Complet
         instance_name_source,
         peer_group_name_source,
         routing_table_name_source,
+        ospf_instance_name_source,
         static_routing_instance_name_source,
         interface_name_source,
         broadcast_domain_name_source,

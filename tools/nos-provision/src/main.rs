@@ -19,7 +19,7 @@ use futures::{SinkExt, StreamExt};
 use ipnet::IpNet;
 use nos_proto::{
     AddressFamily, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, ConfigOp, Event,
-    InterfaceOp, IpcCodec, PolicyDefinitionOp, Redistribute, RedistributeSource,
+    InterfaceOp, IpcCodec, OspfInstanceOp, PolicyDefinitionOp, Redistribute, RedistributeSource,
     RedistributeTarget, Request, RoutingTableOp, SourceAddress, StaticRouteOp,
     StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase, VlanTag,
 };
@@ -217,6 +217,15 @@ struct Args {
     /// `--switching-profile`.
     #[arg(long)]
     delete_switching_profile: bool,
+
+    /// If set, ensures this OSPF instance, sets its router-id
+    /// (`--ospf-router-id`, required alongside this), and associates it
+    /// with `--routing-table` (`RoutingTableOp::SetOspfInstance`) — for
+    /// verifying `nos-watchdogd` dynamically spawns `nos-ospfd` for it.
+    #[arg(long)]
+    ospf_instance: Option<String>,
+    #[arg(long)]
+    ospf_router_id: Option<Ipv4Addr>,
 }
 
 #[tokio::main]
@@ -524,6 +533,25 @@ async fn main() -> anyhow::Result<()> {
         ops.push(ConfigOp::Interface(InterfaceOp::ClearSwitchingProfile {
             name: args.interface.clone(),
         }));
+    }
+
+    if let Some(name) = args.ospf_instance.clone() {
+        let router_id = args
+            .ospf_router_id
+            .context("--ospf-router-id is required when --ospf-instance is set")?;
+        ops.push(ConfigOp::OspfInstance(OspfInstanceOp::Ensure {
+            name: name.clone(),
+        }));
+        ops.push(ConfigOp::OspfInstance(OspfInstanceOp::SetRouterId {
+            name: name.clone(),
+            router_id,
+        }));
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetOspfInstance {
+            name: args.routing_table.clone(),
+            ospf_instance: name,
+        }));
+    } else if args.ospf_router_id.is_some() {
+        bail!("--ospf-router-id requires --ospf-instance to also be set");
     }
 
     for op in ops {

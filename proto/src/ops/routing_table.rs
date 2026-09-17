@@ -39,6 +39,13 @@ pub enum RoutingTableOp {
     Delete {
         name: String,
     },
+    SetOspfInstance {
+        name: String,
+        ospf_instance: String,
+    },
+    ClearOspfInstance {
+        name: String,
+    },
 }
 
 impl RoutingTableOp {
@@ -49,6 +56,7 @@ impl RoutingTableOp {
                     config.routing_tables.push(RoutingTable {
                         name: name.clone(),
                         bgp_instance: None,
+                        ospf_instance: None,
                         static_routing_instance: None,
                         redistribute: None,
                     });
@@ -91,6 +99,17 @@ impl RoutingTableOp {
                 }
                 Ok(())
             }
+            RoutingTableOp::SetOspfInstance {
+                name,
+                ospf_instance,
+            } => {
+                find_table_mut(config, name)?.ospf_instance = Some(ospf_instance.clone());
+                Ok(())
+            }
+            RoutingTableOp::ClearOspfInstance { name } => {
+                find_table_mut(config, name)?.ospf_instance = None;
+                Ok(())
+            }
         }
     }
 }
@@ -114,6 +133,7 @@ mod tests {
         RoutingTable {
             name: name.to_string(),
             bgp_instance: None,
+            ospf_instance: None,
             static_routing_instance: None,
             redistribute: None,
         }
@@ -138,6 +158,7 @@ mod tests {
             routing_tables: vec![RoutingTable {
                 name: "rt1".to_string(),
                 bgp_instance: Some("r1".to_string()),
+                ospf_instance: None,
                 static_routing_instance: None,
                 redistribute: None,
             }],
@@ -197,6 +218,28 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.routing_tables[0].static_routing_instance, None);
+    }
+
+    #[test]
+    fn set_and_clear_ospf_instance() {
+        let mut cfg = Config {
+            routing_tables: vec![table("rt1")],
+            ..Default::default()
+        };
+        RoutingTableOp::SetOspfInstance {
+            name: "rt1".to_string(),
+            ospf_instance: "o1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.routing_tables[0].ospf_instance.as_deref(), Some("o1"));
+
+        RoutingTableOp::ClearOspfInstance {
+            name: "rt1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.routing_tables[0].ospf_instance, None);
     }
 
     #[test]

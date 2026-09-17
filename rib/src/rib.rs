@@ -380,6 +380,7 @@ mod tests {
         let tables = vec![RoutingTable {
             name: "rt1".into(),
             bgp_instance: None,
+            ospf_instance: None,
             static_routing_instance: None,
             redistribute: None,
         }];
@@ -619,6 +620,7 @@ mod tests {
         let tables = vec![RoutingTable {
             name: "rt1".into(),
             bgp_instance: None,
+            ospf_instance: None,
             static_routing_instance: Some("sri1".into()),
             redistribute: None,
         }];

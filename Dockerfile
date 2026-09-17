@@ -14,7 +14,7 @@ COPY . .
 # "nos-bgp/dhat-heap" to build nos-bgpd with dhat heap profiling — see
 # bgp/CLAUDE.md's "Memory profiling" note.
 ARG CARGO_FEATURES=
-RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-watchdogd --bin nos
+RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-watchdogd --bin nos
 
 FROM debian:bookworm-slim AS runtime
 
@@ -28,6 +28,7 @@ COPY --from=builder /app/target/release/nos-bgpd       /usr/local/bin/nos-bgpd
 COPY --from=builder /app/target/release/nos-ribd       /usr/local/bin/nos-ribd
 COPY --from=builder /app/target/release/nos-interfaced /usr/local/bin/nos-interfaced
 COPY --from=builder /app/target/release/nos-logd       /usr/local/bin/nos-logd
+COPY --from=builder /app/target/release/nos-ospfd      /usr/local/bin/nos-ospfd
 COPY --from=builder /app/target/release/nos-watchdogd  /usr/local/bin/nos-watchdogd
 COPY --from=builder /app/target/release/nos            /usr/local/bin/nos
 

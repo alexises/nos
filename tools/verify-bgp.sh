@@ -50,6 +50,12 @@
 # *receiving* peer's import policy after the prefix has already entered the
 # advertiser's loc-rib. Reverting to `accept-all` lets it flow through again.
 #
+# (via the `ospf` subcommand) that declaring a basic OSPF instance (name,
+# router-id, routing-table association -- see ospf/CLAUDE.md; no wire
+# protocol yet) actually gets nos-watchdogd to dynamically spawn a real
+# nos-ospfd process for it, which itself resolves its own instance's
+# router-id/routing-table over a real IPC round trip to nos-configd.
+#
 # Two further subcommands, `reflector` and `route-server`, stand up a third
 # container ("router-c") and reconfigure all three into a hub-and-spoke
 # topology (router-a is the hub; router-b/router-c are not peered with each
@@ -61,7 +67,7 @@
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}
+# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|logs [n]|down|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -113,6 +119,11 @@ LOOPBACK_DEVICE="lo$LOOPBACK_TABLE_ID"
 # differing interface name in each grepped log line keeps the two scenarios'
 # lines unambiguous even so).
 SVI_ADDRESS=203.0.113.9/32
+# Arbitrary name/router-id for the ospf scenario's OspfInstance -- distinct
+# from OSPF_INSTANCE's own asn/router-id concepts, since it names a
+# different section entirely.
+OSPF_INSTANCE=ospf1
+OSPF_ROUTER_ID=9.9.9.9
 
 log() { echo "[verify-bgp] $*" >&2; }
 
@@ -302,6 +313,32 @@ provision_delete_loopback() {
     --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
     --peer "$peer_ip" \
     --delete-loopback
+}
+
+# --- OSPF instance scenario ---
+#
+# Declares an OSPF instance (basic configuration only -- no wire protocol
+# yet, see ospf/CLAUDE.md) on router-a and associates it with the same "rt1"
+# routing table its BGP instance already owns, verifying nos-watchdogd
+# actually spawns a real nos-ospfd process for it and that process resolves
+# its own instance's router-id/routing-table over a real IPC round trip to
+# nos-configd -- over real containers, not a unit test.
+
+provision_ospf() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 ospf_instance=$6 ospf_router_id=$7
+  log "provisioning $name with ospf instance $ospf_instance (router-id=$ospf_router_id)"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --ospf-instance "$ospf_instance" \
+    --ospf-router-id "$ospf_router_id"
 }
 
 # --- L2 switching-profile scenario ---
@@ -853,6 +890,18 @@ cmd_check_loopback() {
     || { log "router-a: FAILED to delete the loopback device"; return 1; }
 }
 
+cmd_check_ospf() {
+  provision_ospf router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID"
+
+  # Confirms nos-watchdogd actually spawned a real nos-ospfd process for the
+  # new OspfInstance (not just that config accepted it) -- only nos-ospfd
+  # itself, once running and connected to nos-configd, ever logs this line.
+  log "waiting for nos-ospfd to resolve its own instance config"
+  wait_for_count_increase router-a "ospf instance config resolved instance=$OSPF_INSTANCE" 0 60 \
+    && log "router-a: nos-ospfd resolved $OSPF_INSTANCE (router-id=$OSPF_ROUTER_ID, routing-table=rt1)" \
+    || { log "router-a: FAILED to see nos-ospfd resolve its instance config"; return 1; }
+}
+
 cmd_check_switching() {
   provision_switching router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
 
@@ -1373,6 +1422,7 @@ case "${1:-}" in
   communities) cmd_check_communities ;;
   reflector) cmd_check_reflector ;;
   route-server) cmd_check_route_server ;;
+  ospf) cmd_check_ospf ;;
   logs) shift; cmd_logs "$@" ;;
   down) cmd_down ;;
   all)
@@ -1392,9 +1442,10 @@ case "${1:-}" in
     cmd_check_communities
     cmd_check_reflector
     cmd_check_route_server
+    cmd_check_ospf
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|logs [n]|down|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|logs [n]|down|all}" >&2
     exit 2
     ;;
 esac

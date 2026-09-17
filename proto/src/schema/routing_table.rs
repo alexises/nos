@@ -87,6 +87,9 @@ pub struct RoutingTable {
     #[garde(custom(|sri: &Option<String>, ctx: &Config| static_routing_instance_reference_valid(sri.as_ref(), ctx)))]
     pub static_routing_instance: Option<String>,
 
+    #[garde(custom(|oi: &Option<String>, ctx: &Config| ospf_instance_reference_valid(oi.as_ref(), ctx)))]
+    pub ospf_instance: Option<String>,
+
     /// `#[garde(skip)]`: the cross-field constraint (the referenced
     /// `bgp_instance`/`static_routing_instance` must actually be set on this
     /// same table) can't live in a per-field closure — garde's per-field
@@ -119,6 +122,28 @@ fn bgp_instance_reference_valid(bgp_instance: Option<&String>, ctx: &Config) -> 
     if claims > 1 {
         return Err(garde::Error::new(
             "bgp instance is already associated with another routing table",
+        ));
+    }
+    Ok(())
+}
+
+/// Same shape as `bgp_instance_reference_valid`, checked against
+/// `ctx.ospf_instances` instead.
+fn ospf_instance_reference_valid(ospf_instance: Option<&String>, ctx: &Config) -> garde::Result {
+    let Some(name) = ospf_instance else {
+        return Ok(());
+    };
+    if !ctx.ospf_instances.iter().any(|i| &i.name == name) {
+        return Err(garde::Error::new("referenced ospf instance does not exist"));
+    }
+    let claims = ctx
+        .routing_tables
+        .iter()
+        .filter(|t| t.ospf_instance.as_deref() == Some(name.as_str()))
+        .count();
+    if claims > 1 {
+        return Err(garde::Error::new(
+            "ospf instance is already associated with another routing table",
         ));
     }
     Ok(())
@@ -202,7 +227,7 @@ fn redistribute_policy_reference_valid(name: Option<&String>, ctx: &Config) -> g
 
 #[cfg(test)]
 mod tests {
-    use crate::schema::{BgpInstance, Config, StaticRoutingInstance};
+    use crate::schema::{BgpInstance, Config, OspfInstance, StaticRoutingInstance};
 
     use super::*;
 
@@ -210,8 +235,17 @@ mod tests {
         RoutingTable {
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),
+            ospf_instance: None,
             static_routing_instance: sri.map(str::to_string),
             redistribute: None,
+        }
+    }
+
+    fn ospf_instance(name: &str) -> OspfInstance {
+        OspfInstance {
+            name: name.to_string(),
+            router_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
+            routing_table: None,
         }
     }
 
@@ -331,6 +365,34 @@ mod tests {
             vec![static_instance("sri1"), static_instance("sri2")],
         );
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn valid_table_with_ospf_association_passes() {
+        let mut cfg = config_with(vec![table("rt1", None, None)], vec![], vec![]);
+        cfg.routing_tables[0].ospf_instance = Some("o1".to_string());
+        cfg.ospf_instances = vec![ospf_instance("o1")];
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn dangling_ospf_instance_reference_fails() {
+        let mut cfg = config_with(vec![table("rt1", None, None)], vec![], vec![]);
+        cfg.routing_tables[0].ospf_instance = Some("does-not-exist".to_string());
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn two_tables_claiming_same_ospf_instance_fails() {
+        let mut cfg = config_with(
+            vec![table("rt1", None, None), table("rt2", None, None)],
+            vec![],
+            vec![],
+        );
+        cfg.routing_tables[0].ospf_instance = Some("o1".to_string());
+        cfg.routing_tables[1].ospf_instance = Some("o1".to_string());
+        cfg.ospf_instances = vec![ospf_instance("o1")];
+        assert!(cfg.validate_with(&cfg).is_err());
     }
 
     fn redistribute() -> Redistribute {

@@ -16,21 +16,32 @@ pub fn sync_routing_table_refs(config: &mut Config) {
         instance.routing_table = None;
         instance.redistribute_policy = None;
     }
+    for instance in &mut config.ospf_instances {
+        instance.routing_table = None;
+    }
     for table in &config.routing_tables {
-        let Some(bgp_instance) = &table.bgp_instance else {
-            continue;
-        };
-        if let Some(instance) = config
-            .bgp_instances
-            .iter_mut()
-            .find(|i| &i.name == bgp_instance)
-        {
-            instance.routing_table = Some(table.name.clone());
-            instance.redistribute_policy = table
-                .redistribute
-                .as_ref()
-                .filter(|r| r.to == RedistributeTarget::Bgp)
-                .and_then(|r| r.policy.clone());
+        if let Some(bgp_instance) = &table.bgp_instance {
+            if let Some(instance) = config
+                .bgp_instances
+                .iter_mut()
+                .find(|i| &i.name == bgp_instance)
+            {
+                instance.routing_table = Some(table.name.clone());
+                instance.redistribute_policy = table
+                    .redistribute
+                    .as_ref()
+                    .filter(|r| r.to == RedistributeTarget::Bgp)
+                    .and_then(|r| r.policy.clone());
+            }
+        }
+        if let Some(ospf_instance) = &table.ospf_instance {
+            if let Some(instance) = config
+                .ospf_instances
+                .iter_mut()
+                .find(|i| &i.name == ospf_instance)
+            {
+                instance.routing_table = Some(table.name.clone());
+            }
         }
     }
 }
@@ -40,7 +51,7 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use super::*;
-    use crate::schema::{BgpInstance, RoutingTable};
+    use crate::schema::{BgpInstance, OspfInstance, RoutingTable};
 
     fn instance(name: &str) -> BgpInstance {
         BgpInstance {
@@ -55,12 +66,28 @@ mod tests {
         }
     }
 
+    fn ospf_instance(name: &str) -> OspfInstance {
+        OspfInstance {
+            name: name.to_string(),
+            router_id: Ipv4Addr::new(1, 1, 1, 1),
+            routing_table: None,
+        }
+    }
+
     fn table(name: &str, bgp_instance: Option<&str>) -> RoutingTable {
         RoutingTable {
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),
+            ospf_instance: None,
             static_routing_instance: None,
             redistribute: None,
+        }
+    }
+
+    fn table_with_ospf(name: &str, ospf_instance: Option<&str>) -> RoutingTable {
+        RoutingTable {
+            ospf_instance: ospf_instance.map(str::to_string),
+            ..table(name, None)
         }
     }
 
@@ -165,5 +192,30 @@ mod tests {
         };
         sync_routing_table_refs(&mut cfg);
         assert_eq!(cfg.bgp_instances[0].redistribute_policy, None);
+    }
+
+    #[test]
+    fn claimed_ospf_instance_gets_mirrored_reference() {
+        let mut cfg = Config {
+            ospf_instances: vec![ospf_instance("o1")],
+            routing_tables: vec![table_with_ospf("rt1", Some("o1"))],
+            ..Default::default()
+        };
+        sync_routing_table_refs(&mut cfg);
+        assert_eq!(cfg.ospf_instances[0].routing_table.as_deref(), Some("rt1"));
+    }
+
+    #[test]
+    fn stale_ospf_reference_is_cleared_when_claim_is_removed() {
+        let mut cfg = Config {
+            ospf_instances: vec![OspfInstance {
+                routing_table: Some("stale".to_string()),
+                ..ospf_instance("o1")
+            }],
+            routing_tables: vec![table_with_ospf("rt1", None)],
+            ..Default::default()
+        };
+        sync_routing_table_refs(&mut cfg);
+        assert_eq!(cfg.ospf_instances[0].routing_table, None);
     }
 }

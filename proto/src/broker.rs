@@ -27,6 +27,10 @@ pub enum ServiceRef {
     /// the instance's config key — resolved through the registry the same
     /// way as `RibTable`, since there can be many.
     BgpInstance(String),
+    /// The `nos-ospfd` instance currently serving one OSPF instance, named by
+    /// the instance's config key — resolved through the registry the same
+    /// way as `RibTable`/`BgpInstance`.
+    OspfInstance(String),
 }
 
 /// Messages sent from a client to `nos-watchdogd`'s broker socket.

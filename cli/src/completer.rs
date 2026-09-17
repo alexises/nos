@@ -27,6 +27,8 @@ pub struct NosCompleter {
     peer_group_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
     /// Live routing table names for `ArgKind::RoutingTableName` slots.
     routing_table_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
+    /// Live OSPF instance names for `ArgKind::OspfInstanceName` slots.
+    ospf_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
     /// Live static routing instance names for
     /// `ArgKind::StaticRoutingInstanceName` slots.
     static_routing_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
@@ -46,6 +48,7 @@ impl NosCompleter {
         instance_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
         peer_group_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
         routing_table_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
+        ospf_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
         static_routing_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
         interface_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
         broadcast_domain_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
@@ -57,6 +60,7 @@ impl NosCompleter {
             instance_name_source,
             peer_group_name_source,
             routing_table_name_source,
+            ospf_instance_name_source,
             static_routing_instance_name_source,
             interface_name_source,
             broadcast_domain_name_source,
@@ -193,6 +197,20 @@ impl Completer for NosCompleter {
                         }
                     }
                 }
+                Token::Arg(ArgKind::OspfInstanceName) => {
+                    for name in (self.ospf_instance_name_source)() {
+                        if name.starts_with(partial) && !suggestions.iter().any(|s| s.value == name)
+                        {
+                            suggestions.push(Suggestion {
+                                value: name,
+                                description: None,
+                                span: Span::new(partial_start, line.len()),
+                                append_whitespace: true,
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
                 Token::Arg(ArgKind::StaticRoutingInstanceName) => {
                     for name in (self.static_routing_instance_name_source)() {
                         if name.starts_with(partial) && !suggestions.iter().any(|s| s.value == name)
@@ -283,6 +301,10 @@ mod tests {
         Box::new(Vec::new)
     }
 
+    fn no_ospf_instances() -> Box<dyn FnMut() -> Vec<String> + Send> {
+        Box::new(Vec::new)
+    }
+
     fn no_static_routing_instances() -> Box<dyn FnMut() -> Vec<String> + Send> {
         Box::new(Vec::new)
     }
@@ -317,6 +339,7 @@ mod tests {
             no_instances(),
             no_peer_groups(),
             no_routing_tables(),
+            no_ospf_instances(),
             no_static_routing_instances(),
             no_interfaces(),
             no_broadcast_domains(),
@@ -334,6 +357,7 @@ mod tests {
             no_instances(),
             no_peer_groups(),
             no_routing_tables(),
+            no_ospf_instances(),
             no_static_routing_instances(),
             no_interfaces(),
             no_broadcast_domains(),
@@ -359,6 +383,7 @@ mod tests {
             no_instances(),
             no_peer_groups(),
             no_routing_tables(),
+            no_ospf_instances(),
             no_static_routing_instances(),
             no_interfaces(),
             no_broadcast_domains(),
@@ -376,6 +401,7 @@ mod tests {
             no_instances(),
             no_peer_groups(),
             no_routing_tables(),
+            no_ospf_instances(),
             no_static_routing_instances(),
             no_interfaces(),
             no_broadcast_domains(),
@@ -403,6 +429,7 @@ mod tests {
             names,
             no_peer_groups(),
             no_routing_tables(),
+            no_ospf_instances(),
             no_static_routing_instances(),
             no_interfaces(),
             no_broadcast_domains(),
@@ -427,6 +454,7 @@ mod tests {
             no_instances(),
             groups,
             no_routing_tables(),
+            no_ospf_instances(),
             no_static_routing_instances(),
             no_interfaces(),
             no_broadcast_domains(),
@@ -451,6 +479,7 @@ mod tests {
             no_instances(),
             no_peer_groups(),
             tables,
+            no_ospf_instances(),
             no_static_routing_instances(),
             no_interfaces(),
             no_broadcast_domains(),
@@ -475,6 +504,7 @@ mod tests {
             no_instances(),
             no_peer_groups(),
             no_routing_tables(),
+            no_ospf_instances(),
             instances,
             no_interfaces(),
             no_broadcast_domains(),
@@ -495,6 +525,7 @@ mod tests {
             no_instances(),
             no_peer_groups(),
             no_routing_tables(),
+            no_ospf_instances(),
             no_static_routing_instances(),
             no_interfaces(),
             no_broadcast_domains(),
@@ -522,6 +553,7 @@ mod tests {
             no_instances(),
             no_peer_groups(),
             no_routing_tables(),
+            no_ospf_instances(),
             no_static_routing_instances(),
             no_interfaces(),
             no_broadcast_domains(),

@@ -2,9 +2,9 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
     BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
-    Interface, InterfaceAddress, InterfaceStatus, LogEntry, LogLevel, NextHopMode, PeerSummary,
-    PolicyDefinition, PrefixList, PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable,
-    SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface,
+    Interface, InterfaceAddress, InterfaceStatus, LogEntry, LogLevel, NextHopMode, OspfInstance,
+    PeerSummary, PolicyDefinition, PrefixList, PrefixListEntry, PrefixRoutes, RouteSourceKind,
+    RoutingTable, SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface,
     SubinterfaceStatus, SwitchingProfile, TransactionSnapshot, VlanTag,
 };
 
@@ -115,9 +115,18 @@ pub fn render_bgp_instance(instance: &BgpInstance) -> String {
     lines.join("\n")
 }
 
+/// Render one OSPF instance as human-readable text.
+pub fn render_ospf_instance(instance: &OspfInstance) -> String {
+    format!(
+        "ospf instance {}: router-id {}",
+        instance.name, instance.router_id
+    )
+}
+
 /// Render one routing table as human-readable text.
 pub fn render_routing_table(table: &RoutingTable) -> String {
     let bgp_instance = table.bgp_instance.as_deref().unwrap_or("unset");
+    let ospf_instance = table.ospf_instance.as_deref().unwrap_or("unset");
     let static_routing_instance = table.static_routing_instance.as_deref().unwrap_or("unset");
     let redistribute_str = match &table.redistribute {
         Some(r) => format!(
@@ -129,7 +138,7 @@ pub fn render_routing_table(table: &RoutingTable) -> String {
         None => "unset".to_string(),
     };
     format!(
-        "routing-table {}: bgp-instance {bgp_instance}, static-routing-instance {static_routing_instance}, redistribute {redistribute_str}",
+        "routing-table {}: bgp-instance {bgp_instance}, ospf-instance {ospf_instance}, static-routing-instance {static_routing_instance}, redistribute {redistribute_str}",
         table.name
     )
 }
@@ -404,6 +413,11 @@ pub fn render_config(config: &Config) -> String {
     } else {
         lines.extend(config.routing_tables.iter().map(render_routing_table));
     }
+    if config.ospf_instances.is_empty() {
+        lines.push("no OSPF instances configured".to_string());
+    } else {
+        lines.extend(config.ospf_instances.iter().map(render_ospf_instance));
+    }
     if config.static_routing_instances.is_empty() {
         lines.push("no static routing instances configured".to_string());
     } else {
@@ -500,6 +514,15 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
             .map_or_else(
                 || format!("routing-table '{name}' not found"),
                 render_routing_table,
+            ),
+        Path::OspfInstance(name) => snapshot
+            .config
+            .ospf_instances
+            .iter()
+            .find(|i| &i.name == name)
+            .map_or_else(
+                || format!("ospf instance '{name}' not found"),
+                render_ospf_instance,
             ),
         Path::StaticRoutingInstance(name) => snapshot
             .config
@@ -721,6 +744,9 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
     for section in &diff.routing_tables {
         render_section(&mut lines, section, 0, color);
     }
+    for section in &diff.ospf_instances {
+        render_section(&mut lines, section, 0, color);
+    }
     for section in &diff.static_routing_instances {
         render_section(&mut lines, section, 0, color);
     }
@@ -872,7 +898,7 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(
             render_config(&cfg),
-            "hostname: nos\nno BGP instances configured\nno routing tables configured\nno static routing instances configured\nno interfaces configured\n\
+            "hostname: nos\nno BGP instances configured\nno routing tables configured\nno OSPF instances configured\nno static routing instances configured\nno interfaces configured\n\
              no community aliases configured\nno community groups configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured"
         );
@@ -887,7 +913,7 @@ mod tests {
         assert_eq!(
             render_config(&cfg),
             "hostname: nos\nbgp instance default: router-id 1.1.1.1, asn 65000, cluster-id default (= router-id)\n\
-             no routing tables configured\nno static routing instances configured\n\
+             no routing tables configured\nno OSPF instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
              no community aliases configured\nno community groups configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured"
@@ -904,7 +930,7 @@ mod tests {
             render_config(&cfg),
             "hostname: nos\nbgp instance vrf-a: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)\n\
              bgp instance vrf-b: router-id 1.1.1.1, asn 65002, cluster-id default (= router-id)\n\
-             no routing tables configured\nno static routing instances configured\n\
+             no routing tables configured\nno OSPF instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
              no community aliases configured\nno community groups configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured"
@@ -981,7 +1007,7 @@ mod tests {
         assert_eq!(
             rendered,
             "transaction 'demo':\nhostname: nos\nbgp instance r1: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)\n\
-             no routing tables configured\nno static routing instances configured\n\
+             no routing tables configured\nno OSPF instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
              no community aliases configured\nno community groups configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured"

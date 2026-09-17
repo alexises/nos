@@ -150,6 +150,16 @@ pub enum Topic {
     SetInterfaceSwitchingProfile,
     /// `ConfigOp::Interface(InterfaceOp::ClearSwitchingProfile)`
     ClearInterfaceSwitchingProfile,
+    /// `ConfigOp::OspfInstance(OspfInstanceOp::Ensure)`
+    EnsureOspfInstance,
+    /// `ConfigOp::OspfInstance(OspfInstanceOp::SetRouterId)`
+    SetOspfInstanceRouterId,
+    /// `ConfigOp::OspfInstance(OspfInstanceOp::Delete)`
+    DeleteOspfInstance,
+    /// `ConfigOp::RoutingTable(RoutingTableOp::SetOspfInstance)`
+    SetRoutingTableOspfInstance,
+    /// `ConfigOp::RoutingTable(RoutingTableOp::ClearOspfInstance)`
+    ClearRoutingTableOspfInstance,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

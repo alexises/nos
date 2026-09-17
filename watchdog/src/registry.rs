@@ -15,6 +15,7 @@ use tracing::debug;
 pub struct EndpointRegistry {
     rib_tables: Arc<RwLock<HashMap<String, PathBuf>>>,
     bgp_instances: Arc<RwLock<HashMap<String, PathBuf>>>,
+    ospf_instances: Arc<RwLock<HashMap<String, PathBuf>>>,
 }
 
 impl EndpointRegistry {
@@ -44,6 +45,19 @@ impl EndpointRegistry {
         self.bgp_instances.write().await.remove(name);
     }
 
+    pub async fn set_ospf_instance(&self, name: &str, socket: PathBuf) {
+        debug!(instance = %name, socket = %socket.display(), "registered ospf instance endpoint");
+        self.ospf_instances
+            .write()
+            .await
+            .insert(name.to_string(), socket);
+    }
+
+    pub async fn remove_ospf_instance(&self, name: &str) {
+        debug!(instance = %name, "removed ospf instance endpoint");
+        self.ospf_instances.write().await.remove(name);
+    }
+
     /// Resolves `service` to its current socket path, if known.
     /// `config_socket`/`interfaces_socket`/`log_socket` are always
     /// resolvable — the watchdog is told them directly via its own
@@ -65,6 +79,7 @@ impl EndpointRegistry {
             ServiceRef::Interfaces => Some(interfaces_socket.to_path_buf()),
             ServiceRef::Log => Some(log_socket.to_path_buf()),
             ServiceRef::BgpInstance(name) => self.bgp_instances.read().await.get(name).cloned(),
+            ServiceRef::OspfInstance(name) => self.ospf_instances.read().await.get(name).cloned(),
         }
     }
 }
@@ -194,6 +209,40 @@ mod tests {
         );
 
         registry.remove_bgp_instance("r1").await;
+        assert_eq!(
+            registry
+                .resolve(&service, config_socket, interfaces_socket, log_socket)
+                .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn ospf_instance_resolves_after_set_and_not_after_remove() {
+        let registry = EndpointRegistry::default();
+        let config_socket = Path::new(CONFIG_SOCKET);
+        let interfaces_socket = Path::new(INTERFACES_SOCKET);
+        let log_socket = Path::new(LOG_SOCKET);
+        let service = ServiceRef::OspfInstance("o1".to_string());
+
+        assert_eq!(
+            registry
+                .resolve(&service, config_socket, interfaces_socket, log_socket)
+                .await,
+            None
+        );
+
+        registry
+            .set_ospf_instance("o1", PathBuf::from("/run/nos/ospf-o1.sock"))
+            .await;
+        assert_eq!(
+            registry
+                .resolve(&service, config_socket, interfaces_socket, log_socket)
+                .await,
+            Some(PathBuf::from("/run/nos/ospf-o1.sock"))
+        );
+
+        registry.remove_ospf_instance("o1").await;
         assert_eq!(
             registry
                 .resolve(&service, config_socket, interfaces_socket, log_socket)

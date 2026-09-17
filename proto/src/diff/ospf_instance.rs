@@ -1,0 +1,154 @@
+use crate::schema::OspfInstance;
+
+use super::{DiffStatus, FieldDiff, SectionDiff};
+
+/// Diffs two lists of `OspfInstance`s, matched by `name` (the field
+/// `garde`'s `unique_in` validator already treats as each instance's key).
+/// `routing_table` is deliberately not compared — it's a derived echo of
+/// the owning `RoutingTable.ospf_instance`, already surfaced by
+/// `diff_routing_tables` (mirrors `diff_bgp_instances` excluding its own
+/// `routing_table`/`redistribute_policy`).
+pub fn diff_ospf_instances(base: &[OspfInstance], candidate: &[OspfInstance]) -> Vec<SectionDiff> {
+    let mut sections = Vec::new();
+
+    for b in base {
+        match candidate.iter().find(|c| c.name == b.name) {
+            None => sections.push(removed_section(b)),
+            Some(c) => {
+                let fields = changed_fields(b, c);
+                if !fields.is_empty() {
+                    sections.push(SectionDiff {
+                        header: header_for(&b.name),
+                        name: b.name.clone(),
+                        status: DiffStatus::Modified,
+                        fields,
+                        subsections: Vec::new(),
+                    });
+                }
+            }
+        }
+    }
+
+    for c in candidate {
+        if !base.iter().any(|b| b.name == c.name) {
+            sections.push(added_section(c));
+        }
+    }
+
+    sections
+}
+
+fn header_for(name: &str) -> String {
+    format!("ospf instance {name}")
+}
+
+fn changed_fields(base: &OspfInstance, candidate: &OspfInstance) -> Vec<FieldDiff> {
+    let mut fields = Vec::new();
+    if base.router_id != candidate.router_id {
+        fields.push(FieldDiff {
+            label: "router-id".to_string(),
+            old: Some(base.router_id.to_string()),
+            new: Some(candidate.router_id.to_string()),
+        });
+    }
+    fields
+}
+
+fn removed_section(instance: &OspfInstance) -> SectionDiff {
+    SectionDiff {
+        header: header_for(&instance.name),
+        name: instance.name.clone(),
+        status: DiffStatus::Removed,
+        fields: vec![FieldDiff {
+            label: "router-id".to_string(),
+            old: Some(instance.router_id.to_string()),
+            new: None,
+        }],
+        subsections: Vec::new(),
+    }
+}
+
+fn added_section(instance: &OspfInstance) -> SectionDiff {
+    SectionDiff {
+        header: header_for(&instance.name),
+        name: instance.name.clone(),
+        status: DiffStatus::Added,
+        fields: vec![FieldDiff {
+            label: "router-id".to_string(),
+            old: None,
+            new: Some(instance.router_id.to_string()),
+        }],
+        subsections: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use super::*;
+
+    fn instance(name: &str, router_id: Ipv4Addr) -> OspfInstance {
+        OspfInstance {
+            name: name.to_string(),
+            router_id,
+            routing_table: None,
+        }
+    }
+
+    #[test]
+    fn no_changes_produces_no_sections() {
+        let base = vec![instance("o1", Ipv4Addr::new(1, 1, 1, 1))];
+        let candidate = base.clone();
+        assert!(diff_ospf_instances(&base, &candidate).is_empty());
+    }
+
+    #[test]
+    fn added_instance() {
+        let base = vec![];
+        let candidate = vec![instance("o1", Ipv4Addr::new(1, 1, 1, 1))];
+        let sections = diff_ospf_instances(&base, &candidate);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].header, "ospf instance o1");
+        assert_eq!(sections[0].status, DiffStatus::Added);
+        assert!(sections[0].fields.iter().all(|f| f.old.is_none()));
+    }
+
+    #[test]
+    fn removed_instance() {
+        let base = vec![instance("o1", Ipv4Addr::new(1, 1, 1, 1))];
+        let candidate = vec![];
+        let sections = diff_ospf_instances(&base, &candidate);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].status, DiffStatus::Removed);
+        assert!(sections[0].fields.iter().all(|f| f.new.is_none()));
+    }
+
+    #[test]
+    fn modified_instance_only_lists_changed_fields() {
+        let base = vec![instance("o1", Ipv4Addr::new(1, 1, 1, 1))];
+        let candidate = vec![instance("o1", Ipv4Addr::new(2, 2, 2, 2))];
+        let sections = diff_ospf_instances(&base, &candidate);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].status, DiffStatus::Modified);
+        assert_eq!(sections[0].fields.len(), 1);
+        assert_eq!(sections[0].fields[0].label, "router-id");
+        assert_eq!(sections[0].fields[0].old.as_deref(), Some("1.1.1.1"));
+        assert_eq!(sections[0].fields[0].new.as_deref(), Some("2.2.2.2"));
+    }
+
+    #[test]
+    fn unrelated_unchanged_instance_is_omitted() {
+        let base = vec![
+            instance("o1", Ipv4Addr::new(1, 1, 1, 1)),
+            instance("o2", Ipv4Addr::new(2, 2, 2, 2)),
+        ];
+        let candidate = vec![
+            instance("o1", Ipv4Addr::new(9, 9, 9, 9)),
+            instance("o2", Ipv4Addr::new(2, 2, 2, 2)),
+        ];
+        let sections = diff_ospf_instances(&base, &candidate);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].header, "ospf instance o1");
+    }
+}

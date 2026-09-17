@@ -50,6 +50,12 @@ fn static_routing_instance_str(t: &RoutingTable) -> String {
         .unwrap_or_else(|| "unset".to_string())
 }
 
+fn ospf_instance_str(t: &RoutingTable) -> String {
+    t.ospf_instance
+        .clone()
+        .unwrap_or_else(|| "unset".to_string())
+}
+
 fn redistribute_str(t: &RoutingTable) -> String {
     match &t.redistribute {
         None => "unset".to_string(),
@@ -76,6 +82,13 @@ fn changed_fields(base: &RoutingTable, candidate: &RoutingTable) -> Vec<FieldDif
             label: "static-routing-instance".to_string(),
             old: Some(static_routing_instance_str(base)),
             new: Some(static_routing_instance_str(candidate)),
+        });
+    }
+    if base.ospf_instance != candidate.ospf_instance {
+        fields.push(FieldDiff {
+            label: "ospf-instance".to_string(),
+            old: Some(ospf_instance_str(base)),
+            new: Some(ospf_instance_str(candidate)),
         });
     }
     if base.redistribute != candidate.redistribute {
@@ -105,6 +118,11 @@ fn removed_section(table: &RoutingTable) -> SectionDiff {
                 new: None,
             },
             FieldDiff {
+                label: "ospf-instance".to_string(),
+                old: Some(ospf_instance_str(table)),
+                new: None,
+            },
+            FieldDiff {
                 label: "redistribute".to_string(),
                 old: Some(redistribute_str(table)),
                 new: None,
@@ -131,6 +149,11 @@ fn added_section(table: &RoutingTable) -> SectionDiff {
                 new: Some(static_routing_instance_str(table)),
             },
             FieldDiff {
+                label: "ospf-instance".to_string(),
+                old: None,
+                new: Some(ospf_instance_str(table)),
+            },
+            FieldDiff {
                 label: "redistribute".to_string(),
                 old: None,
                 new: Some(redistribute_str(table)),
@@ -148,6 +171,7 @@ mod tests {
         RoutingTable {
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),
+            ospf_instance: None,
             static_routing_instance: sri.map(str::to_string),
             redistribute: None,
         }
@@ -183,6 +207,18 @@ mod tests {
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].fields.len(), 1);
         assert_eq!(sections[0].fields[0].label, "bgp-instance");
+    }
+
+    #[test]
+    fn modified_ospf_instance_only_lists_that_field() {
+        let base = vec![table("rt1", None, None)];
+        let mut candidate_table = table("rt1", None, None);
+        candidate_table.ospf_instance = Some("o1".to_string());
+        let candidate = vec![candidate_table];
+        let sections = diff_routing_tables(&base, &candidate);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].fields.len(), 1);
+        assert_eq!(sections[0].fields[0].label, "ospf-instance");
     }
 
     #[test]

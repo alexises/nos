@@ -281,6 +281,7 @@ mod tests {
         RoutingTable {
             name: name.to_string(),
             bgp_instance: None,
+            ospf_instance: None,
             static_routing_instance: None,
             redistribute: None,
         }

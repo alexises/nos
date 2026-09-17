@@ -251,6 +251,7 @@ mod tests {
         let table = RoutingTable {
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
+            ospf_instance: None,
             static_routing_instance: None,
             redistribute: None,
         };
@@ -269,6 +270,7 @@ mod tests {
         let table = RoutingTable {
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
+            ospf_instance: None,
             static_routing_instance: None,
             redistribute: Some(Redistribute {
                 from: RedistributeSource::Static,
@@ -296,6 +298,7 @@ mod tests {
         let table = RoutingTable {
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
+            ospf_instance: None,
             static_routing_instance: None,
             redistribute: Some(Redistribute {
                 from: RedistributeSource::Static,
@@ -324,6 +327,7 @@ mod tests {
         let table = RoutingTable {
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
+            ospf_instance: None,
             static_routing_instance: None,
             redistribute: Some(Redistribute {
                 from: RedistributeSource::Static,

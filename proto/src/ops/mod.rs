@@ -5,6 +5,7 @@ pub mod broadcast_domain;
 pub mod community_alias;
 pub mod community_group;
 pub mod interface;
+pub mod ospf_instance;
 pub mod policy_definition;
 pub mod prefix_list;
 pub mod routing_table;
@@ -20,6 +21,7 @@ pub use broadcast_domain::BroadcastDomainOp;
 pub use community_alias::CommunityAliasOp;
 pub use community_group::CommunityGroupOp;
 pub use interface::InterfaceOp;
+pub use ospf_instance::OspfInstanceOp;
 pub use policy_definition::PolicyDefinitionOp;
 pub use prefix_list::PrefixListOp;
 pub use routing_table::RoutingTableOp;
@@ -61,6 +63,7 @@ pub enum ConfigOp {
     BroadcastDomain(BroadcastDomainOp),
     SwitchingProfile(SwitchingProfileOp),
     Subinterface(SubinterfaceOp),
+    OspfInstance(OspfInstanceOp),
 }
 
 impl ConfigOp {
@@ -87,6 +90,7 @@ impl ConfigOp {
             ConfigOp::BroadcastDomain(op) => op.apply(config),
             ConfigOp::SwitchingProfile(op) => op.apply(config),
             ConfigOp::Subinterface(op) => op.apply(config),
+            ConfigOp::OspfInstance(op) => op.apply(config),
         }
     }
 }
@@ -152,6 +156,8 @@ pub enum OpError {
         tag: u16,
         address: IpNet,
     },
+    #[error("ospf instance '{0}' not found")]
+    OspfInstanceNotFound(String),
 }
 
 #[cfg(test)]

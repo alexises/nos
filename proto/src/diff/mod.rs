@@ -5,6 +5,7 @@ pub mod broadcast_domain;
 pub mod community_alias;
 pub mod community_group;
 pub mod interface;
+pub mod ospf_instance;
 pub mod policy_definition;
 pub mod prefix_list;
 pub mod routing_table;
@@ -67,6 +68,7 @@ pub struct ConfigDiff {
     pub hostname: Option<FieldDiff>,
     pub bgp_instances: Vec<SectionDiff>,
     pub routing_tables: Vec<SectionDiff>,
+    pub ospf_instances: Vec<SectionDiff>,
     pub static_routing_instances: Vec<SectionDiff>,
     pub interfaces: Vec<SectionDiff>,
     pub policy_definitions: Vec<SectionDiff>,
@@ -82,6 +84,7 @@ impl ConfigDiff {
         self.hostname.is_none()
             && self.bgp_instances.is_empty()
             && self.routing_tables.is_empty()
+            && self.ospf_instances.is_empty()
             && self.static_routing_instances.is_empty()
             && self.interfaces.is_empty()
             && self.policy_definitions.is_empty()
@@ -110,6 +113,11 @@ impl ConfigDiff {
             },
             routing_tables: if scopes.contains(&DiffScope::RoutingTables) {
                 self.routing_tables.clone()
+            } else {
+                Vec::new()
+            },
+            ospf_instances: if scopes.contains(&DiffScope::OspfInstances) {
+                self.ospf_instances.clone()
             } else {
                 Vec::new()
             },
@@ -172,6 +180,7 @@ pub enum DiffScope {
     PrefixLists,
     BroadcastDomains,
     SwitchingProfiles,
+    OspfInstances,
 }
 
 /// Computes what changed between `base` (e.g. the running config) and
@@ -192,6 +201,10 @@ pub fn diff_configs(base: &Config, candidate: &Config) -> ConfigDiff {
         routing_tables: routing_table::diff_routing_tables(
             &base.routing_tables,
             &candidate.routing_tables,
+        ),
+        ospf_instances: ospf_instance::diff_ospf_instances(
+            &base.ospf_instances,
+            &candidate.ospf_instances,
         ),
         static_routing_instances: static_routing_instance::diff_static_routing_instances(
             &base.static_routing_instances,
