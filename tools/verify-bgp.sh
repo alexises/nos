@@ -51,10 +51,14 @@
 # advertiser's loc-rib. Reverting to `accept-all` lets it flow through again.
 #
 # (via the `ospf` subcommand) that declaring a basic OSPF instance (name,
-# router-id, routing-table association -- see ospf/CLAUDE.md; no wire
-# protocol yet) actually gets nos-watchdogd to dynamically spawn a real
-# nos-ospfd process for it, which itself resolves its own instance's
-# router-id/routing-table over a real IPC round trip to nos-configd.
+# router-id, routing-table association -- see ospf/CLAUDE.md), a nested
+# area/profile, and attaching that profile to both routers' own eth0 tag-0
+# subinterface actually gets nos-watchdogd to dynamically spawn a real
+# nos-ospfd process for each, which itself resolves its own instance's
+# router-id/routing-table over a real IPC round trip to nos-configd, and
+# actually exchanges real RFC 2328 Hello packets over a real VRF-scoped raw
+# protocol-89 socket between the two containers, reaching neighbor state
+# 2-Way on both sides.
 #
 # Two further subcommands, `reflector` and `route-server`, stand up a third
 # container ("router-c") and reconfigure all three into a hub-and-spoke
@@ -121,9 +125,12 @@ LOOPBACK_DEVICE="lo$LOOPBACK_TABLE_ID"
 SVI_ADDRESS=203.0.113.9/32
 # Arbitrary name/router-id for the ospf scenario's OspfInstance -- distinct
 # from OSPF_INSTANCE's own asn/router-id concepts, since it names a
-# different section entirely.
+# different section entirely. Both routers use the same OSPF_INSTANCE name
+# (each is its own container/config, so that's not a conflict) but distinct
+# OSPF router-ids, needed to identify each other in Hello packets.
 OSPF_INSTANCE=ospf1
 OSPF_ROUTER_ID=9.9.9.9
+OSPF_ROUTER_ID_B=9.9.9.10
 # The ospf scenario's area/profile -- 0.0.0.0 (the backbone) is the obvious
 # choice for a single-area test, and the profile is attached to eth0's own
 # tag-0 subinterface (the same one already carrying the BGP session's
@@ -323,12 +330,15 @@ provision_delete_loopback() {
 
 # --- OSPF instance scenario ---
 #
-# Declares an OSPF instance (basic configuration only -- no wire protocol
-# yet, see ospf/CLAUDE.md) on router-a and associates it with the same "rt1"
-# routing table its BGP instance already owns, verifying nos-watchdogd
-# actually spawns a real nos-ospfd process for it and that process resolves
-# its own instance's router-id/routing-table over a real IPC round trip to
-# nos-configd -- over real containers, not a unit test.
+# Declares an OSPF instance on a router and associates it with the same
+# "rt1" routing table its BGP instance already owns, attaching its profile
+# to that router's own eth0 tag-0 subinterface -- the same one already
+# carrying the BGP session's own address -- verifying nos-watchdogd actually
+# spawns a real nos-ospfd process for it, that process resolves its own
+# instance's router-id/routing-table over a real IPC round trip to
+# nos-configd, and (when called for both routers, see cmd_check_ospf) that a
+# real RFC 2328 Hello exchange over a real VRF-scoped raw protocol-89 socket
+# reaches neighbor state 2-Way -- over real containers, not a unit test.
 
 provision_ospf() {
   local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 ospf_instance=$6 ospf_router_id=$7
@@ -901,6 +911,7 @@ cmd_check_loopback() {
 
 cmd_check_ospf() {
   provision_ospf router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID"
+  provision_ospf router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID_B"
 
   # Confirms nos-watchdogd actually spawned a real nos-ospfd process for the
   # new OspfInstance (not just that config accepted it) -- only nos-ospfd
@@ -923,6 +934,21 @@ cmd_check_ospf() {
   wait_for_count_increase router-a "ospf profile resolved instance=$OSPF_INSTANCE area=$OSPF_AREA profile=$OSPF_PROFILE" 0 60 \
     && log "router-a: nos-ospfd resolved profile $OSPF_PROFILE" \
     || { log "router-a: FAILED to see nos-ospfd resolve its profile config"; return 1; }
+
+  # Confirms a real RFC 2328 Hello exchange over a real raw protocol-89
+  # socket, VRF-scoped, actually reaches 2-Way on both sides -- both
+  # routers' eth0 tag-0 subinterface (the same one already carrying their
+  # BGP session's own address/rt1 association) is the ospf-profile1 attach
+  # point, so this is a real point-to-point link between two containers, not
+  # a loopback/simulated one. Field order matches `link.rs`'s
+  # `info!(link, neighbor, "ospf neighbor reached two-way")` call site.
+  log "waiting for router-a/router-b to reach ospf 2-way"
+  wait_for_count_increase router-a "ospf neighbor reached two-way link=eth0.0 neighbor=$OSPF_ROUTER_ID_B" 0 60 \
+    && log "router-a: reached ospf 2-way with $OSPF_ROUTER_ID_B" \
+    || { log "router-a: FAILED to reach ospf 2-way"; return 1; }
+  wait_for_count_increase router-b "ospf neighbor reached two-way link=eth0.0 neighbor=$OSPF_ROUTER_ID" 0 60 \
+    && log "router-b: reached ospf 2-way with $OSPF_ROUTER_ID" \
+    || { log "router-b: FAILED to reach ospf 2-way"; return 1; }
 }
 
 cmd_check_switching() {

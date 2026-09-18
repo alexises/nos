@@ -1,34 +1,55 @@
-use std::path::PathBuf;
+use std::net::Ipv4Addr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use nos_proto::{DiffScope, Event};
+use nos_proto::{DiffScope, Event, ServiceRef};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::config_client;
+use crate::interface_client;
+use crate::link::{LinkConfig, LinkManager};
+use crate::rib_client;
+use crate::watchdog_client;
 
 /// Fixed reconnect delay for the config subscription, matching every other
 /// config-subscribing consumer in this codebase (`nos-bgp`/`nos-rib`/
 /// `nos-interface`'s own `reconcile::RECONNECT_DELAY`).
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
+/// How often to re-apply desired state even without a new config diff —
+/// needed because a link's VRF/local-address readiness (the owning
+/// `nos-ribd`/`nos-interfaced` having resolved it) is an external condition
+/// no config commit signals, same as `nos-bgp`'s own `reconcile::
+/// REAPPLY_INTERVAL`.
+const REAPPLY_INTERVAL: Duration = Duration::from_secs(10);
+
 /// Runs until `shutdown` fires. Subscribes to `OspfInstances` diffs purely as
 /// a resync trigger — the actual state always comes from a fresh
-/// `fetch_config` call. This is a config-only skeleton (see `ospf/CLAUDE.md`):
-/// there is no OSPF protocol logic yet, so a resync only ever logs what it
-/// found.
-pub async fn run(config_socket: PathBuf, instance: String, mut shutdown: watch::Receiver<bool>) {
+/// `fetch_config` call, plus a periodic tick independent of any config
+/// change.
+pub async fn run(
+    config_socket: PathBuf,
+    watchdog_socket: PathBuf,
+    instance: String,
+    links: Arc<LinkManager>,
+    mut shutdown: watch::Receiver<bool>,
+) {
     while !*shutdown.borrow() {
         match config_client::subscribe_diff(&config_socket, vec![DiffScope::OspfInstances]).await {
             Ok(mut reader) => {
                 info!(instance = %instance, "connected to nos-configd diff stream");
-                resync(&config_socket, &instance).await;
+                let mut reapply = tokio::time::interval(REAPPLY_INTERVAL);
+                reapply.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                reapply.tick().await;
+                resync(&config_socket, &watchdog_socket, &instance, &links).await;
                 loop {
                     tokio::select! {
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(_))) => {
-                                resync(&config_socket, &instance).await;
+                                resync(&config_socket, &watchdog_socket, &instance, &links).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -40,6 +61,9 @@ pub async fn run(config_socket: PathBuf, instance: String, mut shutdown: watch::
                                 break;
                             }
                         },
+                        _ = reapply.tick() => {
+                            resync(&config_socket, &watchdog_socket, &instance, &links).await;
+                        }
                         _ = shutdown.changed() => break,
                     }
                 }
@@ -59,10 +83,16 @@ pub async fn run(config_socket: PathBuf, instance: String, mut shutdown: watch::
         }
     }
 
+    links.shutdown().await;
     info!(instance = %instance, "reconciliation loop stopped");
 }
 
-async fn resync(config_socket: &std::path::Path, instance: &str) {
+async fn resync(
+    config_socket: &Path,
+    watchdog_socket: &Path,
+    instance: &str,
+    links: &Arc<LinkManager>,
+) {
     let cfg = match config_client::fetch_config(config_socket).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -71,40 +101,81 @@ async fn resync(config_socket: &std::path::Path, instance: &str) {
         }
     };
 
-    match cfg.ospf_instances.iter().find(|i| i.name == instance) {
-        Some(own) => {
+    let Some(own) = cfg.ospf_instances.iter().find(|i| i.name == instance) else {
+        // The watchdog would be tearing this process down anyway if the
+        // instance were genuinely removed from config.
+        warn!(instance = %instance, "own ospf instance missing from running config");
+        return;
+    };
+    info!(
+        instance = %instance,
+        router_id = %own.router_id,
+        routing_table = ?own.routing_table,
+        area_count = own.areas.len(),
+        "ospf instance config resolved"
+    );
+
+    let mut desired_links = Vec::new();
+    for area in &own.areas {
+        info!(
+            instance = %instance,
+            area = %area.area_id,
+            profile_count = area.profiles.len(),
+            "ospf area resolved"
+        );
+        for profile in &area.profiles {
+            let interfaces = attach_points_for(&cfg, &profile.name);
             info!(
                 instance = %instance,
-                router_id = %own.router_id,
-                routing_table = ?own.routing_table,
-                area_count = own.areas.len(),
-                "ospf instance config resolved"
+                area = %area.area_id,
+                profile = %profile.name,
+                interfaces = ?interfaces,
+                "ospf profile resolved"
             );
-            for area in &own.areas {
-                info!(
-                    instance = %instance,
-                    area = %area.area_id,
-                    profile_count = area.profiles.len(),
-                    "ospf area resolved"
-                );
-                for profile in &area.profiles {
-                    let interfaces = attach_points_for(&cfg, &profile.name);
-                    info!(
-                        instance = %instance,
-                        area = %area.area_id,
-                        profile = %profile.name,
-                        interfaces = ?interfaces,
-                        "ospf profile resolved"
+
+            let hello_interval = profile
+                .hello_interval
+                .unwrap_or(nos_proto::HELLO_INTERVAL_DEFAULT);
+            let dead_interval = profile
+                .dead_interval
+                .unwrap_or(nos_proto::DEAD_INTERVAL_DEFAULT);
+
+            for attach in subinterface_attach_points(&cfg, &profile.name) {
+                let link_name = attach.display_name();
+                let Some(routing_table) = &attach.routing_table else {
+                    // Can't happen in practice —
+                    // `valid_subinterface_ospf_profile_requires_routing_table`
+                    // already enforces this at commit time — but the field
+                    // is still `Option` on the wire.
+                    warn!(
+                        instance = %instance, link = %link_name,
+                        "ospf profile attached to a subinterface with no routing-table, skipping"
                     );
-                }
+                    continue;
+                };
+                let Some(vrf) = resolve_vrf(watchdog_socket, routing_table).await else {
+                    warn!(instance = %instance, link = %link_name, "ospf link's vrf not resolvable yet");
+                    continue;
+                };
+                let Some(local_addr) =
+                    resolve_local_address(watchdog_socket, &attach.interface, attach.tag).await
+                else {
+                    warn!(instance = %instance, link = %link_name, "ospf link's local address not resolvable yet");
+                    continue;
+                };
+                desired_links.push(LinkConfig {
+                    attach_point: link_name,
+                    area_id: area.area_id,
+                    hello_interval,
+                    dead_interval,
+                    vrf,
+                    local_addr,
+                });
             }
         }
-        None => {
-            // The watchdog would be tearing this process down anyway if the
-            // instance were genuinely removed from config.
-            warn!(instance = %instance, "own ospf instance missing from running config");
-        }
     }
+
+    links.reconcile(desired_links, own.router_id).await;
 }
 
 /// Every L3 attach point (loopback interface name, `<interface>.<tag>`
@@ -133,6 +204,77 @@ fn attach_points_for(cfg: &nos_proto::Config, profile: &str) -> Vec<String> {
     points
 }
 
+/// One `Subinterface.ospf_profile` attach point, with enough structure to
+/// resolve and build a `LinkConfig`. Point-to-point only this phase (see
+/// `ospf/CLAUDE.md`) — loopback and `BroadcastDomain` attach points stay
+/// log-only, handled entirely by `attach_points_for` above.
+struct SubinterfaceAttachPoint {
+    interface: String,
+    tag: u16,
+    routing_table: Option<String>,
+}
+
+impl SubinterfaceAttachPoint {
+    /// Matches `attach_points_for`'s existing `"<interface>.<tag>"`
+    /// convention.
+    fn display_name(&self) -> String {
+        format!("{}.{}", self.interface, self.tag)
+    }
+}
+
+fn subinterface_attach_points(
+    cfg: &nos_proto::Config,
+    profile: &str,
+) -> Vec<SubinterfaceAttachPoint> {
+    let mut points = Vec::new();
+    for iface in &cfg.interfaces {
+        for sub in &iface.subinterfaces {
+            if sub.ospf_profile.as_deref() == Some(profile) {
+                points.push(SubinterfaceAttachPoint {
+                    interface: iface.name.clone(),
+                    tag: sub.tag,
+                    routing_table: sub.routing_table.clone(),
+                });
+            }
+        }
+    }
+    points
+}
+
+/// Resolves `table`'s Linux VRF interface name by asking the owning
+/// `nos-ribd` instance directly over IPC (see `crate::rib_client`),
+/// resolved via the watchdog broker — never derived locally. `None` covers
+/// every "not answerable yet" case uniformly (broker doesn't know that
+/// table, connect failure, rib hasn't created a VRF yet), retried by the
+/// caller's periodic re-apply tick. Mirrors `nos-bgp`'s own
+/// `reconcile::resolve_vrf`.
+async fn resolve_vrf(watchdog_socket: &Path, table: &str) -> Option<String> {
+    let socket =
+        watchdog_client::resolve_once(watchdog_socket, &ServiceRef::RibTable(table.to_string()))
+            .await?;
+    rib_client::get_vrf_name(&socket).await
+}
+
+/// Resolves a subinterface's tag-0-or-tagged local IPv4 address by asking
+/// `nos-interfaced` directly (resolved via the watchdog broker's
+/// `ServiceRef::Interfaces`, mirroring `resolve_vrf`'s `ServiceRef::RibTable`
+/// and `nos-ribd` query). `None` covers every "not resolvable right now"
+/// case uniformly, retried by the caller's periodic re-apply tick.
+async fn resolve_local_address(
+    watchdog_socket: &Path,
+    interface: &str,
+    tag: u16,
+) -> Option<Ipv4Addr> {
+    let socket = watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
+    let status = interface_client::get_interface(&socket, interface).await?;
+    let sub = status.subinterfaces.into_iter().find(|s| s.tag == tag)?;
+    let addr = sub.addresses.into_iter().next()?.address.addr();
+    match addr {
+        std::net::IpAddr::V4(v4) => Some(v4),
+        std::net::IpAddr::V6(_) => None,
+    }
+}
+
 /// Local copy of `nos-watchdog::supervisor::wait_or_shutdown` — not
 /// imported, per the star-dependency rule.
 async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>) -> bool {
@@ -147,6 +289,7 @@ mod tests {
     use nos_proto::{BroadcastDomain, Config, Interface, Subinterface};
 
     use super::attach_points_for;
+    use super::subinterface_attach_points;
 
     fn interface(name: &str, ospf_profile: Option<&str>) -> Interface {
         Interface {
@@ -205,5 +348,39 @@ mod tests {
             ..Default::default()
         };
         assert!(attach_points_for(&cfg, "p1").is_empty());
+    }
+
+    #[test]
+    fn subinterface_attach_points_finds_routing_table() {
+        let mut iface = interface("eth0", None);
+        iface.subinterfaces = vec![Subinterface {
+            tag: 0,
+            addresses: Vec::new(),
+            routing_table: Some("rt1".to_string()),
+            ospf_profile: Some("p1".to_string()),
+        }];
+        let cfg = Config {
+            interfaces: vec![iface],
+            ..Default::default()
+        };
+        let points = subinterface_attach_points(&cfg, "p1");
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].display_name(), "eth0.0");
+        assert_eq!(points[0].routing_table.as_deref(), Some("rt1"));
+    }
+
+    #[test]
+    fn subinterface_attach_points_ignores_loopback_and_broadcast_domain() {
+        let cfg = Config {
+            interfaces: vec![interface("loopback-rt1", Some("p1"))],
+            broadcast_domains: vec![BroadcastDomain {
+                name: "bd1".to_string(),
+                addresses: Vec::new(),
+                routing_table: None,
+                ospf_profile: Some("p1".to_string()),
+            }],
+            ..Default::default()
+        };
+        assert!(subinterface_attach_points(&cfg, "p1").is_empty());
     }
 }

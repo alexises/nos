@@ -3,6 +3,7 @@ use std::net::Ipv4Addr;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
+use super::ospf_profile;
 use super::{Config, OspfProfile};
 
 /// One OSPF area within an `OspfInstance`, keyed by its dotted-quad area id
@@ -18,7 +19,10 @@ pub struct OspfArea {
     #[garde(skip)]
     pub area_id: Ipv4Addr,
 
-    #[garde(dive)]
+    #[garde(
+        dive,
+        custom(|profiles, _ctx: &Config| ospf_profile::valid_profile_timers(profiles))
+    )]
     pub profiles: Vec<OspfProfile>,
 }
 

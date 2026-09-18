@@ -389,6 +389,10 @@ pub enum Resolved {
     /// instance argument): the caller iterates every `BgpInstance` in the
     /// running config itself.
     ShowBgpBrief,
+    /// `show ospf neigh` — data-plane, valid in any mode. Router-wide (no
+    /// instance argument), mirroring `ShowBgpBrief`: the caller iterates
+    /// every `OspfInstance` in the running config itself.
+    ShowOspfNeigh,
     /// `clear bgp <instance> <peer> soft-in` — data-plane action, valid in
     /// any mode.
     ClearBgpSoftIn {
@@ -445,6 +449,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowInterface { name } => Resolved::ShowInterface { name },
         Command::ShowLog { source, follow } => Resolved::ShowLog { source, follow },
         Command::ShowBgpBrief => Resolved::ShowBgpBrief,
+        Command::ShowOspfNeigh => Resolved::ShowOspfNeigh,
         Command::ClearBgpSoftIn { instance, peer } => Resolved::ClearBgpSoftIn { instance, peer },
         Command::Unknown(s) => {
             Resolved::Error(format!("unknown command: '{s}' (type 'help' for a list)"))
@@ -1516,6 +1521,7 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
         | Command::ShowInterface { .. }
         | Command::ShowLog { .. }
         | Command::ShowBgpBrief
+        | Command::ShowOspfNeigh
         | Command::ClearBgpSoftIn { .. }
         | Command::Unknown(_)
         | Command::Exit
@@ -3204,6 +3210,21 @@ mod tests {
         assert_eq!(
             resolve(&config_mode("t1", Path::Root, false), Command::ShowBgpBrief),
             Resolved::ShowBgpBrief
+        );
+    }
+
+    #[test]
+    fn show_ospf_neigh_works_in_any_mode() {
+        assert_eq!(
+            resolve(&Mode::Operational, Command::ShowOspfNeigh),
+            Resolved::ShowOspfNeigh
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::ShowOspfNeigh
+            ),
+            Resolved::ShowOspfNeigh
         );
     }
 

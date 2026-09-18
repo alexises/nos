@@ -512,6 +512,9 @@ pub enum Command {
     /// `show bgp brief` — a one-line-per-peer session summary across every
     /// configured BGP instance.
     ShowBgpBrief,
+    /// `show ospf neigh` — a one-line-per-link neighbor summary across every
+    /// configured OSPF instance.
+    ShowOspfNeigh,
     /// `clear bgp <instance> <peer> soft-in` — ask `<peer>`'s live session
     /// on `<instance>` to resend its routes (RFC 2918 route refresh).
     ClearBgpSoftIn {
@@ -627,6 +630,7 @@ fn parse_show(t: &[&str]) -> Option<Command> {
             follow: true,
         },
         ["bgp", "brief"] => Command::ShowBgpBrief,
+        ["ospf", "neigh"] => Command::ShowOspfNeigh,
         ["source"] => Command::ShowSource,
         _ => return None,
     })
@@ -2460,6 +2464,11 @@ mod tests {
     #[test]
     fn show_bgp_brief() {
         assert_eq!(Command::parse("show bgp brief"), Command::ShowBgpBrief);
+    }
+
+    #[test]
+    fn show_ospf_neigh() {
+        assert_eq!(Command::parse("show ospf neigh"), Command::ShowOspfNeigh);
     }
 
     #[test]

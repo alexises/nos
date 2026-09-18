@@ -10,10 +10,7 @@ use super::OpError;
 /// An edit to a single `OspfProfile` (keyed by `name`, globally unique) nested
 /// under a named `OspfArea` of a named `OspfInstance`, within a transaction's
 /// in-progress config. Applied without validation, matching every other
-/// `Op`. Compound-keyed (`instance`, `area_id`, `name`) like `BgpPeerGroupOp`
-/// — `Ensure`-shaped with room for future `Set*` variants once a profile
-/// gains real fields (see `schema::OspfProfile`'s doc comment), even though
-/// there's nothing to `Set` yet.
+/// `Op`. Compound-keyed (`instance`, `area_id`, `name`) like `BgpPeerGroupOp`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OspfProfileOp {
     /// Creates the profile if it doesn't already exist (the owning area
@@ -30,6 +27,28 @@ pub enum OspfProfileOp {
         area_id: Ipv4Addr,
         name: String,
     },
+    SetHelloInterval {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        hello_interval: u16,
+    },
+    ClearHelloInterval {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+    },
+    SetDeadInterval {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        dead_interval: u16,
+    },
+    ClearDeadInterval {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+    },
 }
 
 impl OspfProfileOp {
@@ -42,7 +61,11 @@ impl OspfProfileOp {
             } => {
                 let area = find_area_mut(config, instance, *area_id)?;
                 if !area.profiles.iter().any(|p| &p.name == name) {
-                    area.profiles.push(OspfProfile { name: name.clone() });
+                    area.profiles.push(OspfProfile {
+                        name: name.clone(),
+                        hello_interval: None,
+                        dead_interval: None,
+                    });
                 }
                 Ok(())
             }
@@ -63,8 +86,61 @@ impl OspfProfileOp {
                 }
                 Ok(())
             }
+            OspfProfileOp::SetHelloInterval {
+                instance,
+                area_id,
+                name,
+                hello_interval,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.hello_interval =
+                    Some(*hello_interval);
+                Ok(())
+            }
+            OspfProfileOp::ClearHelloInterval {
+                instance,
+                area_id,
+                name,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.hello_interval = None;
+                Ok(())
+            }
+            OspfProfileOp::SetDeadInterval {
+                instance,
+                area_id,
+                name,
+                dead_interval,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.dead_interval =
+                    Some(*dead_interval);
+                Ok(())
+            }
+            OspfProfileOp::ClearDeadInterval {
+                instance,
+                area_id,
+                name,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.dead_interval = None;
+                Ok(())
+            }
         }
     }
+}
+
+fn find_profile_mut<'a>(
+    config: &'a mut Config,
+    instance: &str,
+    area_id: Ipv4Addr,
+    name: &str,
+) -> Result<&'a mut OspfProfile, OpError> {
+    find_area_mut(config, instance, area_id)?
+        .profiles
+        .iter_mut()
+        .find(|p| p.name == name)
+        .ok_or_else(|| OpError::OspfProfileNotFound {
+            instance: instance.to_string(),
+            area_id,
+            name: name.to_string(),
+        })
 }
 
 #[cfg(test)]
@@ -92,6 +168,14 @@ mod tests {
         }
     }
 
+    fn profile(name: &str) -> OspfProfile {
+        OspfProfile {
+            name: name.to_string(),
+            hello_interval: None,
+            dead_interval: None,
+        }
+    }
+
     #[test]
     fn ensure_creates_when_missing() {
         let mut cfg = Config {
@@ -112,15 +196,7 @@ mod tests {
     #[test]
     fn ensure_is_noop_when_present() {
         let mut cfg = Config {
-            ospf_instances: vec![instance(
-                "o1",
-                vec![area(
-                    "0.0.0.0",
-                    vec![OspfProfile {
-                        name: "p1".to_string(),
-                    }],
-                )],
-            )],
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
             ..Default::default()
         };
         OspfProfileOp::Ensure {
@@ -158,17 +234,7 @@ mod tests {
         let mut cfg = Config {
             ospf_instances: vec![instance(
                 "o1",
-                vec![area(
-                    "0.0.0.0",
-                    vec![
-                        OspfProfile {
-                            name: "p1".to_string(),
-                        },
-                        OspfProfile {
-                            name: "p2".to_string(),
-                        },
-                    ],
-                )],
+                vec![area("0.0.0.0", vec![profile("p1"), profile("p2")])],
             )],
             ..Default::default()
         };
@@ -193,6 +259,91 @@ mod tests {
             instance: "o1".to_string(),
             area_id: area_id("0.0.0.0"),
             name: "p1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::OspfProfileNotFound { instance, area_id, name }
+            if instance == "o1" && area_id == self::area_id("0.0.0.0") && name == "p1"
+        ));
+    }
+
+    #[test]
+    fn set_and_clear_hello_interval() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        OspfProfileOp::SetHelloInterval {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            hello_interval: 5,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.ospf_instances[0].areas[0].profiles[0].hello_interval,
+            Some(5)
+        );
+
+        OspfProfileOp::ClearHelloInterval {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.ospf_instances[0].areas[0].profiles[0].hello_interval,
+            None
+        );
+    }
+
+    #[test]
+    fn set_and_clear_dead_interval() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        OspfProfileOp::SetDeadInterval {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            dead_interval: 20,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.ospf_instances[0].areas[0].profiles[0].dead_interval,
+            Some(20)
+        );
+
+        OspfProfileOp::ClearDeadInterval {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.ospf_instances[0].areas[0].profiles[0].dead_interval,
+            None
+        );
+    }
+
+    #[test]
+    fn set_hello_interval_missing_profile_errors() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![])])],
+            ..Default::default()
+        };
+        let err = OspfProfileOp::SetHelloInterval {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            hello_interval: 5,
         }
         .apply(&mut cfg)
         .unwrap_err();

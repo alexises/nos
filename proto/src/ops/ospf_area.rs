@@ -115,6 +115,8 @@ mod tests {
                     area_id: area_id("0.0.0.0"),
                     profiles: vec![crate::schema::OspfProfile {
                         name: "p1".to_string(),
+                        hello_interval: None,
+                        dead_interval: None,
                     }],
                 }],
             )],

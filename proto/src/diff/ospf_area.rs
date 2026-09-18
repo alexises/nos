@@ -80,14 +80,17 @@ mod tests {
         }
     }
 
+    fn profile(name: &str) -> OspfProfile {
+        OspfProfile {
+            name: name.to_string(),
+            hello_interval: None,
+            dead_interval: None,
+        }
+    }
+
     #[test]
     fn no_changes_produces_no_sections() {
-        let base = vec![area(
-            "0.0.0.0",
-            vec![OspfProfile {
-                name: "p1".to_string(),
-            }],
-        )];
+        let base = vec![area("0.0.0.0", vec![profile("p1")])];
         let candidate = base.clone();
         assert!(diff_ospf_areas(&base, &candidate).is_empty());
     }
@@ -113,12 +116,7 @@ mod tests {
     #[test]
     fn changed_profiles_is_modified_with_empty_fields() {
         let base = vec![area("0.0.0.0", vec![])];
-        let candidate = vec![area(
-            "0.0.0.0",
-            vec![OspfProfile {
-                name: "p1".to_string(),
-            }],
-        )];
+        let candidate = vec![area("0.0.0.0", vec![profile("p1")])];
         let sections = diff_ospf_areas(&base, &candidate);
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].status, DiffStatus::Modified);
@@ -130,9 +128,7 @@ mod tests {
     fn unrelated_unchanged_area_is_omitted() {
         let base = vec![area("0.0.0.0", vec![]), area("0.0.0.1", vec![])];
         let mut candidate = base.clone();
-        candidate[0].profiles.push(OspfProfile {
-            name: "p1".to_string(),
-        });
+        candidate[0].profiles.push(profile("p1"));
         let sections = diff_ospf_areas(&base, &candidate);
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].header, "ospf area 0.0.0.0");

@@ -13,7 +13,8 @@ use nos_cli::help_menu::HelpMenu;
 use nos_cli::session::{self, Mode, PathAfter, Resolved};
 use nos_cli::spec::{self, Doc};
 use nos_cli::{
-    bgp_client, client, format, interface_client, log_client, rib_client, watchdog_client,
+    bgp_client, client, format, interface_client, log_client, ospf_client, rib_client,
+    watchdog_client,
 };
 use nos_proto::{
     CommandDoc, ConfigOp, Event, LogEvent, PolicyDefinitionOp, ServiceRef, Topic,
@@ -688,6 +689,10 @@ async fn handle_action(
             show_bgp_brief(socket, watchdog_socket).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowOspfNeigh => {
+            show_ospf_neigh(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
         Resolved::ClearBgpSoftIn { instance, peer } => {
             clear_bgp_soft_in(socket, watchdog_socket, &instance, peer).await;
             Outcome::Continue(mode)
@@ -1013,6 +1018,46 @@ async fn show_bgp_brief(config_socket: &Path, watchdog_socket: &Path) {
                 Err(e) => eprintln!("error: {e}"),
             },
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {e}"),
+        }
+    }
+}
+
+/// `show ospf neigh` — fetches the running config for the list of
+/// `OspfInstance`s, resolves each one's `nos-ospfd` via the watchdog broker,
+/// and queries each independently — mirrors `show_bgp_brief` exactly,
+/// including its per-instance "not running" handling.
+async fn show_ospf_neigh(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+
+    if cfg.ospf_instances.is_empty() {
+        println!("no ospf instances configured");
+        return;
+    }
+
+    for instance in &cfg.ospf_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::OspfInstance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(ospf_socket)) => match ospf_client::get_neighbors(&ospf_socket).await {
+                Ok(neighbors) => {
+                    println!(
+                        "{}",
+                        format::render_ospf_neighbors(&instance.name, &neighbors)
+                    );
+                }
+                Err(e) => eprintln!("error: {e}"),
+            },
+            Ok(None) => println!("ospf instance '{}' is not running", instance.name),
             Err(e) => eprintln!("error: {e}"),
         }
     }

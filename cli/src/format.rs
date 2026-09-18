@@ -2,11 +2,11 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
     BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
-    Interface, InterfaceAddress, InterfaceStatus, LogEntry, LogLevel, NextHopMode, OspfArea,
-    OspfInstance, OspfProfile, PeerSummary, PolicyDefinition, PrefixList, PrefixListEntry,
-    PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, SourceAddress, StaticRoute,
-    StaticRoutingInstance, Subinterface, SubinterfaceStatus, SwitchingProfile, TransactionSnapshot,
-    VlanTag,
+    Interface, InterfaceAddress, InterfaceStatus, LogEntry, LogLevel, NeighborSummary, NextHopMode,
+    OspfArea, OspfInstance, OspfNeighborState, OspfProfile, PeerSummary, PolicyDefinition,
+    PrefixList, PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff,
+    SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface, SubinterfaceStatus,
+    SwitchingProfile, TransactionSnapshot, VlanTag,
 };
 
 use crate::session::Path;
@@ -411,6 +411,40 @@ pub fn render_bgp_summary(instance: &str, peers: &[PeerSummary]) -> String {
             peer.remote_address,
             peer.peer_group,
             render_bgp_session_state(peer.state),
+        ));
+    }
+    lines.join("\n")
+}
+
+fn render_ospf_neighbor_state(state: OspfNeighborState) -> &'static str {
+    match state {
+        OspfNeighborState::Down => "Down",
+        OspfNeighborState::Init => "Init",
+        OspfNeighborState::TwoWay => "2-Way",
+    }
+}
+
+/// Render one OSPF instance's link/neighbor summaries, one line per link —
+/// used for `show ospf neigh`. Mirrors `render_bgp_summary`'s shape.
+pub fn render_ospf_neighbors(instance: &str, neighbors: &[NeighborSummary]) -> String {
+    if neighbors.is_empty() {
+        return format!("ospf instance {instance}: no ospf links configured");
+    }
+    let mut lines = vec![format!("ospf instance {instance}:")];
+    for link in neighbors {
+        let neighbor_router_id = link
+            .neighbor_router_id
+            .map_or_else(|| "-".to_string(), |id| id.to_string());
+        let last_hello = link
+            .last_hello_secs
+            .map_or_else(|| "-".to_string(), |s| format!("{s}s"));
+        lines.push(format!(
+            "  {} area {} neighbor {neighbor_router_id} {} last-hello {last_hello} hello-interval {} dead-interval {}",
+            link.link,
+            link.area_id,
+            render_ospf_neighbor_state(link.state),
+            link.hello_interval,
+            link.dead_interval,
         ));
     }
     lines.join("\n")
@@ -1499,6 +1533,46 @@ mod tests {
         assert_eq!(
             render_bgp_summary("r1", &[idle_peer("10.0.0.1")]),
             "bgp instance r1:\n  10.0.0.1 AS - peer-group pg1 Idle uptime - hold-time -"
+        );
+    }
+
+    fn down_link(link: &str) -> NeighborSummary {
+        NeighborSummary {
+            link: link.to_string(),
+            area_id: "0.0.0.0".parse().unwrap(),
+            neighbor_router_id: None,
+            state: OspfNeighborState::Down,
+            last_hello_secs: None,
+            hello_interval: 10,
+            dead_interval: 40,
+        }
+    }
+
+    #[test]
+    fn render_ospf_neighbors_empty_list() {
+        assert_eq!(
+            render_ospf_neighbors("o1", &[]),
+            "ospf instance o1: no ospf links configured"
+        );
+    }
+
+    #[test]
+    fn render_ospf_neighbors_down_link_shows_dash() {
+        assert_eq!(
+            render_ospf_neighbors("o1", &[down_link("eth0.0")]),
+            "ospf instance o1:\n  eth0.0 area 0.0.0.0 neighbor - Down last-hello - hello-interval 10 dead-interval 40"
+        );
+    }
+
+    #[test]
+    fn render_ospf_neighbors_two_way_link_shows_neighbor_and_last_hello() {
+        let mut link = down_link("eth0.0");
+        link.neighbor_router_id = Some("9.9.9.10".parse().unwrap());
+        link.state = OspfNeighborState::TwoWay;
+        link.last_hello_secs = Some(3);
+        assert_eq!(
+            render_ospf_neighbors("o1", &[link]),
+            "ospf instance o1:\n  eth0.0 area 0.0.0.0 neighbor 9.9.9.10 2-Way last-hello 3s hello-interval 10 dead-interval 40"
         );
     }
 }

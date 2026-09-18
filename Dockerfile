@@ -39,12 +39,15 @@ COPY --from=builder /app/target/release/nos            /usr/local/bin/nos
 # nos-bgpd needs CAP_NET_RAW to scope its TCP sockets into a VRF via
 # SO_BINDTODEVICE, and CAP_NET_BIND_SERVICE to listen on BGP's well-known
 # port 179 (<1024) as the unprivileged `nos` user.
+# nos-ospfd needs CAP_NET_RAW too, for its own VRF-scoped (SO_BINDTODEVICE)
+# raw protocol-89 socket used to send/receive OSPF Hello packets.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libcap2-bin \
     && setcap 'cap_net_admin,cap_net_raw=eip' /usr/local/bin/nos-ribd \
     && setcap 'cap_net_admin,cap_net_raw=eip' /usr/local/bin/nos-interfaced \
     && setcap 'cap_net_raw,cap_net_bind_service=eip' /usr/local/bin/nos-bgpd \
+    && setcap 'cap_net_raw=eip' /usr/local/bin/nos-ospfd \
     && apt-get purge -y --auto-remove libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 

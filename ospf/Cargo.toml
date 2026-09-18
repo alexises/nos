@@ -18,7 +18,12 @@ nos-proto          = { workspace = true }
 nos-log-client     = { workspace = true }
 tokio-util         = { workspace = true }
 futures            = { workspace = true }
+socket2            = { workspace = true }
+libc               = { workspace = true }
 
 [[bin]]
 name = "nos-ospfd"
 path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = { workspace = true }

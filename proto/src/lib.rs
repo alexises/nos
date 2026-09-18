@@ -8,6 +8,7 @@ pub mod interface;
 pub mod ipc;
 pub mod log;
 pub mod ops;
+pub mod ospf;
 pub mod paths;
 pub mod rib;
 pub mod schema;
@@ -31,6 +32,7 @@ pub use ops::{
     PolicyDefinitionOp, PrefixListOp, RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp,
     SubinterfaceOp, SwitchingProfileOp,
 };
+pub use ospf::{NeighborSummary, OspfEvent, OspfNeighborState, OspfRequest};
 pub use paths::{DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 pub use rib::{
     BgpRoute, BgpRouteUpdate, PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind,
@@ -42,5 +44,6 @@ pub use schema::{
     PrefixList, PrefixListEntry, Redistribute, RedistributeSource, RedistributeTarget,
     RoutingTable, SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface,
     SwitchingProfile, SwitchingProfileMember, VlanTag, CONNECT_RETRY_TIME_DEFAULT_SECS,
-    HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX,
+    DEAD_INTERVAL_DEFAULT, HELLO_INTERVAL_DEFAULT, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR,
+    LOOPBACK_PREFIX,
 };

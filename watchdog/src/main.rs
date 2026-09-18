@@ -203,8 +203,10 @@ async fn main() -> anyhow::Result<()> {
             name_flag: "--instance",
             daemon: "nos-ospfd",
             noun: "OSPF instance",
-            // No IPC query listener yet — see `ospf/CLAUDE.md`.
-            endpoint: None,
+            endpoint: Some(Endpoint {
+                kind: EndpointKind::OspfInstance,
+                socket_prefix: "ospf",
+            }),
             config_socket: args.config_socket.clone(),
             log_socket: args.log_socket.clone(),
             watchdog_listen_socket: args.listen_socket.clone(),

@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use nos_log_client::ForwardingLayer;
-use nos_ospf::{reconcile, watchdog_client};
+use nos_ospf::link::LinkManager;
+use nos_ospf::{reconcile, server, watchdog_client};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
@@ -23,6 +24,13 @@ struct Args {
     /// current address rather than assuming a hardcoded default.
     #[arg(long, default_value = DEFAULT_WATCHDOG_SOCKET)]
     watchdog_socket: PathBuf,
+
+    /// Unix socket this instance's IPC query server (`OspfRequest::
+    /// GetNeighbors`, backing `show ospf neigh`) listens on. Assigned and
+    /// passed by `nos-watchdogd` at spawn time, mirroring `nos-bgpd`'s own
+    /// `--listen-socket`.
+    #[arg(long)]
+    listen_socket: Option<PathBuf>,
 
     /// Unix socket to forward this process's log events to. Passed directly
     /// by nos-watchdog to every process it spawns (see root `CLAUDE.md`'s
@@ -61,11 +69,23 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
+    let listen_socket = args
+        .listen_socket
+        .unwrap_or_else(|| PathBuf::from(format!("/run/nos/ospf-{}.sock", args.instance)));
+
+    let links = LinkManager::new();
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
+        args.watchdog_socket.clone(),
         args.instance.clone(),
+        links.clone(),
         shutdown_rx,
     ));
+    let server_task = server::start(&listen_socket, args.instance.clone(), links)
+        .inspect_err(|e| {
+            tracing::error!(instance = %args.instance, error = %e, "failed to start OSPF IPC server");
+        })
+        .context("starting OSPF IPC server")?;
 
     wait_for_shutdown_signal()
         .await
@@ -76,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = reconcile_task.await {
         tracing::warn!(instance = %args.instance, error = %e, "reconcile task ended abnormally");
     }
+    server_task.abort();
 
     info!(instance = %args.instance, "shutting down");
     Ok(())

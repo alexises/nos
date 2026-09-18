@@ -15,9 +15,11 @@ services:
     # actually usable by the non-root `nos` user watchdog execs them as.
     # nos-bgpd needs NET_RAW (SO_BINDTODEVICE, to scope its TCP sockets into
     # a VRF) and NET_BIND_SERVICE (to listen on BGP's well-known port 179).
-    # Both are already in Docker's default capability set, so this is
-    # belt-and-suspenders — listed explicitly, like NET_RAW above, so the
-    # container's actual capability requirements aren't silently implicit.
+    # nos-ospfd needs NET_RAW too, for its own VRF-scoped raw protocol-89
+    # socket. Both NET_RAW/NET_BIND_SERVICE are already in Docker's default
+    # capability set, so this is belt-and-suspenders — listed explicitly,
+    # like NET_ADMIN above, so the container's actual capability
+    # requirements aren't silently implicit.
     cap_add:
       - NET_ADMIN
       - NET_RAW

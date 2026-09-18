@@ -154,6 +154,8 @@ mod tests {
                     area_id: "0.0.0.0".parse().unwrap(),
                     profiles: vec![OspfProfile {
                         name: "p1".to_string(),
+                        hello_interval: None,
+                        dead_interval: None,
                     }],
                 }],
                 routing_table: None,
