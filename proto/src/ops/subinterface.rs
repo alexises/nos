@@ -46,6 +46,17 @@ pub enum SubinterfaceOp {
         interface: String,
         tag: u16,
     },
+    /// Upserts the subinterface entry (and its parent `Interface`), mirroring
+    /// `SetRoutingTable`.
+    SetOspfProfile {
+        interface: String,
+        tag: u16,
+        ospf_profile: String,
+    },
+    ClearOspfProfile {
+        interface: String,
+        tag: u16,
+    },
     Delete {
         interface: String,
         tag: u16,
@@ -105,6 +116,19 @@ impl SubinterfaceOp {
                 find_subinterface_mut(config, interface, *tag)?.routing_table = None;
                 Ok(())
             }
+            SubinterfaceOp::SetOspfProfile {
+                interface,
+                tag,
+                ospf_profile,
+            } => {
+                ensure_subinterface_mut(config, interface, *tag)?.ospf_profile =
+                    Some(ospf_profile.clone());
+                Ok(())
+            }
+            SubinterfaceOp::ClearOspfProfile { interface, tag } => {
+                find_subinterface_mut(config, interface, *tag)?.ospf_profile = None;
+                Ok(())
+            }
             SubinterfaceOp::Delete { interface, tag } => {
                 let iface = find_interface_mut(config, interface)?;
                 let before = iface.subinterfaces.len();
@@ -148,6 +172,7 @@ fn ensure_subinterface_mut<'a>(
             name: interface.to_string(),
             addresses: Vec::new(),
             routing_table: None,
+            ospf_profile: None,
             switching_profile: None,
             subinterfaces: Vec::new(),
         });
@@ -158,6 +183,7 @@ fn ensure_subinterface_mut<'a>(
             tag,
             addresses: Vec::new(),
             routing_table: None,
+            ospf_profile: None,
         });
     }
     Ok(iface
@@ -177,6 +203,7 @@ mod tests {
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
+            ospf_profile: None,
             switching_profile: None,
             subinterfaces,
         }
@@ -230,6 +257,7 @@ mod tests {
                         label: None,
                     }],
                     routing_table: None,
+                    ospf_profile: None,
                 }],
             )],
             ..Default::default()
@@ -375,6 +403,30 @@ mod tests {
     }
 
     #[test]
+    fn set_and_clear_ospf_profile() {
+        let mut cfg = Config::default();
+        SubinterfaceOp::SetOspfProfile {
+            interface: "eth0".to_string(),
+            tag: 0,
+            ospf_profile: "p1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.interfaces[0].subinterfaces[0].ospf_profile.as_deref(),
+            Some("p1")
+        );
+
+        SubinterfaceOp::ClearOspfProfile {
+            interface: "eth0".to_string(),
+            tag: 0,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].subinterfaces[0].ospf_profile, None);
+    }
+
+    #[test]
     fn clear_routing_table_missing_subinterface_errors() {
         let mut cfg = Config {
             interfaces: vec![interface("eth0", vec![])],
@@ -420,11 +472,13 @@ mod tests {
                         tag: 0,
                         addresses: Vec::new(),
                         routing_table: None,
+                        ospf_profile: None,
                     },
                     Subinterface {
                         tag: 100,
                         addresses: Vec::new(),
                         routing_table: None,
+                        ospf_profile: None,
                     },
                 ],
             )],

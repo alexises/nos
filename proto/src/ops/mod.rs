@@ -5,7 +5,9 @@ pub mod broadcast_domain;
 pub mod community_alias;
 pub mod community_group;
 pub mod interface;
+pub mod ospf_area;
 pub mod ospf_instance;
+pub mod ospf_profile;
 pub mod policy_definition;
 pub mod prefix_list;
 pub mod routing_table;
@@ -21,7 +23,9 @@ pub use broadcast_domain::BroadcastDomainOp;
 pub use community_alias::CommunityAliasOp;
 pub use community_group::CommunityGroupOp;
 pub use interface::InterfaceOp;
+pub use ospf_area::OspfAreaOp;
 pub use ospf_instance::OspfInstanceOp;
+pub use ospf_profile::OspfProfileOp;
 pub use policy_definition::PolicyDefinitionOp;
 pub use prefix_list::PrefixListOp;
 pub use routing_table::RoutingTableOp;
@@ -30,7 +34,7 @@ pub use static_routing_instance::StaticRoutingInstanceOp;
 pub use subinterface::SubinterfaceOp;
 pub use switching_profile::SwitchingProfileOp;
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
@@ -64,6 +68,8 @@ pub enum ConfigOp {
     SwitchingProfile(SwitchingProfileOp),
     Subinterface(SubinterfaceOp),
     OspfInstance(OspfInstanceOp),
+    OspfArea(OspfAreaOp),
+    OspfProfile(OspfProfileOp),
 }
 
 impl ConfigOp {
@@ -91,6 +97,8 @@ impl ConfigOp {
             ConfigOp::SwitchingProfile(op) => op.apply(config),
             ConfigOp::Subinterface(op) => op.apply(config),
             ConfigOp::OspfInstance(op) => op.apply(config),
+            ConfigOp::OspfArea(op) => op.apply(config),
+            ConfigOp::OspfProfile(op) => op.apply(config),
         }
     }
 }
@@ -158,6 +166,14 @@ pub enum OpError {
     },
     #[error("ospf instance '{0}' not found")]
     OspfInstanceNotFound(String),
+    #[error("ospf area '{area_id}' not found in ospf instance '{instance}'")]
+    OspfAreaNotFound { instance: String, area_id: Ipv4Addr },
+    #[error("ospf profile '{name}' not found in area '{area_id}' of ospf instance '{instance}'")]
+    OspfProfileNotFound {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+    },
 }
 
 #[cfg(test)]

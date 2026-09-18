@@ -36,6 +36,13 @@ pub enum BroadcastDomainOp {
     ClearRoutingTable {
         name: String,
     },
+    SetOspfProfile {
+        name: String,
+        ospf_profile: String,
+    },
+    ClearOspfProfile {
+        name: String,
+    },
     Delete {
         name: String,
     },
@@ -50,6 +57,7 @@ impl BroadcastDomainOp {
                         name: name.clone(),
                         addresses: Vec::new(),
                         routing_table: None,
+                        ospf_profile: None,
                     });
                 }
                 Ok(())
@@ -92,6 +100,14 @@ impl BroadcastDomainOp {
                 find_domain_mut(config, name)?.routing_table = None;
                 Ok(())
             }
+            BroadcastDomainOp::SetOspfProfile { name, ospf_profile } => {
+                find_domain_mut(config, name)?.ospf_profile = Some(ospf_profile.clone());
+                Ok(())
+            }
+            BroadcastDomainOp::ClearOspfProfile { name } => {
+                find_domain_mut(config, name)?.ospf_profile = None;
+                Ok(())
+            }
             BroadcastDomainOp::Delete { name } => {
                 let before = config.broadcast_domains.len();
                 config.broadcast_domains.retain(|d| &d.name != name);
@@ -124,6 +140,7 @@ mod tests {
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
+            ospf_profile: None,
         }
     }
 
@@ -250,6 +267,28 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.broadcast_domains[0].routing_table, None);
+    }
+
+    #[test]
+    fn set_and_clear_ospf_profile() {
+        let mut cfg = Config {
+            broadcast_domains: vec![domain("bd1")],
+            ..Default::default()
+        };
+        BroadcastDomainOp::SetOspfProfile {
+            name: "bd1".to_string(),
+            ospf_profile: "p1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.broadcast_domains[0].ospf_profile.as_deref(), Some("p1"));
+
+        BroadcastDomainOp::ClearOspfProfile {
+            name: "bd1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.broadcast_domains[0].ospf_profile, None);
     }
 
     #[test]

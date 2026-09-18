@@ -208,6 +208,7 @@ mod tests {
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
+            ospf_profile: None,
             switching_profile: None,
             subinterfaces: Vec::new(),
         }
@@ -284,6 +285,7 @@ mod tests {
             tag: 0,
             addresses: vec![iface_addr.clone()],
             routing_table: Some("rt1".to_string()),
+            ospf_profile: None,
         }];
         let interfaces =
             build_from_config(&cfg(vec![iface]), &NoopInterfaceDriver, &Interfaces::new()).await;
@@ -301,6 +303,7 @@ mod tests {
             tag: 300,
             addresses: Vec::new(),
             routing_table: Some("rt1".to_string()),
+            ospf_profile: None,
         }];
         let interfaces =
             build_from_config(&cfg(vec![iface]), &NoopInterfaceDriver, &Interfaces::new()).await;
@@ -410,11 +413,13 @@ mod tests {
                 name: "bd1".to_string(),
                 addresses: Vec::new(),
                 routing_table: None,
+                ospf_profile: None,
             },
             nos_proto::BroadcastDomain {
                 name: "bd2".to_string(),
                 addresses: Vec::new(),
                 routing_table: None,
+                ospf_profile: None,
             },
         ];
         build_from_config(&config, &driver, &Interfaces::new()).await;
@@ -439,6 +444,7 @@ mod tests {
             name: "bd1".to_string(),
             addresses: vec![addr.clone()],
             routing_table: Some("rt1".to_string()),
+            ospf_profile: None,
         }];
         build_from_config(&config, &driver, &Interfaces::new()).await;
         let calls = driver.calls.lock().unwrap().clone();
@@ -457,6 +463,7 @@ mod tests {
             name: "bd1".to_string(),
             addresses: Vec::new(),
             routing_table: None,
+            ospf_profile: None,
         }];
         let previous = build_from_config(&config_with_domain, &driver, &Interfaces::new()).await;
 

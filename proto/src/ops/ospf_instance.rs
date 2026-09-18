@@ -34,6 +34,7 @@ impl OspfInstanceOp {
                     config.ospf_instances.push(OspfInstance {
                         name: name.clone(),
                         router_id: Ipv4Addr::UNSPECIFIED,
+                        areas: Vec::new(),
                         routing_table: None,
                     });
                 }
@@ -74,6 +75,7 @@ mod tests {
         OspfInstance {
             name: name.to_string(),
             router_id: Ipv4Addr::new(1, 1, 1, 1),
+            areas: Vec::new(),
             routing_table: None,
         }
     }

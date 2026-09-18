@@ -1,13 +1,14 @@
 use crate::schema::OspfInstance;
 
-use super::{DiffStatus, FieldDiff, SectionDiff};
+use super::{ospf_area, DiffStatus, FieldDiff, SectionDiff};
 
 /// Diffs two lists of `OspfInstance`s, matched by `name` (the field
 /// `garde`'s `unique_in` validator already treats as each instance's key).
 /// `routing_table` is deliberately not compared — it's a derived echo of
 /// the owning `RoutingTable.ospf_instance`, already surfaced by
-/// `diff_routing_tables` (mirrors `diff_bgp_instances` excluding its own
-/// `routing_table`/`redistribute_policy`).
+/// `diff_routing_tables`. Reports a change when either its own scalar
+/// fields (`router_id`) or its `areas` changed — mirrors `diff_bgp_instances`'
+/// combined fields+subsections shape.
 pub fn diff_ospf_instances(base: &[OspfInstance], candidate: &[OspfInstance]) -> Vec<SectionDiff> {
     let mut sections = Vec::new();
 
@@ -16,13 +17,14 @@ pub fn diff_ospf_instances(base: &[OspfInstance], candidate: &[OspfInstance]) ->
             None => sections.push(removed_section(b)),
             Some(c) => {
                 let fields = changed_fields(b, c);
-                if !fields.is_empty() {
+                let subsections = ospf_area::diff_ospf_areas(&b.areas, &c.areas);
+                if !fields.is_empty() || !subsections.is_empty() {
                     sections.push(SectionDiff {
                         header: header_for(&b.name),
                         name: b.name.clone(),
                         status: DiffStatus::Modified,
                         fields,
-                        subsections: Vec::new(),
+                        subsections,
                     });
                 }
             }
@@ -64,7 +66,7 @@ fn removed_section(instance: &OspfInstance) -> SectionDiff {
             old: Some(instance.router_id.to_string()),
             new: None,
         }],
-        subsections: Vec::new(),
+        subsections: ospf_area::diff_ospf_areas(&instance.areas, &[]),
     }
 }
 
@@ -78,7 +80,7 @@ fn added_section(instance: &OspfInstance) -> SectionDiff {
             old: None,
             new: Some(instance.router_id.to_string()),
         }],
-        subsections: Vec::new(),
+        subsections: ospf_area::diff_ospf_areas(&[], &instance.areas),
     }
 }
 
@@ -92,6 +94,7 @@ mod tests {
         OspfInstance {
             name: name.to_string(),
             router_id,
+            areas: Vec::new(),
             routing_table: None,
         }
     }
@@ -150,5 +153,27 @@ mod tests {
         let sections = diff_ospf_instances(&base, &candidate);
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].header, "ospf instance o1");
+    }
+
+    /// An instance with no changed scalar fields must still surface as
+    /// `Modified`, with empty `fields` and the change nested in
+    /// `subsections`, when only its areas changed.
+    #[test]
+    fn changed_area_is_modified_with_empty_fields() {
+        use crate::schema::OspfArea;
+
+        let base = vec![instance("o1", Ipv4Addr::new(1, 1, 1, 1))];
+        let mut candidate = base.clone();
+        candidate[0].areas.push(OspfArea {
+            area_id: "0.0.0.0".parse().unwrap(),
+            profiles: Vec::new(),
+        });
+
+        let sections = diff_ospf_instances(&base, &candidate);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].status, DiffStatus::Modified);
+        assert!(sections[0].fields.is_empty());
+        assert_eq!(sections[0].subsections.len(), 1);
+        assert_eq!(sections[0].subsections[0].header, "ospf area 0.0.0.0");
     }
 }

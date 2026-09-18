@@ -1,10 +1,10 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use nos_proto::{
     loopback_table_name, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp,
-    CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, OspfInstanceOp, PolicyDefinitionOp,
-    PrefixListEntry, PrefixListOp, RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp,
-    SubinterfaceOp, SwitchingProfileOp, TransactionBase,
+    CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, OspfAreaOp, OspfInstanceOp,
+    OspfProfileOp, PolicyDefinitionOp, PrefixListEntry, PrefixListOp, RoutingTableOp,
+    StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase,
 };
 
 use crate::command::{
@@ -22,6 +22,15 @@ pub enum Path {
     },
     RoutingTable(String),
     OspfInstance(String),
+    OspfArea {
+        instance: String,
+        area_id: Ipv4Addr,
+    },
+    OspfProfile {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+    },
     StaticRoutingInstance(String),
     Interface(String),
     /// A physical interface's tag-scoped L3 attachment point, navigated to
@@ -137,6 +146,42 @@ fn interface_clear_routing_table_op(name: &str) -> ConfigOp {
     }
 }
 
+fn interface_set_ospf_profile_op(name: &str, ospf_profile: String) -> ConfigOp {
+    if let Some((interface, tag)) = split_subinterface(name) {
+        return ConfigOp::Subinterface(SubinterfaceOp::SetOspfProfile {
+            interface,
+            tag,
+            ospf_profile,
+        });
+    }
+    match loopback_table_name(name) {
+        Some(_) => ConfigOp::Interface(InterfaceOp::SetOspfProfile {
+            name: name.to_string(),
+            ospf_profile,
+        }),
+        None => ConfigOp::Subinterface(SubinterfaceOp::SetOspfProfile {
+            interface: name.to_string(),
+            tag: 0,
+            ospf_profile,
+        }),
+    }
+}
+
+fn interface_clear_ospf_profile_op(name: &str) -> ConfigOp {
+    if let Some((interface, tag)) = split_subinterface(name) {
+        return ConfigOp::Subinterface(SubinterfaceOp::ClearOspfProfile { interface, tag });
+    }
+    match loopback_table_name(name) {
+        Some(_) => ConfigOp::Interface(InterfaceOp::ClearOspfProfile {
+            name: name.to_string(),
+        }),
+        None => ConfigOp::Subinterface(SubinterfaceOp::ClearOspfProfile {
+            interface: name.to_string(),
+            tag: 0,
+        }),
+    }
+}
+
 /// The relative (`set address`, `set routing-table`, and their `delete`
 /// counterparts) counterparts to the four `interface_*_op` builders above:
 /// same ops, but targeting whichever L3 attachment point the path is
@@ -215,6 +260,42 @@ fn l3_clear_routing_table_op(target: L3Target<'_>) -> ConfigOp {
         }
         L3Target::BroadcastDomain(name) => {
             ConfigOp::BroadcastDomain(BroadcastDomainOp::ClearRoutingTable {
+                name: name.to_string(),
+            })
+        }
+    }
+}
+
+fn l3_set_ospf_profile_op(target: L3Target<'_>, ospf_profile: String) -> ConfigOp {
+    match target {
+        L3Target::Interface(name) => interface_set_ospf_profile_op(name, ospf_profile),
+        L3Target::Subinterface { interface, tag } => {
+            ConfigOp::Subinterface(SubinterfaceOp::SetOspfProfile {
+                interface: interface.to_string(),
+                tag,
+                ospf_profile,
+            })
+        }
+        L3Target::BroadcastDomain(name) => {
+            ConfigOp::BroadcastDomain(BroadcastDomainOp::SetOspfProfile {
+                name: name.to_string(),
+                ospf_profile,
+            })
+        }
+    }
+}
+
+fn l3_clear_ospf_profile_op(target: L3Target<'_>) -> ConfigOp {
+    match target {
+        L3Target::Interface(name) => interface_clear_ospf_profile_op(name),
+        L3Target::Subinterface { interface, tag } => {
+            ConfigOp::Subinterface(SubinterfaceOp::ClearOspfProfile {
+                interface: interface.to_string(),
+                tag,
+            })
+        }
+        L3Target::BroadcastDomain(name) => {
+            ConfigOp::BroadcastDomain(BroadcastDomainOp::ClearOspfProfile {
                 name: name.to_string(),
             })
         }
@@ -427,6 +508,8 @@ const NO_CURRENT_COMMUNITY_ALIAS: &str = "no current community-alias — use 'ed
 const NO_CURRENT_COMMUNITY_GROUP: &str = "no current community-group — use 'edit community-group <name>' or the fully-qualified 'set community-group <name> ...' form";
 const NO_CURRENT_PREFIX_LIST: &str = "no current prefix-list — use 'edit prefix-list <name>' or the fully-qualified 'set prefix-list <name> ...' form";
 const NO_CURRENT_SWITCHING_PROFILE: &str = "no current switching-profile — use 'edit switching-profile <name>' or the fully-qualified 'set switching-profile <name> ...' form";
+const NO_CURRENT_OSPF_INSTANCE: &str = "no current ospf instance — use 'edit ospf instance <name>' or the fully-qualified 'set ospf instance <name> ...' form";
+const NO_CURRENT_OSPF_AREA: &str = "no current ospf area — use 'edit ospf instance <name> area <area-id>' or 'edit area <area-id>' while navigated into an ospf instance";
 const ALREADY_AT_TOP: &str = "already at the top level";
 
 /// The three L3 attachment points `set address` / `set routing-table` (and
@@ -521,6 +604,20 @@ impl Path {
         }
     }
 
+    pub(crate) fn ospf_instance(&self) -> Result<&str, &'static str> {
+        match self {
+            Path::OspfInstance(name) => Ok(name),
+            _ => Err(NO_CURRENT_OSPF_INSTANCE),
+        }
+    }
+
+    pub(crate) fn ospf_area(&self) -> Result<(&str, Ipv4Addr), &'static str> {
+        match self {
+            Path::OspfArea { instance, area_id } => Ok((instance, *area_id)),
+            _ => Err(NO_CURRENT_OSPF_AREA),
+        }
+    }
+
     pub(crate) fn l3_target(&self) -> Result<L3Target<'_>, &'static str> {
         match self {
             Path::Interface(name) => Ok(L3Target::Interface(name)),
@@ -586,6 +683,55 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             op: ConfigOp::OspfInstance(OspfInstanceOp::Ensure { name: name.clone() }),
             after: PathAfter::To(Path::OspfInstance(name)),
         },
+        Command::Edit(EditTarget::OspfArea { instance, area_id }) => Resolved::ApplyOp {
+            op: ConfigOp::OspfArea(OspfAreaOp::Ensure {
+                instance: instance.clone(),
+                area_id,
+            }),
+            after: PathAfter::To(Path::OspfArea { instance, area_id }),
+        },
+        Command::Edit(EditTarget::OspfAreaRelative { area_id }) => {
+            let instance = path.ospf_instance()?.to_string();
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfArea(OspfAreaOp::Ensure {
+                    instance: instance.clone(),
+                    area_id,
+                }),
+                after: PathAfter::To(Path::OspfArea { instance, area_id }),
+            }
+        }
+        Command::Edit(EditTarget::OspfProfile {
+            instance,
+            area_id,
+            name,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::OspfProfile(OspfProfileOp::Ensure {
+                instance: instance.clone(),
+                area_id,
+                name: name.clone(),
+            }),
+            after: PathAfter::To(Path::OspfProfile {
+                instance,
+                area_id,
+                name,
+            }),
+        },
+        Command::Edit(EditTarget::OspfProfileRelative { name }) => {
+            let (instance, area_id) = path.ospf_area()?;
+            let instance = instance.to_string();
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::Ensure {
+                    instance: instance.clone(),
+                    area_id,
+                    name: name.clone(),
+                }),
+                after: PathAfter::To(Path::OspfProfile {
+                    instance,
+                    area_id,
+                    name,
+                }),
+            }
+        }
         Command::Edit(EditTarget::StaticRoutingInstance { name }) => Resolved::ApplyOp {
             op: ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Ensure {
                 name: name.clone(),
@@ -825,6 +971,16 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 after: PathAfter::Stay,
             }
         }
+        Command::Set(SetTarget::InterfaceOspfProfile { name, ospf_profile }) => Resolved::ApplyOp {
+            op: interface_set_ospf_profile_op(&name, ospf_profile),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::InterfaceOspfProfileRelative { ospf_profile }) => {
+            Resolved::ApplyOp {
+                op: l3_set_ospf_profile_op(path.l3_target()?, ospf_profile),
+                after: PathAfter::Stay,
+            }
+        }
         Command::Set(SetTarget::BroadcastDomainAddress {
             name,
             address,
@@ -935,6 +1091,40 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             op: ConfigOp::OspfInstance(OspfInstanceOp::Delete { name }),
             after: PathAfter::Stay,
         },
+        Command::Delete(DeleteTarget::OspfArea { instance, area_id }) => Resolved::ApplyOp {
+            op: ConfigOp::OspfArea(OspfAreaOp::Delete { instance, area_id }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::OspfAreaRelative { area_id }) => Resolved::ApplyOp {
+            op: ConfigOp::OspfArea(OspfAreaOp::Delete {
+                instance: path.ospf_instance()?.to_string(),
+                area_id,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::OspfProfile {
+            instance,
+            area_id,
+            name,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::OspfProfile(OspfProfileOp::Delete {
+                instance,
+                area_id,
+                name,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::OspfProfileRelative { name }) => {
+            let (instance, area_id) = path.ospf_area()?;
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::Delete {
+                    instance: instance.to_string(),
+                    area_id,
+                    name,
+                }),
+                after: PathAfter::Stay,
+            }
+        }
         Command::Delete(DeleteTarget::Current) => match path {
             Path::BgpInstance(name) => Resolved::ApplyOp {
                 op: ConfigOp::BgpInstance(BgpInstanceOp::Delete { name: name.clone() }),
@@ -954,6 +1144,28 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             Path::OspfInstance(name) => Resolved::ApplyOp {
                 op: ConfigOp::OspfInstance(OspfInstanceOp::Delete { name: name.clone() }),
                 after: PathAfter::ToRoot,
+            },
+            Path::OspfArea { instance, area_id } => Resolved::ApplyOp {
+                op: ConfigOp::OspfArea(OspfAreaOp::Delete {
+                    instance: instance.clone(),
+                    area_id: *area_id,
+                }),
+                after: PathAfter::To(Path::OspfInstance(instance.clone())),
+            },
+            Path::OspfProfile {
+                instance,
+                area_id,
+                name,
+            } => Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::Delete {
+                    instance: instance.clone(),
+                    area_id: *area_id,
+                    name: name.clone(),
+                }),
+                after: PathAfter::To(Path::OspfArea {
+                    instance: instance.clone(),
+                    area_id: *area_id,
+                }),
             },
             Path::StaticRoutingInstance(name) => Resolved::ApplyOp {
                 op: ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Delete {
@@ -1081,6 +1293,14 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
         },
         Command::Delete(DeleteTarget::InterfaceRoutingTableRelative) => Resolved::ApplyOp {
             op: l3_clear_routing_table_op(path.l3_target()?),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::InterfaceOspfProfile { name }) => Resolved::ApplyOp {
+            op: interface_clear_ospf_profile_op(&name),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::InterfaceOspfProfileRelative) => Resolved::ApplyOp {
+            op: l3_clear_ospf_profile_op(path.l3_target()?),
             after: PathAfter::Stay,
         },
         Command::Delete(DeleteTarget::BroadcastDomainAddress { name, address }) => {

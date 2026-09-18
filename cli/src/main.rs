@@ -78,6 +78,21 @@ impl NosPrompt {
             } => format!("({transaction}/ospf:{name})"),
             Mode::Configuration {
                 transaction,
+                path: session::Path::OspfArea { instance, area_id },
+                ..
+            } => format!("({transaction}/ospf:{instance}/area:{area_id})"),
+            Mode::Configuration {
+                transaction,
+                path:
+                    session::Path::OspfProfile {
+                        instance,
+                        area_id,
+                        name,
+                    },
+                ..
+            } => format!("({transaction}/ospf:{instance}/area:{area_id}/profile:{name})"),
+            Mode::Configuration {
+                transaction,
                 path: session::Path::StaticRoutingInstance(name),
                 ..
             } => format!("({transaction}/static-routing-instance:{name})"),
@@ -414,6 +429,35 @@ fn completer_for(socket: &Path, cache: DocCache, mode: &Mode) -> Box<dyn Complet
         Mode::Operational => Box::new(Vec::new),
     };
 
+    // Deliberately flat/global, flattened across every instance's areas —
+    // not scoped to whichever instance/area is already typed on the line —
+    // mirrors `peer_group_name_source`'s own reasoning, since profile names
+    // are unique across the whole config (see
+    // `nos_proto::schema::ospf_profile`).
+    let ospf_profile_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
+        Mode::Configuration { transaction, .. } => {
+            let transaction = transaction.clone();
+            let socket = socket.to_path_buf();
+            Box::new(move || {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(client::get_transaction(&socket, &transaction))
+                })
+                .map(|snap| {
+                    snap.config
+                        .ospf_instances
+                        .into_iter()
+                        .flat_map(|i| i.areas)
+                        .flat_map(|a| a.profiles)
+                        .map(|p| p.name)
+                        .collect()
+                })
+                .unwrap_or_default()
+            })
+        }
+        Mode::Operational => Box::new(Vec::new),
+    };
+
     Box::new(NosCompleter::new(
         mode.clone(),
         doc_source,
@@ -425,6 +469,7 @@ fn completer_for(socket: &Path, cache: DocCache, mode: &Mode) -> Box<dyn Complet
         interface_name_source,
         broadcast_domain_name_source,
         switching_profile_name_source,
+        ospf_profile_name_source,
     ))
 }
 

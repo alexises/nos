@@ -64,6 +64,13 @@ fn routing_table_str(domain: &BroadcastDomain) -> String {
         .unwrap_or_else(|| "unset".to_string())
 }
 
+fn ospf_profile_str(domain: &BroadcastDomain) -> String {
+    domain
+        .ospf_profile
+        .clone()
+        .unwrap_or_else(|| "unset".to_string())
+}
+
 fn changed_fields(base: &BroadcastDomain, candidate: &BroadcastDomain) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     let mut base_addrs = base.addresses.clone();
@@ -84,6 +91,13 @@ fn changed_fields(base: &BroadcastDomain, candidate: &BroadcastDomain) -> Vec<Fi
             new: Some(routing_table_str(candidate)),
         });
     }
+    if base.ospf_profile != candidate.ospf_profile {
+        fields.push(FieldDiff {
+            label: "ospf-profile".to_string(),
+            old: Some(ospf_profile_str(base)),
+            new: Some(ospf_profile_str(candidate)),
+        });
+    }
     fields
 }
 
@@ -101,6 +115,11 @@ fn removed_section(domain: &BroadcastDomain) -> SectionDiff {
             FieldDiff {
                 label: "routing-table".to_string(),
                 old: Some(routing_table_str(domain)),
+                new: None,
+            },
+            FieldDiff {
+                label: "ospf-profile".to_string(),
+                old: Some(ospf_profile_str(domain)),
                 new: None,
             },
         ],
@@ -124,6 +143,11 @@ fn added_section(domain: &BroadcastDomain) -> SectionDiff {
                 old: None,
                 new: Some(routing_table_str(domain)),
             },
+            FieldDiff {
+                label: "ospf-profile".to_string(),
+                old: None,
+                new: Some(ospf_profile_str(domain)),
+            },
         ],
         subsections: Vec::new(),
     }
@@ -138,6 +162,7 @@ mod tests {
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
+            ospf_profile: None,
         }
     }
 
@@ -172,6 +197,17 @@ mod tests {
         assert_eq!(sections[0].status, DiffStatus::Modified);
         assert_eq!(sections[0].fields.len(), 1);
         assert_eq!(sections[0].fields[0].label, "routing-table");
+    }
+
+    #[test]
+    fn modified_ospf_profile_only_lists_that_field() {
+        let base = vec![domain("bd1")];
+        let mut candidate_domain = domain("bd1");
+        candidate_domain.ospf_profile = Some("p1".to_string());
+        let sections = diff_broadcast_domains(&base, &[candidate_domain]);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].fields.len(), 1);
+        assert_eq!(sections[0].fields[0].label, "ospf-profile");
     }
 
     #[test]

@@ -105,6 +105,7 @@ mod tests {
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
+            ospf_profile: None,
         }
     }
 

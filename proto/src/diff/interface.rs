@@ -74,6 +74,13 @@ fn switching_profile_str(iface: &Interface) -> String {
         .unwrap_or_else(|| "unset".to_string())
 }
 
+fn ospf_profile_str(iface: &Interface) -> String {
+    iface
+        .ospf_profile
+        .clone()
+        .unwrap_or_else(|| "unset".to_string())
+}
+
 fn changed_fields(base: &Interface, candidate: &Interface) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     let mut base_addrs = base.addresses.clone();
@@ -101,6 +108,13 @@ fn changed_fields(base: &Interface, candidate: &Interface) -> Vec<FieldDiff> {
             new: Some(switching_profile_str(candidate)),
         });
     }
+    if base.ospf_profile != candidate.ospf_profile {
+        fields.push(FieldDiff {
+            label: "ospf-profile".to_string(),
+            old: Some(ospf_profile_str(base)),
+            new: Some(ospf_profile_str(candidate)),
+        });
+    }
     fields
 }
 
@@ -123,6 +137,11 @@ fn removed_section(iface: &Interface) -> SectionDiff {
             FieldDiff {
                 label: "switching-profile".to_string(),
                 old: Some(switching_profile_str(iface)),
+                new: None,
+            },
+            FieldDiff {
+                label: "ospf-profile".to_string(),
+                old: Some(ospf_profile_str(iface)),
                 new: None,
             },
         ],
@@ -151,6 +170,11 @@ fn added_section(iface: &Interface) -> SectionDiff {
                 old: None,
                 new: Some(switching_profile_str(iface)),
             },
+            FieldDiff {
+                label: "ospf-profile".to_string(),
+                old: None,
+                new: Some(ospf_profile_str(iface)),
+            },
         ],
         subsections: subinterface::diff_subinterfaces(&[], &iface.subinterfaces),
     }
@@ -171,6 +195,7 @@ mod tests {
                 })
                 .collect(),
             routing_table: routing_table.map(str::to_string),
+            ospf_profile: None,
             switching_profile: None,
             subinterfaces: Vec::new(),
         }
@@ -221,6 +246,18 @@ mod tests {
     }
 
     #[test]
+    fn modified_ospf_profile_only_lists_that_field() {
+        let mut base_iface = interface("eth0", &[], None);
+        let mut candidate_iface = base_iface.clone();
+        candidate_iface.ospf_profile = Some("p1".to_string());
+        base_iface.ospf_profile = None;
+        let sections = diff_interfaces(&[base_iface], &[candidate_iface]);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].fields.len(), 1);
+        assert_eq!(sections[0].fields[0].label, "ospf-profile");
+    }
+
+    #[test]
     fn modified_addresses_only_lists_that_field() {
         let base = vec![interface("eth0", &["10.0.0.1/24"], None)];
         let candidate = vec![interface("eth0", &["10.0.0.2/24"], None)];
@@ -246,6 +283,7 @@ mod tests {
                 label: None,
             }],
             routing_table: None,
+            ospf_profile: None,
             switching_profile: None,
             subinterfaces: Vec::new(),
         }];
@@ -256,6 +294,7 @@ mod tests {
                 label: Some("mgmt".to_string()),
             }],
             routing_table: None,
+            ospf_profile: None,
             switching_profile: None,
             subinterfaces: Vec::new(),
         }];
@@ -278,6 +317,7 @@ mod tests {
             tag: 100,
             addresses: Vec::new(),
             routing_table: None,
+            ospf_profile: None,
         }];
         let mut candidate_iface = base_iface.clone();
         candidate_iface.subinterfaces[0].routing_table = Some("rt1".to_string());

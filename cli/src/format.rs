@@ -2,10 +2,11 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
     BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
-    Interface, InterfaceAddress, InterfaceStatus, LogEntry, LogLevel, NextHopMode, OspfInstance,
-    PeerSummary, PolicyDefinition, PrefixList, PrefixListEntry, PrefixRoutes, RouteSourceKind,
-    RoutingTable, SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface,
-    SubinterfaceStatus, SwitchingProfile, TransactionSnapshot, VlanTag,
+    Interface, InterfaceAddress, InterfaceStatus, LogEntry, LogLevel, NextHopMode, OspfArea,
+    OspfInstance, OspfProfile, PeerSummary, PolicyDefinition, PrefixList, PrefixListEntry,
+    PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, SourceAddress, StaticRoute,
+    StaticRoutingInstance, Subinterface, SubinterfaceStatus, SwitchingProfile, TransactionSnapshot,
+    VlanTag,
 };
 
 use crate::session::Path;
@@ -115,12 +116,35 @@ pub fn render_bgp_instance(instance: &BgpInstance) -> String {
     lines.join("\n")
 }
 
-/// Render one OSPF instance as human-readable text.
+/// Render one OSPF instance as human-readable text, including any nested
+/// areas (and each area's nested profiles), indented one/two levels under
+/// the instance line — mirrors `render_interface`'s nested subinterfaces.
 pub fn render_ospf_instance(instance: &OspfInstance) -> String {
-    format!(
+    let mut lines = vec![format!(
         "ospf instance {}: router-id {}",
         instance.name, instance.router_id
-    )
+    )];
+    for area in &instance.areas {
+        for line in render_ospf_area(area).lines() {
+            lines.push(format!("  {line}"));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Render one OSPF area as human-readable text, including any nested
+/// profiles, each indented one level under the area line.
+pub fn render_ospf_area(area: &OspfArea) -> String {
+    let mut lines = vec![format!("area {}", area.area_id)];
+    for profile in &area.profiles {
+        lines.push(format!("  {}", render_ospf_profile(profile)));
+    }
+    lines.join("\n")
+}
+
+/// Render one OSPF profile as human-readable text.
+pub fn render_ospf_profile(profile: &OspfProfile) -> String {
+    format!("profile {}", profile.name)
 }
 
 /// Render one routing table as human-readable text.
@@ -169,8 +193,9 @@ pub fn render_subinterface(sub: &Subinterface) -> String {
             .join(", ")
     };
     let routing_table = sub.routing_table.as_deref().unwrap_or("unset");
+    let ospf_profile = sub.ospf_profile.as_deref().unwrap_or("unset");
     format!(
-        "subinterface {}: address [{addresses}], routing-table {routing_table}",
+        "subinterface {}: address [{addresses}], routing-table {routing_table}, ospf-profile {ospf_profile}",
         sub.tag
     )
 }
@@ -193,9 +218,10 @@ pub fn render_interface(iface: &Interface) -> String {
             .join(", ")
     };
     let routing_table = iface.routing_table.as_deref().unwrap_or("unset");
+    let ospf_profile = iface.ospf_profile.as_deref().unwrap_or("unset");
     let switching_profile = iface.switching_profile.as_deref().unwrap_or("unset");
     let mut lines = vec![format!(
-        "interface {}: address [{addresses}], routing-table {routing_table}, switching-profile {switching_profile}",
+        "interface {}: address [{addresses}], routing-table {routing_table}, ospf-profile {ospf_profile}, switching-profile {switching_profile}",
         iface.name
     )];
     for sub in &iface.subinterfaces {
@@ -524,6 +550,35 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
                 || format!("ospf instance '{name}' not found"),
                 render_ospf_instance,
             ),
+        Path::OspfArea { instance, area_id } => snapshot
+            .config
+            .ospf_instances
+            .iter()
+            .find(|i| &i.name == instance)
+            .and_then(|i| i.areas.iter().find(|a| a.area_id == *area_id))
+            .map_or_else(
+                || format!("ospf area '{area_id}' not found in ospf instance '{instance}'"),
+                render_ospf_area,
+            ),
+        Path::OspfProfile {
+            instance,
+            area_id,
+            name,
+        } => snapshot
+            .config
+            .ospf_instances
+            .iter()
+            .find(|i| &i.name == instance)
+            .and_then(|i| i.areas.iter().find(|a| a.area_id == *area_id))
+            .and_then(|a| a.profiles.iter().find(|p| &p.name == name))
+            .map_or_else(
+                || {
+                    format!(
+                        "ospf profile '{name}' not found in area '{area_id}' of ospf instance '{instance}'"
+                    )
+                },
+                render_ospf_profile,
+            ),
         Path::StaticRoutingInstance(name) => snapshot
             .config
             .static_routing_instances
@@ -685,8 +740,9 @@ pub fn render_broadcast_domain(domain: &BroadcastDomain) -> String {
             .join(", ")
     };
     let routing_table = domain.routing_table.as_deref().unwrap_or("unset");
+    let ospf_profile = domain.ospf_profile.as_deref().unwrap_or("unset");
     format!(
-        "broadcast-domain {}: address [{addresses}], routing-table {routing_table}",
+        "broadcast-domain {}: address [{addresses}], routing-table {routing_table}, ospf-profile {ospf_profile}",
         domain.name
     )
 }
@@ -943,6 +999,7 @@ mod tests {
             name: "eth0".to_string(),
             addresses: Vec::new(),
             routing_table: None,
+            ospf_profile: None,
             switching_profile: None,
             subinterfaces: vec![
                 Subinterface {
@@ -952,19 +1009,21 @@ mod tests {
                         label: None,
                     }],
                     routing_table: Some("rt1".to_string()),
+                    ospf_profile: None,
                 },
                 Subinterface {
                     tag: 100,
                     addresses: Vec::new(),
                     routing_table: None,
+                    ospf_profile: None,
                 },
             ],
         };
         assert_eq!(
             render_interface(&iface),
-            "interface eth0: address [none], routing-table unset, switching-profile unset\n\
-             \x20 subinterface 0: address [10.0.0.1/24], routing-table rt1\n\
-             \x20 subinterface 100: address [none], routing-table unset"
+            "interface eth0: address [none], routing-table unset, ospf-profile unset, switching-profile unset\n\
+             \x20 subinterface 0: address [10.0.0.1/24], routing-table rt1, ospf-profile unset\n\
+             \x20 subinterface 100: address [none], routing-table unset, ospf-profile unset"
         );
     }
 
@@ -980,12 +1039,13 @@ mod tests {
                 label: None,
             }],
             routing_table: Some("rt1".to_string()),
+            ospf_profile: None,
             switching_profile: None,
             subinterfaces: Vec::new(),
         };
         assert_eq!(
             render_interface(&iface),
-            "interface loopback-rt1: address [10.0.0.1/32], routing-table rt1, switching-profile unset"
+            "interface loopback-rt1: address [10.0.0.1/32], routing-table rt1, ospf-profile unset, switching-profile unset"
         );
     }
 
@@ -1042,11 +1102,13 @@ mod tests {
             name: "eth0".to_string(),
             addresses: Vec::new(),
             routing_table: None,
+            ospf_profile: None,
             switching_profile: None,
             subinterfaces: vec![Subinterface {
                 tag: 100,
                 addresses: Vec::new(),
                 routing_table: Some("rt1".to_string()),
+                ospf_profile: None,
             }],
         }];
         let rendered = render_transaction(
@@ -1058,7 +1120,7 @@ mod tests {
         );
         assert_eq!(
             rendered,
-            "subinterface 100: address [none], routing-table rt1"
+            "subinterface 100: address [none], routing-table rt1, ospf-profile unset"
         );
     }
 

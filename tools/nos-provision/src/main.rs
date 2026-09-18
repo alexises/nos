@@ -19,9 +19,10 @@ use futures::{SinkExt, StreamExt};
 use ipnet::IpNet;
 use nos_proto::{
     AddressFamily, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, ConfigOp, Event,
-    InterfaceOp, IpcCodec, OspfInstanceOp, PolicyDefinitionOp, Redistribute, RedistributeSource,
-    RedistributeTarget, Request, RoutingTableOp, SourceAddress, StaticRouteOp,
-    StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase, VlanTag,
+    InterfaceOp, IpcCodec, OspfAreaOp, OspfInstanceOp, OspfProfileOp, PolicyDefinitionOp,
+    Redistribute, RedistributeSource, RedistributeTarget, Request, RoutingTableOp, SourceAddress,
+    StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase,
+    VlanTag,
 };
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -226,6 +227,20 @@ struct Args {
     ospf_instance: Option<String>,
     #[arg(long)]
     ospf_router_id: Option<Ipv4Addr>,
+
+    /// If set (requires `--ospf-instance`), ensures this OSPF area under it
+    /// (`OspfAreaOp::Ensure`).
+    #[arg(long)]
+    ospf_area: Option<Ipv4Addr>,
+    /// If set (requires `--ospf-area`), ensures this OSPF profile under it
+    /// (`OspfProfileOp::Ensure`).
+    #[arg(long)]
+    ospf_profile: Option<String>,
+    /// If set, attaches this profile name to `--interface`'s
+    /// `--subinterface-tag` subinterface (`SubinterfaceOp::SetOspfProfile`)
+    /// — for verifying `nos-ospfd` logs the attachment.
+    #[arg(long)]
+    ospf_interface_profile: Option<String>,
 }
 
 #[tokio::main]
@@ -552,6 +567,34 @@ async fn main() -> anyhow::Result<()> {
         }));
     } else if args.ospf_router_id.is_some() {
         bail!("--ospf-router-id requires --ospf-instance to also be set");
+    }
+
+    if let Some(area_id) = args.ospf_area {
+        let instance = args
+            .ospf_instance
+            .clone()
+            .context("--ospf-area requires --ospf-instance to also be set")?;
+        ops.push(ConfigOp::OspfArea(OspfAreaOp::Ensure {
+            instance: instance.clone(),
+            area_id,
+        }));
+        if let Some(name) = args.ospf_profile.clone() {
+            ops.push(ConfigOp::OspfProfile(OspfProfileOp::Ensure {
+                instance,
+                area_id,
+                name,
+            }));
+        }
+    } else if args.ospf_profile.is_some() {
+        bail!("--ospf-profile requires --ospf-area to also be set");
+    }
+
+    if let Some(profile) = args.ospf_interface_profile.clone() {
+        ops.push(ConfigOp::Subinterface(SubinterfaceOp::SetOspfProfile {
+            interface: args.interface.clone(),
+            tag: args.subinterface_tag,
+            ospf_profile: profile,
+        }));
     }
 
     for op in ops {

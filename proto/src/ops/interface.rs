@@ -40,6 +40,13 @@ pub enum InterfaceOp {
     ClearRoutingTable {
         name: String,
     },
+    SetOspfProfile {
+        name: String,
+        ospf_profile: String,
+    },
+    ClearOspfProfile {
+        name: String,
+    },
     SetSwitchingProfile {
         name: String,
         switching_profile: String,
@@ -61,6 +68,7 @@ impl InterfaceOp {
                         name: name.clone(),
                         addresses: Vec::new(),
                         routing_table: None,
+                        ospf_profile: None,
                         switching_profile: None,
                         subinterfaces: Vec::new(),
                     });
@@ -103,6 +111,14 @@ impl InterfaceOp {
             }
             InterfaceOp::ClearRoutingTable { name } => {
                 find_interface_mut(config, name)?.routing_table = None;
+                Ok(())
+            }
+            InterfaceOp::SetOspfProfile { name, ospf_profile } => {
+                find_interface_mut(config, name)?.ospf_profile = Some(ospf_profile.clone());
+                Ok(())
+            }
+            InterfaceOp::ClearOspfProfile { name } => {
+                find_interface_mut(config, name)?.ospf_profile = None;
                 Ok(())
             }
             InterfaceOp::SetSwitchingProfile {
@@ -149,6 +165,7 @@ mod tests {
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
+            ospf_profile: None,
             switching_profile: None,
             subinterfaces: Vec::new(),
         }
@@ -185,6 +202,7 @@ mod tests {
                 name: "eth0".to_string(),
                 addresses: vec![iface_addr("10.0.0.1/24")],
                 routing_table: None,
+                ospf_profile: None,
                 switching_profile: None,
                 subinterfaces: Vec::new(),
             }],
@@ -323,6 +341,28 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.interfaces[0].routing_table, None);
+    }
+
+    #[test]
+    fn set_and_clear_ospf_profile() {
+        let mut cfg = Config {
+            interfaces: vec![interface("eth0")],
+            ..Default::default()
+        };
+        InterfaceOp::SetOspfProfile {
+            name: "eth0".to_string(),
+            ospf_profile: "p1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].ospf_profile.as_deref(), Some("p1"));
+
+        InterfaceOp::ClearOspfProfile {
+            name: "eth0".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].ospf_profile, None);
     }
 
     #[test]

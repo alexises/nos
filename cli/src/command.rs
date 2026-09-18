@@ -79,6 +79,25 @@ pub enum EditTarget {
     OspfInstance {
         name: String,
     },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    OspfArea {
+        instance: String,
+        area_id: Ipv4Addr,
+    },
+    /// Context-relative — only valid while navigated into an OSPF instance.
+    OspfAreaRelative {
+        area_id: Ipv4Addr,
+    },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    OspfProfile {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+    },
+    /// Context-relative — only valid while navigated into an OSPF area.
+    OspfProfileRelative {
+        name: String,
+    },
     StaticRoutingInstance {
         name: String,
     },
@@ -198,6 +217,11 @@ pub enum SetTarget {
     },
     /// Context-relative — only valid while navigated into an interface.
     InterfaceSwitchingProfileRelative { switching_profile: String },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    InterfaceOspfProfile { name: String, ospf_profile: String },
+    /// Context-relative — only valid while navigated into a loopback
+    /// interface, a subinterface, or a broadcast domain.
+    InterfaceOspfProfileRelative { ospf_profile: String },
     /// Fully-qualified — works from anywhere in configuration mode.
     CommunityAliasValue { name: String, value: String },
     /// Context-relative — only valid while navigated into a community-alias.
@@ -329,6 +353,28 @@ pub enum DeleteTarget {
     OspfInstance {
         name: String,
     },
+    /// `delete ospf instance <name> area <area-id>` — qualified.
+    OspfArea {
+        instance: String,
+        area_id: Ipv4Addr,
+    },
+    /// `delete area <area-id>` — relative, only valid while navigated into
+    /// an OSPF instance.
+    OspfAreaRelative {
+        area_id: Ipv4Addr,
+    },
+    /// `delete ospf instance <name> area <area-id> profile <profile-name>`
+    /// — qualified.
+    OspfProfile {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+    },
+    /// `delete profile <profile-name>` — relative, only valid while
+    /// navigated into an OSPF area.
+    OspfProfileRelative {
+        name: String,
+    },
     /// `delete routing-table <name> redistribute` — qualified clear.
     RoutingTableRedistribute {
         name: String,
@@ -374,6 +420,13 @@ pub enum DeleteTarget {
     /// `delete switching-profile` — relative clear, only valid while
     /// navigated into an interface.
     InterfaceSwitchingProfileRelative,
+    /// `delete interface <name> ospf` — qualified clear.
+    InterfaceOspfProfile {
+        name: String,
+    },
+    /// `delete ospf` — relative clear, only valid while navigated into a
+    /// loopback interface, a subinterface, or a broadcast domain.
+    InterfaceOspfProfileRelative,
     CommunityAlias {
         name: String,
     },
@@ -598,6 +651,23 @@ fn parse_edit(t: &[&str]) -> Option<Command> {
             name: (*name).to_string(),
         }),
         ["ospf", "instance", name] => Command::Edit(EditTarget::OspfInstance {
+            name: (*name).to_string(),
+        }),
+        ["ospf", "instance", instance, "area", area_id] => Command::Edit(EditTarget::OspfArea {
+            instance: (*instance).to_string(),
+            area_id: area_id.parse::<Ipv4Addr>().ok()?,
+        }),
+        ["area", area_id] => Command::Edit(EditTarget::OspfAreaRelative {
+            area_id: area_id.parse::<Ipv4Addr>().ok()?,
+        }),
+        ["ospf", "instance", instance, "area", area_id, "profile", name] => {
+            Command::Edit(EditTarget::OspfProfile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse::<Ipv4Addr>().ok()?,
+                name: (*name).to_string(),
+            })
+        }
+        ["profile", name] => Command::Edit(EditTarget::OspfProfileRelative {
             name: (*name).to_string(),
         }),
         ["static-routing-instance", name] => Command::Edit(EditTarget::StaticRoutingInstance {
@@ -1020,6 +1090,13 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 switching_profile: (*profile).to_string(),
             })
         }
+        ["interface", name, "ospf", profile] => Command::Set(SetTarget::InterfaceOspfProfile {
+            name: (*name).to_string(),
+            ospf_profile: (*profile).to_string(),
+        }),
+        ["ospf", profile] => Command::Set(SetTarget::InterfaceOspfProfileRelative {
+            ospf_profile: (*profile).to_string(),
+        }),
         ["broadcast", "domain", name, "address", addr] => {
             Command::Set(SetTarget::BroadcastDomainAddress {
                 name: (*name).to_string(),
@@ -1181,6 +1258,25 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
         ["ospf", "instance", name] => Command::Delete(DeleteTarget::OspfInstance {
             name: (*name).to_string(),
         }),
+        ["ospf", "instance", instance, "area", area_id] => {
+            Command::Delete(DeleteTarget::OspfArea {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse::<Ipv4Addr>().ok()?,
+            })
+        }
+        ["area", area_id] => Command::Delete(DeleteTarget::OspfAreaRelative {
+            area_id: area_id.parse::<Ipv4Addr>().ok()?,
+        }),
+        ["ospf", "instance", instance, "area", area_id, "profile", name] => {
+            Command::Delete(DeleteTarget::OspfProfile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse::<Ipv4Addr>().ok()?,
+                name: (*name).to_string(),
+            })
+        }
+        ["profile", name] => Command::Delete(DeleteTarget::OspfProfileRelative {
+            name: (*name).to_string(),
+        }),
         ["routing-table", name, "redistribute"] => {
             Command::Delete(DeleteTarget::RoutingTableRedistribute {
                 name: (*name).to_string(),
@@ -1221,6 +1317,10 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
             })
         }
         ["switching-profile"] => Command::Delete(DeleteTarget::InterfaceSwitchingProfileRelative),
+        ["interface", name, "ospf"] => Command::Delete(DeleteTarget::InterfaceOspfProfile {
+            name: (*name).to_string(),
+        }),
+        ["ospf"] => Command::Delete(DeleteTarget::InterfaceOspfProfileRelative),
         ["community-alias", name] => Command::Delete(DeleteTarget::CommunityAlias {
             name: (*name).to_string(),
         }),
@@ -2478,6 +2578,107 @@ mod tests {
             Command::Set(SetTarget::InterfaceSwitchingProfileRelative {
                 switching_profile: "sp1".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn edit_ospf_area_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("edit ospf instance o1 area 0.0.0.0"),
+            Command::Edit(EditTarget::OspfArea {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+            })
+        );
+        assert_eq!(
+            Command::parse("edit area 0.0.0.0"),
+            Command::Edit(EditTarget::OspfAreaRelative {
+                area_id: "0.0.0.0".parse().unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn edit_ospf_profile_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("edit ospf instance o1 area 0.0.0.0 profile p1"),
+            Command::Edit(EditTarget::OspfProfile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("edit profile p1"),
+            Command::Edit(EditTarget::OspfProfileRelative {
+                name: "p1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn set_interface_ospf_profile_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set interface eth0 ospf p1"),
+            Command::Set(SetTarget::InterfaceOspfProfile {
+                name: "eth0".to_string(),
+                ospf_profile: "p1".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("set ospf p1"),
+            Command::Set(SetTarget::InterfaceOspfProfileRelative {
+                ospf_profile: "p1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_ospf_area_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("delete ospf instance o1 area 0.0.0.0"),
+            Command::Delete(DeleteTarget::OspfArea {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete area 0.0.0.0"),
+            Command::Delete(DeleteTarget::OspfAreaRelative {
+                area_id: "0.0.0.0".parse().unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_ospf_profile_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("delete ospf instance o1 area 0.0.0.0 profile p1"),
+            Command::Delete(DeleteTarget::OspfProfile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete profile p1"),
+            Command::Delete(DeleteTarget::OspfProfileRelative {
+                name: "p1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_interface_ospf_profile_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("delete interface eth0 ospf"),
+            Command::Delete(DeleteTarget::InterfaceOspfProfile {
+                name: "eth0".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete ospf"),
+            Command::Delete(DeleteTarget::InterfaceOspfProfileRelative)
         );
     }
 

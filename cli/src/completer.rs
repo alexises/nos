@@ -38,6 +38,9 @@ pub struct NosCompleter {
     broadcast_domain_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
     /// Live switching profile names for `ArgKind::SwitchingProfileName` slots.
     switching_profile_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
+    /// Live OSPF profile names (flattened across every instance/area — see
+    /// `main.rs`'s `completer_for`) for `ArgKind::OspfProfileName` slots.
+    ospf_profile_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
 }
 
 impl NosCompleter {
@@ -53,6 +56,7 @@ impl NosCompleter {
         interface_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
         broadcast_domain_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
         switching_profile_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
+        ospf_profile_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
     ) -> Self {
         Self {
             mode,
@@ -65,6 +69,7 @@ impl NosCompleter {
             interface_name_source,
             broadcast_domain_name_source,
             switching_profile_name_source,
+            ospf_profile_name_source,
         }
     }
 
@@ -95,6 +100,7 @@ impl NosCompleter {
             ArgKind::InterfaceName => &mut *self.interface_name_source,
             ArgKind::BroadcastDomainName => &mut *self.broadcast_domain_name_source,
             ArgKind::SwitchingProfileName => &mut *self.switching_profile_name_source,
+            ArgKind::OspfProfileName => &mut *self.ospf_profile_name_source,
         })
     }
 }
@@ -242,6 +248,10 @@ mod tests {
         Box::new(Vec::new)
     }
 
+    fn no_ospf_profiles() -> Box<dyn FnMut() -> Vec<String> + Send> {
+        Box::new(Vec::new)
+    }
+
     fn values(result: &CompletionResult) -> Vec<String> {
         let mut v: Vec<String> = result
             .suggestions()
@@ -265,6 +275,7 @@ mod tests {
             no_interfaces(),
             no_broadcast_domains(),
             no_switching_profiles(),
+            no_ospf_profiles(),
         );
         let result = completer.complete("sh", 2);
         assert_eq!(values(&result), vec!["show".to_string()]);
@@ -283,6 +294,7 @@ mod tests {
             no_interfaces(),
             no_broadcast_domains(),
             no_switching_profiles(),
+            no_ospf_profiles(),
         );
         let result = completer.complete("com", 3);
         assert!(
@@ -309,6 +321,7 @@ mod tests {
             no_interfaces(),
             no_broadcast_domains(),
             no_switching_profiles(),
+            no_ospf_profiles(),
         );
         let result = completer.complete("com", 3);
         assert_eq!(values(&result), vec!["commit".to_string()]);
@@ -327,6 +340,7 @@ mod tests {
             no_interfaces(),
             no_broadcast_domains(),
             no_switching_profiles(),
+            no_ospf_profiles(),
         );
         let result = completer.complete("", 0);
         let vals = values(&result);
@@ -355,6 +369,7 @@ mod tests {
             no_interfaces(),
             no_broadcast_domains(),
             no_switching_profiles(),
+            no_ospf_profiles(),
         );
         let result = completer.complete("edit bgp instance r", 19);
         assert_eq!(values(&result), vec!["r1".to_string(), "r2".to_string()]);
@@ -380,6 +395,7 @@ mod tests {
             no_interfaces(),
             no_broadcast_domains(),
             no_switching_profiles(),
+            no_ospf_profiles(),
         );
         let result = completer.complete("edit peer-group p", 17);
         assert_eq!(values(&result), vec!["pg1".to_string(), "pg2".to_string()]);
@@ -405,6 +421,7 @@ mod tests {
             no_interfaces(),
             no_broadcast_domains(),
             no_switching_profiles(),
+            no_ospf_profiles(),
         );
         let result = completer.complete("edit routing-table r", 20);
         assert_eq!(values(&result), vec!["rt1".to_string(), "rt2".to_string()]);
@@ -430,6 +447,7 @@ mod tests {
             no_interfaces(),
             no_broadcast_domains(),
             no_switching_profiles(),
+            no_ospf_profiles(),
         );
         let result = completer.complete("edit static-routing-instance s", 30);
         assert_eq!(
@@ -451,6 +469,7 @@ mod tests {
             no_interfaces(),
             no_broadcast_domains(),
             no_switching_profiles(),
+            no_ospf_profiles(),
         );
         let result = completer.complete("show conf", 9);
         let suggestion = result
@@ -479,6 +498,7 @@ mod tests {
             no_interfaces(),
             no_broadcast_domains(),
             no_switching_profiles(),
+            no_ospf_profiles(),
         );
         let result = completer.complete("show config", 11);
         // Not a completion candidate (already fully typed) — use a partial instead.

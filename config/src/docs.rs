@@ -508,6 +508,42 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Unsets the ospf-instance field on a routing table, reverting to no explicit \
              association.",
         ),
+        Topic::EnsureOspfArea => (
+            "Create an OSPF area in the transaction if it doesn't already exist.",
+            "Adds a new area with the given dotted-quad area id to the named OSPF instance's \
+             area list if none exists with that id yet; if one already exists, this is a \
+             no-op. Does not itself set any fields on the area.",
+        ),
+        Topic::DeleteOspfArea => (
+            "Delete an OSPF area from an instance.",
+            "Removes the named area (and every profile nested under it) from the OSPF \
+             instance's area list.",
+        ),
+        Topic::EnsureOspfProfile => (
+            "Create an OSPF profile in the transaction if it doesn't already exist.",
+            "Adds a new profile with the given name to the named area's profile list if none \
+             exists with that name yet; if one already exists, this is a no-op. Profile names \
+             are unique across the whole config, not just within their owning area, checked \
+             at commit time.",
+        ),
+        Topic::DeleteOspfProfile => (
+            "Delete an OSPF profile from an area.",
+            "Removes the named profile from the area's profile list. Any interface, \
+             subinterface, or broadcast domain still referencing it by name will fail \
+             commit-time validation until repointed or cleared.",
+        ),
+        Topic::SetInterfaceOspfProfile => (
+            "Associate an OSPF profile with an interface, subinterface, or broadcast domain.",
+            "Points a loopback interface, a physical interface's subinterface, or a broadcast \
+             domain's own SVI at an OSPF profile by name. The profile must exist, and the \
+             same attach point must also have a routing-table set — OSPF has no meaning \
+             without an L3/VRF context — both checked at commit time.",
+        ),
+        Topic::ClearInterfaceOspfProfile => (
+            "Remove an OSPF profile association.",
+            "Unsets the ospf field on an interface, subinterface, or broadcast domain, \
+             reverting to no explicit association.",
+        ),
     };
     CommandDoc {
         topic,
@@ -601,6 +637,12 @@ mod tests {
         Topic::DeleteOspfInstance,
         Topic::SetRoutingTableOspfInstance,
         Topic::ClearRoutingTableOspfInstance,
+        Topic::EnsureOspfArea,
+        Topic::DeleteOspfArea,
+        Topic::EnsureOspfProfile,
+        Topic::DeleteOspfProfile,
+        Topic::SetInterfaceOspfProfile,
+        Topic::ClearInterfaceOspfProfile,
     ];
 
     #[test]

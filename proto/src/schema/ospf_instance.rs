@@ -5,12 +5,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::validators::unique_in;
 
-use super::Config;
+use super::{Config, OspfArea};
 
-/// A named OSPF instance. Basic configuration only today — `router_id` and
-/// the routing-table (VRF) association, mirroring `BgpInstance`'s own
-/// minimal shape. No areas/interfaces/neighbors yet — this is a config-only
-/// skeleton, see `ospf/CLAUDE.md`.
+/// A named OSPF instance. Basic configuration only today — `router_id`, the
+/// routing-table (VRF) association mirroring `BgpInstance`'s own minimal
+/// shape, and `areas` (dotted-quad-keyed, see `OspfArea`). No interfaces
+/// beyond what a nested area's profiles can be attached to yet, and no wire
+/// protocol — this is a config-only skeleton, see `ospf/CLAUDE.md`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct OspfInstance {
@@ -24,6 +25,10 @@ pub struct OspfInstance {
     #[garde(skip)]
     pub router_id: Ipv4Addr,
 
+    /// This instance's OSPF areas, keyed by `area_id` — see `OspfArea`.
+    #[garde(dive, custom(|areas, _ctx: &Config| unique_area_ids(areas)))]
+    pub areas: Vec<OspfArea>,
+
     /// The name of the `RoutingTable` that claims this instance (i.e. the
     /// VRF it belongs to), mirrored from that table's `ospf_instance` field.
     /// Derived and read-only: never set by any `OspfInstanceOp`, recomputed
@@ -34,6 +39,22 @@ pub struct OspfInstance {
     /// routing table. Deliberately not rendered by `nos-cli`.
     #[garde(skip)]
     pub routing_table: Option<String>,
+}
+
+/// No two areas within the same instance may share an `area_id` — mirrors
+/// `static_routing_instance::unique_subnets`. Scoped to `self.areas` only
+/// (per-instance, not global — unlike `OspfProfile.name`).
+fn unique_area_ids(areas: &[OspfArea]) -> garde::Result {
+    let mut seen: Vec<Ipv4Addr> = Vec::new();
+    for a in areas {
+        if seen.contains(&a.area_id) {
+            return Err(garde::Error::new(
+                "must not repeat an area id within the same ospf instance",
+            ));
+        }
+        seen.push(a.area_id);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -50,6 +71,7 @@ mod tests {
         OspfInstance {
             name: name.to_string(),
             router_id: Ipv4Addr::new(1, 1, 1, 1),
+            areas: Vec::new(),
             routing_table: None,
         }
     }

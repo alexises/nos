@@ -60,6 +60,12 @@ fn routing_table_str(sub: &Subinterface) -> String {
         .unwrap_or_else(|| "unset".to_string())
 }
 
+fn ospf_profile_str(sub: &Subinterface) -> String {
+    sub.ospf_profile
+        .clone()
+        .unwrap_or_else(|| "unset".to_string())
+}
+
 fn changed_fields(base: &Subinterface, candidate: &Subinterface) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     let mut base_addrs = base.addresses.clone();
@@ -80,6 +86,13 @@ fn changed_fields(base: &Subinterface, candidate: &Subinterface) -> Vec<FieldDif
             new: Some(routing_table_str(candidate)),
         });
     }
+    if base.ospf_profile != candidate.ospf_profile {
+        fields.push(FieldDiff {
+            label: "ospf-profile".to_string(),
+            old: Some(ospf_profile_str(base)),
+            new: Some(ospf_profile_str(candidate)),
+        });
+    }
     fields
 }
 
@@ -97,6 +110,11 @@ fn removed_section(sub: &Subinterface) -> SectionDiff {
             FieldDiff {
                 label: "routing-table".to_string(),
                 old: Some(routing_table_str(sub)),
+                new: None,
+            },
+            FieldDiff {
+                label: "ospf-profile".to_string(),
+                old: Some(ospf_profile_str(sub)),
                 new: None,
             },
         ],
@@ -120,6 +138,11 @@ fn added_section(sub: &Subinterface) -> SectionDiff {
                 old: None,
                 new: Some(routing_table_str(sub)),
             },
+            FieldDiff {
+                label: "ospf-profile".to_string(),
+                old: None,
+                new: Some(ospf_profile_str(sub)),
+            },
         ],
         subsections: Vec::new(),
     }
@@ -140,6 +163,7 @@ mod tests {
                 })
                 .collect(),
             routing_table: routing_table.map(str::to_string),
+            ospf_profile: None,
         }
     }
 
@@ -173,6 +197,18 @@ mod tests {
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].fields.len(), 1);
         assert_eq!(sections[0].fields[0].label, "routing-table");
+    }
+
+    #[test]
+    fn modified_ospf_profile_only_lists_that_field() {
+        let mut base_sub = sub(0, &[], None);
+        let mut candidate_sub = base_sub.clone();
+        candidate_sub.ospf_profile = Some("p1".to_string());
+        base_sub.ospf_profile = None;
+        let sections = diff_subinterfaces(&[base_sub], &[candidate_sub]);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].fields.len(), 1);
+        assert_eq!(sections[0].fields[0].label, "ospf-profile");
     }
 
     #[test]

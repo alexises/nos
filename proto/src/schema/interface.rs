@@ -2,7 +2,9 @@ use garde::Validate;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
-use crate::validators::{routing_table_reference_valid, unique_addresses, unique_in};
+use crate::validators::{
+    ospf_profile_reference_valid, routing_table_reference_valid, unique_addresses, unique_in,
+};
 
 use super::{Config, VlanTag};
 
@@ -55,6 +57,13 @@ pub struct Subinterface {
 
     #[garde(custom(|rt: &Option<String>, ctx: &Config| routing_table_reference_valid(rt.as_ref(), ctx)))]
     pub routing_table: Option<String>,
+
+    /// If set, names an `OspfProfile` this subinterface joins OSPF under.
+    /// Requires `routing_table` also set on this same subinterface — OSPF
+    /// has no meaning without an L3/VRF context, see
+    /// `valid_subinterface_ospf_profile_requires_routing_table`.
+    #[garde(custom(|p: &Option<String>, ctx: &Config| ospf_profile_reference_valid(p.as_ref(), ctx)))]
+    pub ospf_profile: Option<String>,
 }
 
 fn valid_subinterface_tag(tag: u16) -> garde::Result {
@@ -79,6 +88,31 @@ fn unique_subinterface_tags(subinterfaces: &[Subinterface]) -> garde::Result {
         }
         seen.push(sub.tag);
     }
+    Ok(())
+}
+
+/// A subinterface's `ospf_profile`, if set, requires `routing_table` also
+/// set on the *same* subinterface — OSPF has no meaning without an L3/VRF
+/// context. Mirrors `valid_addressing_split`'s equivalent check on a
+/// loopback `Interface`.
+fn valid_subinterface_ospf_profile_requires_routing_table(
+    subinterfaces: &[Subinterface],
+) -> garde::Result {
+    for sub in subinterfaces {
+        if sub.ospf_profile.is_some() && sub.routing_table.is_none() {
+            return Err(garde::Error::new(
+                "ospf profile requires a routing-table on the same subinterface",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Umbrella validator for `Interface.subinterfaces` combining the two
+/// cross-field checks above — see each for details.
+fn valid_subinterface_list(subinterfaces: &[Subinterface]) -> garde::Result {
+    unique_subinterface_tags(subinterfaces)?;
+    valid_subinterface_ospf_profile_requires_routing_table(subinterfaces)?;
     Ok(())
 }
 
@@ -118,10 +152,18 @@ pub struct Interface {
     #[garde(custom(|rt: &Option<String>, ctx: &Config| routing_table_reference_valid(rt.as_ref(), ctx)))]
     pub routing_table: Option<String>,
 
+    /// If set, names an `OspfProfile` this loopback interface joins OSPF
+    /// under. Requires `routing_table` also set — see
+    /// `valid_addressing_split`. Unused (must be unset) on a physical
+    /// interface — its OSPF attachment lives on a `Subinterface` instead,
+    /// like `routing_table`.
+    #[garde(custom(|p: &Option<String>, ctx: &Config| ospf_profile_reference_valid(p.as_ref(), ctx)))]
+    pub ospf_profile: Option<String>,
+
     #[garde(custom(|sp: &Option<String>, ctx: &Config| switching_profile_reference_valid(sp.as_ref(), ctx)))]
     pub switching_profile: Option<String>,
 
-    #[garde(dive, custom(|subs, _ctx: &Config| unique_subinterface_tags(subs)))]
+    #[garde(dive, custom(|subs, _ctx: &Config| valid_subinterface_list(subs)))]
     pub subinterfaces: Vec<Subinterface>,
 }
 
@@ -177,9 +219,17 @@ fn valid_addressing_split(interfaces: &[Interface]) -> garde::Result {
                     "loopback interface must not have subinterfaces",
                 ));
             }
-        } else if !iface.addresses.is_empty() || iface.routing_table.is_some() {
+            if iface.ospf_profile.is_some() && iface.routing_table.is_none() {
+                return Err(garde::Error::new(
+                    "ospf profile requires a routing-table on the same interface",
+                ));
+            }
+        } else if !iface.addresses.is_empty()
+            || iface.routing_table.is_some()
+            || iface.ospf_profile.is_some()
+        {
             return Err(garde::Error::new(
-                "physical interface must configure addresses/routing-table on a subinterface (e.g. '.0'), not directly on the interface",
+                "physical interface must configure addresses/routing-table/ospf-profile on a subinterface (e.g. '.0'), not directly on the interface",
             ));
         }
     }
@@ -253,6 +303,7 @@ mod tests {
                 })
                 .collect(),
             routing_table: routing_table.map(str::to_string),
+            ospf_profile: None,
             switching_profile: None,
             subinterfaces: Vec::new(),
         }
@@ -273,6 +324,7 @@ mod tests {
                 })
                 .collect(),
             routing_table: routing_table.map(str::to_string),
+            ospf_profile: None,
         }];
         iface
     }
@@ -444,6 +496,7 @@ mod tests {
                 },
             ],
             routing_table: None,
+            ospf_profile: None,
         }];
         let cfg = config_with(vec![iface], vec![]);
         assert!(cfg.validate_with(&cfg).is_err());
@@ -456,6 +509,7 @@ mod tests {
             tag: 100,
             addresses: Vec::new(),
             routing_table: None,
+            ospf_profile: None,
         }];
         let cfg = config_with(vec![iface], vec![table("rt1")]);
         assert!(cfg.validate_with(&cfg).is_err());
@@ -484,11 +538,13 @@ mod tests {
                 tag: 100,
                 addresses: Vec::new(),
                 routing_table: None,
+                ospf_profile: None,
             },
             Subinterface {
                 tag: 100,
                 addresses: Vec::new(),
                 routing_table: None,
+                ospf_profile: None,
             },
         ];
         let cfg = config_with(vec![iface], vec![]);
@@ -502,6 +558,7 @@ mod tests {
             tag: 4095,
             addresses: Vec::new(),
             routing_table: None,
+            ospf_profile: None,
         }];
         let cfg = config_with(vec![iface], vec![]);
         assert!(cfg.validate_with(&cfg).is_err());
@@ -515,11 +572,13 @@ mod tests {
                 tag: 0,
                 addresses: Vec::new(),
                 routing_table: None,
+                ospf_profile: None,
             },
             Subinterface {
                 tag: 4094,
                 addresses: Vec::new(),
                 routing_table: None,
+                ospf_profile: None,
             },
         ];
         let cfg = config_with(vec![iface], vec![]);
@@ -548,6 +607,7 @@ mod tests {
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
+            ospf_profile: None,
         }
     }
 
@@ -597,5 +657,73 @@ mod tests {
         cfg.broadcast_domains = vec![domain("bd1")];
         cfg.switching_profiles = vec![profile("sp1", vec![member("bd1", VlanTag::Dot1q(100))])];
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    fn config_with_ospf_profile(interfaces: Vec<Interface>, tables: Vec<RoutingTable>) -> Config {
+        use crate::schema::{OspfArea, OspfInstance, OspfProfile};
+        Config {
+            interfaces,
+            routing_tables: tables,
+            ospf_instances: vec![OspfInstance {
+                name: "r1".to_string(),
+                router_id: "1.1.1.1".parse().unwrap(),
+                areas: vec![OspfArea {
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    profiles: vec![OspfProfile {
+                        name: "p1".to_string(),
+                    }],
+                }],
+                routing_table: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn valid_ospf_profile_on_subinterface_with_routing_table_passes() {
+        let iface = physical_with_l3("eth0", &[], Some("rt1"));
+        let mut cfg = config_with_ospf_profile(vec![iface], vec![table("rt1")]);
+        cfg.interfaces[0].subinterfaces[0].ospf_profile = Some("p1".to_string());
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn dangling_ospf_profile_reference_on_subinterface_fails() {
+        let iface = physical_with_l3("eth0", &[], Some("rt1"));
+        let mut cfg = config_with_ospf_profile(vec![iface], vec![table("rt1")]);
+        cfg.interfaces[0].subinterfaces[0].ospf_profile = Some("does-not-exist".to_string());
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn ospf_profile_on_subinterface_without_routing_table_fails() {
+        let iface = physical_with_l3("eth0", &[], None);
+        let mut cfg = config_with_ospf_profile(vec![iface], vec![]);
+        cfg.interfaces[0].subinterfaces[0].ospf_profile = Some("p1".to_string());
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn valid_ospf_profile_on_loopback_with_routing_table_passes() {
+        let iface = interface("loopback-rt1", &[], Some("rt1"));
+        let mut cfg = config_with_ospf_profile(vec![iface], vec![table("rt1")]);
+        cfg.interfaces[0].ospf_profile = Some("p1".to_string());
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn ospf_profile_on_loopback_without_routing_table_fails() {
+        let iface = interface("loopback-rt1", &[], None);
+        let mut cfg = config_with_ospf_profile(vec![iface], vec![table("rt1")]);
+        cfg.interfaces[0].ospf_profile = Some("p1".to_string());
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn ospf_profile_on_physical_interface_flat_fails() {
+        let mut iface = interface("eth0", &[], None);
+        iface.ospf_profile = Some("p1".to_string());
+        let cfg = config_with_ospf_profile(vec![iface], vec![]);
+        assert!(cfg.validate_with(&cfg).is_err());
     }
 }

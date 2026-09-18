@@ -160,6 +160,22 @@ pub enum Topic {
     SetRoutingTableOspfInstance,
     /// `ConfigOp::RoutingTable(RoutingTableOp::ClearOspfInstance)`
     ClearRoutingTableOspfInstance,
+    /// `ConfigOp::OspfArea(OspfAreaOp::Ensure)`
+    EnsureOspfArea,
+    /// `ConfigOp::OspfArea(OspfAreaOp::Delete)`
+    DeleteOspfArea,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::Ensure)`
+    EnsureOspfProfile,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::Delete)`
+    DeleteOspfProfile,
+    /// `ConfigOp::Interface(InterfaceOp::SetOspfProfile)` /
+    /// `ConfigOp::Subinterface(SubinterfaceOp::SetOspfProfile)` /
+    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetOspfProfile)`
+    SetInterfaceOspfProfile,
+    /// `ConfigOp::Interface(InterfaceOp::ClearOspfProfile)` /
+    /// `ConfigOp::Subinterface(SubinterfaceOp::ClearOspfProfile)` /
+    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::ClearOspfProfile)`
+    ClearInterfaceOspfProfile,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

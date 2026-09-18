@@ -45,6 +45,29 @@ pub fn routing_table_reference_valid(
     Ok(())
 }
 
+/// If set, `ospf_profile` must name an existing `OspfProfile`, flattened
+/// across every instance's areas — mirrors `routing_table_reference_valid`
+/// from the reference side, and `ospf_profile::unique_name` from the
+/// declaration side.
+pub fn ospf_profile_reference_valid(
+    ospf_profile: Option<&String>,
+    ctx: &crate::schema::Config,
+) -> garde::Result {
+    let Some(name) = ospf_profile else {
+        return Ok(());
+    };
+    let exists = ctx
+        .ospf_instances
+        .iter()
+        .flat_map(|i| &i.areas)
+        .flat_map(|a| &a.profiles)
+        .any(|p| &p.name == name);
+    if !exists {
+        return Err(garde::Error::new("referenced ospf profile does not exist"));
+    }
+    Ok(())
+}
+
 /// Returns a `garde` error unless `value` is composed only of ASCII
 /// letters, digits, and hyphens, with no leading or trailing hyphen.
 ///

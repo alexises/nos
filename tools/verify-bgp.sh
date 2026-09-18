@@ -124,6 +124,12 @@ SVI_ADDRESS=203.0.113.9/32
 # different section entirely.
 OSPF_INSTANCE=ospf1
 OSPF_ROUTER_ID=9.9.9.9
+# The ospf scenario's area/profile -- 0.0.0.0 (the backbone) is the obvious
+# choice for a single-area test, and the profile is attached to eth0's own
+# tag-0 subinterface (the same one already carrying the BGP session's
+# address and rt1 routing-table association).
+OSPF_AREA=0.0.0.0
+OSPF_PROFILE=ospf-profile1
 
 log() { echo "[verify-bgp] $*" >&2; }
 
@@ -338,7 +344,10 @@ provision_ospf() {
     --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
     --peer "$peer_ip" \
     --ospf-instance "$ospf_instance" \
-    --ospf-router-id "$ospf_router_id"
+    --ospf-router-id "$ospf_router_id" \
+    --ospf-area "$OSPF_AREA" \
+    --ospf-profile "$OSPF_PROFILE" \
+    --ospf-interface-profile "$OSPF_PROFILE"
 }
 
 # --- L2 switching-profile scenario ---
@@ -900,6 +909,20 @@ cmd_check_ospf() {
   wait_for_count_increase router-a "ospf instance config resolved instance=$OSPF_INSTANCE" 0 60 \
     && log "router-a: nos-ospfd resolved $OSPF_INSTANCE (router-id=$OSPF_ROUTER_ID, routing-table=rt1)" \
     || { log "router-a: FAILED to see nos-ospfd resolve its instance config"; return 1; }
+
+  # Confirms the area/profile config (nested under the instance) round-trips
+  # through nos-configd and is resolved by nos-ospfd on the same resync --
+  # not just accepted at commit time.
+  log "waiting for nos-ospfd to resolve its area/profile config"
+  # Field order matches the `info!(instance, area, ..., "...")` call sites in
+  # ospf/src/reconcile.rs -- tracing renders fields after the message in
+  # declaration order, so the pattern must be a contiguous substring of that.
+  wait_for_count_increase router-a "ospf area resolved instance=$OSPF_INSTANCE area=$OSPF_AREA" 0 60 \
+    && log "router-a: nos-ospfd resolved area $OSPF_AREA" \
+    || { log "router-a: FAILED to see nos-ospfd resolve its area config"; return 1; }
+  wait_for_count_increase router-a "ospf profile resolved instance=$OSPF_INSTANCE area=$OSPF_AREA profile=$OSPF_PROFILE" 0 60 \
+    && log "router-a: nos-ospfd resolved profile $OSPF_PROFILE" \
+    || { log "router-a: FAILED to see nos-ospfd resolve its profile config"; return 1; }
 }
 
 cmd_check_switching() {

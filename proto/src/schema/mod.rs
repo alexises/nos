@@ -5,7 +5,9 @@ pub mod broadcast_domain;
 pub mod community_alias;
 pub mod community_group;
 pub mod interface;
+pub mod ospf_area;
 pub mod ospf_instance;
+pub mod ospf_profile;
 pub mod policy_definition;
 pub mod prefix_list;
 pub mod routing_table;
@@ -25,7 +27,9 @@ pub use community_group::CommunityGroup;
 pub use interface::{
     loopback_table_name, Interface, InterfaceAddress, Subinterface, LOOPBACK_PREFIX,
 };
+pub use ospf_area::OspfArea;
 pub use ospf_instance::OspfInstance;
+pub use ospf_profile::OspfProfile;
 pub use policy_definition::PolicyDefinition;
 pub use prefix_list::{PrefixList, PrefixListEntry};
 pub use routing_table::{Redistribute, RedistributeSource, RedistributeTarget, RoutingTable};
@@ -77,7 +81,10 @@ pub struct Config {
     #[garde(dive)]
     pub prefix_lists: Vec<PrefixList>,
 
-    #[garde(dive)]
+    #[garde(
+        dive,
+        custom(|domains, _ctx: &Config| broadcast_domain::valid_broadcast_domains(domains))
+    )]
     pub broadcast_domains: Vec<BroadcastDomain>,
 
     #[garde(dive)]
