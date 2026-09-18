@@ -11,7 +11,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use nos_proto::{LinkInterfaceState, NeighborSummary, NetworkType, OspfNeighborState};
+use nos_proto::{LinkInterfaceState, LsaSummary, NeighborSummary, NetworkType, OspfNeighborState};
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -772,13 +772,18 @@ fn retransmit_pending(
 /// A neighbor's one-shot DBD/LSR/LSU exchange (see `exchange.rs`'s own
 /// `ponytail:` note) only ever sees the LSDB's contents at the moment
 /// negotiation completes — a self-originated LSA that appears afterward (or
-/// one learned from a different link, once cross-link flooding exists)
-/// would otherwise never reach an already-`Full` neighbor. Resending
+/// one learned from a different link, since every link in an area shares one
+/// `Lsdb`) would otherwise never reach an already-`Full` neighbor. Resending
 /// everything on every `RXMT_INTERVAL` tick is safe (`Lsdb::install`/
 /// `on_lsu_received` already reject and cheaply ack non-newer duplicates)
-/// and simple, at the cost of some wasted bandwidth on a lab-scale LSDB.
-/// Upgrade to real event-driven flooding (on origination and on receipt,
-/// reaching every adjacent link) in a later stage.
+/// and simple, at the cost of up to one `RXMT_INTERVAL` of propagation delay
+/// and some wasted bandwidth on a lab-scale LSDB. This is the permanent
+/// design, not a placeholder: nothing in this NOS consumes the LSDB in a
+/// time-sensitive way yet (no SPF/route computation), so real event-driven
+/// flooding (`exchange::Action::InstallAndFlood`) would add real complexity
+/// (threading a fan-out channel through every link task) for a latency bound
+/// nothing needs tightened. Revisit once a SPF phase makes convergence speed
+/// actually matter.
 async fn flood_full_neighbors(
     socket: &OspfSocket,
     cfg: &LinkConfig,
@@ -1132,6 +1137,27 @@ impl LinkManager {
             .collect()
     }
 
+    /// Every installed LSA's header, across every area, for `server.rs`'s
+    /// `OspfRequest::GetDatabase` handler — backs `nos-cli`'s
+    /// `show ospf database`.
+    pub async fn database_summaries(&self) -> Vec<LsaSummary> {
+        let mut result = Vec::new();
+        for (area_id, lsdb) in self.lsdbs.lock().await.iter() {
+            for header in lsdb.lock().await.headers() {
+                result.push(LsaSummary {
+                    area_id: *area_id,
+                    lsa_type: header.lsa_type,
+                    link_state_id: header.link_state_id,
+                    advertising_router: header.advertising_router,
+                    sequence_number: header.sequence_number,
+                    age: header.age,
+                    checksum: header.checksum,
+                });
+            }
+        }
+        result
+    }
+
     /// Aborts every link task. Called once when `crate::reconcile::run`'s
     /// loop exits on shutdown.
     pub async fn shutdown(&self) {
@@ -1155,15 +1181,11 @@ fn to_neighbor_state(state: NeighborState) -> OspfNeighborState {
     match state {
         NeighborState::Down => OspfNeighborState::Down,
         NeighborState::Init => OspfNeighborState::Init,
-        // ExStart/Exchange/Loading/Full aren't reportable yet —
-        // `nos_proto::OspfNeighborState` grows these variants in a later
-        // stage (see ospf/CLAUDE.md). Until then, every state at or past
-        // 2-Way reports as `TwoWay`, since all of them are supersets of it.
-        NeighborState::TwoWay
-        | NeighborState::ExStart
-        | NeighborState::Exchange
-        | NeighborState::Loading
-        | NeighborState::Full => OspfNeighborState::TwoWay,
+        NeighborState::TwoWay => OspfNeighborState::TwoWay,
+        NeighborState::ExStart => OspfNeighborState::ExStart,
+        NeighborState::Exchange => OspfNeighborState::Exchange,
+        NeighborState::Loading => OspfNeighborState::Loading,
+        NeighborState::Full => OspfNeighborState::Full,
     }
 }
 
@@ -1485,6 +1507,38 @@ mod tests {
     }
 
     #[test]
+    fn to_neighbor_state_maps_every_variant_one_to_one() {
+        assert_eq!(
+            to_neighbor_state(NeighborState::Down),
+            OspfNeighborState::Down
+        );
+        assert_eq!(
+            to_neighbor_state(NeighborState::Init),
+            OspfNeighborState::Init
+        );
+        assert_eq!(
+            to_neighbor_state(NeighborState::TwoWay),
+            OspfNeighborState::TwoWay
+        );
+        assert_eq!(
+            to_neighbor_state(NeighborState::ExStart),
+            OspfNeighborState::ExStart
+        );
+        assert_eq!(
+            to_neighbor_state(NeighborState::Exchange),
+            OspfNeighborState::Exchange
+        );
+        assert_eq!(
+            to_neighbor_state(NeighborState::Loading),
+            OspfNeighborState::Loading
+        );
+        assert_eq!(
+            to_neighbor_state(NeighborState::Full),
+            OspfNeighborState::Full
+        );
+    }
+
+    #[test]
     fn router_lsa_links_skips_p2p_link_with_no_neighbor() {
         let cfg = link("eth0.0", 10);
         let status = LinkStatus::new(NetworkType::PointToPoint);
@@ -1606,6 +1660,40 @@ mod tests {
             lsdb.get(&key).unwrap().header.sequence_number,
             lsa::INITIAL_SEQUENCE_NUMBER
         );
+    }
+
+    #[tokio::test]
+    async fn database_summaries_flattens_every_area() {
+        let manager = LinkManager::new();
+        let area = Ipv4Addr::new(0, 0, 0, 0);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let lsdb = manager.lsdb_for(area).await;
+        lsdb.lock().await.install(Lsa {
+            header: LsaHeader {
+                age: 5,
+                options: 0,
+                lsa_type: lsa::LSA_TYPE_ROUTER,
+                link_state_id: router_id,
+                advertising_router: router_id,
+                sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+                checksum: 0xabcd,
+                length: 0,
+            },
+            body: LsaBody::Router(RouterLsaBody {
+                flags: 0,
+                links: Vec::new(),
+            }),
+        });
+
+        let summaries = manager.database_summaries().await;
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].area_id, area);
+        assert_eq!(summaries[0].lsa_type, lsa::LSA_TYPE_ROUTER);
+        assert_eq!(summaries[0].link_state_id, router_id);
+        assert_eq!(summaries[0].advertising_router, router_id);
+        assert_eq!(summaries[0].sequence_number, lsa::INITIAL_SEQUENCE_NUMBER);
+        assert_eq!(summaries[0].age, 5);
+        assert_eq!(summaries[0].checksum, 0xabcd);
     }
 
     #[test]

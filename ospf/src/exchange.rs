@@ -55,12 +55,16 @@ pub enum Action {
     SendLsr(Vec<LsaKey>),
     SendLsu(Vec<Arc<Lsa>>),
     SendLsAck(Vec<LsaHeader>),
-    /// A newly-received LSA that's newer than what's held (or new outright)
-    /// — install it into the LSDB and reflood it to other adjacent
-    /// neighbors. Not yet emitted by anything in this module: `on_lsu_received`
-    /// installs directly into the `Lsdb` it's handed rather than deferring
-    /// through this action, since cross-link reflooding (which would need
-    /// this to carry the LSA out to `link.rs`) isn't implemented yet.
+    /// A newly-received LSA that's newer than what's held (or new outright).
+    /// Never emitted: `on_lsu_received` installs directly into the `Lsdb` it's
+    /// handed, and cross-link propagation is left entirely to `link.rs`'s
+    /// periodic `flood_full_neighbors` resend (every link in an area shares
+    /// one `Lsdb`, so the LSA is already "installed" everywhere that matters
+    /// the moment `on_lsu_received` runs — only *telling already-`Full`
+    /// neighbors sooner* is missing, and nothing here needs that told
+    /// quickly). This variant is kept, unused, as the natural extension point
+    /// if a future SPF phase ever needs event-driven flooding's tighter
+    /// latency bound — see `link.rs`'s `flood_full_neighbors` `ponytail:` note.
     InstallAndFlood(Arc<Lsa>),
     NeighborEvent(Event),
 }

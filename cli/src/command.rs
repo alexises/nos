@@ -549,6 +549,9 @@ pub enum Command {
     /// `show ospf neigh` — a one-line-per-link neighbor summary across every
     /// configured OSPF instance.
     ShowOspfNeigh,
+    /// `show ospf database` — every installed LSA's header, across every
+    /// configured OSPF instance.
+    ShowOspfDatabase,
     /// `clear bgp <instance> <peer> soft-in` — ask `<peer>`'s live session
     /// on `<instance>` to resend its routes (RFC 2918 route refresh).
     ClearBgpSoftIn {
@@ -665,6 +668,7 @@ fn parse_show(t: &[&str]) -> Option<Command> {
         },
         ["bgp", "brief"] => Command::ShowBgpBrief,
         ["ospf", "neigh"] => Command::ShowOspfNeigh,
+        ["ospf", "database"] => Command::ShowOspfDatabase,
         ["source"] => Command::ShowSource,
         _ => return None,
     })

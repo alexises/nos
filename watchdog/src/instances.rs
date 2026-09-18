@@ -49,10 +49,9 @@ pub struct Managed {
     pub daemon: &'static str,
     /// What one object is called, for log lines: `"BGP instance"`.
     pub noun: &'static str,
-    /// `None` for `nos-ospfd`, which has no IPC query listener yet (see
-    /// `ospf/CLAUDE.md`) — so it gets neither a `--listen-socket` nor a
-    /// registry entry. `EndpointKind::OspfInstance` already exists for
-    /// whichever future change gives it one.
+    /// `None` for a daemon family with no IPC query listener to register —
+    /// every family managed here (`nos-bgpd`, `nos-ribd`, `nos-ospfd`)
+    /// currently has one, so `main.rs` always passes `Some` today.
     pub endpoint: Option<Endpoint>,
     pub config_socket: PathBuf,
     pub log_socket: PathBuf,

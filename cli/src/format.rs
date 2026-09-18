@@ -5,10 +5,10 @@ use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
     BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
     Interface, InterfaceAddress, InterfaceStatus, LinkInterfaceState, LogEntry, LogLevel,
-    NeighborSummary, NextHopMode, OspfArea, OspfInstance, OspfNeighborState, OspfProfile,
-    PeerSummary, PolicyDefinition, PrefixList, PrefixListEntry, PrefixRoutes, RouteSourceKind,
-    RoutingTable, SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface,
-    SubinterfaceStatus, SwitchingProfile, TransactionSnapshot, VlanTag,
+    LsaSummary, NeighborSummary, NextHopMode, OspfArea, OspfInstance, OspfNeighborState,
+    OspfProfile, PeerSummary, PolicyDefinition, PrefixList, PrefixListEntry, PrefixRoutes,
+    RouteSourceKind, RoutingTable, SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance,
+    Subinterface, SubinterfaceStatus, SwitchingProfile, TransactionSnapshot, VlanTag,
 };
 
 use crate::session::Path;
@@ -423,6 +423,10 @@ fn render_ospf_neighbor_state(state: OspfNeighborState) -> &'static str {
         OspfNeighborState::Down => "Down",
         OspfNeighborState::Init => "Init",
         OspfNeighborState::TwoWay => "2-Way",
+        OspfNeighborState::ExStart => "ExStart",
+        OspfNeighborState::Exchange => "Exchange",
+        OspfNeighborState::Loading => "Loading",
+        OspfNeighborState::Full => "Full",
     }
 }
 
@@ -469,6 +473,29 @@ pub fn render_ospf_neighbors(instance: &str, neighbors: &[NeighborSummary]) -> S
             link.priority,
             render_ip_or_dash(link.dr),
             render_ip_or_dash(link.bdr),
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Render one OSPF instance's installed-LSA headers, one line per LSA —
+/// used for `show ospf database`. Mirrors `render_ospf_neighbors`' shape.
+pub fn render_ospf_database(instance: &str, entries: &[LsaSummary]) -> String {
+    if entries.is_empty() {
+        return format!("ospf instance {instance}: no LSAs installed");
+    }
+    let mut lines = vec![format!("ospf instance {instance}:")];
+    for lsa in entries {
+        lines.push(format!(
+            "  area {} type {} link-state-id {} advertising-router {} \
+             sequence 0x{:08x} age {} checksum 0x{:04x}",
+            lsa.area_id,
+            lsa.lsa_type,
+            lsa.link_state_id,
+            lsa.advertising_router,
+            lsa.sequence_number,
+            lsa.age,
+            lsa.checksum,
         ));
     }
     lines.join("\n")
@@ -1624,6 +1651,32 @@ mod tests {
             "ospf instance o1:\n  broadcast-domain:bd1 area 0.0.0.0 if-state backup neighbor \
              9.9.9.10 2-Way last-hello - hello-interval 10 dead-interval 40 priority 1 \
              neighbor-priority 200 dr 9.9.9.10 bdr 1.1.1.1"
+        );
+    }
+
+    #[test]
+    fn render_ospf_database_empty_list() {
+        assert_eq!(
+            render_ospf_database("o1", &[]),
+            "ospf instance o1: no LSAs installed"
+        );
+    }
+
+    #[test]
+    fn render_ospf_database_one_lsa() {
+        let lsa = LsaSummary {
+            area_id: "0.0.0.0".parse().unwrap(),
+            lsa_type: 1,
+            link_state_id: "1.1.1.1".parse().unwrap(),
+            advertising_router: "1.1.1.1".parse().unwrap(),
+            sequence_number: 0x8000_0001u32 as i32,
+            age: 42,
+            checksum: 0xabcd,
+        };
+        assert_eq!(
+            render_ospf_database("o1", &[lsa]),
+            "ospf instance o1:\n  area 0.0.0.0 type 1 link-state-id 1.1.1.1 \
+             advertising-router 1.1.1.1 sequence 0x80000001 age 42 checksum 0xabcd"
         );
     }
 }

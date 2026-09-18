@@ -66,6 +66,12 @@ async fn handle_connection(
                     break;
                 }
             }
+            OspfRequest::GetDatabase => {
+                let event = OspfEvent::Database(links.database_summaries().await);
+                if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
         }
     }
 }

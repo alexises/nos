@@ -34,7 +34,9 @@ pub use ops::{
     PolicyDefinitionOp, PrefixListOp, RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp,
     SubinterfaceOp, SwitchingProfileOp,
 };
-pub use ospf::{LinkInterfaceState, NeighborSummary, OspfEvent, OspfNeighborState, OspfRequest};
+pub use ospf::{
+    LinkInterfaceState, LsaSummary, NeighborSummary, OspfEvent, OspfNeighborState, OspfRequest,
+};
 pub use paths::{DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 pub use rib::{
     BgpRoute, BgpRouteUpdate, PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind,

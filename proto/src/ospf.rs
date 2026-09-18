@@ -1,27 +1,30 @@
-//! `nos-ospfd`'s IPC query protocol — backs `nos-cli`'s `show ospf neigh`.
-//! Mirrors `bgp`'s shape: a request/event pair framed by `IpcCodec` over a
-//! Unix socket resolved via the watchdog broker (`ServiceRef::OspfInstance`).
+//! `nos-ospfd`'s IPC query protocol — backs `nos-cli`'s `show ospf neigh`/
+//! `show ospf database`. Mirrors `bgp`'s shape: a request/event pair framed
+//! by `IpcCodec` over a Unix socket resolved via the watchdog broker
+//! (`ServiceRef::OspfInstance`).
 //!
-//! This phase's neighbor-state ceiling is Hello-protocol discovery only, up
-//! to `TwoWay` — see `ospf/CLAUDE.md`. No DBD/LSR/LSU/LSAck, no LSDB, no
-//! ExStart/Exchange/Loading/Full — true on both point-to-point and
-//! broadcast (RFC 2328 DR/BDR-elected) links.
+//! Neighbor establishment reaches the full RFC 2328 §10.5 ladder (`Down`
+//! through `Full`), backed by a real per-area LSDB — see `ospf/CLAUDE.md`.
 
 use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
-/// One neighbor's state, as reported by `nos-ospfd`. `Down` is an ongoing,
-/// valid state (no Hello received yet, or the dead-interval expired) — a
-/// point-to-point link always reports at least one row, even `Down`; a
-/// broadcast link reports one row per currently-known neighbor (zero if
-/// none yet — there's no single fixed peer to show a placeholder for on a
-/// multi-access segment).
+/// One neighbor's state, as reported by `nos-ospfd` — the full RFC 2328
+/// §10.5 ladder. `Down` is an ongoing, valid state (no Hello received yet,
+/// or the dead-interval expired) — a point-to-point link always reports at
+/// least one row, even `Down`; a broadcast link reports one row per
+/// currently-known neighbor (zero if none yet — there's no single fixed peer
+/// to show a placeholder for on a multi-access segment).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OspfNeighborState {
     Down,
     Init,
     TwoWay,
+    ExStart,
+    Exchange,
+    Loading,
+    Full,
 }
 
 /// RFC 2328 §9.1's interface states, as they apply to this phase's Hello-only
@@ -71,6 +74,20 @@ pub struct NeighborSummary {
     pub bdr: Option<Ipv4Addr>,
 }
 
+/// One installed LSA's header fields, for `show ospf database` — never the
+/// full LSA body, which this NOS has no operator-facing use for yet (no SPF
+/// consumer to explain a route's ancestry).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LsaSummary {
+    pub area_id: Ipv4Addr,
+    pub lsa_type: u8,
+    pub link_state_id: Ipv4Addr,
+    pub advertising_router: Ipv4Addr,
+    pub sequence_number: i32,
+    pub age: u16,
+    pub checksum: u16,
+}
+
 /// Messages sent from a client to one `nos-ospfd` instance's IPC socket.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -80,10 +97,13 @@ pub struct NeighborSummary {
 pub enum OspfRequest {
     /// One-shot: every configured link's current neighbor summary.
     GetNeighbors,
+    /// One-shot: every installed LSA's header, across every area.
+    GetDatabase,
 }
 
 /// Messages sent from `nos-ospfd` to a query client.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum OspfEvent {
     Neighbors(Vec<NeighborSummary>),
+    Database(Vec<LsaSummary>),
 }

@@ -873,6 +873,27 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      reported individually rather than aborting the whole command.",
         },
         Always),
+    spec!(["show" "ospf" "neigh"],
+        "show ospf neigh",
+        Doc::Local {
+            summary: "Show a one-line-per-neighbor OSPF adjacency summary across every instance.",
+            detail: "Queries every configured OSPF instance's nos-ospfd (each resolved via \
+                     nos-watchdogd) for its links' current neighbor state, interface state, \
+                     last-hello age, and elected DR/BDR. An instance whose nos-ospfd isn't \
+                     running is reported individually rather than aborting the whole command.",
+        },
+        Always),
+    spec!(["show" "ospf" "database"],
+        "show ospf database",
+        Doc::Local {
+            summary: "Show every installed LSA's header across every OSPF instance.",
+            detail: "Queries every configured OSPF instance's nos-ospfd (each resolved via \
+                     nos-watchdogd) for its per-area LSDB's installed LSA headers (type, \
+                     link-state-id, advertising router, sequence number, age, checksum). An \
+                     instance whose nos-ospfd isn't running is reported individually rather \
+                     than aborting the whole command.",
+        },
+        Always),
     spec!(["clear" "bgp" (BgpInstanceName) (Plain) "soft-in"],
         "clear bgp <instance> <peer> soft-in",
         Doc::Local {

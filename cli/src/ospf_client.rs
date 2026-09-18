@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, NeighborSummary, OspfEvent, OspfRequest};
+use nos_proto::{IpcCodec, LsaSummary, NeighborSummary, OspfEvent, OspfRequest};
 use thiserror::Error;
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -18,10 +18,19 @@ pub enum OspfClientError {
     ConnectionClosed,
     #[error("i/o error talking to nos-ospfd: {0}")]
     Io(#[from] std::io::Error),
+    #[error("nos-ospfd sent an unexpected reply: {0}")]
+    UnexpectedReply(&'static str),
 }
 
-/// Fetches every configured link's current neighbor summary.
-pub async fn get_neighbors(ospf_socket: &Path) -> Result<Vec<NeighborSummary>, OspfClientError> {
+async fn connect(
+    ospf_socket: &Path,
+) -> Result<
+    (
+        FramedRead<tokio::net::unix::OwnedReadHalf, IpcCodec<OspfEvent>>,
+        FramedWrite<tokio::net::unix::OwnedWriteHalf, IpcCodec<OspfRequest>>,
+    ),
+    OspfClientError,
+> {
     let stream =
         UnixStream::connect(ospf_socket)
             .await
@@ -30,11 +39,31 @@ pub async fn get_neighbors(ospf_socket: &Path) -> Result<Vec<NeighborSummary>, O
                 source,
             })?;
     let (r, w) = stream.into_split();
-    let mut reader = FramedRead::new(r, IpcCodec::<OspfEvent>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<OspfRequest>::default());
+    Ok((
+        FramedRead::new(r, IpcCodec::<OspfEvent>::default()),
+        FramedWrite::new(w, IpcCodec::<OspfRequest>::default()),
+    ))
+}
+
+/// Fetches every configured link's current neighbor summary.
+pub async fn get_neighbors(ospf_socket: &Path) -> Result<Vec<NeighborSummary>, OspfClientError> {
+    let (mut reader, mut writer) = connect(ospf_socket).await?;
     writer.send(OspfRequest::GetNeighbors).await?;
     match reader.next().await {
         Some(Ok(OspfEvent::Neighbors(neighbors))) => Ok(neighbors),
+        Some(Ok(_)) => Err(OspfClientError::UnexpectedReply("reply to GetNeighbors")),
+        Some(Err(e)) => Err(OspfClientError::Io(e)),
+        None => Err(OspfClientError::ConnectionClosed),
+    }
+}
+
+/// Fetches every installed LSA's header, across every area.
+pub async fn get_database(ospf_socket: &Path) -> Result<Vec<LsaSummary>, OspfClientError> {
+    let (mut reader, mut writer) = connect(ospf_socket).await?;
+    writer.send(OspfRequest::GetDatabase).await?;
+    match reader.next().await {
+        Some(Ok(OspfEvent::Database(entries))) => Ok(entries),
+        Some(Ok(_)) => Err(OspfClientError::UnexpectedReply("reply to GetDatabase")),
         Some(Err(e)) => Err(OspfClientError::Io(e)),
         None => Err(OspfClientError::ConnectionClosed),
     }

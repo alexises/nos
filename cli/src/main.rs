@@ -693,6 +693,10 @@ async fn handle_action(
             show_ospf_neigh(socket, watchdog_socket).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowOspfDatabase => {
+            show_ospf_database(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
         Resolved::ClearBgpSoftIn { instance, peer } => {
             clear_bgp_soft_in(socket, watchdog_socket, &instance, peer).await;
             Outcome::Continue(mode)
@@ -1054,6 +1058,42 @@ async fn show_ospf_neigh(config_socket: &Path, watchdog_socket: &Path) {
                         "{}",
                         format::render_ospf_neighbors(&instance.name, &neighbors)
                     );
+                }
+                Err(e) => eprintln!("error: {e}"),
+            },
+            Ok(None) => println!("ospf instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {e}"),
+        }
+    }
+}
+
+/// `show ospf database` — mirrors `show_ospf_neigh` exactly, one instance at
+/// a time, reporting a not-running instance individually rather than
+/// aborting the whole command.
+async fn show_ospf_database(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+
+    if cfg.ospf_instances.is_empty() {
+        println!("no ospf instances configured");
+        return;
+    }
+
+    for instance in &cfg.ospf_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::OspfInstance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(ospf_socket)) => match ospf_client::get_database(&ospf_socket).await {
+                Ok(entries) => {
+                    println!("{}", format::render_ospf_database(&instance.name, &entries));
                 }
                 Err(e) => eprintln!("error: {e}"),
             },
