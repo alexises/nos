@@ -478,7 +478,7 @@ mod tests {
     fn sample() -> HelloPacket {
         HelloPacket {
             router_id: Ipv4Addr::new(9, 9, 9, 9),
-            area_id: Ipv4Addr::new(0, 0, 0, 0),
+            area_id: Ipv4Addr::UNSPECIFIED,
             hello_interval: 10,
             dead_interval: 40,
             router_priority: 1,
@@ -491,7 +491,7 @@ mod tests {
     fn sample_dbd() -> DbdPacket {
         DbdPacket {
             router_id: Ipv4Addr::new(9, 9, 9, 9),
-            area_id: Ipv4Addr::new(0, 0, 0, 0),
+            area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 1500,
             options: 0,
             init: true,
@@ -504,7 +504,7 @@ mod tests {
                 lsa_type: lsa::LSA_TYPE_ROUTER,
                 link_state_id: Ipv4Addr::new(9, 9, 9, 9),
                 advertising_router: Ipv4Addr::new(9, 9, 9, 9),
-                sequence_number: 0x8000_0001u32 as i32,
+                sequence_number: 0x8000_0001u32.cast_signed(),
                 checksum: 0x1234,
                 length: 24,
             }],
@@ -514,7 +514,7 @@ mod tests {
     fn sample_lsr() -> LsrPacket {
         LsrPacket {
             router_id: Ipv4Addr::new(9, 9, 9, 9),
-            area_id: Ipv4Addr::new(0, 0, 0, 0),
+            area_id: Ipv4Addr::UNSPECIFIED,
             requests: vec![LsaKey {
                 lsa_type: lsa::LSA_TYPE_ROUTER,
                 link_state_id: Ipv4Addr::new(9, 9, 9, 10),
@@ -526,7 +526,7 @@ mod tests {
     fn sample_lsu() -> LsuPacket {
         LsuPacket {
             router_id: Ipv4Addr::new(9, 9, 9, 9),
-            area_id: Ipv4Addr::new(0, 0, 0, 0),
+            area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![
                 Lsa {
                     header: LsaHeader {
@@ -535,7 +535,7 @@ mod tests {
                         lsa_type: lsa::LSA_TYPE_ROUTER,
                         link_state_id: Ipv4Addr::new(9, 9, 9, 9),
                         advertising_router: Ipv4Addr::new(9, 9, 9, 9),
-                        sequence_number: 0x8000_0001u32 as i32,
+                        sequence_number: 0x8000_0001u32.cast_signed(),
                         checksum: 0,
                         length: 0,
                     },
@@ -551,7 +551,7 @@ mod tests {
                         lsa_type: lsa::LSA_TYPE_NETWORK,
                         link_state_id: Ipv4Addr::new(10, 0, 0, 1),
                         advertising_router: Ipv4Addr::new(9, 9, 9, 9),
-                        sequence_number: 0x8000_0001u32 as i32,
+                        sequence_number: 0x8000_0001u32.cast_signed(),
                         checksum: 0,
                         length: 0,
                     },
@@ -567,14 +567,14 @@ mod tests {
     fn sample_lsack() -> LsAckPacket {
         LsAckPacket {
             router_id: Ipv4Addr::new(9, 9, 9, 9),
-            area_id: Ipv4Addr::new(0, 0, 0, 0),
+            area_id: Ipv4Addr::UNSPECIFIED,
             lsa_headers: vec![LsaHeader {
                 age: 1,
                 options: 0,
                 lsa_type: lsa::LSA_TYPE_ROUTER,
                 link_state_id: Ipv4Addr::new(9, 9, 9, 9),
                 advertising_router: Ipv4Addr::new(9, 9, 9, 9),
-                sequence_number: 0x8000_0001u32 as i32,
+                sequence_number: 0x8000_0001u32.cast_signed(),
                 checksum: 0x1234,
                 length: 24,
             }],
@@ -758,7 +758,7 @@ mod tests {
             lsa_type: lsa::LSA_TYPE_NETWORK,
             link_state_id: Ipv4Addr::new(10, 0, 0, 1),
             advertising_router: Ipv4Addr::new(9, 9, 9, 9),
-            sequence_number: 0x8000_0002u32 as i32,
+            sequence_number: 0x8000_0002u32.cast_signed(),
             checksum: 0x5678,
             length: 28,
         });

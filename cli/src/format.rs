@@ -348,6 +348,7 @@ fn render_route_source(source: RouteSourceKind) -> &'static str {
     match source {
         RouteSourceKind::Static => "static",
         RouteSourceKind::Bgp => "bgp",
+        RouteSourceKind::Ospf => "ospf",
     }
 }
 
@@ -1669,7 +1670,7 @@ mod tests {
             lsa_type: 1,
             link_state_id: "1.1.1.1".parse().unwrap(),
             advertising_router: "1.1.1.1".parse().unwrap(),
-            sequence_number: 0x8000_0001u32 as i32,
+            sequence_number: 0x8000_0001u32.cast_signed(),
             age: 42,
             checksum: 0xabcd,
         };

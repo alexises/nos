@@ -437,7 +437,7 @@ mod tests {
         // this, the slave waits here forever for a message that will never
         // come again.
         let mut adj = AdjacencyData::default();
-        let master_lsa = header("1.1.1.1", 0x8000_0001u32 as i32);
+        let master_lsa = header("1.1.1.1", 0x8000_0001u32.cast_signed());
         let poll = DbdPacket {
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
@@ -523,7 +523,7 @@ mod tests {
             dd_sequence_number: 7,
             ..Default::default()
         };
-        let neighbor_lsa = header("1.1.1.1", 0x8000_0001u32 as i32);
+        let neighbor_lsa = header("1.1.1.1", 0x8000_0001u32.cast_signed());
         let reply = DbdPacket {
             router_id: router_id("9.9.9.5"),
             area_id: Ipv4Addr::UNSPECIFIED,
@@ -686,7 +686,7 @@ mod tests {
             dd_sequence_number: 5,
             ..Default::default()
         };
-        let neighbor_header = header("1.1.1.1", 0x8000_0001u32 as i32);
+        let neighbor_header = header("1.1.1.1", 0x8000_0001u32.cast_signed());
         let dbd = DbdPacket {
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
@@ -722,8 +722,8 @@ mod tests {
             dd_sequence_number: 5,
             ..Default::default()
         };
-        let local = header("1.1.1.1", 0x8000_0002u32 as i32);
-        let neighbor_header = header("1.1.1.1", 0x8000_0001u32 as i32);
+        let local = header("1.1.1.1", 0x8000_0002u32.cast_signed());
+        let neighbor_header = header("1.1.1.1", 0x8000_0001u32.cast_signed());
         let dbd = DbdPacket {
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
@@ -877,7 +877,7 @@ mod tests {
     fn lsr_for_held_lsa_sends_lsu_and_tracks_retransmission() {
         let mut adj = AdjacencyData::default();
         let mut lsdb = Lsdb::new();
-        let l = full_lsa("1.1.1.1", 0x8000_0001u32 as i32);
+        let l = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
         lsdb.install(l.clone());
         let lsr = LsrPacket {
             router_id: router_id("9.9.9.10"),
@@ -913,7 +913,7 @@ mod tests {
             ..Default::default()
         };
         let mut lsdb = Lsdb::new();
-        let l = full_lsa("1.1.1.1", 0x8000_0001u32 as i32);
+        let l = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
         let lsu = LsuPacket {
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
@@ -936,7 +936,7 @@ mod tests {
     fn lsu_with_stale_duplicate_is_acked_but_not_reported_as_newly_installed() {
         let mut adj = AdjacencyData::default();
         let mut lsdb = Lsdb::new();
-        let l = full_lsa("1.1.1.1", 0x8000_0001u32 as i32);
+        let l = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
         lsdb.install(l.clone());
         let lsu = LsuPacket {
             router_id: router_id("9.9.9.10"),
@@ -961,7 +961,7 @@ mod tests {
             ..Default::default()
         };
         let mut lsdb = Lsdb::new();
-        let l = full_lsa("1.1.1.1", 0x8000_0001u32 as i32);
+        let l = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
         let lsu = LsuPacket {
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
@@ -975,7 +975,7 @@ mod tests {
 
     #[test]
     fn lsack_clears_retransmission_list() {
-        let l = full_lsa("1.1.1.1", 0x8000_0001u32 as i32);
+        let l = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
         let mut adj = AdjacencyData {
             retransmission_list: HashMap::from([(l.header.key(), Arc::new(l.clone()))]),
             ..Default::default()
