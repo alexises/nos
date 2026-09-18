@@ -2,14 +2,17 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec, SubinterfaceStatus};
+use nos_proto::{
+    BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec,
+    SubinterfaceStatus,
+};
 use tokio::net::UnixListener;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{error, info, trace, warn};
 
-use crate::state::{InterfaceState, Interfaces};
+use crate::state::{BroadcastDomainState, InterfaceState, Interfaces};
 
 /// Binds `listen_socket` and spawns the IPC accept loop for interface
 /// queries.
@@ -71,6 +74,10 @@ async fn dispatch(interfaces: &Arc<RwLock<Interfaces>>, req: InterfaceRequest) -
             Some(iface) => InterfaceEvent::Interface(to_status(iface.clone())),
             None => InterfaceEvent::NotFound,
         },
+        InterfaceRequest::GetBroadcastDomain { name } => match guard.get_domain(&name) {
+            Some(domain) => InterfaceEvent::BroadcastDomain(to_domain_status(domain.clone())),
+            None => InterfaceEvent::NotFound,
+        },
     }
 }
 
@@ -89,5 +96,13 @@ fn to_status(iface: InterfaceState) -> InterfaceStatus {
                 routing_table: s.routing_table,
             })
             .collect(),
+    }
+}
+
+fn to_domain_status(domain: BroadcastDomainState) -> BroadcastDomainStatus {
+    BroadcastDomainStatus {
+        name: domain.name,
+        addresses: domain.addresses,
+        routing_table: domain.routing_table,
     }
 }

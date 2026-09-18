@@ -56,12 +56,15 @@ pub struct InterfaceState {
 #[derive(Debug, Clone, Default)]
 pub struct Interfaces {
     by_name: HashMap<String, InterfaceState>,
+    /// Every `BroadcastDomain`'s desired state as of the last resync —
+    /// queryable over IPC (`InterfaceRequest::GetBroadcastDomain`), mirrors
+    /// `by_name`'s role for interfaces.
+    by_domain: HashMap<String, BroadcastDomainState>,
     /// Every `BroadcastDomain` name configured as of the last resync —
-    /// tracked purely so the next resync can diff for domains removed from
-    /// config and call `driver.remove_broadcast_domain`, the same
-    /// "previous vs current, call remove for what's gone" shape `by_name`
-    /// itself already uses for interfaces. Not exposed over IPC — nothing
-    /// queries domains through `nos-interfaced`.
+    /// tracked so the next resync can diff for domains removed from config
+    /// and call `driver.remove_broadcast_domain`, the same "previous vs
+    /// current, call remove for what's gone" shape `by_name` itself already
+    /// uses for interfaces.
     domains: HashSet<String>,
 }
 
@@ -72,6 +75,10 @@ impl Interfaces {
 
     pub fn get(&self, name: &str) -> Option<&InterfaceState> {
         self.by_name.get(name)
+    }
+
+    pub fn get_domain(&self, name: &str) -> Option<&BroadcastDomainState> {
+        self.by_domain.get(name)
     }
 
     /// Every interface, ordered by name — for serving an unfiltered
@@ -100,6 +107,7 @@ pub async fn build_from_config(
     driver: &dyn InterfaceDriver,
     previous: &Interfaces,
 ) -> Interfaces {
+    let mut by_domain = HashMap::with_capacity(cfg.broadcast_domains.len());
     for domain in &cfg.broadcast_domains {
         let state = BroadcastDomainState {
             name: domain.name.clone(),
@@ -109,6 +117,7 @@ pub async fn build_from_config(
         if let Err(e) = driver.ensure_broadcast_domain(&state).await {
             warn!(domain = %state.name, error = %e, "failed to ensure broadcast domain bridge");
         }
+        by_domain.insert(state.name.clone(), state);
     }
     let domains: HashSet<String> = cfg
         .broadcast_domains
@@ -183,7 +192,11 @@ pub async fn build_from_config(
         }
     }
 
-    Interfaces { by_name, domains }
+    Interfaces {
+        by_name,
+        by_domain,
+        domains,
+    }
 }
 
 #[cfg(test)]
@@ -453,6 +466,32 @@ mod tests {
             addresses: vec![addr],
             routing_table: Some("rt1".to_string()),
         })));
+    }
+
+    #[tokio::test]
+    async fn get_domain_returns_configured_domain() {
+        let mut config = cfg(vec![]);
+        let addr = InterfaceAddress {
+            address: "10.0.0.1/24".parse().unwrap(),
+            label: None,
+        };
+        config.broadcast_domains = vec![nos_proto::BroadcastDomain {
+            name: "bd1".to_string(),
+            addresses: vec![addr.clone()],
+            routing_table: Some("rt1".to_string()),
+            ospf_profile: None,
+        }];
+        let interfaces = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        let domain = interfaces.get_domain("bd1").unwrap();
+        assert_eq!(domain.addresses, vec![addr]);
+        assert_eq!(domain.routing_table.as_deref(), Some("rt1"));
+    }
+
+    #[tokio::test]
+    async fn get_domain_missing_domain_is_none() {
+        let interfaces =
+            build_from_config(&cfg(vec![]), &NoopInterfaceDriver, &Interfaces::new()).await;
+        assert!(interfaces.get_domain("bd1").is_none());
     }
 
     #[tokio::test]

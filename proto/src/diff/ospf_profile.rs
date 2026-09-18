@@ -1,4 +1,4 @@
-use crate::schema::OspfProfile;
+use crate::schema::{NetworkType, OspfProfile};
 
 use super::{DiffStatus, FieldDiff, SectionDiff};
 
@@ -60,6 +60,28 @@ fn dead_interval_str(p: &OspfProfile) -> String {
         .map_or_else(|| "default (40s)".to_string(), |d| d.to_string())
 }
 
+/// No default rendered, unlike `hello_interval_str`/`dead_interval_str`/
+/// `priority_str` — this NOS has no SPF/LSDB yet, so `cost` has no
+/// behavioral default to speak of (see `schema::OspfProfile.cost`'s doc
+/// comment).
+fn cost_str(p: &OspfProfile) -> String {
+    p.cost
+        .map_or_else(|| "unset".to_string(), |c| c.to_string())
+}
+
+fn priority_str(p: &OspfProfile) -> String {
+    p.priority
+        .map_or_else(|| "default (1)".to_string(), |pr| pr.to_string())
+}
+
+fn network_type_str(p: &OspfProfile) -> String {
+    match p.network_type {
+        None => "unset (derived from attach point)".to_string(),
+        Some(NetworkType::PointToPoint) => "point-to-point".to_string(),
+        Some(NetworkType::Broadcast) => "broadcast".to_string(),
+    }
+}
+
 fn changed_fields(base: &OspfProfile, candidate: &OspfProfile) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     if base.hello_interval != candidate.hello_interval {
@@ -76,6 +98,27 @@ fn changed_fields(base: &OspfProfile, candidate: &OspfProfile) -> Vec<FieldDiff>
             new: Some(dead_interval_str(candidate)),
         });
     }
+    if base.cost != candidate.cost {
+        fields.push(FieldDiff {
+            label: "cost".to_string(),
+            old: Some(cost_str(base)),
+            new: Some(cost_str(candidate)),
+        });
+    }
+    if base.priority != candidate.priority {
+        fields.push(FieldDiff {
+            label: "priority".to_string(),
+            old: Some(priority_str(base)),
+            new: Some(priority_str(candidate)),
+        });
+    }
+    if base.network_type != candidate.network_type {
+        fields.push(FieldDiff {
+            label: "network-type".to_string(),
+            old: Some(network_type_str(base)),
+            new: Some(network_type_str(candidate)),
+        });
+    }
     fields
 }
 
@@ -88,6 +131,9 @@ mod tests {
             name: name.to_string(),
             hello_interval: None,
             dead_interval: None,
+            cost: None,
+            priority: None,
+            network_type: None,
         }
     }
 
@@ -146,5 +192,47 @@ mod tests {
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].fields.len(), 1);
         assert_eq!(sections[0].fields[0].label, "dead-interval");
+    }
+
+    #[test]
+    fn modified_cost_reports_only_that_field() {
+        let base = vec![profile("p1")];
+        let mut modified = profile("p1");
+        modified.cost = Some(20);
+        let sections = diff_ospf_profiles(&base, &[modified]);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].fields.len(), 1);
+        assert_eq!(sections[0].fields[0].label, "cost");
+        assert_eq!(sections[0].fields[0].old.as_deref(), Some("unset"));
+        assert_eq!(sections[0].fields[0].new.as_deref(), Some("20"));
+    }
+
+    #[test]
+    fn modified_priority_reports_only_that_field() {
+        let base = vec![profile("p1")];
+        let mut modified = profile("p1");
+        modified.priority = Some(200);
+        let sections = diff_ospf_profiles(&base, &[modified]);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].fields.len(), 1);
+        assert_eq!(sections[0].fields[0].label, "priority");
+        assert_eq!(sections[0].fields[0].old.as_deref(), Some("default (1)"));
+        assert_eq!(sections[0].fields[0].new.as_deref(), Some("200"));
+    }
+
+    #[test]
+    fn modified_network_type_reports_only_that_field() {
+        let base = vec![profile("p1")];
+        let mut modified = profile("p1");
+        modified.network_type = Some(NetworkType::Broadcast);
+        let sections = diff_ospf_profiles(&base, &[modified]);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].fields.len(), 1);
+        assert_eq!(sections[0].fields[0].label, "network-type");
+        assert_eq!(
+            sections[0].fields[0].old.as_deref(),
+            Some("unset (derived from attach point)")
+        );
+        assert_eq!(sections[0].fields[0].new.as_deref(), Some("broadcast"));
     }
 }

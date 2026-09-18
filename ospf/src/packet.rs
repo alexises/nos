@@ -2,9 +2,8 @@
 //! plus the Hello packet body (Appendix A.3.2). Pure encode/decode, no I/O —
 //! `socket.rs` sends/receives the bytes this module produces/consumes.
 //!
-//! Only what the Hello-only, point-to-point phase this crate implements
-//! needs (see `ospf/CLAUDE.md`): no `DBD`/`LSR`/`LSU`/`LSAck` packet types,
-//! no LSAs.
+//! Only what this crate implements needs (see `ospf/CLAUDE.md`): no
+//! `DBD`/`LSR`/`LSU`/`LSAck` packet types, no LSAs.
 
 use std::net::Ipv4Addr;
 
@@ -33,20 +32,27 @@ pub enum PacketError {
     TruncatedBody,
 }
 
-/// One Hello packet's contents. Point-to-point simplifications (see
-/// `ospf/CLAUDE.md`): no DR/BDR election, so `network_mask`/router-priority/
-/// designated-router/backup-designated-router carry no real information —
-/// this type omits them entirely rather than modeling always-zero fields.
+/// One Hello packet's contents. `network_mask` is still omitted — RFC 2328
+/// §10.5 says to ignore it on a point-to-point/virtual link, and this NOS
+/// never validates it on a broadcast link either (no address-mask-based
+/// subnet check is implemented), so there's nothing meaningful to do with
+/// it in either direction; it's sent as `0.0.0.0` and ignored on decode.
+/// `router_priority`/`designated_router`/`backup_designated_router` are
+/// real fields, used by `ospf::election`'s DR/BDR election on a `Broadcast`
+/// link (sent, but functionally inert, on a `PointToPoint` one).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelloPacket {
     pub router_id: Ipv4Addr,
     pub area_id: Ipv4Addr,
     pub hello_interval: u16,
     pub dead_interval: u32,
+    pub router_priority: u8,
+    pub designated_router: Ipv4Addr,
+    pub backup_designated_router: Ipv4Addr,
     /// Router IDs this Hello lists as neighbors it has heard from. RFC 2328's
-    /// full neighbor list, collapsed in practice to 0 or 1 entries by every
-    /// caller in this crate — a point-to-point link has at most one
-    /// neighbor — but decoded/encoded honestly as a list.
+    /// full neighbor list — collapsed to 0 or 1 entries on a point-to-point
+    /// link (which has at most one neighbor), but honestly a full list for
+    /// a broadcast link's potentially many neighbors.
     pub neighbors: Vec<Ipv4Addr>,
 }
 
@@ -68,16 +74,15 @@ pub fn encode_hello(pkt: &HelloPacket) -> Vec<u8> {
     buf.extend_from_slice(&0u16.to_be_bytes()); // AuType: none
     buf.extend_from_slice(&[0u8; 8]); // authentication: none
 
-    // Hello body (Appendix A.3.2). Network mask, router priority, and
-    // DR/BDR are meaningless on a point-to-point link (RFC 2328 §10.5) —
-    // sent as zero, ignored on decode.
+    // Hello body (Appendix A.3.2). Network mask stays zero/ignored — see
+    // `HelloPacket`'s doc comment.
     buf.extend_from_slice(&Ipv4Addr::UNSPECIFIED.octets()); // network mask
     buf.extend_from_slice(&pkt.hello_interval.to_be_bytes());
     buf.push(0); // options
-    buf.push(0); // router priority
+    buf.push(pkt.router_priority);
     buf.extend_from_slice(&pkt.dead_interval.to_be_bytes());
-    buf.extend_from_slice(&Ipv4Addr::UNSPECIFIED.octets()); // designated router
-    buf.extend_from_slice(&Ipv4Addr::UNSPECIFIED.octets()); // backup designated router
+    buf.extend_from_slice(&pkt.designated_router.octets());
+    buf.extend_from_slice(&pkt.backup_designated_router.octets());
     for n in &pkt.neighbors {
         buf.extend_from_slice(&n.octets());
     }
@@ -113,7 +118,10 @@ pub fn decode_hello(data: &[u8]) -> Result<HelloPacket, PacketError> {
         return Err(PacketError::TruncatedBody);
     }
     let hello_interval = u16::from_be_bytes([body[4], body[5]]);
+    let router_priority = body[7];
     let dead_interval = u32::from_be_bytes([body[8], body[9], body[10], body[11]]);
+    let designated_router = read_ipv4(body, 12);
+    let backup_designated_router = read_ipv4(body, 16);
 
     let neighbor_bytes = &body[HELLO_BODY_FIXED_LEN..];
     if !neighbor_bytes.len().is_multiple_of(4) {
@@ -131,6 +139,9 @@ pub fn decode_hello(data: &[u8]) -> Result<HelloPacket, PacketError> {
         area_id,
         hello_interval,
         dead_interval,
+        router_priority,
+        designated_router,
+        backup_designated_router,
         neighbors,
     })
 }
@@ -181,6 +192,9 @@ mod tests {
             area_id: Ipv4Addr::new(0, 0, 0, 0),
             hello_interval: 10,
             dead_interval: 40,
+            router_priority: 1,
+            designated_router: Ipv4Addr::new(9, 9, 9, 9),
+            backup_designated_router: Ipv4Addr::new(9, 9, 9, 10),
             neighbors: vec![Ipv4Addr::new(9, 9, 9, 10)],
         }
     }
@@ -209,6 +223,18 @@ mod tests {
         let encoded = encode_hello(&pkt);
         let decoded = decode_hello(&encoded).unwrap();
         assert_eq!(decoded, pkt);
+    }
+
+    #[test]
+    fn round_trip_preserves_dr_bdr_and_priority() {
+        let pkt = sample();
+        let decoded = decode_hello(&encode_hello(&pkt)).unwrap();
+        assert_eq!(decoded.router_priority, pkt.router_priority);
+        assert_eq!(decoded.designated_router, pkt.designated_router);
+        assert_eq!(
+            decoded.backup_designated_router,
+            pkt.backup_designated_router
+        );
     }
 
     #[test]

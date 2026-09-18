@@ -1,12 +1,14 @@
+use std::net::Ipv4Addr;
+
 use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
     BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
-    Interface, InterfaceAddress, InterfaceStatus, LogEntry, LogLevel, NeighborSummary, NextHopMode,
-    OspfArea, OspfInstance, OspfNeighborState, OspfProfile, PeerSummary, PolicyDefinition,
-    PrefixList, PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff,
-    SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface, SubinterfaceStatus,
-    SwitchingProfile, TransactionSnapshot, VlanTag,
+    Interface, InterfaceAddress, InterfaceStatus, LinkInterfaceState, LogEntry, LogLevel,
+    NeighborSummary, NextHopMode, OspfArea, OspfInstance, OspfNeighborState, OspfProfile,
+    PeerSummary, PolicyDefinition, PrefixList, PrefixListEntry, PrefixRoutes, RouteSourceKind,
+    RoutingTable, SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface,
+    SubinterfaceStatus, SwitchingProfile, TransactionSnapshot, VlanTag,
 };
 
 use crate::session::Path;
@@ -424,27 +426,49 @@ fn render_ospf_neighbor_state(state: OspfNeighborState) -> &'static str {
     }
 }
 
-/// Render one OSPF instance's link/neighbor summaries, one line per link —
-/// used for `show ospf neigh`. Mirrors `render_bgp_summary`'s shape.
+fn render_ospf_interface_state(state: LinkInterfaceState) -> &'static str {
+    match state {
+        LinkInterfaceState::PointToPoint => "point-to-point",
+        LinkInterfaceState::Waiting => "waiting",
+        LinkInterfaceState::Dr => "dr",
+        LinkInterfaceState::Backup => "backup",
+        LinkInterfaceState::DrOther => "dr-other",
+    }
+}
+
+fn render_ip_or_dash(addr: Option<Ipv4Addr>) -> String {
+    addr.map_or_else(|| "-".to_string(), |a| a.to_string())
+}
+
+/// Render one OSPF instance's link/neighbor summaries, one line per
+/// neighbor — used for `show ospf neigh`. Mirrors `render_bgp_summary`'s
+/// shape.
 pub fn render_ospf_neighbors(instance: &str, neighbors: &[NeighborSummary]) -> String {
     if neighbors.is_empty() {
         return format!("ospf instance {instance}: no ospf links configured");
     }
     let mut lines = vec![format!("ospf instance {instance}:")];
     for link in neighbors {
-        let neighbor_router_id = link
-            .neighbor_router_id
-            .map_or_else(|| "-".to_string(), |id| id.to_string());
+        let neighbor_router_id = render_ip_or_dash(link.neighbor_router_id);
         let last_hello = link
             .last_hello_secs
             .map_or_else(|| "-".to_string(), |s| format!("{s}s"));
+        let neighbor_priority = link
+            .neighbor_priority
+            .map_or_else(|| "-".to_string(), |p| p.to_string());
         lines.push(format!(
-            "  {} area {} neighbor {neighbor_router_id} {} last-hello {last_hello} hello-interval {} dead-interval {}",
+            "  {} area {} if-state {} neighbor {neighbor_router_id} {} last-hello {last_hello} \
+             hello-interval {} dead-interval {} priority {} neighbor-priority {neighbor_priority} \
+             dr {} bdr {}",
             link.link,
             link.area_id,
+            render_ospf_interface_state(link.interface_state),
             render_ospf_neighbor_state(link.state),
             link.hello_interval,
             link.dead_interval,
+            link.priority,
+            render_ip_or_dash(link.dr),
+            render_ip_or_dash(link.bdr),
         ));
     }
     lines.join("\n")
@@ -1540,11 +1564,16 @@ mod tests {
         NeighborSummary {
             link: link.to_string(),
             area_id: "0.0.0.0".parse().unwrap(),
+            interface_state: LinkInterfaceState::PointToPoint,
             neighbor_router_id: None,
             state: OspfNeighborState::Down,
             last_hello_secs: None,
             hello_interval: 10,
             dead_interval: 40,
+            priority: 1,
+            neighbor_priority: None,
+            dr: None,
+            bdr: None,
         }
     }
 
@@ -1560,7 +1589,9 @@ mod tests {
     fn render_ospf_neighbors_down_link_shows_dash() {
         assert_eq!(
             render_ospf_neighbors("o1", &[down_link("eth0.0")]),
-            "ospf instance o1:\n  eth0.0 area 0.0.0.0 neighbor - Down last-hello - hello-interval 10 dead-interval 40"
+            "ospf instance o1:\n  eth0.0 area 0.0.0.0 if-state point-to-point neighbor - Down \
+             last-hello - hello-interval 10 dead-interval 40 priority 1 neighbor-priority - \
+             dr - bdr -"
         );
     }
 
@@ -1570,9 +1601,29 @@ mod tests {
         link.neighbor_router_id = Some("9.9.9.10".parse().unwrap());
         link.state = OspfNeighborState::TwoWay;
         link.last_hello_secs = Some(3);
+        link.neighbor_priority = Some(1);
         assert_eq!(
             render_ospf_neighbors("o1", &[link]),
-            "ospf instance o1:\n  eth0.0 area 0.0.0.0 neighbor 9.9.9.10 2-Way last-hello 3s hello-interval 10 dead-interval 40"
+            "ospf instance o1:\n  eth0.0 area 0.0.0.0 if-state point-to-point neighbor 9.9.9.10 \
+             2-Way last-hello 3s hello-interval 10 dead-interval 40 priority 1 \
+             neighbor-priority 1 dr - bdr -"
+        );
+    }
+
+    #[test]
+    fn render_ospf_neighbors_broadcast_link_shows_interface_state_and_dr_bdr() {
+        let mut link = down_link("broadcast-domain:bd1");
+        link.interface_state = LinkInterfaceState::Backup;
+        link.neighbor_router_id = Some("9.9.9.10".parse().unwrap());
+        link.state = OspfNeighborState::TwoWay;
+        link.neighbor_priority = Some(200);
+        link.dr = Some("9.9.9.10".parse().unwrap());
+        link.bdr = Some("1.1.1.1".parse().unwrap());
+        assert_eq!(
+            render_ospf_neighbors("o1", &[link]),
+            "ospf instance o1:\n  broadcast-domain:bd1 area 0.0.0.0 if-state backup neighbor \
+             9.9.9.10 2-Way last-hello - hello-interval 10 dead-interval 40 priority 1 \
+             neighbor-priority 200 dr 9.9.9.10 bdr 1.1.1.1"
         );
     }
 }

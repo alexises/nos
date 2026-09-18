@@ -85,6 +85,9 @@ mod tests {
             name: name.to_string(),
             hello_interval: None,
             dead_interval: None,
+            cost: None,
+            priority: None,
+            network_type: None,
         }
     }
 

@@ -8,7 +8,8 @@ use nos_proto::{
 };
 
 use crate::command::{
-    BgpInstanceField, BgpPeerGroupField, Command, DeleteTarget, EditTarget, SetTarget,
+    BgpInstanceField, BgpPeerGroupField, Command, DeleteTarget, EditTarget, OspfProfileField,
+    SetTarget,
 };
 
 /// Navigation position within the transaction's config tree.
@@ -515,6 +516,7 @@ const NO_CURRENT_PREFIX_LIST: &str = "no current prefix-list — use 'edit prefi
 const NO_CURRENT_SWITCHING_PROFILE: &str = "no current switching-profile — use 'edit switching-profile <name>' or the fully-qualified 'set switching-profile <name> ...' form";
 const NO_CURRENT_OSPF_INSTANCE: &str = "no current ospf instance — use 'edit ospf instance <name>' or the fully-qualified 'set ospf instance <name> ...' form";
 const NO_CURRENT_OSPF_AREA: &str = "no current ospf area — use 'edit ospf instance <name> area <area-id>' or 'edit area <area-id>' while navigated into an ospf instance";
+const NO_CURRENT_OSPF_PROFILE: &str = "no current ospf profile — use 'edit ospf instance <name> area <area-id> profile <name>' or 'edit profile <name>' while navigated into an ospf area";
 const ALREADY_AT_TOP: &str = "already at the top level";
 
 /// The three L3 attachment points `set address` / `set routing-table` (and
@@ -620,6 +622,17 @@ impl Path {
         match self {
             Path::OspfArea { instance, area_id } => Ok((instance, *area_id)),
             _ => Err(NO_CURRENT_OSPF_AREA),
+        }
+    }
+
+    pub(crate) fn ospf_profile(&self) -> Result<(&str, Ipv4Addr, &str), &'static str> {
+        match self {
+            Path::OspfProfile {
+                instance,
+                area_id,
+                name,
+            } => Ok((instance, *area_id, name)),
+            _ => Err(NO_CURRENT_OSPF_PROFILE),
         }
     }
 
@@ -837,6 +850,22 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             let (instance, group) = path.peer_group()?;
             Resolved::ApplyOp {
                 op: peer_group_set_op(instance.to_string(), group.to_string(), field),
+                after: PathAfter::Stay,
+            }
+        }
+        Command::Set(SetTarget::OspfProfile {
+            instance,
+            area_id,
+            name,
+            field,
+        }) => Resolved::ApplyOp {
+            op: ospf_profile_set_op(instance, area_id, name, field),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::OspfProfileRelative { field }) => {
+            let (instance, area_id, name) = path.ospf_profile()?;
+            Resolved::ApplyOp {
+                op: ospf_profile_set_op(instance.to_string(), area_id, name.to_string(), field),
                 after: PathAfter::Stay,
             }
         }
@@ -1445,6 +1474,49 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 BgpPeerGroupOp::ClearKeepaliveInterval { instance, name }
             })?
         }
+        Command::Delete(DeleteTarget::HelloInterval) => {
+            ospf_profile_clear(path, |instance, area_id, name| {
+                OspfProfileOp::ClearHelloInterval {
+                    instance,
+                    area_id,
+                    name,
+                }
+            })?
+        }
+        Command::Delete(DeleteTarget::DeadInterval) => {
+            ospf_profile_clear(path, |instance, area_id, name| {
+                OspfProfileOp::ClearDeadInterval {
+                    instance,
+                    area_id,
+                    name,
+                }
+            })?
+        }
+        Command::Delete(DeleteTarget::Cost) => {
+            ospf_profile_clear(path, |instance, area_id, name| OspfProfileOp::ClearCost {
+                instance,
+                area_id,
+                name,
+            })?
+        }
+        Command::Delete(DeleteTarget::Priority) => {
+            ospf_profile_clear(path, |instance, area_id, name| {
+                OspfProfileOp::ClearPriority {
+                    instance,
+                    area_id,
+                    name,
+                }
+            })?
+        }
+        Command::Delete(DeleteTarget::NetworkType) => {
+            ospf_profile_clear(path, |instance, area_id, name| {
+                OspfProfileOp::ClearNetworkType {
+                    instance,
+                    area_id,
+                    name,
+                }
+            })?
+        }
         Command::Delete(DeleteTarget::ConnectRetryTime) => {
             peer_group_clear(path, |instance, name| {
                 BgpPeerGroupOp::ClearConnectRetryTime { instance, name }
@@ -1648,11 +1720,66 @@ fn peer_group_set_op(instance: String, group: String, field: BgpPeerGroupField) 
     })
 }
 
+/// `delete <field>` on the ospf profile the path is currently navigated
+/// into — mirrors `peer_group_clear` exactly.
+fn ospf_profile_clear(
+    path: &Path,
+    op: impl FnOnce(String, Ipv4Addr, String) -> OspfProfileOp,
+) -> Result<Resolved, &'static str> {
+    let (instance, area_id, name) = path.ospf_profile()?;
+    Ok(Resolved::ApplyOp {
+        op: ConfigOp::OspfProfile(op(instance.to_string(), area_id, name.to_string())),
+        after: PathAfter::Stay,
+    })
+}
+
+fn ospf_profile_set_op(
+    instance: String,
+    area_id: Ipv4Addr,
+    name: String,
+    field: OspfProfileField,
+) -> ConfigOp {
+    ConfigOp::OspfProfile(match field {
+        OspfProfileField::HelloInterval(hello_interval) => OspfProfileOp::SetHelloInterval {
+            instance,
+            area_id,
+            name,
+            hello_interval,
+        },
+        OspfProfileField::DeadInterval(dead_interval) => OspfProfileOp::SetDeadInterval {
+            instance,
+            area_id,
+            name,
+            dead_interval,
+        },
+        OspfProfileField::Cost(cost) => OspfProfileOp::SetCost {
+            instance,
+            area_id,
+            name,
+            cost,
+        },
+        OspfProfileField::Priority(priority) => OspfProfileOp::SetPriority {
+            instance,
+            area_id,
+            name,
+            priority,
+        },
+        OspfProfileField::NetworkType(network_type) => OspfProfileOp::SetNetworkType {
+            instance,
+            area_id,
+            name,
+            network_type,
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
 
-    use nos_proto::{NextHopMode, Redistribute, RedistributeSource, RedistributeTarget};
+    use nos_proto::{
+        NetworkType, NextHopMode, Redistribute, RedistributeSource, RedistributeTarget,
+    };
 
     use super::*;
 
@@ -2022,6 +2149,14 @@ mod tests {
         }
     }
 
+    fn ospf_profile_path(instance: &str, area_id: &str, name: &str) -> Path {
+        Path::OspfProfile {
+            instance: instance.to_string(),
+            area_id: area_id.parse().unwrap(),
+            name: name.to_string(),
+        }
+    }
+
     #[test]
     fn edit_bgp_peer_group_qualified_navigates() {
         assert_eq!(
@@ -2166,6 +2301,179 @@ mod tests {
                     instance: "r1".to_string(),
                     name: "pg1".to_string(),
                     connect_retry_time: 45,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_ospf_profile_fields_qualified_and_relative() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::OspfProfile {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                    field: OspfProfileField::HelloInterval(5),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::SetHelloInterval {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                    hello_interval: 5,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", ospf_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Set(SetTarget::OspfProfileRelative {
+                    field: OspfProfileField::DeadInterval(20),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::SetDeadInterval {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                    dead_interval: 20,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", ospf_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Set(SetTarget::OspfProfileRelative {
+                    field: OspfProfileField::Cost(15),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::SetCost {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                    cost: 15,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", ospf_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Set(SetTarget::OspfProfileRelative {
+                    field: OspfProfileField::Priority(200),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::SetPriority {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                    priority: 200,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", ospf_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Set(SetTarget::OspfProfileRelative {
+                    field: OspfProfileField::NetworkType(NetworkType::Broadcast),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::SetNetworkType {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                    network_type: NetworkType::Broadcast,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn delete_ospf_profile_fields_require_ospf_profile_context() {
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::OspfInstance("o1".to_string()), false),
+                Command::Delete(DeleteTarget::HelloInterval)
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", ospf_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Delete(DeleteTarget::HelloInterval)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::ClearHelloInterval {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", ospf_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Delete(DeleteTarget::DeadInterval)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::ClearDeadInterval {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", ospf_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Delete(DeleteTarget::Cost)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::ClearCost {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", ospf_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Delete(DeleteTarget::Priority)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::ClearPriority {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", ospf_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Delete(DeleteTarget::NetworkType)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::ClearNetworkType {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
                 }),
                 after: PathAfter::Stay,
             }

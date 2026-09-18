@@ -176,6 +176,26 @@ pub enum Topic {
     /// `ConfigOp::Subinterface(SubinterfaceOp::ClearOspfProfile)` /
     /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::ClearOspfProfile)`
     ClearInterfaceOspfProfile,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::SetHelloInterval)`
+    SetOspfProfileHelloInterval,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::ClearHelloInterval)`
+    ClearOspfProfileHelloInterval,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::SetDeadInterval)`
+    SetOspfProfileDeadInterval,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::ClearDeadInterval)`
+    ClearOspfProfileDeadInterval,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::SetCost)`
+    SetOspfProfileCost,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::ClearCost)`
+    ClearOspfProfileCost,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::SetPriority)`
+    SetOspfProfilePriority,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::ClearPriority)`
+    ClearOspfProfilePriority,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::SetNetworkType)`
+    SetOspfProfileNetworkType,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::ClearNetworkType)`
+    ClearOspfProfileNetworkType,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

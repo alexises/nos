@@ -29,7 +29,9 @@ pub use interface::{
 };
 pub use ospf_area::OspfArea;
 pub use ospf_instance::OspfInstance;
-pub use ospf_profile::{OspfProfile, DEAD_INTERVAL_DEFAULT, HELLO_INTERVAL_DEFAULT};
+pub use ospf_profile::{
+    NetworkType, OspfProfile, DEAD_INTERVAL_DEFAULT, HELLO_INTERVAL_DEFAULT, PRIORITY_DEFAULT,
+};
 pub use policy_definition::PolicyDefinition;
 pub use prefix_list::{PrefixList, PrefixListEntry};
 pub use routing_table::{Redistribute, RedistributeSource, RedistributeTarget, RoutingTable};

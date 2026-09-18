@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Config, OspfProfile};
+use crate::schema::{Config, NetworkType, OspfProfile};
 
 use super::ospf_area::find_area_mut;
 use super::OpError;
@@ -49,6 +49,39 @@ pub enum OspfProfileOp {
         area_id: Ipv4Addr,
         name: String,
     },
+    SetCost {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        cost: u16,
+    },
+    ClearCost {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+    },
+    SetPriority {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        priority: u8,
+    },
+    ClearPriority {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+    },
+    SetNetworkType {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        network_type: NetworkType,
+    },
+    ClearNetworkType {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+    },
 }
 
 impl OspfProfileOp {
@@ -65,6 +98,9 @@ impl OspfProfileOp {
                         name: name.clone(),
                         hello_interval: None,
                         dead_interval: None,
+                        cost: None,
+                        priority: None,
+                        network_type: None,
                     });
                 }
                 Ok(())
@@ -122,6 +158,58 @@ impl OspfProfileOp {
                 find_profile_mut(config, instance, *area_id, name)?.dead_interval = None;
                 Ok(())
             }
+            OspfProfileOp::SetCost {
+                instance,
+                area_id,
+                name,
+                cost,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.cost = Some(*cost);
+                Ok(())
+            }
+            OspfProfileOp::ClearCost {
+                instance,
+                area_id,
+                name,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.cost = None;
+                Ok(())
+            }
+            OspfProfileOp::SetPriority {
+                instance,
+                area_id,
+                name,
+                priority,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.priority = Some(*priority);
+                Ok(())
+            }
+            OspfProfileOp::ClearPriority {
+                instance,
+                area_id,
+                name,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.priority = None;
+                Ok(())
+            }
+            OspfProfileOp::SetNetworkType {
+                instance,
+                area_id,
+                name,
+                network_type,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.network_type =
+                    Some(*network_type);
+                Ok(())
+            }
+            OspfProfileOp::ClearNetworkType {
+                instance,
+                area_id,
+                name,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.network_type = None;
+                Ok(())
+            }
         }
     }
 }
@@ -173,6 +261,9 @@ mod tests {
             name: name.to_string(),
             hello_interval: None,
             dead_interval: None,
+            cost: None,
+            priority: None,
+            network_type: None,
         }
     }
 
@@ -352,5 +443,92 @@ mod tests {
             OpError::OspfProfileNotFound { instance, area_id, name }
             if instance == "o1" && area_id == self::area_id("0.0.0.0") && name == "p1"
         ));
+    }
+
+    #[test]
+    fn set_and_clear_cost() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        OspfProfileOp::SetCost {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            cost: 20,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.ospf_instances[0].areas[0].profiles[0].cost, Some(20));
+
+        OspfProfileOp::ClearCost {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.ospf_instances[0].areas[0].profiles[0].cost, None);
+    }
+
+    #[test]
+    fn set_and_clear_priority() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        OspfProfileOp::SetPriority {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            priority: 200,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.ospf_instances[0].areas[0].profiles[0].priority,
+            Some(200)
+        );
+
+        OspfProfileOp::ClearPriority {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.ospf_instances[0].areas[0].profiles[0].priority, None);
+    }
+
+    #[test]
+    fn set_and_clear_network_type() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        OspfProfileOp::SetNetworkType {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            network_type: NetworkType::Broadcast,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.ospf_instances[0].areas[0].profiles[0].network_type,
+            Some(NetworkType::Broadcast)
+        );
+
+        OspfProfileOp::ClearNetworkType {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.ospf_instances[0].areas[0].profiles[0].network_type,
+            None
+        );
     }
 }

@@ -532,6 +532,64 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              subinterface, or broadcast domain still referencing it by name will fail \
              commit-time validation until repointed or cleared.",
         ),
+        Topic::SetOspfProfileHelloInterval => (
+            "Set an OSPF profile's Hello interval.",
+            "Sets the hello-interval field on a profile — how often nos-ospfd sends Hello \
+             packets on any link using it. When both hello-interval and dead-interval are set, \
+             dead-interval must be strictly greater than hello-interval — checked at commit \
+             time, not when the edit is applied.",
+        ),
+        Topic::ClearOspfProfileHelloInterval => (
+            "Clear an OSPF profile's Hello interval.",
+            "Unsets the hello-interval field on a profile, reverting to the default of 10 \
+             seconds.",
+        ),
+        Topic::SetOspfProfileDeadInterval => (
+            "Set an OSPF profile's router dead interval.",
+            "Sets the dead-interval field on a profile — how long nos-ospfd waits without a \
+             Hello from a neighbor before declaring it down. Must be strictly greater than \
+             hello-interval whenever both are explicitly set — checked at commit time, not \
+             when the edit is applied.",
+        ),
+        Topic::ClearOspfProfileDeadInterval => (
+            "Clear an OSPF profile's router dead interval.",
+            "Unsets the dead-interval field on a profile, reverting to the default of 40 \
+             seconds.",
+        ),
+        Topic::SetOspfProfileCost => (
+            "Set an OSPF profile's interface cost.",
+            "Sets the cost field on a profile. This NOS has no SPF/LSDB yet, so this value has \
+             no behavioral effect today — it's stored and validated (1-65535) as a \
+             forward-declared placeholder for a future SPF phase.",
+        ),
+        Topic::ClearOspfProfileCost => (
+            "Clear an OSPF profile's interface cost.",
+            "Unsets the cost field on a profile. There is no default to revert to — the field \
+             simply becomes unset again.",
+        ),
+        Topic::SetOspfProfilePriority => (
+            "Set an OSPF profile's Router Priority.",
+            "Sets the priority field on a profile — used by RFC 2328 §9.4 DR/BDR election on \
+             a broadcast link (a priority of 0 makes a router ineligible to become DR/BDR); \
+             sent on the wire, but functionally inert, on a point-to-point link.",
+        ),
+        Topic::ClearOspfProfilePriority => (
+            "Clear an OSPF profile's Router Priority.",
+            "Unsets the priority field on a profile, reverting to the default of 1.",
+        ),
+        Topic::SetOspfProfileNetworkType => (
+            "Set an OSPF profile's network type.",
+            "Sets the network-type field on a profile to point-to-point or broadcast, \
+             overriding the default that would otherwise be derived from each attach point's \
+             own kind (a subinterface defaults to point-to-point, a broadcast domain defaults \
+             to broadcast). Never validated against the attach point's actual kind — this NOS \
+             allows forcing either behavior on either kind of attach point, matching real OSPF.",
+        ),
+        Topic::ClearOspfProfileNetworkType => (
+            "Clear an OSPF profile's network type override.",
+            "Unsets the network-type field on a profile, reverting to the default derived \
+             from each attach point's own kind.",
+        ),
         Topic::SetInterfaceOspfProfile => (
             "Associate an OSPF profile with an interface, subinterface, or broadcast domain.",
             "Points a loopback interface, a physical interface's subinterface, or a broadcast \
@@ -643,6 +701,16 @@ mod tests {
         Topic::DeleteOspfProfile,
         Topic::SetInterfaceOspfProfile,
         Topic::ClearInterfaceOspfProfile,
+        Topic::SetOspfProfileHelloInterval,
+        Topic::ClearOspfProfileHelloInterval,
+        Topic::SetOspfProfileDeadInterval,
+        Topic::ClearOspfProfileDeadInterval,
+        Topic::SetOspfProfileCost,
+        Topic::ClearOspfProfileCost,
+        Topic::SetOspfProfilePriority,
+        Topic::ClearOspfProfilePriority,
+        Topic::SetOspfProfileNetworkType,
+        Topic::ClearOspfProfileNetworkType,
     ];
 
     #[test]

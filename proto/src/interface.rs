@@ -28,6 +28,16 @@ pub struct SubinterfaceStatus {
     pub routing_table: Option<String>,
 }
 
+/// The wire twin of `schema::BroadcastDomain` — a domain's own bridge
+/// device's flat L3 config (same shape as a loopback interface's, see
+/// `schema::BroadcastDomain`'s doc comment).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BroadcastDomainStatus {
+    pub name: String,
+    pub addresses: Vec<InterfaceAddress>,
+    pub routing_table: Option<String>,
+}
+
 /// Messages sent from a client to `nos-interfaced`'s IPC socket.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -39,6 +49,8 @@ pub enum InterfaceRequest {
     GetInterfaces,
     /// One-shot: a single named interface.
     GetInterface { name: String },
+    /// One-shot: a single named broadcast domain.
+    GetBroadcastDomain { name: String },
 }
 
 /// Messages sent from `nos-interfaced` to a client.
@@ -48,6 +60,9 @@ pub enum InterfaceEvent {
     Interfaces(Vec<InterfaceStatus>),
     /// Reply to `GetInterface` when the named interface exists.
     Interface(InterfaceStatus),
-    /// Reply to `GetInterface` when no such interface is configured.
+    /// Reply to `GetInterface`/`GetBroadcastDomain` when no such
+    /// interface/domain is configured.
     NotFound,
+    /// Reply to `GetBroadcastDomain` when the named domain exists.
+    BroadcastDomain(BroadcastDomainStatus),
 }

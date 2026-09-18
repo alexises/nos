@@ -2,18 +2,21 @@
 //! Mirrors `bgp`'s shape: a request/event pair framed by `IpcCodec` over a
 //! Unix socket resolved via the watchdog broker (`ServiceRef::OspfInstance`).
 //!
-//! This phase's ceiling is Hello-protocol neighbor discovery only, up to
-//! `TwoWay` — see `ospf/CLAUDE.md`. No DBD/LSR/LSU/LSAck, no LSDB, no
-//! ExStart/Exchange/Loading/Full.
+//! This phase's neighbor-state ceiling is Hello-protocol discovery only, up
+//! to `TwoWay` — see `ospf/CLAUDE.md`. No DBD/LSR/LSU/LSAck, no LSDB, no
+//! ExStart/Exchange/Loading/Full — true on both point-to-point and
+//! broadcast (RFC 2328 DR/BDR-elected) links.
 
 use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
-/// A point-to-point link's neighbor state, as reported by `nos-ospfd`.
-/// `Down` is an ongoing, valid state (no Hello received yet, or the
-/// dead-interval expired) — every configured link reports at least `Down`,
-/// never an absence.
+/// One neighbor's state, as reported by `nos-ospfd`. `Down` is an ongoing,
+/// valid state (no Hello received yet, or the dead-interval expired) — a
+/// point-to-point link always reports at least one row, even `Down`; a
+/// broadcast link reports one row per currently-known neighbor (zero if
+/// none yet — there's no single fixed peer to show a placeholder for on a
+/// multi-access segment).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OspfNeighborState {
     Down,
@@ -21,16 +24,31 @@ pub enum OspfNeighborState {
     TwoWay,
 }
 
-/// One point-to-point link's neighbor summary, for `show ospf neigh`. At
-/// most one neighbor per link this phase (point-to-point only, no DR/BDR
-/// election — see `ospf/CLAUDE.md`).
+/// RFC 2328 §9.1's interface states, as they apply to this phase's Hello-only
+/// scope: `PointToPoint` is fixed forever on a point-to-point link (no
+/// election ever runs); a broadcast link starts `Waiting`, then becomes
+/// `Dr`/`Backup`/`DrOther` once RFC 2328 §9.4 election runs (see
+/// `ospf::election`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinkInterfaceState {
+    PointToPoint,
+    Waiting,
+    Dr,
+    Backup,
+    DrOther,
+}
+
+/// One neighbor's summary row, for `show ospf neigh` — one row per
+/// currently-known neighbor on a link (see `OspfNeighborState`'s doc
+/// comment for point-to-point vs. broadcast row-count semantics).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NeighborSummary {
     /// The attach point's display name, matching
-    /// `reconcile::attach_points_for`'s existing `"<interface>.<tag>"`
-    /// convention (e.g. `"eth0.100"`).
+    /// `reconcile::attach_points_for`'s existing `"<interface>.<tag>"`/
+    /// `"broadcast-domain:<name>"` convention.
     pub link: String,
     pub area_id: Ipv4Addr,
+    pub interface_state: LinkInterfaceState,
     /// Known once at least one Hello has been received on this link.
     pub neighbor_router_id: Option<Ipv4Addr>,
     pub state: OspfNeighborState,
@@ -39,6 +57,18 @@ pub struct NeighborSummary {
     pub last_hello_secs: Option<u64>,
     pub hello_interval: u16,
     pub dead_interval: u16,
+    /// This link's own configured Router Priority — mirrors how
+    /// `hello_interval`/`dead_interval` already report the *local* link's
+    /// config on every row.
+    pub priority: u8,
+    /// The remote neighbor's own decoded Router Priority. `None` if no
+    /// Hello has been received from it yet.
+    pub neighbor_priority: Option<u8>,
+    /// This link's currently elected DR/BDR — `None` on a point-to-point
+    /// link (no election ever runs) or before a broadcast link's first
+    /// election.
+    pub dr: Option<Ipv4Addr>,
+    pub bdr: Option<Ipv4Addr>,
 }
 
 /// Messages sent from a client to one `nos-ospfd` instance's IPC socket.

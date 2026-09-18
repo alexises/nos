@@ -241,6 +241,13 @@ struct Args {
     /// — for verifying `nos-ospfd` logs the attachment.
     #[arg(long)]
     ospf_interface_profile: Option<String>,
+    /// If set, attaches this profile name to `--broadcast-domain`'s own SVI
+    /// (`BroadcastDomainOp::SetOspfProfile`) — for verifying `nos-ospfd`'s
+    /// broadcast-network-type Hello/DR-BDR-election path. Combine with
+    /// `--broadcast-domain-svi-address`/`--switching-profile`/
+    /// `--switching-profile-member` to build the whole attach point.
+    #[arg(long)]
+    ospf_broadcast_domain_profile: Option<String>,
 }
 
 #[tokio::main]
@@ -595,6 +602,15 @@ async fn main() -> anyhow::Result<()> {
             tag: args.subinterface_tag,
             ospf_profile: profile,
         }));
+    }
+
+    if let Some(profile) = args.ospf_broadcast_domain_profile.clone() {
+        ops.push(ConfigOp::BroadcastDomain(
+            BroadcastDomainOp::SetOspfProfile {
+                name: args.broadcast_domain.clone(),
+                ospf_profile: profile,
+            },
+        ));
     }
 
     for op in ops {

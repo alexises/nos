@@ -22,7 +22,9 @@ pub use codec::IpcCodec;
 pub use derive::sync_routing_table_refs;
 pub use diff::{diff_configs, ConfigDiff, DiffScope, DiffStatus, FieldDiff, SectionDiff};
 pub use docs::{CommandDoc, Topic};
-pub use interface::{InterfaceEvent, InterfaceRequest, InterfaceStatus, SubinterfaceStatus};
+pub use interface::{
+    BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, SubinterfaceStatus,
+};
 pub use ipc::{Event, Request, TransactionBase, TransactionSnapshot};
 pub use ipnet::IpNet;
 pub use log::{LogEntry, LogEvent, LogLevel, LogRequest};
@@ -32,7 +34,7 @@ pub use ops::{
     PolicyDefinitionOp, PrefixListOp, RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp,
     SubinterfaceOp, SwitchingProfileOp,
 };
-pub use ospf::{NeighborSummary, OspfEvent, OspfNeighborState, OspfRequest};
+pub use ospf::{LinkInterfaceState, NeighborSummary, OspfEvent, OspfNeighborState, OspfRequest};
 pub use paths::{DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 pub use rib::{
     BgpRoute, BgpRouteUpdate, PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind,
@@ -40,10 +42,10 @@ pub use rib::{
 pub use schema::{
     loopback_table_name, AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpInstance, BgpPeer,
     BgpPeerGroup, BroadcastDomain, CommunityAlias, CommunityGroup, Config, Interface,
-    InterfaceAddress, NextHopMode, OspfArea, OspfInstance, OspfProfile, PolicyDefinition,
-    PrefixList, PrefixListEntry, Redistribute, RedistributeSource, RedistributeTarget,
-    RoutingTable, SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface,
-    SwitchingProfile, SwitchingProfileMember, VlanTag, CONNECT_RETRY_TIME_DEFAULT_SECS,
-    DEAD_INTERVAL_DEFAULT, HELLO_INTERVAL_DEFAULT, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR,
-    LOOPBACK_PREFIX,
+    InterfaceAddress, NetworkType, NextHopMode, OspfArea, OspfInstance, OspfProfile,
+    PolicyDefinition, PrefixList, PrefixListEntry, Redistribute, RedistributeSource,
+    RedistributeTarget, RoutingTable, SourceAddress, StaticRoute, StaticRoutingInstance,
+    Subinterface, SwitchingProfile, SwitchingProfileMember, VlanTag,
+    CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT, HELLO_INTERVAL_DEFAULT,
+    HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX, PRIORITY_DEFAULT,
 };

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use nos_proto::{DiffScope, Event, ServiceRef};
+use nos_proto::{DiffScope, Event, NetworkType, ServiceRef};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -130,6 +130,7 @@ async fn resync(
                 area = %area.area_id,
                 profile = %profile.name,
                 interfaces = ?interfaces,
+                cost = ?profile.cost,
                 "ospf profile resolved"
             );
 
@@ -139,6 +140,7 @@ async fn resync(
             let dead_interval = profile
                 .dead_interval
                 .unwrap_or(nos_proto::DEAD_INTERVAL_DEFAULT);
+            let priority = profile.priority.unwrap_or(nos_proto::PRIORITY_DEFAULT);
 
             for attach in subinterface_attach_points(&cfg, &profile.name) {
                 let link_name = attach.display_name();
@@ -170,6 +172,43 @@ async fn resync(
                     dead_interval,
                     vrf,
                     local_addr,
+                    network_type: profile.network_type.unwrap_or(NetworkType::PointToPoint),
+                    priority,
+                });
+            }
+
+            for attach in broadcast_domain_attach_points(&cfg, &profile.name) {
+                let link_name = attach.display_name();
+                let Some(routing_table) = &attach.routing_table else {
+                    // Can't happen in practice —
+                    // `broadcast_domain::valid_broadcast_domains` already
+                    // enforces this at commit time — but the field is
+                    // still `Option` on the wire.
+                    warn!(
+                        instance = %instance, link = %link_name,
+                        "ospf profile attached to a broadcast domain with no routing-table, skipping"
+                    );
+                    continue;
+                };
+                let Some(vrf) = resolve_vrf(watchdog_socket, routing_table).await else {
+                    warn!(instance = %instance, link = %link_name, "ospf link's vrf not resolvable yet");
+                    continue;
+                };
+                let Some(local_addr) =
+                    resolve_broadcast_domain_local_address(watchdog_socket, &attach.name).await
+                else {
+                    warn!(instance = %instance, link = %link_name, "ospf link's local address not resolvable yet");
+                    continue;
+                };
+                desired_links.push(LinkConfig {
+                    attach_point: link_name,
+                    area_id: area.area_id,
+                    hello_interval,
+                    dead_interval,
+                    vrf,
+                    local_addr,
+                    network_type: profile.network_type.unwrap_or(NetworkType::Broadcast),
+                    priority,
                 });
             }
         }
@@ -241,6 +280,35 @@ fn subinterface_attach_points(
     points
 }
 
+/// One `BroadcastDomain.ospf_profile` attach point, with enough structure to
+/// resolve and build a `LinkConfig`.
+struct BroadcastDomainAttachPoint {
+    name: String,
+    routing_table: Option<String>,
+}
+
+impl BroadcastDomainAttachPoint {
+    /// Matches `attach_points_for`'s existing `"broadcast-domain:<name>"`
+    /// convention.
+    fn display_name(&self) -> String {
+        format!("broadcast-domain:{}", self.name)
+    }
+}
+
+fn broadcast_domain_attach_points(
+    cfg: &nos_proto::Config,
+    profile: &str,
+) -> Vec<BroadcastDomainAttachPoint> {
+    cfg.broadcast_domains
+        .iter()
+        .filter(|d| d.ospf_profile.as_deref() == Some(profile))
+        .map(|d| BroadcastDomainAttachPoint {
+            name: d.name.clone(),
+            routing_table: d.routing_table.clone(),
+        })
+        .collect()
+}
+
 /// Resolves `table`'s Linux VRF interface name by asking the owning
 /// `nos-ribd` instance directly over IPC (see `crate::rib_client`),
 /// resolved via the watchdog broker — never derived locally. `None` covers
@@ -275,6 +343,24 @@ async fn resolve_local_address(
     }
 }
 
+/// Resolves a broadcast domain's own SVI local IPv4 address by asking
+/// `nos-interfaced` directly, mirroring `resolve_local_address` exactly
+/// (same reasoning: ask the owning daemon rather than reading `Config`
+/// directly, so this stays consistent with a future kernel-derived address
+/// nos-interfaced might one day report that isn't in static config at all).
+async fn resolve_broadcast_domain_local_address(
+    watchdog_socket: &Path,
+    domain: &str,
+) -> Option<Ipv4Addr> {
+    let socket = watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
+    let status = interface_client::get_broadcast_domain(&socket, domain).await?;
+    let addr = status.addresses.into_iter().next()?.address.addr();
+    match addr {
+        std::net::IpAddr::V4(v4) => Some(v4),
+        std::net::IpAddr::V6(_) => None,
+    }
+}
+
 /// Local copy of `nos-watchdog::supervisor::wait_or_shutdown` — not
 /// imported, per the star-dependency rule.
 async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>) -> bool {
@@ -289,6 +375,7 @@ mod tests {
     use nos_proto::{BroadcastDomain, Config, Interface, Subinterface};
 
     use super::attach_points_for;
+    use super::broadcast_domain_attach_points;
     use super::subinterface_attach_points;
 
     fn interface(name: &str, ospf_profile: Option<&str>) -> Interface {
@@ -382,5 +469,38 @@ mod tests {
             ..Default::default()
         };
         assert!(subinterface_attach_points(&cfg, "p1").is_empty());
+    }
+
+    #[test]
+    fn broadcast_domain_attach_points_finds_routing_table() {
+        let cfg = Config {
+            broadcast_domains: vec![BroadcastDomain {
+                name: "bd1".to_string(),
+                addresses: Vec::new(),
+                routing_table: Some("rt1".to_string()),
+                ospf_profile: Some("p1".to_string()),
+            }],
+            ..Default::default()
+        };
+        let points = broadcast_domain_attach_points(&cfg, "p1");
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].display_name(), "broadcast-domain:bd1");
+        assert_eq!(points[0].routing_table.as_deref(), Some("rt1"));
+    }
+
+    #[test]
+    fn broadcast_domain_attach_points_ignores_loopback_and_subinterface() {
+        let mut iface = interface("eth0", None);
+        iface.subinterfaces = vec![Subinterface {
+            tag: 0,
+            addresses: Vec::new(),
+            routing_table: Some("rt1".to_string()),
+            ospf_profile: Some("p1".to_string()),
+        }];
+        let cfg = Config {
+            interfaces: vec![interface("loopback-rt1", Some("p1")), iface],
+            ..Default::default()
+        };
+        assert!(broadcast_domain_attach_points(&cfg, "p1").is_empty());
     }
 }

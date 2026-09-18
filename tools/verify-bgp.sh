@@ -58,7 +58,12 @@
 # router-id/routing-table over a real IPC round trip to nos-configd, and
 # actually exchanges real RFC 2328 Hello packets over a real VRF-scoped raw
 # protocol-89 socket between the two containers, reaching neighbor state
-# 2-Way on both sides.
+# 2-Way on both sides -- and that the same profile, attached a second time to
+# each router's own broadcast-domain bridge (a real Linux bridge trunked from
+# eth0 via a dot1q sub-interface, reachable over the same docker network),
+# reaches 2-Way there too and runs a real RFC 2328 §9.4 DR/BDR election,
+# converging deterministically on the higher-router-id side as DR and the
+# other as Backup.
 #
 # Two further subcommands, `reflector` and `route-server`, stand up a third
 # container ("router-c") and reconfigure all three into a hub-and-spoke
@@ -137,6 +142,18 @@ OSPF_ROUTER_ID_B=9.9.9.10
 # address and rt1 routing-table association).
 OSPF_AREA=0.0.0.0
 OSPF_PROFILE=ospf-profile1
+# The ospf scenario's broadcast-domain (multi-access) link -- reuses
+# $OSPF_PROFILE as-is (network-type is derived per attach-point kind when
+# left unset, so the same profile runs point-to-point on eth0.0 and
+# broadcast on this domain simultaneously). Dot1q tag 400 is distinct from
+# switching's 100/200 and routed-subinterface's $SUBINTERFACE_TAG (300).
+# 203.0.113.64/28 is a fresh sub-block of the loopback/svi scenarios' own
+# 203.0.113.0/24 (TEST-NET-3), clear of their .1/.9 host addresses, wide
+# enough for both routers' own host address on the shared segment.
+OSPF_BROADCAST_DOMAIN=bd-ospf
+OSPF_BROADCAST_TAG=400
+OSPF_BROADCAST_ADDRESS_A=203.0.113.65/28
+OSPF_BROADCAST_ADDRESS_B=203.0.113.66/28
 
 log() { echo "[verify-bgp] $*" >&2; }
 
@@ -358,6 +375,38 @@ provision_ospf() {
     --ospf-area "$OSPF_AREA" \
     --ospf-profile "$OSPF_PROFILE" \
     --ospf-interface-profile "$OSPF_PROFILE"
+}
+
+# Attaches $OSPF_PROFILE to a second, multi-access link too: trunks eth0
+# (via a dedicated switching profile, dot1q $OSPF_BROADCAST_TAG -- distinct
+# from eth0.0's own untagged BGP/point-to-point-OSPF address, so it never
+# conflicts) into a broadcast domain, addresses that domain's own bridge
+# (an SVI) with a real host address on a shared subnet, and points the
+# domain's ospf field at $OSPF_PROFILE (`BroadcastDomainOp::SetOspfProfile`)
+# -- verifying nos-ospfd's network-type-Broadcast path: real RFC 2328 §9.4
+# DR/BDR election over the same raw protocol-89 socket mechanism the
+# point-to-point link above already proved, this time with multiple
+# neighbors and an elected DR. Requires `provision_ospf` to have already
+# committed $OSPF_PROFILE for this router.
+provision_ospf_broadcast() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 svi_addr=$6
+  log "provisioning $name with an ospf broadcast-domain link ($OSPF_BROADCAST_DOMAIN, dot1q $OSPF_BROADCAST_TAG, address=$svi_addr)"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --routing-table rt1 \
+    --switching-profile sp-ospf \
+    --switching-profile-member "$OSPF_BROADCAST_DOMAIN:$OSPF_BROADCAST_TAG" \
+    --broadcast-domain "$OSPF_BROADCAST_DOMAIN" \
+    --broadcast-domain-svi-address "$svi_addr" \
+    --ospf-broadcast-domain-profile "$OSPF_PROFILE"
 }
 
 # --- L2 switching-profile scenario ---
@@ -949,6 +998,33 @@ cmd_check_ospf() {
   wait_for_count_increase router-b "ospf neighbor reached two-way link=eth0.0 neighbor=$OSPF_ROUTER_ID" 0 60 \
     && log "router-b: reached ospf 2-way with $OSPF_ROUTER_ID" \
     || { log "router-b: FAILED to reach ospf 2-way"; return 1; }
+
+  provision_ospf_broadcast router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPF_BROADCAST_ADDRESS_A"
+  provision_ospf_broadcast router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" "$OSPF_BROADCAST_ADDRESS_B"
+
+  # Confirms the same Hello protocol also reaches 2-Way on a broadcast
+  # (multi-access) link -- this time via each router's own bd-ospf bridge
+  # rather than a raw subinterface -- and that real RFC 2328 §9.4 DR/BDR
+  # election converges deterministically: with equal (default) priority on
+  # both sides, the higher router-id (router-b's $OSPF_ROUTER_ID_B) wins DR,
+  # and with only two eligible routers the other side becomes Backup, never
+  # DROther. Field order matches `link.rs`'s `info!(link, dr, [bdr],
+  # "ospf interface became ...")` call sites.
+  log "waiting for router-a/router-b to reach ospf 2-way on the broadcast link"
+  wait_for_count_increase router-a "ospf neighbor reached two-way link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPF_ROUTER_ID_B" 0 60 \
+    && log "router-a: reached ospf 2-way with $OSPF_ROUTER_ID_B on the broadcast link" \
+    || { log "router-a: FAILED to reach ospf 2-way on the broadcast link"; return 1; }
+  wait_for_count_increase router-b "ospf neighbor reached two-way link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPF_ROUTER_ID" 0 60 \
+    && log "router-b: reached ospf 2-way with $OSPF_ROUTER_ID on the broadcast link" \
+    || { log "router-b: FAILED to reach ospf 2-way on the broadcast link"; return 1; }
+
+  log "waiting for router-a/router-b to elect a dr/backup on the broadcast link"
+  wait_for_count_increase router-b "ospf interface became dr link=broadcast-domain:$OSPF_BROADCAST_DOMAIN dr=$OSPF_ROUTER_ID_B" 0 60 \
+    && log "router-b: became dr" \
+    || { log "router-b: FAILED to become dr"; return 1; }
+  wait_for_count_increase router-a "ospf interface became backup link=broadcast-domain:$OSPF_BROADCAST_DOMAIN dr=$OSPF_ROUTER_ID_B bdr=$OSPF_ROUTER_ID" 0 60 \
+    && log "router-a: became backup" \
+    || { log "router-a: FAILED to become backup"; return 1; }
 }
 
 cmd_check_switching() {

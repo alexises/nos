@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec};
+use nos_proto::{
+    BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec,
+};
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::trace;
@@ -37,6 +39,36 @@ pub async fn get_interface(interface_socket: &Path, name: &str) -> Option<Interf
         trace!(
             name,
             "nos-interfaced gave no well-formed GetInterface reply"
+        );
+        None
+    }
+}
+
+/// One-shot query of `nos-interfaced` for one named broadcast domain's
+/// reconciled SVI addresses. Best-effort, mirrors `get_interface` exactly.
+pub async fn get_broadcast_domain(
+    interface_socket: &Path,
+    name: &str,
+) -> Option<BroadcastDomainStatus> {
+    let Ok(stream) = UnixStream::connect(interface_socket).await else {
+        trace!(socket = %interface_socket.display(), "failed to connect to nos-interfaced");
+        return None;
+    };
+    let (r, w) = stream.into_split();
+    let mut reader = FramedRead::new(r, IpcCodec::<InterfaceEvent>::default());
+    let mut writer = FramedWrite::new(w, IpcCodec::<InterfaceRequest>::default());
+    writer
+        .send(InterfaceRequest::GetBroadcastDomain {
+            name: name.to_string(),
+        })
+        .await
+        .ok()?;
+    if let Some(Ok(InterfaceEvent::BroadcastDomain(status))) = reader.next().await {
+        Some(status)
+    } else {
+        trace!(
+            name,
+            "nos-interfaced gave no well-formed GetBroadcastDomain reply"
         );
         None
     }
@@ -102,5 +134,42 @@ mod tests {
         let path = tmp.path().join("does-not-exist.sock");
 
         assert_eq!(get_interface(&path, "eth0").await, None);
+    }
+
+    #[tokio::test]
+    async fn broadcast_domain_returns_status_on_well_formed_reply() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("interface.sock");
+        serve_once(&path, |_req| {
+            Some(InterfaceEvent::BroadcastDomain(BroadcastDomainStatus {
+                name: "bd1".to_string(),
+                addresses: vec![InterfaceAddress {
+                    address: "10.0.0.1/24".parse().unwrap(),
+                    label: None,
+                }],
+                routing_table: Some("rt1".to_string()),
+            }))
+        });
+
+        let status = get_broadcast_domain(&path, "bd1").await.unwrap();
+        assert_eq!(status.name, "bd1");
+        assert_eq!(status.routing_table.as_deref(), Some("rt1"));
+    }
+
+    #[tokio::test]
+    async fn broadcast_domain_returns_none_when_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("interface.sock");
+        serve_once(&path, |_req| Some(InterfaceEvent::NotFound));
+
+        assert_eq!(get_broadcast_domain(&path, "bd1").await, None);
+    }
+
+    #[tokio::test]
+    async fn broadcast_domain_returns_none_when_connection_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("does-not-exist.sock");
+
+        assert_eq!(get_broadcast_domain(&path, "bd1").await, None);
     }
 }

@@ -1,7 +1,9 @@
 // nos-ospf: OSPF daemon — Hello-protocol neighbor discovery up to 2-Way,
-// point-to-point links only (see ospf/CLAUDE.md)
+// point-to-point and broadcast (RFC 2328 DR/BDR election) links (see
+// ospf/CLAUDE.md)
 
 pub mod config_client;
+pub mod election;
 pub mod interface_client;
 pub mod link;
 pub mod neighbor;

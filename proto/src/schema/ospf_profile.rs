@@ -12,6 +12,21 @@ pub const HELLO_INTERVAL_DEFAULT: u16 = 10;
 /// 2328 Appendix C.3's point-to-point/broadcast default.
 pub const DEAD_INTERVAL_DEFAULT: u16 = 40;
 
+/// This profile's own Router Priority when left unset. RFC 2328 Appendix
+/// C.3's typical default. `0` is a legal, meaningful value too — it means
+/// "never eligible to become DR/BDR" (see `ospf::election`) — so this is
+/// only a default, never a floor.
+pub const PRIORITY_DEFAULT: u8 = 1;
+
+/// Which RFC 2328 network type an attach point using this profile runs.
+/// `OspfProfile.network_type` is `Option` — see its doc comment for how an
+/// unset value is resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NetworkType {
+    PointToPoint,
+    Broadcast,
+}
+
 /// A named OSPF profile, declared inside an area (`OspfArea.profiles`) but
 /// referenced by bare name from any L3 attach point's `ospf_profile` field
 /// (`Interface`/`Subinterface`/`BroadcastDomain`) with no instance/area
@@ -38,6 +53,40 @@ pub struct OspfProfile {
     /// hold-time/keepalive-interval pattern).
     #[garde(skip)]
     pub dead_interval: Option<u16>,
+
+    /// Interface cost, in the usual OSPF sense (lower is preferred by SPF).
+    /// `None`/no default rendered — this NOS has no SPF/LSDB yet (see
+    /// `ospf/CLAUDE.md`), so this field has no behavioral consumer today;
+    /// it's a forward-declared placeholder, stored/validated/rendered only.
+    /// `0` is rejected (not a valid OSPF cost) even though nothing reads
+    /// the value yet — ordinary schema hygiene.
+    #[garde(custom(|c: &Option<u16>, _ctx: &Config| valid_cost(*c)))]
+    pub cost: Option<u16>,
+
+    /// `None` defaults to `PRIORITY_DEFAULT` (1). Governs RFC 2328 §9.4
+    /// DR/BDR election eligibility on a `Broadcast` attach point; sent on
+    /// the wire (but functionally inert) on a `PointToPoint` one too.
+    #[garde(skip)]
+    pub priority: Option<u8>,
+
+    /// `None` resolves per attach point: a `Subinterface`/loopback
+    /// `Interface` attach point defaults to `PointToPoint`, a
+    /// `BroadcastDomain` one defaults to `Broadcast` — resolved by
+    /// `ospf::reconcile`, not here, since one profile may be referenced by
+    /// attach points of different kinds at once. Setting this explicitly
+    /// overrides that default per attach point (e.g. forcing
+    /// point-to-point behavior on a `BroadcastDomain` attach point, or
+    /// vice versa) — never validated against the attach point's own kind,
+    /// matching real OSPF's own allowance for this.
+    #[garde(skip)]
+    pub network_type: Option<NetworkType>,
+}
+
+fn valid_cost(cost: Option<u16>) -> garde::Result {
+    match cost {
+        Some(0) => Err(garde::Error::new("cost must be between 1 and 65535")),
+        _ => Ok(()),
+    }
 }
 
 /// Profile names are unique across the whole config, not just within the
@@ -81,13 +130,16 @@ mod tests {
 
     use crate::schema::{Config, OspfArea, OspfInstance};
 
-    use super::OspfProfile;
+    use super::{NetworkType, OspfProfile};
 
     fn profile(name: &str) -> OspfProfile {
         OspfProfile {
             name: name.to_string(),
             hello_interval: None,
             dead_interval: None,
+            cost: None,
+            priority: None,
+            network_type: None,
         }
     }
 
@@ -171,6 +223,9 @@ mod tests {
             name: name.to_string(),
             hello_interval,
             dead_interval,
+            cost: None,
+            priority: None,
+            network_type: None,
         }
     }
 
@@ -208,5 +263,48 @@ mod tests {
             )],
         )]);
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn nonzero_cost_passes() {
+        let mut p = profile("p1");
+        p.cost = Some(10);
+        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn zero_cost_fails() {
+        let mut p = profile("p1");
+        p.cost = Some(0);
+        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn unset_cost_passes() {
+        let cfg = config_with(vec![instance(
+            "r1",
+            vec![area("0.0.0.0", vec![profile("p1")])],
+        )]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn any_priority_passes() {
+        let mut p = profile("p1");
+        p.priority = Some(0);
+        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn either_network_type_passes() {
+        for network_type in [NetworkType::PointToPoint, NetworkType::Broadcast] {
+            let mut p = profile("p1");
+            p.network_type = Some(network_type);
+            let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+            cfg.validate_with(&cfg).unwrap();
+        }
     }
 }

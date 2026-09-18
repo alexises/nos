@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
 use nos_proto::{
-    AddressFamily, BgpAoAlgorithm, NextHopMode, Redistribute, RedistributeSource,
+    AddressFamily, BgpAoAlgorithm, NetworkType, NextHopMode, Redistribute, RedistributeSource,
     RedistributeTarget, SourceAddress, TransactionBase, VlanTag,
 };
 
@@ -57,6 +57,16 @@ pub enum BgpPeerGroupField {
     /// commit time.
     ImportPolicy(String),
     ExportPolicy(String),
+}
+
+/// A single field edit targeting an `OspfProfile`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OspfProfileField {
+    HelloInterval(u16),
+    DeadInterval(u16),
+    Cost(u16),
+    Priority(u8),
+    NetworkType(NetworkType),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +188,16 @@ pub enum SetTarget {
     /// `set router-id <ip>` while navigated into an `OspfInstance` reuses
     /// `SetTarget::Relative { field: BgpInstanceField::RouterId }` instead.
     OspfInstance { name: String, router_id: Ipv4Addr },
+    /// Fully-qualified `OspfProfile` field edit — works from anywhere in
+    /// configuration mode.
+    OspfProfile {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        field: OspfProfileField,
+    },
+    /// Context-relative — only valid while navigated into an `OspfProfile`.
+    OspfProfileRelative { field: OspfProfileField },
     /// Fully-qualified — works from anywhere in configuration mode.
     RoutingTableRedistribute {
         name: String,
@@ -375,6 +395,20 @@ pub enum DeleteTarget {
     OspfProfileRelative {
         name: String,
     },
+    /// `delete hello-interval` — only valid while navigated into an
+    /// `OspfProfile`.
+    HelloInterval,
+    /// `delete dead-interval` — only valid while navigated into an
+    /// `OspfProfile`.
+    DeadInterval,
+    /// `delete cost` — only valid while navigated into an `OspfProfile`.
+    Cost,
+    /// `delete priority` — only valid while navigated into an
+    /// `OspfProfile`.
+    Priority,
+    /// `delete network-type` — only valid while navigated into an
+    /// `OspfProfile`.
+    NetworkType,
     /// `delete routing-table <name> redistribute` — qualified clear.
     RoutingTableRedistribute {
         name: String,
@@ -1101,6 +1135,72 @@ fn parse_set(t: &[&str]) -> Option<Command> {
         ["ospf", profile] => Command::Set(SetTarget::InterfaceOspfProfileRelative {
             ospf_profile: (*profile).to_string(),
         }),
+        ["ospf", "instance", instance, "area", area_id, "profile", name, "hello-interval", n] => {
+            Command::Set(SetTarget::OspfProfile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::HelloInterval(n.parse::<u16>().ok()?),
+            })
+        }
+        ["ospf", "instance", instance, "area", area_id, "profile", name, "dead-interval", n] => {
+            Command::Set(SetTarget::OspfProfile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::DeadInterval(n.parse::<u16>().ok()?),
+            })
+        }
+        ["ospf", "instance", instance, "area", area_id, "profile", name, "cost", n] => {
+            Command::Set(SetTarget::OspfProfile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::Cost(n.parse::<u16>().ok()?),
+            })
+        }
+        ["ospf", "instance", instance, "area", area_id, "profile", name, "priority", n] => {
+            Command::Set(SetTarget::OspfProfile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::Priority(n.parse::<u8>().ok()?),
+            })
+        }
+        ["ospf", "instance", instance, "area", area_id, "profile", name, "network-type", "point-to-point"] => {
+            Command::Set(SetTarget::OspfProfile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::NetworkType(NetworkType::PointToPoint),
+            })
+        }
+        ["ospf", "instance", instance, "area", area_id, "profile", name, "network-type", "broadcast"] => {
+            Command::Set(SetTarget::OspfProfile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::NetworkType(NetworkType::Broadcast),
+            })
+        }
+        ["hello-interval", n] => Command::Set(SetTarget::OspfProfileRelative {
+            field: OspfProfileField::HelloInterval(n.parse::<u16>().ok()?),
+        }),
+        ["dead-interval", n] => Command::Set(SetTarget::OspfProfileRelative {
+            field: OspfProfileField::DeadInterval(n.parse::<u16>().ok()?),
+        }),
+        ["cost", n] => Command::Set(SetTarget::OspfProfileRelative {
+            field: OspfProfileField::Cost(n.parse::<u16>().ok()?),
+        }),
+        ["priority", n] => Command::Set(SetTarget::OspfProfileRelative {
+            field: OspfProfileField::Priority(n.parse::<u8>().ok()?),
+        }),
+        ["network-type", "point-to-point"] => Command::Set(SetTarget::OspfProfileRelative {
+            field: OspfProfileField::NetworkType(NetworkType::PointToPoint),
+        }),
+        ["network-type", "broadcast"] => Command::Set(SetTarget::OspfProfileRelative {
+            field: OspfProfileField::NetworkType(NetworkType::Broadcast),
+        }),
         ["broadcast", "domain", name, "address", addr] => {
             Command::Set(SetTarget::BroadcastDomainAddress {
                 name: (*name).to_string(),
@@ -1281,6 +1381,11 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
         ["profile", name] => Command::Delete(DeleteTarget::OspfProfileRelative {
             name: (*name).to_string(),
         }),
+        ["hello-interval"] => Command::Delete(DeleteTarget::HelloInterval),
+        ["dead-interval"] => Command::Delete(DeleteTarget::DeadInterval),
+        ["cost"] => Command::Delete(DeleteTarget::Cost),
+        ["priority"] => Command::Delete(DeleteTarget::Priority),
+        ["network-type"] => Command::Delete(DeleteTarget::NetworkType),
         ["routing-table", name, "redistribute"] => {
             Command::Delete(DeleteTarget::RoutingTableRedistribute {
                 name: (*name).to_string(),
@@ -2079,6 +2184,130 @@ mod tests {
         assert_eq!(
             Command::parse("delete connect-retry-time"),
             Command::Delete(DeleteTarget::ConnectRetryTime)
+        );
+    }
+
+    #[test]
+    fn set_ospf_profile_fields_qualified() {
+        assert_eq!(
+            Command::parse("set ospf instance o1 area 0.0.0.0 profile p1 hello-interval 5"),
+            Command::Set(SetTarget::OspfProfile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+                field: OspfProfileField::HelloInterval(5),
+            })
+        );
+        assert_eq!(
+            Command::parse("set ospf instance o1 area 0.0.0.0 profile p1 dead-interval 20"),
+            Command::Set(SetTarget::OspfProfile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+                field: OspfProfileField::DeadInterval(20),
+            })
+        );
+        assert_eq!(
+            Command::parse("set ospf instance o1 area 0.0.0.0 profile p1 cost 15"),
+            Command::Set(SetTarget::OspfProfile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+                field: OspfProfileField::Cost(15),
+            })
+        );
+        assert_eq!(
+            Command::parse("set ospf instance o1 area 0.0.0.0 profile p1 priority 200"),
+            Command::Set(SetTarget::OspfProfile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+                field: OspfProfileField::Priority(200),
+            })
+        );
+        assert_eq!(
+            Command::parse(
+                "set ospf instance o1 area 0.0.0.0 profile p1 network-type point-to-point"
+            ),
+            Command::Set(SetTarget::OspfProfile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+                field: OspfProfileField::NetworkType(NetworkType::PointToPoint),
+            })
+        );
+        assert_eq!(
+            Command::parse("set ospf instance o1 area 0.0.0.0 profile p1 network-type broadcast"),
+            Command::Set(SetTarget::OspfProfile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+                field: OspfProfileField::NetworkType(NetworkType::Broadcast),
+            })
+        );
+    }
+
+    #[test]
+    fn set_ospf_profile_fields_relative() {
+        assert_eq!(
+            Command::parse("set hello-interval 5"),
+            Command::Set(SetTarget::OspfProfileRelative {
+                field: OspfProfileField::HelloInterval(5),
+            })
+        );
+        assert_eq!(
+            Command::parse("set dead-interval 20"),
+            Command::Set(SetTarget::OspfProfileRelative {
+                field: OspfProfileField::DeadInterval(20),
+            })
+        );
+        assert_eq!(
+            Command::parse("set cost 15"),
+            Command::Set(SetTarget::OspfProfileRelative {
+                field: OspfProfileField::Cost(15),
+            })
+        );
+        assert_eq!(
+            Command::parse("set priority 200"),
+            Command::Set(SetTarget::OspfProfileRelative {
+                field: OspfProfileField::Priority(200),
+            })
+        );
+        assert_eq!(
+            Command::parse("set network-type point-to-point"),
+            Command::Set(SetTarget::OspfProfileRelative {
+                field: OspfProfileField::NetworkType(NetworkType::PointToPoint),
+            })
+        );
+        assert_eq!(
+            Command::parse("set network-type broadcast"),
+            Command::Set(SetTarget::OspfProfileRelative {
+                field: OspfProfileField::NetworkType(NetworkType::Broadcast),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_ospf_profile_fields_relative() {
+        assert_eq!(
+            Command::parse("delete hello-interval"),
+            Command::Delete(DeleteTarget::HelloInterval)
+        );
+        assert_eq!(
+            Command::parse("delete dead-interval"),
+            Command::Delete(DeleteTarget::DeadInterval)
+        );
+        assert_eq!(
+            Command::parse("delete cost"),
+            Command::Delete(DeleteTarget::Cost)
+        );
+        assert_eq!(
+            Command::parse("delete priority"),
+            Command::Delete(DeleteTarget::Priority)
+        );
+        assert_eq!(
+            Command::parse("delete network-type"),
+            Command::Delete(DeleteTarget::NetworkType)
         );
     }
 
