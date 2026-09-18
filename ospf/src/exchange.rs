@@ -124,11 +124,26 @@ fn on_dbd_in_exstart(
     match neighbor_router_id.cmp(&local_router_id) {
         Ordering::Greater => {
             // Neighbor has the higher router-id: it is master, we are
-            // slave — but only a genuine negotiation attempt from it is a
-            // valid trigger (a lower-id neighbor sending MS=0 to us would
-            // be nonsensical, so anything else this early is ignored;
-            // retransmission will eventually resend a proper one).
-            if !is_negotiation_attempt {
+            // slave. Accept either its genuine negotiation attempt
+            // (I=1,M=1,MS=1) or its one poll reply (I=0,M=0,MS=1) as the
+            // trigger — symmetric to the `Ordering::Less` branch's own
+            // "accept either" reasoning below, and for the same underlying
+            // cause: the two sides' Hello-driven ExStart entry isn't
+            // synchronized, so if the master reaches ExStart (and sends its
+            // attempt) before *we* reach 2-Way with it, `handle_dbd` has no
+            // adjacency yet to receive that attempt into and silently drops
+            // it (see its own doc comment) — including every retransmitted
+            // copy, since the master, having since moved on, only ever
+            // resends its most recent packet. By the time we create our own
+            // adjacency and send our own (late) attempt, the only packet we
+            // ever get back is the master's reply to *that* — never its
+            // original attempt, which is gone for good. Without this,
+            // we'd wait here forever for a message that will never come
+            // again (a real bug this NOS's `ospf-dr` Docker scenario found:
+            // a third router joining a segment with an already-converged
+            // DR/BDR pair got stuck exactly this way).
+            let is_master_reply = !dbd.init && !dbd.more && dbd.master;
+            if !is_negotiation_attempt && !is_master_reply {
                 return Vec::new();
             }
             adj.is_master = false;
@@ -144,10 +159,30 @@ fn on_dbd_in_exstart(
                 dd_sequence_number: dbd.dd_sequence_number,
                 lsa_headers: local_lsdb_headers.to_vec(),
             };
-            vec![
-                Action::SendDbd(reply),
-                Action::NeighborEvent(Event::NegotiationDone),
-            ]
+            if is_negotiation_attempt {
+                // Normal case: this is the master's own fresh attempt,
+                // carrying no summary of its own yet. Reply with ours and
+                // wait separately for any further exchange.
+                vec![
+                    Action::SendDbd(reply),
+                    Action::NeighborEvent(Event::NegotiationDone),
+                ]
+            } else {
+                // This packet *is* the master's reply/poll — its actual
+                // completing summary too, since (per this branch's own
+                // doc comment) we never got to see its separate initial
+                // attempt. Process its content immediately rather than
+                // waiting forever for a second message the master will
+                // never send again.
+                adj.request_list = compute_request_list(&dbd.lsa_headers, local_lsdb_headers);
+                vec![
+                    Action::SendDbd(reply),
+                    Action::NeighborEvent(Event::NegotiationDone),
+                    Action::NeighborEvent(Event::ExchangeDone {
+                        more_to_load: !adj.request_list.is_empty(),
+                    }),
+                ]
+            }
         }
         Ordering::Less => {
             // We have the higher router-id: we are master. Accept either
@@ -387,6 +422,62 @@ mod tests {
             [Action::SendDbd(reply), Action::NeighborEvent(Event::NegotiationDone)]
                 if !reply.master && reply.dd_sequence_number == 42
         ));
+    }
+
+    #[test]
+    fn slave_accepts_masters_reply_as_exstart_trigger() {
+        // Regression test (found via a real three-router Docker scenario,
+        // `ospf-dr`, not a unit test): symmetric to
+        // `master_accepts_neighbors_reply_as_exstart_trigger` below, but for
+        // the *slave* side. If the master reaches ExStart (and sends its
+        // attempt) before we ourselves reach 2-Way with it, `handle_dbd` has
+        // no adjacency yet to receive that attempt into and drops it — and
+        // every retransmitted copy, since the master, once it processes our
+        // own (later) attempt, only ever resends its reply to that. Without
+        // this, the slave waits here forever for a message that will never
+        // come again.
+        let mut adj = AdjacencyData::default();
+        let master_lsa = header("1.1.1.1", 0x8000_0001u32 as i32);
+        let poll = DbdPacket {
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            interface_mtu: 0,
+            options: 0,
+            init: false,
+            more: false,
+            master: true,
+            dd_sequence_number: 42,
+            lsa_headers: vec![master_lsa],
+        };
+        let actions = on_dbd_received(
+            &mut adj,
+            NeighborState::ExStart,
+            router_id("9.9.9.9"),
+            router_id("9.9.9.10"),
+            &poll,
+            &[],
+        );
+        assert!(!adj.is_master);
+        assert_eq!(adj.dd_sequence_number, 42);
+        assert_eq!(adj.request_list, vec![master_lsa.key()]);
+        assert_eq!(
+            actions,
+            vec![
+                Action::SendDbd(DbdPacket {
+                    router_id: router_id("9.9.9.9"),
+                    area_id: Ipv4Addr::UNSPECIFIED,
+                    interface_mtu: 0,
+                    options: 0,
+                    init: false,
+                    more: false,
+                    master: false,
+                    dd_sequence_number: 42,
+                    lsa_headers: Vec::new(),
+                }),
+                Action::NeighborEvent(Event::NegotiationDone),
+                Action::NeighborEvent(Event::ExchangeDone { more_to_load: true }),
+            ]
+        );
     }
 
     #[test]

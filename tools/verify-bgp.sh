@@ -71,12 +71,20 @@
 # other) to verify RFC 4456 route reflection and RFC 7947 route-server
 # transparency actually work over real sessions, not just in unit tests.
 #
+# A third, `ospf-dr` (requires `ospf` to have already run), adds router-c
+# onto router-a/router-b's own bd-ospf broadcast segment with a deliberately
+# lower OSPF router-id, confirming RFC 2328 §9.4's election-stability
+# property (router-b stays DR, router-a stays Backup, router-c settles at
+# DrOther without disturbing the incumbents) and that a DrOther still forms
+# a real Full adjacency with both the DR and the BDR (RFC 2328 §8's positive
+# restriction) over real containers.
+#
 # nos-cli's interactive shell (reedline) can't be scripted over a plain
 # pipe, so provisioning goes through `nos-provision` (tools/nos-provision) —
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|logs [n]|down|all}
+# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|logs [n]|down|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -154,6 +162,14 @@ OSPF_BROADCAST_DOMAIN=bd-ospf
 OSPF_BROADCAST_TAG=400
 OSPF_BROADCAST_ADDRESS_A=203.0.113.65/28
 OSPF_BROADCAST_ADDRESS_B=203.0.113.66/28
+# The `ospf-dr` scenario's third router on the same broadcast segment.
+# Deliberately lower than both $OSPF_ROUTER_ID (router-a, 9.9.9.9) and
+# $OSPF_ROUTER_ID_B (router-b, 9.9.9.10) so the election's expected outcome
+# is deterministic: router-b stays DR, router-a stays Backup (RFC 2328
+# §9.4's incumbent-stickiness — a lower-router-id newcomer never displaces
+# an already-elected DR/BDR), and router-c becomes DrOther.
+OSPF_ROUTER_ID_C=9.9.9.8
+OSPF_BROADCAST_ADDRESS_C=203.0.113.67/28
 
 log() { echo "[verify-bgp] $*" >&2; }
 
@@ -375,6 +391,35 @@ provision_ospf() {
     --ospf-area "$OSPF_AREA" \
     --ospf-profile "$OSPF_PROFILE" \
     --ospf-interface-profile "$OSPF_PROFILE"
+}
+
+# Same as `provision_ospf`, but never attaches the profile to eth0's own
+# tag-0 subinterface (no `--ospf-interface-profile`) -- for the `ospf-dr`
+# scenario's router-c, which shares router-a/router-b's docker network (and
+# thus eth0's own broadcast domain) but must not run a second, unwanted
+# point-to-point OSPF adjacency there: router-a/router-b's eth0.0 Hellos
+# would otherwise reach router-c's eth0.0 socket too (raw sockets have no
+# per-peer demux -- see socket.rs's own doc comment on this exact class of
+# bug), and a point-to-point link was never designed to track more than one
+# neighbor. router-c only ever joins OSPF via the broadcast-domain bridge,
+# provisioned separately by `provision_ospf_broadcast`.
+provision_ospf_instance_only() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 ospf_instance=$6 ospf_router_id=$7
+  log "provisioning $name with ospf instance $ospf_instance (router-id=$ospf_router_id), no point-to-point attach point"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --ospf-instance "$ospf_instance" \
+    --ospf-router-id "$ospf_router_id" \
+    --ospf-area "$OSPF_AREA" \
+    --ospf-profile "$OSPF_PROFILE"
 }
 
 # Attaches $OSPF_PROFILE to a second, multi-access link too: trunks eth0
@@ -1067,6 +1112,61 @@ cmd_check_ospf() {
     || { log "router-b: FAILED to reach ospf full on the broadcast link"; return 1; }
 }
 
+# --- Multi-router OSPF DR/BDR scenario (Stage 5) ---
+#
+# Adds a third router ("router-c") onto the same bd-ospf broadcast segment
+# `cmd_check_ospf` already established between router-a/router-b -- assumes
+# that phase has already run in this invocation (`up && established && ospf`
+# first, per this file's own header comment). router-c's OSPF router-id
+# ($OSPF_ROUTER_ID_C) is deliberately lower than both router-a's and
+# router-b's, so RFC 2328 §9.4's incumbent-stickiness keeps router-b DR and
+# router-a Backup unchanged -- router-c simply becomes DrOther. This proves
+# both the election's stability property (a new, lower-id candidate never
+# displaces an already-elected DR/BDR) and RFC 2328 §8's restriction that a
+# DrOther still forms a real Full adjacency with the DR and the BDR (never
+# with another DrOther, which is the negative half -- not proven here, see
+# `link::should_form_adjacency`'s own unit test for that; a real end-to-end
+# proof of the negative half needs a fourth router, out of scope for now).
+cmd_check_ospf_dr() {
+  start_router router-c "$IP_C"
+  wait_for_config_socket router-c
+  provision_ospf_instance_only router-c "$ASN_C" "$RID_C" "$IP_C" "$IP_A" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID_C"
+  provision_ospf_broadcast router-c "$ASN_C" "$RID_C" "$IP_C" "$IP_A" "$OSPF_BROADCAST_ADDRESS_C"
+
+  log "waiting for router-c to reach ospf 2-way with router-a and router-b on the broadcast link"
+  wait_for_count_increase router-c "ospf neighbor reached two-way link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPF_ROUTER_ID" 0 60 \
+    && log "router-c: reached ospf 2-way with $OSPF_ROUTER_ID (router-a)" \
+    || { log "router-c: FAILED to reach ospf 2-way with router-a"; return 1; }
+  wait_for_count_increase router-c "ospf neighbor reached two-way link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPF_ROUTER_ID_B" 0 60 \
+    && log "router-c: reached ospf 2-way with $OSPF_ROUTER_ID_B (router-b)" \
+    || { log "router-c: FAILED to reach ospf 2-way with router-b"; return 1; }
+
+  # The positive half of RFC 2328 §9.4's stability property: router-b/
+  # router-a's incumbent DR/Backup roles are unchanged (no new "became dr"/
+  # "became backup" log line fires for them -- nothing to wait for), while
+  # router-c, the new lower-id arrival, settles at DrOther.
+  log "waiting for router-c to settle as dr-other (router-b stays dr, router-a stays backup)"
+  wait_for_count_increase router-c "ospf interface became dr-other link=broadcast-domain:$OSPF_BROADCAST_DOMAIN dr=$OSPF_ROUTER_ID_B bdr=$OSPF_ROUTER_ID" 0 60 \
+    && log "router-c: became dr-other" \
+    || { log "router-c: FAILED to become dr-other"; return 1; }
+
+  # RFC 2328 §8's positive half: a DrOther still forms a real Full adjacency
+  # with both the DR and the BDR.
+  log "waiting for router-c to reach ospf full with both router-a and router-b"
+  wait_for_count_increase router-c "ospf neighbor reached full link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPF_ROUTER_ID" 0 60 \
+    && log "router-c: reached ospf full with $OSPF_ROUTER_ID (router-a, backup)" \
+    || { log "router-c: FAILED to reach ospf full with router-a"; return 1; }
+  wait_for_count_increase router-c "ospf neighbor reached full link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPF_ROUTER_ID_B" 0 60 \
+    && log "router-c: reached ospf full with $OSPF_ROUTER_ID_B (router-b, dr)" \
+    || { log "router-c: FAILED to reach ospf full with router-b"; return 1; }
+  wait_for_count_increase router-a "ospf neighbor reached full link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPF_ROUTER_ID_C" 0 60 \
+    && log "router-a: reached ospf full with $OSPF_ROUTER_ID_C (router-c, dr-other)" \
+    || { log "router-a: FAILED to reach ospf full with router-c"; return 1; }
+  wait_for_count_increase router-b "ospf neighbor reached full link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPF_ROUTER_ID_C" 0 60 \
+    && log "router-b: reached ospf full with $OSPF_ROUTER_ID_C (router-c, dr-other)" \
+    || { log "router-b: FAILED to reach ospf full with router-c"; return 1; }
+}
+
 cmd_check_switching() {
   provision_switching router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
 
@@ -1588,6 +1688,7 @@ case "${1:-}" in
   reflector) cmd_check_reflector ;;
   route-server) cmd_check_route_server ;;
   ospf) cmd_check_ospf ;;
+  ospf-dr) cmd_check_ospf_dr ;;
   logs) shift; cmd_logs "$@" ;;
   down) cmd_down ;;
   all)
@@ -1608,9 +1709,10 @@ case "${1:-}" in
     cmd_check_reflector
     cmd_check_route_server
     cmd_check_ospf
+    cmd_check_ospf_dr
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|logs [n]|down|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|logs [n]|down|all}" >&2
     exit 2
     ;;
 esac
