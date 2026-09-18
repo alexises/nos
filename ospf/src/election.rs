@@ -9,9 +9,14 @@
 //! `link.rs` re-runs `elect` after every Hello-driven neighbor-state change
 //! and every dead-interval sweep, so the correct steady state is still
 //! reached, just within one extra Hello interval instead of instantly.
-//! Harmless here since no neighbor ever progresses past `TwoWay` regardless
-//! of DR/BDR-ness this phase (see `ospf/CLAUDE.md`) — upgrade to a second
-//! pass if adjacency formation ever depends on DR/BDR-ness.
+//!
+//! Adjacency formation *does* now depend on DR/BDR-ness (`link::
+//! should_form_adjacency`, re-checked on every re-election) — but that's
+//! still harmless: a delayed-by-one-interval settle only delays *when*
+//! `ExStart` begins for a newly-eligible pair, it never produces a wrong
+//! adjacency decision, since eligibility is re-evaluated fresh on every
+//! election result rather than cached. Upgrade to a second pass if a
+//! faster DR/BDR settle time ever matters on its own merits.
 
 use std::net::Ipv4Addr;
 

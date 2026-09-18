@@ -1,13 +1,15 @@
-//! One OSPF link's Hello-protocol driver, plus `LinkManager` — the OSPF
-//! analogue of `bgp::session::SessionManager`, much smaller since there's no
-//! shared listener, no auth, and no collision resolution: each link just
-//! owns its own raw socket, neighbor FSM(s), and (on a `Broadcast` link)
-//! RFC 2328 §9.4 DR/BDR election.
+//! One OSPF link's driver, plus `LinkManager` — the OSPF analogue of
+//! `bgp::session::SessionManager`, much smaller since there's no shared
+//! listener, no auth, and no collision resolution: each link just owns its
+//! own raw socket, neighbor FSM(s), RFC 2328 §9.4 DR/BDR election on a
+//! `Broadcast` link, and — once a neighbor is eligible — RFC 2328
+//! §10.6-10.8's DBD/LSR/LSU/LSAck adjacency-forming exchange
+//! (`crate::exchange`).
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nos_proto::{LinkInterfaceState, NeighborSummary, NetworkType, OspfNeighborState};
 use tokio::sync::{watch, Mutex};
@@ -16,9 +18,32 @@ use tokio::time::Instant;
 use tracing::{info, warn};
 
 use crate::election::{self, Candidate};
+use crate::exchange::{self, AdjacencyData};
+use crate::lsa::{
+    self, Lsa, LsaBody, LsaHeader, LsaKey, NetworkLsaBody, RouterLink, RouterLsaBody,
+};
+use crate::lsdb::Lsdb;
 use crate::neighbor::{self, NeighborState};
-use crate::packet::{self, HelloPacket};
+use crate::packet::{self, DbdPacket, LsAckPacket, LsrPacket, LsuPacket, OspfPacket};
 use crate::socket::OspfSocket;
+
+/// RFC 2328 Appendix C.3's default `RxmtInterval` — how often an
+/// unacknowledged LSR/LSU is resent.
+///
+/// # ponytail: fixed, not a per-`OspfProfile` config field
+/// `hello_interval`/`dead_interval`/`priority` are all operator-tunable per
+/// profile, but adding a matching `retransmit_interval` field would touch
+/// schema/ops/diff/cli plumbing across ~7 files for a knob nothing in this
+/// NOS's verification suite needs tuned. Upgrade to a real
+/// `OspfProfile.retransmit_interval: Option<u16>` (mirroring
+/// `hello_interval`'s exact pattern) if an operator ever needs to tune it.
+const RXMT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How often `LinkManager` recomputes and reinstalls this router's own
+/// self-originated LSAs — independent of, and much more frequent than, the
+/// 10s config-reapply tick, so a freshly-`Full` adjacency's Router-LSA
+/// shows up quickly rather than waiting on the next config resync.
+const ORIGINATION_INTERVAL: Duration = Duration::from_secs(2);
 
 /// One link's fully-resolved desired state — diffed wholesale by
 /// `LinkManager::reconcile`, mirroring `bgp::session::ResolvedPeer`: any
@@ -34,6 +59,16 @@ pub struct LinkConfig {
     pub dead_interval: u16,
     pub vrf: String,
     pub local_addr: Ipv4Addr,
+    /// The real Linux device this link's raw socket binds to — the
+    /// specific L3 interface OSPF actually runs on: the physical/VLAN
+    /// subinterface itself for a point-to-point attach point, or the
+    /// `BroadcastDomain`'s own bridge (its SVI) for a broadcast one. Never
+    /// the VRF device: OSPF's raw protocol-89 socket has no port/connection
+    /// concept to demultiplex by, so a VRF-wide bind would also receive
+    /// every *other* OSPF link's traffic in the same VRF, corrupting each
+    /// link's own DBD/LSR/LSU sequence-number/role state — a real bug this
+    /// field's introduction fixed (see `socket.rs`'s doc comment).
+    pub kernel_interface: String,
     pub network_type: NetworkType,
     pub priority: u8,
 }
@@ -51,13 +86,20 @@ pub enum InterfaceState {
     DrOther,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NeighborInfo {
     pub state: NeighborState,
     pub priority: u8,
     pub declared_dr: Ipv4Addr,
     pub declared_bdr: Ipv4Addr,
     pub last_hello_received: Instant,
+    /// The neighbor's own IP address, as seen on the last Hello it sent —
+    /// DBD/LSR/LSU/LSAck reply unicast to this, unlike Hello's multicast.
+    pub address: Ipv4Addr,
+    /// `Some` from `ExStart` onward; cleared whenever the neighbor drops
+    /// back to `Init`/`Down` (RFC 2328: losing 2-way tears down any
+    /// adjacency, forcing a fresh negotiation on reconnect).
+    pub adjacency: Option<AdjacencyData>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,11 +128,70 @@ impl LinkStatus {
 
 pub type StatusHandle = watch::Sender<LinkStatus>;
 
+/// RFC 2328 §7.5/§10.4: on a broadcast link, a neighbor only proceeds
+/// toward a full adjacency if this router or that neighbor is the elected
+/// DR/BDR — every other pair (`DrOther`-`DrOther`) stays at `TwoWay`
+/// forever. Point-to-point has no such restriction (`interface_state` is
+/// always `PointToPoint`, so every neighbor is always eligible).
+fn should_form_adjacency(
+    interface_state: InterfaceState,
+    neighbor_id: Ipv4Addr,
+    dr: Option<Ipv4Addr>,
+    bdr: Option<Ipv4Addr>,
+) -> bool {
+    matches!(
+        interface_state,
+        InterfaceState::PointToPoint | InterfaceState::Dr | InterfaceState::Backup
+    ) || dr == Some(neighbor_id)
+        || bdr == Some(neighbor_id)
+}
+
+/// A sequence number unlikely to collide with whatever this router last
+/// used with this neighbor (RFC 2328 §10.6 has no stronger requirement than
+/// that). Kept in `link.rs`, not `exchange.rs`, so the DBD negotiation logic
+/// stays free of wall-clock reads and fully unit-testable.
+fn initial_dd_sequence_number() -> u32 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(1, |d| d.subsec_nanos())
+}
+
+/// Builds a fresh `AdjacencyData` plus the negotiation DBD to send —
+/// used both when a neighbor first becomes adjacency-eligible and when a
+/// `SeqNumberMismatch` forces negotiation to restart from scratch.
+fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyData, DbdPacket) {
+    let seed = initial_dd_sequence_number();
+    let dbd = DbdPacket {
+        router_id: local_router_id,
+        area_id: cfg.area_id,
+        interface_mtu: 0, // never enforced by this NOS, on send or receive
+        options: 0,
+        init: true,
+        more: true,
+        master: true,
+        dd_sequence_number: seed,
+        lsa_headers: Vec::new(),
+    };
+    let adj = AdjacencyData {
+        is_master: false, // resolved once the neighbor's own negotiation DBD arrives
+        dd_sequence_number: seed,
+        request_list: Vec::new(),
+        retransmission_list: HashMap::new(),
+        last_dbd_sent: Some(dbd.clone()),
+    };
+    (adj, dbd)
+}
+
 /// Runs until aborted (link removed from config, or process shutdown — see
 /// `LinkManager`). Owns the raw socket, the Hello send ticker, and every
 /// timer this link's network type needs.
-pub async fn run(cfg: LinkConfig, local_router_id: Ipv4Addr, status: StatusHandle) {
-    let socket = match OspfSocket::open(&cfg.vrf, cfg.local_addr) {
+pub async fn run(
+    cfg: LinkConfig,
+    local_router_id: Ipv4Addr,
+    lsdb: Arc<Mutex<Lsdb>>,
+    status: StatusHandle,
+) {
+    let socket = match OspfSocket::open(&cfg.kernel_interface, cfg.local_addr) {
         Ok(s) => s,
         Err(e) => {
             warn!(link = %cfg.attach_point, error = %e, "failed to open ospf raw socket");
@@ -115,6 +216,9 @@ pub async fn run(cfg: LinkConfig, local_router_id: Ipv4Addr, status: StatusHandl
     let wait_deadline = Instant::now() + Duration::from_secs(u64::from(cfg.dead_interval));
     let mut waiting = is_broadcast;
 
+    let mut rxmt_sweep = tokio::time::interval(RXMT_INTERVAL);
+    rxmt_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     info!(link = %cfg.attach_point, vrf = %cfg.vrf, "ospf link driver started");
     if is_broadcast {
         info!(link = %cfg.attach_point, "ospf interface reached waiting");
@@ -125,12 +229,48 @@ pub async fn run(cfg: LinkConfig, local_router_id: Ipv4Addr, status: StatusHandl
             _ = hello_ticker.tick() => {
                 send_hello(&socket, &cfg, local_router_id, &status);
             }
-            result = socket.recv_hello() => {
-                let left_waiting = handle_received(
-                    result, &cfg, local_router_id, &status, &mut p2p_dead_deadline, waiting,
-                );
-                if left_waiting {
-                    waiting = false;
+            result = socket.recv_packet() => {
+                match result {
+                    Ok((source, data)) => match packet::decode(&data) {
+                        Ok(OspfPacket::Hello(hello)) => {
+                            let left_waiting = handle_hello(
+                                &cfg, local_router_id, &status, source, &hello,
+                                &mut p2p_dead_deadline, waiting,
+                            );
+                            if left_waiting {
+                                waiting = false;
+                            }
+                            advance_adjacencies(&socket, &cfg, local_router_id, &status);
+                        }
+                        Ok(OspfPacket::Dbd(dbd)) => {
+                            if let Some(actions) =
+                                handle_dbd(&cfg, local_router_id, &status, &lsdb, &dbd).await
+                            {
+                                execute_actions(&socket, &cfg, local_router_id, &status, dbd.router_id, actions);
+                            }
+                        }
+                        Ok(OspfPacket::Lsr(lsr)) => {
+                            if let Some(actions) =
+                                handle_lsr(&cfg, local_router_id, &status, &lsdb, &lsr).await
+                            {
+                                execute_actions(&socket, &cfg, local_router_id, &status, lsr.router_id, actions);
+                            }
+                        }
+                        Ok(OspfPacket::Lsu(lsu)) => {
+                            if let Some(actions) =
+                                handle_lsu(&cfg, local_router_id, &status, &lsdb, &lsu).await
+                            {
+                                execute_actions(&socket, &cfg, local_router_id, &status, lsu.router_id, actions);
+                            }
+                        }
+                        Ok(OspfPacket::LsAck(ack)) => {
+                            handle_lsack(&status, &ack);
+                        }
+                        Err(e) => {
+                            warn!(link = %cfg.attach_point, error = %e, "failed to decode ospf packet");
+                        }
+                    },
+                    Err(e) => warn!(link = %cfg.attach_point, error = %e, "ospf recv error"),
                 }
             }
             () = tokio::time::sleep_until(p2p_dead_deadline), if !is_broadcast => {
@@ -141,11 +281,17 @@ pub async fn run(cfg: LinkConfig, local_router_id: Ipv4Addr, status: StatusHandl
                 sweep_dead_neighbors(&cfg, &status);
                 if !waiting {
                     run_election(&cfg, local_router_id, &status);
+                    advance_adjacencies(&socket, &cfg, local_router_id, &status);
                 }
             }
             () = tokio::time::sleep_until(wait_deadline), if waiting => {
                 waiting = false;
                 run_election(&cfg, local_router_id, &status);
+                advance_adjacencies(&socket, &cfg, local_router_id, &status);
+            }
+            _ = rxmt_sweep.tick() => {
+                retransmit_pending(&socket, &cfg, local_router_id, &status);
+                flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &status).await;
             }
         }
     }
@@ -176,7 +322,7 @@ fn send_hello(
     };
     drop(current);
 
-    let pkt = HelloPacket {
+    let pkt = packet::HelloPacket {
         router_id: local_router_id,
         area_id: cfg.area_id,
         hello_interval: cfg.hello_interval,
@@ -186,7 +332,7 @@ fn send_hello(
         backup_designated_router,
         neighbors,
     };
-    if let Err(e) = socket.send_hello(&packet::encode_hello(&pkt)) {
+    if let Err(e) = socket.send_multicast(&packet::encode_hello(&pkt)) {
         warn!(link = %cfg.attach_point, error = %e, "failed to send ospf hello");
     }
 }
@@ -194,28 +340,15 @@ fn send_hello(
 /// Returns whether this Hello caused a broadcast link to leave `Waiting`
 /// early (RFC 2328's "`BackupSeen`" shortcut — a neighbor already declaring
 /// itself DR means the election result is already knowable).
-fn handle_received(
-    result: std::io::Result<Vec<u8>>,
+fn handle_hello(
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
+    source: Ipv4Addr,
+    hello: &packet::HelloPacket,
     p2p_dead_deadline: &mut Instant,
     waiting: bool,
 ) -> bool {
-    let data = match result {
-        Ok(received) => received,
-        Err(e) => {
-            warn!(link = %cfg.attach_point, error = %e, "ospf recv error");
-            return false;
-        }
-    };
-    let hello = match packet::decode_hello(&data) {
-        Ok(hello) => hello,
-        Err(e) => {
-            warn!(link = %cfg.attach_point, error = %e, "failed to decode ospf hello");
-            return false;
-        }
-    };
     // RFC 2328 §10.5's packet-validity check precedes any neighbor event —
     // a mismatched area is logged and dropped, not fed into the FSM.
     if hello.area_id != cfg.area_id {
@@ -239,17 +372,34 @@ fn handle_received(
     if old_state != NeighborState::TwoWay && new_state == NeighborState::TwoWay {
         info!(link = %cfg.attach_point, neighbor = %hello.router_id, "ospf neighbor reached two-way");
     }
+    if old_state != NeighborState::Init
+        && new_state == NeighborState::Init
+        && old_state != NeighborState::Down
+    {
+        warn!(link = %cfg.attach_point, neighbor = %hello.router_id, "ospf neighbor adjacency torn down, back to init");
+    }
     status.send_modify(|s| {
-        s.neighbors.insert(
-            hello.router_id,
-            NeighborInfo {
-                state: new_state,
-                priority: hello.router_priority,
-                declared_dr: hello.designated_router,
-                declared_bdr: hello.backup_designated_router,
+        let entry = s
+            .neighbors
+            .entry(hello.router_id)
+            .or_insert_with(|| NeighborInfo {
+                state: NeighborState::Down,
+                priority: 0,
+                declared_dr: Ipv4Addr::UNSPECIFIED,
+                declared_bdr: Ipv4Addr::UNSPECIFIED,
                 last_hello_received: Instant::now(),
-            },
-        );
+                address: source,
+                adjacency: None,
+            });
+        entry.state = new_state;
+        entry.priority = hello.router_priority;
+        entry.declared_dr = hello.designated_router;
+        entry.declared_bdr = hello.backup_designated_router;
+        entry.last_hello_received = Instant::now();
+        entry.address = source;
+        if matches!(new_state, NeighborState::Down | NeighborState::Init) {
+            entry.adjacency = None;
+        }
     });
 
     match cfg.network_type {
@@ -269,6 +419,399 @@ fn handle_received(
     }
 }
 
+/// Scans every `TwoWay` neighbor with no adjacency yet and, for each one
+/// now eligible (`should_form_adjacency`), starts RFC 2328 §10.6
+/// negotiation: sends the initial negotiation DBD and moves it to
+/// `ExStart`. Called after anything that could change eligibility — a
+/// fresh `TwoWay`, or a completed election.
+fn advance_adjacencies(
+    socket: &OspfSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+) {
+    let snapshot = status.borrow().clone();
+    let eligible: Vec<Ipv4Addr> = snapshot
+        .neighbors
+        .iter()
+        .filter(|(id, info)| {
+            info.state == NeighborState::TwoWay
+                && info.adjacency.is_none()
+                && should_form_adjacency(snapshot.interface_state, **id, snapshot.dr, snapshot.bdr)
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    drop(snapshot);
+
+    for neighbor_id in eligible {
+        let Some(neighbor_addr) = status
+            .borrow()
+            .neighbors
+            .get(&neighbor_id)
+            .map(|n| n.address)
+        else {
+            continue;
+        };
+        let (adj, dbd) = start_negotiation(cfg, local_router_id);
+        if let Err(e) = socket.send_unicast(neighbor_addr, &packet::encode_dbd(&dbd)) {
+            warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf dbd");
+        }
+        let new_state = neighbor::step(NeighborState::TwoWay, neighbor::Event::AdjacencyEligible);
+        info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf neighbor reached exstart");
+        status.send_modify(|s| {
+            if let Some(info) = s.neighbors.get_mut(&neighbor_id) {
+                info.state = new_state;
+                info.adjacency = Some(adj);
+            }
+        });
+    }
+}
+
+/// Handles one received DBD packet against the sending neighbor's current
+/// adjacency data, returning the actions `execute_actions` still needs to
+/// carry out (sends). Returns `None` if the neighbor is unknown or has no
+/// adjacency in progress.
+async fn handle_dbd(
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+    lsdb: &Mutex<Lsdb>,
+    dbd: &DbdPacket,
+) -> Option<Vec<exchange::Action>> {
+    let (old_state, mut adj) = {
+        let snapshot = status.borrow();
+        let neighbor = snapshot.neighbors.get(&dbd.router_id)?;
+        (neighbor.state, neighbor.adjacency.clone()?)
+    };
+
+    let local_lsdb_headers = lsdb.lock().await.headers();
+    let actions = exchange::on_dbd_received(
+        &mut adj,
+        old_state,
+        local_router_id,
+        dbd.router_id,
+        dbd,
+        &local_lsdb_headers,
+    );
+
+    Some(finish_neighbor_event(
+        cfg,
+        local_router_id,
+        status,
+        dbd.router_id,
+        old_state,
+        adj,
+        actions,
+    ))
+}
+
+/// Handles one received LSR packet, looking up every requested LSA in
+/// `lsdb`. Returns `None` if the neighbor is unknown or has no adjacency in
+/// progress.
+async fn handle_lsr(
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+    lsdb: &Mutex<Lsdb>,
+    lsr: &LsrPacket,
+) -> Option<Vec<exchange::Action>> {
+    let (old_state, mut adj) = {
+        let snapshot = status.borrow();
+        let neighbor = snapshot.neighbors.get(&lsr.router_id)?;
+        (neighbor.state, neighbor.adjacency.clone()?)
+    };
+
+    let actions = {
+        let lsdb = lsdb.lock().await;
+        exchange::on_lsr_received(&mut adj, &lsdb, lsr)
+    };
+
+    Some(finish_neighbor_event(
+        cfg,
+        local_router_id,
+        status,
+        lsr.router_id,
+        old_state,
+        adj,
+        actions,
+    ))
+}
+
+/// Handles one received LSU packet, installing every carried LSA into
+/// `lsdb`. Returns `None` if the neighbor is unknown or has no adjacency in
+/// progress.
+async fn handle_lsu(
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+    lsdb: &Mutex<Lsdb>,
+    lsu: &LsuPacket,
+) -> Option<Vec<exchange::Action>> {
+    let (old_state, mut adj) = {
+        let snapshot = status.borrow();
+        let neighbor = snapshot.neighbors.get(&lsu.router_id)?;
+        (neighbor.state, neighbor.adjacency.clone()?)
+    };
+
+    let (actions, newly_installed) = {
+        let mut lsdb = lsdb.lock().await;
+        exchange::on_lsu_received(&mut adj, &mut lsdb, lsu)
+    };
+    for header in &newly_installed {
+        info!(
+            link = %cfg.attach_point, neighbor = %lsu.router_id,
+            lsa_type = header.lsa_type, link_state_id = %header.link_state_id,
+            advertising_router = %header.advertising_router,
+            "ospf lsa installed"
+        );
+    }
+
+    Some(finish_neighbor_event(
+        cfg,
+        local_router_id,
+        status,
+        lsu.router_id,
+        old_state,
+        adj,
+        actions,
+    ))
+}
+
+/// Handles one received `LSAck` packet — no neighbor-state transition
+/// possible from an ack alone, just retransmission-list bookkeeping.
+fn handle_lsack(status: &StatusHandle, ack: &LsAckPacket) {
+    let Some(mut adj) = status
+        .borrow()
+        .neighbors
+        .get(&ack.router_id)
+        .and_then(|n| n.adjacency.clone())
+    else {
+        return;
+    };
+    exchange::on_lsack_received(&mut adj, ack);
+    status.send_modify(|s| {
+        if let Some(info) = s.neighbors.get_mut(&ack.router_id) {
+            info.adjacency = Some(adj.clone());
+        }
+    });
+}
+
+/// Applies any `NeighborEvent`s in `actions` to `old_state` via
+/// `neighbor::step`, logs state-transition milestones, and — if the result
+/// is a `SeqNumberMismatch`-triggered restart back to `ExStart` — replaces
+/// `actions` with a fresh negotiation DBD instead of replaying whatever the
+/// caller computed (mirroring `advance_adjacencies`'s own negotiation
+/// start). Shared tail of `handle_dbd`/`handle_lsr`/`handle_lsu`.
+fn finish_neighbor_event(
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+    neighbor_id: Ipv4Addr,
+    old_state: NeighborState,
+    mut adj: AdjacencyData,
+    actions: Vec<exchange::Action>,
+) -> Vec<exchange::Action> {
+    let mut new_state = old_state;
+    for action in &actions {
+        if let exchange::Action::NeighborEvent(event) = action {
+            new_state = neighbor::step(new_state, *event);
+        }
+    }
+
+    let actions = if new_state == NeighborState::ExStart && old_state != NeighborState::ExStart {
+        let (fresh_adj, negotiation_dbd) = start_negotiation(cfg, local_router_id);
+        adj = fresh_adj;
+        warn!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf neighbor sequence mismatch, restarting negotiation");
+        vec![exchange::Action::SendDbd(negotiation_dbd)]
+    } else {
+        for action in &actions {
+            if let exchange::Action::SendDbd(pkt) = action {
+                adj.last_dbd_sent = Some(pkt.clone());
+            }
+        }
+        if matches!(new_state, NeighborState::Loading | NeighborState::Full) {
+            adj.last_dbd_sent = None;
+        }
+        actions
+    };
+
+    match (old_state, new_state) {
+        (s, NeighborState::Exchange) if s != NeighborState::Exchange => {
+            info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf neighbor reached exchange");
+        }
+        (s, NeighborState::Loading) if s != NeighborState::Loading => {
+            info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf neighbor reached loading");
+        }
+        (s, NeighborState::Full) if s != NeighborState::Full => {
+            info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf neighbor reached full");
+        }
+        _ => {}
+    }
+
+    status.send_modify(|s| {
+        if let Some(info) = s.neighbors.get_mut(&neighbor_id) {
+            info.state = new_state;
+            info.adjacency = Some(adj.clone());
+        }
+    });
+
+    actions
+}
+
+/// Carries out the I/O side of an `exchange::Action` list — sending
+/// packets. `NeighborEvent` is already applied to state by the caller;
+/// `InstallAndFlood` lands in a later stage (cross-link flooding).
+fn execute_actions(
+    socket: &OspfSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+    neighbor_id: Ipv4Addr,
+    actions: Vec<exchange::Action>,
+) {
+    let Some(neighbor_addr) = status
+        .borrow()
+        .neighbors
+        .get(&neighbor_id)
+        .map(|n| n.address)
+    else {
+        return;
+    };
+    for action in actions {
+        let (kind, payload) = match action {
+            exchange::Action::SendDbd(pkt) => ("dbd", packet::encode_dbd(&pkt)),
+            exchange::Action::SendLsr(requests) => (
+                "lsr",
+                packet::encode_lsr(&LsrPacket {
+                    router_id: local_router_id,
+                    area_id: cfg.area_id,
+                    requests,
+                }),
+            ),
+            exchange::Action::SendLsu(lsas) => (
+                "lsu",
+                packet::encode_lsu(&LsuPacket {
+                    router_id: local_router_id,
+                    area_id: cfg.area_id,
+                    lsas: lsas.iter().map(|l| (**l).clone()).collect(),
+                }),
+            ),
+            exchange::Action::SendLsAck(lsa_headers) => (
+                "lsack",
+                packet::encode_lsack(&LsAckPacket {
+                    router_id: local_router_id,
+                    area_id: cfg.area_id,
+                    lsa_headers,
+                }),
+            ),
+            exchange::Action::NeighborEvent(_) | exchange::Action::InstallAndFlood(_) => continue,
+        };
+        if let Err(e) = socket.send_unicast(neighbor_addr, &payload) {
+            warn!(link = %cfg.attach_point, neighbor = %neighbor_id, kind, error = %e, "failed to send ospf packet");
+        }
+    }
+}
+
+/// Resends every neighbor's last-sent DBD (if any — see `AdjacencyData::
+/// last_dbd_sent`'s doc comment for why this is necessary, not just a
+/// reliability nicety) and outstanding request/retransmission list —
+/// ponytail: the whole set every tick, rather than tracking each entry's
+/// own last-sent time, since `RXMT_INTERVAL` is already the granularity RFC
+/// 2328 uses and this NOS's per-neighbor outstanding set is tiny (a handful
+/// of LSAs on a lab topology).
+fn retransmit_pending(
+    socket: &OspfSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+) {
+    let snapshot = status.borrow().clone();
+    for (neighbor_id, info) in &snapshot.neighbors {
+        let Some(adj) = &info.adjacency else { continue };
+        if let Some(dbd) = &adj.last_dbd_sent {
+            if let Err(e) = socket.send_unicast(info.address, &packet::encode_dbd(dbd)) {
+                warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf dbd");
+            }
+        }
+        if !matches!(
+            info.state,
+            NeighborState::Exchange | NeighborState::Loading | NeighborState::Full
+        ) {
+            continue;
+        }
+        if !adj.request_list.is_empty() {
+            let lsr = LsrPacket {
+                router_id: local_router_id,
+                area_id: cfg.area_id,
+                requests: adj.request_list.clone(),
+            };
+            if let Err(e) = socket.send_unicast(info.address, &packet::encode_lsr(&lsr)) {
+                warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsr");
+            }
+        }
+        if !adj.retransmission_list.is_empty() {
+            let lsu = LsuPacket {
+                router_id: local_router_id,
+                area_id: cfg.area_id,
+                lsas: adj
+                    .retransmission_list
+                    .values()
+                    .map(|l| (**l).clone())
+                    .collect(),
+            };
+            if let Err(e) = socket.send_unicast(info.address, &packet::encode_lsu(&lsu)) {
+                warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsu");
+            }
+        }
+    }
+}
+
+/// Resends the entire local LSDB to every `Full` neighbor on this link.
+///
+/// # ponytail: periodic full resend, not RFC 2328 §13's event-driven flood
+/// A neighbor's one-shot DBD/LSR/LSU exchange (see `exchange.rs`'s own
+/// `ponytail:` note) only ever sees the LSDB's contents at the moment
+/// negotiation completes — a self-originated LSA that appears afterward (or
+/// one learned from a different link, once cross-link flooding exists)
+/// would otherwise never reach an already-`Full` neighbor. Resending
+/// everything on every `RXMT_INTERVAL` tick is safe (`Lsdb::install`/
+/// `on_lsu_received` already reject and cheaply ack non-newer duplicates)
+/// and simple, at the cost of some wasted bandwidth on a lab-scale LSDB.
+/// Upgrade to real event-driven flooding (on origination and on receipt,
+/// reaching every adjacent link) in a later stage.
+async fn flood_full_neighbors(
+    socket: &OspfSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    lsdb: &Mutex<Lsdb>,
+    status: &StatusHandle,
+) {
+    let full_neighbors: Vec<(Ipv4Addr, Ipv4Addr)> = status
+        .borrow()
+        .neighbors
+        .iter()
+        .filter(|(_, info)| info.state == NeighborState::Full)
+        .map(|(id, info)| (*id, info.address))
+        .collect();
+    if full_neighbors.is_empty() {
+        return;
+    }
+    let lsas = lsdb.lock().await.all();
+    if lsas.is_empty() {
+        return;
+    }
+    let payload = packet::encode_lsu(&LsuPacket {
+        router_id: local_router_id,
+        area_id: cfg.area_id,
+        lsas: lsas.iter().map(|l| (**l).clone()).collect(),
+    });
+    for (neighbor_id, neighbor_addr) in full_neighbors {
+        if let Err(e) = socket.send_unicast(neighbor_addr, &payload) {
+            warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsu");
+        }
+    }
+}
+
 /// Point-to-point only — `run()` only arms this branch when
 /// `cfg.network_type` is `PointToPoint`. At most one neighbor entry.
 fn apply_dead_timer(cfg: &LinkConfig, status: &StatusHandle) {
@@ -282,6 +825,7 @@ fn apply_dead_timer(cfg: &LinkConfig, status: &StatusHandle) {
     status.send_modify(|s| {
         for info in s.neighbors.values_mut() {
             info.state = new_state;
+            info.adjacency = None;
         }
     });
 }
@@ -312,6 +856,7 @@ fn sweep_dead_neighbors(cfg: &LinkConfig, status: &StatusHandle) {
         for id in &expired {
             if let Some(info) = s.neighbors.get_mut(id) {
                 info.state = neighbor::step(info.state, neighbor::Event::InactivityTimerExpired);
+                info.adjacency = None;
             }
         }
     });
@@ -331,7 +876,22 @@ fn run_election(cfg: &LinkConfig, local_router_id: Ipv4Addr, status: &StatusHand
     let neighbor_candidates: Vec<Candidate> = snapshot
         .neighbors
         .iter()
-        .filter(|(_, info)| info.state == NeighborState::TwoWay)
+        // RFC 2328 §9.4: every neighbor at 2-Way *or better* is eligible —
+        // not just exactly `TwoWay`. A neighbor that has since progressed
+        // to `ExStart`/`Exchange`/`Loading`/`Full` is still on the segment
+        // and must stay in the DR/BDR candidate pool; excluding it here
+        // once adjacency starts forming would make this router think it's
+        // alone and incorrectly elect itself.
+        .filter(|(_, info)| {
+            matches!(
+                info.state,
+                NeighborState::TwoWay
+                    | NeighborState::ExStart
+                    | NeighborState::Exchange
+                    | NeighborState::Loading
+                    | NeighborState::Full
+            )
+        })
         .map(|(id, info)| Candidate {
             router_id: *id,
             priority: info.priority,
@@ -389,19 +949,128 @@ struct LinkEntry {
     status: watch::Receiver<LinkStatus>,
 }
 
-/// Owns every OSPF link's driver task for one `nos-ospfd` process.
-/// `reconcile` is the sole entry point, called by `crate::reconcile::run` on
-/// every resync; it's idempotent and safe to call repeatedly with the same
-/// desired state — mirrors `bgp::session::SessionManager`.
+/// Owns every OSPF link's driver task for one `nos-ospfd` process, plus its
+/// per-area LSDBs. `reconcile` is the sole entry point, called by
+/// `crate::reconcile::run` on every resync; it's idempotent and safe to
+/// call repeatedly with the same desired state — mirrors
+/// `bgp::session::SessionManager`.
 pub struct LinkManager {
     links: Mutex<HashMap<String, LinkEntry>>,
+    /// Partitioned by area, not a single flat map — `OspfArea` is already
+    /// multi-valued in this NOS's config schema, so a flat LSDB would leak
+    /// LSAs across areas the moment a second one is configured.
+    lsdbs: Mutex<HashMap<Ipv4Addr, Arc<Mutex<Lsdb>>>>,
+    /// Set on every `reconcile` call, read by the background origination
+    /// task started in `new`.
+    router_id: Mutex<Option<Ipv4Addr>>,
 }
 
 impl LinkManager {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
+        let manager = Arc::new(Self {
             links: Mutex::new(HashMap::new()),
-        })
+            lsdbs: Mutex::new(HashMap::new()),
+            router_id: Mutex::new(None),
+        });
+        let background = Arc::clone(&manager);
+        // Runs for the process's lifetime — like every link driver task, it
+        // ends only when the tokio runtime itself is torn down at process
+        // exit, so there's nothing to abort on shutdown.
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(ORIGINATION_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                if let Some(router_id) = *background.router_id.lock().await {
+                    background.originate_router_lsas(router_id).await;
+                }
+            }
+        });
+        manager
+    }
+
+    /// Gets or creates the shared LSDB for `area_id`.
+    async fn lsdb_for(&self, area_id: Ipv4Addr) -> Arc<Mutex<Lsdb>> {
+        Arc::clone(
+            self.lsdbs
+                .lock()
+                .await
+                .entry(area_id)
+                .or_insert_with(|| Arc::new(Mutex::new(Lsdb::new()))),
+        )
+    }
+
+    /// RFC 2328 §12.4's self-origination: recomputes and (re)installs this
+    /// router's own Router-LSA per area (from every currently-running
+    /// link's config/status in that area) and Network-LSA on any broadcast
+    /// link where it's DR with at least one `Full` neighbor. Run
+    /// periodically (see `ORIGINATION_INTERVAL`) rather than event-driven
+    /// off each link's own state changes, since it's cheap and every
+    /// relevant link's status already sits in a `watch` channel this can
+    /// just snapshot.
+    async fn originate_router_lsas(&self, local_router_id: Ipv4Addr) {
+        let snapshot: Vec<(LinkConfig, LinkStatus)> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .map(|e| (e.config.clone(), e.status.borrow().clone()))
+            .collect();
+
+        let mut by_area: HashMap<Ipv4Addr, Vec<(LinkConfig, LinkStatus)>> = HashMap::new();
+        for (cfg, status) in snapshot {
+            by_area.entry(cfg.area_id).or_default().push((cfg, status));
+        }
+
+        for (area_id, links) in by_area {
+            let lsdb = self.lsdb_for(area_id).await;
+            let mut lsdb = lsdb.lock().await;
+
+            install_self_originated(
+                &mut lsdb,
+                local_router_id,
+                lsa::LSA_TYPE_ROUTER,
+                local_router_id,
+                LsaBody::Router(RouterLsaBody {
+                    flags: 0,
+                    links: router_lsa_links(local_router_id, &links),
+                }),
+            );
+
+            for (cfg, status) in &links {
+                if status.interface_state != InterfaceState::Dr {
+                    continue;
+                }
+                let attached: Vec<Ipv4Addr> = std::iter::once(local_router_id)
+                    .chain(
+                        status
+                            .neighbors
+                            .iter()
+                            .filter(|(_, n)| n.state == NeighborState::Full)
+                            .map(|(id, _)| *id),
+                    )
+                    .collect();
+                if attached.len() < 2 {
+                    // No fully-adjacent neighbor yet — nothing transit
+                    // about this network from the LSDB's perspective.
+                    continue;
+                }
+                install_self_originated(
+                    &mut lsdb,
+                    local_router_id,
+                    lsa::LSA_TYPE_NETWORK,
+                    cfg.local_addr,
+                    LsaBody::Network(NetworkLsaBody {
+                        // This NOS doesn't track a broadcast domain's
+                        // subnet mask on its OSPF attach point — nothing
+                        // consumes it before a future SPF phase, so it's
+                        // left unspecified rather than fabricated.
+                        network_mask: Ipv4Addr::UNSPECIFIED,
+                        attached_routers: attached,
+                    }),
+                );
+            }
+        }
     }
 
     /// Diffs `desired` against currently-running links by `attach_point`:
@@ -413,6 +1082,8 @@ impl LinkManager {
     /// tick that re-resolves a not-yet-ready VRF/interface also recovers
     /// from a transient socket failure this way.
     pub async fn reconcile(self: &Arc<Self>, desired: Vec<LinkConfig>, local_router_id: Ipv4Addr) {
+        *self.router_id.lock().await = Some(local_router_id);
+
         let mut links = self.links.lock().await;
         links.retain(|_, entry| !entry.task.is_finished());
 
@@ -433,8 +1104,9 @@ impl LinkManager {
         }
         for cfg in to_spawn {
             let key = cfg.attach_point.clone();
+            let lsdb = self.lsdb_for(cfg.area_id).await;
             let (status_tx, status_rx) = watch::channel(LinkStatus::new(cfg.network_type));
-            let task = tokio::spawn(run(cfg.clone(), local_router_id, status_tx));
+            let task = tokio::spawn(run(cfg.clone(), local_router_id, lsdb, status_tx));
             links.insert(
                 key,
                 LinkEntry {
@@ -483,7 +1155,15 @@ fn to_neighbor_state(state: NeighborState) -> OspfNeighborState {
     match state {
         NeighborState::Down => OspfNeighborState::Down,
         NeighborState::Init => OspfNeighborState::Init,
-        NeighborState::TwoWay => OspfNeighborState::TwoWay,
+        // ExStart/Exchange/Loading/Full aren't reportable yet —
+        // `nos_proto::OspfNeighborState` grows these variants in a later
+        // stage (see ospf/CLAUDE.md). Until then, every state at or past
+        // 2-Way reports as `TwoWay`, since all of them are supersets of it.
+        NeighborState::TwoWay
+        | NeighborState::ExStart
+        | NeighborState::Exchange
+        | NeighborState::Loading
+        | NeighborState::Full => OspfNeighborState::TwoWay,
     }
 }
 
@@ -534,6 +1214,97 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<NeighborSummary> {
         .collect()
 }
 
+/// RFC 2328 §12.4.1's Router-LSA link entries for every currently-running
+/// link in one area. Deliberately minimal: one entry per link with at least
+/// one neighbor (point-to-point) or a resolved DR (broadcast) — no
+/// companion stub-network entries for p2p subnets, since nothing consumes
+/// this for SPF yet (see module doc). Pure — takes an already-gathered
+/// snapshot so it stays independently unit-testable.
+fn router_lsa_links(
+    local_router_id: Ipv4Addr,
+    links: &[(LinkConfig, LinkStatus)],
+) -> Vec<RouterLink> {
+    let mut result = Vec::new();
+    for (cfg, status) in links {
+        match cfg.network_type {
+            NetworkType::PointToPoint => {
+                if let Some((neighbor_id, _)) = status
+                    .neighbors
+                    .iter()
+                    .find(|(_, n)| n.state != NeighborState::Down)
+                {
+                    result.push(RouterLink {
+                        link_id: *neighbor_id,
+                        link_data: cfg.local_addr,
+                        link_type: 1, // point-to-point
+                        metric: 1,
+                    });
+                }
+            }
+            NetworkType::Broadcast => {
+                let Some(dr) = status.dr else { continue };
+                let dr_addr = if dr == local_router_id {
+                    cfg.local_addr
+                } else {
+                    match status.neighbors.get(&dr) {
+                        Some(n) => n.address,
+                        None => continue,
+                    }
+                };
+                result.push(RouterLink {
+                    link_id: dr_addr,
+                    link_data: cfg.local_addr,
+                    link_type: 2, // transit network
+                    metric: 1,
+                });
+            }
+        }
+    }
+    result
+}
+
+/// Installs a self-originated LSA (`link_state_id`/`advertising_router` per
+/// RFC 2328 §12.4's convention — always this router for a Router-LSA,
+/// always the DR's interface address keyed to `local_router_id` for a
+/// Network-LSA) if `body` actually changed since what's held, bumping the
+/// sequence number by one rather than reinstalling identical content every
+/// `ORIGINATION_INTERVAL` tick.
+fn install_self_originated(
+    lsdb: &mut Lsdb,
+    local_router_id: Ipv4Addr,
+    lsa_type: u8,
+    link_state_id: Ipv4Addr,
+    body: LsaBody,
+) {
+    let key = LsaKey {
+        lsa_type,
+        link_state_id,
+        advertising_router: local_router_id,
+    };
+    let sequence_number = match lsdb.get(&key) {
+        Some(existing) if existing.body == body => return,
+        Some(existing) => existing.header.sequence_number.wrapping_add(1),
+        None => lsa::INITIAL_SEQUENCE_NUMBER,
+    };
+    lsdb.install(Lsa {
+        header: LsaHeader {
+            age: 0,
+            options: 0,
+            lsa_type,
+            link_state_id,
+            advertising_router: local_router_id,
+            sequence_number,
+            checksum: 0,
+            length: 0,
+        },
+        body,
+    });
+    info!(
+        lsa_type, link_state_id = %link_state_id, advertising_router = %local_router_id,
+        "ospf lsa originated"
+    );
+}
+
 /// Pure diffing, like `bgp::session::diff_peers`.
 fn diff_links(
     current: &HashMap<String, LinkConfig>,
@@ -573,6 +1344,7 @@ mod tests {
             dead_interval: 40,
             vrf: "vrf100".to_string(),
             local_addr: Ipv4Addr::new(10, 0, 0, 1),
+            kernel_interface: "eth0".to_string(),
             network_type: NetworkType::PointToPoint,
             priority: 1,
         }
@@ -646,5 +1418,260 @@ mod tests {
         let status = LinkStatus::new(NetworkType::Broadcast);
         assert_eq!(status.interface_state, InterfaceState::Waiting);
         assert!(status.neighbors.is_empty());
+    }
+
+    #[test]
+    fn point_to_point_neighbor_is_always_adjacency_eligible() {
+        assert!(should_form_adjacency(
+            InterfaceState::PointToPoint,
+            Ipv4Addr::new(1, 1, 1, 1),
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn dr_other_pair_is_not_adjacency_eligible() {
+        assert!(!should_form_adjacency(
+            InterfaceState::DrOther,
+            Ipv4Addr::new(1, 1, 1, 1),
+            Some(Ipv4Addr::new(2, 2, 2, 2)),
+            Some(Ipv4Addr::new(3, 3, 3, 3)),
+        ));
+    }
+
+    #[test]
+    fn dr_is_eligible_with_every_neighbor() {
+        assert!(should_form_adjacency(
+            InterfaceState::Dr,
+            Ipv4Addr::new(1, 1, 1, 1),
+            Some(Ipv4Addr::new(9, 9, 9, 9)),
+            None,
+        ));
+    }
+
+    #[test]
+    fn dr_other_is_eligible_with_the_dr() {
+        let dr = Ipv4Addr::new(2, 2, 2, 2);
+        assert!(should_form_adjacency(
+            InterfaceState::DrOther,
+            dr,
+            Some(dr),
+            None,
+        ));
+    }
+
+    #[test]
+    fn dr_other_is_eligible_with_the_bdr() {
+        let bdr = Ipv4Addr::new(3, 3, 3, 3);
+        assert!(should_form_adjacency(
+            InterfaceState::DrOther,
+            bdr,
+            None,
+            Some(bdr),
+        ));
+    }
+
+    fn neighbor_info(state: NeighborState, address: Ipv4Addr) -> NeighborInfo {
+        NeighborInfo {
+            state,
+            priority: 1,
+            declared_dr: Ipv4Addr::UNSPECIFIED,
+            declared_bdr: Ipv4Addr::UNSPECIFIED,
+            last_hello_received: Instant::now(),
+            address,
+            adjacency: None,
+        }
+    }
+
+    #[test]
+    fn router_lsa_links_skips_p2p_link_with_no_neighbor() {
+        let cfg = link("eth0.0", 10);
+        let status = LinkStatus::new(NetworkType::PointToPoint);
+        assert!(router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)]).is_empty());
+    }
+
+    #[test]
+    fn router_lsa_links_includes_p2p_link_with_a_neighbor() {
+        let cfg = link("eth0.0", 10);
+        let mut status = LinkStatus::new(NetworkType::PointToPoint);
+        let neighbor_id = Ipv4Addr::new(9, 9, 9, 10);
+        status.neighbors.insert(
+            neighbor_id,
+            neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2)),
+        );
+        let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg.clone(), status)]);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].link_id, neighbor_id);
+        assert_eq!(links[0].link_data, cfg.local_addr);
+        assert_eq!(links[0].link_type, 1);
+    }
+
+    #[test]
+    fn router_lsa_links_skips_broadcast_link_with_no_dr_yet() {
+        let mut cfg = link("bd1", 10);
+        cfg.network_type = NetworkType::Broadcast;
+        let status = LinkStatus::new(NetworkType::Broadcast);
+        assert!(router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)]).is_empty());
+    }
+
+    #[test]
+    fn router_lsa_links_uses_own_address_when_self_is_dr() {
+        let mut cfg = link("bd1", 10);
+        cfg.network_type = NetworkType::Broadcast;
+        let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let mut status = LinkStatus::new(NetworkType::Broadcast);
+        status.interface_state = InterfaceState::Dr;
+        status.dr = Some(local_router_id);
+        let links = router_lsa_links(local_router_id, &[(cfg.clone(), status)]);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].link_id, cfg.local_addr);
+        assert_eq!(links[0].link_type, 2);
+    }
+
+    #[test]
+    fn router_lsa_links_uses_dr_neighbor_address_when_not_self() {
+        let mut cfg = link("bd1", 10);
+        cfg.network_type = NetworkType::Broadcast;
+        let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let dr_id = Ipv4Addr::new(9, 9, 9, 10);
+        let dr_addr = Ipv4Addr::new(10, 0, 0, 2);
+        let mut status = LinkStatus::new(NetworkType::Broadcast);
+        status.interface_state = InterfaceState::Backup;
+        status.dr = Some(dr_id);
+        status
+            .neighbors
+            .insert(dr_id, neighbor_info(NeighborState::Full, dr_addr));
+        let links = router_lsa_links(local_router_id, &[(cfg, status)]);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].link_id, dr_addr);
+    }
+
+    #[test]
+    fn install_self_originated_first_install_uses_initial_sequence_number() {
+        let mut lsdb = Lsdb::new();
+        let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let body = LsaBody::Router(RouterLsaBody {
+            flags: 0,
+            links: Vec::new(),
+        });
+        install_self_originated(
+            &mut lsdb,
+            local_router_id,
+            lsa::LSA_TYPE_ROUTER,
+            local_router_id,
+            body.clone(),
+        );
+        let key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_ROUTER,
+            link_state_id: local_router_id,
+            advertising_router: local_router_id,
+        };
+        let installed = lsdb.get(&key).unwrap();
+        assert_eq!(
+            installed.header.sequence_number,
+            lsa::INITIAL_SEQUENCE_NUMBER
+        );
+        assert_eq!(installed.body, body);
+    }
+
+    #[test]
+    fn install_self_originated_unchanged_body_is_a_no_op() {
+        let mut lsdb = Lsdb::new();
+        let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let body = LsaBody::Router(RouterLsaBody {
+            flags: 0,
+            links: Vec::new(),
+        });
+        install_self_originated(
+            &mut lsdb,
+            local_router_id,
+            lsa::LSA_TYPE_ROUTER,
+            local_router_id,
+            body.clone(),
+        );
+        install_self_originated(
+            &mut lsdb,
+            local_router_id,
+            lsa::LSA_TYPE_ROUTER,
+            local_router_id,
+            body,
+        );
+        let key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_ROUTER,
+            link_state_id: local_router_id,
+            advertising_router: local_router_id,
+        };
+        assert_eq!(
+            lsdb.get(&key).unwrap().header.sequence_number,
+            lsa::INITIAL_SEQUENCE_NUMBER
+        );
+    }
+
+    #[test]
+    fn install_self_originated_changed_body_bumps_sequence_number() {
+        let mut lsdb = Lsdb::new();
+        let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        install_self_originated(
+            &mut lsdb,
+            local_router_id,
+            lsa::LSA_TYPE_ROUTER,
+            local_router_id,
+            LsaBody::Router(RouterLsaBody {
+                flags: 0,
+                links: Vec::new(),
+            }),
+        );
+        install_self_originated(
+            &mut lsdb,
+            local_router_id,
+            lsa::LSA_TYPE_ROUTER,
+            local_router_id,
+            LsaBody::Router(RouterLsaBody {
+                flags: 1,
+                links: Vec::new(),
+            }),
+        );
+        let key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_ROUTER,
+            link_state_id: local_router_id,
+            advertising_router: local_router_id,
+        };
+        assert_eq!(
+            lsdb.get(&key).unwrap().header.sequence_number,
+            lsa::INITIAL_SEQUENCE_NUMBER + 1
+        );
+    }
+
+    #[test]
+    fn run_election_keeps_a_neighbor_past_two_way_in_the_candidate_pool() {
+        // Regression test: once a neighbor progresses to `ExStart` (or
+        // beyond), it must stay eligible for DR/BDR election — excluding
+        // it here would make this router think it's alone on the segment
+        // and incorrectly re-elect itself DR on every subsequent
+        // recomputation, flapping a segment that already converged.
+        let mut cfg = link("bd1", 10);
+        cfg.network_type = NetworkType::Broadcast;
+        cfg.priority = 1;
+        let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let neighbor_id = Ipv4Addr::new(9, 9, 9, 9);
+        let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::Broadcast));
+        status.send_modify(|s| {
+            // A previously-converged, stable outcome: the neighbor is DR
+            // (and its own Hello already self-declares that), this router
+            // is Backup.
+            s.dr = Some(neighbor_id);
+            s.bdr = Some(local_router_id);
+            s.interface_state = InterfaceState::Backup;
+            let mut info = neighbor_info(NeighborState::ExStart, Ipv4Addr::new(10, 0, 0, 2));
+            info.declared_dr = neighbor_id;
+            s.neighbors.insert(neighbor_id, info);
+        });
+
+        run_election(&cfg, local_router_id, &status);
+
+        let result = status.borrow();
+        assert_eq!(result.dr, Some(neighbor_id));
+        assert_eq!(result.bdr, Some(local_router_id));
     }
 }

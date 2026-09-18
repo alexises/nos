@@ -172,6 +172,7 @@ async fn resync(
                     dead_interval,
                     vrf,
                     local_addr,
+                    kernel_interface: subinterface_kernel_interface(&attach.interface, attach.tag),
                     network_type: profile.network_type.unwrap_or(NetworkType::PointToPoint),
                     priority,
                 });
@@ -194,10 +195,10 @@ async fn resync(
                     warn!(instance = %instance, link = %link_name, "ospf link's vrf not resolvable yet");
                     continue;
                 };
-                let Some(local_addr) =
-                    resolve_broadcast_domain_local_address(watchdog_socket, &attach.name).await
+                let Some((local_addr, kernel_interface)) =
+                    resolve_broadcast_domain(watchdog_socket, &attach.name).await
                 else {
-                    warn!(instance = %instance, link = %link_name, "ospf link's local address not resolvable yet");
+                    warn!(instance = %instance, link = %link_name, "ospf link's local address/bridge not resolvable yet");
                     continue;
                 };
                 desired_links.push(LinkConfig {
@@ -207,6 +208,7 @@ async fn resync(
                     dead_interval,
                     vrf,
                     local_addr,
+                    kernel_interface,
                     network_type: profile.network_type.unwrap_or(NetworkType::Broadcast),
                     priority,
                 });
@@ -343,21 +345,38 @@ async fn resolve_local_address(
     }
 }
 
-/// Resolves a broadcast domain's own SVI local IPv4 address by asking
-/// `nos-interfaced` directly, mirroring `resolve_local_address` exactly
-/// (same reasoning: ask the owning daemon rather than reading `Config`
-/// directly, so this stays consistent with a future kernel-derived address
-/// nos-interfaced might one day report that isn't in static config at all).
-async fn resolve_broadcast_domain_local_address(
+/// Resolves a broadcast domain's own SVI local IPv4 address *and* its real
+/// kernel bridge device name (`nos-ospfd`'s socket binds to the bridge
+/// itself — the L3 attach point for this domain — never the shared VRF
+/// device; see `link::LinkConfig::kernel_interface`'s doc comment) from one
+/// `GetBroadcastDomain` query, asking `nos-interfaced` directly the same
+/// way `resolve_local_address` does. `None` covers every "not resolvable
+/// right now" case uniformly (including the bridge not created yet),
+/// retried by the caller's periodic re-apply tick.
+async fn resolve_broadcast_domain(
     watchdog_socket: &Path,
     domain: &str,
-) -> Option<Ipv4Addr> {
+) -> Option<(Ipv4Addr, String)> {
     let socket = watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let status = interface_client::get_broadcast_domain(&socket, domain).await?;
+    let bridge_name = status.bridge_name?;
     let addr = status.addresses.into_iter().next()?.address.addr();
     match addr {
-        std::net::IpAddr::V4(v4) => Some(v4),
+        std::net::IpAddr::V4(v4) => Some((v4, bridge_name)),
         std::net::IpAddr::V6(_) => None,
+    }
+}
+
+/// A `Subinterface` attach point's real kernel device name — the untagged
+/// case shares the physical link itself; a real VLAN tag gets its own
+/// `<interface>.<tag>` sub-interface (see root `CLAUDE.md`'s "L2 switching"
+/// section). Pure — no IPC needed, since this is exactly the naming
+/// convention `nos-interfaced`'s own driver already uses.
+fn subinterface_kernel_interface(interface: &str, tag: u16) -> String {
+    if tag == 0 {
+        interface.to_string()
+    } else {
+        format!("{interface}.{tag}")
     }
 }
 

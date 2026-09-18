@@ -540,7 +540,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
     async fn ensure_broadcast_domain(
         &self,
         desired: &BroadcastDomainState,
-    ) -> Result<(), DriverError> {
+    ) -> Result<String, DriverError> {
         let bridge_id =
             bridge_registry::ensure_bridge_id(&self.bridge_registry_path, &desired.name)?;
         let ifname = bridge_registry::bridge_ifname(bridge_id);
@@ -572,7 +572,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             .set(LinkUnspec::new_with_index(link.header.index).up().build())
             .execute()
             .await?;
-        Ok(())
+        Ok(ifname)
     }
 
     /// Deletes `domain`'s bridge device, if one was ever created for it.

@@ -24,6 +24,11 @@ pub struct BroadcastDomainState {
     pub name: String,
     pub addresses: Vec<InterfaceAddress>,
     pub routing_table: Option<String>,
+    /// The real kernel bridge device name, filled in from
+    /// `driver.ensure_broadcast_domain`'s return value after construction —
+    /// `None` on the value passed *into* that call (the driver is what
+    /// determines it), `Some` once known.
+    pub bridge_name: Option<String>,
 }
 
 /// One interface's desired state, as reconciled from the running config.
@@ -109,13 +114,17 @@ pub async fn build_from_config(
 ) -> Interfaces {
     let mut by_domain = HashMap::with_capacity(cfg.broadcast_domains.len());
     for domain in &cfg.broadcast_domains {
-        let state = BroadcastDomainState {
+        let mut state = BroadcastDomainState {
             name: domain.name.clone(),
             addresses: domain.addresses.clone(),
             routing_table: domain.routing_table.clone(),
+            bridge_name: None,
         };
-        if let Err(e) = driver.ensure_broadcast_domain(&state).await {
-            warn!(domain = %state.name, error = %e, "failed to ensure broadcast domain bridge");
+        match driver.ensure_broadcast_domain(&state).await {
+            Ok(bridge_name) => state.bridge_name = Some(bridge_name),
+            Err(e) => {
+                warn!(domain = %state.name, error = %e, "failed to ensure broadcast domain bridge");
+            }
         }
         by_domain.insert(state.name.clone(), state);
     }
@@ -263,12 +272,12 @@ mod tests {
         async fn ensure_broadcast_domain(
             &self,
             desired: &BroadcastDomainState,
-        ) -> Result<(), DriverError> {
+        ) -> Result<String, DriverError> {
             self.calls
                 .lock()
                 .unwrap()
                 .push(Call::EnsureDomain(desired.clone()));
-            Ok(())
+            Ok(format!("recording-br-{}", desired.name))
         }
 
         async fn remove_broadcast_domain(&self, domain: &str) -> Result<(), DriverError> {
@@ -465,6 +474,7 @@ mod tests {
             name: "bd1".to_string(),
             addresses: vec![addr],
             routing_table: Some("rt1".to_string()),
+            bridge_name: None,
         })));
     }
 

@@ -33,14 +33,14 @@ impl InterfaceDriver for NoopInterfaceDriver {
     async fn ensure_broadcast_domain(
         &self,
         desired: &BroadcastDomainState,
-    ) -> Result<(), DriverError> {
+    ) -> Result<String, DriverError> {
         debug!(
             domain = %desired.name,
             addresses = ?desired.addresses,
             routing_table = ?desired.routing_table,
             "would ensure broadcast domain bridge (noop driver — no OS effect)"
         );
-        Ok(())
+        Ok(format!("noop-br-{}", desired.name))
     }
 
     async fn remove_broadcast_domain(&self, domain: &str) -> Result<(), DriverError> {

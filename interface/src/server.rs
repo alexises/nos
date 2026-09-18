@@ -104,5 +104,6 @@ fn to_domain_status(domain: BroadcastDomainState) -> BroadcastDomainStatus {
         name: domain.name,
         addresses: domain.addresses,
         routing_table: domain.routing_table,
+        bridge_name: domain.bridge_name,
     }
 }

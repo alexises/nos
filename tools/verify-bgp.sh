@@ -999,6 +999,34 @@ cmd_check_ospf() {
     && log "router-b: reached ospf 2-way with $OSPF_ROUTER_ID" \
     || { log "router-b: FAILED to reach ospf 2-way"; return 1; }
 
+  # Confirms the adjacency actually completes RFC 2328 §10.6-10.8's real
+  # DBD/LSR/LSU/LSAck exchange and reaches Full -- not just 2-Way -- over
+  # the same raw socket. Field order matches `link.rs`'s
+  # `info!(link, neighbor, "ospf neighbor reached full")` call site.
+  log "waiting for router-a/router-b to reach ospf full on the point-to-point link"
+  wait_for_count_increase router-a "ospf neighbor reached full link=eth0.0 neighbor=$OSPF_ROUTER_ID_B" 0 60 \
+    && log "router-a: reached ospf full with $OSPF_ROUTER_ID_B" \
+    || { log "router-a: FAILED to reach ospf full"; return 1; }
+  wait_for_count_increase router-b "ospf neighbor reached full link=eth0.0 neighbor=$OSPF_ROUTER_ID" 0 60 \
+    && log "router-b: reached ospf full with $OSPF_ROUTER_ID" \
+    || { log "router-b: FAILED to reach ospf full"; return 1; }
+
+  # Confirms real LSA content (this NOS's own self-originated Router-LSA)
+  # actually flows over the wire and gets installed into the receiving
+  # side's LSDB -- not asserted against a specific link, since a router's
+  # LSDB is shared per-area across every one of its links (real RFC 2328
+  # behavior), so which link an LSA's install is first observed on is a
+  # legitimate race, not something to pin down. Field order matches
+  # `link.rs`'s `info!(link, neighbor, lsa_type, link_state_id,
+  # advertising_router, "ospf lsa installed")` call site.
+  log "waiting for router-a/router-b to install a real lsa learned from each other"
+  wait_for_count_increase router-a "ospf lsa installed.*neighbor=$OSPF_ROUTER_ID_B" 0 60 \
+    && log "router-a: installed an lsa learned from $OSPF_ROUTER_ID_B" \
+    || { log "router-a: FAILED to install an lsa"; return 1; }
+  wait_for_count_increase router-b "ospf lsa installed.*neighbor=$OSPF_ROUTER_ID" 0 60 \
+    && log "router-b: installed an lsa learned from $OSPF_ROUTER_ID" \
+    || { log "router-b: FAILED to install an lsa"; return 1; }
+
   provision_ospf_broadcast router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPF_BROADCAST_ADDRESS_A"
   provision_ospf_broadcast router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" "$OSPF_BROADCAST_ADDRESS_B"
 
@@ -1025,6 +1053,18 @@ cmd_check_ospf() {
   wait_for_count_increase router-a "ospf interface became backup link=broadcast-domain:$OSPF_BROADCAST_DOMAIN dr=$OSPF_ROUTER_ID_B bdr=$OSPF_ROUTER_ID" 0 60 \
     && log "router-a: became backup" \
     || { log "router-a: FAILED to become backup"; return 1; }
+
+  # Confirms the broadcast-link adjacency also completes the real DBD/LSR/
+  # LSU/LSAck exchange and reaches Full, restricted to the DR/BDR pair per
+  # RFC 2328 §7.5/§10.4 (the only two eligible routers on this 2-router
+  # segment, so both proceed).
+  log "waiting for router-a/router-b to reach ospf full on the broadcast link"
+  wait_for_count_increase router-a "ospf neighbor reached full link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPF_ROUTER_ID_B" 0 60 \
+    && log "router-a: reached ospf full with $OSPF_ROUTER_ID_B on the broadcast link" \
+    || { log "router-a: FAILED to reach ospf full on the broadcast link"; return 1; }
+  wait_for_count_increase router-b "ospf neighbor reached full link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPF_ROUTER_ID" 0 60 \
+    && log "router-b: reached ospf full with $OSPF_ROUTER_ID on the broadcast link" \
+    || { log "router-b: FAILED to reach ospf full on the broadcast link"; return 1; }
 }
 
 cmd_check_switching() {

@@ -72,11 +72,14 @@ pub trait InterfaceDriver: Send + Sync {
     /// references it — same "create eagerly from config" pattern as
     /// `nos-ribd`'s VRF-per-`RoutingTable`. Must complete (or at least be
     /// attempted) before any interface's `apply` in the same resync, since
-    /// `apply` enslaves into this bridge by name.
+    /// `apply` enslaves into this bridge by name. Returns the bridge's real
+    /// kernel device name — `nos-ospfd` needs this (via
+    /// `InterfaceRequest::GetBroadcastDomain`) to bind its raw socket to the
+    /// domain's own bridge rather than the shared VRF device.
     async fn ensure_broadcast_domain(
         &self,
         desired: &BroadcastDomainState,
-    ) -> Result<(), DriverError>;
+    ) -> Result<String, DriverError>;
 
     /// Called once per resync for every `BroadcastDomain` name present in
     /// the previous resync but absent from the current one (removed from

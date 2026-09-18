@@ -36,6 +36,14 @@ pub struct BroadcastDomainStatus {
     pub name: String,
     pub addresses: Vec<InterfaceAddress>,
     pub routing_table: Option<String>,
+    /// The real Linux bridge device name the `linux` driver allocated for
+    /// this domain (e.g. `br1`) — `None` until the driver has actually
+    /// created it (or under the `noop` driver, a synthesized placeholder).
+    /// `nos-ospfd` needs this to bind its raw protocol-89 socket to the
+    /// domain's own bridge device rather than the shared VRF device (see
+    /// `ospf/CLAUDE.md`'s "LSA exchange" section for why per-link binding,
+    /// not VRF-wide binding, is required).
+    pub bridge_name: Option<String>,
 }
 
 /// Messages sent from a client to `nos-interfaced`'s IPC socket.
