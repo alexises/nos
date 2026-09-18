@@ -6,11 +6,12 @@
 //! §10.6-10.8's DBD/LSR/LSU/LSAck adjacency-forming exchange
 //! (`crate::exchange`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ipnet::Ipv4Net;
 use nos_proto::{LinkInterfaceState, LsaSummary, NeighborSummary, NetworkType, OspfNeighborState};
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
@@ -21,11 +22,13 @@ use crate::election::{self, Candidate};
 use crate::exchange::{self, AdjacencyData};
 use crate::lsa::{
     self, Lsa, LsaBody, LsaHeader, LsaKey, NetworkLsaBody, RouterLink, RouterLsaBody,
+    LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK, LINK_TYPE_TRANSIT_NETWORK,
 };
 use crate::lsdb::Lsdb;
 use crate::neighbor::{self, NeighborState};
 use crate::packet::{self, DbdPacket, LsAckPacket, LsrPacket, LsuPacket, OspfPacket};
 use crate::socket::OspfSocket;
+use crate::spf;
 
 /// RFC 2328 Appendix C.3's default `RxmtInterval` — how often an
 /// unacknowledged LSR/LSU is resent.
@@ -59,6 +62,14 @@ pub struct LinkConfig {
     pub dead_interval: u16,
     pub vrf: String,
     pub local_addr: Ipv4Addr,
+    /// This link's own subnet's prefix length — needed (alongside
+    /// `local_addr`) to originate a real stub-network Router-LSA link for
+    /// a point-to-point subnet, and a real `NetworkLsaBody.network_mask`
+    /// for a broadcast one. See `crate::spf`.
+    pub local_prefix_len: u8,
+    /// This link's RFC 2328 §16 SPF cost — `OspfProfile.cost`, defaulting
+    /// to `1` when unset (see `reconcile.rs`).
+    pub cost: u16,
     /// The real Linux device this link's raw socket binds to — the
     /// specific L3 interface OSPF actually runs on: the physical/VLAN
     /// subinterface itself for a point-to-point attach point, or the
@@ -968,6 +979,13 @@ pub struct LinkManager {
     /// Set on every `reconcile` call, read by the background origination
     /// task started in `new`.
     router_id: Mutex<Option<Ipv4Addr>>,
+    /// Loopback (`Interface.ospf_profile`) attach points' own subnets, per
+    /// area — these have no live `LinkConfig`/socket (see `reconcile.rs`'s
+    /// "log-only" loopback handling), so they're threaded in here directly
+    /// rather than through `links`, purely so `originate_router_lsas` can
+    /// advertise a real stub-network link for each one. Replaced wholesale
+    /// on every `reconcile` call, like every other desired-state field.
+    stub_networks: Mutex<HashMap<Ipv4Addr, Vec<(Ipv4Net, u16)>>>,
 }
 
 impl LinkManager {
@@ -976,6 +994,7 @@ impl LinkManager {
             links: Mutex::new(HashMap::new()),
             lsdbs: Mutex::new(HashMap::new()),
             router_id: Mutex::new(None),
+            stub_networks: Mutex::new(HashMap::new()),
         });
         let background = Arc::clone(&manager);
         // Runs for the process's lifetime — like every link driver task, it
@@ -1027,9 +1046,31 @@ impl LinkManager {
             by_area.entry(cfg.area_id).or_default().push((cfg, status));
         }
 
-        for (area_id, links) in by_area {
+        let stub_networks = self.stub_networks.lock().await.clone();
+
+        // An area with only a loopback stub and no live link would
+        // otherwise never appear here at all — union both sets of area
+        // ids rather than iterating `by_area` alone.
+        let area_ids: HashSet<Ipv4Addr> = by_area
+            .keys()
+            .copied()
+            .chain(stub_networks.keys().copied())
+            .collect();
+
+        for area_id in area_ids {
+            let links = by_area.get(&area_id).cloned().unwrap_or_default();
             let lsdb = self.lsdb_for(area_id).await;
             let mut lsdb = lsdb.lock().await;
+
+            let mut router_links = router_lsa_links(local_router_id, &links);
+            for (subnet, cost) in stub_networks.get(&area_id).into_iter().flatten() {
+                router_links.push(RouterLink {
+                    link_id: subnet.network(),
+                    link_data: subnet.netmask(),
+                    link_type: LINK_TYPE_STUB_NETWORK,
+                    metric: *cost,
+                });
+            }
 
             install_self_originated(
                 &mut lsdb,
@@ -1038,7 +1079,7 @@ impl LinkManager {
                 local_router_id,
                 LsaBody::Router(RouterLsaBody {
                     flags: 0,
-                    links: router_lsa_links(local_router_id, &links),
+                    links: router_links,
                 }),
             );
 
@@ -1060,17 +1101,14 @@ impl LinkManager {
                     // about this network from the LSDB's perspective.
                     continue;
                 }
+                let network_mask = local_subnet(cfg).map_or(Ipv4Addr::UNSPECIFIED, |n| n.netmask());
                 install_self_originated(
                     &mut lsdb,
                     local_router_id,
                     lsa::LSA_TYPE_NETWORK,
                     cfg.local_addr,
                     LsaBody::Network(NetworkLsaBody {
-                        // This NOS doesn't track a broadcast domain's
-                        // subnet mask on its OSPF attach point — nothing
-                        // consumes it before a future SPF phase, so it's
-                        // left unspecified rather than fabricated.
-                        network_mask: Ipv4Addr::UNSPECIFIED,
+                        network_mask,
                         attached_routers: attached,
                     }),
                 );
@@ -1086,8 +1124,14 @@ impl LinkManager {
     /// running" so this pass respawns it too — the same periodic re-apply
     /// tick that re-resolves a not-yet-ready VRF/interface also recovers
     /// from a transient socket failure this way.
-    pub async fn reconcile(self: &Arc<Self>, desired: Vec<LinkConfig>, local_router_id: Ipv4Addr) {
+    pub async fn reconcile(
+        self: &Arc<Self>,
+        desired: Vec<LinkConfig>,
+        desired_stubs: HashMap<Ipv4Addr, Vec<(Ipv4Net, u16)>>,
+        local_router_id: Ipv4Addr,
+    ) {
         *self.router_id.lock().await = Some(local_router_id);
+        *self.stub_networks.lock().await = desired_stubs;
 
         let mut links = self.links.lock().await;
         links.retain(|_, entry| !entry.task.is_finished());
@@ -1156,6 +1200,27 @@ impl LinkManager {
             }
         }
         result
+    }
+
+    /// Runs `crate::spf::compute` against every area's current LSDB and
+    /// merges the results into one route set, for `crate::rib_push_client`.
+    /// Areas are logically disjoint in this NOS's single-area/intra-area
+    /// scope (no Summary-LSA/inter-area routing), so a plain overwrite on
+    /// key collision is fine. Empty if `router_id` hasn't been set yet
+    /// (before this instance's first `reconcile` call).
+    pub async fn compute_routes(&self) -> Vec<spf::RouteEntry> {
+        let Some(router_id) = *self.router_id.lock().await else {
+            return Vec::new();
+        };
+        let areas: Vec<Arc<Mutex<Lsdb>>> = self.lsdbs.lock().await.values().cloned().collect();
+        let mut merged: HashMap<Ipv4Net, spf::RouteEntry> = HashMap::new();
+        for lsdb in areas {
+            let lsas = lsdb.lock().await.all();
+            for entry in spf::compute(router_id, &lsas) {
+                merged.insert(entry.prefix, entry);
+            }
+        }
+        merged.into_values().collect()
     }
 
     /// Aborts every link task. Called once when `crate::reconcile::run`'s
@@ -1236,12 +1301,23 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<NeighborSummary> {
         .collect()
 }
 
+/// This link's own subnet, if `local_prefix_len` is a valid IPv4 prefix
+/// length — used to originate a stub-network link for it.
+fn local_subnet(cfg: &LinkConfig) -> Option<Ipv4Net> {
+    Ipv4Net::new(cfg.local_addr, cfg.local_prefix_len).ok()
+}
+
 /// RFC 2328 §12.4.1's Router-LSA link entries for every currently-running
-/// link in one area. Deliberately minimal: one entry per link with at least
-/// one neighbor (point-to-point) or a resolved DR (broadcast) — no
-/// companion stub-network entries for p2p subnets, since nothing consumes
-/// this for SPF yet (see module doc). Pure — takes an already-gathered
-/// snapshot so it stays independently unit-testable.
+/// link in one area: one type-1 (point-to-point) entry per link with at
+/// least one neighbor, one type-2 (transit-network) entry per link with a
+/// resolved DR (broadcast), and — per RFC 2328 §12.4.1.1 — a type-3
+/// (stub-network) entry for every point-to-point link's own subnet
+/// *unconditionally*, independent of neighbor state (a numbered p2p
+/// interface always advertises its own subnet). Both ends of a p2p link
+/// therefore advertise the identical subnet; `crate::spf`'s
+/// directly-connected filter is what keeps that from producing a spurious
+/// route back to your own subnet via the neighbor. Pure — takes an
+/// already-gathered snapshot so it stays independently unit-testable.
 fn router_lsa_links(
     local_router_id: Ipv4Addr,
     links: &[(LinkConfig, LinkStatus)],
@@ -1258,8 +1334,16 @@ fn router_lsa_links(
                     result.push(RouterLink {
                         link_id: *neighbor_id,
                         link_data: cfg.local_addr,
-                        link_type: 1, // point-to-point
-                        metric: 1,
+                        link_type: LINK_TYPE_POINT_TO_POINT,
+                        metric: cfg.cost,
+                    });
+                }
+                if let Some(subnet) = local_subnet(cfg) {
+                    result.push(RouterLink {
+                        link_id: subnet.network(),
+                        link_data: subnet.netmask(),
+                        link_type: LINK_TYPE_STUB_NETWORK,
+                        metric: cfg.cost,
                     });
                 }
             }
@@ -1276,8 +1360,8 @@ fn router_lsa_links(
                 result.push(RouterLink {
                     link_id: dr_addr,
                     link_data: cfg.local_addr,
-                    link_type: 2, // transit network
-                    metric: 1,
+                    link_type: LINK_TYPE_TRANSIT_NETWORK,
+                    metric: cfg.cost,
                 });
             }
         }
@@ -1361,11 +1445,13 @@ mod tests {
     fn link(attach_point: &str, hello_interval: u16) -> LinkConfig {
         LinkConfig {
             attach_point: attach_point.to_string(),
-            area_id: Ipv4Addr::new(0, 0, 0, 0),
+            area_id: Ipv4Addr::UNSPECIFIED,
             hello_interval,
             dead_interval: 40,
             vrf: "vrf100".to_string(),
             local_addr: Ipv4Addr::new(10, 0, 0, 1),
+            local_prefix_len: 24,
+            cost: 1,
             kernel_interface: "eth0".to_string(),
             network_type: NetworkType::PointToPoint,
             priority: 1,
@@ -1539,10 +1625,16 @@ mod tests {
     }
 
     #[test]
-    fn router_lsa_links_skips_p2p_link_with_no_neighbor() {
+    fn router_lsa_links_p2p_with_no_neighbor_still_emits_stub_network() {
+        // RFC 2328 §12.4.1.1: a numbered p2p interface always advertises
+        // its own subnet, independent of neighbor state.
         let cfg = link("eth0.0", 10);
         let status = LinkStatus::new(NetworkType::PointToPoint);
-        assert!(router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)]).is_empty());
+        let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)]);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].link_type, LINK_TYPE_STUB_NETWORK);
+        assert_eq!(links[0].link_id, Ipv4Addr::new(10, 0, 0, 0));
+        assert_eq!(links[0].link_data, Ipv4Addr::new(255, 255, 255, 0));
     }
 
     #[test]
@@ -1555,10 +1647,14 @@ mod tests {
             neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2)),
         );
         let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg.clone(), status)]);
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].link_id, neighbor_id);
-        assert_eq!(links[0].link_data, cfg.local_addr);
-        assert_eq!(links[0].link_type, 1);
+        assert_eq!(links.len(), 2);
+        let p2p = links
+            .iter()
+            .find(|l| l.link_type == LINK_TYPE_POINT_TO_POINT)
+            .unwrap();
+        assert_eq!(p2p.link_id, neighbor_id);
+        assert_eq!(p2p.link_data, cfg.local_addr);
+        assert!(links.iter().any(|l| l.link_type == LINK_TYPE_STUB_NETWORK));
     }
 
     #[test]
@@ -1663,9 +1759,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn originate_router_lsas_includes_loopback_stub_for_area_with_no_live_link() {
+        // Regression test for the area-union fix: an area with only a
+        // loopback stub network and no live `LinkConfig` must still get a
+        // Router-LSA originated for it.
+        let manager = LinkManager::new();
+        let area = Ipv4Addr::UNSPECIFIED;
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let subnet: Ipv4Net = "192.168.9.0/24".parse().unwrap();
+        manager
+            .reconcile(
+                Vec::new(),
+                HashMap::from([(area, vec![(subnet, 5)])]),
+                router_id,
+            )
+            .await;
+        manager.originate_router_lsas(router_id).await;
+
+        let lsdb = manager.lsdb_for(area).await;
+        let key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_ROUTER,
+            link_state_id: router_id,
+            advertising_router: router_id,
+        };
+        let installed = lsdb.lock().await.get(&key).unwrap();
+        let LsaBody::Router(body) = &installed.body else {
+            panic!("expected router lsa")
+        };
+        assert_eq!(body.links.len(), 1);
+        assert_eq!(body.links[0].link_type, LINK_TYPE_STUB_NETWORK);
+        assert_eq!(body.links[0].link_id, Ipv4Addr::new(192, 168, 9, 0));
+        assert_eq!(body.links[0].metric, 5);
+    }
+
+    #[tokio::test]
     async fn database_summaries_flattens_every_area() {
         let manager = LinkManager::new();
-        let area = Ipv4Addr::new(0, 0, 0, 0);
+        let area = Ipv4Addr::UNSPECIFIED;
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let lsdb = manager.lsdb_for(area).await;
         lsdb.lock().await.install(Lsa {

@@ -60,13 +60,9 @@ fn dead_interval_str(p: &OspfProfile) -> String {
         .map_or_else(|| "default (40s)".to_string(), |d| d.to_string())
 }
 
-/// No default rendered, unlike `hello_interval_str`/`dead_interval_str`/
-/// `priority_str` — this NOS has no SPF/LSDB yet, so `cost` has no
-/// behavioral default to speak of (see `schema::OspfProfile.cost`'s doc
-/// comment).
 fn cost_str(p: &OspfProfile) -> String {
     p.cost
-        .map_or_else(|| "unset".to_string(), |c| c.to_string())
+        .map_or_else(|| "default (1)".to_string(), |c| c.to_string())
 }
 
 fn priority_str(p: &OspfProfile) -> String {
@@ -203,7 +199,7 @@ mod tests {
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].fields.len(), 1);
         assert_eq!(sections[0].fields[0].label, "cost");
-        assert_eq!(sections[0].fields[0].old.as_deref(), Some("unset"));
+        assert_eq!(sections[0].fields[0].old.as_deref(), Some("default (1)"));
         assert_eq!(sections[0].fields[0].new.as_deref(), Some("20"));
     }
 

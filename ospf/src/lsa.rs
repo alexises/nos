@@ -3,9 +3,12 @@
 //! (Appendix A.4.2) and Network-LSA (Appendix A.4.3). Pure encode/decode, no
 //! I/O, same style as `packet.rs`.
 //!
-//! Router-LSA link **metric** is round-tripped as read/written here, but
-//! nothing in this crate computes or consumes a real metric yet (no SPF) —
-//! self-originated LSAs (a later phase) send a fixed `1`.
+//! Router-LSA link **metric** and the three link types (point-to-point,
+//! transit-network, stub-network) are real inputs to `crate::spf`'s RFC
+//! 2328 §16.1/§16.2 Dijkstra — self-originated LSAs (`crate::link`) send a
+//! link's configured `OspfProfile.cost` and always advertise a stub-network
+//! link for a point-to-point interface's own subnet, real transit-network
+//! masks included.
 //!
 //! AS-external/Summary LSAs (types 3/4/5) and multi-area ABR behavior are out
 //! of scope, matching `ospf/CLAUDE.md`'s single-backbone-area ceiling.
@@ -17,6 +20,11 @@ use crate::packet::{read_ipv4, PacketError};
 
 pub const LSA_TYPE_ROUTER: u8 = 1;
 pub const LSA_TYPE_NETWORK: u8 = 2;
+
+/// RFC 2328 §12.4.1's Router-LSA link types.
+pub const LINK_TYPE_POINT_TO_POINT: u8 = 1;
+pub const LINK_TYPE_TRANSIT_NETWORK: u8 = 2;
+pub const LINK_TYPE_STUB_NETWORK: u8 = 3;
 
 pub const LSA_HEADER_LEN: usize = 20;
 /// One Router-LSA link entry's wire length (Appendix A.4.2): Link ID (4) +
@@ -331,7 +339,7 @@ mod tests {
                 lsa_type: LSA_TYPE_ROUTER,
                 link_state_id: Ipv4Addr::new(9, 9, 9, 9),
                 advertising_router: Ipv4Addr::new(9, 9, 9, 9),
-                sequence_number: 0x8000_0001u32 as i32,
+                sequence_number: 0x8000_0001u32.cast_signed(),
                 checksum: 0,
                 length: 0,
             },
@@ -355,7 +363,7 @@ mod tests {
                 lsa_type: LSA_TYPE_NETWORK,
                 link_state_id: Ipv4Addr::new(10, 0, 0, 1),
                 advertising_router: Ipv4Addr::new(9, 9, 9, 9),
-                sequence_number: 0x8000_0001u32 as i32,
+                sequence_number: 0x8000_0001u32.cast_signed(),
                 checksum: 0,
                 length: 0,
             },

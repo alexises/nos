@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
 use nos_proto::{
-    BgpRouteUpdate, IpNet, IpcCodec, PrefixRoutes, RibEvent, RibRequest, RouteEntry,
-    RouteSourceKind,
+    BgpRouteUpdate, IpNet, IpcCodec, OspfRouteUpdate, PrefixRoutes, RibEvent, RibRequest,
+    RouteEntry, RouteSourceKind,
 };
 use tokio::net::UnixListener;
 use tokio::sync::RwLock;
@@ -107,6 +107,10 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
             apply_bgp_route_update(ctx, updates).await;
             None
         }
+        RibRequest::PushOspfRoutes(updates) => {
+            apply_ospf_route_update(ctx, updates).await;
+            None
+        }
     }
 }
 
@@ -188,6 +192,77 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
     }
 }
 
+/// Applies one batch of OSPF-pushed route updates to the shared `Rib` — the
+/// OSPF analogue of `apply_bgp_route_update` above, identical shape (`Full`
+/// goes through the driver's full `apply`, `Add`/`Remove` recompute only the
+/// touched prefix's winner and `apply_delta` just that), since the two
+/// writers only ever touch disjoint `RouteSource` candidates.
+async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
+    let mut guard = ctx.rib.write().await;
+    let mut deltas: HashMap<IpNet, Option<RibEntry>> = HashMap::new();
+    let mut full_replace = false;
+
+    for update in updates {
+        match update {
+            OspfRouteUpdate::Full(routes) => {
+                guard.replace_source(
+                    RouteSource::Ospf,
+                    routes.into_iter().map(|r| RibEntry {
+                        prefix: r.prefix,
+                        gateway: r.next_hop,
+                        source: RouteSource::Ospf,
+                    }),
+                );
+                full_replace = true;
+            }
+            OspfRouteUpdate::Add(r) => {
+                let entry = RibEntry {
+                    prefix: r.prefix,
+                    gateway: r.next_hop,
+                    source: RouteSource::Ospf,
+                };
+                match guard.upsert_and_diff(entry) {
+                    BestPathChange::Unchanged => {}
+                    BestPathChange::Installed(e) => {
+                        deltas.insert(r.prefix, Some(e));
+                    }
+                    BestPathChange::Removed => {
+                        deltas.insert(r.prefix, None);
+                    }
+                }
+            }
+            OspfRouteUpdate::Remove(prefix) => {
+                match guard.remove_and_diff(&prefix, RouteSource::Ospf) {
+                    BestPathChange::Unchanged => {}
+                    BestPathChange::Installed(e) => {
+                        deltas.insert(prefix, Some(e));
+                    }
+                    BestPathChange::Removed => {
+                        deltas.insert(prefix, None);
+                    }
+                }
+            }
+        }
+    }
+
+    if full_replace {
+        let routes = guard.best_routes();
+        drop(guard);
+        info!(table = %ctx.table, prefixes = routes.len(), "applying ospf-pushed routes to kernel");
+        if let Err(e) = ctx.driver.apply(&ctx.table, &routes).await {
+            error!(table = %ctx.table, error = %e, "failed to apply ospf-pushed routes to kernel");
+        }
+    } else {
+        drop(guard);
+        if !deltas.is_empty() {
+            info!(table = %ctx.table, changed = deltas.len(), "applying ospf route deltas to kernel");
+            if let Err(e) = ctx.driver.apply_delta(&ctx.table, &deltas).await {
+                error!(table = %ctx.table, error = %e, "failed to apply ospf route deltas to kernel");
+            }
+        }
+    }
+}
+
 fn to_prefix_routes(prefix: nos_proto::IpNet, candidates: &[RibEntry]) -> PrefixRoutes {
     PrefixRoutes {
         prefix,
@@ -205,5 +280,6 @@ fn to_source_kind(source: RouteSource) -> RouteSourceKind {
     match source {
         RouteSource::Static => RouteSourceKind::Static,
         RouteSource::Bgp => RouteSourceKind::Bgp,
+        RouteSource::Ospf => RouteSourceKind::Ospf,
     }
 }

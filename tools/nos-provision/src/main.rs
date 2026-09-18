@@ -155,6 +155,20 @@ struct Args {
     #[arg(long)]
     delete_loopback: bool,
 
+    /// If set, attaches this OSPF profile name to `--routing-table`'s
+    /// loopback interface (`InterfaceOp::SetOspfProfile`) — for verifying
+    /// `nos-ospfd` originates a real stub-network Router-LSA link for it
+    /// (see `ospf/CLAUDE.md`'s SPF section). Mutually exclusive with
+    /// `--clear-ospf-loopback-profile`.
+    #[arg(long)]
+    ospf_loopback_profile: Option<String>,
+
+    /// If set, clears the loopback interface's OSPF profile attachment
+    /// instead of setting one. Mutually exclusive with
+    /// `--ospf-loopback-profile`.
+    #[arg(long)]
+    clear_ospf_loopback_profile: bool,
+
     /// Which broadcast domain `--broadcast-domain-svi-address`/
     /// `--delete-broadcast-domain-svi` target.
     #[arg(long, default_value = "bd-svi")]
@@ -450,6 +464,30 @@ async fn main() -> anyhow::Result<()> {
     }
     if args.delete_loopback {
         ops.push(ConfigOp::Interface(InterfaceOp::Delete {
+            name: loopback_name.clone(),
+        }));
+    }
+
+    if args.ospf_loopback_profile.is_some() && args.clear_ospf_loopback_profile {
+        bail!("--ospf-loopback-profile and --clear-ospf-loopback-profile are mutually exclusive");
+    }
+    if let Some(profile) = args.ospf_loopback_profile.clone() {
+        // An ospf_profile on a loopback requires routing_table also set on
+        // the same Interface (`valid_addressing_split`) -- VRF enslavement
+        // itself is derived from the loopback's name, but the validator
+        // still demands the field be explicit, mirroring the Subinterface/
+        // BroadcastDomain OSPF requirement.
+        ops.push(ConfigOp::Interface(InterfaceOp::SetRoutingTable {
+            name: loopback_name.clone(),
+            routing_table: args.routing_table.clone(),
+        }));
+        ops.push(ConfigOp::Interface(InterfaceOp::SetOspfProfile {
+            name: loopback_name.clone(),
+            ospf_profile: profile,
+        }));
+    }
+    if args.clear_ospf_loopback_profile {
+        ops.push(ConfigOp::Interface(InterfaceOp::ClearOspfProfile {
             name: loopback_name,
         }));
     }

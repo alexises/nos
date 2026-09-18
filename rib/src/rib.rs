@@ -14,16 +14,21 @@ pub enum RouteSource {
     /// (see `crate::server::apply_bgp_route_update`) — its per-prefix best
     /// path, peer-learned routes only.
     Bgp,
+    /// Pushed by the owning `nos-ospfd` instance over `RibRequest::PushOspfRoutes`
+    /// (see `crate::server::apply_ospf_route_update`) — its own SPF-computed
+    /// routes, never a directly-connected destination (see `ospf::spf`).
+    Ospf,
 }
 
 impl RouteSource {
-    /// Lower wins, like an administrative distance. Static is preferred
-    /// over Bgp, matching conventional router defaults (an explicit
-    /// operator override beats a dynamically learned route).
+    /// Lower wins, like an administrative distance. Static beats Bgp beats
+    /// Ospf, matching conventional (Cisco-style) router defaults: an
+    /// explicit operator override beats eBGP beats an interior IGP route.
     fn preference(self) -> u8 {
         match self {
             RouteSource::Static => 1,
             RouteSource::Bgp => 20,
+            RouteSource::Ospf => 110,
         }
     }
 }
@@ -60,13 +65,13 @@ fn diff_best(before: Option<&RibEntry>, after: Option<RibEntry>) -> BestPathChan
 }
 
 /// One routing table's candidate routes, keyed by prefix, potentially with
-/// more than one source contending for a prefix. Two independent writers
+/// more than one source contending for a prefix. Three independent writers
 /// mutate this: `crate::reconcile::resync` (config-driven, rebuilds the
-/// whole `Static` side from scratch on every resync) and
-/// `crate::server::apply_bgp_route_update` (BGP-push-driven, incremental).
-/// Each writer only ever touches its own `RouteSource`'s candidates via
-/// `replace_source`/`upsert`/`remove`, so neither can clobber the other's
-/// state.
+/// whole `Static` side from scratch on every resync), and
+/// `crate::server::apply_bgp_route_update`/`apply_ospf_route_update`
+/// (push-driven, incremental). Each writer only ever touches its own
+/// `RouteSource`'s candidates via `replace_source`/`upsert`/`remove`, so
+/// none can clobber another's state.
 #[derive(Debug, Clone, Default)]
 pub struct Rib {
     entries: HashMap<IpNet, Vec<RibEntry>>,

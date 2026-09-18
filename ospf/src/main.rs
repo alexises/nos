@@ -4,7 +4,7 @@ use anyhow::Context;
 use clap::Parser;
 use nos_log_client::ForwardingLayer;
 use nos_ospf::link::LinkManager;
-use nos_ospf::{reconcile, server, watchdog_client};
+use nos_ospf::{reconcile, rib_push_client, server, watchdog_client};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
@@ -73,14 +73,22 @@ async fn main() -> anyhow::Result<()> {
         .listen_socket
         .unwrap_or_else(|| PathBuf::from(format!("/run/nos/ospf-{}.sock", args.instance)));
 
+    let (routing_table_tx, routing_table_rx) = watch::channel(None::<String>);
     let links = LinkManager::new();
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),
         args.instance.clone(),
         links.clone(),
-        shutdown_rx,
+        routing_table_tx,
+        shutdown_rx.clone(),
     ));
+    let rib_push_task = rib_push_client::spawn(
+        args.watchdog_socket.clone(),
+        links.clone(),
+        routing_table_rx,
+        shutdown_rx,
+    );
     let server_task = server::start(&listen_socket, args.instance.clone(), links)
         .inspect_err(|e| {
             tracing::error!(instance = %args.instance, error = %e, "failed to start OSPF IPC server");
@@ -96,6 +104,7 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = reconcile_task.await {
         tracing::warn!(instance = %args.instance, error = %e, "reconcile task ended abnormally");
     }
+    rib_push_task.abort();
     server_task.abort();
 
     info!(instance = %args.instance, "shutting down");

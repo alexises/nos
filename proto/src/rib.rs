@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub enum RouteSourceKind {
     Static,
     Bgp,
+    Ospf,
 }
 
 /// One candidate route for a prefix.
@@ -49,6 +50,26 @@ pub enum BgpRouteUpdate {
     Remove(IpNet),
 }
 
+/// One SPF-computed OSPF route, pushed by the owning `nos-ospfd` instance
+/// for kernel installation — the OSPF analogue of `BgpRoute`. Never a
+/// directly-connected destination (root's own subnet) — see
+/// `ospf::spf::compute`'s directly-connected filter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OspfRoute {
+    pub prefix: IpNet,
+    pub next_hop: IpAddr,
+}
+
+/// Sent by the owning `nos-ospfd` instance to `nos-ribd` over a persistent,
+/// long-lived connection — the OSPF analogue of `BgpRouteUpdate`, same
+/// `Full`-on-connect-then-incremental shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum OspfRouteUpdate {
+    Full(Vec<OspfRoute>),
+    Add(OspfRoute),
+    Remove(IpNet),
+}
+
 /// Messages sent from a client to a `nos-ribd` instance's IPC socket.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -85,6 +106,11 @@ pub enum RibRequest {
     /// first, then touches the kernel once for the prefixes whose winning
     /// route actually changed, never once per update.
     PushBgpRoutes(Vec<BgpRouteUpdate>),
+    /// Fire-and-forget, no reply — sent continuously by the owning
+    /// `nos-ospfd` instance over one long-lived connection, the OSPF
+    /// analogue of `PushBgpRoutes` above (its own SPF computation, not BGP
+    /// best-path selection, is what changes here).
+    PushOspfRoutes(Vec<OspfRouteUpdate>),
 }
 
 /// Messages sent from a `nos-ribd` instance to a client.

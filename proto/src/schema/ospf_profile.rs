@@ -54,12 +54,11 @@ pub struct OspfProfile {
     #[garde(skip)]
     pub dead_interval: Option<u16>,
 
-    /// Interface cost, in the usual OSPF sense (lower is preferred by SPF).
-    /// `None`/no default rendered — this NOS has no SPF/LSDB yet (see
-    /// `ospf/CLAUDE.md`), so this field has no behavioral consumer today;
-    /// it's a forward-declared placeholder, stored/validated/rendered only.
-    /// `0` is rejected (not a valid OSPF cost) even though nothing reads
-    /// the value yet — ordinary schema hygiene.
+    /// Interface cost, in the usual OSPF sense (lower is preferred by
+    /// SPF). `None` defaults to `1` — a real behavioral consumer:
+    /// `ospf::link::router_lsa_links`/`originate_router_lsas` use it as
+    /// this link's RFC 2328 §16 metric, and `ospf::spf::compute` sums it
+    /// along the Dijkstra path. `0` is rejected (not a valid OSPF cost).
     #[garde(custom(|c: &Option<u16>, _ctx: &Config| valid_cost(*c)))]
     pub cost: Option<u16>,
 

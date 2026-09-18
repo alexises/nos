@@ -1194,6 +1194,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "ipnet",
  "libc",
  "nos-log-client",
  "nos-proto",

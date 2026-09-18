@@ -79,12 +79,20 @@
 # a real Full adjacency with both the DR and the BDR (RFC 2328 §8's positive
 # restriction) over real containers.
 #
+# A fourth, `ospf-spf` (also requires `ospf` to have already run), attaches
+# OSPF to router-b's own loopback interface at a distinct subnet -- a
+# destination with no neighbor of its own -- confirming router-a's own
+# nos-ospfd actually runs a real RFC 2328 §16.1/§16.2 SPF computation over
+# its LSDB, derives the correct next-hop purely from the LSDB (never a live
+# neighbor table), and pushes the computed route to its own nos-ribd for
+# real kernel installation, then withdraws it again on removal.
+#
 # nos-cli's interactive shell (reedline) can't be scripted over a plain
 # pipe, so provisioning goes through `nos-provision` (tools/nos-provision) —
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|logs [n]|down|all}
+# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|logs [n]|down|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -170,6 +178,13 @@ OSPF_BROADCAST_ADDRESS_B=203.0.113.66/28
 # an already-elected DR/BDR), and router-c becomes DrOther.
 OSPF_ROUTER_ID_C=9.9.9.8
 OSPF_BROADCAST_ADDRESS_C=203.0.113.67/28
+# The `ospf-spf` scenario's own stub-network destination -- a fourth host
+# address in the same TEST-NET-3 (RFC 5737) block already used by
+# loopback/svi/ospf-broadcast, distinct from every one of them (.1/.9/
+# .64-.79), attached to router-b's own loopback interface so router-a must
+# learn it purely via a real RFC 2328 §16 SPF computation, never a
+# directly-connected address.
+OSPF_SPF_LOOPBACK_ADDRESS=203.0.113.80/32
 
 log() { echo "[verify-bgp] $*" >&2; }
 
@@ -452,6 +467,47 @@ provision_ospf_broadcast() {
     --broadcast-domain "$OSPF_BROADCAST_DOMAIN" \
     --broadcast-domain-svi-address "$svi_addr" \
     --ospf-broadcast-domain-profile "$OSPF_PROFILE"
+}
+
+# Ensures a loopback interface for $name (same `loopback-<table>` naming
+# convention as `provision_loopback`) and attaches $OSPF_PROFILE to it
+# (`InterfaceOp::SetOspfProfile`) -- a destination with no neighbor of its
+# own, exercising RFC 2328 §16.2's stub-network leaf processing. Requires
+# `provision_ospf`/`cmd_check_ospf` to have already committed $OSPF_PROFILE
+# for $name.
+provision_ospf_loopback() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 loopback_addr=$6
+  log "provisioning $name with a loopback interface joined to ospf (address=$loopback_addr, profile=$OSPF_PROFILE)"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --loopback-address "$loopback_addr" \
+    --ospf-loopback-profile "$OSPF_PROFILE"
+}
+
+# Clears $name's loopback ospf-profile attachment (keeps the loopback
+# interface/address itself in place).
+provision_clear_ospf_loopback() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  log "clearing $name's loopback ospf-profile attachment"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --clear-ospf-loopback-profile
 }
 
 # --- L2 switching-profile scenario ---
@@ -1112,6 +1168,49 @@ cmd_check_ospf() {
     || { log "router-b: FAILED to reach ospf full on the broadcast link"; return 1; }
 }
 
+# --- OSPF SPF route computation scenario ---
+#
+# Requires `ospf` to have already run (router-a/router-b's real p2p
+# adjacency over eth0.0). Attaches OSPF to router-b's own loopback
+# interface (`loopback-rt1`) at a distinct subnet ($OSPF_SPF_LOOPBACK_
+# ADDRESS) -- a destination with no neighbor of its own, exercising RFC
+# 2328 §16.2's stub-network leaf processing -- and confirms router-a's own
+# nos-ospfd actually runs a real RFC 2328 §16.1 Dijkstra over its LSDB,
+# derives the correct next-hop (router-b's own eth0.0 address, read from
+# router-b's own Router-LSA -- never a live neighbor table, see
+# `ospf/src/spf.rs`), and pushes the computed route to its own nos-ribd for
+# real kernel installation -- over real containers, not a unit test. The
+# real per-route kernel-install/withdraw log lines (`rib/src/driver/
+# linux.rs`'s "added route"/"removed route", already generic across every
+# `RouteSource`) are reused rather than adding a new one, filtered by
+# `source=Ospf` to distinguish this route from anything BGP might install.
+cmd_check_ospf_spf() {
+  local before
+  before=$(docker logs router-a 2>&1 | grep -c "ospf lsa installed.*advertising_router=$OSPF_ROUTER_ID_B" || true)
+
+  provision_ospf_loopback router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" "$OSPF_SPF_LOOPBACK_ADDRESS"
+
+  log "waiting for router-a to learn router-b's reoriginated router-lsa (with the new stub-network link)"
+  wait_for_count_increase router-a "ospf lsa installed.*advertising_router=$OSPF_ROUTER_ID_B" "$before" 60 \
+    && log "router-a: learned router-b's updated router-lsa" \
+    || { log "router-a: FAILED to learn router-b's updated router-lsa"; return 1; }
+
+  log "waiting for router-a to compute and install a real kernel route to $OSPF_SPF_LOOPBACK_ADDRESS via ospf spf"
+  # add_route's `source` field is `Option<RouteSource>` (the full apply()
+  # path passes a source-less None for its bulk kernel-drift reconcile), so
+  # its Debug rendering is "Some(Ospf)", not "Ospf".
+  wait_for_count_increase router-a "added route prefix=$OSPF_SPF_LOOPBACK_ADDRESS.*source=Some(Ospf)" 0 60 \
+    && log "router-a: installed a real spf-computed route to $OSPF_SPF_LOOPBACK_ADDRESS" \
+    || { log "router-a: FAILED to install the spf-computed route"; return 1; }
+
+  provision_clear_ospf_loopback router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A"
+
+  log "waiting for router-a to withdraw the spf-computed route"
+  wait_for_count_increase router-a "removed route prefix=$OSPF_SPF_LOOPBACK_ADDRESS" 0 60 \
+    && log "router-a: withdrew the route to $OSPF_SPF_LOOPBACK_ADDRESS" \
+    || { log "router-a: FAILED to withdraw the spf-computed route"; return 1; }
+}
+
 # --- Multi-router OSPF DR/BDR scenario (Stage 5) ---
 #
 # Adds a third router ("router-c") onto the same bd-ospf broadcast segment
@@ -1689,6 +1788,7 @@ case "${1:-}" in
   route-server) cmd_check_route_server ;;
   ospf) cmd_check_ospf ;;
   ospf-dr) cmd_check_ospf_dr ;;
+  ospf-spf) cmd_check_ospf_spf ;;
   logs) shift; cmd_logs "$@" ;;
   down) cmd_down ;;
   all)
@@ -1710,9 +1810,10 @@ case "${1:-}" in
     cmd_check_route_server
     cmd_check_ospf
     cmd_check_ospf_dr
+    cmd_check_ospf_spf
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|logs [n]|down|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|logs [n]|down|all}" >&2
     exit 2
     ;;
 esac
