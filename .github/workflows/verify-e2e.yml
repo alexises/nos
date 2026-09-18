@@ -1,0 +1,31 @@
+name: verify-e2e
+
+# Real end-to-end verification against a real kernel (BGP/OSPF/RPL/interface
+# drivers) via tools/verify-e2e.sh. Too slow/privileged for every PR — like
+# ci.yml's `mutants` job, this only runs on a schedule or manual dispatch.
+# Each group is self-contained (its own `up` + checks + teardown) and runs on
+# its own independent runner, so there's no collision between the hardcoded
+# container names/network tools/verify-e2e.sh uses.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [base, drivers, rpl, ospf-suite, multi]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          tags: nos:local
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: tools/verify-e2e.sh ${{ matrix.group }}

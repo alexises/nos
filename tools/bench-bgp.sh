@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # BGP performance benchmark: nos-bgpd vs GoBGP / BIRD / FRR.
 #
-# Same shape as tools/verify-bgp.sh (docker network, subcommands, everything
+# Same shape as tools/verify-e2e.sh (docker network, subcommands, everything
 # observed from outside the container), but measuring instead of asserting.
 # One daemon under test at a time, in a fixed three-container topology:
 #
@@ -89,7 +89,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Same split-target-dir reasoning as verify-bgp.sh: nos-provision must be
+# Same split-target-dir reasoning as verify-e2e.sh: nos-provision must be
 # built against bookworm's glibc to run inside the runtime image.
 PROVISION_BIN="$REPO/target/docker-verify/release/nos-provision"
 WORKDIR="$REPO/target/bench-bgp"
@@ -528,7 +528,7 @@ else:
     accept
 EOF
   # nos-provision runs as the container's unprivileged `nos` user, a
-  # different uid than this shell (same reason verify-bgp.sh chmods its own
+  # different uid than this shell (same reason verify-e2e.sh chmods its own
   # policy file).
   chmod 644 "$WORKDIR/bench-in.rpl"
 }
@@ -571,7 +571,7 @@ stop_injectors() {
 }
 
 # nos's DUT container is the whole watchdog-supervised stack, exactly as
-# verify-bgp.sh starts it -- plus an optional RUST_LOG, which reaches
+# verify-e2e.sh starts it -- plus an optional RUST_LOG, which reaches
 # nos-bgpd because watchdog/src/supervisor.rs spawns children with a plain
 # Command that inherits the environment.
 start_nos_dut() {
@@ -605,7 +605,7 @@ start_nos_dut() {
 
   # One nos-provision call per neighbour: BgpPeerOp::Set upserts, so each
   # call adds a peer rather than replacing the previous one (the same way
-  # verify-bgp.sh's reflector scenario adds a second client). The injector
+  # verify-e2e.sh's reflector scenario adds a second client). The injector
   # peer-groups get the RPL import policy; the monitor's never does -- it is
   # the measuring instrument, not part of the test.
   local k
@@ -629,7 +629,7 @@ wait_for_dut_log() {
   for _ in $(seq 1 "$timeout"); do
     # Captured into a variable rather than piped into `grep -q`: under
     # pipefail, grep's early exit SIGPIPEs `docker logs` and the pipeline
-    # reports failure even on a match (see verify-bgp.sh's wait_for_log).
+    # reports failure even on a match (see verify-e2e.sh's wait_for_log).
     logs=$(docker logs "$DUT" 2>&1) || true
     if grep -q "$pattern" <<<"$logs"; then
       return 0
@@ -894,7 +894,7 @@ wait_for_main_table_routes() {
 # re-resolved every tick because nos-bgpd is spawned (and respawned) by the
 # watchdog rather than being the container's own pid 1. The runtime images
 # have no ps/pgrep, hence the /proc/*/comm scan (same trick as
-# verify-bgp.sh's kill_process_by_name).
+# verify-e2e.sh's kill_process_by_name).
 sampler_pid=
 sampler_start() {
   local proc=$1

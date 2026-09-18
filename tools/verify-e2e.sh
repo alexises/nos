@@ -92,7 +92,7 @@
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-bgp.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|logs [n]|down|all}
+# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -186,7 +186,7 @@ OSPF_BROADCAST_ADDRESS_C=203.0.113.67/28
 # directly-connected address.
 OSPF_SPF_LOOPBACK_ADDRESS=203.0.113.80/32
 
-log() { echo "[verify-bgp] $*" >&2; }
+log() { echo "[verify-e2e] $*" >&2; }
 
 build_provision_tool() {
   log "building nos-provision (bookworm-glibc-compatible, matching the runtime image)"
@@ -207,6 +207,20 @@ ensure_network() {
     log "creating network $NET ($SUBNET)"
     docker network create --subnet "$SUBNET" "$NET" >/dev/null
   fi
+}
+
+# cmd_up/cmd_up_reflector/cmd_up_route_server each need the image/provision
+# tool/network ready -- guarded so a run that calls more than one of them
+# (e.g. `all`) doesn't rebuild nos-provision (no persisted CARGO_HOME, so a
+# repeat call pays real container-startup/registry overhead for nothing)
+# three times over.
+ENV_READY=0
+ensure_env_up() {
+  [[ "$ENV_READY" -eq 1 ]] && return 0
+  build_image
+  build_provision_tool
+  ensure_network
+  ENV_READY=1
 }
 
 start_router() {
@@ -713,9 +727,7 @@ provision_reflector_client_redistribute() {
 }
 
 cmd_up_reflector() {
-  build_image
-  build_provision_tool
-  ensure_network
+  ensure_env_up
   start_router router-a "$IP_A"
   start_router router-b "$IP_B"
   start_router router-c "$IP_C"
@@ -805,9 +817,7 @@ provision_route_server_client_redistribute() {
 }
 
 cmd_up_route_server() {
-  build_image
-  build_provision_tool
-  ensure_network
+  ensure_env_up
   start_router router-a "$IP_A"
   start_router router-b "$IP_B"
   start_router router-c "$IP_C"
@@ -902,9 +912,7 @@ wait_for_log() {
 }
 
 cmd_up() {
-  build_image
-  build_provision_tool
-  ensure_network
+  ensure_env_up
   start_router router-a "$IP_A"
   start_router router-b "$IP_B"
   wait_for_config_socket router-a
@@ -1010,8 +1018,8 @@ cmd_check_auth() {
   log "reconfiguring router-a with a mismatched md5 password"
   provision_auth router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "wrong-password"
 
-  log "waiting 20s to confirm the session does NOT (re-)establish with mismatched md5 passwords"
-  sleep 20
+  log "waiting 8s to confirm the session does NOT (re-)establish with mismatched md5 passwords"
+  sleep 8
   local after_a after_b
   after_a=$(established_count router-a)
   after_b=$(established_count router-b)
@@ -1492,8 +1500,8 @@ cmd_check_policy() {
     && log "router-a: installed redistributed static route into its own loc-rib" \
     || { log "router-a: FAILED to install redistributed route locally"; return 1; }
 
-  log "waiting 15s to confirm router-b's import policy rejects $REDISTRIBUTE_PREFIX (does not re-enter adj-rib-in)"
-  sleep 15
+  log "waiting 6s to confirm router-b's import policy rejects $REDISTRIBUTE_PREFIX (does not re-enter adj-rib-in)"
+  sleep 6
   local after_reject
   after_reject=$(learned_prefix_count router-b)
   if [[ "$after_reject" -gt "$before_reject" ]]; then
@@ -1577,8 +1585,8 @@ cmd_check_redistribute_policy() {
   before_b=$(learned_prefix_count router-b)
 
   provision_redistribute_policy router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
-  log "waiting 15s to confirm router-a's redistribute policy filters $REDISTRIBUTE_PREFIX before it reaches router-a's own loc-rib"
-  sleep 15
+  log "waiting 6s to confirm router-a's redistribute policy filters $REDISTRIBUTE_PREFIX before it reaches router-a's own loc-rib"
+  sleep 6
   local after_a
   after_a=$(loc_rib_prefix_count router-a)
   if [[ "$after_a" -gt "$before_a" ]]; then
@@ -1769,6 +1777,68 @@ cmd_down() {
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 
+# --- Self-contained group subcommands ---
+#
+# Each bundles a set of related phases (its own `up` + checks) and tears
+# itself down on exit, whether it passes or fails -- unlike `all` below, which
+# leaves containers running for a human to inspect via `logs`. Meant to run as
+# independent parallel CI jobs (see .github/workflows/verify-e2e.yml), each on
+# its own runner/VM, so the hardcoded container names/network below never
+# collide between them.
+
+cleanup_on_exit() {
+  # Set VERIFY_E2E_KEEP=1 to skip auto-teardown for local debugging (inspect
+  # via `tools/verify-e2e.sh logs`, then `tools/verify-e2e.sh down` manually).
+  [[ "${VERIFY_E2E_KEEP:-0}" -eq 1 ]] && return
+  cmd_down
+}
+
+cmd_group_base() {
+  trap cleanup_on_exit EXIT
+  cmd_up
+  cmd_check_established
+  cmd_check_reconnect
+  cmd_check_collision
+  cmd_check_redistribute
+  cmd_check_auth
+}
+
+cmd_group_drivers() {
+  trap cleanup_on_exit EXIT
+  cmd_up
+  cmd_check_established
+  cmd_check_loopback
+  cmd_check_switching
+  cmd_check_svi
+  cmd_check_routed_subinterface
+  cmd_check_source_address
+}
+
+cmd_group_rpl() {
+  trap cleanup_on_exit EXIT
+  cmd_up
+  cmd_check_established
+  cmd_check_redistribute
+  cmd_check_policy
+  cmd_check_redistribute_policy
+  cmd_check_communities
+}
+
+cmd_group_ospf_suite() {
+  trap cleanup_on_exit EXIT
+  cmd_up
+  cmd_check_established
+  cmd_check_ospf
+  cmd_check_ospf_dr
+  cmd_check_ospf_spf
+}
+
+cmd_group_multi() {
+  trap cleanup_on_exit EXIT
+  cmd_check_reflector
+  cmd_check_route_server
+}
+
 case "${1:-}" in
   up) cmd_up ;;
   established) cmd_check_established ;;
@@ -1791,6 +1861,11 @@ case "${1:-}" in
   ospf-spf) cmd_check_ospf_spf ;;
   logs) shift; cmd_logs "$@" ;;
   down) cmd_down ;;
+  base) cmd_group_base ;;
+  drivers) cmd_group_drivers ;;
+  rpl) cmd_group_rpl ;;
+  ospf-suite) cmd_group_ospf_suite ;;
+  multi) cmd_group_multi ;;
   all)
     cmd_up
     cmd_check_established
@@ -1813,7 +1888,7 @@ case "${1:-}" in
     cmd_check_ospf_spf
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|logs [n]|down|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
     exit 2
     ;;
 esac
