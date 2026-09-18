@@ -48,6 +48,13 @@ const RXMT_INTERVAL: Duration = Duration::from_secs(5);
 /// shows up quickly rather than waiting on the next config resync.
 const ORIGINATION_INTERVAL: Duration = Duration::from_secs(2);
 
+/// RFC 2328 §14: how often `LinkManager` ages every installed LSA by one
+/// (simulated) second. Real wall-clock cadence — `age_multiplier` scales how
+/// many simulated seconds each tick advances, not this tick's own rate, so
+/// `age` stays a wire-correct simulated-seconds value regardless of what a
+/// test harness sets the multiplier to.
+const AGE_TICK_INTERVAL: Duration = Duration::from_secs(1);
+
 /// One link's fully-resolved desired state — diffed wholesale by
 /// `LinkManager::reconcile`, mirroring `bgp::session::ResolvedPeer`: any
 /// field change (including a re-resolved `vrf`/`local_addr`, or a changed
@@ -986,27 +993,42 @@ pub struct LinkManager {
     /// advertise a real stub-network link for each one. Replaced wholesale
     /// on every `reconcile` call, like every other desired-state field.
     stub_networks: Mutex<HashMap<Ipv4Addr, Vec<(Ipv4Net, u16)>>>,
+    /// Scales `AGE_TICK_INTERVAL`'s per-tick age-increment — always `1` (one
+    /// simulated second per real second) outside of `tools/verify-e2e.sh`'s
+    /// `ospf-aging` phase, which needs RFC 2328 §14's 1800s/3600s timers to
+    /// resolve in seconds rather than tens of minutes. See `main.rs`'s
+    /// `--lsa-age-multiplier`.
+    age_multiplier: u16,
 }
 
 impl LinkManager {
-    pub fn new() -> Arc<Self> {
+    pub fn new(age_multiplier: u16) -> Arc<Self> {
         let manager = Arc::new(Self {
             links: Mutex::new(HashMap::new()),
             lsdbs: Mutex::new(HashMap::new()),
             router_id: Mutex::new(None),
             stub_networks: Mutex::new(HashMap::new()),
+            age_multiplier,
         });
         let background = Arc::clone(&manager);
         // Runs for the process's lifetime — like every link driver task, it
         // ends only when the tokio runtime itself is torn down at process
         // exit, so there's nothing to abort on shutdown.
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(ORIGINATION_INTERVAL);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut origination_tick = tokio::time::interval(ORIGINATION_INTERVAL);
+            origination_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut age_tick = tokio::time::interval(AGE_TICK_INTERVAL);
+            age_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                tick.tick().await;
-                if let Some(router_id) = *background.router_id.lock().await {
-                    background.originate_router_lsas(router_id).await;
+                tokio::select! {
+                    _ = origination_tick.tick() => {
+                        if let Some(router_id) = *background.router_id.lock().await {
+                            background.originate_router_lsas(router_id).await;
+                        }
+                    }
+                    _ = age_tick.tick() => {
+                        background.age_lsdbs().await;
+                    }
                 }
             }
         });
@@ -1022,6 +1044,30 @@ impl LinkManager {
                 .entry(area_id)
                 .or_insert_with(|| Arc::new(Mutex::new(Lsdb::new()))),
         )
+    }
+
+    /// RFC 2328 §14: ages every installed LSA, in every area, by one
+    /// (simulated) second times `age_multiplier`, evicting anything that
+    /// reaches `MAX_AGE`. Run every `AGE_TICK_INTERVAL`, independent of
+    /// `originate_router_lsas` — aging is LSDB-wide, not per-link.
+    async fn age_lsdbs(&self) {
+        let areas: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
+            .lsdbs
+            .lock()
+            .await
+            .iter()
+            .map(|(area_id, lsdb)| (*area_id, Arc::clone(lsdb)))
+            .collect();
+        for (area_id, lsdb) in areas {
+            let evicted = lsdb.lock().await.age_and_evict(self.age_multiplier);
+            for key in evicted {
+                info!(
+                    area = %area_id, lsa_type = key.lsa_type, link_state_id = %key.link_state_id,
+                    advertising_router = %key.advertising_router,
+                    "ospf lsa maxage flushed"
+                );
+            }
+        }
     }
 
     /// RFC 2328 §12.4's self-origination: recomputes and (re)installs this
@@ -1374,7 +1420,11 @@ fn router_lsa_links(
 /// always the DR's interface address keyed to `local_router_id` for a
 /// Network-LSA) if `body` actually changed since what's held, bumping the
 /// sequence number by one rather than reinstalling identical content every
-/// `ORIGINATION_INTERVAL` tick.
+/// `ORIGINATION_INTERVAL` tick. Also reoriginates — bumping the sequence
+/// number even with unchanged content — once the held instance's age has
+/// reached RFC 2328 §14's `LS_REFRESH_TIME`, so a live self-originated LSA
+/// never reaches `MAX_AGE` and gets locally flushed by `LinkManager::
+/// age_lsdbs`.
 fn install_self_originated(
     lsdb: &mut Lsdb,
     local_router_id: Ipv4Addr,
@@ -1387,9 +1437,13 @@ fn install_self_originated(
         link_state_id,
         advertising_router: local_router_id,
     };
-    let sequence_number = match lsdb.get(&key) {
-        Some(existing) if existing.body == body => return,
-        Some(existing) => existing.header.sequence_number.wrapping_add(1),
+    let existing = lsdb.get(&key);
+    let needs_refresh = existing
+        .as_ref()
+        .is_some_and(|e| e.header.age >= lsa::LS_REFRESH_TIME);
+    let sequence_number = match &existing {
+        Some(e) if e.body == body && !needs_refresh => return,
+        Some(e) => e.header.sequence_number.wrapping_add(1),
         None => lsa::INITIAL_SEQUENCE_NUMBER,
     };
     lsdb.install(Lsa {
@@ -1407,6 +1461,7 @@ fn install_self_originated(
     });
     info!(
         lsa_type, link_state_id = %link_state_id, advertising_router = %local_router_id,
+        refreshed = needs_refresh,
         "ospf lsa originated"
     );
 }
@@ -1758,12 +1813,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn install_self_originated_age_based_refresh_bumps_sequence_number_even_with_unchanged_body() {
+        let mut lsdb = Lsdb::new();
+        let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let body = LsaBody::Router(RouterLsaBody {
+            flags: 0,
+            links: Vec::new(),
+        });
+        install_self_originated(
+            &mut lsdb,
+            local_router_id,
+            lsa::LSA_TYPE_ROUTER,
+            local_router_id,
+            body.clone(),
+        );
+        lsdb.age_and_evict(lsa::LS_REFRESH_TIME);
+
+        install_self_originated(
+            &mut lsdb,
+            local_router_id,
+            lsa::LSA_TYPE_ROUTER,
+            local_router_id,
+            body,
+        );
+
+        let key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_ROUTER,
+            link_state_id: local_router_id,
+            advertising_router: local_router_id,
+        };
+        let installed = lsdb.get(&key).unwrap();
+        assert_eq!(
+            installed.header.sequence_number,
+            lsa::INITIAL_SEQUENCE_NUMBER + 1
+        );
+        assert_eq!(installed.header.age, 0);
+    }
+
     #[tokio::test]
     async fn originate_router_lsas_includes_loopback_stub_for_area_with_no_live_link() {
         // Regression test for the area-union fix: an area with only a
         // loopback stub network and no live `LinkConfig` must still get a
         // Router-LSA originated for it.
-        let manager = LinkManager::new();
+        let manager = LinkManager::new(1);
         let area = Ipv4Addr::UNSPECIFIED;
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let subnet: Ipv4Net = "192.168.9.0/24".parse().unwrap();
@@ -1794,7 +1887,7 @@ mod tests {
 
     #[tokio::test]
     async fn database_summaries_flattens_every_area() {
-        let manager = LinkManager::new();
+        let manager = LinkManager::new(1);
         let area = Ipv4Addr::UNSPECIFIED;
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let lsdb = manager.lsdb_for(area).await;

@@ -36,6 +36,11 @@ const ROUTER_LINK_LEN: usize = 12;
 /// and, per §13.1's tie-break, always treated as the newer instance.
 pub const MAX_AGE: u16 = 3600;
 
+/// RFC 2328 §14's `LSRefreshTime` (seconds) — a self-originated LSA is
+/// reoriginated once its own age reaches this, even with unchanged content,
+/// so it never reaches `MAX_AGE` while its originator is still alive.
+pub const LS_REFRESH_TIME: u16 = 1800;
+
 /// RFC 2328 §12.1.6's `InitialSequenceNumber` — every self-originated LSA
 /// starts here and increments by one on each refresh.
 pub const INITIAL_SEQUENCE_NUMBER: i32 = i32::MIN + 1;
@@ -310,9 +315,11 @@ fn lsa_checksum(without_age: &[u8]) -> u16 {
 /// wins, then higher checksum, then an instance at `MAX_AGE` (being flushed)
 /// is always considered newer than one that isn't. Returns `Ordering::Equal`
 /// for what §13.1 calls "the same instance" — this deliberately doesn't
-/// implement the `MaxAgeDiff` age-difference tie-break, since without a
-/// running age-increment timer (see module doc) two genuinely-independent
-/// instances converging here would never legitimately differ only by age.
+/// implement the `MaxAgeDiff` age-difference tie-break: a real age-increment
+/// timer now runs (`link::LinkManager`'s age tick, see `lsdb::Lsdb::
+/// age_and_evict`), but two instances that already tie on sequence number
+/// and checksum are the same content regardless of stored age, so there's no
+/// ambiguity left for `MaxAgeDiff` to resolve.
 pub fn is_newer(a: &LsaHeader, b: &LsaHeader) -> Ordering {
     if a.sequence_number != b.sequence_number {
         return a.sequence_number.cmp(&b.sequence_number);

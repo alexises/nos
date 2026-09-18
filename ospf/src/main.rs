@@ -37,6 +37,14 @@ struct Args {
     /// "Process supervision" section).
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
+
+    /// Multiplies the per-second LSA-age-clock increment (default 1 = real
+    /// time). Test/debug only — never set by nos-watchdogd's normal config-
+    /// driven spawn path, only reachable via its opaque `--ospfd-arg` pass-
+    /// through (see root `CLAUDE.md`'s "Memory profiling" for the identical
+    /// pattern). Do not wire this into OspfProfile/nos-cli.
+    #[arg(long, default_value_t = 1)]
+    lsa_age_multiplier: u16,
 }
 
 #[tokio::main]
@@ -74,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from(format!("/run/nos/ospf-{}.sock", args.instance)));
 
     let (routing_table_tx, routing_table_rx) = watch::channel(None::<String>);
-    let links = LinkManager::new();
+    let links = LinkManager::new(args.lsa_age_multiplier);
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),

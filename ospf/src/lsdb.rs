@@ -64,6 +64,30 @@ impl Lsdb {
     pub fn all(&self) -> Vec<Arc<Lsa>> {
         self.entries.values().cloned().collect()
     }
+
+    /// RFC 2328 §14: ages every installed LSA by `delta` (saturating at
+    /// `MAX_AGE`) and evicts any entry that reaches it, returning the
+    /// evicted keys so `link.rs` can log them. No "premature aging"
+    /// reflood ceremony — this codebase has no LSA-withdrawal path to
+    /// support, so a stale received LSA simply expires locally on each
+    /// router's own clock once its originator stops refreshing it.
+    pub fn age_and_evict(&mut self, delta: u16) -> Vec<LsaKey> {
+        let mut evicted = Vec::new();
+        self.entries.retain(|key, lsa| {
+            let aged = lsa.header.age.saturating_add(delta).min(lsa::MAX_AGE);
+            if aged >= lsa::MAX_AGE {
+                evicted.push(*key);
+                return false;
+            }
+            if aged != lsa.header.age {
+                let mut updated = (**lsa).clone();
+                updated.header.age = aged;
+                *lsa = Arc::new(updated);
+            }
+            true
+        });
+        evicted
+    }
 }
 
 #[cfg(test)]
@@ -133,5 +157,40 @@ mod tests {
         db.install(lsa(1));
         assert_eq!(db.headers().len(), 1);
         assert_eq!(db.headers()[0].key(), lsa(1).header.key());
+    }
+
+    #[test]
+    fn age_and_evict_increments_age_without_eviction() {
+        let mut db = Lsdb::new();
+        db.install(lsa(1));
+        let evicted = db.age_and_evict(100);
+        assert!(evicted.is_empty());
+        assert_eq!(db.get(&lsa(1).header.key()).unwrap().header.age, 100);
+    }
+
+    #[test]
+    fn age_and_evict_evicts_at_max_age() {
+        let mut db = Lsdb::new();
+        db.install(lsa(1));
+        let evicted = db.age_and_evict(lsa::MAX_AGE);
+        assert_eq!(evicted, vec![lsa(1).header.key()]);
+        assert!(db.get(&lsa(1).header.key()).is_none());
+    }
+
+    #[test]
+    fn age_and_evict_only_evicts_crossed_entries() {
+        let mut db = Lsdb::new();
+        let mut stale = lsa(1);
+        stale.header.link_state_id = Ipv4Addr::new(1, 1, 1, 1);
+        stale.header.advertising_router = Ipv4Addr::new(1, 1, 1, 1);
+        stale.header.age = lsa::MAX_AGE - 10;
+        db.install(stale.clone());
+        db.install(lsa(1));
+
+        let evicted = db.age_and_evict(10);
+
+        assert_eq!(evicted, vec![stale.header.key()]);
+        assert!(db.get(&stale.header.key()).is_none());
+        assert_eq!(db.get(&lsa(1).header.key()).unwrap().header.age, 10);
     }
 }

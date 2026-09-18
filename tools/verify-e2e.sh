@@ -87,12 +87,22 @@
 # neighbor table), and pushes the computed route to its own nos-ribd for
 # real kernel installation, then withdraws it again on removal.
 #
+# A fifth, `ospf-aging`, is self-contained (its own router-a/router-b,
+# launched with a real --lsa-age-multiplier so RFC 2328 §14's real
+# 1800s/3600s timers resolve in seconds), confirming a real age-increment
+# timer runs against the LSDB, a self-originated LSA is actually
+# reoriginated (bumped sequence number) once its own age crosses
+# LSRefreshTime even with unchanged content, and that once its originator
+# stops refreshing it (nos-ospfd killed), the receiving router's own held
+# copy actually ages out and gets flushed at MaxAge purely on its own local
+# clock.
+#
 # nos-cli's interactive shell (reedline) can't be scripted over a plain
 # pipe, so provisioning goes through `nos-provision` (tools/nos-provision) —
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
+# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|ospf-aging|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -185,6 +195,11 @@ OSPF_BROADCAST_ADDRESS_C=203.0.113.67/28
 # learn it purely via a real RFC 2328 §16 SPF computation, never a
 # directly-connected address.
 OSPF_SPF_LOOPBACK_ADDRESS=203.0.113.80/32
+# The `ospf-aging` scenario's --lsa-age-multiplier: scales nos-ospfd's
+# per-second LSA-age-clock so RFC 2328 §14's real 1800s (LSRefreshTime) /
+# 3600s (MaxAge) timers resolve in CI-friendly seconds instead of tens of
+# minutes -- 1800/180=10s, 3600/180=20s.
+OSPF_AGE_MULTIPLIER=180
 
 log() { echo "[verify-e2e] $*" >&2; }
 
@@ -225,16 +240,20 @@ ensure_env_up() {
 
 start_router() {
   local name=$1 ip=$2
+  shift 2
   log "starting $name at $ip"
   docker volume create "${name}-run" >/dev/null
   docker volume create "${name}-data" >/dev/null
   docker rm -f "$name" >/dev/null 2>&1 || true
+  # "$@" (any remaining args) is forwarded to nos-watchdogd -- e.g.
+  # `ospf-aging`'s `--ospfd-arg --lsa-age-multiplier=...`. Every other call
+  # site passes none, so this is backward-compatible.
   docker run -d --name "$name" \
     --network "$NET" --ip "$ip" \
     --cap-add NET_ADMIN --cap-add NET_RAW --cap-add NET_BIND_SERVICE \
     -v "${name}-run:/run/nos" \
     -v "${name}-data:/var/lib/nos" \
-    "$IMAGE" >/dev/null
+    "$IMAGE" "$@" >/dev/null
 }
 
 wait_for_config_socket() {
@@ -1274,6 +1293,62 @@ cmd_check_ospf_dr() {
     || { log "router-b: FAILED to reach ospf full with router-c"; return 1; }
 }
 
+# --- OSPF LSA aging/refresh/flush scenario (RFC 2328 §14) ---
+#
+# Self-contained (own router-a/router-b, not chained onto `ospf`/`ospf-dr`/
+# `ospf-spf`'s containers), since it needs both routers' nos-ospfd launched
+# with a real --lsa-age-multiplier from process start (`--ospfd-arg`,
+# forwarded straight through by nos-watchdogd, see root CLAUDE.md's
+# "Process supervision") -- an already-running container can't have that
+# retro-fitted onto it. $OSPF_AGE_MULTIPLIER scales the per-second age clock
+# so LSRefreshTime (1800s) and MaxAge (3600s) resolve in ~10s/~20s instead of
+# 30/60 real minutes.
+cmd_up_ospf_aging() {
+  ensure_env_up
+  start_router router-a "$IP_A" --ospfd-arg "--lsa-age-multiplier=$OSPF_AGE_MULTIPLIER"
+  start_router router-b "$IP_B" --ospfd-arg "--lsa-age-multiplier=$OSPF_AGE_MULTIPLIER"
+  wait_for_config_socket router-a
+  wait_for_config_socket router-b
+  provision_ospf router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID"
+  provision_ospf router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID_B"
+}
+
+cmd_check_ospf_aging() {
+  cmd_up_ospf_aging
+
+  log "waiting for router-a/router-b to reach ospf full on the point-to-point link"
+  wait_for_count_increase router-a "ospf neighbor reached full link=eth0.0 neighbor=$OSPF_ROUTER_ID_B" 0 60 \
+    && log "router-a: reached ospf full with $OSPF_ROUTER_ID_B" \
+    || { log "router-a: FAILED to reach ospf full"; return 1; }
+  wait_for_count_increase router-b "ospf neighbor reached full link=eth0.0 neighbor=$OSPF_ROUTER_ID" 0 60 \
+    && log "router-b: reached ospf full with $OSPF_ROUTER_ID" \
+    || { log "router-b: FAILED to reach ospf full"; return 1; }
+
+  # router-a's own Router-LSA content never changes on this link, so a
+  # bumped sequence number with refreshed=true can only come from the
+  # RFC 2328 §14 age-based refresh path, not the content-diff path.
+  log "waiting for router-a to self-refresh its router-lsa purely due to elapsed age (content unchanged)"
+  wait_for_count_increase router-a "ospf lsa originated.*advertising_router=$OSPF_ROUTER_ID.*refreshed=true" 0 45 \
+    && log "router-a: refreshed its own router-lsa at LSRefreshTime" \
+    || { log "router-a: FAILED to age-refresh its own router-lsa"; return 1; }
+
+  log "waiting for router-b to install the refreshed (higher sequence number) instance"
+  wait_for_count_increase router-b "ospf lsa installed.*advertising_router=$OSPF_ROUTER_ID" 0 20 \
+    && log "router-b: installed router-a's refreshed router-lsa" \
+    || { log "router-b: FAILED to install the refreshed router-lsa"; return 1; }
+
+  # Stop router-a's nos-ospfd so it stops refreshing -- router-b's own held
+  # copy must then age out and evict purely on its own local clock, with no
+  # further packets from router-a needed at all.
+  log "killing router-a's nos-ospfd to stop further refreshes"
+  kill_process_by_name router-a nos-ospfd
+
+  log "waiting for router-b to flush router-a's now-stale router-lsa at maxage"
+  wait_for_count_increase router-b "ospf lsa maxage flushed.*advertising_router=$OSPF_ROUTER_ID" 0 45 \
+    && log "router-b: flushed router-a's router-lsa at maxage" \
+    || { log "router-b: FAILED to flush the stale router-lsa"; return 1; }
+}
+
 cmd_check_switching() {
   provision_switching router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
 
@@ -1831,6 +1906,7 @@ cmd_group_ospf_suite() {
   cmd_check_ospf
   cmd_check_ospf_dr
   cmd_check_ospf_spf
+  cmd_check_ospf_aging
 }
 
 cmd_group_multi() {
@@ -1859,6 +1935,7 @@ case "${1:-}" in
   ospf) cmd_check_ospf ;;
   ospf-dr) cmd_check_ospf_dr ;;
   ospf-spf) cmd_check_ospf_spf ;;
+  ospf-aging) cmd_check_ospf_aging ;;
   logs) shift; cmd_logs "$@" ;;
   down) cmd_down ;;
   base) cmd_group_base ;;
@@ -1886,9 +1963,10 @@ case "${1:-}" in
     cmd_check_ospf
     cmd_check_ospf_dr
     cmd_check_ospf_spf
+    cmd_check_ospf_aging
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|ospf-aging|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
     exit 2
     ;;
 esac
