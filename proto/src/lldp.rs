@@ -21,6 +21,8 @@ pub struct LldpNeighbor {
     pub system_description: Option<String>,
     /// The capabilities the neighbor has *enabled*, by name (e.g. `router`).
     pub capabilities: Vec<String>,
+    /// Management addresses the neighbor advertised (already formatted).
+    pub management_addresses: Vec<String>,
     /// Seconds until this entry ages out, unless refreshed first.
     pub ttl_remaining_secs: u32,
 }

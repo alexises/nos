@@ -5,6 +5,7 @@ pub mod broadcast_domain;
 pub mod community_alias;
 pub mod community_group;
 pub mod interface;
+pub mod lldp;
 pub mod ospf_area;
 pub mod ospf_instance;
 pub mod ospf_profile;
@@ -85,6 +86,8 @@ pub struct ConfigDiff {
     pub broadcast_domains: Vec<SectionDiff>,
     pub switching_profiles: Vec<SectionDiff>,
     pub port_aggregates: Vec<SectionDiff>,
+    /// Field-level: `Config.lldp` is one singleton section, not a keyed list.
+    pub lldp: Vec<FieldDiff>,
 }
 
 impl ConfigDiff {
@@ -103,6 +106,7 @@ impl ConfigDiff {
             && self.broadcast_domains.is_empty()
             && self.switching_profiles.is_empty()
             && self.port_aggregates.is_empty()
+            && self.lldp.is_empty()
     }
 
     /// A copy of this diff keeping only the sections/fields covered by
@@ -181,6 +185,11 @@ impl ConfigDiff {
             } else {
                 Vec::new()
             },
+            lldp: if scopes.contains(&DiffScope::Lldp) {
+                self.lldp.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -203,6 +212,7 @@ pub enum DiffScope {
     OspfInstances,
     Ospfv3Instances,
     PortAggregates,
+    Lldp,
 }
 
 /// Computes what changed between `base` (e.g. the running config) and
@@ -262,6 +272,7 @@ pub fn diff_configs(base: &Config, candidate: &Config) -> ConfigDiff {
             &base.port_aggregates,
             &candidate.port_aggregates,
         ),
+        lldp: lldp::diff_lldp(&base.lldp, &candidate.lldp),
     }
 }
 

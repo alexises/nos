@@ -174,7 +174,10 @@
 # address either) and enables `lldp transmit`/`lldp receive` on both routers'
 # eth1, confirming nos-lldpd runs a real LLDPDU exchange over a real raw
 # AF_PACKET socket and learns the other router's System Name and port id,
-# then that turning transmit off on one side makes it send a real TTL-0
+# then that tuned timers (tx-interval 5 x tx-hold 3 -> a learned TTL of 15) and
+# a Management Address TLV really reach the neighbor, that both routers on the
+# customer-bridge destination group still hear each other while a mismatched
+# pair never does, then that turning transmit off on one side makes it send a real TTL-0
 # shutdown LLDPDU that the other side acts on immediately (not after the 120s
 # TTL), that transmit coming back is learned again, and that dropping receive
 # restarts the link as transmit-only.
@@ -1941,12 +1944,77 @@ cmd_check_lldp() {
     --lldp-transmit-interface eth1 --lldp-receive-interface eth1
 
   log "waiting for both routers' nos-lldpd to learn the other over the real veth"
-  wait_for_count_increase router-a "lldp neighbor learned interface=eth1 .* port_id=eth1 system_name=router-b" "$learned_a_base" 60 \
-    && log "router-a: learned router-b via lldp on eth1" \
+  # ttl=120 is the 802.1AB default (tx-interval 30 x tx-hold 4): nothing here
+  # configures a timer yet.
+  wait_for_count_increase router-a "lldp neighbor learned interface=eth1 .* port_id=eth1 system_name=router-b ttl=120" "$learned_a_base" 60 \
+    && log "router-a: learned router-b via lldp on eth1 (default ttl 120)" \
     || { log "router-a: FAILED to learn router-b via lldp"; return 1; }
-  wait_for_count_increase router-b "lldp neighbor learned interface=eth1 .* port_id=eth1 system_name=router-a" "$learned_b_base" 60 \
-    && log "router-b: learned router-a via lldp on eth1" \
+  wait_for_count_increase router-b "lldp neighbor learned interface=eth1 .* port_id=eth1 system_name=router-a ttl=120" "$learned_b_base" 60 \
+    && log "router-b: learned router-a via lldp on eth1 (default ttl 120)" \
     || { log "router-b: FAILED to learn router-a via lldp"; return 1; }
+
+  # Tunable timers + Management Address TLV. tx-interval 5 x tx-hold 3 must show
+  # up as the TTL the *neighbor* learned (15), and each router's own address as
+  # the management address it advertised. A config change restarts the link, so
+  # each side re-learns the other with the new values.
+  local mgmt_a_base mgmt_b_base
+  mgmt_a_base=$(log_count router-a "lldp neighbor learned interface=eth1 .* system_name=router-b ttl=15 management_addresses=$IP_B")
+  mgmt_b_base=$(log_count router-b "lldp neighbor learned interface=eth1 .* system_name=router-a ttl=15 management_addresses=$IP_A")
+  provision_lldp router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" \
+    --lldp-tx-interval 5 --lldp-tx-hold 3 --lldp-management-address "$IP_A"
+  provision_lldp router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" \
+    --lldp-tx-interval 5 --lldp-tx-hold 3 --lldp-management-address "$IP_B"
+  wait_for_count_increase router-a "lldp neighbor learned interface=eth1 .* system_name=router-b ttl=15 management_addresses=$IP_B" "$mgmt_a_base" 60 \
+    && log "router-a: learned router-b with ttl 15 and management address $IP_B" \
+    || { log "router-a: FAILED to see router-b's tuned ttl / management address"; return 1; }
+  wait_for_count_increase router-b "lldp neighbor learned interface=eth1 .* system_name=router-a ttl=15 management_addresses=$IP_A" "$mgmt_b_base" 60 \
+    && log "router-b: learned router-a with ttl 15 and management address $IP_A" \
+    || { log "router-b: FAILED to see router-a's tuned ttl / management address"; return 1; }
+
+  # Destination group. Both on customer-bridge (01:80:C2:00:00:00): still
+  # neighbors. Then only router-b back on nearest-bridge: the two groups never
+  # see each other -- router-a first drops router-b on its shutdown LLDPDU
+  # (sent to the group router-a is still on), and after that neither re-learns
+  # the other, though both keep transmitting every 5s. Then router-a follows and
+  # both learn again.
+  learned_a_base=$(log_count router-a "lldp neighbor learned interface=eth1 .* system_name=router-b")
+  learned_b_base=$(log_count router-b "lldp neighbor learned interface=eth1 .* system_name=router-a")
+  provision_lldp router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" --lldp-destination-interface eth1=customer-bridge
+  provision_lldp router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" --lldp-destination-interface eth1=customer-bridge
+  wait_for_count_increase router-a "lldp neighbor learned interface=eth1 .* system_name=router-b" "$learned_a_base" 60 \
+    && log "router-a: learned router-b over the customer-bridge group" \
+    || { log "router-a: FAILED to learn router-b over the customer-bridge group"; return 1; }
+  wait_for_count_increase router-b "lldp neighbor learned interface=eth1 .* system_name=router-a" "$learned_b_base" 60 \
+    && log "router-b: learned router-a over the customer-bridge group" \
+    || { log "router-b: FAILED to learn router-a over the customer-bridge group"; return 1; }
+
+  removed_a_base=$(log_count router-a "lldp neighbor removed interface=eth1 .* reason=\"shutdown\"")
+  provision_lldp router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" --lldp-destination-interface eth1=nearest-bridge
+  wait_for_count_increase router-a "lldp neighbor removed interface=eth1 .* reason=\"shutdown\"" "$removed_a_base" 30 \
+    && log "router-a: dropped router-b on its shutdown LLDPDU (sent to the old group)" \
+    || { log "router-a: FAILED to see router-b leave the customer-bridge group"; return 1; }
+  learned_a_base=$(log_count router-a "lldp neighbor learned interface=eth1 .* system_name=router-b")
+  learned_b_base=$(log_count router-b "lldp neighbor learned interface=eth1 .* system_name=router-a")
+  log "mismatched destination groups: neither side may learn the other (waiting 15s, ~3 transmit intervals)"
+  sleep 15
+  if [[ $(log_count router-a "lldp neighbor learned interface=eth1 .* system_name=router-b") -ne $learned_a_base \
+     || $(log_count router-b "lldp neighbor learned interface=eth1 .* system_name=router-a") -ne $learned_b_base ]]; then
+    log "FAILED: a neighbor was learned across mismatched destination groups"
+    return 1
+  fi
+  log "no neighbor learned across mismatched destination groups"
+
+  provision_lldp router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" --lldp-destination-interface eth1=nearest-bridge
+  wait_for_count_increase router-a "lldp neighbor learned interface=eth1 .* system_name=router-b" "$learned_a_base" 60 \
+    && log "router-a: learned router-b again once both are back on nearest-bridge" \
+    || { log "router-a: FAILED to re-learn router-b on nearest-bridge"; return 1; }
+  wait_for_count_increase router-b "lldp neighbor learned interface=eth1 .* system_name=router-a" "$learned_b_base" 60 \
+    && log "router-b: re-learned router-a on nearest-bridge" \
+    || { log "router-b: FAILED to re-learn router-a on nearest-bridge"; return 1; }
+
+  # Retake the baseline: the destination steps above also logged "shutdown"
+  # removals, which must not satisfy the check below.
+  removed_a_base=$(log_count router-a "lldp neighbor removed interface=eth1 .* reason=\"shutdown\"")
 
   # router-b stops transmitting: its link restarts, and on the way out sends a
   # real TTL-0 shutdown LLDPDU. router-a must drop router-b on receiving it --

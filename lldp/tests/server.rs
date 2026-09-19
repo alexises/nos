@@ -34,6 +34,7 @@ fn pdu(chassis: u8, port: &str, name: &str) -> Lldpdu {
         system_name: Some(name.to_string()),
         system_description: None,
         capabilities: None,
+        management_addresses: Vec::new(),
     }
 }
 

@@ -1,0 +1,175 @@
+//! LLDP configuration (IEEE 802.1AB) that isn't a per-interface on/off flag:
+//! the system-wide timers and management address (`Config.lldp`), and the
+//! per-interface destination group (`Interface.lldp_destination`).
+
+use std::net::IpAddr;
+
+use serde::{Deserialize, Serialize};
+
+/// 802.1AB `msgTxInterval` default.
+pub const TX_INTERVAL_DEFAULT_SECS: u16 = 30;
+/// 802.1AB `msgTxHold` default.
+pub const TX_HOLD_DEFAULT: u8 = 4;
+/// 802.1AB's `msgTxInterval` range.
+pub const TX_INTERVAL_MAX_SECS: u16 = 3600;
+/// 802.1AB's `msgTxHold` range is 1..=100.
+pub const TX_HOLD_MAX: u8 = 100;
+
+/// System-wide LLDP settings. `None` for a timer means the 802.1AB default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LldpSettings {
+    /// `msgTxInterval`: seconds between periodic LLDPDUs.
+    pub tx_interval_secs: Option<u16>,
+    /// `msgTxHold`: the advertised TTL is this × the interval.
+    pub tx_hold: Option<u8>,
+    /// Advertised in the Management Address TLV on every LLDP-enabled link.
+    /// Taken as configured — not checked against any interface's addresses.
+    pub management_address: Option<IpAddr>,
+}
+
+impl LldpSettings {
+    pub fn effective_interval_secs(&self) -> u16 {
+        self.tx_interval_secs.unwrap_or(TX_INTERVAL_DEFAULT_SECS)
+    }
+
+    pub fn effective_hold(&self) -> u8 {
+        self.tx_hold.unwrap_or(TX_HOLD_DEFAULT)
+    }
+
+    /// The TTL advertised in every LLDPDU: `msgTxHold × msgTxInterval`.
+    /// Saturates rather than overflowing; `check` rejects a config that would.
+    pub fn effective_ttl_secs(&self) -> u16 {
+        u16::try_from(u32::from(self.effective_interval_secs()) * u32::from(self.effective_hold()))
+            .unwrap_or(u16::MAX)
+    }
+
+    /// Commit-time validation (`Config.lldp`'s `garde` custom check).
+    pub(crate) fn check(&self) -> garde::Result {
+        if !(1..=TX_INTERVAL_MAX_SECS).contains(&self.effective_interval_secs()) {
+            return Err(garde::Error::new(format!(
+                "lldp tx-interval must be 1-{TX_INTERVAL_MAX_SECS} seconds"
+            )));
+        }
+        if !(1..=TX_HOLD_MAX).contains(&self.effective_hold()) {
+            return Err(garde::Error::new(format!(
+                "lldp tx-hold must be 1-{TX_HOLD_MAX}"
+            )));
+        }
+        // The TTL field is 16 bits; the two ranges alone allow 360000.
+        if u32::from(self.effective_interval_secs()) * u32::from(self.effective_hold())
+            > u32::from(u16::MAX)
+        {
+            return Err(garde::Error::new(
+                "lldp tx-interval × tx-hold must be at most 65535 seconds (the 16-bit TTL)",
+            ));
+        }
+        if let Some(addr) = self.management_address {
+            if addr.is_unspecified() || addr.is_multicast() {
+                return Err(garde::Error::new(
+                    "lldp management-address must be a unicast address",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Which 802.1AB destination group an interface's LLDPDUs use. Both ends of a
+/// link must agree: a frame to a different group is never seen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LldpDestination {
+    /// `01:80:C2:00:00:0E` — link-local, never forwarded by any bridge.
+    #[default]
+    NearestBridge,
+    /// `01:80:C2:00:00:03` — forwarded by C-VLAN/S-VLAN bridges, not TPMRs.
+    NonTpmr,
+    /// `01:80:C2:00:00:00` — not forwarded by customer bridges.
+    CustomerBridge,
+}
+
+impl LldpDestination {
+    pub const fn mac(self) -> [u8; 6] {
+        let last = match self {
+            LldpDestination::NearestBridge => 0x0E,
+            LldpDestination::NonTpmr => 0x03,
+            LldpDestination::CustomerBridge => 0x00,
+        };
+        [0x01, 0x80, 0xC2, 0x00, 0x00, last]
+    }
+
+    /// The CLI/config spelling.
+    pub const fn name(self) -> &'static str {
+        match self {
+            LldpDestination::NearestBridge => "nearest-bridge",
+            LldpDestination::NonTpmr => "non-tpmr",
+            LldpDestination::CustomerBridge => "customer-bridge",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::NearestBridge, Self::NonTpmr, Self::CustomerBridge]
+            .into_iter()
+            .find(|d| d.name() == name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(i: Option<u16>, h: Option<u8>, a: Option<&str>) -> LldpSettings {
+        LldpSettings {
+            tx_interval_secs: i,
+            tx_hold: h,
+            management_address: a.map(|a| a.parse().unwrap()),
+        }
+    }
+
+    #[test]
+    fn defaults_are_the_802_1ab_values() {
+        let s = LldpSettings::default();
+        assert_eq!(s.effective_interval_secs(), 30);
+        assert_eq!(s.effective_ttl_secs(), 120);
+        assert!(s.check().is_ok());
+    }
+
+    #[test]
+    fn ttl_is_hold_times_interval() {
+        assert_eq!(settings(Some(5), Some(3), None).effective_ttl_secs(), 15);
+    }
+
+    #[test]
+    fn out_of_range_values_are_rejected() {
+        assert!(settings(Some(0), None, None).check().is_err());
+        assert!(settings(Some(3601), None, None).check().is_err());
+        assert!(settings(None, Some(0), None).check().is_err());
+        assert!(settings(None, Some(101), None).check().is_err());
+        // Each in range on its own, but the TTL would overflow 16 bits.
+        assert!(settings(Some(3600), Some(100), None).check().is_err());
+        assert!(settings(Some(3600), Some(18), None).check().is_ok());
+    }
+
+    #[test]
+    fn management_address_must_be_unicast() {
+        assert!(settings(None, None, Some("10.0.0.1")).check().is_ok());
+        assert!(settings(None, None, Some("2001:db8::1")).check().is_ok());
+        assert!(settings(None, None, Some("0.0.0.0")).check().is_err());
+        assert!(settings(None, None, Some("224.0.0.1")).check().is_err());
+        assert!(settings(None, None, Some("ff02::1")).check().is_err());
+    }
+
+    #[test]
+    fn destination_macs_and_names_round_trip() {
+        assert_eq!(LldpDestination::default().mac()[5], 0x0E);
+        assert_eq!(LldpDestination::NonTpmr.mac()[5], 0x03);
+        assert_eq!(LldpDestination::CustomerBridge.mac()[5], 0x00);
+        for d in [
+            LldpDestination::NearestBridge,
+            LldpDestination::NonTpmr,
+            LldpDestination::CustomerBridge,
+        ] {
+            assert_eq!(LldpDestination::from_name(d.name()), Some(d));
+        }
+        assert_eq!(LldpDestination::from_name("bogus"), None);
+    }
+}

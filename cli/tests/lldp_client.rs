@@ -13,6 +13,7 @@ fn sample() -> LldpNeighbor {
         system_name: Some("router-b".to_string()),
         system_description: Some("nos 0.1.0".to_string()),
         capabilities: vec!["router".to_string()],
+        management_addresses: vec!["10.0.0.2".to_string()],
         ttl_remaining_secs: 117,
     }
 }

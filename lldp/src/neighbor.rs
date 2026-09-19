@@ -92,6 +92,12 @@ impl NeighborTable {
                 system_name: e.pdu.system_name.clone(),
                 system_description: e.pdu.system_description.clone(),
                 capabilities: e.pdu.enabled_capability_names(),
+                management_addresses: e
+                    .pdu
+                    .management_addresses
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
                 ttl_remaining_secs: u32::try_from(
                     e.expires_at.saturating_duration_since(now).as_secs(),
                 )
@@ -121,6 +127,7 @@ mod tests {
             system_name: Some(format!("r{chassis}")),
             system_description: None,
             capabilities: None,
+            management_addresses: Vec::new(),
         }
     }
 

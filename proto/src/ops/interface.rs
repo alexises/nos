@@ -1,7 +1,7 @@
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Config, Interface, InterfaceAddress};
+use crate::schema::{Config, Interface, InterfaceAddress, LldpDestination};
 
 use super::OpError;
 
@@ -57,6 +57,13 @@ pub enum InterfaceOp {
         name: String,
         enabled: bool,
     },
+    SetLldpDestination {
+        name: String,
+        destination: LldpDestination,
+    },
+    ClearLldpDestination {
+        name: String,
+    },
     SetOspfProfile {
         name: String,
         ospf_profile: String,
@@ -106,6 +113,7 @@ impl InterfaceOp {
                         mtu: None,
                         lldp_transmit: false,
                         lldp_receive: false,
+                        lldp_destination: crate::schema::LldpDestination::default(),
                         subinterfaces: Vec::new(),
                     });
                 }
@@ -163,6 +171,14 @@ impl InterfaceOp {
             }
             InterfaceOp::SetLldpReceive { name, enabled } => {
                 find_interface_mut(config, name)?.lldp_receive = *enabled;
+                Ok(())
+            }
+            InterfaceOp::SetLldpDestination { name, destination } => {
+                find_interface_mut(config, name)?.lldp_destination = *destination;
+                Ok(())
+            }
+            InterfaceOp::ClearLldpDestination { name } => {
+                find_interface_mut(config, name)?.lldp_destination = LldpDestination::default();
                 Ok(())
             }
             InterfaceOp::SetOspfProfile { name, ospf_profile } => {
@@ -246,6 +262,7 @@ mod tests {
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,
+            lldp_destination: crate::schema::LldpDestination::default(),
             subinterfaces: Vec::new(),
         }
     }
@@ -288,6 +305,7 @@ mod tests {
                 mtu: None,
                 lldp_transmit: false,
                 lldp_receive: false,
+                lldp_destination: crate::schema::LldpDestination::default(),
                 subinterfaces: Vec::new(),
             }],
             ..Default::default()
@@ -456,6 +474,33 @@ mod tests {
         .unwrap();
         assert!(!cfg.interfaces[0].lldp_transmit);
         assert!(cfg.interfaces[0].lldp_receive);
+    }
+
+    #[test]
+    fn set_and_clear_lldp_destination() {
+        let mut cfg = Config {
+            interfaces: vec![interface("eth0")],
+            ..Default::default()
+        };
+        InterfaceOp::SetLldpDestination {
+            name: "eth0".to_string(),
+            destination: LldpDestination::CustomerBridge,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.interfaces[0].lldp_destination,
+            LldpDestination::CustomerBridge
+        );
+        InterfaceOp::ClearLldpDestination {
+            name: "eth0".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.interfaces[0].lldp_destination,
+            LldpDestination::NearestBridge
+        );
     }
 
     #[test]

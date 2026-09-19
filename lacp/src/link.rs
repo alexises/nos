@@ -74,7 +74,7 @@ pub async fn run(
     observations: Arc<Mutex<HashMap<String, PortObservation>>>,
     changed: Arc<Notify>,
 ) {
-    let socket = match LacpSocket::open(&config.interface) {
+    let socket = match crate::socket::open(&config.interface) {
         Ok(s) => s,
         Err(e) => {
             warn!(interface = %config.interface, error = %e, "failed to open lacp socket");

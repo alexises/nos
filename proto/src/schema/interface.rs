@@ -7,7 +7,7 @@ use crate::validators::{
     unique_addresses, unique_in,
 };
 
-use super::{Config, VlanTag};
+use super::{Config, LldpDestination, VlanTag};
 
 /// Any `Interface.name` starting with this prefix is a loopback interface
 /// for the routing table named by the rest of the string (e.g.
@@ -216,6 +216,12 @@ pub struct Interface {
     #[garde(skip)]
     pub lldp_receive: bool,
 
+    /// Which 802.1AB destination group this link's LLDPDUs use. Both ends
+    /// must agree. Physical interfaces only — see `valid_lldp_physical_only`.
+    #[serde(default)]
+    #[garde(skip)]
+    pub lldp_destination: LldpDestination,
+
     #[garde(dive, custom(|subs, _ctx: &Config| valid_subinterface_list(subs)))]
     pub subinterfaces: Vec<Subinterface>,
 }
@@ -388,10 +394,12 @@ fn valid_port_aggregate_membership(interfaces: &[Interface]) -> garde::Result {
 /// LLDP runs on a physical link — a loopback has no wire to speak it on.
 fn valid_lldp_physical_only(interfaces: &[Interface]) -> garde::Result {
     for iface in interfaces {
-        if (iface.lldp_transmit || iface.lldp_receive) && loopback_table_name(&iface.name).is_some()
-        {
+        let configured = iface.lldp_transmit
+            || iface.lldp_receive
+            || iface.lldp_destination != LldpDestination::default();
+        if configured && loopback_table_name(&iface.name).is_some() {
             return Err(garde::Error::new(
-                "lldp can only be enabled on a physical interface, not a loopback",
+                "lldp can only be configured on a physical interface, not a loopback",
             ));
         }
     }
@@ -432,6 +440,7 @@ mod tests {
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,
+            lldp_destination: crate::schema::LldpDestination::default(),
             subinterfaces: Vec::new(),
         }
     }
@@ -929,6 +938,14 @@ mod tests {
             let cfg = config_with(vec![iface], vec![table("rt1")]);
             assert!(cfg.validate_with(&cfg).is_err());
         }
+    }
+
+    #[test]
+    fn lldp_destination_on_loopback_fails() {
+        let mut iface = interface("loopback-rt1", &[], None);
+        iface.lldp_destination = LldpDestination::CustomerBridge;
+        let cfg = config_with(vec![iface], vec![table("rt1")]);
+        assert!(cfg.validate_with(&cfg).is_err());
     }
 
     #[test]

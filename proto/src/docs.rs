@@ -230,6 +230,14 @@ pub enum Topic {
     ClearInterfacePortAggregate,
     /// `ConfigOp::PortAggregate(PortAggregateOp::SetLacpRate)`
     SetPortAggregateLacpRate,
+    /// `ConfigOp::Interface(InterfaceOp::SetLldpDestination)`
+    SetInterfaceLldpDestination,
+    /// `ConfigOp::Lldp(LldpOp::SetTxInterval)`
+    SetLldpTxInterval,
+    /// `ConfigOp::Lldp(LldpOp::SetTxHold)`
+    SetLldpTxHold,
+    /// `ConfigOp::Lldp(LldpOp::SetManagementAddress)`
+    SetLldpManagementAddress,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

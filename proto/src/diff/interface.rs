@@ -160,6 +160,13 @@ fn changed_fields(base: &Interface, candidate: &Interface) -> Vec<FieldDiff> {
             new: Some(on_off(candidate.lldp_receive)),
         });
     }
+    if base.lldp_destination != candidate.lldp_destination {
+        fields.push(FieldDiff {
+            label: "lldp-destination".to_string(),
+            old: Some(base.lldp_destination.name().to_string()),
+            new: Some(candidate.lldp_destination.name().to_string()),
+        });
+    }
     fields
 }
 
@@ -207,6 +214,11 @@ fn removed_section(iface: &Interface) -> SectionDiff {
             FieldDiff {
                 label: "lldp-receive".to_string(),
                 old: Some(on_off(iface.lldp_receive)),
+                new: None,
+            },
+            FieldDiff {
+                label: "lldp-destination".to_string(),
+                old: Some(iface.lldp_destination.name().to_string()),
                 new: None,
             },
         ],
@@ -260,6 +272,11 @@ fn added_section(iface: &Interface) -> SectionDiff {
                 old: None,
                 new: Some(on_off(iface.lldp_receive)),
             },
+            FieldDiff {
+                label: "lldp-destination".to_string(),
+                old: None,
+                new: Some(iface.lldp_destination.name().to_string()),
+            },
         ],
         subsections: subinterface::diff_subinterfaces(&[], &iface.subinterfaces),
     }
@@ -287,6 +304,7 @@ mod tests {
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,
+            lldp_destination: crate::schema::LldpDestination::default(),
             subinterfaces: Vec::new(),
         }
     }
@@ -380,6 +398,7 @@ mod tests {
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,
+            lldp_destination: crate::schema::LldpDestination::default(),
             subinterfaces: Vec::new(),
         }];
         let candidate = vec![Interface {
@@ -396,6 +415,7 @@ mod tests {
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,
+            lldp_destination: crate::schema::LldpDestination::default(),
             subinterfaces: Vec::new(),
         }];
         let sections = diff_interfaces(&base, &candidate);

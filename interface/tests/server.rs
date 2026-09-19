@@ -31,6 +31,7 @@ async fn sample_interfaces() -> Interfaces {
                 mtu: None,
                 lldp_transmit: false,
                 lldp_receive: false,
+                lldp_destination: nos_proto::LldpDestination::default(),
                 subinterfaces: vec![nos_proto::Subinterface {
                     ospfv3_profile: None,
                     tag: 0,
@@ -50,6 +51,7 @@ async fn sample_interfaces() -> Interfaces {
                 mtu: None,
                 lldp_transmit: false,
                 lldp_receive: false,
+                lldp_destination: nos_proto::LldpDestination::default(),
                 subinterfaces: vec![],
             },
         ],

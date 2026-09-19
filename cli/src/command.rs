@@ -2,9 +2,9 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
 use nos_proto::{
-    AddressFamily, BgpAoAlgorithm, LacpRate, NetworkType, NextHopMode, OspfCryptoAlgorithm,
-    PortAggregateMode, Redistribute, RedistributeSource, RedistributeTarget, SourceAddress,
-    TransactionBase, VlanTag,
+    AddressFamily, BgpAoAlgorithm, LacpRate, LldpDestination, NetworkType, NextHopMode,
+    OspfCryptoAlgorithm, PortAggregateMode, Redistribute, RedistributeSource, RedistributeTarget,
+    SourceAddress, TransactionBase, VlanTag,
 };
 
 /// A single field edit targeting a BGP instance.
@@ -176,6 +176,22 @@ pub enum LldpDirection {
     Receive,
 }
 
+/// A system-wide `lldp` setting (`Config.lldp`), for `set lldp <setting> <value>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LldpSetting {
+    TxInterval(u16),
+    TxHold(u8),
+    ManagementAddress(IpAddr),
+}
+
+/// Which `lldp` setting a `delete lldp <setting>` command clears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LldpSettingKind {
+    TxInterval,
+    TxHold,
+    ManagementAddress,
+}
+
 fn parse_lldp_direction(token: &str) -> LldpDirection {
     if token == "transmit" {
         LldpDirection::Transmit
@@ -322,6 +338,16 @@ pub enum SetTarget {
     /// `set lldp transmit|receive` — context-relative, only valid while
     /// navigated into an interface.
     InterfaceLldpRelative { direction: LldpDirection },
+    /// `set interface <name> lldp destination <group>` — fully-qualified.
+    InterfaceLldpDestination {
+        name: String,
+        destination: LldpDestination,
+    },
+    /// `set lldp destination <group>` — context-relative.
+    InterfaceLldpDestinationRelative { destination: LldpDestination },
+    /// `set lldp tx-interval|tx-hold|management-address <value>` — a
+    /// system-wide scalar, valid from anywhere in configuration mode.
+    Lldp(LldpSetting),
     /// Fully-qualified — works from anywhere in configuration mode.
     InterfaceSwitchingProfile {
         name: String,
@@ -616,6 +642,14 @@ pub enum DeleteTarget {
     InterfaceLldpRelative {
         direction: LldpDirection,
     },
+    /// `delete interface <name> lldp destination` — qualified reset.
+    InterfaceLldpDestination {
+        name: String,
+    },
+    /// `delete lldp destination` — relative reset.
+    InterfaceLldpDestinationRelative,
+    /// `delete lldp tx-interval|tx-hold|management-address`.
+    Lldp(LldpSettingKind),
     /// `delete interface <name> switching-profile` — qualified clear.
     InterfaceSwitchingProfile {
         name: String,
@@ -1427,6 +1461,26 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 direction: parse_lldp_direction(dir),
             })
         }
+        ["interface", name, "lldp", "destination", group] => {
+            Command::Set(SetTarget::InterfaceLldpDestination {
+                name: (*name).to_string(),
+                destination: LldpDestination::from_name(group)?,
+            })
+        }
+        ["lldp", "destination", group] => {
+            Command::Set(SetTarget::InterfaceLldpDestinationRelative {
+                destination: LldpDestination::from_name(group)?,
+            })
+        }
+        ["lldp", "tx-interval", secs] => {
+            Command::Set(SetTarget::Lldp(LldpSetting::TxInterval(secs.parse().ok()?)))
+        }
+        ["lldp", "tx-hold", hold] => {
+            Command::Set(SetTarget::Lldp(LldpSetting::TxHold(hold.parse().ok()?)))
+        }
+        ["lldp", "management-address", addr] => Command::Set(SetTarget::Lldp(
+            LldpSetting::ManagementAddress(addr.parse().ok()?),
+        )),
         ["interface", name, "mtu", mtu] => Command::Set(SetTarget::InterfaceMtu {
             name: (*name).to_string(),
             mtu: mtu.parse::<u32>().ok()?,
@@ -1916,6 +1970,17 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
             Command::Delete(DeleteTarget::InterfaceLldpRelative {
                 direction: parse_lldp_direction(dir),
             })
+        }
+        ["interface", name, "lldp", "destination"] => {
+            Command::Delete(DeleteTarget::InterfaceLldpDestination {
+                name: (*name).to_string(),
+            })
+        }
+        ["lldp", "destination"] => Command::Delete(DeleteTarget::InterfaceLldpDestinationRelative),
+        ["lldp", "tx-interval"] => Command::Delete(DeleteTarget::Lldp(LldpSettingKind::TxInterval)),
+        ["lldp", "tx-hold"] => Command::Delete(DeleteTarget::Lldp(LldpSettingKind::TxHold)),
+        ["lldp", "management-address"] => {
+            Command::Delete(DeleteTarget::Lldp(LldpSettingKind::ManagementAddress))
         }
         ["interface", name, "mtu"] => Command::Delete(DeleteTarget::InterfaceMtu {
             name: (*name).to_string(),
@@ -2518,6 +2583,59 @@ mod tests {
         assert_eq!(
             Command::parse("set router-id not-an-ip"),
             Command::Unknown("set router-id not-an-ip".to_string())
+        );
+    }
+
+    #[test]
+    fn set_and_delete_lldp_destination_and_system_settings() {
+        assert_eq!(
+            Command::parse("set interface eth1 lldp destination customer-bridge"),
+            Command::Set(SetTarget::InterfaceLldpDestination {
+                name: "eth1".to_string(),
+                destination: LldpDestination::CustomerBridge,
+            })
+        );
+        assert_eq!(
+            Command::parse("set lldp destination non-tpmr"),
+            Command::Set(SetTarget::InterfaceLldpDestinationRelative {
+                destination: LldpDestination::NonTpmr,
+            })
+        );
+        assert_eq!(
+            Command::parse("set lldp destination bogus"),
+            Command::Unknown("set lldp destination bogus".to_string())
+        );
+        assert_eq!(
+            Command::parse("set lldp tx-interval 5"),
+            Command::Set(SetTarget::Lldp(LldpSetting::TxInterval(5)))
+        );
+        assert_eq!(
+            Command::parse("set lldp tx-hold 3"),
+            Command::Set(SetTarget::Lldp(LldpSetting::TxHold(3)))
+        );
+        assert_eq!(
+            Command::parse("set lldp management-address 2001:db8::1"),
+            Command::Set(SetTarget::Lldp(LldpSetting::ManagementAddress(
+                "2001:db8::1".parse().unwrap()
+            )))
+        );
+        assert_eq!(
+            Command::parse("set lldp tx-interval fast"),
+            Command::Unknown("set lldp tx-interval fast".to_string())
+        );
+        assert_eq!(
+            Command::parse("delete interface eth1 lldp destination"),
+            Command::Delete(DeleteTarget::InterfaceLldpDestination {
+                name: "eth1".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete lldp destination"),
+            Command::Delete(DeleteTarget::InterfaceLldpDestinationRelative)
+        );
+        assert_eq!(
+            Command::parse("delete lldp management-address"),
+            Command::Delete(DeleteTarget::Lldp(LldpSettingKind::ManagementAddress))
         );
     }
 

@@ -291,6 +291,36 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              neighbors. Independent of lldp transmit. Physical interfaces only — rejected on \
              a loopback at commit time.",
         ),
+        Topic::SetInterfaceLldpDestination => (
+            "Set the LLDP destination group an interface uses.",
+            "Chooses which IEEE 802.1AB multicast group this interface's LLDPDUs are sent to \
+             and accepted from: nearest-bridge (01:80:C2:00:00:0E, the default — never \
+             forwarded by any bridge), non-tpmr (…:03, forwarded by C-VLAN/S-VLAN bridges) or \
+             customer-bridge (…:00). Both ends of a link must use the same group, or neither \
+             will ever see the other. `delete` restores nearest-bridge. Physical interfaces \
+             only — rejected on a loopback at commit time.",
+        ),
+        Topic::SetLldpTxInterval => (
+            "Set the system-wide LLDP transmit interval.",
+            "Sets msgTxInterval — seconds between periodic LLDPDUs (1-3600, default 30). \
+             The TTL advertised to neighbors is tx-hold × tx-interval and must fit in 16 bits \
+             (65535 seconds). Applies to every LLDP-enabled interface; changing it restarts \
+             each link (a shutdown LLDPDU, then a fresh advertisement). `delete` restores the \
+             default.",
+        ),
+        Topic::SetLldpTxHold => (
+            "Set the system-wide LLDP transmit hold multiplier.",
+            "Sets msgTxHold (1-100, default 4): the TTL advertised to neighbors is this × \
+             tx-interval, so a neighbor tolerates that many missed advertisements. Applies to \
+             every LLDP-enabled interface. `delete` restores the default.",
+        ),
+        Topic::SetLldpManagementAddress => (
+            "Set the LLDP management address.",
+            "Sets the IPv4 or IPv6 unicast address advertised in the Management Address TLV \
+             of every LLDPDU this system sends, so neighbors can show how to reach it. It is \
+             advertised as configured — it is not checked against any interface's addresses. \
+             `delete` stops advertising one.",
+        ),
         Topic::DeleteInterface => (
             "Delete an interface from the transaction.",
             "Removes an interface and all of its addresses/subinterfaces from the \
@@ -792,6 +822,10 @@ mod tests {
         Topic::ClearInterfaceMtu,
         Topic::SetInterfaceLldpTransmit,
         Topic::SetInterfaceLldpReceive,
+        Topic::SetInterfaceLldpDestination,
+        Topic::SetLldpTxInterval,
+        Topic::SetLldpTxHold,
+        Topic::SetLldpManagementAddress,
         Topic::DeleteInterface,
         Topic::SetBgpPeerGroupHoldTime,
         Topic::ClearBgpPeerGroupHoldTime,

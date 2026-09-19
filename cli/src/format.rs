@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::net::Ipv4Addr;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -297,6 +298,15 @@ pub fn render_interface(iface: &Interface) -> String {
         on_off(iface.lldp_transmit),
         on_off(iface.lldp_receive),
     )];
+    // Only when set, so an interface that doesn't use it renders unchanged.
+    if iface.lldp_destination != nos_proto::LldpDestination::default() {
+        write!(
+            lines[0],
+            ", lldp-destination {}",
+            iface.lldp_destination.name()
+        )
+        .expect("writing to a String cannot fail");
+    }
     for sub in &iface.subinterfaces {
         lines.push(format!("  {}", render_subinterface(sub)));
     }
@@ -472,8 +482,13 @@ pub fn render_lldp_neighbors(neighbors: &[nos_proto::LldpNeighbor]) -> String {
                 .as_deref()
                 .filter(|d| *d != n.port_id)
                 .map_or_else(String::new, |d| format!(" ({d})"));
+            let management = if n.management_addresses.is_empty() {
+                String::new()
+            } else {
+                format!(", management {}", n.management_addresses.join(","))
+            };
             format!(
-                "{}: neighbor {}, chassis {}, port {}{description}, capabilities {capabilities}, ttl {}s",
+                "{}: neighbor {}, chassis {}, port {}{description}, capabilities {capabilities}{management}, ttl {}s",
                 n.local_interface,
                 n.system_name.as_deref().unwrap_or("unnamed"),
                 n.chassis_id,
@@ -799,9 +814,26 @@ pub fn render_static_routing_instance(instance: &StaticRoutingInstance) -> Strin
     lines.join("\n")
 }
 
+/// The system-wide `lldp` settings line; only shown when something is set.
+fn render_lldp_settings(lldp: &nos_proto::LldpSettings) -> String {
+    let secs = lldp
+        .tx_interval_secs
+        .map_or_else(|| "default".to_string(), |v| v.to_string());
+    let hold = lldp
+        .tx_hold
+        .map_or_else(|| "default".to_string(), |v| v.to_string());
+    let address = lldp
+        .management_address
+        .map_or_else(|| "unset".to_string(), |a| a.to_string());
+    format!("lldp: tx-interval {secs}, tx-hold {hold}, management-address {address}")
+}
+
 /// Render a full running-config snapshot as human-readable text.
 pub fn render_config(config: &Config) -> String {
     let mut lines = vec![format!("hostname: {}", config.hostname)];
+    if config.lldp != nos_proto::LldpSettings::default() {
+        lines.push(render_lldp_settings(&config.lldp));
+    }
     if config.bgp_instances.is_empty() {
         lines.push("no BGP instances configured".to_string());
     } else {
@@ -1223,6 +1255,9 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
     if let Some(field) = &diff.hostname {
         render_field_diff(&mut lines, field, "", color);
     }
+    for field in &diff.lldp {
+        render_field_diff(&mut lines, field, "", color);
+    }
 
     for section in &diff.bgp_instances {
         render_section(&mut lines, section, 0, color);
@@ -1442,6 +1477,7 @@ mod tests {
             mtu: Some(9000),
             lldp_transmit: false,
             lldp_receive: false,
+            lldp_destination: nos_proto::LldpDestination::default(),
             subinterfaces: vec![
                 Subinterface {
                     ospfv3_profile: None,
@@ -1489,6 +1525,7 @@ mod tests {
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,
+            lldp_destination: nos_proto::LldpDestination::default(),
             subinterfaces: Vec::new(),
         };
         assert_eq!(
@@ -1558,6 +1595,7 @@ mod tests {
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,
+            lldp_destination: nos_proto::LldpDestination::default(),
             subinterfaces: vec![Subinterface {
                 ospfv3_profile: None,
                 tag: 100,
@@ -2115,6 +2153,7 @@ mod tests {
             mtu: None,
             lldp_transmit: true,
             lldp_receive: false,
+            lldp_destination: nos_proto::LldpDestination::default(),
             subinterfaces: Vec::new(),
         };
         assert!(render_interface(&iface).ends_with("lldp-transmit on, lldp-receive off"));
@@ -2133,12 +2172,47 @@ mod tests {
             system_name: Some("router-b".to_string()),
             system_description: None,
             capabilities: vec!["router".to_string()],
+            management_addresses: Vec::new(),
             ttl_remaining_secs: 117,
         };
         assert_eq!(
-            render_lldp_neighbors(&[neighbor]),
+            render_lldp_neighbors(std::slice::from_ref(&neighbor)),
             "eth1: neighbor router-b, chassis 02:00:00:00:00:02, port eth1 (uplink), capabilities router, ttl 117s"
         );
+        let with_mgmt = nos_proto::LldpNeighbor {
+            management_addresses: vec!["10.0.0.2".to_string(), "2001:db8::2".to_string()],
+            ..neighbor
+        };
+        assert!(render_lldp_neighbors(&[with_mgmt])
+            .contains("capabilities router, management 10.0.0.2,2001:db8::2, ttl 117s"));
+    }
+
+    #[test]
+    fn lldp_settings_and_destination_render_only_when_set() {
+        let mut cfg = Config::default();
+        assert!(!render_config(&cfg).contains("lldp"));
+        cfg.lldp.tx_interval_secs = Some(5);
+        cfg.lldp.management_address = Some("10.0.0.1".parse().unwrap());
+        assert!(render_config(&cfg)
+            .contains("lldp: tx-interval 5, tx-hold default, management-address 10.0.0.1"));
+
+        let mut iface = nos_proto::Interface {
+            name: "eth1".to_string(),
+            addresses: Vec::new(),
+            routing_table: None,
+            ospf_profile: None,
+            ospfv3_profile: None,
+            switching_profile: None,
+            port_aggregate: None,
+            mtu: None,
+            lldp_transmit: true,
+            lldp_receive: true,
+            lldp_destination: nos_proto::LldpDestination::default(),
+            subinterfaces: Vec::new(),
+        };
+        assert!(!render_interface(&iface).contains("lldp-destination"));
+        iface.lldp_destination = nos_proto::LldpDestination::NonTpmr;
+        assert!(render_interface(&iface).ends_with("lldp-receive on, lldp-destination non-tpmr"));
     }
 
     #[test]

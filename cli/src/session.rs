@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use nos_proto::{
     loopback_table_name, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp,
-    CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, OspfAreaOp, OspfCryptoKey,
+    CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, LldpOp, OspfAreaOp, OspfCryptoKey,
     OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
     PolicyDefinitionOp, PortAggregateOp, PrefixListEntry, PrefixListOp, RoutingTableOp,
     StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase,
@@ -10,7 +10,7 @@ use nos_proto::{
 
 use crate::command::{
     BgpInstanceField, BgpPeerGroupField, Command, DeleteTarget, EditTarget, LldpDirection,
-    OspfProfileField, SetTarget,
+    LldpSetting, LldpSettingKind, OspfProfileField, SetTarget,
 };
 
 /// Navigation position within the transaction's config tree.
@@ -1356,6 +1356,30 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             op: lldp_op(path.interface()?.to_string(), direction, true),
             after: PathAfter::Stay,
         },
+        Command::Set(SetTarget::InterfaceLldpDestination { name, destination }) => {
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::SetLldpDestination { name, destination }),
+                after: PathAfter::Stay,
+            }
+        }
+        Command::Set(SetTarget::InterfaceLldpDestinationRelative { destination }) => {
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::SetLldpDestination {
+                    name: path.interface()?.to_string(),
+                    destination,
+                }),
+                after: PathAfter::Stay,
+            }
+        }
+        // System-wide, like hostname: no navigation context to check.
+        Command::Set(SetTarget::Lldp(setting)) => Resolved::ApplyOp {
+            op: ConfigOp::Lldp(match setting {
+                LldpSetting::TxInterval(secs) => LldpOp::SetTxInterval { secs },
+                LldpSetting::TxHold(hold) => LldpOp::SetTxHold { hold },
+                LldpSetting::ManagementAddress(address) => LldpOp::SetManagementAddress { address },
+            }),
+            after: PathAfter::Stay,
+        },
         Command::Set(SetTarget::InterfaceMtu { name, mtu }) => Resolved::ApplyOp {
             op: ConfigOp::Interface(InterfaceOp::SetMtu { name, mtu }),
             after: PathAfter::Stay,
@@ -1849,6 +1873,24 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
         },
         Command::Delete(DeleteTarget::InterfaceLldpRelative { direction }) => Resolved::ApplyOp {
             op: lldp_op(path.interface()?.to_string(), direction, false),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::InterfaceLldpDestination { name }) => Resolved::ApplyOp {
+            op: ConfigOp::Interface(InterfaceOp::ClearLldpDestination { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::InterfaceLldpDestinationRelative) => Resolved::ApplyOp {
+            op: ConfigOp::Interface(InterfaceOp::ClearLldpDestination {
+                name: path.interface()?.to_string(),
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::Lldp(kind)) => Resolved::ApplyOp {
+            op: ConfigOp::Lldp(match kind {
+                LldpSettingKind::TxInterval => LldpOp::ClearTxInterval,
+                LldpSettingKind::TxHold => LldpOp::ClearTxHold,
+                LldpSettingKind::ManagementAddress => LldpOp::ClearManagementAddress,
+            }),
             after: PathAfter::Stay,
         },
         Command::Delete(DeleteTarget::InterfaceMtu { name }) => Resolved::ApplyOp {
@@ -5673,6 +5715,68 @@ mod tests {
                 Command::Set(SetTarget::InterfaceLldpRelative {
                     direction: LldpDirection::Transmit,
                 })
+            ),
+            Resolved::Error(_)
+        ));
+    }
+
+    #[test]
+    fn lldp_destination_and_system_settings_resolve_to_ops() {
+        let root = config_mode("t1", Path::Root, false);
+        assert_eq!(
+            resolve(
+                &root,
+                Command::Set(SetTarget::Lldp(LldpSetting::TxInterval(5)))
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Lldp(LldpOp::SetTxInterval { secs: 5 }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &root,
+                Command::Delete(DeleteTarget::Lldp(LldpSettingKind::ManagementAddress))
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Lldp(LldpOp::ClearManagementAddress),
+                after: PathAfter::Stay,
+            }
+        );
+        let in_interface = config_mode("t1", Path::Interface("eth1".to_string()), false);
+        assert_eq!(
+            resolve(
+                &in_interface,
+                Command::Set(SetTarget::InterfaceLldpDestinationRelative {
+                    destination: nos_proto::LldpDestination::NonTpmr,
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::SetLldpDestination {
+                    name: "eth1".to_string(),
+                    destination: nos_proto::LldpDestination::NonTpmr,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &root,
+                Command::Delete(DeleteTarget::InterfaceLldpDestination {
+                    name: "eth1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::ClearLldpDestination {
+                    name: "eth1".to_string()
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert!(matches!(
+            resolve(
+                &root,
+                Command::Delete(DeleteTarget::InterfaceLldpDestinationRelative)
             ),
             Resolved::Error(_)
         ));

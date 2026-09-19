@@ -1,8 +1,8 @@
-//! Steady-state loop: subscribes to `Interfaces`/`Hostname` diffs purely as a
-//! resync trigger, always re-fetching the whole config — same shape as
+//! Steady-state loop: subscribes to `Interfaces`/`Hostname`/`Lldp` diffs purely
+//! as a resync trigger, always re-fetching the whole config — same shape as
 //! `nos-lacp`'s `reconcile::run`. Runs one `link::run` task per interface with
-//! `lldp transmit` and/or `lldp receive` set, restarting a link whose flags or
-//! advertised System Name changed and respawning one that ended on its own.
+//! `lldp transmit` and/or `lldp receive` set, restarting a link whose flags, timers,
+//! destination group or advertised identity changed and respawning one that ended on its own.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -106,6 +106,11 @@ fn desired_links(cfg: &Config, chassis_mac: [u8; 6]) -> Vec<LinkConfig> {
             receive: i.lldp_receive,
             system_name: cfg.hostname.clone(),
             chassis_mac,
+            tx_interval: Duration::from_secs(u64::from(cfg.lldp.effective_interval_secs())),
+            ttl_secs: cfg.lldp.effective_ttl_secs(),
+            management_address: cfg.lldp.management_address,
+            bridge: i.switching_profile.is_some(),
+            destination: i.lldp_destination.mac(),
         })
         .collect()
 }
@@ -115,7 +120,7 @@ pub async fn run(
     neighbors: SharedNeighbors,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let scopes = vec![DiffScope::Interfaces, DiffScope::Hostname];
+    let scopes = vec![DiffScope::Interfaces, DiffScope::Hostname, DiffScope::Lldp];
     let chassis_mac = local_system_id();
     let mut links = Links {
         neighbors,
@@ -236,6 +241,7 @@ mod tests {
             mtu: None,
             lldp_transmit: tx,
             lldp_receive: rx,
+            lldp_destination: nos_proto::LldpDestination::default(),
             subinterfaces: Vec::new(),
         }
     }
@@ -272,6 +278,33 @@ mod tests {
         assert_ne!(before, desired_links(&cfg, [2, 0, 0, 0, 0, 1]));
         cfg.hostname = "a".to_string();
         cfg.interfaces[0].lldp_receive = false;
+        assert_ne!(before, desired_links(&cfg, [2, 0, 0, 0, 0, 1]));
+    }
+
+    #[test]
+    fn timers_management_address_bridge_and_destination_flow_into_the_link() {
+        let mut bridged = iface("eth1", true, true);
+        bridged.switching_profile = Some("sp1".to_string());
+        bridged.lldp_destination = nos_proto::LldpDestination::CustomerBridge;
+        let mut cfg = Config {
+            interfaces: vec![bridged, iface("eth2", true, true)],
+            ..Default::default()
+        };
+        cfg.lldp.tx_interval_secs = Some(5);
+        cfg.lldp.tx_hold = Some(3);
+        cfg.lldp.management_address = Some("10.0.0.1".parse().unwrap());
+        let before = desired_links(&cfg, [2, 0, 0, 0, 0, 1]);
+        assert_eq!(before[0].tx_interval, Duration::from_secs(5));
+        assert_eq!(before[0].ttl_secs, 15);
+        assert_eq!(
+            before[0].management_address,
+            Some("10.0.0.1".parse().unwrap())
+        );
+        assert!(before[0].bridge && !before[1].bridge);
+        assert_eq!(before[0].destination[5], 0x00);
+        assert_eq!(before[1].destination[5], 0x0E);
+        // Any of them changing restarts the link.
+        cfg.lldp.tx_hold = None;
         assert_ne!(before, desired_links(&cfg, [2, 0, 0, 0, 0, 1]));
     }
 

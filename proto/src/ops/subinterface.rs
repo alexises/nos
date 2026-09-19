@@ -203,6 +203,7 @@ fn ensure_subinterface_mut<'a>(
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,
+            lldp_destination: crate::schema::LldpDestination::default(),
             subinterfaces: Vec::new(),
         });
     }
@@ -240,6 +241,7 @@ mod tests {
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,
+            lldp_destination: crate::schema::LldpDestination::default(),
             subinterfaces,
         }
     }

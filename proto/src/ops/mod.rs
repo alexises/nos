@@ -5,6 +5,7 @@ pub mod broadcast_domain;
 pub mod community_alias;
 pub mod community_group;
 pub mod interface;
+pub mod lldp;
 pub mod ospf_area;
 pub mod ospf_instance;
 pub mod ospf_profile;
@@ -28,6 +29,7 @@ pub use broadcast_domain::BroadcastDomainOp;
 pub use community_alias::CommunityAliasOp;
 pub use community_group::CommunityGroupOp;
 pub use interface::InterfaceOp;
+pub use lldp::LldpOp;
 pub use ospf_area::OspfAreaOp;
 pub use ospf_instance::OspfInstanceOp;
 pub use ospf_profile::OspfProfileOp;
@@ -85,6 +87,7 @@ pub enum ConfigOp {
     Ospfv3Profile(Ospfv3ProfileOp),
     PortAggregate(PortAggregateOp),
     PortAggregateSubinterface(PortAggregateSubinterfaceOp),
+    Lldp(LldpOp),
 }
 
 impl ConfigOp {
@@ -119,6 +122,7 @@ impl ConfigOp {
             ConfigOp::Ospfv3Profile(op) => op.apply(config),
             ConfigOp::PortAggregate(op) => op.apply(config),
             ConfigOp::PortAggregateSubinterface(op) => op.apply(config),
+            ConfigOp::Lldp(op) => op.apply(config),
         }
     }
 }

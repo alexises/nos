@@ -1,12 +1,12 @@
 //! One LLDP-enabled interface's transmit/receive task — the LLDP counterpart
 //! of `nos-lacp`'s `link.rs` `run()` shape.
 //!
-//! Timers are the fixed 802.1AB defaults (no CLI knobs, like `nos-lacp`'s
-//! priorities): `msgTxInterval` 30s and `msgTxHold` 4, so a neighbor is
-//! advertised with a TTL of 120s.
+//! The transmit interval and advertised TTL come from `LinkConfig`
+//! (`lldp tx-interval`/`tx-hold`, defaulting to the 802.1AB 30s × 4 = 120s).
 
 use std::collections::HashMap;
 use std::io;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,14 +16,11 @@ use tracing::{debug, info, trace, warn};
 
 use crate::neighbor::{NeighborTable, Update};
 use crate::packet::{
-    self, Capabilities, Id, Lldpdu, CAP_ROUTER, CHASSIS_SUBTYPE_MAC, PORT_SUBTYPE_IF_NAME,
+    self, Capabilities, Id, Lldpdu, CAP_BRIDGE, CAP_ROUTER, CHASSIS_SUBTYPE_MAC,
+    PORT_SUBTYPE_IF_NAME,
 };
 use crate::socket::{self, LldpSocket};
 
-/// 802.1AB `msgTxInterval` default.
-pub const TX_INTERVAL: Duration = Duration::from_secs(30);
-/// `msgTxHold` (4) × `msgTxInterval`.
-pub const TTL_SECS: u16 = 120;
 /// How soon to retry a periodic transmit that found the link down.
 const LINK_DOWN_RETRY: Duration = Duration::from_secs(1);
 
@@ -38,6 +35,17 @@ pub struct LinkConfig {
     pub system_name: String,
     /// This machine's chassis identity — see `reconcile::local_system_id`.
     pub chassis_mac: [u8; 6],
+    /// `msgTxInterval`: how often to transmit.
+    pub tx_interval: Duration,
+    /// The TTL advertised in every LLDPDU (`msgTxHold × msgTxInterval`).
+    pub ttl_secs: u16,
+    /// Advertised in the Management Address TLV, if set.
+    pub management_address: Option<IpAddr>,
+    /// Whether the interface is a bridge port (has a switching profile), which
+    /// sets the Bridge bit in *enabled* capabilities.
+    pub bridge: bool,
+    /// The 802.1AB destination group this link speaks on.
+    pub destination: [u8; 6],
 }
 
 /// Every receiving interface's neighbor table, keyed by interface name. Shared
@@ -60,16 +68,15 @@ pub fn local_pdu(cfg: &LinkConfig) -> Lldpdu {
             subtype: PORT_SUBTYPE_IF_NAME,
             value: cfg.interface.as_bytes().to_vec(),
         },
-        ttl: TTL_SECS,
+        ttl: cfg.ttl_secs,
         port_description: Some(cfg.interface.clone()),
         system_name: Some(cfg.system_name.clone()),
         system_description: Some(format!("nos {}", env!("CARGO_PKG_VERSION"))),
-        // ponytail: Router only; a Bridge bit for switching-profile ports is
-        // the upgrade path.
         capabilities: Some(Capabilities {
-            supported: CAP_ROUTER,
-            enabled: CAP_ROUTER,
+            supported: CAP_ROUTER | CAP_BRIDGE,
+            enabled: CAP_ROUTER | if cfg.bridge { CAP_BRIDGE } else { 0 },
         }),
+        management_addresses: cfg.management_address.into_iter().collect(),
     }
 }
 
@@ -82,6 +89,7 @@ fn shutdown_pdu(cfg: &LinkConfig) -> Lldpdu {
         system_name: None,
         system_description: None,
         capabilities: None,
+        management_addresses: Vec::new(),
         ..local_pdu(cfg)
     }
 }
@@ -127,6 +135,13 @@ fn handle_rx(cfg: &LinkConfig, neighbors: &SharedNeighbors, payload: &[u8], now:
     let chassis = pdu.chassis_display();
     let port = pdu.port_display();
     let system_name = pdu.system_name.clone().unwrap_or_default();
+    let ttl = pdu.ttl;
+    let management_addresses = pdu
+        .management_addresses
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
     let update = neighbors
         .lock()
         .unwrap()
@@ -137,7 +152,8 @@ fn handle_rx(cfg: &LinkConfig, neighbors: &SharedNeighbors, payload: &[u8], now:
         Update::New => {
             info!(
                 interface = %cfg.interface, chassis_id = %chassis, port_id = %port,
-                system_name = %system_name, "lldp neighbor learned"
+                system_name = %system_name, ttl, management_addresses = %management_addresses,
+                "lldp neighbor learned"
             );
             true
         }
@@ -183,7 +199,7 @@ pub async fn run(
     neighbors: SharedNeighbors,
     mut stop: watch::Receiver<bool>,
 ) -> io::Result<()> {
-    let socket = LldpSocket::open(&cfg.interface)?;
+    let socket = socket::open(&cfg.interface, cfg.destination)?;
     if cfg.receive {
         neighbors
             .lock()
@@ -192,11 +208,12 @@ pub async fn run(
     }
     info!(
         interface = %cfg.interface, transmit = cfg.transmit, receive = cfg.receive,
+        tx_interval_secs = cfg.tx_interval.as_secs(), ttl_secs = cfg.ttl_secs,
         "lldp link started"
     );
 
     // The first tick fires immediately, which is the initial transmit.
-    let mut tx = interval(TX_INTERVAL);
+    let mut tx = interval(cfg.tx_interval);
     tx.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let result = loop {
@@ -247,6 +264,11 @@ mod tests {
             receive: true,
             system_name: format!("router-{mac_last}"),
             chassis_mac: [2, 0, 0, 0, 0, mac_last],
+            tx_interval: Duration::from_secs(30),
+            ttl_secs: 120,
+            management_address: None,
+            bridge: false,
+            destination: nos_proto::LldpDestination::default().mac(),
         }
     }
 
@@ -267,13 +289,35 @@ mod tests {
         assert_eq!(pdu.chassis_display(), "02:00:00:00:00:01");
         assert_eq!(pdu.port_display(), "eth1");
         assert_eq!(pdu.system_name.as_deref(), Some("router-1"));
-        assert_eq!(pdu.ttl, TTL_SECS);
+        assert_eq!(pdu.ttl, 120);
+    }
+
+    #[test]
+    fn timers_management_address_and_bridge_bit_reach_the_wire() {
+        let mut c = cfg(1);
+        c.ttl_secs = 15;
+        c.management_address = Some("10.0.0.1".parse().unwrap());
+        let pdu = packet::decode(&packet::encode(&local_pdu(&c))).unwrap();
+        assert_eq!(pdu.ttl, 15);
+        assert_eq!(
+            pdu.management_addresses,
+            vec!["10.0.0.1".parse::<IpAddr>().unwrap()]
+        );
+        // Router only, until the interface is a bridge port.
+        assert_eq!(pdu.enabled_capability_names(), ["router"]);
+        assert_eq!(pdu.capabilities.unwrap().supported, CAP_ROUTER | CAP_BRIDGE);
+        c.bridge = true;
+        let pdu = packet::decode(&packet::encode(&local_pdu(&c))).unwrap();
+        assert_eq!(pdu.enabled_capability_names(), ["bridge", "router"]);
     }
 
     #[test]
     fn shutdown_pdu_has_ttl_zero_and_only_mandatory_tlvs() {
-        let pdu = packet::decode(&packet::encode(&shutdown_pdu(&cfg(1)))).unwrap();
+        let mut c = cfg(1);
+        c.management_address = Some("10.0.0.1".parse().unwrap());
+        let pdu = packet::decode(&packet::encode(&shutdown_pdu(&c))).unwrap();
         assert_eq!(pdu.ttl, 0);
+        assert!(pdu.management_addresses.is_empty());
         assert_eq!(pdu.system_name, None);
         assert_eq!(pdu.chassis_display(), "02:00:00:00:00:01");
     }

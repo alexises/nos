@@ -4,6 +4,8 @@
 //! untrusted wire data, so `decode` bounds-checks every length and never
 //! panics.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 use thiserror::Error;
 
 const TLV_END: u8 = 0;
@@ -14,6 +16,7 @@ const TLV_PORT_DESCRIPTION: u8 = 4;
 const TLV_SYSTEM_NAME: u8 = 5;
 const TLV_SYSTEM_DESCRIPTION: u8 = 6;
 const TLV_SYSTEM_CAPABILITIES: u8 = 7;
+const TLV_MANAGEMENT_ADDRESS: u8 = 8;
 
 /// Chassis ID subtype 4: a MAC address.
 pub const CHASSIS_SUBTYPE_MAC: u8 = 4;
@@ -22,6 +25,19 @@ pub const PORT_SUBTYPE_IF_NAME: u8 = 5;
 
 /// System Capabilities bit for "Router" (802.1AB Table 8-4).
 pub const CAP_ROUTER: u16 = 0x0010;
+/// System Capabilities bit for "Bridge" (802.1AB Table 8-4).
+pub const CAP_BRIDGE: u16 = 0x0004;
+
+/// IANA address family numbers used in the Management Address TLV.
+const AF_IPV4: u8 = 1;
+const AF_IPV6: u8 = 2;
+/// Interface numbering subtype 1: "unknown" — the address is system-wide, not
+/// tied to this port.
+const IF_NUMBERING_UNKNOWN: u8 = 1;
+
+/// Most management addresses kept from one received LLDPDU. Input is
+/// untrusted, and every one is stored and printed.
+const MAX_MANAGEMENT_ADDRESSES: usize = 4;
 
 /// Longest value any single TLV can carry (9-bit length field).
 const MAX_TLV_VALUE: usize = 511;
@@ -52,6 +68,8 @@ pub struct Lldpdu {
     pub system_name: Option<String>,
     pub system_description: Option<String>,
     pub capabilities: Option<Capabilities>,
+    /// IPv4/IPv6 addresses from Management Address TLVs, in wire order.
+    pub management_addresses: Vec<IpAddr>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -168,6 +186,13 @@ pub fn encode(pdu: &Lldpdu) -> Vec<u8> {
         value.extend_from_slice(&c.enabled.to_be_bytes());
         push_tlv(&mut out, TLV_SYSTEM_CAPABILITIES, &value);
     }
+    for addr in &pdu.management_addresses {
+        push_tlv(
+            &mut out,
+            TLV_MANAGEMENT_ADDRESS,
+            &encode_management_address(*addr),
+        );
+    }
     push_tlv(&mut out, TLV_END, &[]);
     out
 }
@@ -193,6 +218,7 @@ pub fn decode(mut data: &[u8]) -> Result<Lldpdu, DecodeError> {
         system_name: None,
         system_description: None,
         capabilities: None,
+        management_addresses: Vec::new(),
     };
 
     while !data.is_empty() {
@@ -248,6 +274,12 @@ pub fn decode(mut data: &[u8]) -> Result<Lldpdu, DecodeError> {
                     enabled: u16::from_be_bytes([value[2], value[3]]),
                 });
             }
+            // Optional and untrusted: a malformed or non-IP one is skipped
+            // rather than rejecting the whole LLDPDU (and its neighbor).
+            TLV_MANAGEMENT_ADDRESS if pdu.management_addresses.len() < MAX_MANAGEMENT_ADDRESSES => {
+                pdu.management_addresses
+                    .extend(decode_management_address(value));
+            }
             _ => {} // unknown / organizationally specific: skip
         }
     }
@@ -256,6 +288,44 @@ pub fn decode(mut data: &[u8]) -> Result<Lldpdu, DecodeError> {
     pdu.port_id = port_id.ok_or(DecodeError::MissingMandatory)?;
     pdu.ttl = ttl.ok_or(DecodeError::MissingMandatory)?;
     Ok(pdu)
+}
+
+/// Management Address TLV value (802.1AB §8.5.9): address string length (the
+/// family byte plus the address), family, address, interface numbering
+/// subtype, 4-byte interface number, OID length, OID.
+fn encode_management_address(addr: IpAddr) -> Vec<u8> {
+    let (family, octets) = match addr {
+        IpAddr::V4(a) => (AF_IPV4, a.octets().to_vec()),
+        IpAddr::V6(a) => (AF_IPV6, a.octets().to_vec()),
+    };
+    let mut value = vec![u8::try_from(1 + octets.len()).expect("<= 17"), family];
+    value.extend_from_slice(&octets);
+    value.push(IF_NUMBERING_UNKNOWN);
+    value.extend_from_slice(&0u32.to_be_bytes());
+    value.push(0); // no OID
+    value
+}
+
+/// The IPv4/IPv6 address in a Management Address TLV value, or `None` if it's
+/// truncated, internally inconsistent, or another address family.
+fn decode_management_address(value: &[u8]) -> Option<IpAddr> {
+    let addr_len = usize::from(*value.first()?);
+    // The trailing interface subtype (1) + number (4) + OID length (1).
+    let oid_len = usize::from(*value.get(1 + addr_len + 5)?);
+    if addr_len < 2 || value.len() < 1 + addr_len + 6 + oid_len {
+        return None;
+    }
+    let family = value[1];
+    let octets = &value[2..=addr_len];
+    match (family, octets.len()) {
+        (AF_IPV4, 4) => Some(IpAddr::V4(Ipv4Addr::from(
+            <[u8; 4]>::try_from(octets).ok()?,
+        ))),
+        (AF_IPV6, 16) => Some(IpAddr::V6(Ipv6Addr::from(
+            <[u8; 16]>::try_from(octets).ok()?,
+        ))),
+        _ => None,
+    }
 }
 
 fn decode_id(value: &[u8], what: &'static str) -> Result<Id, DecodeError> {
@@ -301,6 +371,7 @@ mod tests {
                 supported: CAP_ROUTER,
                 enabled: CAP_ROUTER,
             }),
+            management_addresses: Vec::new(),
         }
     }
 
@@ -327,6 +398,68 @@ mod tests {
         assert_eq!(pdu.chassis_display(), "02:00:00:00:00:01");
         assert_eq!(pdu.port_display(), "eth1");
         assert_eq!(pdu.enabled_capability_names(), vec!["router".to_string()]);
+    }
+
+    #[test]
+    fn management_addresses_round_trip_in_order() {
+        let mut pdu = sample();
+        pdu.management_addresses =
+            vec!["10.0.0.1".parse().unwrap(), "2001:db8::1".parse().unwrap()];
+        assert_eq!(decode(&encode(&pdu)).unwrap(), pdu);
+    }
+
+    /// `sample()` with one hand-built Management Address TLV before the End TLV.
+    fn with_mgmt_tlv(value: &[u8]) -> Vec<u8> {
+        let mut bytes = encode(&sample());
+        bytes.truncate(bytes.len() - 2);
+        push_tlv(&mut bytes, TLV_MANAGEMENT_ADDRESS, value);
+        push_tlv(&mut bytes, TLV_END, &[]);
+        bytes
+    }
+
+    #[test]
+    fn malformed_management_addresses_are_skipped_not_fatal() {
+        let good = encode_management_address("10.0.0.1".parse().unwrap());
+        for bad in [
+            vec![],                                          // empty
+            vec![5, AF_IPV4, 10, 0, 0, 1],                   // no interface/OID trailer
+            vec![5, AF_IPV4, 10, 0, 0, 1, 1, 0, 0, 0, 0, 9], // OID length overruns
+            vec![4, AF_IPV4, 10, 0, 0, 1, 0, 0, 0, 0, 0], // addr length shorter than family needs
+            vec![5, 6, 10, 0, 0, 1, 1, 0, 0, 0, 0, 0],    // family 6 (802): not an IP
+            vec![1, AF_IPV4, 1, 0, 0, 0, 0, 0],           // no address bytes
+            vec![255, AF_IPV4],                           // length points past the value
+        ] {
+            let pdu = decode(&with_mgmt_tlv(&bad)).unwrap();
+            assert!(pdu.management_addresses.is_empty(), "{bad:?}");
+        }
+        assert_eq!(
+            decode(&with_mgmt_tlv(&good))
+                .unwrap()
+                .management_addresses
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn management_address_with_an_oid_is_accepted() {
+        let mut value = encode_management_address("10.0.0.1".parse().unwrap());
+        *value.last_mut().unwrap() = 3;
+        value.extend_from_slice(&[1, 2, 3]);
+        assert_eq!(
+            decode(&with_mgmt_tlv(&value)).unwrap().management_addresses,
+            vec!["10.0.0.1".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn stored_management_addresses_are_capped() {
+        let mut pdu = sample();
+        pdu.management_addresses = (1..=10).map(|i| IpAddr::from([10, 0, 0, i])).collect();
+        assert_eq!(
+            decode(&encode(&pdu)).unwrap().management_addresses.len(),
+            MAX_MANAGEMENT_ADDRESSES
+        );
     }
 
     #[test]

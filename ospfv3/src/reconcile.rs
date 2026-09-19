@@ -511,6 +511,7 @@ mod tests {
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,
+            lldp_destination: nos_proto::LldpDestination::default(),
             subinterfaces: Vec::new(),
         }
     }

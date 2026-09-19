@@ -19,8 +19,8 @@ use futures::{SinkExt, StreamExt};
 use ipnet::IpNet;
 use nos_proto::{
     AddressFamily, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, ConfigOp, Event,
-    InterfaceOp, IpcCodec, LacpRate, OspfAreaOp, OspfCryptoAlgorithm, OspfCryptoKey,
-    OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
+    InterfaceOp, IpcCodec, LacpRate, LldpDestination, LldpOp, OspfAreaOp, OspfCryptoAlgorithm,
+    OspfCryptoKey, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
     PolicyDefinitionOp, PortAggregateMode, PortAggregateOp, Redistribute, RedistributeSource,
     RedistributeTarget, Request, RoutingTableOp, SourceAddress, StaticRouteOp,
     StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase, VlanTag,
@@ -362,6 +362,26 @@ struct Args {
     /// Same as `--no-lldp-transmit-interface`, for `lldp receive`.
     #[arg(long = "no-lldp-receive-interface")]
     no_lldp_receive_interfaces: Vec<String>,
+
+    /// If set, the system-wide LLDP `tx-interval` in seconds
+    /// (`LldpOp::SetTxInterval`).
+    #[arg(long)]
+    lldp_tx_interval: Option<u16>,
+
+    /// If set, the system-wide LLDP `tx-hold` (`LldpOp::SetTxHold`).
+    #[arg(long)]
+    lldp_tx_hold: Option<u8>,
+
+    /// If set, the LLDP management address advertised in the Management
+    /// Address TLV (`LldpOp::SetManagementAddress`).
+    #[arg(long)]
+    lldp_management_address: Option<IpAddr>,
+
+    /// One `<interface>=<group>` per repetition (group is `nearest-bridge`,
+    /// `non-tpmr` or `customer-bridge`): sets that interface's LLDP
+    /// destination group (`InterfaceOp::SetLldpDestination`).
+    #[arg(long = "lldp-destination-interface")]
+    lldp_destination_interfaces: Vec<String>,
 
     /// If set (requires `--port-aggregate`, naming which one), deletes the
     /// port aggregate outright instead of ensuring/enslaving into it
@@ -985,6 +1005,30 @@ async fn main() -> anyhow::Result<()> {
                 name: name.clone(),
                 enabled,
             }
+        }));
+    }
+
+    if let Some(secs) = args.lldp_tx_interval {
+        ops.push(ConfigOp::Lldp(LldpOp::SetTxInterval { secs }));
+    }
+    if let Some(hold) = args.lldp_tx_hold {
+        ops.push(ConfigOp::Lldp(LldpOp::SetTxHold { hold }));
+    }
+    if let Some(address) = args.lldp_management_address {
+        ops.push(ConfigOp::Lldp(LldpOp::SetManagementAddress { address }));
+    }
+    for spec in &args.lldp_destination_interfaces {
+        let (name, group) = spec
+            .split_once('=')
+            .context("--lldp-destination-interface takes <interface>=<group>")?;
+        let destination = LldpDestination::from_name(group)
+            .with_context(|| format!("unknown lldp destination group '{group}'"))?;
+        ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
+            name: name.to_string(),
+        }));
+        ops.push(ConfigOp::Interface(InterfaceOp::SetLldpDestination {
+            name: name.to_string(),
+            destination,
         }));
     }
 

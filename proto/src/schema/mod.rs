@@ -5,6 +5,7 @@ pub mod broadcast_domain;
 pub mod community_alias;
 pub mod community_group;
 pub mod interface;
+pub mod lldp;
 pub mod ospf_area;
 pub mod ospf_instance;
 pub mod ospf_profile;
@@ -31,6 +32,7 @@ pub use community_group::CommunityGroup;
 pub use interface::{
     loopback_table_name, Interface, InterfaceAddress, Subinterface, LOOPBACK_PREFIX,
 };
+pub use lldp::{LldpDestination, LldpSettings};
 pub use ospf_area::OspfArea;
 pub use ospf_instance::OspfInstance;
 pub use ospf_profile::{
@@ -113,6 +115,12 @@ pub struct Config {
     #[serde(default = "default_hostname")]
     #[garde(length(min = 1, max = 253), custom(|h, _ctx: &Config| hostname_charset(h)))]
     pub hostname: String,
+
+    /// System-wide LLDP timers and management address. `serde(default)` so
+    /// on-disk config saved before this field existed still loads.
+    #[serde(default)]
+    #[garde(custom(|l: &LldpSettings, _ctx: &Config| l.check()))]
+    pub lldp: LldpSettings,
 }
 
 impl Default for Config {
@@ -132,6 +140,7 @@ impl Default for Config {
             switching_profiles: Vec::new(),
             port_aggregates: Vec::new(),
             hostname: default_hostname(),
+            lldp: LldpSettings::default(),
         }
     }
 }
@@ -156,6 +165,16 @@ mod tests {
             ..Default::default()
         };
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn lldp_settings_are_validated_at_config_level() {
+        let mut cfg = Config::default();
+        cfg.lldp.tx_interval_secs = Some(5);
+        cfg.lldp.tx_hold = Some(3);
+        cfg.validate_with(&cfg).unwrap();
+        cfg.lldp.tx_interval_secs = Some(0);
+        assert!(cfg.validate_with(&cfg).is_err());
     }
 
     #[test]
