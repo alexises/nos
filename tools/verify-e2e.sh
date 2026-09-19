@@ -171,7 +171,7 @@
 # DrOther-to-DR/BDR Full-adjacency restriction hold over the new address
 # family too.
 #
-# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|mtu|port-aggregate|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
+# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|mtu|port-aggregate|lacp|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -355,6 +355,16 @@ OSPFV3_BROADCAST_ADDRESS_C=2001:db8:3::3/64
 # incumbent-stickiness rationale as $OSPF_ROUTER_ID_C.
 OSPFV3_ROUTER_ID_C=9.9.9.8
 
+# The `lacp` scenario's own port-aggregate name -- deliberately distinct
+# from the `port-aggregate` scenario's own "bond1" so the two phases' log
+# greps never collide when both run in the same `all`/`drivers` sequence,
+# even though they're otherwise structurally independent (different
+# Interface.port_aggregate targets, no shared kernel state). Reuses the
+# same NET_BOND1/NET_BOND2 networks/eth1+eth2 member interfaces as
+# `port-aggregate`, but connects both to *both* routers (real LACP needs a
+# real partner negotiating on both ends, unlike static Xor).
+LACP_AGGREGATE=bond-lacp
+
 log() { echo "[verify-e2e] $*" >&2; }
 
 build_provision_tool() {
@@ -417,11 +427,15 @@ start_router() {
   docker volume create "${name}-run" >/dev/null
   docker volume create "${name}-data" >/dev/null
   docker rm -f "$name" >/dev/null 2>&1 || true
+  # The hard memory cap keeps a runaway daemon (a logging hot loop once grew
+  # nos-logd to ~14 GB) from taking down the host instead of just its own
+  # container.
   # "$@" (any remaining args) is forwarded to nos-watchdogd -- e.g.
   # `ospf-aging`'s `--ospfd-arg --lsa-age-multiplier=...`. Every other call
   # site passes none, so this is backward-compatible.
   docker run -d --name "$name" \
     --network "$NET" --ip "$ip" \
+    --memory 2g --memory-swap 2g \
     --cap-add NET_ADMIN --cap-add NET_RAW --cap-add NET_BIND_SERVICE \
     -v "${name}-run:/run/nos" \
     -v "${name}-data:/var/lib/nos" \
@@ -657,6 +671,130 @@ provision_delete_port_aggregate() {
     --enslave-interface-into-port-aggregate eth1 \
     --enslave-interface-into-port-aggregate eth2 \
     --delete-port-aggregate
+}
+
+# --- LACP scenario ---
+#
+# Configures a real IEEE 802.1AX LACP-mode Linux bonding device
+# ("bond-lacp") on *both* routers over two dedicated member links (eth1/eth2),
+# verifying nos-lacpd runs a real LACPDU exchange over a real raw AF_PACKET
+# socket between the two containers, converges its Receive/Mux state machines
+# to `Distributing` on both ends, and pushes the negotiated active-member set
+# to nos-interfaced, which actually enslaves both real member interfaces into
+# the kernel bond device -- over a real kernel, not a unit test. Then severs
+# one member link for real and confirms nos-lacpd detects the loss and
+# nos-interfaced releases it from the bond, before tearing the aggregate down.
+#
+# The two links are direct veth pairs between the two containers' network
+# namespaces, NOT docker networks (unlike the static `port-aggregate`
+# scenario's NET_BOND1/NET_BOND2): a docker network is a Linux bridge, and a
+# Linux bridge never forwards the 01:80:C2:00:00:02 slow-protocols address
+# (the kernel refuses to enable it -- it's in the restricted link-local group
+# range), so no LACPDU could ever cross one. A veth pair is a plain L2 wire.
+# Creating one across two containers needs iproute2 and CAP_NET_ADMIN, which
+# the runtime image deliberately lacks, so a throwaway privileged helper
+# container does it (see ensure_netns_helper).
+
+NETNS_HELPER_IMAGE=nos-verify-netns-helper:local
+
+ensure_netns_helper() {
+  docker image inspect "$NETNS_HELPER_IMAGE" >/dev/null 2>&1 && return 0
+  log "building $NETNS_HELPER_IMAGE (debian + iproute2)"
+  docker build -q -t "$NETNS_HELPER_IMAGE" - >/dev/null <<'DOCKERFILE'
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+DOCKERFILE
+}
+
+# Runs `ip ...` inside container $1's network namespace.
+ip_in() {
+  local container=$1
+  shift
+  docker run --rm --privileged --net="container:$container" "$NETNS_HELPER_IMAGE" ip "$@"
+}
+
+lacp_link_veths() {
+  ensure_netns_helper
+  local pid_a pid_b iface
+  pid_a=$(docker inspect -f '{{.State.Pid}}' router-a)
+  pid_b=$(docker inspect -f '{{.State.Pid}}' router-b)
+  for iface in eth1 eth2; do
+    if ip_in router-a link show "$iface" >/dev/null 2>&1; then
+      continue
+    fi
+    log "creating veth pair $iface between router-a and router-b"
+    docker run --rm --privileged --pid=host "$NETNS_HELPER_IMAGE" \
+      ip link add "$iface" netns "$pid_a" type veth peer name "$iface" netns "$pid_b"
+  done
+}
+
+# Deleting one end of a veth pair deletes both.
+lacp_unlink_veths() {
+  ip_in router-a link del eth1 2>/dev/null || true
+  ip_in router-a link del eth2 2>/dev/null || true
+}
+
+provision_lacp() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  log "provisioning $name with a real lacp port aggregate $LACP_AGGREGATE over eth1+eth2"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --port-aggregate "$LACP_AGGREGATE" \
+    --port-aggregate-mode lacp \
+    --enslave-interface-into-port-aggregate eth1 \
+    --enslave-interface-into-port-aggregate eth2
+}
+
+provision_delete_lacp() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  log "provisioning $name with its lacp port aggregate $LACP_AGGREGATE removed"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --port-aggregate "$LACP_AGGREGATE" \
+    --port-aggregate-mode lacp \
+    --enslave-interface-into-port-aggregate eth1 \
+    --enslave-interface-into-port-aggregate eth2 \
+    --delete-port-aggregate
+}
+
+# Withdraws one member (eth2) from $1's aggregate by config, leaving the rest
+# in place -- so that router's nos-lacpd stops speaking LACP on it while the
+# link itself stays up. (Taking the link down instead wouldn't hold: each
+# nos-interfaced re-applies "admin up" on every 10s resync.)
+provision_lacp_withdraw_eth2() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  log "provisioning $name with eth2 withdrawn from $LACP_AGGREGATE"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --port-aggregate "$LACP_AGGREGATE" \
+    --port-aggregate-mode lacp \
+    --enslave-interface-into-port-aggregate eth1 \
+    --clear-port-aggregate-member eth2
 }
 
 # --- OSPF instance scenario ---
@@ -1425,6 +1563,15 @@ wait_for_count_increase() {
   return 1
 }
 
+# Current number of ANSI-stripped log lines matching PATTERN -- the baseline
+# for wait_for_count_increase when an earlier phase may already have emitted
+# the same line.
+log_count() {
+  local name=$1 pattern=$2 count
+  count=$(docker logs "$name" 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep -c "$pattern") || true
+  echo "${count:-0}"
+}
+
 wait_for_log() {
   local name=$1 pattern=$2 timeout=${3:-60}
   log "waiting for '$pattern' in $name's logs (up to ${timeout}s)"
@@ -1641,6 +1788,89 @@ cmd_check_port_aggregate() {
   wait_for_count_increase router-a "deleted port aggregate bond port_aggregate=bond1 bond=bond1" 0 60 \
     && log "router-a: deleted port aggregate bond1" \
     || { log "router-a: FAILED to delete the port aggregate bond device"; return 1; }
+}
+
+cmd_check_lacp() {
+  # The kernel bond device is named from nos-interfaced's registry id
+  # (bond<id>), not from the aggregate's config name, and that id depends on
+  # which aggregates earlier phases created (`port-aggregate` takes bond1
+  # first in `all`) -- so match any bond name, with baselines taken before
+  # provisioning so earlier phases' identical lines never count.
+  declare -A enslave_base
+  local name iface
+  for name in router-a router-b; do
+    for iface in eth1 eth2; do
+      enslave_base["$name/$iface"]=$(log_count "$name" "enslaved interface to bond interface=$iface bond=bond")
+    done
+  done
+  local release_base
+  release_base=$(log_count router-a "removed interface from master enslavement interface=eth2")
+
+  lacp_link_veths
+  provision_lacp router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+  provision_lacp router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A"
+
+  log "waiting for both routers' nos-lacpd to reconcile $LACP_AGGREGATE's members"
+  wait_for_count_increase router-a "lacp reconciled aggregate members aggregate=$LACP_AGGREGATE members=2" 0 60 \
+    && log "router-a: nos-lacpd reconciled $LACP_AGGREGATE to 2 active members" \
+    || { log "router-a: FAILED to reconcile lacp aggregate members"; return 1; }
+  wait_for_count_increase router-b "lacp reconciled aggregate members aggregate=$LACP_AGGREGATE members=2" 0 60 \
+    && log "router-b: nos-lacpd reconciled $LACP_AGGREGATE to 2 active members" \
+    || { log "router-b: FAILED to reconcile lacp aggregate members"; return 1; }
+
+  log "waiting for real lacpdu negotiation to reach Distributing on both routers/both links"
+  for name in router-a router-b; do
+    for iface in eth1 eth2; do
+      wait_for_count_increase "$name" \
+        "interface=$iface receive_state=Current mux_state=Distributing" 0 60 \
+        && log "$name: $iface mux machine reached Distributing" \
+        || { log "$name: FAILED -- $iface never reached Distributing"; return 1; }
+    done
+  done
+
+  log "waiting for both routers to actually enslave eth1/eth2 into the real kernel bond"
+  for name in router-a router-b; do
+    for iface in eth1 eth2; do
+      wait_for_count_increase "$name" \
+        "enslaved interface to bond interface=$iface bond=bond" "${enslave_base["$name/$iface"]}" 60 \
+        && log "$name: enslaved $iface into $LACP_AGGREGATE" \
+        || { log "$name: FAILED to enslave $iface into $LACP_AGGREGATE"; return 1; }
+    done
+  done
+
+  # Make router-b stop speaking LACP on eth2 (withdrawn from its aggregate
+  # by config; the veth itself stays up) and confirm nos-lacpd on router-a
+  # actually detects the silence (real Receive Machine timeout, no packets
+  # from the other end at all) and nos-interfaced actually releases eth2 from
+  # its kernel bond as a result -- proving the LACP-gated enslavement is
+  # genuinely dynamic, not just applied once at provisioning time. Up to 90s
+  # (802.1AX's Long Current_While_Timer -- this implementation never
+  # advertises the Short rate, see lacp/CLAUDE.md) before the Receive Machine
+  # even notices, comfortably budgeted for here.
+  provision_lacp_withdraw_eth2 router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A"
+
+  log "waiting for router-a's lacp receive machine to expire on eth2 (up to 110s, real 802.1ax timer)"
+  wait_for_count_increase router-a "interface=eth2 receive_state=Expired" 0 110 \
+    && log "router-a: eth2 lacp receive machine expired" \
+    || { log "router-a: FAILED -- eth2 receive machine never expired"; return 1; }
+
+  log "waiting for router-a to release eth2 from the kernel bond"
+  wait_for_count_increase router-a "removed interface from master enslavement interface=eth2" "$release_base" 30 \
+    && log "router-a: released eth2 from $LACP_AGGREGATE" \
+    || { log "router-a: FAILED to release eth2 from the kernel bond"; return 1; }
+
+  provision_delete_lacp router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+  provision_delete_lacp router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A"
+
+  log "waiting for both routers to delete the lacp port aggregate bond device"
+  wait_for_count_increase router-a "deleted port aggregate bond port_aggregate=$LACP_AGGREGATE bond=" 0 60 \
+    && log "router-a: deleted $LACP_AGGREGATE" \
+    || { log "router-a: FAILED to delete the lacp port aggregate bond device"; return 1; }
+  wait_for_count_increase router-b "deleted port aggregate bond port_aggregate=$LACP_AGGREGATE bond=" 0 60 \
+    && log "router-b: deleted $LACP_AGGREGATE" \
+    || { log "router-b: FAILED to delete the lacp port aggregate bond device"; return 1; }
+
+  lacp_unlink_veths
 }
 
 cmd_check_ospf() {
@@ -2831,6 +3061,7 @@ cmd_group_drivers() {
   cmd_check_loopback
   cmd_check_mtu
   cmd_check_port_aggregate
+  cmd_check_lacp
   cmd_check_switching
   cmd_check_svi
   cmd_check_routed_subinterface
@@ -2880,6 +3111,7 @@ case "${1:-}" in
   loopback) cmd_check_loopback ;;
   mtu) cmd_check_mtu ;;
   port-aggregate) cmd_check_port_aggregate ;;
+  lacp) cmd_check_lacp ;;
   switching) cmd_check_switching ;;
   svi) cmd_check_svi ;;
   routed-subinterface) cmd_check_routed_subinterface ;;
@@ -2917,6 +3149,7 @@ case "${1:-}" in
     cmd_check_loopback
     cmd_check_mtu
     cmd_check_port_aggregate
+    cmd_check_lacp
     cmd_check_switching
     cmd_check_svi
     cmd_check_routed_subinterface
@@ -2939,7 +3172,7 @@ case "${1:-}" in
     cmd_check_ospfv3_dr
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|mtu|port-aggregate|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|mtu|port-aggregate|lacp|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
     exit 2
     ;;
 esac

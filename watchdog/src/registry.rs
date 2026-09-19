@@ -67,24 +67,26 @@ impl EndpointRegistry {
     }
 
     /// Resolves `service` to its current socket path, if known.
-    /// `config_socket`/`interfaces_socket`/`log_socket` are always
-    /// resolvable — the watchdog is told them directly via its own
-    /// `--config-socket`/`--interfaced-listen-socket`/`--log-socket` args, so
-    /// none needs to be tracked in the map (there's exactly one
-    /// `nos-configd`, one `nos-interfaced`, and one `nos-logd`, unlike
-    /// `RibTable`/`BgpInstance`, which are keyed by name because there can be
-    /// many).
+    /// `config_socket`/`interfaces_socket`/`log_socket`/`lacp_socket` are
+    /// always resolvable — the watchdog is told them directly via its own
+    /// `--config-socket`/`--interfaced-listen-socket`/`--log-socket`/
+    /// `--lacpd-listen-socket` args, so none needs to be tracked in the map
+    /// (there's exactly one `nos-configd`, one `nos-interfaced`, one
+    /// `nos-logd`, and one `nos-lacpd`, unlike `RibTable`/`BgpInstance`,
+    /// which are keyed by name because there can be many).
     pub async fn resolve(
         &self,
         service: &ServiceRef,
         config_socket: &Path,
         interfaces_socket: &Path,
         log_socket: &Path,
+        lacp_socket: &Path,
     ) -> Option<PathBuf> {
         let (kind, name) = match service {
             ServiceRef::Config => return Some(config_socket.to_path_buf()),
             ServiceRef::Interfaces => return Some(interfaces_socket.to_path_buf()),
             ServiceRef::Log => return Some(log_socket.to_path_buf()),
+            ServiceRef::Lacp => return Some(lacp_socket.to_path_buf()),
             ServiceRef::RibTable(name) => (EndpointKind::RibTable, name),
             ServiceRef::BgpInstance(name) => (EndpointKind::BgpInstance, name),
             ServiceRef::OspfInstance(name) => (EndpointKind::OspfInstance, name),
@@ -101,6 +103,7 @@ mod tests {
     const CONFIG_SOCKET: &str = "/run/nos/config.sock";
     const INTERFACES_SOCKET: &str = "/run/nos/interface.sock";
     const LOG_SOCKET: &str = "/run/nos/log.sock";
+    const LACP_SOCKET: &str = "/run/nos/lacp.sock";
 
     #[tokio::test]
     async fn config_always_resolves() {
@@ -108,13 +111,15 @@ mod tests {
         let config_socket = Path::new(CONFIG_SOCKET);
         let interfaces_socket = Path::new(INTERFACES_SOCKET);
         let log_socket = Path::new(LOG_SOCKET);
+        let lacp_socket = Path::new(LACP_SOCKET);
         assert_eq!(
             registry
                 .resolve(
                     &ServiceRef::Config,
                     config_socket,
                     interfaces_socket,
-                    log_socket
+                    log_socket,
+                    lacp_socket
                 )
                 .await,
             Some(config_socket.to_path_buf())
@@ -127,13 +132,15 @@ mod tests {
         let config_socket = Path::new(CONFIG_SOCKET);
         let interfaces_socket = Path::new(INTERFACES_SOCKET);
         let log_socket = Path::new(LOG_SOCKET);
+        let lacp_socket = Path::new(LACP_SOCKET);
         assert_eq!(
             registry
                 .resolve(
                     &ServiceRef::Interfaces,
                     config_socket,
                     interfaces_socket,
-                    log_socket
+                    log_socket,
+                    lacp_socket
                 )
                 .await,
             Some(interfaces_socket.to_path_buf())
@@ -146,16 +153,39 @@ mod tests {
         let config_socket = Path::new(CONFIG_SOCKET);
         let interfaces_socket = Path::new(INTERFACES_SOCKET);
         let log_socket = Path::new(LOG_SOCKET);
+        let lacp_socket = Path::new(LACP_SOCKET);
         assert_eq!(
             registry
                 .resolve(
                     &ServiceRef::Log,
                     config_socket,
                     interfaces_socket,
-                    log_socket
+                    log_socket,
+                    lacp_socket
                 )
                 .await,
             Some(log_socket.to_path_buf())
+        );
+    }
+
+    #[tokio::test]
+    async fn lacp_always_resolves() {
+        let registry = EndpointRegistry::default();
+        let config_socket = Path::new(CONFIG_SOCKET);
+        let interfaces_socket = Path::new(INTERFACES_SOCKET);
+        let log_socket = Path::new(LOG_SOCKET);
+        let lacp_socket = Path::new(LACP_SOCKET);
+        assert_eq!(
+            registry
+                .resolve(
+                    &ServiceRef::Lacp,
+                    config_socket,
+                    interfaces_socket,
+                    log_socket,
+                    lacp_socket
+                )
+                .await,
+            Some(lacp_socket.to_path_buf())
         );
     }
 
@@ -165,11 +195,18 @@ mod tests {
         let config_socket = Path::new(CONFIG_SOCKET);
         let interfaces_socket = Path::new(INTERFACES_SOCKET);
         let log_socket = Path::new(LOG_SOCKET);
+        let lacp_socket = Path::new(LACP_SOCKET);
         let service = ServiceRef::RibTable("rt1".to_string());
 
         assert_eq!(
             registry
-                .resolve(&service, config_socket, interfaces_socket, log_socket)
+                .resolve(
+                    &service,
+                    config_socket,
+                    interfaces_socket,
+                    log_socket,
+                    lacp_socket
+                )
                 .await,
             None
         );
@@ -183,7 +220,13 @@ mod tests {
             .await;
         assert_eq!(
             registry
-                .resolve(&service, config_socket, interfaces_socket, log_socket)
+                .resolve(
+                    &service,
+                    config_socket,
+                    interfaces_socket,
+                    log_socket,
+                    lacp_socket
+                )
                 .await,
             Some(PathBuf::from("/run/nos/rib-rt1.sock"))
         );
@@ -191,7 +234,13 @@ mod tests {
         registry.remove(EndpointKind::RibTable, "rt1").await;
         assert_eq!(
             registry
-                .resolve(&service, config_socket, interfaces_socket, log_socket)
+                .resolve(
+                    &service,
+                    config_socket,
+                    interfaces_socket,
+                    log_socket,
+                    lacp_socket
+                )
                 .await,
             None
         );
@@ -203,11 +252,18 @@ mod tests {
         let config_socket = Path::new(CONFIG_SOCKET);
         let interfaces_socket = Path::new(INTERFACES_SOCKET);
         let log_socket = Path::new(LOG_SOCKET);
+        let lacp_socket = Path::new(LACP_SOCKET);
         let service = ServiceRef::BgpInstance("r1".to_string());
 
         assert_eq!(
             registry
-                .resolve(&service, config_socket, interfaces_socket, log_socket)
+                .resolve(
+                    &service,
+                    config_socket,
+                    interfaces_socket,
+                    log_socket,
+                    lacp_socket
+                )
                 .await,
             None
         );
@@ -221,7 +277,13 @@ mod tests {
             .await;
         assert_eq!(
             registry
-                .resolve(&service, config_socket, interfaces_socket, log_socket)
+                .resolve(
+                    &service,
+                    config_socket,
+                    interfaces_socket,
+                    log_socket,
+                    lacp_socket
+                )
                 .await,
             Some(PathBuf::from("/run/nos/bgp-r1.sock"))
         );
@@ -229,7 +291,13 @@ mod tests {
         registry.remove(EndpointKind::BgpInstance, "r1").await;
         assert_eq!(
             registry
-                .resolve(&service, config_socket, interfaces_socket, log_socket)
+                .resolve(
+                    &service,
+                    config_socket,
+                    interfaces_socket,
+                    log_socket,
+                    lacp_socket
+                )
                 .await,
             None
         );
@@ -241,11 +309,18 @@ mod tests {
         let config_socket = Path::new(CONFIG_SOCKET);
         let interfaces_socket = Path::new(INTERFACES_SOCKET);
         let log_socket = Path::new(LOG_SOCKET);
+        let lacp_socket = Path::new(LACP_SOCKET);
         let service = ServiceRef::OspfInstance("o1".to_string());
 
         assert_eq!(
             registry
-                .resolve(&service, config_socket, interfaces_socket, log_socket)
+                .resolve(
+                    &service,
+                    config_socket,
+                    interfaces_socket,
+                    log_socket,
+                    lacp_socket
+                )
                 .await,
             None
         );
@@ -259,7 +334,13 @@ mod tests {
             .await;
         assert_eq!(
             registry
-                .resolve(&service, config_socket, interfaces_socket, log_socket)
+                .resolve(
+                    &service,
+                    config_socket,
+                    interfaces_socket,
+                    log_socket,
+                    lacp_socket
+                )
                 .await,
             Some(PathBuf::from("/run/nos/ospf-o1.sock"))
         );
@@ -267,7 +348,13 @@ mod tests {
         registry.remove(EndpointKind::OspfInstance, "o1").await;
         assert_eq!(
             registry
-                .resolve(&service, config_socket, interfaces_socket, log_socket)
+                .resolve(
+                    &service,
+                    config_socket,
+                    interfaces_socket,
+                    log_socket,
+                    lacp_socket
+                )
                 .await,
             None
         );

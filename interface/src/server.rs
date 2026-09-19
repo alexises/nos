@@ -12,7 +12,17 @@ use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{error, info, trace, warn};
 
+use crate::driver::InterfaceDriver;
 use crate::state::{BroadcastDomainState, InterfaceState, Interfaces, PortAggregateState};
+
+/// Bundles this instance's shared in-memory state (for the read-only query
+/// kinds) and its driver (so a `PushLacpMembers` push can apply the newly
+/// gated interfaces to the kernel immediately) — mirrors `nos-ribd`'s own
+/// `Context`.
+struct Context {
+    interfaces: Arc<RwLock<Interfaces>>,
+    driver: Arc<dyn InterfaceDriver>,
+}
 
 /// Binds `listen_socket` and spawns the IPC accept loop for interface
 /// queries.
@@ -21,20 +31,22 @@ use crate::state::{BroadcastDomainState, InterfaceState, Interfaces, PortAggrega
 pub fn start(
     listen_socket: &Path,
     interfaces: Arc<RwLock<Interfaces>>,
+    driver: Arc<dyn InterfaceDriver>,
 ) -> std::io::Result<JoinHandle<()>> {
     if listen_socket.exists() {
         std::fs::remove_file(listen_socket)?;
     }
     let listener = UnixListener::bind(listen_socket)?;
     info!(socket = %listen_socket.display(), "interface IPC server listening");
-    Ok(tokio::spawn(accept_loop(listener, interfaces)))
+    let ctx = Arc::new(Context { interfaces, driver });
+    Ok(tokio::spawn(accept_loop(listener, ctx)))
 }
 
-async fn accept_loop(listener: UnixListener, interfaces: Arc<RwLock<Interfaces>>) {
+async fn accept_loop(listener: UnixListener, ctx: Arc<Context>) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                tokio::spawn(handle_connection(stream, interfaces.clone()));
+                tokio::spawn(handle_connection(stream, ctx.clone()));
             }
             Err(e) => {
                 error!(error = %e, "interface IPC accept loop terminated");
@@ -44,51 +56,88 @@ async fn accept_loop(listener: UnixListener, interfaces: Arc<RwLock<Interfaces>>
     }
 }
 
-async fn handle_connection(stream: tokio::net::UnixStream, interfaces: Arc<RwLock<Interfaces>>) {
+async fn handle_connection(stream: tokio::net::UnixStream, ctx: Arc<Context>) {
     let (read_half, write_half) = stream.into_split();
     let mut reader = FramedRead::new(read_half, IpcCodec::<InterfaceRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<InterfaceEvent>::default());
 
     while let Some(msg) = reader.next().await {
         let event = match msg {
-            Ok(req) => dispatch(&interfaces, req).await,
+            Ok(req) => dispatch(&ctx, req).await,
             Err(e) => {
                 warn!(error = %e, "interface IPC read error");
                 break;
             }
         };
-        if writer.send(event).await.is_err() {
-            break;
+        if let Some(event) = event {
+            if writer.send(event).await.is_err() {
+                break;
+            }
         }
     }
 }
 
-async fn dispatch(interfaces: &Arc<RwLock<Interfaces>>, req: InterfaceRequest) -> InterfaceEvent {
+async fn dispatch(ctx: &Context, req: InterfaceRequest) -> Option<InterfaceEvent> {
     trace!(request = ?req, "serving interface query");
-    let guard = interfaces.read().await;
     match req {
         InterfaceRequest::GetInterfaces => {
-            InterfaceEvent::Interfaces(guard.all().into_iter().map(to_status).collect())
+            let guard = ctx.interfaces.read().await;
+            Some(InterfaceEvent::Interfaces(
+                guard.all().into_iter().map(to_status).collect(),
+            ))
         }
-        InterfaceRequest::GetInterface { name } => match guard.get(&name) {
-            Some(iface) => InterfaceEvent::Interface(to_status(iface.clone())),
-            None => InterfaceEvent::NotFound,
-        },
-        InterfaceRequest::GetBroadcastDomain { name } => match guard.get_domain(&name) {
-            Some(domain) => InterfaceEvent::BroadcastDomain(to_domain_status(domain.clone())),
-            None => InterfaceEvent::NotFound,
-        },
-        InterfaceRequest::GetPortAggregates => InterfaceEvent::PortAggregates(
-            guard
-                .all_port_aggregates()
-                .into_iter()
-                .map(to_port_aggregate_status)
-                .collect(),
-        ),
-        InterfaceRequest::GetPortAggregate { name } => match guard.get_port_aggregate(&name) {
-            Some(agg) => InterfaceEvent::PortAggregate(to_port_aggregate_status(agg.clone())),
-            None => InterfaceEvent::NotFound,
-        },
+        InterfaceRequest::GetInterface { name } => {
+            let guard = ctx.interfaces.read().await;
+            Some(match guard.get(&name) {
+                Some(iface) => InterfaceEvent::Interface(to_status(iface.clone())),
+                None => InterfaceEvent::NotFound,
+            })
+        }
+        InterfaceRequest::GetBroadcastDomain { name } => {
+            let guard = ctx.interfaces.read().await;
+            Some(match guard.get_domain(&name) {
+                Some(domain) => InterfaceEvent::BroadcastDomain(to_domain_status(domain.clone())),
+                None => InterfaceEvent::NotFound,
+            })
+        }
+        InterfaceRequest::GetPortAggregates => {
+            let guard = ctx.interfaces.read().await;
+            Some(InterfaceEvent::PortAggregates(
+                guard
+                    .all_port_aggregates()
+                    .into_iter()
+                    .map(to_port_aggregate_status)
+                    .collect(),
+            ))
+        }
+        InterfaceRequest::GetPortAggregate { name } => {
+            let guard = ctx.interfaces.read().await;
+            Some(match guard.get_port_aggregate(&name) {
+                Some(agg) => InterfaceEvent::PortAggregate(to_port_aggregate_status(agg.clone())),
+                None => InterfaceEvent::NotFound,
+            })
+        }
+        InterfaceRequest::PushLacpMembers(msg) => {
+            apply_lacp_push(ctx, msg).await;
+            None
+        }
+    }
+}
+
+/// Applies one `nos-lacpd` push: replaces the aggregate's active-member set
+/// and immediately re-`apply`s every affected interface, rather than
+/// waiting for the periodic re-apply tick — mirrors `nos-ribd`'s
+/// `apply_bgp_route_update`'s immediate-apply precedent.
+async fn apply_lacp_push(ctx: &Context, msg: nos_proto::LacpAggregateMembers) {
+    let updated = ctx
+        .interfaces
+        .write()
+        .await
+        .set_lacp_active_members(&msg.aggregate, msg.active_members);
+    for iface in updated {
+        if let Err(e) = ctx.driver.apply(&iface).await {
+            warn!(interface = %iface.name, error = %e, "failed to apply lacp-pushed enslavement");
+        }
     }
 }
 

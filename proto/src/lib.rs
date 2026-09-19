@@ -6,6 +6,7 @@ pub mod diff;
 pub mod docs;
 pub mod interface;
 pub mod ipc;
+pub mod lacp;
 pub mod log;
 pub mod ops;
 pub mod ospf;
@@ -24,11 +25,15 @@ pub use derive::sync_routing_table_refs;
 pub use diff::{diff_configs, ConfigDiff, DiffScope, DiffStatus, FieldDiff, SectionDiff};
 pub use docs::{CommandDoc, Topic};
 pub use interface::{
-    BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, PortAggregateStatus,
-    SubinterfaceStatus,
+    BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, LacpAggregateMembers,
+    PortAggregateStatus, SubinterfaceStatus,
 };
 pub use ipc::{Event, Request, TransactionBase, TransactionSnapshot};
 pub use ipnet::IpNet;
+pub use lacp::{
+    LacpEvent, LacpMuxState, LacpPortStatus, LacpReceiveState, LacpRequest,
+    PortAggregateLacpSummary,
+};
 pub use log::{LogEntry, LogEvent, LogLevel, LogRequest};
 pub use ops::{
     BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, CommunityAliasOp,

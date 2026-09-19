@@ -2,10 +2,14 @@ use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use nos_proto::LogEntry;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
+
+use crate::store::entry_size;
 
 /// Once the store file grows past `capacity * COMPACT_FACTOR` lines, it's
 /// rewritten down to the most recent `capacity` — bounds disk usage without
@@ -48,7 +52,15 @@ pub fn load_recent(path: &Path, capacity: usize) -> Vec<LogEntry> {
 /// A failure to open or write the file disables persistence for the rest of
 /// this run (a warning is logged once) rather than crashing `nos-logd` —
 /// the in-memory buffer keeps serving queries either way.
-pub async fn run(path: PathBuf, capacity: usize, mut rx: mpsc::UnboundedReceiver<LogEntry>) {
+///
+/// `queued` is `LogStore::persist_queue_bytes`: each received entry's bytes are
+/// released from it, which is what lets the store bound the queue's memory.
+pub async fn run(
+    path: PathBuf,
+    capacity: usize,
+    mut rx: mpsc::UnboundedReceiver<LogEntry>,
+    queued: Arc<AtomicUsize>,
+) {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         if let Err(e) = fs::create_dir_all(parent) {
             warn!(error = %e, path = %parent.display(), "failed to create log store directory");
@@ -65,13 +77,16 @@ pub async fn run(path: PathBuf, capacity: usize, mut rx: mpsc::UnboundedReceiver
     else {
         // Drain the channel so senders (LogStore::record) never block on a
         // full mpsc queue even though nothing is being persisted.
-        while rx.recv().await.is_some() {}
+        while let Some(entry) = rx.recv().await {
+            queued.fetch_sub(entry_size(&entry), Ordering::Relaxed);
+        }
         return;
     };
     info!(path = %path.display(), "log persistence started");
     let mut lines_since_compact = count_lines(&path).unwrap_or(0);
 
     while let Some(entry) = rx.recv().await {
+        queued.fetch_sub(entry_size(&entry), Ordering::Relaxed);
         match serde_json::to_string(&entry) {
             Ok(line) => match writeln!(file, "{line}") {
                 Ok(()) => lines_since_compact += 1,
@@ -151,7 +166,7 @@ mod tests {
         tx.send(entry("one")).unwrap();
         tx.send(entry("two")).unwrap();
         drop(tx);
-        run(path.clone(), 10, rx).await;
+        run(path.clone(), 10, rx, Arc::default()).await;
 
         let loaded = load_recent(&path, 10);
         assert_eq!(
@@ -174,7 +189,7 @@ mod tests {
             tx.send(entry(&i.to_string())).unwrap();
         }
         drop(tx);
-        run(path.clone(), 1, rx).await;
+        run(path.clone(), 1, rx, Arc::default()).await;
 
         let loaded = load_recent(&path, 10);
         assert_eq!(

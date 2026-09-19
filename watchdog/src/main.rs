@@ -98,6 +98,24 @@ struct Args {
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
 
+    /// Path to the nos-lacpd binary to supervise. Like nos-interfaced/
+    /// nos-logd, exactly one instance is always supervised regardless of how
+    /// many `Lacp`-mode port aggregates are configured — see
+    /// `lacp/CLAUDE.md`.
+    #[arg(long, default_value = "/usr/local/bin/nos-lacpd")]
+    lacpd_bin: PathBuf,
+
+    /// Extra arguments forwarded to nos-lacpd.
+    #[arg(long = "lacpd-arg", allow_hyphen_values = true)]
+    lacpd_flags: Vec<String>,
+
+    /// Unix socket nos-lacpd listens on for LACP status queries (e.g. from
+    /// `nos show lacp`). Also served out as the resolved address for
+    /// `ServiceRef::Lacp` broker queries, the same way
+    /// `--interfaced-listen-socket` is for `ServiceRef::Interfaces`.
+    #[arg(long, default_value = "/run/nos/lacp.sock")]
+    lacpd_listen_socket: PathBuf,
+
     /// Path to nos-configd's IPC Unix socket, used by the watchdog itself to
     /// subscribe to BGP instance and routing table changes. Independent of
     /// `--configd-arg`, which is an opaque pass-through to the child — if
@@ -263,12 +281,30 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     )));
 
+    let lacpd_args = std::iter::once("--listen-socket".to_string())
+        .chain(std::iter::once(
+            args.lacpd_listen_socket.display().to_string(),
+        ))
+        .chain(std::iter::once("--watchdog-socket".to_string()))
+        .chain(std::iter::once(args.listen_socket.display().to_string()))
+        .chain(std::iter::once("--log-socket".to_string()))
+        .chain(std::iter::once(args.log_socket.display().to_string()))
+        .chain(args.lacpd_flags)
+        .collect();
+    let lacpd_spec = ProcessSpec::new("nos-lacpd", args.lacpd_bin, lacpd_args);
+    tasks.push(tokio::spawn(supervise_one(
+        lacpd_spec,
+        policy,
+        shutdown_rx.clone(),
+    )));
+
     let broker_task = broker::start(
         &args.listen_socket,
         registry,
         args.config_socket,
         args.interfaced_listen_socket,
         args.log_socket,
+        args.lacpd_listen_socket,
     )
     .inspect_err(|e| tracing::error!(error = %e, "failed to start broker IPC server"))
     .context("starting broker IPC server")?;

@@ -1646,8 +1646,15 @@ fn parse_set(t: &[&str]) -> Option<Command> {
             name: (*name).to_string(),
             mode: PortAggregateMode::Xor,
         }),
+        ["port-aggregate", name, "mode", "lacp"] => Command::Set(SetTarget::PortAggregateMode {
+            name: (*name).to_string(),
+            mode: PortAggregateMode::Lacp,
+        }),
         ["mode", "xor"] => Command::Set(SetTarget::PortAggregateModeRelative {
             mode: PortAggregateMode::Xor,
+        }),
+        ["mode", "lacp"] => Command::Set(SetTarget::PortAggregateModeRelative {
+            mode: PortAggregateMode::Lacp,
         }),
         ["interface", name, "port-aggregate", aggregate] => {
             Command::Set(SetTarget::InterfacePortAggregate {

@@ -15,9 +15,19 @@ use super::{bridge_registry, port_aggregate_registry, rib_client, DriverError, I
 use crate::state::{BroadcastDomainState, InterfaceState, PortAggregateState, SubinterfaceState};
 use crate::watchdog_client;
 
+/// Both `Xor` and `Lacp` create the kernel bond in the same
+/// `BalanceXor` mode — **never** `BondMode::Ieee8023Ad`. The kernel's own
+/// 802.3ad bonding mode intercepts slow-protocol (ethertype `0x8809`)
+/// frames on every slave via its own `rx_handler` before userspace ever
+/// sees them, which would silently starve `nos-lacpd`'s raw `AF_PACKET`
+/// sockets of every LACPDU it needs to run its own real negotiation. The
+/// `PortAggregateMode` distinction only changes which control plane
+/// decides which members are actually enslaved (unconditionally here vs.
+/// gated on `nos-lacpd`'s push, see `InterfaceState.port_aggregate_active`)
+/// — never the kernel driver's own bonding algorithm.
 fn bond_mode_of(mode: PortAggregateMode) -> BondMode {
     match mode {
-        PortAggregateMode::Xor => BondMode::BalanceXor,
+        PortAggregateMode::Xor | PortAggregateMode::Lacp => BondMode::BalanceXor,
     }
 }
 
@@ -449,13 +459,17 @@ impl LinuxInterfaceDriver {
     /// `port_aggregate`, if set, names the `PortAggregate` `name` should be
     /// enslaved into — only ever passed by `apply` for a member interface;
     /// `ensure_port_aggregate` always passes `None`, since a bond never
-    /// nests into another bond.
+    /// nests into another bond. `port_aggregate_active` gates whether that
+    /// enslavement actually happens right now (see
+    /// `InterfaceState.port_aggregate_active`); ignored when
+    /// `port_aggregate` is `None`.
     async fn reconcile_physical_link(
         &self,
         name: &str,
         link: &LinkMessage,
         switching_profile_members: &[(String, VlanTag)],
         port_aggregate: Option<&str>,
+        port_aggregate_active: bool,
         subinterfaces: &[SubinterfaceState],
     ) -> Result<(), DriverError> {
         let index = link.header.index;
@@ -479,6 +493,7 @@ impl LinuxInterfaceDriver {
         // `valid_port_aggregate_membership`) rejects any of the three
         // colliding, since the link has only one master.
         let bond_ifname = port_aggregate
+            .filter(|_| port_aggregate_active)
             .and_then(|name| {
                 port_aggregate_registry::lookup_port_aggregate_id(
                     &self.port_aggregate_registry_path,
@@ -566,6 +581,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
                 &link,
                 &desired.switching_profile_members,
                 desired.port_aggregate.as_deref(),
+                desired.port_aggregate_active,
                 &desired.subinterfaces,
             )
             .await?;
@@ -713,6 +729,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             &link,
             &desired.switching_profile_members,
             None,
+            true,
             &desired.subinterfaces,
         )
         .await?;

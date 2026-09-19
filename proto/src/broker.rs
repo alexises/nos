@@ -36,6 +36,10 @@ pub enum ServiceRef {
     /// the same way as `OspfInstance`, a separate variant since v2/v3 are
     /// two independent daemon families.
     Ospfv3Instance(String),
+    /// The single `nos-lacpd` instance, resolved directly like `Interfaces`/
+    /// `Log` rather than through the registry — there is exactly one LACP
+    /// engine regardless of how many `Lacp`-mode `PortAggregate`s exist.
+    Lacp,
 }
 
 /// Messages sent from a client to `nos-watchdogd`'s broker socket.

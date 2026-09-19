@@ -1,5 +1,5 @@
 [workspace]
-members = ["proto", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tcp-auth", "rpl", "log-client"]
+members = ["proto", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tcp-auth", "rpl", "log-client", "lacp"]
 resolver = "2"
 
 [workspace.dependencies]

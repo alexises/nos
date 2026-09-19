@@ -68,6 +68,15 @@ pub struct InterfaceState {
     /// driver itself (via its own port-aggregate-id registry), not here,
     /// mirroring `routing_table`'s VRF-name resolution.
     pub port_aggregate: Option<String>,
+    /// Whether this interface should actually be enslaved into
+    /// `port_aggregate`'s bond device right now. Always `true` when
+    /// `port_aggregate` is set on a `Xor`-mode aggregate (unconditional,
+    /// unchanged from before this field existed). For a `Lacp`-mode
+    /// aggregate, `true` only once `nos-lacpd` has pushed this interface
+    /// into `Interfaces.lacp_active_members` for it — see
+    /// `Interfaces::set_lacp_active_members`. Meaningless when
+    /// `port_aggregate` is `None`.
+    pub port_aggregate_active: bool,
     /// The configured MTU, or `None` to leave whatever the kernel link
     /// already has untouched — a link-layer property of the physical (or
     /// loopback) interface itself, applying to every one of `subinterfaces`
@@ -121,6 +130,17 @@ pub struct Interfaces {
     /// Every `PortAggregate` name configured as of the last resync — same
     /// removal-diffing role as `domains`.
     port_aggregates: HashSet<String>,
+    /// The most recently pushed active-member set (`nos_proto::
+    /// LacpAggregateMembers`) for each `Lacp`-mode `PortAggregate`, keyed by
+    /// aggregate name — see `InterfaceState.port_aggregate_active`. Unlike
+    /// every other field here, this is **not** rebuilt by
+    /// `build_from_config` (it isn't derived from `Config` at all) —
+    /// carried forward unchanged from `previous` on every ordinary resync,
+    /// so an unrelated config change never reverts a negotiated bond back
+    /// to "nothing enslaved". A fresh `Interfaces::new()` has an empty map,
+    /// which is the deliberate fail-safe default: nothing is enslaved into
+    /// a `Lacp`-mode bond until the first real push arrives.
+    lacp_active_members: HashMap<String, Vec<String>>,
 }
 
 impl Interfaces {
@@ -159,6 +179,31 @@ impl Interfaces {
 
     pub fn is_empty(&self) -> bool {
         self.by_name.is_empty()
+    }
+
+    /// Applies a fresh `nos-lacpd` push (`InterfaceRequest::PushLacpMembers`)
+    /// — replaces `aggregate`'s active-member set and recomputes
+    /// `port_aggregate_active` for every currently-known interface that
+    /// references it, returning those interfaces' updated state so the
+    /// caller can `driver.apply` them immediately rather than waiting for
+    /// the next periodic resync (mirrors `nos-ribd`'s BGP-route-push
+    /// immediate-apply precedent).
+    pub fn set_lacp_active_members(
+        &mut self,
+        aggregate: &str,
+        active_members: Vec<String>,
+    ) -> Vec<InterfaceState> {
+        let active: HashSet<&str> = active_members.iter().map(String::as_str).collect();
+        let mut updated = Vec::new();
+        for state in self.by_name.values_mut() {
+            if state.port_aggregate.as_deref() == Some(aggregate) {
+                state.port_aggregate_active = active.contains(state.name.as_str());
+                updated.push(state.clone());
+            }
+        }
+        self.lacp_active_members
+            .insert(aggregate.to_string(), active_members);
+        updated
     }
 }
 
@@ -255,6 +300,12 @@ pub async fn build_from_config(
         let switching_profile_members =
             resolve_switching_profile_members(cfg, iface.switching_profile.as_deref());
         let subinterfaces = build_subinterfaces(driver, &iface.name, &iface.subinterfaces).await;
+        let port_aggregate_active = resolve_port_aggregate_active(
+            cfg,
+            iface.port_aggregate.as_deref(),
+            &iface.name,
+            &previous.lacp_active_members,
+        );
         let state = InterfaceState {
             name: iface.name.clone(),
             addresses: iface.addresses.clone(),
@@ -262,6 +313,7 @@ pub async fn build_from_config(
             switching_profile: iface.switching_profile.clone(),
             switching_profile_members,
             port_aggregate: iface.port_aggregate.clone(),
+            port_aggregate_active,
             mtu: iface.mtu,
             subinterfaces,
         };
@@ -271,6 +323,7 @@ pub async fn build_from_config(
             routing_table = ?state.routing_table,
             switching_profile_members = ?state.switching_profile_members,
             port_aggregate = ?state.port_aggregate,
+            port_aggregate_active = state.port_aggregate_active,
             subinterfaces = ?state.subinterfaces,
             "applying interface state"
         );
@@ -299,6 +352,34 @@ pub async fn build_from_config(
         domains,
         by_port_aggregate,
         port_aggregates,
+        lacp_active_members: previous.lacp_active_members.clone(),
+    }
+}
+
+/// Whether `iface_name` should actually be enslaved into `port_aggregate`
+/// right now — unconditional for a `Xor`-mode aggregate (or one not found
+/// in `cfg`, which commit-time validation should already prevent), gated on
+/// `lacp_active_members` for a `Lacp`-mode one. See
+/// `InterfaceState.port_aggregate_active`.
+fn resolve_port_aggregate_active(
+    cfg: &Config,
+    port_aggregate: Option<&str>,
+    iface_name: &str,
+    lacp_active_members: &HashMap<String, Vec<String>>,
+) -> bool {
+    let Some(name) = port_aggregate else {
+        return false;
+    };
+    let mode = cfg
+        .port_aggregates
+        .iter()
+        .find(|a| a.name == name)
+        .map(|a| a.mode);
+    match mode {
+        Some(PortAggregateMode::Lacp) => lacp_active_members
+            .get(name)
+            .is_some_and(|members| members.iter().any(|m| m == iface_name)),
+        _ => true,
     }
 }
 
@@ -752,5 +833,72 @@ mod tests {
             interfaces.get("eth0").unwrap().port_aggregate.as_deref(),
             Some("bond1")
         );
+    }
+
+    fn cfg_with_aggregate(mode: PortAggregateMode, member: Interface) -> Config {
+        let mut config = cfg(vec![member]);
+        config.port_aggregates = vec![nos_proto::PortAggregate {
+            name: "bond1".to_string(),
+            mode,
+            switching_profile: None,
+            mtu: None,
+            subinterfaces: Vec::new(),
+        }];
+        config
+    }
+
+    #[tokio::test]
+    async fn xor_mode_member_is_active_unconditionally() {
+        let mut iface = interface("eth0");
+        iface.port_aggregate = Some("bond1".to_string());
+        let interfaces = build_from_config(
+            &cfg_with_aggregate(PortAggregateMode::Xor, iface),
+            &NoopInterfaceDriver,
+            &Interfaces::new(),
+        )
+        .await;
+        assert!(interfaces.get("eth0").unwrap().port_aggregate_active);
+    }
+
+    #[tokio::test]
+    async fn lacp_mode_member_is_inactive_until_pushed() {
+        let mut iface = interface("eth0");
+        iface.port_aggregate = Some("bond1".to_string());
+        let interfaces = build_from_config(
+            &cfg_with_aggregate(PortAggregateMode::Lacp, iface),
+            &NoopInterfaceDriver,
+            &Interfaces::new(),
+        )
+        .await;
+        assert!(!interfaces.get("eth0").unwrap().port_aggregate_active);
+    }
+
+    #[tokio::test]
+    async fn set_lacp_active_members_activates_pushed_interface() {
+        let mut iface = interface("eth0");
+        iface.port_aggregate = Some("bond1".to_string());
+        let config = cfg_with_aggregate(PortAggregateMode::Lacp, iface);
+        let mut interfaces =
+            build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+
+        let updated = interfaces.set_lacp_active_members("bond1", vec!["eth0".to_string()]);
+
+        assert_eq!(updated.len(), 1);
+        assert!(updated[0].port_aggregate_active);
+        assert!(interfaces.get("eth0").unwrap().port_aggregate_active);
+    }
+
+    #[tokio::test]
+    async fn lacp_active_members_survive_an_unrelated_resync() {
+        let mut iface = interface("eth0");
+        iface.port_aggregate = Some("bond1".to_string());
+        let config = cfg_with_aggregate(PortAggregateMode::Lacp, iface);
+        let mut previous =
+            build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        previous.set_lacp_active_members("bond1", vec!["eth0".to_string()]);
+
+        let interfaces = build_from_config(&config, &NoopInterfaceDriver, &previous).await;
+
+        assert!(interfaces.get("eth0").unwrap().port_aggregate_active);
     }
 }

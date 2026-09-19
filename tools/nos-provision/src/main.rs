@@ -28,6 +28,24 @@ use nos_proto::{
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
+/// Clap-facing mirror of `nos_proto::PortAggregateMode` — `clap::ValueEnum`
+/// can't be derived on a `nos-proto` type directly (that crate stays
+/// dependency-free of `clap`, per the star-dependency rule).
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum PortAggregateModeArg {
+    Xor,
+    Lacp,
+}
+
+impl From<PortAggregateModeArg> for PortAggregateMode {
+    fn from(mode: PortAggregateModeArg) -> Self {
+        match mode {
+            PortAggregateModeArg::Xor => PortAggregateMode::Xor,
+            PortAggregateModeArg::Lacp => PortAggregateMode::Lacp,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[allow(clippy::struct_excessive_bools)] // one CLI flag per independent provisioning toggle
 struct Args {
@@ -268,12 +286,18 @@ struct Args {
     #[arg(long)]
     delete_switching_profile: bool,
 
-    /// If set, creates this port aggregate (a static, non-LACP Xor Linux
-    /// bond — the only mode this NOS supports so far) if missing, and
+    /// If set, creates this port aggregate (a Linux bond) if missing, and
     /// enslaves every `--enslave-interface-into-port-aggregate` member into
     /// it (`PortAggregateOp::Ensure`, `InterfaceOp::SetPortAggregate`).
     #[arg(long)]
     port_aggregate: Option<String>,
+
+    /// The aggregate's mode: `xor` (static, every member enslaved
+    /// unconditionally) or `lacp` (real IEEE 802.1AX negotiation via
+    /// `nos-lacpd` — see `lacp/CLAUDE.md`). Only meaningful with
+    /// `--port-aggregate` also set.
+    #[arg(long, value_enum, default_value_t = PortAggregateModeArg::Xor)]
+    port_aggregate_mode: PortAggregateModeArg,
 
     /// If set (requires `--port-aggregate`), sets the aggregate's own mtu
     /// (`PortAggregateOp::SetMtu`).
@@ -285,6 +309,13 @@ struct Args {
     /// Only meaningful with `--port-aggregate` also set.
     #[arg(long = "enslave-interface-into-port-aggregate")]
     port_aggregate_members: Vec<String>,
+
+    /// One interface name per repetition: clears that interface's
+    /// `port_aggregate` reference (`InterfaceOp::ClearPortAggregate`),
+    /// withdrawing just that member while leaving the aggregate and its other
+    /// members in place. Independent of `--port-aggregate`.
+    #[arg(long = "clear-port-aggregate-member")]
+    clear_port_aggregate_members: Vec<String>,
 
     /// If set (requires `--port-aggregate`, naming which one), deletes the
     /// port aggregate outright instead of ensuring/enslaving into it
@@ -831,7 +862,7 @@ async fn main() -> anyhow::Result<()> {
     } else if let Some(name) = args.port_aggregate.clone() {
         ops.push(ConfigOp::PortAggregate(PortAggregateOp::Ensure {
             name: name.clone(),
-            mode: PortAggregateMode::Xor,
+            mode: args.port_aggregate_mode.into(),
         }));
         if let Some(mtu) = args.port_aggregate_mtu {
             ops.push(ConfigOp::PortAggregate(PortAggregateOp::SetMtu {
@@ -852,6 +883,12 @@ async fn main() -> anyhow::Result<()> {
         bail!(
             "--port-aggregate-mtu/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
         );
+    }
+
+    for member in &args.clear_port_aggregate_members {
+        ops.push(ConfigOp::Interface(InterfaceOp::ClearPortAggregate {
+            name: member.clone(),
+        }));
     }
 
     if let Some(name) = args.ospf_instance.clone() {

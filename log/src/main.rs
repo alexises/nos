@@ -54,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
         args.log_store_path.clone(),
         args.capacity,
         persist_rx,
+        store.persist_queue_bytes(),
     ));
 
     let server_task =

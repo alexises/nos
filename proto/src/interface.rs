@@ -92,6 +92,23 @@ pub struct PortAggregateStatus {
     pub bond_name: Option<String>,
 }
 
+/// One `PortAggregate`'s current 802.1AX-negotiated active-member set,
+/// pushed by the owning (single, system-wide) `nos-lacpd` instance to
+/// `nos-interfaced` over a persistent connection — the data-plane push
+/// counterpart of `RibRequest::PushBgpRoutes` (see root `CLAUDE.md`'s
+/// "Config plane vs data plane"). Unlike that route push, this is always a
+/// **full resend of the whole set**, never incremental `Add`/`Remove`: a
+/// `PortAggregate` realistically has a handful of members, so there is no
+/// batching win, and a full resend collapses "on every negotiation change"
+/// and "on reconnect" into the same one code path. Only meaningful for a
+/// `PortAggregateMode::Lacp` aggregate — `nos-lacpd` never pushes for a
+/// `Xor` one, whose members are enslaved unconditionally regardless.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LacpAggregateMembers {
+    pub aggregate: String,
+    pub active_members: Vec<String>,
+}
+
 /// Messages sent from a client to `nos-interfaced`'s IPC socket.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -109,6 +126,11 @@ pub enum InterfaceRequest {
     GetPortAggregates,
     /// One-shot: a single named port aggregate.
     GetPortAggregate { name: String },
+    /// Fire-and-forget, sent by `nos-lacpd`: replaces the given aggregate's
+    /// active-member set and applies it to the kernel bond immediately
+    /// (not deferred to the periodic re-apply tick), gating which of its
+    /// `Lacp`-mode members are currently enslaved. No reply.
+    PushLacpMembers(LacpAggregateMembers),
 }
 
 /// Messages sent from `nos-interfaced` to a client.

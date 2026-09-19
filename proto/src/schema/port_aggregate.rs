@@ -6,15 +6,24 @@ use crate::validators::unique_in;
 use super::interface::{switching_profile_reference_valid, valid_mtu, valid_subinterface_list};
 use super::{Config, Subinterface, VlanTag};
 
-/// A bonding mode with no LACP (802.3ad) negotiation — the switch side must
-/// be statically configured to match. Only the one mode this phase needs is
-/// modeled; add a variant here (`RoundRobin`/`ActiveBackup`/`Broadcast`/…)
-/// when a real need for it shows up, per `PortAggregate`'s own doc comment.
+/// How a `PortAggregate`'s member set is decided. Both variants create the
+/// *same* underlying kernel bond device (`BondMode::BalanceXor` — see
+/// `interface::driver::linux::bond_mode_of`'s doc comment for why `Lacp`
+/// does **not** map to the kernel's own `Ieee8023Ad` bonding mode); the
+/// difference is only which control plane decides which members are
+/// actually enslaved into it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PortAggregateMode {
-    /// Linux bonding's `BalanceXor` — outgoing traffic is hashed across
-    /// members by a fixed policy (source/destination MAC by default).
+    /// Static: every member named by an `Interface.port_aggregate`
+    /// reference is enslaved unconditionally, no negotiation.
     Xor,
+    /// Dynamic: membership is negotiated by `nos-lacpd` (real IEEE 802.1AX
+    /// LACPDU exchange and Actor/Partner state machines, see `lacp/
+    /// CLAUDE.md`), which pushes its currently-negotiated active-member set
+    /// to `nos-interfaced` — a member interface is only enslaved once
+    /// `nos-lacpd` confirms it, and is released again if negotiation lapses
+    /// (partner LACPDUs stop, link goes down, etc).
+    Lacp,
 }
 
 /// A named Linux bonding device — static aggregation only, no LACP. Same
@@ -113,7 +122,7 @@ mod tests {
     fn aggregate(name: &str) -> PortAggregate {
         PortAggregate {
             name: name.to_string(),
-            mode: PortAggregateMode::Xor,
+            mode: PortAggregateMode::Xor, // arbitrary — mode has no bearing on the validators tested here
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),

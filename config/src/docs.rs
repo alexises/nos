@@ -499,10 +499,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::EnsurePortAggregate => (
             "Create a port aggregate in the transaction if it doesn't already exist.",
-            "Adds a new static (non-LACP) Linux bonding device with the given name and mode to \
-             the transaction's in-progress config if none exists with that name yet; if one \
-             already exists, this is a no-op. An interface becomes a bonded member by pointing \
-             its own port-aggregate field at this aggregate's name, the same way it points at a \
+            "Adds a new Linux bonding device with the given name and mode to the transaction's \
+             in-progress config if none exists with that name yet; if one already exists, this \
+             is a no-op. An interface becomes a bonded member by pointing its own \
+             port-aggregate field at this aggregate's name, the same way it points at a \
              switching profile for L2 trunking.",
         ),
         Topic::DeletePortAggregate => (
@@ -514,13 +514,16 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         Topic::SetPortAggregateMode => (
             "Set a port aggregate's bonding mode.",
             "Updates the mode field on the named port aggregate in the transaction's \
-             in-progress config. The aggregate must already exist. Only static (non-LACP) \
-             modes are supported.",
+             in-progress config. The aggregate must already exist. `xor` enslaves every member \
+             interface unconditionally, with no negotiation. `lacp` negotiates membership over \
+             a real IEEE 802.1AX LACPDU exchange run by nos-lacpd — a member is only enslaved \
+             once negotiation with the partner confirms it, and is released again if the \
+             negotiation lapses.",
         ),
         Topic::SetInterfacePortAggregate => (
             "Associate an interface with a port aggregate as a bonded member.",
-            "Points an interface at a port aggregate by name, making it a static bonded member. \
-             The port aggregate must exist, checked at commit time. A member interface must not \
+            "Points an interface at a port aggregate by name, making it a bonded member. The \
+             port aggregate must exist, checked at commit time. A member interface must not \
              also carry a switching-profile association or any subinterfaces — like VRF/bridge \
              enslavement, bond enslavement claims the link's one Linux master device — checked \
              at commit time.",

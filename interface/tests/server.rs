@@ -73,7 +73,7 @@ async fn get_interfaces_returns_every_interface_sorted_by_name() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("interface.sock");
     let interfaces = Arc::new(RwLock::new(sample_interfaces().await));
-    let _server = server::start(&path, interfaces).unwrap();
+    let _server = server::start(&path, interfaces, Arc::new(NoopInterfaceDriver)).unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     writer.send(InterfaceRequest::GetInterfaces).await.unwrap();
@@ -92,7 +92,7 @@ async fn get_interface_returns_matching_status() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("interface.sock");
     let interfaces = Arc::new(RwLock::new(sample_interfaces().await));
-    let _server = server::start(&path, interfaces).unwrap();
+    let _server = server::start(&path, interfaces, Arc::new(NoopInterfaceDriver)).unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     writer
@@ -122,7 +122,7 @@ async fn get_interface_missing_returns_not_found() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("interface.sock");
     let interfaces = Arc::new(RwLock::new(sample_interfaces().await));
-    let _server = server::start(&path, interfaces).unwrap();
+    let _server = server::start(&path, interfaces, Arc::new(NoopInterfaceDriver)).unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     writer

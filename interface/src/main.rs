@@ -140,10 +140,10 @@ async fn main() -> anyhow::Result<()> {
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         interfaces.clone(),
-        driver,
+        driver.clone(),
         shutdown_rx,
     ));
-    let server_task = server::start(&args.listen_socket, interfaces)
+    let server_task = server::start(&args.listen_socket, interfaces, driver)
         .inspect_err(|e| tracing::error!(error = %e, "failed to start interface IPC server"))
         .context("starting interface IPC server")?;
 
