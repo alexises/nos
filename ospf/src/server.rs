@@ -72,6 +72,9 @@ async fn handle_connection(
                     break;
                 }
             }
+            OspfRequest::RedistributeRoutes(update) => {
+                links.apply_redistribute_update(update).await;
+            }
         }
     }
 }

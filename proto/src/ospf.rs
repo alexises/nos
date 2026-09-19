@@ -99,6 +99,12 @@ pub enum OspfRequest {
     GetNeighbors,
     /// One-shot: every installed LSA's header, across every area.
     GetDatabase,
+    /// Fire-and-forget, no reply — sent continuously by `nos-ribd` over one
+    /// long-lived connection, the OSPF-redistribution analogue of
+    /// `BgpRequest::RedistributeRoutes`: this instance's ASBR-redistributed
+    /// routes (e.g. `redistribute from static to ospf`), to be originated as
+    /// real RFC 2328 AS-external-LSAs.
+    RedistributeRoutes(crate::bgp::RedistributeUpdate),
 }
 
 /// Messages sent from `nos-ospfd` to a query client.

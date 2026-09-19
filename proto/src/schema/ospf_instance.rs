@@ -39,6 +39,17 @@ pub struct OspfInstance {
     /// routing table. Deliberately not rendered by `nos-cli`.
     #[garde(skip)]
     pub routing_table: Option<String>,
+
+    /// The name of the RPL policy filtering routes redistributed into this
+    /// instance, mirrored from the owning `RoutingTable.redistribute.policy`
+    /// (only when `redistribute.to == Ospf`). Derived and read-only, exactly
+    /// like `routing_table` above: never set by any `OspfInstanceOp`,
+    /// recomputed by `nos-config` (`crate::derive::sync_routing_table_refs`)
+    /// on every commit and on load. `nos-ospfd` reads this directly to
+    /// resolve its own redistribution policy without scanning every routing
+    /// table. Deliberately not rendered by `nos-cli`.
+    #[garde(skip)]
+    pub redistribute_policy: Option<String>,
 }
 
 /// No two areas within the same instance may share an `area_id` — mirrors
@@ -73,6 +84,7 @@ mod tests {
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             areas: Vec::new(),
             routing_table: None,
+            redistribute_policy: None,
         }
     }
 

@@ -11,8 +11,12 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ipnet::Ipv4Net;
-use nos_proto::{LinkInterfaceState, LsaSummary, NeighborSummary, NetworkType, OspfNeighborState};
+use ipnet::{IpNet, Ipv4Net};
+use nos_proto::{
+    LinkInterfaceState, LsaSummary, NeighborSummary, NetworkType, OspfNeighborState,
+    RedistributeUpdate,
+};
+use nos_rpl::CompiledPolicy;
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -21,8 +25,8 @@ use tracing::{info, warn};
 use crate::election::{self, Candidate};
 use crate::exchange::{self, AdjacencyData};
 use crate::lsa::{
-    self, Lsa, LsaBody, LsaHeader, LsaKey, NetworkLsaBody, RouterLink, RouterLsaBody,
-    LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK, LINK_TYPE_TRANSIT_NETWORK,
+    self, AsExternalLsaBody, Lsa, LsaBody, LsaHeader, LsaKey, NetworkLsaBody, RouterLink,
+    RouterLsaBody, LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK, LINK_TYPE_TRANSIT_NETWORK,
 };
 use crate::lsdb::Lsdb;
 use crate::neighbor::{self, NeighborState};
@@ -1175,6 +1179,18 @@ pub struct LinkManager {
     /// resolve in seconds rather than tens of minutes. See `main.rs`'s
     /// `--lsa-age-multiplier`.
     age_multiplier: u16,
+    /// Raw (pre-policy) redistributed prefixes from `OspfRequest::
+    /// RedistributeRoutes`. A `HashSet`, not a map — the `RedistributedRoute`
+    /// gateway is never used: this router always originates with
+    /// `forwarding_address = 0.0.0.0`, so a redistributed route's own next-hop
+    /// always comes from SPF's own computed next-hop to the ASBR, never from
+    /// the raw route's gateway (see `AsExternalLsaBody`'s doc comment).
+    redistribute_raw: Mutex<HashSet<Ipv4Net>>,
+    /// Policy-filtered set actually originated as Type-5 LSAs. Recomputed by
+    /// `set_redistribute_policy`, called every resync from `reconcile.rs`,
+    /// mirroring `bgp::BgpRib::set_redistribute_policy`'s "called
+    /// unconditionally, re-filters eagerly" contract.
+    redistribute_filtered: Mutex<HashSet<Ipv4Net>>,
 }
 
 impl LinkManager {
@@ -1185,6 +1201,8 @@ impl LinkManager {
             router_id: Mutex::new(None),
             stub_networks: Mutex::new(HashMap::new()),
             age_multiplier,
+            redistribute_raw: Mutex::new(HashSet::new()),
+            redistribute_filtered: Mutex::new(HashSet::new()),
         });
         let background = Arc::clone(&manager);
         // Runs for the process's lifetime — like every link driver task, it
@@ -1200,6 +1218,7 @@ impl LinkManager {
                     _ = origination_tick.tick() => {
                         if let Some(router_id) = *background.router_id.lock().await {
                             background.originate_router_lsas(router_id).await;
+                            background.originate_as_external_lsas(router_id).await;
                         }
                     }
                     _ = age_tick.tick() => {
@@ -1336,6 +1355,96 @@ impl LinkManager {
                 );
             }
         }
+    }
+
+    /// RFC 2328 §12.4.3-style self-origination of this router's own
+    /// redistributed prefixes as AS-external-LSAs (ASBR-only — see
+    /// `ospf/CLAUDE.md`'s "ASBR and AS-external-LSA origination"). Run from
+    /// the same tick as `originate_router_lsas`.
+    ///
+    /// This is the one genuinely new cross-area mechanism in this crate:
+    /// this router's own redistributed prefixes are installed into *every*
+    /// area it is itself attached to (`self.lsdbs`'s full key set), not just
+    /// one — real RFC 2328 AS-external-LSAs are domain-wide, not area-scoped,
+    /// like Router-/Network-LSAs. This is **not** real ABR translation of
+    /// another router's externally-learned LSA across areas (which stays out
+    /// of scope, see root `CLAUDE.md`) — it's simply this same router
+    /// replicating its own origination into every area it directly
+    /// participates in. No new flooding code is needed beyond the install
+    /// step: `flood_full_neighbors` already resends each link's own area's
+    /// full `Lsdb` periodically, so a freshly-installed Type-5 propagates
+    /// automatically.
+    async fn originate_as_external_lsas(&self, local_router_id: Ipv4Addr) {
+        let prefixes: Vec<Ipv4Net> = self
+            .redistribute_filtered
+            .lock()
+            .await
+            .iter()
+            .copied()
+            .collect();
+        let area_ids: Vec<Ipv4Addr> = self.lsdbs.lock().await.keys().copied().collect();
+
+        for area_id in area_ids {
+            let lsdb = self.lsdb_for(area_id).await;
+            let mut lsdb = lsdb.lock().await;
+            for prefix in &prefixes {
+                install_self_originated(
+                    &mut lsdb,
+                    local_router_id,
+                    lsa::LSA_TYPE_AS_EXTERNAL,
+                    prefix.network(),
+                    LsaBody::AsExternal(AsExternalLsaBody {
+                        network_mask: prefix.netmask(),
+                        metric: 0,
+                        forwarding_address: Ipv4Addr::UNSPECIFIED,
+                        external_route_tag: 0,
+                    }),
+                );
+            }
+        }
+    }
+
+    /// Applies one `OspfRequest::RedistributeRoutes` update (`Full`/`Add`/
+    /// `Remove`, pushed continuously by the owning `nos-ribd` instance) to
+    /// the raw redistributed-prefix set. This is `OSPFv2` (IPv4-only,
+    /// `Ipv4Addr` throughout this crate); `RedistributedRoute.prefix` is a
+    /// dual-stack `IpNet` shared with BGP's own redistribution wire type, so
+    /// an `IpNet::V6` entry is skipped with a `warn!` rather than stored or
+    /// panicked on.
+    pub async fn apply_redistribute_update(&self, update: RedistributeUpdate) {
+        let mut raw = self.redistribute_raw.lock().await;
+        match update {
+            RedistributeUpdate::Full(routes) => {
+                raw.clear();
+                for route in routes {
+                    insert_redistributed_prefix(&mut raw, route.prefix);
+                }
+            }
+            RedistributeUpdate::Add(route) => {
+                insert_redistributed_prefix(&mut raw, route.prefix);
+            }
+            RedistributeUpdate::Remove(prefix) => match prefix {
+                IpNet::V4(v4) => {
+                    raw.remove(&v4);
+                }
+                IpNet::V6(_) => {}
+            },
+        }
+    }
+
+    /// Re-filters every raw redistributed prefix through `policy`, storing
+    /// the surviving set into `redistribute_filtered`. Called unconditionally
+    /// on every resync from `reconcile.rs` (mirrors `bgp::BgpRib::
+    /// set_redistribute_policy`'s "called unconditionally, re-filters
+    /// eagerly" contract, so a policy edit takes effect promptly rather than
+    /// waiting on the next raw update).
+    pub async fn set_redistribute_policy(&self, policy: Arc<CompiledPolicy>) {
+        let raw = self.redistribute_raw.lock().await.clone();
+        let filtered: HashSet<Ipv4Net> = raw
+            .into_iter()
+            .filter(|&prefix| passes_redistribute_policy(prefix, &policy))
+            .collect();
+        *self.redistribute_filtered.lock().await = filtered;
     }
 
     /// Diffs `desired` against currently-running links by `attach_point`:
@@ -1640,6 +1749,51 @@ fn install_self_originated(
         refreshed = needs_refresh,
         "ospf lsa originated"
     );
+}
+
+/// Inserts `prefix` into `raw` if it's IPv4 — see `LinkManager::
+/// apply_redistribute_update`'s doc comment for why a v6 entry is skipped
+/// rather than stored.
+fn insert_redistributed_prefix(raw: &mut HashSet<Ipv4Net>, prefix: IpNet) {
+    match prefix {
+        IpNet::V4(v4) => {
+            raw.insert(v4);
+        }
+        IpNet::V6(_) => {
+            warn!(prefix = %prefix, "ospf redistribute update carried an ipv6 prefix, ignoring (ospfv2 is ipv4-only)");
+        }
+    }
+}
+
+/// Evaluates `prefix` against `policy` — the redistribute-policy adapter.
+/// OSPF has no route type of its own to adapt (unlike `bgp::rib::
+/// to_policy_input`, which converts a real `RibRoute`), so `nos_rpl::
+/// BgpInput` is built inline with empty/default values: a redistribute
+/// policy has no legitimate reason to reference `this.bgp.*` fields, so they
+/// simply read as empty/zero, harmless for a script that only matches on
+/// `this.prefix`.
+fn passes_redistribute_policy(prefix: Ipv4Net, policy: &CompiledPolicy) -> bool {
+    let input = nos_rpl::Input {
+        prefix: IpNet::V4(prefix),
+        bgp: nos_rpl::BgpInput {
+            origin: nos_rpl::Origin::Igp,
+            as_path: &[],
+            local_pref: 0,
+            med: None,
+            next_hop: None,
+            learned_via_ibgp: false,
+            router_id: None,
+            originator_id: None,
+            cluster_list: &[],
+            communities: &[],
+            extended_communities: &[],
+            large_communities: &[],
+        },
+    };
+    matches!(
+        nos_rpl::vm::run(policy, &input),
+        nos_rpl::Verdict::Accept { .. }
+    )
 }
 
 /// Pure diffing, like `bgp::session::diff_peers`.

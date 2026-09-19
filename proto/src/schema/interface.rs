@@ -680,6 +680,7 @@ mod tests {
                     }],
                 }],
                 routing_table: None,
+                redistribute_policy: None,
             }],
             ..Default::default()
         }

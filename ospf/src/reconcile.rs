@@ -7,6 +7,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use ipnet::Ipv4Net;
 use nos_proto::{DiffScope, Event, NetworkType, OspfAuth, OspfCryptoAlgorithm, ServiceRef};
+use nos_rpl::CompiledPolicy;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -270,9 +271,119 @@ async fn resync(
         }
     }
 
+    let redistribute_policy = resolve_redistribute_policy(&cfg, own.redistribute_policy.as_deref());
+    links.set_redistribute_policy(redistribute_policy).await;
+
     links
         .reconcile(desired_links, desired_stubs, own.router_id)
         .await;
+}
+
+/// Resolves the mirrored `OspfInstance.redistribute_policy` field to a
+/// compiled policy. Unlike `bgp::policy::PolicyCache` (which caches many
+/// policies for many peer-groups), `OspfInstance.redistribute_policy` is
+/// exactly one policy per instance — compiling fresh every resync tick (the
+/// same cadence every other resolution in this function already runs at)
+/// needs no cache-invalidation logic; add a cache only if profiling ever
+/// shows this compile step matters.
+///
+/// `None` resolves to `accept-all`, matching `bgp::reconcile::resync`'s own
+/// precedent — redistribution is already opt-in via the `Redistribute`
+/// rule's existence, unlike peer import/export policy's deny-all default.
+///
+/// `ponytail:` this duplicates `bgp::policy::PolicyCache::resync`'s
+/// `Symbols`-building logic rather than sharing it — expected, not an
+/// oversight, per the star-dependency rule (components share only
+/// `nos-proto`, never each other's code).
+fn resolve_redistribute_policy(
+    cfg: &nos_proto::Config,
+    redistribute_policy_name: Option<&str>,
+) -> Arc<CompiledPolicy> {
+    let Some(name) = redistribute_policy_name else {
+        return Arc::new(nos_rpl::ACCEPT_ALL.clone());
+    };
+    if name == nos_rpl::ACCEPT_ALL_NAME {
+        return Arc::new(nos_rpl::ACCEPT_ALL.clone());
+    }
+    if name == nos_rpl::DENY_ALL_NAME {
+        return Arc::new(nos_rpl::DENY_ALL.clone());
+    }
+    let Some(def) = cfg.policy_definitions.iter().find(|p| p.name == name) else {
+        // Can't happen in practice — commit-time validation already
+        // guarantees this reference exists — but the field is still a plain
+        // `Option<String>` on the wire.
+        return Arc::new(nos_rpl::DENY_ALL.clone());
+    };
+
+    let alias_parts: Vec<(&str, Vec<i64>)> = cfg
+        .community_aliases
+        .iter()
+        .filter_map(|a| {
+            nos_rpl::parse_colon_literal(&a.value).map(|parts| (a.name.as_str(), parts))
+        })
+        .collect();
+    let alias_refs: Vec<(&str, &[i64])> = alias_parts
+        .iter()
+        .map(|(n, p)| (*n, p.as_slice()))
+        .collect();
+
+    let resolve_member = |m: &str| -> Option<Vec<i64>> {
+        cfg.community_aliases
+            .iter()
+            .find(|a| a.name == m)
+            .and_then(|a| nos_rpl::parse_colon_literal(&a.value))
+            .or_else(|| nos_rpl::parse_colon_literal(m))
+    };
+    let group_parts: Vec<(&str, Vec<Vec<i64>>)> = cfg
+        .community_groups
+        .iter()
+        .map(|g| {
+            (
+                g.name.as_str(),
+                g.members.iter().filter_map(|m| resolve_member(m)).collect(),
+            )
+        })
+        .collect();
+    let group_member_slices: Vec<Vec<&[i64]>> = group_parts
+        .iter()
+        .map(|(_, members)| members.iter().map(Vec::as_slice).collect())
+        .collect();
+    let group_refs: Vec<(&str, &[&[i64]])> = group_parts
+        .iter()
+        .zip(&group_member_slices)
+        .map(|((name, _), slices)| (*name, slices.as_slice()))
+        .collect();
+
+    let prefix_list_entries: Vec<(&str, Vec<nos_rpl::PrefixListEntry>)> = cfg
+        .prefix_lists
+        .iter()
+        .map(|pl| {
+            let entries = pl
+                .entries
+                .iter()
+                .map(|e| nos_rpl::PrefixListEntry {
+                    cidr: e.cidr,
+                    range: e.range,
+                })
+                .collect();
+            (pl.name.as_str(), entries)
+        })
+        .collect();
+    let prefix_list_refs: Vec<(&str, &[nos_rpl::PrefixListEntry])> = prefix_list_entries
+        .iter()
+        .map(|(n, e)| (*n, e.as_slice()))
+        .collect();
+
+    let symbols = nos_rpl::Symbols {
+        aliases: &alias_refs,
+        groups: &group_refs,
+        prefix_lists: &prefix_list_refs,
+    };
+
+    match nos_rpl::compile(&def.source, &symbols) {
+        Ok(compiled) => Arc::new(compiled),
+        Err(_) => Arc::new(nos_rpl::DENY_ALL.clone()), // unreachable post-commit-validation
+    }
 }
 
 /// Every L3 attach point (loopback interface name, `<interface>.<tag>`

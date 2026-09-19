@@ -18,6 +18,7 @@ pub fn sync_routing_table_refs(config: &mut Config) {
     }
     for instance in &mut config.ospf_instances {
         instance.routing_table = None;
+        instance.redistribute_policy = None;
     }
     for table in &config.routing_tables {
         if let Some(bgp_instance) = &table.bgp_instance {
@@ -41,6 +42,11 @@ pub fn sync_routing_table_refs(config: &mut Config) {
                 .find(|i| &i.name == ospf_instance)
             {
                 instance.routing_table = Some(table.name.clone());
+                instance.redistribute_policy = table
+                    .redistribute
+                    .as_ref()
+                    .filter(|r| r.to == RedistributeTarget::Ospf)
+                    .and_then(|r| r.policy.clone());
             }
         }
     }
@@ -72,6 +78,7 @@ mod tests {
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             areas: Vec::new(),
             routing_table: None,
+            redistribute_policy: None,
         }
     }
 
@@ -106,6 +113,23 @@ mod tests {
                 policy: policy.map(str::to_string),
             }),
             ..table(name, bgp_instance)
+        }
+    }
+
+    fn table_with_ospf_redistribute(
+        name: &str,
+        ospf_instance: Option<&str>,
+        policy: Option<&str>,
+    ) -> RoutingTable {
+        use crate::schema::{Redistribute, RedistributeSource};
+
+        RoutingTable {
+            redistribute: Some(Redistribute {
+                from: RedistributeSource::Static,
+                to: RedistributeTarget::Ospf,
+                policy: policy.map(str::to_string),
+            }),
+            ..table_with_ospf(name, ospf_instance)
         }
     }
 
@@ -218,5 +242,33 @@ mod tests {
         };
         sync_routing_table_refs(&mut cfg);
         assert_eq!(cfg.ospf_instances[0].routing_table, None);
+    }
+
+    #[test]
+    fn redistribute_to_ospf_mirrors_policy_name() {
+        let mut cfg = Config {
+            ospf_instances: vec![ospf_instance("o1")],
+            routing_tables: vec![table_with_ospf_redistribute("rt1", Some("o1"), Some("p1"))],
+            ..Default::default()
+        };
+        sync_routing_table_refs(&mut cfg);
+        assert_eq!(
+            cfg.ospf_instances[0].redistribute_policy.as_deref(),
+            Some("p1")
+        );
+    }
+
+    #[test]
+    fn stale_ospf_redistribute_policy_is_cleared_when_claim_is_removed() {
+        let mut cfg = Config {
+            ospf_instances: vec![OspfInstance {
+                redistribute_policy: Some("stale".to_string()),
+                ..ospf_instance("o1")
+            }],
+            routing_tables: vec![table_with_ospf("rt1", None)],
+            ..Default::default()
+        };
+        sync_routing_table_refs(&mut cfg);
+        assert_eq!(cfg.ospf_instances[0].redistribute_policy, None);
     }
 }

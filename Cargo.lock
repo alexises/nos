@@ -1268,6 +1268,7 @@ dependencies = [
  "md-5",
  "nos-log-client",
  "nos-proto",
+ "nos-rpl",
  "serde",
  "sha1",
  "sha2",

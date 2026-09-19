@@ -174,13 +174,15 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              explicit association.",
         ),
         Topic::SetRoutingTableRedistribute => (
-            "Redistribute this table's static routes into its associated BGP instance.",
-            "Sets the redistribute field on a routing table (currently only 'from static to \
-             bgp' is supported). Both bgp-instance and static-routing-instance must already be \
-             set on the table for the rule to be valid — checked at commit time, not when the \
+            "Redistribute this table's static routes into its associated BGP or OSPF instance.",
+            "Sets the redistribute field on a routing table ('from static to bgp' or 'from \
+             static to ospf' — redistributing into OSPF makes this router a real RFC 2328 ASBR, \
+             originating an AS-external-LSA per redistributed prefix). Both bgp-instance/\
+             ospf-instance (matching the chosen target) and static-routing-instance must already \
+             be set on the table for the rule to be valid — checked at commit time, not when the \
              rule is set. An optional trailing 'policy <name>' clause names an RPL policy (or \
-             accept-all/deny-all) to filter redistributed routes through before they reach BGP; \
-             omitted, redistribution stays unfiltered (accept-all), unlike a peer-group's \
+             accept-all/deny-all) to filter redistributed routes through before they reach BGP/ \
+             OSPF; omitted, redistribution stays unfiltered (accept-all), unlike a peer-group's \
              import-policy/export-policy, which default to deny-all.",
         ),
         Topic::ClearRoutingTableRedistribute => (

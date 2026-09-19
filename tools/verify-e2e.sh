@@ -106,12 +106,20 @@
 # simulated), and that reverting to a matching key lets a fresh Full
 # adjacency form again.
 #
+# A seventh, `asbr` (requires `ospf` to have already run), configures a
+# static route + "redistribute from static to ospf" on router-a, confirming
+# real RFC 2328 ASBR behavior: router-a actually originates a Type-5
+# AS-external-LSA for the redistributed prefix, router-b learns and installs
+# it into its own LSDB over the real adjacency, and router-b's own SPF
+# computes and pushes a real kernel route for it via nos-ribd -- see
+# ospf/CLAUDE.md's "ASBR and AS-external-LSA origination".
+#
 # nos-cli's interactive shell (reedline) can't be scripted over a plain
 # pipe, so provisioning goes through `nos-provision` (tools/nos-provision) —
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|ospf-aging|ospf-auth|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
+# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|ospf-aging|ospf-auth|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -209,6 +217,14 @@ OSPF_SPF_LOOPBACK_ADDRESS=203.0.113.80/32
 # 3600s (MaxAge) timers resolve in CI-friendly seconds instead of tens of
 # minutes -- 1800/180=10s, 3600/180=20s.
 OSPF_AGE_MULTIPLIER=180
+# The `asbr` scenario's own redistribute-into-ospf static route: a distinct
+# sub-block of TEST-NET-1 (RFC 5737) from routed-subinterface's own
+# 192.0.2.1/24 subinterface address, so the two scenarios' log lines are
+# never confusable. ASBR_GATEWAY is on-link within the shared docker network
+# (10.50.0.0/24), same convention as REDISTRIBUTE_GATEWAY, so the kernel
+# accepts installing the resulting route even though nothing listens there.
+ASBR_PREFIX=192.0.2.128/25
+ASBR_GATEWAY=10.50.0.98
 
 log() { echo "[verify-e2e] $*" >&2; }
 
@@ -448,6 +464,47 @@ provision_ospf() {
     --ospf-area "$OSPF_AREA" \
     --ospf-profile "$OSPF_PROFILE" \
     --ospf-interface-profile "$OSPF_PROFILE"
+}
+
+# --- ASBR / AS-external-LSA scenario ---
+#
+# Configures a static route + "redistribute from static to ospf" on
+# router-a (the ASBR) -- requires `provision_ospf`/`cmd_check_ospf` to have
+# already run for both routers, since this reuses their existing ospf
+# instance/area/profile. Verifies real RFC 2328 ASBR behavior: router-a
+# actually originates a Type-5 AS-external-LSA for $ASBR_PREFIX, router-b
+# learns and installs it into its own LSDB over the real adjacency, and
+# router-b's own SPF computes and pushes a real kernel route for it via
+# nos-ribd -- see ospf/CLAUDE.md's "ASBR and AS-external-LSA origination".
+#
+# NOTE: `RoutingTableOp::SetRedistribute` stores only one `Redistribute` rule
+# per table, and this script's own rt1 is the only routing table any
+# scenario configures -- so provisioning this overwrites rt1's earlier
+# "redistribute from static to bgp" rule (from `provision_redistribute`) with
+# "from static to ospf". This is why `cmd_check_asbr` runs late in the `all`
+# sequence, after every bgp-redistribution-dependent check (`redistribute`/
+# `policy`/`redistribute-policy`/`communities`) has already completed.
+provision_asbr() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 ospf_instance=$6 ospf_router_id=$7
+  log "provisioning $name with a static route + 'redistribute from static to ospf' (real asbr)"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --ospf-instance "$ospf_instance" \
+    --ospf-router-id "$ospf_router_id" \
+    --ospf-area "$OSPF_AREA" \
+    --ospf-profile "$OSPF_PROFILE" \
+    --ospf-interface-profile "$OSPF_PROFILE" \
+    --static-route "$ASBR_PREFIX" \
+    --static-gateway "$ASBR_GATEWAY" \
+    --redistribute-to-ospf
 }
 
 # Same as `provision_ospf`, but also sets a single RFC 2328 Appendix D.3 /
@@ -1231,6 +1288,35 @@ cmd_check_ospf() {
     || { log "router-b: FAILED to reach ospf full on the broadcast link"; return 1; }
 }
 
+cmd_check_asbr() {
+  local originated_before installed_before route_before
+  originated_before=$(docker logs router-a 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep -c "ospf lsa originated.*lsa_type=5" || true)
+  installed_before=$(docker logs router-b 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep -c "ospf lsa installed.*lsa_type=5" || true)
+  route_before=$(docker logs router-b 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep -c "added route" || true)
+
+  provision_asbr router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID"
+
+  # Field order matches `link.rs`'s `install_self_originated`'s
+  # `info!(lsa_type, link_state_id, advertising_router, refreshed, "ospf lsa
+  # originated")` call site.
+  log "waiting for router-a to originate a real as-external-lsa for $ASBR_PREFIX"
+  wait_for_count_increase router-a "ospf lsa originated.*lsa_type=5" "$originated_before" 60 \
+    && log "router-a: originated an as-external-lsa (real asbr behavior)" \
+    || { log "router-a: FAILED to originate an as-external-lsa"; return 1; }
+
+  log "waiting for router-b to learn router-a's as-external-lsa"
+  wait_for_count_increase router-b "ospf lsa installed.*lsa_type=5" "$installed_before" 60 \
+    && log "router-b: installed router-a's as-external-lsa into its own lsdb" \
+    || { log "router-b: FAILED to learn the as-external-lsa"; return 1; }
+
+  # Same `add_route`/`Option<RouteSource>` rendering quirk as
+  # `cmd_check_ospf_spf`'s own check -- see its comment.
+  log "waiting for router-b to compute (via ospf spf) and install a real kernel route to $ASBR_PREFIX"
+  wait_for_count_increase router-b "added route prefix=$ASBR_PREFIX.*source=Some(Ospf)" "$route_before" 60 \
+    && log "router-b: installed the asbr-redistributed route into the real kernel routing table" \
+    || { log "router-b: FAILED to install the asbr-redistributed route"; return 1; }
+}
+
 # --- OSPF authentication scenario ---
 #
 # Requires `ospf` to have already run (router-a/router-b's real p2p
@@ -2002,6 +2088,7 @@ cmd_group_ospf_suite() {
   cmd_up
   cmd_check_established
   cmd_check_ospf
+  cmd_check_asbr
   cmd_check_ospf_dr
   cmd_check_ospf_spf
   cmd_check_ospf_auth
@@ -2032,6 +2119,7 @@ case "${1:-}" in
   reflector) cmd_check_reflector ;;
   route-server) cmd_check_route_server ;;
   ospf) cmd_check_ospf ;;
+  asbr) cmd_check_asbr ;;
   ospf-dr) cmd_check_ospf_dr ;;
   ospf-spf) cmd_check_ospf_spf ;;
   ospf-aging) cmd_check_ospf_aging ;;
@@ -2061,13 +2149,14 @@ case "${1:-}" in
     cmd_check_reflector
     cmd_check_route_server
     cmd_check_ospf
+    cmd_check_asbr
     cmd_check_ospf_dr
     cmd_check_ospf_spf
     cmd_check_ospf_auth
     cmd_check_ospf_aging
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|ospf-aging|ospf-auth|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|ospf-aging|ospf-auth|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
     exit 2
     ;;
 esac

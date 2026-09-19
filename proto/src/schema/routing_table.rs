@@ -27,17 +27,19 @@ impl std::fmt::Display for RedistributeSource {
     }
 }
 
-/// The target side of a `Redistribute` rule. Only `Bgp` exists today — see
+/// The target side of a `Redistribute` rule — `Bgp` or `Ospf`. See
 /// `Redistribute`'s doc comment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RedistributeTarget {
     Bgp,
+    Ospf,
 }
 
 impl RedistributeTarget {
     pub fn as_str(&self) -> &'static str {
         match self {
             RedistributeTarget::Bgp => "bgp",
+            RedistributeTarget::Ospf => "ospf",
         }
     }
 }
@@ -203,6 +205,11 @@ pub(crate) fn valid_redistribute_rules(tables: &[RoutingTable], ctx: &Config) ->
                 "redistribute to bgp requires bgp-instance to be set",
             ));
         }
+        if redistribute.to == RedistributeTarget::Ospf && table.ospf_instance.is_none() {
+            return Err(garde::Error::new(
+                "redistribute to ospf requires ospf-instance to be set",
+            ));
+        }
         redistribute_policy_reference_valid(redistribute.policy.as_ref(), ctx)?;
     }
     Ok(())
@@ -247,6 +254,7 @@ mod tests {
             router_id: std::net::Ipv4Addr::new(1, 1, 1, 1),
             areas: Vec::new(),
             routing_table: None,
+            redistribute_policy: None,
         }
     }
 
@@ -430,6 +438,30 @@ mod tests {
         rt.redistribute = Some(redistribute());
         let cfg = config_with(vec![rt], vec![], vec![static_instance("sri1")]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn redistribute_without_ospf_instance_fails() {
+        let mut rt = table("rt1", None, Some("sri1"));
+        rt.redistribute = Some(Redistribute {
+            to: RedistributeTarget::Ospf,
+            ..redistribute()
+        });
+        let cfg = config_with(vec![rt], vec![], vec![static_instance("sri1")]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn redistribute_to_ospf_with_ospf_instance_passes() {
+        let mut rt = table("rt1", None, Some("sri1"));
+        rt.ospf_instance = Some("o1".to_string());
+        rt.redistribute = Some(Redistribute {
+            to: RedistributeTarget::Ospf,
+            ..redistribute()
+        });
+        let mut cfg = config_with(vec![rt], vec![], vec![static_instance("sri1")]);
+        cfg.ospf_instances = vec![ospf_instance("o1")];
+        cfg.validate_with(&cfg).unwrap();
     }
 
     fn config_with_policy(

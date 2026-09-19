@@ -1,6 +1,7 @@
 pub mod bgp_client;
 pub mod config_client;
 pub mod driver;
+pub mod ospf_client;
 pub mod reconcile;
 pub mod rib;
 pub mod server;

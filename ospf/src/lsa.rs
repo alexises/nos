@@ -10,8 +10,11 @@
 //! link for a point-to-point interface's own subnet, real transit-network
 //! masks included.
 //!
-//! AS-external/Summary LSAs (types 3/4/5) and multi-area ABR behavior are out
-//! of scope, matching `ospf/CLAUDE.md`'s single-backbone-area ceiling.
+//! AS-external-LSA (type 5, Appendix A.4.5) is now implemented too, for
+//! ASBR-only redistribution (see `ospf/CLAUDE.md`'s "ASBR and AS-external-LSA
+//! origination") — Summary-LSAs (types 3/4) and multi-area ABR behavior
+//! remain out of scope, matching `ospf/CLAUDE.md`'s single-backbone-area
+//! ceiling.
 
 use std::cmp::Ordering;
 use std::net::Ipv4Addr;
@@ -20,6 +23,7 @@ use crate::packet::{read_ipv4, PacketError};
 
 pub const LSA_TYPE_ROUTER: u8 = 1;
 pub const LSA_TYPE_NETWORK: u8 = 2;
+pub const LSA_TYPE_AS_EXTERNAL: u8 = 5;
 
 /// RFC 2328 §12.4.1's Router-LSA link types.
 pub const LINK_TYPE_POINT_TO_POINT: u8 = 1;
@@ -105,10 +109,41 @@ pub struct NetworkLsaBody {
     pub attached_routers: Vec<Ipv4Addr>,
 }
 
+/// RFC 2328 Appendix A.4.5's AS-external-LSA body.
+///
+/// `ponytail:` this crate only ever produces/consumes Type-1 external-route
+/// semantics — `metric`'s top bit (RFC 2328's E-type flag, distinguishing
+/// Type-1 from Type-2 metrics) is always forced to `0` on encode and always
+/// masked off on decode, so a foreign/corrupt encoder's E-bit can never leak
+/// into a value `crate::spf` sums. There is no Type-1/Type-2 comparison
+/// machinery in `crate::spf` — nothing downstream needs the distinction, and
+/// this NOS never produces a Type-2 route (see `spf::EXTERNAL_METRIC_CONSTANT`).
+/// `forwarding_address` is decoded faithfully (so a foreign LSA never fails
+/// to parse) but `crate::spf` only ever treats an external route as reachable
+/// via the advertising ASBR's own next-hop — a non-zero forwarding address is
+/// never resolved to an alternate one. Upgrade path for both: thread an
+/// `e_type` and a resolved forwarding-address next-hop through
+/// `spf::RouteEntry` if real Type-2/forwarding-address interop is ever
+/// needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AsExternalLsaBody {
+    pub network_mask: Ipv4Addr,
+    /// Low 24 bits only — the top byte's high bit (E-type) is always `0`.
+    pub metric: u32,
+    pub forwarding_address: Ipv4Addr,
+    pub external_route_tag: u32,
+}
+
+/// Masks off the wire's E-type bit (RFC 2328 A.4.5) so it can never leak into
+/// a value `crate::spf` treats as a plain additive cost — see
+/// `AsExternalLsaBody`'s doc comment.
+const EXTERNAL_METRIC_MASK: u32 = 0x00FF_FFFF;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LsaBody {
     Router(RouterLsaBody),
     Network(NetworkLsaBody),
+    AsExternal(AsExternalLsaBody),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -190,6 +225,14 @@ fn encode_body(body: &LsaBody) -> Vec<u8> {
             }
             buf
         }
+        LsaBody::AsExternal(e) => {
+            let mut buf = Vec::with_capacity(16);
+            buf.extend_from_slice(&e.network_mask.octets());
+            buf.extend_from_slice(&(e.metric & EXTERNAL_METRIC_MASK).to_be_bytes());
+            buf.extend_from_slice(&e.forwarding_address.octets());
+            buf.extend_from_slice(&e.external_route_tag.to_be_bytes());
+            buf
+        }
     }
 }
 
@@ -232,6 +275,22 @@ fn decode_body(lsa_type: u8, data: &[u8]) -> Result<LsaBody, PacketError> {
             Ok(LsaBody::Network(NetworkLsaBody {
                 network_mask,
                 attached_routers,
+            }))
+        }
+        LSA_TYPE_AS_EXTERNAL => {
+            if data.len() < 16 {
+                return Err(PacketError::TruncatedBody);
+            }
+            let network_mask = read_ipv4(data, 0);
+            let metric =
+                u32::from_be_bytes([data[4], data[5], data[6], data[7]]) & EXTERNAL_METRIC_MASK;
+            let forwarding_address = read_ipv4(data, 8);
+            let external_route_tag = u32::from_be_bytes([data[12], data[13], data[14], data[15]]);
+            Ok(LsaBody::AsExternal(AsExternalLsaBody {
+                network_mask,
+                metric,
+                forwarding_address,
+                external_route_tag,
             }))
         }
         other => Err(PacketError::UnknownLsaType(other)),
@@ -420,9 +479,69 @@ mod tests {
     #[test]
     fn unknown_lsa_type_is_rejected() {
         let mut lsa = router_lsa();
-        lsa.header.lsa_type = 5;
+        lsa.header.lsa_type = 4;
         let encoded = encode_lsa(&lsa);
-        assert_eq!(decode_lsa(&encoded), Err(PacketError::UnknownLsaType(5)));
+        assert_eq!(decode_lsa(&encoded), Err(PacketError::UnknownLsaType(4)));
+    }
+
+    fn as_external_lsa() -> Lsa {
+        Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type: LSA_TYPE_AS_EXTERNAL,
+                link_state_id: Ipv4Addr::new(192, 0, 2, 0),
+                advertising_router: Ipv4Addr::new(9, 9, 9, 9),
+                sequence_number: 0x8000_0001u32.cast_signed(),
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::AsExternal(AsExternalLsaBody {
+                network_mask: Ipv4Addr::new(255, 255, 255, 0),
+                metric: 20,
+                forwarding_address: Ipv4Addr::UNSPECIFIED,
+                external_route_tag: 0,
+            }),
+        }
+    }
+
+    #[test]
+    fn as_external_lsa_round_trips() {
+        let lsa = as_external_lsa();
+        let decoded = decode_lsa(&encode_lsa(&lsa)).unwrap();
+        assert_eq!(decoded.body, lsa.body);
+    }
+
+    /// Hand-crafts raw wire bytes with the E-type bit set in the metric's top
+    /// byte (bypassing `encode_body`'s own masking) to prove `decode_body`
+    /// masks it off independently, not just as a side effect of what
+    /// `encode_body` already stripped — see `AsExternalLsaBody`'s doc comment.
+    #[test]
+    fn as_external_lsa_metric_e_type_bit_masked_on_decode() {
+        let header = LsaHeader {
+            age: 0,
+            options: 0,
+            lsa_type: LSA_TYPE_AS_EXTERNAL,
+            link_state_id: Ipv4Addr::new(192, 0, 2, 0),
+            advertising_router: Ipv4Addr::new(9, 9, 9, 9),
+            sequence_number: 0x8000_0001u32.cast_signed(),
+            checksum: 0,
+            length: u16::try_from(LSA_HEADER_LEN + 16).unwrap(),
+        };
+        let mut buf = Vec::new();
+        encode_lsa_header(&mut buf, &header);
+        buf.extend_from_slice(&Ipv4Addr::new(255, 255, 255, 0).octets());
+        buf.extend_from_slice(&(0x0000_0014u32 | 0x8000_0000u32).to_be_bytes()); // metric=20, E-type bit set
+        buf.extend_from_slice(&Ipv4Addr::UNSPECIFIED.octets());
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        let checksum = lsa_checksum(&buf[2..]);
+        buf[16..18].copy_from_slice(&checksum.to_be_bytes());
+
+        let decoded = decode_lsa(&buf).unwrap();
+        let LsaBody::AsExternal(e) = decoded.body else {
+            panic!("expected as-external lsa")
+        };
+        assert_eq!(e.metric, 20);
     }
 
     #[test]

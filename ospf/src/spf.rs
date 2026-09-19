@@ -26,9 +26,20 @@ use std::sync::Arc;
 use ipnet::Ipv4Net;
 
 use crate::lsa::{
-    Lsa, LsaBody, NetworkLsaBody, RouterLsaBody, LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK,
-    LINK_TYPE_TRANSIT_NETWORK,
+    AsExternalLsaBody, Lsa, LsaBody, NetworkLsaBody, RouterLsaBody, LINK_TYPE_POINT_TO_POINT,
+    LINK_TYPE_STUB_NETWORK, LINK_TYPE_TRANSIT_NETWORK,
 };
+
+/// `ponytail:` RFC 2328 §16.4's E1/E2 external-metric-type distinction is not
+/// implemented — every AS-external route is treated as Type-1 (the ASBR's
+/// own intra-area SPF distance plus this fixed constant, summed like a stub
+/// route), always. There is no per-route metric-type selection and no
+/// Type-1-beats-Type-2 tie-break, since this NOS never produces a Type-2
+/// route in the first place (see `AsExternalLsaBody`'s own doc comment).
+/// Upgrade path: thread an `e_type` through `RouteEntry` and compare per RFC
+/// 2328 §16.4.1 if a second redistribution source with meaningfully
+/// different cost semantics is ever added.
+pub const EXTERNAL_METRIC_CONSTANT: u32 = 20;
 
 /// One SPF vertex — a router (keyed by its router-id) or a transit network
 /// (keyed by the Network-LSA's `link_state_id`, the DR's own address on
@@ -85,14 +96,25 @@ pub fn compute(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<RouteEntry> {
         .iter()
         .filter_map(|l| match &l.body {
             LsaBody::Router(r) => Some((l.header.advertising_router, r)),
-            LsaBody::Network(_) => None,
+            LsaBody::Network(_) | LsaBody::AsExternal(_) => None,
         })
         .collect();
     let networks: HashMap<Ipv4Addr, &NetworkLsaBody> = lsas
         .iter()
         .filter_map(|l| match &l.body {
             LsaBody::Network(n) => Some((l.header.link_state_id, n)),
-            LsaBody::Router(_) => None,
+            LsaBody::Router(_) | LsaBody::AsExternal(_) => None,
+        })
+        .collect();
+    // Plain `Vec`, not a `HashMap` keyed by advertising_router — one ASBR
+    // can originate more than one Type-5 for different prefixes.
+    let externals: Vec<(Ipv4Addr, Ipv4Addr, &AsExternalLsaBody)> = lsas
+        .iter()
+        .filter_map(|l| match &l.body {
+            LsaBody::AsExternal(e) => {
+                Some((l.header.advertising_router, l.header.link_state_id, e))
+            }
+            LsaBody::Router(_) | LsaBody::Network(_) => None,
         })
         .collect();
 
@@ -101,6 +123,7 @@ pub fn compute(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<RouteEntry> {
 
     collect_network_routes(root, &routers, &networks, &dist, &next_hop, &mut out);
     collect_stub_routes(root, &routers, &dist, &next_hop, &mut out);
+    collect_external_routes(root, &externals, &dist, &next_hop, &mut out);
 
     out.into_values().collect()
 }
@@ -324,6 +347,54 @@ fn collect_stub_routes(
                 },
             );
         }
+    }
+}
+
+/// RFC 2328 §16.4 AS-external routes, restricted to this NOS's Type-1-only
+/// simplification (see `EXTERNAL_METRIC_CONSTANT`'s doc comment) and
+/// forwarding-address-`0.0.0.0`-only simplification (see
+/// `AsExternalLsaBody`'s doc comment): every external route's next-hop is
+/// always the advertising ASBR's own next-hop, and its cost is always the
+/// ASBR's intra-area distance plus the fixed external metric.
+///
+/// **Explicit `asbr == root` guard**: this router's own Type-5 LSA, once
+/// installed into its own area's LSDB (see `crate::link::
+/// originate_as_external_lsas`), would otherwise compute a spurious route to
+/// its own redistributed prefix via itself at `0 + EXTERNAL_METRIC_CONSTANT`
+/// — `dist` is seeded with `root -> 0`, so this is a real, not hypothetical,
+/// case skipped here the same way `collect_stub_routes` skips `router_id ==
+/// root`.
+fn collect_external_routes(
+    root: Ipv4Addr,
+    externals: &[(Ipv4Addr, Ipv4Addr, &AsExternalLsaBody)],
+    dist: &HashMap<Vertex, u32>,
+    next_hop: &HashMap<Vertex, NextHop>,
+    out: &mut HashMap<(Ipv4Addr, Ipv4Addr), RouteEntry>,
+) {
+    for &(asbr, link_state_id, ext) in externals {
+        if asbr == root {
+            continue;
+        }
+        let vertex = Vertex::Router(asbr);
+        let Some(&d) = dist.get(&vertex) else {
+            continue;
+        };
+        let Some(NextHop::Router(nh)) = next_hop.get(&vertex).copied() else {
+            continue;
+        };
+        // Same `(Ipv4Addr, Ipv4Addr)` key shape `collect_stub_routes` uses,
+        // so a stub route and an external route to the same prefix collide
+        // correctly and `insert_best` keeps whichever is cheaper.
+        let key = (link_state_id, ext.network_mask);
+        insert_best(
+            out,
+            key,
+            RouteEntry {
+                prefix: net_from(link_state_id, ext.network_mask),
+                next_hop: nh,
+                metric: d.saturating_add(ext.metric),
+            },
+        );
     }
 }
 
@@ -608,5 +679,89 @@ mod tests {
         // W's Router-LSA was never flooded/installed at all.
         let root_lsa = router_lsa(root, vec![p2p(w, addr(10, 0, 0, 1), 1)]);
         assert!(compute(root, &[root_lsa]).is_empty());
+    }
+
+    fn as_external_lsa(prefix: Ipv4Addr, mask: Ipv4Addr, advertising_router: Ipv4Addr) -> Arc<Lsa> {
+        Arc::new(Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type: crate::lsa::LSA_TYPE_AS_EXTERNAL,
+                link_state_id: prefix,
+                advertising_router,
+                sequence_number: 1,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::AsExternal(AsExternalLsaBody {
+                network_mask: mask,
+                metric: EXTERNAL_METRIC_CONSTANT,
+                forwarding_address: Ipv4Addr::UNSPECIFIED,
+                external_route_tag: 0,
+            }),
+        })
+    }
+
+    #[test]
+    fn reachable_asbr_external_route_uses_asbr_distance_plus_constant() {
+        let root = router_id(1);
+        let asbr = router_id(2);
+        let root_lsa = router_lsa(root, vec![p2p(asbr, addr(10, 0, 0, 1), 5)]);
+        let asbr_lsa = router_lsa(asbr, vec![p2p(root, addr(10, 0, 0, 2), 5)]);
+        let ext_lsa = as_external_lsa(addr(192, 0, 2, 0), addr(255, 255, 255, 0), asbr);
+
+        let routes = compute(root, &[root_lsa, asbr_lsa, ext_lsa]);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].prefix, "192.0.2.0/24".parse().unwrap());
+        assert_eq!(routes[0].next_hop, addr(10, 0, 0, 2));
+        assert_eq!(routes[0].metric, 5 + EXTERNAL_METRIC_CONSTANT);
+    }
+
+    #[test]
+    fn unreachable_asbr_external_route_is_skipped() {
+        let root = router_id(1);
+        let asbr = router_id(2);
+        // ASBR's own Router-LSA was never flooded/installed at all.
+        let root_lsa = router_lsa(root, vec![]);
+        let ext_lsa = as_external_lsa(addr(192, 0, 2, 0), addr(255, 255, 255, 0), asbr);
+        assert!(compute(root, &[root_lsa, ext_lsa]).is_empty());
+    }
+
+    #[test]
+    fn external_route_tie_break_against_stub_route_keeps_cheaper() {
+        let root = router_id(1);
+        let stub_router = router_id(2);
+        let asbr = router_id(3);
+        let net = addr(192, 0, 2, 0);
+        let mask = addr(255, 255, 255, 0);
+
+        // Via the stub-advertising router: cost 1 + 100 = 101.
+        let root_lsa = router_lsa(
+            root,
+            vec![
+                p2p(stub_router, addr(10, 0, 0, 1), 1),
+                p2p(asbr, addr(10, 0, 1, 1), 1),
+            ],
+        );
+        let stub_router_lsa = router_lsa(
+            stub_router,
+            vec![p2p(root, addr(10, 0, 0, 2), 1), stub(net, mask, 100)],
+        );
+        // Via the ASBR: cost 1 + EXTERNAL_METRIC_CONSTANT (20) = 21, cheaper.
+        let asbr_lsa = router_lsa(asbr, vec![p2p(root, addr(10, 0, 1, 2), 1)]);
+        let ext_lsa = as_external_lsa(net, mask, asbr);
+
+        let routes = compute(root, &[root_lsa, stub_router_lsa, asbr_lsa, ext_lsa]);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].next_hop, addr(10, 0, 1, 2));
+        assert_eq!(routes[0].metric, 1 + EXTERNAL_METRIC_CONSTANT);
+    }
+
+    #[test]
+    fn own_as_external_lsa_is_never_treated_as_a_route_to_self() {
+        let root = router_id(1);
+        let root_lsa = router_lsa(root, vec![]);
+        let ext_lsa = as_external_lsa(addr(192, 0, 2, 0), addr(255, 255, 255, 0), root);
+        assert!(compute(root, &[root_lsa, ext_lsa]).is_empty());
     }
 }

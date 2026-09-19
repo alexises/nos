@@ -90,6 +90,24 @@ struct Args {
     #[arg(long)]
     redistribute_policy: Option<String>,
 
+    /// If set, configures `redistribute from static to ospf` on
+    /// `--routing-table` — makes this router a real RFC 2328 ASBR. Requires
+    /// `--static-route` (so the table has a `static_routing_instance` to
+    /// redistribute from) and `--ospf-instance` (so the table has an
+    /// `ospf_instance` to redistribute into) to also be set. Not mutually
+    /// exclusive with `--redistribute` at the tool level, but
+    /// `RoutingTableOp::SetRedistribute` only stores one `Redistribute` rule
+    /// per table — setting both in one invocation just has the second
+    /// `SetRedistribute` op overwrite the first.
+    #[arg(long)]
+    redistribute_to_ospf: bool,
+
+    /// Names an RPL policy (or `accept-all`/`deny-all`) to filter routes
+    /// redistributed into OSPF through. Only meaningful with
+    /// `--redistribute-to-ospf`; omitted, redistribution stays unfiltered.
+    #[arg(long)]
+    redistribute_to_ospf_policy: Option<String>,
+
     /// If set, configures an RFC 2385 TCP MD5 password on `--peer-group`
     /// (`BgpPeerGroupOp::SetMd5Auth`) — for verifying session authentication
     /// end to end (matching passwords on both routers establish; a
@@ -402,8 +420,11 @@ async fn main() -> anyhow::Result<()> {
                 static_routing_instance: args.static_routing_instance.clone(),
             },
         ));
-    } else if args.redistribute {
-        bail!("--redistribute requires --static-route (and --static-gateway) to also be set");
+    } else if args.redistribute || args.redistribute_to_ospf {
+        bail!(
+            "--redistribute/--redistribute-to-ospf require --static-route (and \
+             --static-gateway) to also be set"
+        );
     }
 
     if args.redistribute {
@@ -413,6 +434,19 @@ async fn main() -> anyhow::Result<()> {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: args.redistribute_policy.clone(),
+            },
+        }));
+    }
+    if args.redistribute_to_ospf {
+        if args.ospf_instance.is_none() {
+            bail!("--redistribute-to-ospf requires --ospf-instance to also be set");
+        }
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
+            name: args.routing_table.clone(),
+            redistribute: Redistribute {
+                from: RedistributeSource::Static,
+                to: RedistributeTarget::Ospf,
+                policy: args.redistribute_to_ospf_policy.clone(),
             },
         }));
     }

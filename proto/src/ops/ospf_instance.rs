@@ -36,6 +36,7 @@ impl OspfInstanceOp {
                         router_id: Ipv4Addr::UNSPECIFIED,
                         areas: Vec::new(),
                         routing_table: None,
+                        redistribute_policy: None,
                     });
                 }
                 Ok(())
@@ -77,6 +78,7 @@ mod tests {
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             areas: Vec::new(),
             routing_table: None,
+            redistribute_policy: None,
         }
     }
 

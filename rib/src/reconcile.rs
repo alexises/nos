@@ -15,6 +15,7 @@ use tracing::{debug, error, info, trace, warn};
 use crate::bgp_client;
 use crate::config_client;
 use crate::driver::RibDriver;
+use crate::ospf_client;
 use crate::rib::{build_from_config, Rib, RibEntry, RouteSource};
 
 /// Fixed reconnect delay for the config subscription, matching
@@ -54,6 +55,7 @@ pub async fn run(
     rib: Arc<RwLock<Rib>>,
     driver: Arc<dyn RibDriver>,
     redistribute_tx: watch::Sender<bgp_client::RedistributeTarget>,
+    ospf_redistribute_tx: watch::Sender<ospf_client::RedistributeTarget>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     while !*shutdown.borrow() {
@@ -74,7 +76,7 @@ pub async fn run(
                     tokio::select! {
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(_))) => {
-                                resync(&config_socket, &table, &rib, driver.as_ref(), &redistribute_tx).await;
+                                resync(&config_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -87,7 +89,7 @@ pub async fn run(
                             }
                         },
                         _ = reapply.tick() => {
-                            resync(&config_socket, &table, &rib, driver.as_ref(), &redistribute_tx).await;
+                            resync(&config_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx).await;
                         }
                         _ = shutdown.changed() => break,
                     }
@@ -122,6 +124,7 @@ async fn resync(
     rib: &Arc<RwLock<Rib>>,
     driver: &dyn RibDriver,
     redistribute_tx: &watch::Sender<bgp_client::RedistributeTarget>,
+    ospf_redistribute_tx: &watch::Sender<ospf_client::RedistributeTarget>,
 ) {
     match config_client::fetch_config(config_socket).await {
         Ok(cfg) => {
@@ -158,6 +161,8 @@ async fn resync(
                 error!(table = %table, error = %e, "failed to apply routes to kernel");
             }
             let _ = redistribute_tx.send(compute_redistribute_target(&cfg, table, &routes));
+            let _ =
+                ospf_redistribute_tx.send(compute_redistribute_target_ospf(&cfg, table, &routes));
         }
         Err(e) => {
             warn!(table = %table, error = %e, "failed to fetch running config, keeping previous RIB");
@@ -206,6 +211,50 @@ fn compute_redistribute_target(
 
     bgp_client::RedistributeTarget {
         bgp_instance: table.bgp_instance.clone(),
+        routes: redistributed,
+    }
+}
+
+/// The OSPF-redistribution analogue of `compute_redistribute_target` — same
+/// shape, matching `to: Ospf` instead of `to: Bgp` and populating
+/// `ospf_client::RedistributeTarget`. Kept as a separate function rather
+/// than generalizing over the target/instance-field pair: there are only two
+/// call sites, and the field name differs per target struct
+/// (`bgp_instance` vs. `ospf_instance`), so a generic parameter isn't worth
+/// it yet.
+fn compute_redistribute_target_ospf(
+    cfg: &Config,
+    table_name: &str,
+    routes: &HashMap<IpNet, RibEntry>,
+) -> ospf_client::RedistributeTarget {
+    let Some(table) = cfg.routing_tables.iter().find(|t| t.name == table_name) else {
+        return ospf_client::RedistributeTarget::default();
+    };
+
+    let active_rule = matches!(
+        &table.redistribute,
+        Some(Redistribute {
+            from: RedistributeSource::Static,
+            to: RedistributeTarget::Ospf,
+            ..
+        })
+    );
+
+    let redistributed = if active_rule {
+        routes
+            .values()
+            .filter(|entry| entry.source == RouteSource::Static)
+            .map(|entry| RedistributedRoute {
+                prefix: entry.prefix,
+                gateway: entry.gateway,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    ospf_client::RedistributeTarget {
+        ospf_instance: table.ospf_instance.clone(),
         routes: redistributed,
     }
 }
@@ -352,5 +401,106 @@ mod tests {
                 gateway: "2001:db8::1".parse().unwrap(),
             }]
         );
+    }
+
+    #[test]
+    fn ospf_table_not_found_publishes_idle_target() {
+        let cfg = Config::default();
+        let target = compute_redistribute_target_ospf(&cfg, "rt1", &HashMap::new());
+        assert_eq!(target, ospf_client::RedistributeTarget::default());
+    }
+
+    #[test]
+    fn ospf_no_redistribute_rule_publishes_ospf_instance_with_empty_routes() {
+        let table = RoutingTable {
+            name: "rt1".into(),
+            bgp_instance: None,
+            ospf_instance: Some("ospf1".into()),
+            static_routing_instance: None,
+            redistribute: None,
+        };
+        let cfg = cfg_with_table(table);
+        let mut routes = HashMap::new();
+        let entry = static_entry("10.0.0.0/24", "10.0.0.1");
+        routes.insert(entry.prefix, entry);
+
+        let target = compute_redistribute_target_ospf(&cfg, "rt1", &routes);
+        assert_eq!(target.ospf_instance.as_deref(), Some("ospf1"));
+        assert!(target.routes.is_empty());
+    }
+
+    #[test]
+    fn ospf_active_rule_redistributes_static_ipv4_routes() {
+        let table = RoutingTable {
+            name: "rt1".into(),
+            bgp_instance: None,
+            ospf_instance: Some("ospf1".into()),
+            static_routing_instance: None,
+            redistribute: Some(Redistribute {
+                from: RedistributeSource::Static,
+                to: RedistributeTarget::Ospf,
+                policy: None,
+            }),
+        };
+        let cfg = cfg_with_table(table);
+        let mut routes = HashMap::new();
+        let entry = static_entry("10.0.0.0/24", "10.0.0.1");
+        routes.insert(entry.prefix, entry);
+
+        let target = compute_redistribute_target_ospf(&cfg, "rt1", &routes);
+        assert_eq!(target.ospf_instance.as_deref(), Some("ospf1"));
+        assert_eq!(target.routes.len(), 1);
+        assert_eq!(target.routes[0].prefix, "10.0.0.0/24".parse().unwrap());
+    }
+
+    #[test]
+    fn ospf_active_rule_skips_bgp_sourced_routes() {
+        let table = RoutingTable {
+            name: "rt1".into(),
+            bgp_instance: None,
+            ospf_instance: Some("ospf1".into()),
+            static_routing_instance: None,
+            redistribute: Some(Redistribute {
+                from: RedistributeSource::Static,
+                to: RedistributeTarget::Ospf,
+                policy: None,
+            }),
+        };
+        let cfg = cfg_with_table(table);
+        let mut routes = HashMap::new();
+        let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
+        routes.insert(
+            prefix,
+            RibEntry {
+                prefix,
+                gateway: "10.0.0.9".parse().unwrap(),
+                source: RouteSource::Bgp,
+            },
+        );
+
+        let target = compute_redistribute_target_ospf(&cfg, "rt1", &routes);
+        assert!(target.routes.is_empty());
+    }
+
+    #[test]
+    fn ospf_rule_does_not_redistribute_when_target_is_bgp() {
+        let table = RoutingTable {
+            name: "rt1".into(),
+            bgp_instance: Some("bgp1".into()),
+            ospf_instance: Some("ospf1".into()),
+            static_routing_instance: None,
+            redistribute: Some(Redistribute {
+                from: RedistributeSource::Static,
+                to: RedistributeTarget::Bgp,
+                policy: None,
+            }),
+        };
+        let cfg = cfg_with_table(table);
+        let mut routes = HashMap::new();
+        let entry = static_entry("10.0.0.0/24", "10.0.0.1");
+        routes.insert(entry.prefix, entry);
+
+        let target = compute_redistribute_target_ospf(&cfg, "rt1", &routes);
+        assert!(target.routes.is_empty());
     }
 }

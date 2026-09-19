@@ -252,6 +252,7 @@ mod tests {
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             areas,
             routing_table: None,
+            redistribute_policy: None,
         }
     }
 
