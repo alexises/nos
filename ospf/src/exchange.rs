@@ -6,17 +6,20 @@
 //! up incrementally across many packets rather than swapped wholesale like
 //! `bgp::fsm`'s `RemoteInfo`.
 //!
-//! # ponytail: one-shot summary exchange, no DBD pagination
-//! RFC 2328 lets the master paginate its summary list across many DBD
-//! polls (`more` bit), each acked by the slave before the next is sent.
-//! This crate always sends its *entire* local LSDB summary in a single DBD
-//! (`more: false`) in each direction — correct only because this NOS's
-//! LSDB is lab-scale (a handful of Router/Network-LSAs), always well under
-//! one packet's `RECV_BUF_LEN`. Upgrade to real pagination if a summary
-//! list ever risks exceeding one packet.
+//! # ponytail: fixed per-packet header budget, not a live MTU probe
+//! Real RFC 2328 §10.8 pagination: the local LSDB summary is chunked into
+//! `max_headers`-sized pieces (a caller-supplied budget — see `link.rs`'s
+//! `--dbd-max-headers`, defaulting to `DEFAULT_DBD_MAX_HEADERS`), one chunk
+//! per DD sequence number, each acked before the next is sent, in both
+//! directions. What's still simplified: `max_headers` is a fixed
+//! conservative constant sized off a generic Ethernet MTU assumption, not
+//! derived from a live query of the link's real interface MTU (this NOS
+//! never enforces `DbdPacket.interface_mtu` on send or receive at all).
+//! Upgrade to a live-MTU-derived budget if a link with an unusually small
+//! MTU ever needs it.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
@@ -24,6 +27,12 @@ use crate::lsa::{self, Lsa, LsaHeader, LsaKey};
 use crate::lsdb::Lsdb;
 use crate::neighbor::{Event, NeighborState};
 use crate::packet::{DbdPacket, LsAckPacket, LsrPacket, LsuPacket};
+
+/// A conservative per-DBD-packet LSA-header budget: 1500-byte Ethernet MTU
+/// − 20 (IP) − 24 (OSPF common header) − 8 (`DBD_BODY_FIXED_LEN`) ≈ 1448
+/// bytes ÷ 20 (`LSA_HEADER_LEN`) ≈ 72, rounded down for crypto-auth trailer
+/// headroom. See this module's own `ponytail:` note above.
+pub const DEFAULT_DBD_MAX_HEADERS: usize = 64;
 
 /// One neighbor's DBD/LSR/LSU exchange state, from `ExStart` onward.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -44,6 +53,22 @@ pub struct AdjacencyData {
     /// own adjacency data doesn't exist until it too reaches `ExStart`),
     /// so without a resend, that first packet is silently dropped forever.
     pub last_dbd_sent: Option<DbdPacket>,
+    /// RFC 2328 §10.8: local LSDB headers not yet sent to this neighbor —
+    /// seeded once from a full LSDB snapshot at `ExStart` exit, then drained
+    /// `max_headers` at a time (`pop_chunk`), one chunk per DD sequence
+    /// number, until empty.
+    pub summary_remaining: VecDeque<LsaHeader>,
+}
+
+/// Pops up to `max` headers off the front of `remaining` for the next DBD
+/// packet, returning the chunk plus whether any remain after it (the `more`
+/// bit). `VecDeque::pop_front` keeps this O(chunk size) per call rather than
+/// the O(n) a `Vec::drain(0..n)` would cost when called repeatedly.
+fn pop_chunk(remaining: &mut VecDeque<LsaHeader>, max: usize) -> (Vec<LsaHeader>, bool) {
+    let chunk: Vec<LsaHeader> = std::iter::from_fn(|| remaining.pop_front())
+        .take(max)
+        .collect();
+    (chunk, !remaining.is_empty())
 }
 
 /// One effect `link.rs` must carry out — sending a packet, or feeding an
@@ -85,6 +110,7 @@ pub fn on_dbd_received(
     neighbor_router_id: Ipv4Addr,
     dbd: &DbdPacket,
     local_lsdb_headers: &[LsaHeader],
+    max_headers: usize,
 ) -> Vec<Action> {
     match state {
         NeighborState::ExStart => on_dbd_in_exstart(
@@ -93,8 +119,11 @@ pub fn on_dbd_received(
             neighbor_router_id,
             dbd,
             local_lsdb_headers,
+            max_headers,
         ),
-        NeighborState::Exchange => on_dbd_in_exchange(adj, dbd, local_lsdb_headers),
+        NeighborState::Exchange => {
+            on_dbd_in_exchange(adj, local_router_id, dbd, local_lsdb_headers, max_headers)
+        }
         // `Loading`/`Full`: ignore everything here, negotiation-shaped or
         // not. A genuine peer restart is instead caught via Hello — losing
         // 2-way already clears `adjacency` (see `link::handle_hello`) — so
@@ -118,6 +147,7 @@ fn on_dbd_in_exstart(
     neighbor_router_id: Ipv4Addr,
     dbd: &DbdPacket,
     local_lsdb_headers: &[LsaHeader],
+    max_headers: usize,
 ) -> Vec<Action> {
     let is_negotiation_attempt = dbd.init && dbd.more && dbd.master;
 
@@ -125,64 +155,52 @@ fn on_dbd_in_exstart(
         Ordering::Greater => {
             // Neighbor has the higher router-id: it is master, we are
             // slave. Accept either its genuine negotiation attempt
-            // (I=1,M=1,MS=1) or its one poll reply (I=0,M=0,MS=1) as the
-            // trigger — symmetric to the `Ordering::Less` branch's own
-            // "accept either" reasoning below, and for the same underlying
-            // cause: the two sides' Hello-driven ExStart entry isn't
-            // synchronized, so if the master reaches ExStart (and sends its
-            // attempt) before *we* reach 2-Way with it, `handle_dbd` has no
-            // adjacency yet to receive that attempt into and silently drops
-            // it (see its own doc comment) — including every retransmitted
-            // copy, since the master, having since moved on, only ever
-            // resends its most recent packet. By the time we create our own
-            // adjacency and send our own (late) attempt, the only packet we
-            // ever get back is the master's reply to *that* — never its
-            // original attempt, which is gone for good. Without this,
-            // we'd wait here forever for a message that will never come
-            // again (a real bug this NOS's `ospf-dr` Docker scenario found:
-            // a third router joining a segment with an already-converged
-            // DR/BDR pair got stuck exactly this way).
-            let is_master_reply = !dbd.init && !dbd.more && dbd.master;
+            // (I=1,M=1,MS=1) or its poll/reply (I=0,MS=1 — `more` may be
+            // either value now that a paginated first poll can legitimately
+            // still have data left) as the trigger — symmetric to the
+            // `Ordering::Less` branch's own "accept either" reasoning
+            // below, and for the same underlying cause: the two sides'
+            // Hello-driven ExStart entry isn't synchronized, so if the
+            // master reaches ExStart (and sends its attempt) before *we*
+            // reach 2-Way with it, `handle_dbd` has no adjacency yet to
+            // receive that attempt into and silently drops it (see its own
+            // doc comment) — including every retransmitted copy, since the
+            // master, having since moved on, only ever resends its most
+            // recent packet. By the time we create our own adjacency and
+            // send our own (late) attempt, the only packet we ever get back
+            // is the master's reply to *that* — never its original attempt,
+            // which is gone for good. Without this, we'd wait here forever
+            // for a message that will never come again (a real bug this
+            // NOS's `ospf-dr` Docker scenario found: a third router joining
+            // a segment with an already-converged DR/BDR pair got stuck
+            // exactly this way). The `!dbd.more` requirement this check
+            // used to carry was only ever correct while the summary always
+            // fit in one packet — dropped now that a legitimate first poll
+            // can span more than one.
+            let is_master_reply = !dbd.init && dbd.master;
             if !is_negotiation_attempt && !is_master_reply {
                 return Vec::new();
             }
             adj.is_master = false;
-            adj.dd_sequence_number = dbd.dd_sequence_number;
-            let reply = DbdPacket {
-                router_id: local_router_id,
-                area_id: dbd.area_id,
-                interface_mtu: 0,
-                options: 0,
-                init: false,
-                more: false,
-                master: false,
-                dd_sequence_number: dbd.dd_sequence_number,
-                lsa_headers: local_lsdb_headers.to_vec(),
-            };
-            if is_negotiation_attempt {
-                // Normal case: this is the master's own fresh attempt,
-                // carrying no summary of its own yet. Reply with ours and
-                // wait separately for any further exchange.
-                vec![
-                    Action::SendDbd(reply),
-                    Action::NeighborEvent(Event::NegotiationDone),
-                ]
-            } else {
-                // This packet *is* the master's reply/poll — its actual
-                // completing summary too, since (per this branch's own
-                // doc comment) we never got to see its separate initial
-                // attempt. Process its content immediately rather than
-                // waiting forever for a second message the master will
-                // never send again.
-                adj.request_list = compute_request_list(&dbd.lsa_headers, local_lsdb_headers);
-                vec![
-                    Action::SendDbd(reply),
-                    Action::NeighborEvent(Event::NegotiationDone),
-                    Action::NeighborEvent(Event::ExchangeDone {
-                        more_to_load: !adj.request_list.is_empty(),
-                    }),
-                ]
+            adj.summary_remaining = local_lsdb_headers.iter().copied().collect();
+            // Real content always starts with *our* reply (slave replies
+            // to the master's bare attempt with its own first chunk
+            // immediately, RFC 2328 §10.6) — correct whether `dbd` is the
+            // bare attempt itself (its own `lsa_headers` is empty, so this
+            // is a no-op beyond adopting the seed) or the master's poll
+            // arriving first (per this branch's own doc comment above).
+            let (reply, done) =
+                slave_process_poll(adj, local_router_id, dbd, local_lsdb_headers, max_headers);
+            let mut actions = vec![
+                Action::SendDbd(reply),
+                Action::NeighborEvent(Event::NegotiationDone),
+            ];
+            if done {
+                actions.push(Action::NeighborEvent(Event::ExchangeDone {
+                    more_to_load: !adj.request_list.is_empty(),
+                }));
             }
+            actions
         }
         Ordering::Less => {
             // We have the higher router-id: we are master. Accept either
@@ -200,42 +218,40 @@ fn on_dbd_in_exstart(
                 return Vec::new();
             }
             adj.is_master = true;
-            let poll = DbdPacket {
-                router_id: local_router_id,
-                area_id: dbd.area_id,
-                interface_mtu: 0,
-                options: 0,
-                init: false,
-                more: false,
-                master: true,
-                dd_sequence_number: adj.dd_sequence_number,
-                lsa_headers: local_lsdb_headers.to_vec(),
-            };
+            adj.summary_remaining = local_lsdb_headers.iter().copied().collect();
             if is_negotiation_attempt {
-                // Normal case: this is the neighbor's own fresh attempt,
-                // carrying no summary of its own yet. Respond with our
-                // poll and wait separately for its reply.
-                vec![
-                    Action::SendDbd(poll),
-                    Action::NeighborEvent(Event::NegotiationDone),
-                ]
-            } else {
-                // This packet *is* the neighbor's reply — proof of role
-                // and the actual completing summary at once, since (per
-                // this branch's own doc comment) we never got to see its
-                // separate initial attempt. Nothing else is coming
-                // separately, so process its content immediately too,
-                // rather than waiting forever for a second message the
-                // neighbor (already past its own ExStart) will never send.
-                adj.request_list = compute_request_list(&dbd.lsa_headers, local_lsdb_headers);
-                vec![
-                    Action::SendDbd(poll),
-                    Action::NeighborEvent(Event::NegotiationDone),
-                    Action::NeighborEvent(Event::ExchangeDone {
-                        more_to_load: !adj.request_list.is_empty(),
-                    }),
-                ]
+                // The bare handshake only — no content from either side
+                // yet. RFC 2328 §10.8: the master's *own* content-sending
+                // only begins once the slave's real reply arrives (handled
+                // below, or by `on_dbd_in_exchange` once this transitions
+                // out of `ExStart`) — sending our own first chunk here too,
+                // at this same round, would race the slave's identically-
+                // numbered reply instead of properly following it (the bug
+                // this design point exists to avoid: two independently-sent
+                // "round 0" packets can never be a request/response pair to
+                // each other). Our already-sent negotiation attempt
+                // (`start_negotiation`) keeps being retransmitted as-is
+                // (`AdjacencyData::last_dbd_sent`) until superseded.
+                return vec![Action::NeighborEvent(Event::NegotiationDone)];
             }
+            // `dbd` is the neighbor's actual reply, arriving before we ever
+            // processed a bare attempt from it (per this branch's own doc
+            // comment) — process it exactly like a normal in-`Exchange`
+            // reply: extend the request list, then advance to our own
+            // first real chunk if either side still has data.
+            let (maybe_poll, done) =
+                master_process_reply(adj, local_router_id, dbd, local_lsdb_headers, max_headers);
+            let mut actions = Vec::new();
+            if let Some(poll) = maybe_poll {
+                actions.push(Action::SendDbd(poll));
+            }
+            actions.push(Action::NeighborEvent(Event::NegotiationDone));
+            if done {
+                actions.push(Action::NeighborEvent(Event::ExchangeDone {
+                    more_to_load: !adj.request_list.is_empty(),
+                }));
+            }
+            actions
         }
         // Equal router-ids can't happen on a real network (every router-id
         // is required to be unique) — nothing sensible to negotiate.
@@ -243,10 +259,90 @@ fn on_dbd_in_exstart(
     }
 }
 
-fn on_dbd_in_exchange(
+/// The slave's side of one round: adopt the sender's sequence number,
+/// extend the request list from its chunk, and reply with our own next
+/// chunk. Shared by `on_dbd_in_exstart` (the very first round, where the
+/// sequence number is adopted unconditionally rather than validated — RFC
+/// 2328 §10.6: the master is always authoritative) and `on_dbd_in_exchange`
+/// (every later round, after the caller has already validated it). Returns
+/// the reply to send plus whether both sides have now declared themselves
+/// out of data (RFC 2328 §10.8's termination test).
+fn slave_process_poll(
     adj: &mut AdjacencyData,
+    local_router_id: Ipv4Addr,
     dbd: &DbdPacket,
     local_lsdb_headers: &[LsaHeader],
+    max_headers: usize,
+) -> (DbdPacket, bool) {
+    adj.dd_sequence_number = dbd.dd_sequence_number;
+    adj.request_list
+        .extend(compute_request_list(&dbd.lsa_headers, local_lsdb_headers));
+    let (chunk, more) = pop_chunk(&mut adj.summary_remaining, max_headers);
+    let reply = DbdPacket {
+        router_id: local_router_id,
+        area_id: dbd.area_id,
+        interface_mtu: 0,
+        options: 0,
+        init: false,
+        more,
+        master: false,
+        dd_sequence_number: adj.dd_sequence_number,
+        lsa_headers: chunk,
+    };
+    let done = !dbd.more && !more;
+    (reply, done)
+}
+
+/// The master's side of one round: extend the request list from the
+/// slave's reply, then — unless both sides have now declared themselves out
+/// of data — advance the sequence number and pop our own next chunk to
+/// poll with. Shared by `on_dbd_in_exstart` (the neighbor's reply arriving
+/// before we ever saw a bare attempt, so its own sequence number is
+/// informational only — RFC 2328 §10.6: as master, only *our* sequence
+/// number is authoritative) and `on_dbd_in_exchange` (every later round,
+/// after the caller has already validated the reply's sequence number
+/// matches our last poll). Returns the next poll to send (`None` once
+/// nothing more needs polling for) plus whether both sides are now done.
+fn master_process_reply(
+    adj: &mut AdjacencyData,
+    local_router_id: Ipv4Addr,
+    dbd: &DbdPacket,
+    local_lsdb_headers: &[LsaHeader],
+    max_headers: usize,
+) -> (Option<DbdPacket>, bool) {
+    adj.request_list
+        .extend(compute_request_list(&dbd.lsa_headers, local_lsdb_headers));
+    // RFC 2328 §10.8's termination test: both sides have declared
+    // themselves out of summary data (M-bit clear on both this reply and
+    // whatever we last sent).
+    if !dbd.more && adj.summary_remaining.is_empty() {
+        return (None, true);
+    }
+    // Otherwise keep polling — even with nothing left of our own, we still
+    // need to poll again (an empty chunk) purely to let the slave send its
+    // next one.
+    adj.dd_sequence_number = adj.dd_sequence_number.wrapping_add(1);
+    let (chunk, more) = pop_chunk(&mut adj.summary_remaining, max_headers);
+    let poll = DbdPacket {
+        router_id: local_router_id,
+        area_id: dbd.area_id,
+        interface_mtu: 0,
+        options: 0,
+        init: false,
+        more,
+        master: true,
+        dd_sequence_number: adj.dd_sequence_number,
+        lsa_headers: chunk,
+    };
+    (Some(poll), false)
+}
+
+fn on_dbd_in_exchange(
+    adj: &mut AdjacencyData,
+    local_router_id: Ipv4Addr,
+    dbd: &DbdPacket,
+    local_lsdb_headers: &[LsaHeader],
+    max_headers: usize,
 ) -> Vec<Action> {
     // A negotiation-shaped packet (I=1,M=1,MS=1) here means the peer is
     // still retransmitting its very first message — its own view hasn't
@@ -263,23 +359,40 @@ fn on_dbd_in_exchange(
         return Vec::new();
     }
 
-    let valid = if adj.is_master {
-        // Expect the slave's one reply to our poll: same sequence number,
+    if adj.is_master {
+        // Expect the slave's reply to our last poll: same sequence number,
         // MS bit clear.
-        dbd.dd_sequence_number == adj.dd_sequence_number && !dbd.master
+        if dbd.dd_sequence_number != adj.dd_sequence_number || dbd.master {
+            return vec![Action::NeighborEvent(Event::SeqNumberMismatch)];
+        }
+        let (maybe_poll, done) =
+            master_process_reply(adj, local_router_id, dbd, local_lsdb_headers, max_headers);
+        let mut actions = Vec::new();
+        if let Some(poll) = maybe_poll {
+            actions.push(Action::SendDbd(poll));
+        }
+        if done {
+            actions.push(Action::NeighborEvent(Event::ExchangeDone {
+                more_to_load: !adj.request_list.is_empty(),
+            }));
+        }
+        actions
     } else {
-        // Expect the master's one real poll: MS bit set, matching the
-        // sequence number negotiated in ExStart.
-        dbd.master && dbd.dd_sequence_number == adj.dd_sequence_number
-    };
-    if !valid {
-        return vec![Action::NeighborEvent(Event::SeqNumberMismatch)];
+        // Expect the master's next poll: MS bit set, sequence number one
+        // past the last one we accepted.
+        if !dbd.master || dbd.dd_sequence_number != adj.dd_sequence_number.wrapping_add(1) {
+            return vec![Action::NeighborEvent(Event::SeqNumberMismatch)];
+        }
+        let (reply, done) =
+            slave_process_poll(adj, local_router_id, dbd, local_lsdb_headers, max_headers);
+        let mut actions = vec![Action::SendDbd(reply)];
+        if done {
+            actions.push(Action::NeighborEvent(Event::ExchangeDone {
+                more_to_load: !adj.request_list.is_empty(),
+            }));
+        }
+        actions
     }
-
-    adj.request_list = compute_request_list(&dbd.lsa_headers, local_lsdb_headers);
-    vec![Action::NeighborEvent(Event::ExchangeDone {
-        more_to_load: !adj.request_list.is_empty(),
-    })]
 }
 
 /// Handles one received LSR: looks up every requested LSA in `lsdb`. If any
@@ -414,6 +527,7 @@ mod tests {
             router_id("9.9.9.10"),
             &dbd,
             &[],
+            100,
         );
         assert!(!adj.is_master);
         assert_eq!(adj.dd_sequence_number, 42);
@@ -456,10 +570,14 @@ mod tests {
             router_id("9.9.9.10"),
             &poll,
             &[],
+            100,
         );
         assert!(!adj.is_master);
         assert_eq!(adj.dd_sequence_number, 42);
         assert_eq!(adj.request_list, vec![master_lsa.key()]);
+        // The master's poll already says `more: false`, and our own reply
+        // carries no data of its own (empty local LSDB) — both sides are
+        // done in this same round, so `ExchangeDone` fires alongside it.
         assert_eq!(
             actions,
             vec![
@@ -494,14 +612,16 @@ mod tests {
             router_id("9.9.9.5"),
             &dbd,
             &[],
+            100,
         );
         assert!(adj.is_master);
         assert_eq!(adj.dd_sequence_number, 7);
-        assert!(matches!(
-            actions.as_slice(),
-            [Action::SendDbd(poll), Action::NeighborEvent(Event::NegotiationDone)]
-                if poll.master && poll.dd_sequence_number == 7
-        ));
+        // A bare negotiation attempt carries no content from either side —
+        // real content-sending only begins once the slave's actual reply
+        // arrives (RFC 2328 §10.8), so this fires only `NegotiationDone`,
+        // no `SendDbd`. Our already-sent negotiation attempt keeps being
+        // retransmitted as-is until then.
+        assert_eq!(actions, vec![Action::NeighborEvent(Event::NegotiationDone)]);
     }
 
     #[test]
@@ -542,24 +662,18 @@ mod tests {
             router_id("9.9.9.5"),
             &reply,
             &[],
+            100,
         );
         assert!(adj.is_master);
         assert_eq!(adj.dd_sequence_number, 7, "must keep our own chosen seed");
         assert_eq!(adj.request_list, vec![neighbor_lsa.key()]);
+        // The neighbor's reply already says `more: false`, and our own
+        // local LSDB is empty (nothing to poll back with) — both sides are
+        // done immediately, with no `SendDbd` at all (we have nothing of
+        // our own to send).
         assert_eq!(
             actions,
             vec![
-                Action::SendDbd(DbdPacket {
-                    router_id: router_id("9.9.9.9"),
-                    area_id: Ipv4Addr::UNSPECIFIED,
-                    interface_mtu: 0,
-                    options: 0,
-                    init: false,
-                    more: false,
-                    master: true,
-                    dd_sequence_number: 7,
-                    lsa_headers: Vec::new(),
-                }),
                 Action::NeighborEvent(Event::NegotiationDone),
                 Action::NeighborEvent(Event::ExchangeDone { more_to_load: true }),
             ]
@@ -590,6 +704,7 @@ mod tests {
             router_id("9.9.9.10"),
             &reply,
             &[],
+            100,
         );
         assert!(actions.is_empty());
     }
@@ -606,6 +721,7 @@ mod tests {
             router_id("9.9.9.10"),
             &dbd,
             &[],
+            100,
         );
         assert!(actions.is_empty());
     }
@@ -635,6 +751,7 @@ mod tests {
             router_id("9.9.9.10"),
             &dbd,
             &[],
+            100,
         );
         assert_eq!(
             actions,
@@ -647,6 +764,11 @@ mod tests {
 
     #[test]
     fn exchange_as_slave_with_master_poll_reaches_exchange_done() {
+        // `adj.dd_sequence_number == 5` models round 5 already having
+        // happened via `on_dbd_in_exstart` (which now always sends the
+        // slave's own first chunk immediately) — this poll is round 6, the
+        // master's next (and, since both sides carry no more data, final)
+        // poll.
         let mut adj = AdjacencyData {
             is_master: false,
             dd_sequence_number: 5,
@@ -660,7 +782,7 @@ mod tests {
             init: false,
             more: false,
             master: true,
-            dd_sequence_number: 5,
+            dd_sequence_number: 6,
             lsa_headers: Vec::new(),
         };
         let actions = on_dbd_received(
@@ -670,12 +792,30 @@ mod tests {
             router_id("9.9.9.5"),
             &dbd,
             &[],
+            100,
         );
+        assert_eq!(adj.dd_sequence_number, 6);
+        // The slave must still send its own (empty) reply at the new
+        // sequence number alongside declaring the exchange done — the
+        // master needs to see it to know the slave has nothing left too.
         assert_eq!(
             actions,
-            vec![Action::NeighborEvent(Event::ExchangeDone {
-                more_to_load: false
-            })]
+            vec![
+                Action::SendDbd(DbdPacket {
+                    router_id: router_id("9.9.9.9"),
+                    area_id: Ipv4Addr::UNSPECIFIED,
+                    interface_mtu: 0,
+                    options: 0,
+                    init: false,
+                    more: false,
+                    master: false,
+                    dd_sequence_number: 6,
+                    lsa_headers: Vec::new(),
+                }),
+                Action::NeighborEvent(Event::ExchangeDone {
+                    more_to_load: false
+                }),
+            ]
         );
     }
 
@@ -705,6 +845,7 @@ mod tests {
             router_id("9.9.9.10"),
             &dbd,
             &[],
+            100,
         );
         assert_eq!(adj.request_list, vec![neighbor_header.key()]);
         assert_eq!(
@@ -742,12 +883,271 @@ mod tests {
             router_id("9.9.9.10"),
             &dbd,
             &[local],
+            100,
         );
         assert!(adj.request_list.is_empty());
         assert_eq!(
             actions,
             vec![Action::NeighborEvent(Event::ExchangeDone {
                 more_to_load: false
+            })]
+        );
+    }
+
+    #[test]
+    fn master_paginates_own_summary_across_multiple_rounds() {
+        // Models round 5 (`on_dbd_in_exstart`) already having sent the
+        // first chunk (`h0`, not itself constructed here), leaving two more
+        // headers to drain one at a time (`max_headers: 1`).
+        let h1 = header("2.2.2.2", 1);
+        let h2 = header("3.3.3.3", 1);
+        let mut adj = AdjacencyData {
+            is_master: true,
+            dd_sequence_number: 5,
+            summary_remaining: VecDeque::from(vec![h1, h2]),
+            ..Default::default()
+        };
+        let empty_slave_reply = |seq: u32| DbdPacket {
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            interface_mtu: 0,
+            options: 0,
+            init: false,
+            more: false,
+            master: false,
+            dd_sequence_number: seq,
+            lsa_headers: Vec::new(),
+        };
+
+        // Round 5's reply: master still has h1/h2 left, so it must poll
+        // again rather than declare done.
+        let actions = on_dbd_received(
+            &mut adj,
+            NeighborState::Exchange,
+            router_id("9.9.9.9"),
+            router_id("9.9.9.10"),
+            &empty_slave_reply(5),
+            &[],
+            1,
+        );
+        assert_eq!(adj.dd_sequence_number, 6);
+        assert_eq!(adj.summary_remaining, VecDeque::from(vec![h2]));
+        assert_eq!(
+            actions,
+            vec![Action::SendDbd(DbdPacket {
+                router_id: router_id("9.9.9.9"),
+                area_id: Ipv4Addr::UNSPECIFIED,
+                interface_mtu: 0,
+                options: 0,
+                init: false,
+                more: true,
+                master: true,
+                dd_sequence_number: 6,
+                lsa_headers: vec![h1],
+            })]
+        );
+
+        // Round 6's reply: one header (h2) left, still not done.
+        let actions = on_dbd_received(
+            &mut adj,
+            NeighborState::Exchange,
+            router_id("9.9.9.9"),
+            router_id("9.9.9.10"),
+            &empty_slave_reply(6),
+            &[],
+            1,
+        );
+        assert_eq!(adj.dd_sequence_number, 7);
+        assert!(adj.summary_remaining.is_empty());
+        assert_eq!(
+            actions,
+            vec![Action::SendDbd(DbdPacket {
+                router_id: router_id("9.9.9.9"),
+                area_id: Ipv4Addr::UNSPECIFIED,
+                interface_mtu: 0,
+                options: 0,
+                init: false,
+                more: false,
+                master: true,
+                dd_sequence_number: 7,
+                lsa_headers: vec![h2],
+            })]
+        );
+
+        // Round 7's reply: both sides now empty -- done.
+        let actions = on_dbd_received(
+            &mut adj,
+            NeighborState::Exchange,
+            router_id("9.9.9.9"),
+            router_id("9.9.9.10"),
+            &empty_slave_reply(7),
+            &[],
+            1,
+        );
+        assert_eq!(
+            actions,
+            vec![Action::NeighborEvent(Event::ExchangeDone {
+                more_to_load: false
+            })]
+        );
+    }
+
+    #[test]
+    fn slave_paginates_own_summary_across_multiple_rounds() {
+        // Symmetric to `master_paginates_own_summary_across_multiple_rounds`,
+        // for the slave side: round 5 already sent the first chunk, two
+        // more headers remain, drained one at a time.
+        let h1 = header("2.2.2.2", 1);
+        let h2 = header("3.3.3.3", 1);
+        let mut adj = AdjacencyData {
+            is_master: false,
+            dd_sequence_number: 5,
+            summary_remaining: VecDeque::from(vec![h1, h2]),
+            ..Default::default()
+        };
+        let master_poll = |seq: u32, more: bool| DbdPacket {
+            router_id: router_id("9.9.9.5"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            interface_mtu: 0,
+            options: 0,
+            init: false,
+            more,
+            master: true,
+            dd_sequence_number: seq,
+            lsa_headers: Vec::new(),
+        };
+
+        // Master's next poll (round 6) -- master has nothing else, but the
+        // slave still has h1/h2 to send.
+        let actions = on_dbd_received(
+            &mut adj,
+            NeighborState::Exchange,
+            router_id("9.9.9.9"),
+            router_id("9.9.9.5"),
+            &master_poll(6, false),
+            &[],
+            1,
+        );
+        assert_eq!(adj.dd_sequence_number, 6);
+        assert_eq!(adj.summary_remaining, VecDeque::from(vec![h2]));
+        assert_eq!(
+            actions,
+            vec![Action::SendDbd(DbdPacket {
+                router_id: router_id("9.9.9.9"),
+                area_id: Ipv4Addr::UNSPECIFIED,
+                interface_mtu: 0,
+                options: 0,
+                init: false,
+                more: true,
+                master: false,
+                dd_sequence_number: 6,
+                lsa_headers: vec![h1],
+            })]
+        );
+
+        // Round 7: slave's last header, both sides now declare done in the
+        // same round.
+        let actions = on_dbd_received(
+            &mut adj,
+            NeighborState::Exchange,
+            router_id("9.9.9.9"),
+            router_id("9.9.9.5"),
+            &master_poll(7, false),
+            &[],
+            1,
+        );
+        assert_eq!(adj.dd_sequence_number, 7);
+        assert!(adj.summary_remaining.is_empty());
+        assert_eq!(
+            actions,
+            vec![
+                Action::SendDbd(DbdPacket {
+                    router_id: router_id("9.9.9.9"),
+                    area_id: Ipv4Addr::UNSPECIFIED,
+                    interface_mtu: 0,
+                    options: 0,
+                    init: false,
+                    more: false,
+                    master: false,
+                    dd_sequence_number: 7,
+                    lsa_headers: vec![h2],
+                }),
+                Action::NeighborEvent(Event::ExchangeDone {
+                    more_to_load: false
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn master_keeps_polling_with_empty_chunk_while_slave_still_has_data() {
+        // Master's own summary is already fully sent (`summary_remaining`
+        // empty), but the slave's `more` bit is still set -- master must
+        // keep polling (with an empty chunk of its own) purely to let the
+        // slave send what it has left, and `request_list` must accumulate
+        // across both rounds rather than losing round 5's entry.
+        let h_a = header("4.4.4.4", 1);
+        let h_b = header("5.5.5.5", 1);
+        let mut adj = AdjacencyData {
+            is_master: true,
+            dd_sequence_number: 5,
+            ..Default::default()
+        };
+        let slave_reply = |seq: u32, more: bool, header: LsaHeader| DbdPacket {
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            interface_mtu: 0,
+            options: 0,
+            init: false,
+            more,
+            master: false,
+            dd_sequence_number: seq,
+            lsa_headers: vec![header],
+        };
+
+        let actions = on_dbd_received(
+            &mut adj,
+            NeighborState::Exchange,
+            router_id("9.9.9.9"),
+            router_id("9.9.9.10"),
+            &slave_reply(5, true, h_a),
+            &[],
+            100,
+        );
+        assert_eq!(adj.request_list, vec![h_a.key()]);
+        assert_eq!(
+            actions,
+            vec![Action::SendDbd(DbdPacket {
+                router_id: router_id("9.9.9.9"),
+                area_id: Ipv4Addr::UNSPECIFIED,
+                interface_mtu: 0,
+                options: 0,
+                init: false,
+                more: false,
+                master: true,
+                dd_sequence_number: 6,
+                lsa_headers: Vec::new(),
+            })]
+        );
+
+        let actions = on_dbd_received(
+            &mut adj,
+            NeighborState::Exchange,
+            router_id("9.9.9.9"),
+            router_id("9.9.9.10"),
+            &slave_reply(6, false, h_b),
+            &[],
+            100,
+        );
+        assert_eq!(
+            adj.request_list,
+            vec![h_a.key(), h_b.key()],
+            "request_list must accumulate across rounds, not overwrite"
+        );
+        assert_eq!(
+            actions,
+            vec![Action::NeighborEvent(Event::ExchangeDone {
+                more_to_load: true
             })]
         );
     }
@@ -777,6 +1177,45 @@ mod tests {
             router_id("9.9.9.10"),
             &dbd,
             &[],
+            100,
+        );
+        assert_eq!(
+            actions,
+            vec![Action::NeighborEvent(Event::SeqNumberMismatch)]
+        );
+    }
+
+    #[test]
+    fn exchange_mismatch_as_slave_triggers_seq_number_mismatch() {
+        // The slave expects the master's next poll to be exactly one past
+        // the last sequence number it accepted -- a repeated or skipped
+        // value is a mismatch, not just an equal one (equal was the
+        // pre-pagination check; every subsequent round now legitimately
+        // increments).
+        let mut adj = AdjacencyData {
+            is_master: false,
+            dd_sequence_number: 5,
+            ..Default::default()
+        };
+        let dbd = DbdPacket {
+            router_id: router_id("9.9.9.5"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            interface_mtu: 0,
+            options: 0,
+            init: false,
+            more: false,
+            master: true,
+            dd_sequence_number: 5, // stale, not 6
+            lsa_headers: Vec::new(),
+        };
+        let actions = on_dbd_received(
+            &mut adj,
+            NeighborState::Exchange,
+            router_id("9.9.9.9"),
+            router_id("9.9.9.5"),
+            &dbd,
+            &[],
+            100,
         );
         assert_eq!(
             actions,
@@ -803,6 +1242,7 @@ mod tests {
             router_id("9.9.9.10"),
             &dbd,
             &[],
+            100,
         );
         assert!(actions.is_empty());
         assert_eq!(adj.dd_sequence_number, 5, "must not adopt the stray seq");
@@ -823,6 +1263,7 @@ mod tests {
             router_id("9.9.9.10"),
             &dbd,
             &[],
+            100,
         );
         assert!(actions.is_empty());
         assert_eq!(adj.dd_sequence_number, 5, "must not adopt the stray seq");
@@ -843,6 +1284,7 @@ mod tests {
             router_id("9.9.9.10"),
             &dbd,
             &[],
+            100,
         );
         assert!(actions.is_empty());
     }
@@ -859,6 +1301,7 @@ mod tests {
             router_id("9.9.9.10"),
             &dbd,
             &[],
+            100,
         );
         assert!(actions.is_empty());
     }

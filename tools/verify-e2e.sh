@@ -123,12 +123,23 @@
 # route for a prefix that is not in its own area at all -- see
 # ospf/CLAUDE.md's "ABR and Summary-LSA origination".
 #
+# A ninth, `ospf-dbd-pagination`, is self-contained (its own router-a/
+# router-b, launched with a real --dbd-max-headers=1 so RFC 2328 §10.8's DBD
+# pagination triggers deterministically -- router-a also redistributes a
+# static route into ospf, the same provisioning `asbr` uses, purely to give
+# it two distinct LSAs already installed before the DBD exchange starts,
+# since a single-LSA summary still fits in one chunk even at
+# --dbd-max-headers=1), confirming real multi-packet DBD pagination
+# actually happens over the wire (at least one "more remaining" chunk
+# logged) and that the adjacency still reaches Full correctly despite it --
+# see ospf/CLAUDE.md's "Exchange".
+#
 # nos-cli's interactive shell (reedline) can't be scripted over a plain
 # pipe, so provisioning goes through `nos-provision` (tools/nos-provision) —
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
+# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -1643,6 +1654,55 @@ cmd_check_ospf_aging() {
     || { log "router-b: FAILED to flush the stale router-lsa"; return 1; }
 }
 
+# --- OSPF DBD pagination scenario (RFC 2328 §10.8) ---
+#
+# Self-contained (own router-a/router-b, not chained onto `ospf`'s
+# containers), since it needs both routers' nos-ospfd launched with a real
+# --dbd-max-headers from process start (`--ospfd-arg`, forwarded straight
+# through by nos-watchdogd, see root CLAUDE.md's "Process supervision") --
+# an already-running container can't have that retro-fitted onto it. A cap
+# of 1 forces multiple DBD rounds even over this script's small lab LSDB
+# (a handful of Router-LSAs), no extra LSAs need provisioning.
+cmd_up_ospf_dbd_pagination() {
+  ensure_env_up
+  start_router router-a "$IP_A" --ospfd-arg "--dbd-max-headers=1"
+  start_router router-b "$IP_B" --ospfd-arg "--dbd-max-headers=1"
+  wait_for_config_socket router-a
+  wait_for_config_socket router-b
+  # router-a also redistributes a static route into ospf (the same
+  # provisioning `asbr` uses), purely to give it two distinct LSAs
+  # (its own Router-LSA plus a self-originated Type-5) already installed
+  # before the adjacency's DBD exchange even starts -- with a single-LSA
+  # summary, --dbd-max-headers=1 still fits in one chunk and never
+  # actually paginates.
+  provision_asbr router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID"
+  provision_ospf router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID_B"
+}
+
+cmd_check_ospf_dbd_pagination() {
+  cmd_up_ospf_dbd_pagination
+
+  # Proves pagination actually triggered (not just that the flag was
+  # accepted) -- the log line link.rs's `execute_actions` emits for every
+  # non-negotiation DBD chunk with `more: true` still set.
+  log "waiting for a real multi-packet dbd chunk to be sent"
+  if wait_for_count_increase router-a "ospf dbd chunk sent, more remaining" 0 60 \
+      || wait_for_count_increase router-b "ospf dbd chunk sent, more remaining" 0 60; then
+    log "pagination triggered: a dbd chunk with more remaining was sent"
+  else
+    log "FAILED: no paginated dbd chunk was ever sent"
+    return 1
+  fi
+
+  log "waiting for router-a/router-b to still reach ospf full despite pagination"
+  wait_for_count_increase router-a "ospf neighbor reached full link=eth0.0 neighbor=$OSPF_ROUTER_ID_B" 0 60 \
+    && log "router-a: reached ospf full with $OSPF_ROUTER_ID_B" \
+    || { log "router-a: FAILED to reach ospf full"; return 1; }
+  wait_for_count_increase router-b "ospf neighbor reached full link=eth0.0 neighbor=$OSPF_ROUTER_ID" 0 60 \
+    && log "router-b: reached ospf full with $OSPF_ROUTER_ID" \
+    || { log "router-b: FAILED to reach ospf full"; return 1; }
+}
+
 cmd_check_switching() {
   provision_switching router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
 
@@ -2204,6 +2264,7 @@ cmd_group_ospf_suite() {
   cmd_check_abr
   cmd_check_ospf_auth
   cmd_check_ospf_aging
+  cmd_check_ospf_dbd_pagination
 }
 
 cmd_group_multi() {
@@ -2236,6 +2297,7 @@ case "${1:-}" in
   abr) cmd_check_abr ;;
   ospf-aging) cmd_check_ospf_aging ;;
   ospf-auth) cmd_check_ospf_auth ;;
+  ospf-dbd-pagination) cmd_check_ospf_dbd_pagination ;;
   logs) shift; cmd_logs "$@" ;;
   down) cmd_down ;;
   base) cmd_group_base ;;
@@ -2267,9 +2329,10 @@ case "${1:-}" in
     cmd_check_abr
     cmd_check_ospf_auth
     cmd_check_ospf_aging
+    cmd_check_ospf_dbd_pagination
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
     exit 2
     ;;
 esac

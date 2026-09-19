@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use nos_log_client::ForwardingLayer;
+use nos_ospf::exchange::DEFAULT_DBD_MAX_HEADERS;
 use nos_ospf::link::LinkManager;
 use nos_ospf::{reconcile, rib_push_client, server, watchdog_client};
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
@@ -45,6 +46,16 @@ struct Args {
     /// pattern). Do not wire this into OspfProfile/nos-cli.
     #[arg(long, default_value_t = 1)]
     lsa_age_multiplier: u16,
+
+    /// RFC 2328 §10.8's per-DBD-packet LSA-header budget. Unlike
+    /// `lsa_age_multiplier`, this one matters in real production use (it
+    /// bounds how many headers this NOS puts in one DBD packet), so its
+    /// default is a real conservative value (`DEFAULT_DBD_MAX_HEADERS`) —
+    /// only overridden by `tools/verify-e2e.sh`'s `ospf-dbd-pagination`
+    /// phase, via the same opaque `--ospfd-arg` pass-through, to force
+    /// multi-packet pagination deterministically over a small lab LSDB.
+    #[arg(long, default_value_t = DEFAULT_DBD_MAX_HEADERS)]
+    dbd_max_headers: usize,
 }
 
 #[tokio::main]
@@ -82,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from(format!("/run/nos/ospf-{}.sock", args.instance)));
 
     let (routing_table_tx, routing_table_rx) = watch::channel(None::<String>);
-    let links = LinkManager::new(args.lsa_age_multiplier);
+    let links = LinkManager::new(args.lsa_age_multiplier, args.dbd_max_headers);
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),
