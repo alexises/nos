@@ -18,6 +18,9 @@ pub struct InterfaceStatus {
     pub addresses: Vec<InterfaceAddress>,
     pub routing_table: Option<String>,
     pub switching_profile: Option<String>,
+    /// If set, names the `PortAggregate` this interface is a static bonded
+    /// member of — same shape/role as `switching_profile`.
+    pub port_aggregate: Option<String>,
     /// This interface's configured MTU, or `1500` (Linux's own default) if
     /// unset — reflects desired config like every other field here, applies
     /// uniformly to every one of `subinterfaces` (MTU is a physical-link
@@ -69,6 +72,26 @@ pub struct BroadcastDomainStatus {
     pub bridge_name: Option<String>,
 }
 
+/// The wire twin of `schema::PortAggregate` — a static Linux bonding
+/// device's config, the same shape as `InterfaceStatus` minus the
+/// loopback-only flat `addresses`/`routing_table` fields (a bond is never a
+/// loopback — all its L3 config lives in `subinterfaces`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PortAggregateStatus {
+    pub name: String,
+    pub mode: crate::schema::PortAggregateMode,
+    pub switching_profile: Option<String>,
+    pub mtu: u32,
+    pub subinterfaces: Vec<SubinterfaceStatus>,
+    /// See `InterfaceStatus.link_local_address` — same observed-kernel-state
+    /// semantics, scoped to this bond's own kernel device.
+    pub link_local_address: Option<Ipv6Addr>,
+    /// The real Linux bond device name the `linux` driver allocated for this
+    /// aggregate (e.g. `bond1`) — `None` until the driver has actually
+    /// created it (or under the `noop` driver, a synthesized placeholder).
+    pub bond_name: Option<String>,
+}
+
 /// Messages sent from a client to `nos-interfaced`'s IPC socket.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -82,6 +105,10 @@ pub enum InterfaceRequest {
     GetInterface { name: String },
     /// One-shot: a single named broadcast domain.
     GetBroadcastDomain { name: String },
+    /// One-shot: every port aggregate currently configured.
+    GetPortAggregates,
+    /// One-shot: a single named port aggregate.
+    GetPortAggregate { name: String },
 }
 
 /// Messages sent from `nos-interfaced` to a client.
@@ -91,9 +118,13 @@ pub enum InterfaceEvent {
     Interfaces(Vec<InterfaceStatus>),
     /// Reply to `GetInterface` when the named interface exists.
     Interface(InterfaceStatus),
-    /// Reply to `GetInterface`/`GetBroadcastDomain` when no such
-    /// interface/domain is configured.
+    /// Reply to `GetInterface`/`GetBroadcastDomain`/`GetPortAggregate` when
+    /// no such interface/domain/aggregate is configured.
     NotFound,
     /// Reply to `GetBroadcastDomain` when the named domain exists.
     BroadcastDomain(BroadcastDomainStatus),
+    /// Reply to `GetPortAggregates`.
+    PortAggregates(Vec<PortAggregateStatus>),
+    /// Reply to `GetPortAggregate` when the named aggregate exists.
+    PortAggregate(PortAggregateStatus),
 }

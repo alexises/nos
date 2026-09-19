@@ -68,6 +68,13 @@ pub enum InterfaceOp {
     ClearSwitchingProfile {
         name: String,
     },
+    SetPortAggregate {
+        name: String,
+        port_aggregate: String,
+    },
+    ClearPortAggregate {
+        name: String,
+    },
     Delete {
         name: String,
     },
@@ -85,6 +92,7 @@ impl InterfaceOp {
                         ospf_profile: None,
                         ospfv3_profile: None,
                         switching_profile: None,
+                        port_aggregate: None,
                         mtu: None,
                         subinterfaces: Vec::new(),
                     });
@@ -168,6 +176,17 @@ impl InterfaceOp {
                 find_interface_mut(config, name)?.switching_profile = None;
                 Ok(())
             }
+            InterfaceOp::SetPortAggregate {
+                name,
+                port_aggregate,
+            } => {
+                find_interface_mut(config, name)?.port_aggregate = Some(port_aggregate.clone());
+                Ok(())
+            }
+            InterfaceOp::ClearPortAggregate { name } => {
+                find_interface_mut(config, name)?.port_aggregate = None;
+                Ok(())
+            }
             InterfaceOp::Delete { name } => {
                 let before = config.interfaces.len();
                 config.interfaces.retain(|i| &i.name != name);
@@ -203,6 +222,7 @@ mod tests {
             ospf_profile: None,
             ospfv3_profile: None,
             switching_profile: None,
+            port_aggregate: None,
             mtu: None,
             subinterfaces: Vec::new(),
         }
@@ -242,6 +262,7 @@ mod tests {
                 routing_table: None,
                 ospf_profile: None,
                 switching_profile: None,
+                port_aggregate: None,
                 mtu: None,
                 subinterfaces: Vec::new(),
             }],
@@ -446,6 +467,28 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.interfaces[0].switching_profile, None);
+    }
+
+    #[test]
+    fn set_and_clear_port_aggregate() {
+        let mut cfg = Config {
+            interfaces: vec![interface("eth0")],
+            ..Default::default()
+        };
+        InterfaceOp::SetPortAggregate {
+            name: "eth0".to_string(),
+            port_aggregate: "bond1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].port_aggregate.as_deref(), Some("bond1"));
+
+        InterfaceOp::ClearPortAggregate {
+            name: "eth0".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].port_aggregate, None);
     }
 
     #[test]

@@ -17,7 +17,12 @@
 # addressed, then deleted again on removal, (via the `mtu` subcommand) that a
 # non-default MTU configured directly on an interface (a link-layer
 # property, not per-subinterface) actually gets applied to the real kernel
-# link by nos-interfaced's Linux driver, (via the `switching` subcommand)
+# link by nos-interfaced's Linux driver, (via the `port-aggregate`
+# subcommand) that a static (non-LACP, Xor) Linux bonding device actually
+# gets created and two real dedicated member interfaces (eth1/eth2, on their
+# own docker networks -- bonding needs >=2 real distinct links) actually get
+# enslaved into it by nos-interfaced's Linux driver, then torn down again,
+# (via the `switching` subcommand)
 # that a real L2 switching profile trunking an interface into two broadcast
 # domains at two different local dot1q tags actually gets one real Linux
 # bridge device created per domain and one real 802.1q sub-interface per
@@ -166,7 +171,7 @@
 # DrOther-to-DR/BDR Full-adjacency restriction hold over the new address
 # family too.
 #
-# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|mtu|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
+# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|mtu|port-aggregate|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -177,6 +182,13 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROVISION_BIN="$REPO/target/docker-verify/release/nos-provision"
 IMAGE=nos:local
 NET=nos-verify-net
+# Two extra single-purpose docker networks, connected only to router-a, for
+# the `port-aggregate` scenario -- bonding needs >=2 real distinct links,
+# which no other scenario's shared eth0 (already carrying the BGP session's
+# own address) can provide. Docker assigns interface names in connection
+# order, so router-a ends up with eth1/eth2 alongside its primary eth0.
+NET_BOND1=nos-verify-net-bond1
+NET_BOND2=nos-verify-net-bond2
 SUBNET=10.50.0.0/24
 # A fixed ULA (RFC 4193) block for the docker network's own IPv6 subnet --
 # see ensure_network's own comment. Never assigned to nos's own config
@@ -590,6 +602,61 @@ provision_mtu() {
     --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
     --peer "$peer_ip" \
     --mtu "$mtu"
+}
+
+# --- Port aggregate scenario ---
+#
+# Configures a static (non-LACP, Xor) Linux bonding device ("bond1") on
+# router-a and enslaves two dedicated member links (eth1/eth2 -- see
+# NET_BOND1/NET_BOND2 above) into it, verifying nos-interfaced's Linux
+# driver actually creates a real kernel bond device and enslaves both real
+# member interfaces into it -- over a real kernel, not a unit test -- then
+# deletes the aggregate and confirms the bond device (and both members'
+# enslavement) is torn down again.
+
+ensure_bond_networks() {
+  docker network inspect "$NET_BOND1" >/dev/null 2>&1 || docker network create "$NET_BOND1" >/dev/null
+  docker network inspect "$NET_BOND2" >/dev/null 2>&1 || docker network create "$NET_BOND2" >/dev/null
+}
+
+provision_port_aggregate() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  ensure_bond_networks
+  docker network connect "$NET_BOND1" "$name" 2>/dev/null || true
+  docker network connect "$NET_BOND2" "$name" 2>/dev/null || true
+  log "provisioning $name with a static (xor) port aggregate bond1 over eth1+eth2"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --port-aggregate bond1 \
+    --enslave-interface-into-port-aggregate eth1 \
+    --enslave-interface-into-port-aggregate eth2
+}
+
+provision_delete_port_aggregate() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  log "provisioning $name with its port aggregate bond1 removed"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --port-aggregate bond1 \
+    --enslave-interface-into-port-aggregate eth1 \
+    --enslave-interface-into-port-aggregate eth2 \
+    --delete-port-aggregate
 }
 
 # --- OSPF instance scenario ---
@@ -1540,6 +1607,40 @@ cmd_check_mtu() {
   wait_for_count_increase router-a "applied interface mtu interface=eth0 mtu=$MTU_VALUE" 0 60 \
     && log "router-a: applied mtu $MTU_VALUE to eth0" \
     || { log "router-a: FAILED to apply the interface mtu"; return 1; }
+}
+
+cmd_check_port_aggregate() {
+  provision_port_aggregate router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+
+  log "waiting for router-a to create the port aggregate bond device"
+  wait_for_count_increase router-a "created port aggregate bond port_aggregate=bond1 bond=bond1 mode=Xor" 0 60 \
+    && log "router-a: created port aggregate bond1 (mode=Xor)" \
+    || { log "router-a: FAILED to create the port aggregate bond device"; return 1; }
+
+  log "waiting for router-a to enslave eth1/eth2 into bond1"
+  wait_for_count_increase router-a "enslaved interface to bond interface=eth1 bond=bond1" 0 60 \
+    && log "router-a: enslaved eth1 into bond1" \
+    || { log "router-a: FAILED to enslave eth1 into bond1"; return 1; }
+  wait_for_count_increase router-a "enslaved interface to bond interface=eth2 bond=bond1" 0 60 \
+    && log "router-a: enslaved eth2 into bond1" \
+    || { log "router-a: FAILED to enslave eth2 into bond1"; return 1; }
+
+  provision_delete_port_aggregate router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B"
+
+  # Deleting the bond device (below) already releases both slaves as a
+  # kernel-level side effect of destroying their master — unlike deleting a
+  # vlan sub-interface (see cmd_check_switching), there is no separate
+  # explicit "unenslaved" netlink call/log line for this driver to emit on
+  # its next resync, since the kernel gets there first. Real effect
+  # confirmed manually against the live container while writing this check
+  # (both members come back up with no master once bond1 is gone) — the
+  # bond device's own deletion log line below is this phase's teardown
+  # assertion, mirroring cmd_check_switching's own precedent of asserting
+  # only on log lines the driver actually emits.
+  log "waiting for router-a to delete the port aggregate bond device"
+  wait_for_count_increase router-a "deleted port aggregate bond port_aggregate=bond1 bond=bond1" 0 60 \
+    && log "router-a: deleted port aggregate bond1" \
+    || { log "router-a: FAILED to delete the port aggregate bond device"; return 1; }
 }
 
 cmd_check_ospf() {
@@ -2694,7 +2795,7 @@ cmd_down() {
   docker rm -f router-a router-b router-c >/dev/null 2>&1 || true
   docker volume rm router-a-run router-a-data router-b-run router-b-data router-c-run router-c-data \
     >/dev/null 2>&1 || true
-  docker network rm "$NET" >/dev/null 2>&1 || true
+  docker network rm "$NET" "$NET_BOND1" "$NET_BOND2" >/dev/null 2>&1 || true
 }
 
 # --- Self-contained group subcommands ---
@@ -2729,6 +2830,7 @@ cmd_group_drivers() {
   cmd_check_established
   cmd_check_loopback
   cmd_check_mtu
+  cmd_check_port_aggregate
   cmd_check_switching
   cmd_check_svi
   cmd_check_routed_subinterface
@@ -2777,6 +2879,7 @@ case "${1:-}" in
   auth) cmd_check_auth ;;
   loopback) cmd_check_loopback ;;
   mtu) cmd_check_mtu ;;
+  port-aggregate) cmd_check_port_aggregate ;;
   switching) cmd_check_switching ;;
   svi) cmd_check_svi ;;
   routed-subinterface) cmd_check_routed_subinterface ;;
@@ -2813,6 +2916,7 @@ case "${1:-}" in
     cmd_check_auth
     cmd_check_loopback
     cmd_check_mtu
+    cmd_check_port_aggregate
     cmd_check_switching
     cmd_check_svi
     cmd_check_routed_subinterface
@@ -2835,7 +2939,7 @@ case "${1:-}" in
     cmd_check_ospfv3_dr
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|mtu|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|mtu|port-aggregate|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
     exit 2
     ;;
 esac

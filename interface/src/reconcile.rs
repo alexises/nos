@@ -26,15 +26,16 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const REAPPLY_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Runs until `shutdown` fires. Subscribes to `Interfaces`, `BroadcastDomains`,
-/// and `SwitchingProfiles` diffs purely as an edge trigger: every
-/// `Event::Diff` received (including the first, synthesized one) causes a
-/// full `resync` — a fresh `Request::Get` plus a from-scratch `Interfaces`
-/// rebuild — rather than incremental diff application, since
+/// `SwitchingProfiles`, and `PortAggregates` diffs purely as an edge
+/// trigger: every `Event::Diff` received (including the first, synthesized
+/// one) causes a full `resync` — a fresh `Request::Get` plus a from-scratch
+/// `Interfaces` rebuild — rather than incremental diff application, since
 /// `SectionDiff`/`FieldDiff` only carry pre-formatted display strings, not
 /// structured data (mirrors `nos-rib`'s `reconcile::run`). `BroadcastDomains`/
-/// `SwitchingProfiles` are included so a domain/profile-only edit (no
-/// `Interface` object itself touched) still triggers a resync — otherwise a
-/// newly added `BroadcastDomain` wouldn't get its bridge created until some
+/// `SwitchingProfiles`/`PortAggregates` are included so a domain/profile/
+/// aggregate-only edit (no `Interface` object itself touched) still
+/// triggers a resync — otherwise a newly added `BroadcastDomain`/
+/// `PortAggregate` wouldn't get its bridge/bond created until some
 /// unrelated interface change happened to resync anyway. A periodic tick
 /// alongside the diff stream also triggers `resync`, independent of any
 /// config change — see `REAPPLY_INTERVAL`.
@@ -48,6 +49,7 @@ pub async fn run(
         DiffScope::Interfaces,
         DiffScope::BroadcastDomains,
         DiffScope::SwitchingProfiles,
+        DiffScope::PortAggregates,
     ];
     while !*shutdown.borrow() {
         match config_client::subscribe_diff(&config_socket, scopes.clone()).await {

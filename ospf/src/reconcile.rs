@@ -689,6 +689,7 @@ mod tests {
             routing_table: None,
             ospf_profile: ospf_profile.map(str::to_string),
             switching_profile: None,
+            port_aggregate: None,
             mtu: None,
             subinterfaces: Vec::new(),
         }

@@ -123,8 +123,10 @@ fn valid_subinterface_ospf_profile_requires_routing_table(
 }
 
 /// Umbrella validator for `Interface.subinterfaces` combining the two
-/// cross-field checks above — see each for details.
-fn valid_subinterface_list(subinterfaces: &[Subinterface]) -> garde::Result {
+/// cross-field checks above — see each for details. `pub(crate)` since
+/// `PortAggregate.subinterfaces` (same type, same rules) reuses this
+/// verbatim.
+pub(crate) fn valid_subinterface_list(subinterfaces: &[Subinterface]) -> garde::Result {
     unique_subinterface_tags(subinterfaces)?;
     valid_subinterface_ospf_profile_requires_routing_table(subinterfaces)?;
     Ok(())
@@ -183,6 +185,14 @@ pub struct Interface {
     #[garde(custom(|sp: &Option<String>, ctx: &Config| switching_profile_reference_valid(sp.as_ref(), ctx)))]
     pub switching_profile: Option<String>,
 
+    /// If set, names a `PortAggregate` this interface is a static bonded
+    /// member of. Mutually exclusive with `switching_profile` and a non-empty
+    /// `subinterfaces` — a bonded slave, like a VRF- or bridge-enslaved link,
+    /// can only have one Linux master device. See
+    /// `valid_port_aggregate_membership`.
+    #[garde(custom(|pa: &Option<String>, ctx: &Config| port_aggregate_reference_valid(pa.as_ref(), ctx)))]
+    pub port_aggregate: Option<String>,
+
     /// The link's MTU, in bytes. A link-layer property of the physical (or
     /// loopback) interface itself — unlike `addresses`/`routing_table`, it's
     /// not part of the loopback/physical addressing split (see
@@ -198,7 +208,7 @@ pub struct Interface {
 }
 
 /// RFC 791's IPv4 minimum through Linux's practical link-layer ceiling.
-fn valid_mtu(mtu: Option<u32>) -> garde::Result {
+pub(crate) fn valid_mtu(mtu: Option<u32>) -> garde::Result {
     match mtu {
         Some(m) if !(68..=65535).contains(&m) => {
             Err(garde::Error::new("mtu must be between 68 and 65535"))
@@ -231,7 +241,9 @@ fn interface_name_valid(name: &String, ctx: &Config) -> garde::Result {
 }
 
 /// If set, `switching_profile` must name an existing `SwitchingProfile`.
-fn switching_profile_reference_valid(
+/// `pub(crate)` since `PortAggregate` (a bond can also be trunked into a
+/// broadcast domain) reuses this verbatim.
+pub(crate) fn switching_profile_reference_valid(
     switching_profile: Option<&String>,
     ctx: &Config,
 ) -> garde::Result {
@@ -241,6 +253,19 @@ fn switching_profile_reference_valid(
     if !ctx.switching_profiles.iter().any(|p| &p.name == name) {
         return Err(garde::Error::new(
             "referenced switching profile does not exist",
+        ));
+    }
+    Ok(())
+}
+
+/// If set, `port_aggregate` must name an existing `PortAggregate`.
+fn port_aggregate_reference_valid(port_aggregate: Option<&String>, ctx: &Config) -> garde::Result {
+    let Some(name) = port_aggregate else {
+        return Ok(());
+    };
+    if !ctx.port_aggregates.iter().any(|a| &a.name == name) {
+        return Err(garde::Error::new(
+            "referenced port aggregate does not exist",
         ));
     }
     Ok(())
@@ -324,11 +349,35 @@ pub(crate) fn valid_subinterface_and_switching_profile_tags(
     Ok(())
 }
 
-/// Umbrella `Config.interfaces`-level validator combining the two
-/// cross-field checks above — see each for details.
+/// An interface with `port_aggregate` set can't also carry a
+/// `switching_profile` or any `subinterfaces` — like VRF/bridge enslavement,
+/// bond enslavement claims the link's one Linux master, so there's nothing
+/// left for an L2 trunk or a per-tag VLAN sub-link to attach to.
+fn valid_port_aggregate_membership(interfaces: &[Interface]) -> garde::Result {
+    for iface in interfaces {
+        if iface.port_aggregate.is_none() {
+            continue;
+        }
+        if iface.switching_profile.is_some() {
+            return Err(garde::Error::new(
+                "an interface in a port aggregate must not also have a switching-profile",
+            ));
+        }
+        if !iface.subinterfaces.is_empty() {
+            return Err(garde::Error::new(
+                "an interface in a port aggregate must not also have subinterfaces",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Umbrella `Config.interfaces`-level validator combining the cross-field
+/// checks above — see each for details.
 pub(crate) fn valid_interfaces(interfaces: &[Interface], ctx: &Config) -> garde::Result {
     valid_addressing_split(interfaces)?;
     valid_subinterface_and_switching_profile_tags(interfaces, ctx)?;
+    valid_port_aggregate_membership(interfaces)?;
     Ok(())
 }
 
@@ -352,6 +401,7 @@ mod tests {
             routing_table: routing_table.map(str::to_string),
             ospf_profile: None,
             switching_profile: None,
+            port_aggregate: None,
             mtu: None,
             subinterfaces: Vec::new(),
         }
@@ -790,6 +840,53 @@ mod tests {
         let mut iface = interface("eth0", &[], None);
         iface.ospf_profile = Some("p1".to_string());
         let cfg = config_with_ospf_profile(vec![iface], vec![]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    fn aggregate(name: &str) -> crate::schema::PortAggregate {
+        crate::schema::PortAggregate {
+            name: name.to_string(),
+            mode: crate::schema::PortAggregateMode::Xor,
+            switching_profile: None,
+            mtu: None,
+            subinterfaces: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn valid_port_aggregate_reference_passes() {
+        let mut iface = interface("eth0", &[], None);
+        iface.port_aggregate = Some("bond1".to_string());
+        let mut cfg = config_with(vec![iface], vec![]);
+        cfg.port_aggregates = vec![aggregate("bond1")];
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn dangling_port_aggregate_reference_fails() {
+        let mut iface = interface("eth0", &[], None);
+        iface.port_aggregate = Some("does-not-exist".to_string());
+        let cfg = config_with(vec![iface], vec![]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn port_aggregate_member_with_switching_profile_fails() {
+        let mut iface = interface("eth0", &[], None);
+        iface.port_aggregate = Some("bond1".to_string());
+        iface.switching_profile = Some("sp1".to_string());
+        let mut cfg = config_with(vec![iface], vec![]);
+        cfg.port_aggregates = vec![aggregate("bond1")];
+        cfg.switching_profiles = vec![profile("sp1", vec![])];
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn port_aggregate_member_with_subinterfaces_fails() {
+        let mut iface = physical_with_l3("eth0", &[], Some("rt1"));
+        iface.port_aggregate = Some("bond1".to_string());
+        let mut cfg = config_with(vec![iface], vec![table("rt1")]);
+        cfg.port_aggregates = vec![aggregate("bond1")];
         assert!(cfg.validate_with(&cfg).is_err());
     }
 }

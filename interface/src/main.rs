@@ -66,6 +66,15 @@ struct Args {
     #[arg(long, default_value = "/var/lib/nos/linux-driver/bridge-ids.yaml")]
     bridge_registry_path: PathBuf,
 
+    /// Path to this driver's own private persisted port-aggregate-name ->
+    /// bond-id map (`--driver linux` only) — same shape and directory as
+    /// `--bridge-registry-path`.
+    #[arg(
+        long,
+        default_value = "/var/lib/nos/linux-driver/port-aggregate-ids.yaml"
+    )]
+    port_aggregate_registry_path: PathBuf,
+
     /// Unix socket to forward this process's log events to. Passed directly
     /// by nos-watchdog to every process it spawns (see root `CLAUDE.md`'s
     /// "Process supervision" section), the same way `--config-socket` is.
@@ -117,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
                 LinuxInterfaceDriver::new(
                     args.watchdog_socket.clone(),
                     args.bridge_registry_path.clone(),
+                    args.port_aggregate_registry_path.clone(),
                 )
                 .inspect_err(|e| {
                     tracing::error!(error = %e, "failed to initialize linux interface driver");

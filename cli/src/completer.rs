@@ -46,6 +46,8 @@ pub struct NosCompleter {
     /// Live `OSPFv3` profile names (flattened across every instance/area) for
     /// `ArgKind::Ospfv3ProfileName` slots.
     ospfv3_profile_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
+    /// Live port aggregate names for `ArgKind::PortAggregateName` slots.
+    port_aggregate_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
 }
 
 impl NosCompleter {
@@ -64,6 +66,7 @@ impl NosCompleter {
         ospf_profile_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
         ospfv3_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
         ospfv3_profile_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
+        port_aggregate_name_source: Box<dyn FnMut() -> Vec<String> + Send>,
     ) -> Self {
         Self {
             mode,
@@ -79,6 +82,7 @@ impl NosCompleter {
             ospf_profile_name_source,
             ospfv3_instance_name_source,
             ospfv3_profile_name_source,
+            port_aggregate_name_source,
         }
     }
 
@@ -112,6 +116,7 @@ impl NosCompleter {
             ArgKind::OspfProfileName => &mut *self.ospf_profile_name_source,
             ArgKind::Ospfv3InstanceName => &mut *self.ospfv3_instance_name_source,
             ArgKind::Ospfv3ProfileName => &mut *self.ospfv3_profile_name_source,
+            ArgKind::PortAggregateName => &mut *self.port_aggregate_name_source,
         })
     }
 }
@@ -271,6 +276,10 @@ mod tests {
         Box::new(Vec::new)
     }
 
+    fn no_port_aggregates() -> Box<dyn FnMut() -> Vec<String> + Send> {
+        Box::new(Vec::new)
+    }
+
     fn values(result: &CompletionResult) -> Vec<String> {
         let mut v: Vec<String> = result
             .suggestions()
@@ -297,6 +306,7 @@ mod tests {
             no_ospf_profiles(),
             no_ospfv3_instances(),
             no_ospfv3_profiles(),
+            no_port_aggregates(),
         );
         let result = completer.complete("sh", 2);
         assert_eq!(values(&result), vec!["show".to_string()]);
@@ -318,6 +328,7 @@ mod tests {
             no_ospf_profiles(),
             no_ospfv3_instances(),
             no_ospfv3_profiles(),
+            no_port_aggregates(),
         );
         let result = completer.complete("com", 3);
         assert!(
@@ -347,6 +358,7 @@ mod tests {
             no_ospf_profiles(),
             no_ospfv3_instances(),
             no_ospfv3_profiles(),
+            no_port_aggregates(),
         );
         let result = completer.complete("com", 3);
         assert_eq!(values(&result), vec!["commit".to_string()]);
@@ -368,6 +380,7 @@ mod tests {
             no_ospf_profiles(),
             no_ospfv3_instances(),
             no_ospfv3_profiles(),
+            no_port_aggregates(),
         );
         let result = completer.complete("", 0);
         let vals = values(&result);
@@ -399,6 +412,7 @@ mod tests {
             no_ospf_profiles(),
             no_ospfv3_instances(),
             no_ospfv3_profiles(),
+            no_port_aggregates(),
         );
         let result = completer.complete("edit bgp instance r", 19);
         assert_eq!(values(&result), vec!["r1".to_string(), "r2".to_string()]);
@@ -427,6 +441,7 @@ mod tests {
             no_ospf_profiles(),
             no_ospfv3_instances(),
             no_ospfv3_profiles(),
+            no_port_aggregates(),
         );
         let result = completer.complete("edit peer-group p", 17);
         assert_eq!(values(&result), vec!["pg1".to_string(), "pg2".to_string()]);
@@ -455,6 +470,7 @@ mod tests {
             no_ospf_profiles(),
             no_ospfv3_instances(),
             no_ospfv3_profiles(),
+            no_port_aggregates(),
         );
         let result = completer.complete("edit routing-table r", 20);
         assert_eq!(values(&result), vec!["rt1".to_string(), "rt2".to_string()]);
@@ -483,6 +499,7 @@ mod tests {
             no_ospf_profiles(),
             no_ospfv3_instances(),
             no_ospfv3_profiles(),
+            no_port_aggregates(),
         );
         let result = completer.complete("edit static-routing-instance s", 30);
         assert_eq!(
@@ -507,6 +524,7 @@ mod tests {
             no_ospf_profiles(),
             no_ospfv3_instances(),
             no_ospfv3_profiles(),
+            no_port_aggregates(),
         );
         let result = completer.complete("show conf", 9);
         let suggestion = result
@@ -538,6 +556,7 @@ mod tests {
             no_ospf_profiles(),
             no_ospfv3_instances(),
             no_ospfv3_profiles(),
+            no_port_aggregates(),
         );
         let result = completer.complete("show config", 11);
         // Not a completion candidate (already fully typed) — use a partial instead.

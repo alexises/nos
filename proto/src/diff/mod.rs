@@ -12,6 +12,7 @@ pub mod ospfv3_area;
 pub mod ospfv3_instance;
 pub mod ospfv3_profile;
 pub mod policy_definition;
+pub mod port_aggregate;
 pub mod prefix_list;
 pub mod routing_table;
 pub mod static_route;
@@ -83,6 +84,7 @@ pub struct ConfigDiff {
     pub prefix_lists: Vec<SectionDiff>,
     pub broadcast_domains: Vec<SectionDiff>,
     pub switching_profiles: Vec<SectionDiff>,
+    pub port_aggregates: Vec<SectionDiff>,
 }
 
 impl ConfigDiff {
@@ -100,6 +102,7 @@ impl ConfigDiff {
             && self.prefix_lists.is_empty()
             && self.broadcast_domains.is_empty()
             && self.switching_profiles.is_empty()
+            && self.port_aggregates.is_empty()
     }
 
     /// A copy of this diff keeping only the sections/fields covered by
@@ -173,6 +176,11 @@ impl ConfigDiff {
             } else {
                 Vec::new()
             },
+            port_aggregates: if scopes.contains(&DiffScope::PortAggregates) {
+                self.port_aggregates.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -194,6 +202,7 @@ pub enum DiffScope {
     SwitchingProfiles,
     OspfInstances,
     Ospfv3Instances,
+    PortAggregates,
 }
 
 /// Computes what changed between `base` (e.g. the running config) and
@@ -248,6 +257,10 @@ pub fn diff_configs(base: &Config, candidate: &Config) -> ConfigDiff {
         switching_profiles: switching_profile::diff_switching_profiles(
             &base.switching_profiles,
             &candidate.switching_profiles,
+        ),
+        port_aggregates: port_aggregate::diff_port_aggregates(
+            &base.port_aggregates,
+            &candidate.port_aggregates,
         ),
     }
 }

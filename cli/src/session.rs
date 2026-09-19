@@ -4,8 +4,8 @@ use nos_proto::{
     loopback_table_name, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp,
     CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, OspfAreaOp, OspfCryptoKey,
     OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
-    PolicyDefinitionOp, PrefixListEntry, PrefixListOp, RoutingTableOp, StaticRouteOp,
-    StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase,
+    PolicyDefinitionOp, PortAggregateOp, PrefixListEntry, PrefixListOp, RoutingTableOp,
+    StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase,
 };
 
 use crate::command::{
@@ -59,6 +59,7 @@ pub enum Path {
     PrefixList(String),
     BroadcastDomain(String),
     SwitchingProfile(String),
+    PortAggregate(String),
 }
 
 /// Splits `"eth0.100"` into `("eth0", 100)` when the suffix after the LAST
@@ -466,6 +467,11 @@ pub enum Resolved {
     ShowInterface {
         name: Option<String>,
     },
+    /// `show port-aggregate` (every aggregate) or `show port-aggregate
+    /// <name>` (one) — data-plane, valid in any mode.
+    ShowPortAggregate {
+        name: Option<String>,
+    },
     /// `show log [<source>] [--follow]` — data-plane, valid in any mode.
     ShowLog {
         source: Option<String>,
@@ -542,6 +548,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowConfig => Resolved::ShowRunningConfig,
         Command::ShowRoute { table, address } => Resolved::ShowRoute { table, address },
         Command::ShowInterface { name } => Resolved::ShowInterface { name },
+        Command::ShowPortAggregate { name } => Resolved::ShowPortAggregate { name },
         Command::ShowLog { source, follow } => Resolved::ShowLog { source, follow },
         Command::ShowBgpBrief => Resolved::ShowBgpBrief,
         Command::ShowOspfNeigh => Resolved::ShowOspfNeigh,
@@ -611,6 +618,7 @@ const NO_CURRENT_COMMUNITY_ALIAS: &str = "no current community-alias — use 'ed
 const NO_CURRENT_COMMUNITY_GROUP: &str = "no current community-group — use 'edit community-group <name>' or the fully-qualified 'set community-group <name> ...' form";
 const NO_CURRENT_PREFIX_LIST: &str = "no current prefix-list — use 'edit prefix-list <name>' or the fully-qualified 'set prefix-list <name> ...' form";
 const NO_CURRENT_SWITCHING_PROFILE: &str = "no current switching-profile — use 'edit switching-profile <name>' or the fully-qualified 'set switching-profile <name> ...' form";
+const NO_CURRENT_PORT_AGGREGATE: &str = "no current port-aggregate — use 'edit port-aggregate <name>' or the fully-qualified 'set port-aggregate <name> ...' form";
 const NO_CURRENT_OSPF_INSTANCE: &str = "no current ospf instance — use 'edit ospf instance <name>' or the fully-qualified 'set ospf instance <name> ...' form";
 const NO_CURRENT_OSPF_AREA: &str = "no current ospf area — use 'edit ospf instance <name> area <area-id>' or 'edit area <area-id>' while navigated into an ospf instance";
 const NO_CURRENT_OSPF_PROFILE: &str = "no current ospf profile — use 'edit ospf instance <name> area <area-id> profile <name>' or 'edit profile <name>' while navigated into an ospf area";
@@ -713,6 +721,13 @@ impl Path {
         match self {
             Path::SwitchingProfile(name) => Ok(name),
             _ => Err(NO_CURRENT_SWITCHING_PROFILE),
+        }
+    }
+
+    pub(crate) fn port_aggregate(&self) -> Result<&str, &'static str> {
+        match self {
+            Path::PortAggregate(name) => Ok(name),
+            _ => Err(NO_CURRENT_PORT_AGGREGATE),
         }
     }
 
@@ -982,6 +997,13 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
         Command::Edit(EditTarget::SwitchingProfile { name }) => Resolved::ApplyOp {
             op: ConfigOp::SwitchingProfile(SwitchingProfileOp::Ensure { name: name.clone() }),
             after: PathAfter::To(Path::SwitchingProfile(name)),
+        },
+        Command::Edit(EditTarget::PortAggregate { name }) => Resolved::ApplyOp {
+            op: ConfigOp::PortAggregate(PortAggregateOp::Ensure {
+                name: name.clone(),
+                mode: nos_proto::PortAggregateMode::Xor,
+            }),
+            after: PathAfter::To(Path::PortAggregate(name)),
         },
         Command::EditSource => Resolved::EditPolicySource {
             name: path.policy_definition()?.to_string(),
@@ -1436,6 +1458,36 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             }),
             after: PathAfter::Stay,
         },
+        Command::Set(SetTarget::PortAggregateMode { name, mode }) => Resolved::ApplyOp {
+            op: ConfigOp::PortAggregate(PortAggregateOp::SetMode { name, mode }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::PortAggregateModeRelative { mode }) => Resolved::ApplyOp {
+            op: ConfigOp::PortAggregate(PortAggregateOp::SetMode {
+                name: path.port_aggregate()?.to_string(),
+                mode,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::InterfacePortAggregate {
+            name,
+            port_aggregate,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::Interface(InterfaceOp::SetPortAggregate {
+                name,
+                port_aggregate,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::InterfacePortAggregateRelative { port_aggregate }) => {
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::SetPortAggregate {
+                    name: path.interface()?.to_string(),
+                    port_aggregate,
+                }),
+                after: PathAfter::Stay,
+            }
+        }
 
         Command::Delete(DeleteTarget::BgpInstance { name }) => Resolved::ApplyOp {
             op: ConfigOp::BgpInstance(BgpInstanceOp::Delete { name }),
@@ -1626,6 +1678,10 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             },
             Path::SwitchingProfile(name) => Resolved::ApplyOp {
                 op: ConfigOp::SwitchingProfile(SwitchingProfileOp::Delete { name: name.clone() }),
+                after: PathAfter::ToRoot,
+            },
+            Path::PortAggregate(name) => Resolved::ApplyOp {
+                op: ConfigOp::PortAggregate(PortAggregateOp::Delete { name: name.clone() }),
                 after: PathAfter::ToRoot,
             },
             Path::Root => Resolved::Error(
@@ -1866,6 +1922,20 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 after: PathAfter::Stay,
             }
         }
+        Command::Delete(DeleteTarget::PortAggregate { name }) => Resolved::ApplyOp {
+            op: ConfigOp::PortAggregate(PortAggregateOp::Delete { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::InterfacePortAggregate { name }) => Resolved::ApplyOp {
+            op: ConfigOp::Interface(InterfaceOp::ClearPortAggregate { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::InterfacePortAggregateRelative) => Resolved::ApplyOp {
+            op: ConfigOp::Interface(InterfaceOp::ClearPortAggregate {
+                name: path.interface()?.to_string(),
+            }),
+            after: PathAfter::Stay,
+        },
         Command::Delete(DeleteTarget::BgpPeerGroup { instance, name }) => Resolved::ApplyOp {
             op: ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Delete { instance, name }),
             after: PathAfter::Stay,
@@ -2100,6 +2170,7 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
         | Command::ShowConfig
         | Command::ShowRoute { .. }
         | Command::ShowInterface { .. }
+        | Command::ShowPortAggregate { .. }
         | Command::ShowLog { .. }
         | Command::ShowBgpBrief
         | Command::ShowOspfNeigh
@@ -5403,6 +5474,122 @@ mod tests {
                 Command::ShowOspfv3Database
             ),
             Resolved::ShowOspfv3Database
+        );
+    }
+
+    #[test]
+    fn edit_port_aggregate_ensures_and_navigates() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Edit(EditTarget::PortAggregate {
+                    name: "bond1".to_string(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::PortAggregate(nos_proto::PortAggregateOp::Ensure {
+                    name: "bond1".to_string(),
+                    mode: nos_proto::PortAggregateMode::Xor,
+                }),
+                after: PathAfter::To(Path::PortAggregate("bond1".to_string())),
+            }
+        );
+    }
+
+    #[test]
+    fn set_port_aggregate_mode_relative_requires_navigation() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::PortAggregateModeRelative {
+                    mode: nos_proto::PortAggregateMode::Xor,
+                })
+            ),
+            Resolved::Error(NO_CURRENT_PORT_AGGREGATE.to_string())
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::PortAggregate("bond1".to_string()), false),
+                Command::Set(SetTarget::PortAggregateModeRelative {
+                    mode: nos_proto::PortAggregateMode::Xor,
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::PortAggregate(nos_proto::PortAggregateOp::SetMode {
+                    name: "bond1".to_string(),
+                    mode: nos_proto::PortAggregateMode::Xor,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_and_clear_interface_port_aggregate() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Interface("eth0".to_string()), false),
+                Command::Set(SetTarget::InterfacePortAggregateRelative {
+                    port_aggregate: "bond1".to_string(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::SetPortAggregate {
+                    name: "eth0".to_string(),
+                    port_aggregate: "bond1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Interface("eth0".to_string()), false),
+                Command::Delete(DeleteTarget::InterfacePortAggregateRelative)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::ClearPortAggregate {
+                    name: "eth0".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn bare_delete_on_port_aggregate_returns_to_root() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::PortAggregate("bond1".to_string()), false),
+                Command::Delete(DeleteTarget::Current)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::PortAggregate(nos_proto::PortAggregateOp::Delete {
+                    name: "bond1".to_string(),
+                }),
+                after: PathAfter::ToRoot,
+            }
+        );
+    }
+
+    #[test]
+    fn show_port_aggregate_works_in_any_mode() {
+        assert_eq!(
+            resolve(
+                &Mode::Operational,
+                Command::ShowPortAggregate { name: None }
+            ),
+            Resolved::ShowPortAggregate { name: None }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::ShowPortAggregate {
+                    name: Some("bond1".to_string()),
+                }
+            ),
+            Resolved::ShowPortAggregate {
+                name: Some("bond1".to_string()),
+            }
         );
     }
 }

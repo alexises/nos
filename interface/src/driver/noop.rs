@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use tracing::debug;
 
 use super::{DriverError, InterfaceDriver};
-use crate::state::{BroadcastDomainState, InterfaceState};
+use crate::state::{BroadcastDomainState, InterfaceState, PortAggregateState};
 
 /// Platform-agnostic default: logs the state that would be applied but
 /// never touches the OS network stack. Preserves today's placeholder
@@ -47,6 +47,26 @@ impl InterfaceDriver for NoopInterfaceDriver {
         debug!(
             domain = %domain,
             "would remove broadcast domain bridge (noop driver — no OS effect)"
+        );
+        Ok(())
+    }
+
+    async fn ensure_port_aggregate(
+        &self,
+        desired: &PortAggregateState,
+    ) -> Result<String, DriverError> {
+        debug!(
+            port_aggregate = %desired.name,
+            mode = ?desired.mode,
+            "would ensure port aggregate bond (noop driver — no OS effect)"
+        );
+        Ok(format!("noop-bond-{}", desired.name))
+    }
+
+    async fn remove_port_aggregate(&self, name: &str) -> Result<(), DriverError> {
+        debug!(
+            port_aggregate = %name,
+            "would remove port aggregate bond (noop driver — no OS effect)"
         );
         Ok(())
     }

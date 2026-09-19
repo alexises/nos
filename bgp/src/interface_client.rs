@@ -80,6 +80,7 @@ mod tests {
                 }],
                 routing_table: None,
                 switching_profile: None,
+                port_aggregate: None,
                 mtu: 1500,
                 subinterfaces: vec![],
             }))

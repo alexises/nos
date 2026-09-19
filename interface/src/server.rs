@@ -4,7 +4,7 @@ use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
 use nos_proto::{
     BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec,
-    SubinterfaceStatus,
+    PortAggregateStatus, SubinterfaceStatus,
 };
 use tokio::net::UnixListener;
 use tokio::sync::RwLock;
@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{error, info, trace, warn};
 
-use crate::state::{BroadcastDomainState, InterfaceState, Interfaces};
+use crate::state::{BroadcastDomainState, InterfaceState, Interfaces, PortAggregateState};
 
 /// Binds `listen_socket` and spawns the IPC accept loop for interface
 /// queries.
@@ -78,6 +78,17 @@ async fn dispatch(interfaces: &Arc<RwLock<Interfaces>>, req: InterfaceRequest) -
             Some(domain) => InterfaceEvent::BroadcastDomain(to_domain_status(domain.clone())),
             None => InterfaceEvent::NotFound,
         },
+        InterfaceRequest::GetPortAggregates => InterfaceEvent::PortAggregates(
+            guard
+                .all_port_aggregates()
+                .into_iter()
+                .map(to_port_aggregate_status)
+                .collect(),
+        ),
+        InterfaceRequest::GetPortAggregate { name } => match guard.get_port_aggregate(&name) {
+            Some(agg) => InterfaceEvent::PortAggregate(to_port_aggregate_status(agg.clone())),
+            None => InterfaceEvent::NotFound,
+        },
     }
 }
 
@@ -92,6 +103,7 @@ fn to_status(iface: InterfaceState) -> InterfaceStatus {
         addresses: iface.addresses,
         routing_table: iface.routing_table,
         switching_profile: iface.switching_profile,
+        port_aggregate: iface.port_aggregate,
         mtu: iface.mtu.unwrap_or(DEFAULT_MTU),
         subinterfaces: iface
             .subinterfaces
@@ -117,5 +129,26 @@ fn to_domain_status(domain: BroadcastDomainState) -> BroadcastDomainStatus {
         routing_table: domain.routing_table,
         bridge_name: domain.bridge_name,
         link_local_address: domain.link_local_address,
+    }
+}
+
+fn to_port_aggregate_status(agg: PortAggregateState) -> PortAggregateStatus {
+    PortAggregateStatus {
+        name: agg.name,
+        mode: agg.mode,
+        switching_profile: agg.switching_profile,
+        mtu: agg.mtu.unwrap_or(DEFAULT_MTU),
+        subinterfaces: agg
+            .subinterfaces
+            .into_iter()
+            .map(|s| SubinterfaceStatus {
+                tag: s.tag,
+                addresses: s.addresses,
+                routing_table: s.routing_table,
+                link_local_address: s.link_local_address,
+            })
+            .collect(),
+        link_local_address: agg.link_local_address,
+        bond_name: agg.bond_name,
     }
 }

@@ -3,15 +3,23 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use futures::TryStreamExt;
-use nos_proto::{loopback_table_name, InterfaceAddress, IpNet, ServiceRef, VlanTag};
+use nos_proto::{
+    loopback_table_name, InterfaceAddress, IpNet, PortAggregateMode, ServiceRef, VlanTag,
+};
 use rtnetlink::packet_route::address::{AddressAttribute, AddressMessage, AddressScope};
-use rtnetlink::packet_route::link::{LinkAttribute, LinkMessage};
-use rtnetlink::{Handle, LinkBridge, LinkDummy, LinkUnspec, LinkVlan};
+use rtnetlink::packet_route::link::{BondMode, LinkAttribute, LinkMessage};
+use rtnetlink::{Handle, LinkBond, LinkBridge, LinkDummy, LinkUnspec, LinkVlan};
 use tracing::{debug, info, trace};
 
-use super::{bridge_registry, rib_client, DriverError, InterfaceDriver};
-use crate::state::{BroadcastDomainState, InterfaceState};
+use super::{bridge_registry, port_aggregate_registry, rib_client, DriverError, InterfaceDriver};
+use crate::state::{BroadcastDomainState, InterfaceState, PortAggregateState, SubinterfaceState};
 use crate::watchdog_client;
+
+fn bond_mode_of(mode: PortAggregateMode) -> BondMode {
+    match mode {
+        PortAggregateMode::Xor => BondMode::BalanceXor,
+    }
+}
 
 /// errno(3) `ENODEV` — the kernel's reply to a targeted `RTM_GETLINK`
 /// lookup (`match_name`/`match_index`) for a link that doesn't exist.
@@ -23,6 +31,10 @@ const ENODEV: i32 = 19;
 enum MasterKind {
     Vrf,
     Bridge,
+    /// A `PortAggregate`'s bond device — enslavement is the same generic
+    /// `IFLA_MASTER` operation as `Vrf`/`Bridge`, just a different kind of
+    /// master link.
+    Bond,
 }
 
 /// What a tag>0 `<interface>.<tag>` sub-link should be enslaved to — an L2
@@ -75,12 +87,17 @@ pub struct LinuxInterfaceDriver {
     /// This driver's own private persisted domain-name -> bridge-id map —
     /// see `bridge_registry` module docs. Never read by any other process.
     bridge_registry_path: PathBuf,
+    /// This driver's own private persisted aggregate-name -> bond-id map —
+    /// see `port_aggregate_registry` module docs. Never read by any other
+    /// process.
+    port_aggregate_registry_path: PathBuf,
 }
 
 impl LinuxInterfaceDriver {
     pub fn new(
         watchdog_socket: PathBuf,
         bridge_registry_path: PathBuf,
+        port_aggregate_registry_path: PathBuf,
     ) -> Result<Self, DriverError> {
         let (connection, handle, _) = rtnetlink::new_connection()?;
         tokio::spawn(connection);
@@ -88,6 +105,7 @@ impl LinuxInterfaceDriver {
             handle,
             watchdog_socket,
             bridge_registry_path,
+            port_aggregate_registry_path,
         })
     }
 
@@ -273,6 +291,18 @@ impl LinuxInterfaceDriver {
             (Some(current), Some(want)) if current == want => {}
             (None, None) => {}
             (_, Some(want)) => {
+                if kind == MasterKind::Bond {
+                    // Unlike bridge/VRF enslavement, Linux bonding refuses to
+                    // enslave a link that's administratively up ("Device can
+                    // not be enslaved while up") — bring it down first; the
+                    // caller's own trailing `up` (apply's final
+                    // LinkUnspec::up()) brings it back.
+                    self.handle
+                        .link()
+                        .set(LinkUnspec::new_with_index(index).down().build())
+                        .execute()
+                        .await?;
+                }
                 self.handle
                     .link()
                     .set(LinkUnspec::new_with_index(index).controller(want).build())
@@ -288,6 +318,11 @@ impl LinuxInterfaceDriver {
                         interface = %interface,
                         bridge = %master_ifname.unwrap_or_default(),
                         "enslaved interface to bridge"
+                    ),
+                    MasterKind::Bond => info!(
+                        interface = %interface,
+                        bond = %master_ifname.unwrap_or_default(),
+                        "enslaved interface to bond"
                     ),
                 }
             }
@@ -402,6 +437,93 @@ impl LinuxInterfaceDriver {
         }
         Ok(())
     }
+
+    /// Reconciles a link's addresses, master enslavement (VRF, bridge, or
+    /// bond — at most one applies, by construction), and tag>0 VLAN
+    /// sub-interfaces from its `subinterfaces`/`switching_profile_members` —
+    /// the shared body of `apply`'s physical-interface case and
+    /// `ensure_port_aggregate`'s own reconciliation, since a `PortAggregate`
+    /// has the identical (non-loopback) config surface as a physical
+    /// `Interface`. `name` is the real kernel link name (an interface's own
+    /// config name, or a bond's registry-allocated ifname).
+    /// `port_aggregate`, if set, names the `PortAggregate` `name` should be
+    /// enslaved into — only ever passed by `apply` for a member interface;
+    /// `ensure_port_aggregate` always passes `None`, since a bond never
+    /// nests into another bond.
+    async fn reconcile_physical_link(
+        &self,
+        name: &str,
+        link: &LinkMessage,
+        switching_profile_members: &[(String, VlanTag)],
+        port_aggregate: Option<&str>,
+        subinterfaces: &[SubinterfaceState],
+    ) -> Result<(), DriverError> {
+        let index = link.header.index;
+
+        // All (tag-0) L3 config lives in `subinterfaces` — see
+        // `schema::valid_addressing_split`/`PortAggregate`'s own doc
+        // comment.
+        let tag0 = subinterfaces.iter().find(|s| s.tag == 0);
+        let physical_addresses: &[InterfaceAddress] =
+            tag0.map_or(&[][..], |s| s.addresses.as_slice());
+        self.reconcile_addresses(name, index, physical_addresses)
+            .await?;
+
+        let vrf_ifname = match tag0.and_then(|s| s.routing_table.clone()) {
+            Some(table_name) => self.resolve_vrf_name(&table_name).await,
+            None => None,
+        };
+        // At most one of a VRF/bond/`Untagged`-bridge master can apply to
+        // the same link — commit-time validation
+        // (`valid_subinterface_and_switching_profile_tags`,
+        // `valid_port_aggregate_membership`) rejects any of the three
+        // colliding, since the link has only one master.
+        let bond_ifname = port_aggregate
+            .and_then(|name| {
+                port_aggregate_registry::lookup_port_aggregate_id(
+                    &self.port_aggregate_registry_path,
+                    name,
+                )
+            })
+            .map(port_aggregate_registry::port_aggregate_ifname);
+        let untagged_bridge = switching_profile_members
+            .iter()
+            .find(|(_, tag)| *tag == VlanTag::Untagged)
+            .and_then(|(domain, _)| {
+                bridge_registry::lookup_bridge_id(&self.bridge_registry_path, domain)
+            })
+            .map(bridge_registry::bridge_ifname);
+        let (master_ifname, master_kind) = match (vrf_ifname, bond_ifname, untagged_bridge) {
+            (Some(name), _, _) => (Some(name), MasterKind::Vrf),
+            (None, Some(name), _) => (Some(name), MasterKind::Bond),
+            (None, None, bridge) => (bridge, MasterKind::Bridge),
+        };
+        self.reconcile_master(name, link, master_ifname.as_deref(), master_kind)
+            .await?;
+
+        // Union of L2 dot1q switching-profile members and L3 subinterfaces
+        // (tag>0) — commit-time validation guarantees the two sets of tags
+        // are disjoint, so each tag appears in at most one of the two.
+        let mut tagged: Vec<(u16, TaggedMaster)> = switching_profile_members
+            .iter()
+            .filter_map(|(domain, tag)| match tag {
+                VlanTag::Dot1q(id) => Some((*id, TaggedMaster::Bridge(domain.clone()))),
+                VlanTag::Untagged => None,
+            })
+            .collect();
+        tagged.extend(subinterfaces.iter().filter(|s| s.tag > 0).map(|s| {
+            (
+                s.tag,
+                TaggedMaster::Vrf {
+                    routing_table: s.routing_table.clone(),
+                    addresses: s.addresses.clone(),
+                },
+            )
+        }));
+        self.reconcile_tagged_subinterfaces(name, index, &tagged)
+            .await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -428,69 +550,26 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         };
         let index = link.header.index;
 
-        // A loopback interface still carries its flat L3 config directly
-        // (`desired.addresses`/`routing_table`, unchanged); every other
-        // interface's own (tag-0) L3 config lives in `desired.subinterfaces`
-        // instead — see `schema::valid_addressing_split`.
-        let tag0 = desired.subinterfaces.iter().find(|s| s.tag == 0);
-        let physical_addresses: &[InterfaceAddress] = if loopback_table.is_some() {
-            &desired.addresses
+        if let Some(table_name) = loopback_table {
+            // A loopback interface carries its flat L3 config directly
+            // (`desired.addresses`/`routing_table`) — it never has
+            // `subinterfaces`/`switching_profile`/`port_aggregate`, so
+            // there's nothing for `reconcile_physical_link` to share here.
+            self.reconcile_addresses(&desired.name, index, &desired.addresses)
+                .await?;
+            let vrf_ifname = self.resolve_vrf_name(table_name).await;
+            self.reconcile_master(&desired.name, &link, vrf_ifname.as_deref(), MasterKind::Vrf)
+                .await?;
         } else {
-            tag0.map_or(&[][..], |s| s.addresses.as_slice())
-        };
-        self.reconcile_addresses(&desired.name, index, physical_addresses)
-            .await?;
-
-        let vrf_table = loopback_table
-            .map(str::to_string)
-            .or_else(|| tag0.and_then(|s| s.routing_table.clone()));
-        let vrf_ifname = match vrf_table {
-            Some(table_name) => self.resolve_vrf_name(&table_name).await,
-            None => None,
-        };
-        // At most one of `vrf_ifname`/an `Untagged` member can apply to the
-        // same interface — commit-time validation
-        // (`valid_subinterface_and_switching_profile_tags`) rejects a tag-0
-        // subinterface's `routing_table` colliding with an `Untagged`
-        // switching-profile member, since the physical link has only one
-        // master.
-        let untagged_bridge = desired
-            .switching_profile_members
-            .iter()
-            .find(|(_, tag)| *tag == VlanTag::Untagged)
-            .and_then(|(domain, _)| {
-                bridge_registry::lookup_bridge_id(&self.bridge_registry_path, domain)
-            })
-            .map(bridge_registry::bridge_ifname);
-        let (master_ifname, master_kind) = match vrf_ifname {
-            Some(name) => (Some(name), MasterKind::Vrf),
-            None => (untagged_bridge, MasterKind::Bridge),
-        };
-        self.reconcile_master(&desired.name, &link, master_ifname.as_deref(), master_kind)
-            .await?;
-
-        // Union of L2 dot1q switching-profile members and L3 subinterfaces
-        // (tag>0) — commit-time validation guarantees the two sets of tags
-        // are disjoint, so each tag appears in at most one of the two.
-        let mut tagged: Vec<(u16, TaggedMaster)> = desired
-            .switching_profile_members
-            .iter()
-            .filter_map(|(domain, tag)| match tag {
-                VlanTag::Dot1q(id) => Some((*id, TaggedMaster::Bridge(domain.clone()))),
-                VlanTag::Untagged => None,
-            })
-            .collect();
-        tagged.extend(desired.subinterfaces.iter().filter(|s| s.tag > 0).map(|s| {
-            (
-                s.tag,
-                TaggedMaster::Vrf {
-                    routing_table: s.routing_table.clone(),
-                    addresses: s.addresses.clone(),
-                },
+            self.reconcile_physical_link(
+                &desired.name,
+                &link,
+                &desired.switching_profile_members,
+                desired.port_aggregate.as_deref(),
+                &desired.subinterfaces,
             )
-        }));
-        self.reconcile_tagged_subinterfaces(&desired.name, index, &tagged)
             .await?;
+        }
 
         let mut link_set = LinkUnspec::new_with_index(index).up();
         if let Some(mtu) = desired.mtu {
@@ -591,6 +670,77 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         if let Some(link) = self.find_link(&ifname).await? {
             self.handle.link().del(link.header.index).execute().await?;
             info!(domain = %domain, bridge = %ifname, "deleted broadcast domain bridge");
+        }
+        Ok(())
+    }
+
+    /// Ensures a bond device named from `desired.name`'s persisted bond id
+    /// (see `port_aggregate_registry`) exists — find-or-create, same shape
+    /// as `ensure_broadcast_domain`'s bridge — then reconciles the bond's
+    /// own `switching_profile`/`mtu`/`subinterfaces` via the same
+    /// `reconcile_physical_link` helper `apply` uses for a physical
+    /// interface, since the config surface is identical.
+    async fn ensure_port_aggregate(
+        &self,
+        desired: &PortAggregateState,
+    ) -> Result<String, DriverError> {
+        let bond_id = port_aggregate_registry::ensure_port_aggregate_id(
+            &self.port_aggregate_registry_path,
+            &desired.name,
+        )?;
+        let ifname = port_aggregate_registry::port_aggregate_ifname(bond_id);
+        let link = if let Some(link) = self.find_link(&ifname).await? {
+            link
+        } else {
+            self.handle
+                .link()
+                .add(
+                    LinkBond::new(&ifname)
+                        .mode(bond_mode_of(desired.mode))
+                        .build(),
+                )
+                .execute()
+                .await?;
+            info!(port_aggregate = %desired.name, bond = %ifname, mode = ?desired.mode, "created port aggregate bond");
+            self.find_link(&ifname)
+                .await?
+                .ok_or_else(|| DriverError::LinkNotFoundAfterCreate(ifname.clone()))?
+        };
+        let index = link.header.index;
+
+        self.reconcile_physical_link(
+            &ifname,
+            &link,
+            &desired.switching_profile_members,
+            None,
+            &desired.subinterfaces,
+        )
+        .await?;
+
+        let mut link_set = LinkUnspec::new_with_index(index).up();
+        if let Some(mtu) = desired.mtu {
+            link_set = link_set.mtu(mtu);
+            info!(port_aggregate = %desired.name, mtu, "applied port aggregate mtu");
+        }
+        self.handle.link().set(link_set.build()).execute().await?;
+        Ok(ifname)
+    }
+
+    /// Deletes `name`'s bond device, if one was ever created for it. Never
+    /// touches the port-aggregate-id registry entry — same reasoning as
+    /// `remove_broadcast_domain`.
+    async fn remove_port_aggregate(&self, name: &str) -> Result<(), DriverError> {
+        let Some(bond_id) = port_aggregate_registry::lookup_port_aggregate_id(
+            &self.port_aggregate_registry_path,
+            name,
+        ) else {
+            debug!(port_aggregate = %name, "no port aggregate id allocated, nothing to tear down");
+            return Ok(());
+        };
+        let ifname = port_aggregate_registry::port_aggregate_ifname(bond_id);
+        if let Some(link) = self.find_link(&ifname).await? {
+            self.handle.link().del(link.header.index).execute().await?;
+            info!(port_aggregate = %name, bond = %ifname, "deleted port aggregate bond");
         }
         Ok(())
     }

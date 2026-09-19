@@ -157,6 +157,11 @@ impl NosPrompt {
                 path: session::Path::SwitchingProfile(name),
                 ..
             } => format!("({transaction}/switching-profile:{name})"),
+            Mode::Configuration {
+                transaction,
+                path: session::Path::PortAggregate(name),
+                ..
+            } => format!("({transaction}/port-aggregate:{name})"),
         };
         Self { hostname, suffix }
     }
@@ -450,6 +455,28 @@ fn completer_for(socket: &Path, cache: DocCache, mode: &Mode) -> Box<dyn Complet
         Mode::Operational => Box::new(Vec::new),
     };
 
+    let port_aggregate_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
+        Mode::Configuration { transaction, .. } => {
+            let transaction = transaction.clone();
+            let socket = socket.to_path_buf();
+            Box::new(move || {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(client::get_transaction(&socket, &transaction))
+                })
+                .map(|snap| {
+                    snap.config
+                        .port_aggregates
+                        .into_iter()
+                        .map(|a| a.name)
+                        .collect()
+                })
+                .unwrap_or_default()
+            })
+        }
+        Mode::Operational => Box::new(Vec::new),
+    };
+
     // Deliberately flat/global, flattened across every instance's areas —
     // not scoped to whichever instance/area is already typed on the line —
     // mirrors `peer_group_name_source`'s own reasoning, since profile names
@@ -541,6 +568,7 @@ fn completer_for(socket: &Path, cache: DocCache, mode: &Mode) -> Box<dyn Complet
         ospf_profile_name_source,
         ospfv3_instance_name_source,
         ospfv3_profile_name_source,
+        port_aggregate_name_source,
     ))
 }
 
@@ -749,6 +777,10 @@ async fn handle_action(
         }
         Resolved::ShowInterface { name } => {
             show_interface(watchdog_socket, name.as_deref()).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowPortAggregate { name } => {
+            show_port_aggregate(watchdog_socket, name.as_deref()).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowLog { source, follow } => {
@@ -1004,6 +1036,35 @@ async fn show_interface(watchdog_socket: &Path, name: Option<&str>) {
         Some(name) => match interface_client::get_interface(&interface_socket, name).await {
             Ok(Some(status)) => println!("{}", format::render_interface_statuses(&[status])),
             Ok(None) => println!("interface '{name}' not found"),
+            Err(e) => eprintln!("error: {e}"),
+        },
+    }
+}
+
+/// Same resolution and shape as `show_interface`, against `nos-interfaced`'s
+/// port-aggregate query instead.
+async fn show_port_aggregate(watchdog_socket: &Path, name: Option<&str>) {
+    let interface_socket =
+        match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Interfaces).await {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                eprintln!("nos-interfaced is not running");
+                return;
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                return;
+            }
+        };
+
+    match name {
+        None => match interface_client::get_port_aggregates(&interface_socket).await {
+            Ok(statuses) => println!("{}", format::render_port_aggregate_statuses(&statuses)),
+            Err(e) => eprintln!("error: {e}"),
+        },
+        Some(name) => match interface_client::get_port_aggregate(&interface_socket, name).await {
+            Ok(Some(status)) => println!("{}", format::render_port_aggregate_statuses(&[status])),
+            Ok(None) => println!("port aggregate '{name}' not found"),
             Err(e) => eprintln!("error: {e}"),
         },
     }

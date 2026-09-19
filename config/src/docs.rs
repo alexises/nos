@@ -497,6 +497,39 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Unsets the switching-profile field on an interface, reverting to no explicit \
              association.",
         ),
+        Topic::EnsurePortAggregate => (
+            "Create a port aggregate in the transaction if it doesn't already exist.",
+            "Adds a new static (non-LACP) Linux bonding device with the given name and mode to \
+             the transaction's in-progress config if none exists with that name yet; if one \
+             already exists, this is a no-op. An interface becomes a bonded member by pointing \
+             its own port-aggregate field at this aggregate's name, the same way it points at a \
+             switching profile for L2 trunking.",
+        ),
+        Topic::DeletePortAggregate => (
+            "Delete a port aggregate from the transaction.",
+            "Removes a port aggregate from the transaction's in-progress config. Any interface \
+             still pointing at it as its port-aggregate becomes invalid — checked at commit \
+             time, not when the aggregate is deleted.",
+        ),
+        Topic::SetPortAggregateMode => (
+            "Set a port aggregate's bonding mode.",
+            "Updates the mode field on the named port aggregate in the transaction's \
+             in-progress config. The aggregate must already exist. Only static (non-LACP) \
+             modes are supported.",
+        ),
+        Topic::SetInterfacePortAggregate => (
+            "Associate an interface with a port aggregate as a bonded member.",
+            "Points an interface at a port aggregate by name, making it a static bonded member. \
+             The port aggregate must exist, checked at commit time. A member interface must not \
+             also carry a switching-profile association or any subinterfaces — like VRF/bridge \
+             enslavement, bond enslavement claims the link's one Linux master device — checked \
+             at commit time.",
+        ),
+        Topic::ClearInterfacePortAggregate => (
+            "Remove an interface's port-aggregate association.",
+            "Unsets the port-aggregate field on an interface, reverting to no explicit bonded \
+             membership.",
+        ),
         Topic::EnsureOspfInstance => (
             "Create an OSPF instance in the transaction if it doesn't already exist.",
             "Adds a new OSPF instance with the given name to the transaction's in-progress \
@@ -761,6 +794,11 @@ mod tests {
         Topic::DeleteSwitchingProfile,
         Topic::SetInterfaceSwitchingProfile,
         Topic::ClearInterfaceSwitchingProfile,
+        Topic::EnsurePortAggregate,
+        Topic::DeletePortAggregate,
+        Topic::SetPortAggregateMode,
+        Topic::SetInterfacePortAggregate,
+        Topic::ClearInterfacePortAggregate,
         Topic::EnsureOspfInstance,
         Topic::SetOspfInstanceRouterId,
         Topic::DeleteOspfInstance,

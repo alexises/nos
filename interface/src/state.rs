@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv6Addr;
 
-use nos_proto::{Config, InterfaceAddress, VlanTag};
+use nos_proto::{Config, InterfaceAddress, PortAggregateMode, VlanTag};
 use tracing::{debug, trace, warn};
 
 use crate::driver::InterfaceDriver;
@@ -63,6 +63,11 @@ pub struct InterfaceState {
     /// unset (or names a profile that doesn't exist, which commit-time
     /// validation already prevents).
     pub switching_profile_members: Vec<(String, VlanTag)>,
+    /// The raw `Interface.port_aggregate` name, same shape as
+    /// `switching_profile` — resolved to a real bond device name by the
+    /// driver itself (via its own port-aggregate-id registry), not here,
+    /// mirroring `routing_table`'s VRF-name resolution.
+    pub port_aggregate: Option<String>,
     /// The configured MTU, or `None` to leave whatever the kernel link
     /// already has untouched — a link-layer property of the physical (or
     /// loopback) interface itself, applying to every one of `subinterfaces`
@@ -71,6 +76,28 @@ pub struct InterfaceState {
     /// This (non-loopback) interface's per-tag L3 subinterfaces — see
     /// `SubinterfaceState`. Empty for a loopback interface.
     pub subinterfaces: Vec<SubinterfaceState>,
+}
+
+/// A `PortAggregate`'s desired state, mirroring `nos_proto::PortAggregate` —
+/// the same config surface as a physical `InterfaceState` (no flat
+/// `addresses`/`routing_table` — all L3 config lives under
+/// `subinterfaces`), plus `mode`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortAggregateState {
+    pub name: String,
+    pub mode: PortAggregateMode,
+    pub switching_profile: Option<String>,
+    pub switching_profile_members: Vec<(String, VlanTag)>,
+    pub mtu: Option<u32>,
+    pub subinterfaces: Vec<SubinterfaceState>,
+    /// The real kernel bond device name, filled in from
+    /// `driver.ensure_port_aggregate`'s return value after construction —
+    /// mirrors `BroadcastDomainState.bridge_name`.
+    pub bond_name: Option<String>,
+    /// This bond's own kernel device's observed IPv6 link-local address —
+    /// see `SubinterfaceState.link_local_address`'s doc comment. `None`
+    /// until `bond_name` itself is known.
+    pub link_local_address: Option<Ipv6Addr>,
 }
 
 /// Every configured interface's desired state, rebuilt wholesale on every
@@ -88,6 +115,12 @@ pub struct Interfaces {
     /// current, call remove for what's gone" shape `by_name` itself already
     /// uses for interfaces.
     domains: HashSet<String>,
+    /// Every `PortAggregate`'s desired state as of the last resync —
+    /// queryable over IPC, mirrors `by_domain`'s role for broadcast domains.
+    by_port_aggregate: HashMap<String, PortAggregateState>,
+    /// Every `PortAggregate` name configured as of the last resync — same
+    /// removal-diffing role as `domains`.
+    port_aggregates: HashSet<String>,
 }
 
 impl Interfaces {
@@ -101,6 +134,19 @@ impl Interfaces {
 
     pub fn get_domain(&self, name: &str) -> Option<&BroadcastDomainState> {
         self.by_domain.get(name)
+    }
+
+    pub fn get_port_aggregate(&self, name: &str) -> Option<&PortAggregateState> {
+        self.by_port_aggregate.get(name)
+    }
+
+    /// Every port aggregate, ordered by name — for serving an unfiltered
+    /// `show port-aggregate` query.
+    pub fn all_port_aggregates(&self) -> Vec<PortAggregateState> {
+        let mut aggregates: Vec<PortAggregateState> =
+            self.by_port_aggregate.values().cloned().collect();
+        aggregates.sort_by(|a, b| a.name.cmp(&b.name));
+        aggregates
     }
 
     /// Every interface, ordered by name — for serving an unfiltered
@@ -165,39 +211,57 @@ pub async fn build_from_config(
         }
     }
 
+    let mut by_port_aggregate = HashMap::with_capacity(cfg.port_aggregates.len());
+    for agg in &cfg.port_aggregates {
+        let switching_profile_members =
+            resolve_switching_profile_members(cfg, agg.switching_profile.as_deref());
+        let subinterfaces = build_subinterfaces(driver, &agg.name, &agg.subinterfaces).await;
+        let mut state = PortAggregateState {
+            name: agg.name.clone(),
+            mode: agg.mode,
+            switching_profile: agg.switching_profile.clone(),
+            switching_profile_members,
+            mtu: agg.mtu,
+            subinterfaces,
+            bond_name: None,
+            link_local_address: None,
+        };
+        match driver.ensure_port_aggregate(&state).await {
+            Ok(bond_name) => {
+                state.link_local_address = driver.link_local_address(&bond_name).await;
+                state.bond_name = Some(bond_name);
+            }
+            Err(e) => {
+                warn!(port_aggregate = %state.name, error = %e, "failed to ensure port aggregate bond");
+            }
+        }
+        by_port_aggregate.insert(state.name.clone(), state);
+    }
+    let port_aggregates: HashSet<String> =
+        cfg.port_aggregates.iter().map(|a| a.name.clone()).collect();
+    for gone in previous
+        .port_aggregates
+        .iter()
+        .filter(|name| !port_aggregates.contains(name.as_str()))
+    {
+        debug!(port_aggregate = %gone, "port aggregate removed from config, cleaning up");
+        if let Err(e) = driver.remove_port_aggregate(gone).await {
+            warn!(port_aggregate = %gone, error = %e, "failed to clean up removed port aggregate");
+        }
+    }
+
     let mut by_name = HashMap::with_capacity(cfg.interfaces.len());
     for iface in &cfg.interfaces {
-        let switching_profile_members = iface
-            .switching_profile
-            .as_deref()
-            .and_then(|name| cfg.switching_profiles.iter().find(|p| p.name == name))
-            .map(|p| {
-                p.members
-                    .iter()
-                    .map(|m| (m.broadcast_domain.clone(), m.tag))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut subinterfaces = Vec::with_capacity(iface.subinterfaces.len());
-        for s in &iface.subinterfaces {
-            let kernel_interface = if s.tag == 0 {
-                iface.name.clone()
-            } else {
-                format!("{}.{}", iface.name, s.tag)
-            };
-            subinterfaces.push(SubinterfaceState {
-                tag: s.tag,
-                addresses: s.addresses.clone(),
-                routing_table: s.routing_table.clone(),
-                link_local_address: driver.link_local_address(&kernel_interface).await,
-            });
-        }
+        let switching_profile_members =
+            resolve_switching_profile_members(cfg, iface.switching_profile.as_deref());
+        let subinterfaces = build_subinterfaces(driver, &iface.name, &iface.subinterfaces).await;
         let state = InterfaceState {
             name: iface.name.clone(),
             addresses: iface.addresses.clone(),
             routing_table: iface.routing_table.clone(),
             switching_profile: iface.switching_profile.clone(),
             switching_profile_members,
+            port_aggregate: iface.port_aggregate.clone(),
             mtu: iface.mtu,
             subinterfaces,
         };
@@ -206,6 +270,7 @@ pub async fn build_from_config(
             addresses = ?state.addresses,
             routing_table = ?state.routing_table,
             switching_profile_members = ?state.switching_profile_members,
+            port_aggregate = ?state.port_aggregate,
             subinterfaces = ?state.subinterfaces,
             "applying interface state"
         );
@@ -232,7 +297,55 @@ pub async fn build_from_config(
         by_name,
         by_domain,
         domains,
+        by_port_aggregate,
+        port_aggregates,
     }
+}
+
+/// Resolves a `switching_profile` name (if set) to its `SwitchingProfile`'s
+/// member list — shared by an `Interface`'s own resolution and a
+/// `PortAggregate`'s own (a bond can be trunked into a broadcast domain the
+/// same way a physical interface can).
+fn resolve_switching_profile_members(
+    cfg: &Config,
+    switching_profile: Option<&str>,
+) -> Vec<(String, VlanTag)> {
+    switching_profile
+        .and_then(|name| cfg.switching_profiles.iter().find(|p| p.name == name))
+        .map(|p| {
+            p.members
+                .iter()
+                .map(|m| (m.broadcast_domain.clone(), m.tag))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Builds `SubinterfaceState`s for `subs`, keyed off `base_name` (an
+/// `Interface`'s or `PortAggregate`'s own name) for the tag>0
+/// `<base_name>.<tag>` kernel device naming convention — shared by both,
+/// since a bond's own VLAN sub-links are named identically to a physical
+/// interface's.
+async fn build_subinterfaces(
+    driver: &dyn InterfaceDriver,
+    base_name: &str,
+    subs: &[nos_proto::Subinterface],
+) -> Vec<SubinterfaceState> {
+    let mut subinterfaces = Vec::with_capacity(subs.len());
+    for s in subs {
+        let kernel_interface = if s.tag == 0 {
+            base_name.to_string()
+        } else {
+            format!("{base_name}.{}", s.tag)
+        };
+        subinterfaces.push(SubinterfaceState {
+            tag: s.tag,
+            addresses: s.addresses.clone(),
+            routing_table: s.routing_table.clone(),
+            link_local_address: driver.link_local_address(&kernel_interface).await,
+        });
+    }
+    subinterfaces
 }
 
 #[cfg(test)]
@@ -260,6 +373,7 @@ mod tests {
             ospf_profile: None,
             ospfv3_profile: None,
             switching_profile: None,
+            port_aggregate: None,
             mtu: None,
             subinterfaces: Vec::new(),
         }
@@ -273,6 +387,8 @@ mod tests {
         Remove(String),
         EnsureDomain(BroadcastDomainState),
         RemoveDomain(String),
+        EnsurePortAggregate(PortAggregateState),
+        RemovePortAggregate(String),
     }
 
     #[derive(Default)]
@@ -314,6 +430,25 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(Call::RemoveDomain(domain.to_string()));
+            Ok(())
+        }
+
+        async fn ensure_port_aggregate(
+            &self,
+            desired: &PortAggregateState,
+        ) -> Result<String, DriverError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(Call::EnsurePortAggregate(desired.clone()));
+            Ok(format!("recording-bond-{}", desired.name))
+        }
+
+        async fn remove_port_aggregate(&self, name: &str) -> Result<(), DriverError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(Call::RemovePortAggregate(name.to_string()));
             Ok(())
         }
 
@@ -561,5 +696,61 @@ mod tests {
 
         let calls = driver.calls.lock().unwrap().clone();
         assert!(calls.contains(&Call::RemoveDomain("bd1".to_string())));
+    }
+
+    fn aggregate(name: &str) -> nos_proto::PortAggregate {
+        nos_proto::PortAggregate {
+            name: name.to_string(),
+            mode: nos_proto::PortAggregateMode::Xor,
+            switching_profile: None,
+            mtu: None,
+            subinterfaces: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_port_aggregate_is_called_for_every_configured_aggregate() {
+        let driver = RecordingDriver::default();
+        let mut config = cfg(vec![]);
+        config.port_aggregates = vec![aggregate("bond1")];
+        build_from_config(&config, &driver, &Interfaces::new()).await;
+        let calls = driver.calls.lock().unwrap().clone();
+        assert!(calls
+            .iter()
+            .any(|c| matches!(c, Call::EnsurePortAggregate(a) if a.name == "bond1")));
+    }
+
+    #[tokio::test]
+    async fn get_port_aggregate_returns_configured_aggregate() {
+        let mut config = cfg(vec![]);
+        config.port_aggregates = vec![aggregate("bond1")];
+        let interfaces = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
+        let agg = interfaces.get_port_aggregate("bond1").unwrap();
+        assert_eq!(agg.mode, nos_proto::PortAggregateMode::Xor);
+    }
+
+    #[tokio::test]
+    async fn remove_port_aggregate_is_called_for_aggregate_dropped_from_config() {
+        let driver = RecordingDriver::default();
+        let mut config_with_aggregate = cfg(vec![]);
+        config_with_aggregate.port_aggregates = vec![aggregate("bond1")];
+        let previous = build_from_config(&config_with_aggregate, &driver, &Interfaces::new()).await;
+
+        build_from_config(&cfg(vec![]), &driver, &previous).await;
+
+        let calls = driver.calls.lock().unwrap().clone();
+        assert!(calls.contains(&Call::RemovePortAggregate("bond1".to_string())));
+    }
+
+    #[tokio::test]
+    async fn interface_port_aggregate_is_threaded_through() {
+        let mut iface = interface("eth0");
+        iface.port_aggregate = Some("bond1".to_string());
+        let interfaces =
+            build_from_config(&cfg(vec![iface]), &NoopInterfaceDriver, &Interfaces::new()).await;
+        assert_eq!(
+            interfaces.get("eth0").unwrap().port_aggregate.as_deref(),
+            Some("bond1")
+        );
     }
 }

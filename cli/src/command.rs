@@ -2,8 +2,9 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
 use nos_proto::{
-    AddressFamily, BgpAoAlgorithm, NetworkType, NextHopMode, OspfCryptoAlgorithm, Redistribute,
-    RedistributeSource, RedistributeTarget, SourceAddress, TransactionBase, VlanTag,
+    AddressFamily, BgpAoAlgorithm, NetworkType, NextHopMode, OspfCryptoAlgorithm,
+    PortAggregateMode, Redistribute, RedistributeSource, RedistributeTarget, SourceAddress,
+    TransactionBase, VlanTag,
 };
 
 /// A single field edit targeting a BGP instance.
@@ -161,6 +162,9 @@ pub enum EditTarget {
         name: String,
     },
     SwitchingProfile {
+        name: String,
+    },
+    PortAggregate {
         name: String,
     },
 }
@@ -355,6 +359,20 @@ pub enum SetTarget {
         broadcast_domain: String,
         tag: VlanTag,
     },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    PortAggregateMode {
+        name: String,
+        mode: PortAggregateMode,
+    },
+    /// Context-relative — only valid while navigated into a port aggregate.
+    PortAggregateModeRelative { mode: PortAggregateMode },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    InterfacePortAggregate {
+        name: String,
+        port_aggregate: String,
+    },
+    /// Context-relative — only valid while navigated into an interface.
+    InterfacePortAggregateRelative { port_aggregate: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -639,6 +657,17 @@ pub enum DeleteTarget {
     SwitchingProfileMemberRelative {
         broadcast_domain: String,
     },
+    PortAggregate {
+        name: String,
+    },
+    /// `delete interface <name> port-aggregate` — qualified clear.
+    InterfacePortAggregate {
+        name: String,
+    },
+    /// `delete port-aggregate` — relative clear, only valid while navigated
+    /// into an interface (clears its membership, not the aggregate itself —
+    /// use `delete port-aggregate <name>` for that).
+    InterfacePortAggregateRelative,
 }
 
 /// A parsed REPL input line.
@@ -655,6 +684,11 @@ pub enum Command {
     },
     /// `show interface` (every interface) or `show interface <name>` (one).
     ShowInterface {
+        name: Option<String>,
+    },
+    /// `show port-aggregate` (every aggregate) or `show port-aggregate
+    /// <name>` (one).
+    ShowPortAggregate {
         name: Option<String>,
     },
     /// `show log [<source>] [--follow]` — a one-shot buffer snapshot,
@@ -776,6 +810,10 @@ fn parse_show(t: &[&str]) -> Option<Command> {
         ["interface", name] => Command::ShowInterface {
             name: Some((*name).to_string()),
         },
+        ["port-aggregate"] => Command::ShowPortAggregate { name: None },
+        ["port-aggregate", name] => Command::ShowPortAggregate {
+            name: Some((*name).to_string()),
+        },
         ["log"] => Command::ShowLog {
             source: None,
             follow: false,
@@ -878,6 +916,9 @@ fn parse_edit(t: &[&str]) -> Option<Command> {
             name: (*name).to_string(),
         }),
         ["switching-profile", name] => Command::Edit(EditTarget::SwitchingProfile {
+            name: (*name).to_string(),
+        }),
+        ["port-aggregate", name] => Command::Edit(EditTarget::PortAggregate {
             name: (*name).to_string(),
         }),
         ["source"] => Command::EditSource,
@@ -1601,6 +1642,22 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 tag: VlanTag::Untagged,
             })
         }
+        ["port-aggregate", name, "mode", "xor"] => Command::Set(SetTarget::PortAggregateMode {
+            name: (*name).to_string(),
+            mode: PortAggregateMode::Xor,
+        }),
+        ["mode", "xor"] => Command::Set(SetTarget::PortAggregateModeRelative {
+            mode: PortAggregateMode::Xor,
+        }),
+        ["interface", name, "port-aggregate", aggregate] => {
+            Command::Set(SetTarget::InterfacePortAggregate {
+                name: (*name).to_string(),
+                port_aggregate: (*aggregate).to_string(),
+            })
+        }
+        ["port-aggregate", aggregate] => Command::Set(SetTarget::InterfacePortAggregateRelative {
+            port_aggregate: (*aggregate).to_string(),
+        }),
         _ => return None,
     })
 }
@@ -1849,6 +1906,15 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
                 broadcast_domain: (*domain).to_string(),
             })
         }
+        ["port-aggregate", name] => Command::Delete(DeleteTarget::PortAggregate {
+            name: (*name).to_string(),
+        }),
+        ["interface", name, "port-aggregate"] => {
+            Command::Delete(DeleteTarget::InterfacePortAggregate {
+                name: (*name).to_string(),
+            })
+        }
+        ["port-aggregate"] => Command::Delete(DeleteTarget::InterfacePortAggregateRelative),
         _ => return None,
     })
 }
@@ -1956,6 +2022,84 @@ mod tests {
         assert_eq!(
             Command::parse("show route rt1 not-an-address"),
             Command::Unknown("show route rt1 not-an-address".to_string())
+        );
+    }
+
+    #[test]
+    fn edit_port_aggregate() {
+        assert_eq!(
+            Command::parse("edit port-aggregate bond1"),
+            Command::Edit(EditTarget::PortAggregate {
+                name: "bond1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn set_port_aggregate_mode() {
+        assert_eq!(
+            Command::parse("set port-aggregate bond1 mode xor"),
+            Command::Set(SetTarget::PortAggregateMode {
+                name: "bond1".to_string(),
+                mode: PortAggregateMode::Xor,
+            })
+        );
+        assert_eq!(
+            Command::parse("set mode xor"),
+            Command::Set(SetTarget::PortAggregateModeRelative {
+                mode: PortAggregateMode::Xor,
+            })
+        );
+    }
+
+    #[test]
+    fn set_and_delete_interface_port_aggregate() {
+        assert_eq!(
+            Command::parse("set interface eth0 port-aggregate bond1"),
+            Command::Set(SetTarget::InterfacePortAggregate {
+                name: "eth0".to_string(),
+                port_aggregate: "bond1".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("set port-aggregate bond1"),
+            Command::Set(SetTarget::InterfacePortAggregateRelative {
+                port_aggregate: "bond1".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete interface eth0 port-aggregate"),
+            Command::Delete(DeleteTarget::InterfacePortAggregate {
+                name: "eth0".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete port-aggregate"),
+            Command::Delete(DeleteTarget::InterfacePortAggregateRelative)
+        );
+    }
+
+    #[test]
+    fn delete_port_aggregate() {
+        assert_eq!(
+            Command::parse("delete port-aggregate bond1"),
+            Command::Delete(DeleteTarget::PortAggregate {
+                name: "bond1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn show_port_aggregate() {
+        assert_eq!(
+            Command::parse("show port-aggregate"),
+            Command::ShowPortAggregate { name: None }
+        );
+        assert_eq!(
+            Command::parse("show port-aggregate bond1"),
+            Command::ShowPortAggregate {
+                name: Some("bond1".to_string()),
+            }
         );
     }
 

@@ -7,10 +7,10 @@ use nos_proto::{
     Interface, InterfaceAddress, InterfaceStatus, LinkInterfaceState, LogEntry, LogLevel,
     LsaSummary, NeighborSummary, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm,
     OspfInstance, OspfNeighborState, OspfProfile, Ospfv3Area, Ospfv3Instance, Ospfv3LsaSummary,
-    Ospfv3NeighborSummary, Ospfv3Profile, PeerSummary, PolicyDefinition, PrefixList,
-    PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, SourceAddress,
-    StaticRoute, StaticRoutingInstance, Subinterface, SubinterfaceStatus, SwitchingProfile,
-    TransactionSnapshot, VlanTag,
+    Ospfv3NeighborSummary, Ospfv3Profile, PeerSummary, PolicyDefinition, PortAggregate,
+    PortAggregateStatus, PrefixList, PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable,
+    SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface,
+    SubinterfaceStatus, SwitchingProfile, TransactionSnapshot, VlanTag,
 };
 
 use crate::session::Path;
@@ -356,6 +356,52 @@ pub fn render_interface_statuses(statuses: &[InterfaceStatus]) -> String {
     statuses
         .iter()
         .map(render_interface_status)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Render one port aggregate's config-only view — the `PortAggregate`
+/// counterpart of `render_interface`, minus the loopback-only flat
+/// addresses/routing-table fields it has none of.
+pub fn render_port_aggregate(agg: &PortAggregate) -> String {
+    let switching_profile = agg.switching_profile.as_deref().unwrap_or("unset");
+    let mtu = agg
+        .mtu
+        .map_or_else(|| "unset".to_string(), |m| m.to_string());
+    let mut lines = vec![format!(
+        "port-aggregate {}: mode {:?}, switching-profile {switching_profile}, mtu {mtu}",
+        agg.name, agg.mode
+    )];
+    for sub in &agg.subinterfaces {
+        lines.push(format!("  {}", render_subinterface(sub)));
+    }
+    lines.join("\n")
+}
+
+/// Render one port aggregate's daemon-reported status — the `PortAggregate`
+/// counterpart of `render_interface_status`.
+pub fn render_port_aggregate_status(status: &PortAggregateStatus) -> String {
+    let switching_profile = status.switching_profile.as_deref().unwrap_or("unset");
+    let mut lines = vec![format!(
+        "port-aggregate {}: mode {:?}, switching-profile {switching_profile}, mtu {}",
+        status.name, status.mode, status.mtu
+    )];
+    for sub in &status.subinterfaces {
+        lines.push(format!("  {}", render_subinterface_status(sub)));
+    }
+    lines.join("\n")
+}
+
+/// Render every port aggregate's daemon-reported status, one per line — used
+/// for both `show port-aggregate` (many entries) and `show port-aggregate
+/// <name>` (one).
+pub fn render_port_aggregate_statuses(statuses: &[PortAggregateStatus]) -> String {
+    if statuses.is_empty() {
+        return "no port aggregates".to_string();
+    }
+    statuses
+        .iter()
+        .map(render_port_aggregate_status)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -706,6 +752,11 @@ pub fn render_config(config: &Config) -> String {
                 .map(render_switching_profile),
         );
     }
+    if config.port_aggregates.is_empty() {
+        lines.push("no port aggregates configured".to_string());
+    } else {
+        lines.extend(config.port_aggregates.iter().map(render_port_aggregate));
+    }
     lines.join("\n")
 }
 
@@ -912,6 +963,15 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
             .map_or_else(
                 || format!("switching-profile '{name}' not found"),
                 render_switching_profile,
+            ),
+        Path::PortAggregate(name) => snapshot
+            .config
+            .port_aggregates
+            .iter()
+            .find(|a| &a.name == name)
+            .map_or_else(
+                || format!("port-aggregate '{name}' not found"),
+                render_port_aggregate,
             ),
     }
 }
@@ -1214,7 +1274,8 @@ mod tests {
             render_config(&cfg),
             "hostname: nos\nno BGP instances configured\nno routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\nno interfaces configured\n\
              no community aliases configured\nno community groups configured\nno prefix lists configured\n\
-             no broadcast domains configured\nno switching profiles configured"
+             no broadcast domains configured\nno switching profiles configured\n\
+             no port aggregates configured"
         );
     }
 
@@ -1230,7 +1291,8 @@ mod tests {
              no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
              no community aliases configured\nno community groups configured\nno prefix lists configured\n\
-             no broadcast domains configured\nno switching profiles configured"
+             no broadcast domains configured\nno switching profiles configured\n\
+             no port aggregates configured"
         );
     }
 
@@ -1247,7 +1309,8 @@ mod tests {
              no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
              no community aliases configured\nno community groups configured\nno prefix lists configured\n\
-             no broadcast domains configured\nno switching profiles configured"
+             no broadcast domains configured\nno switching profiles configured\n\
+             no port aggregates configured"
         );
     }
 
@@ -1260,6 +1323,7 @@ mod tests {
             routing_table: None,
             ospf_profile: None,
             switching_profile: None,
+            port_aggregate: None,
             mtu: Some(9000),
             subinterfaces: vec![
                 Subinterface {
@@ -1304,6 +1368,7 @@ mod tests {
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
             switching_profile: None,
+            port_aggregate: None,
             mtu: None,
             subinterfaces: Vec::new(),
         };
@@ -1334,7 +1399,8 @@ mod tests {
              no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
              no community aliases configured\nno community groups configured\nno prefix lists configured\n\
-             no broadcast domains configured\nno switching profiles configured"
+             no broadcast domains configured\nno switching profiles configured\n\
+             no port aggregates configured"
         );
     }
 
@@ -1369,6 +1435,7 @@ mod tests {
             routing_table: None,
             ospf_profile: None,
             switching_profile: None,
+            port_aggregate: None,
             mtu: None,
             subinterfaces: vec![Subinterface {
                 ospfv3_profile: None,

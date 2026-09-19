@@ -12,6 +12,8 @@ pub mod ospfv3_area;
 pub mod ospfv3_instance;
 pub mod ospfv3_profile;
 pub mod policy_definition;
+pub mod port_aggregate;
+pub mod port_aggregate_subinterface;
 pub mod prefix_list;
 pub mod routing_table;
 pub mod static_route;
@@ -33,6 +35,8 @@ pub use ospfv3_area::Ospfv3AreaOp;
 pub use ospfv3_instance::Ospfv3InstanceOp;
 pub use ospfv3_profile::Ospfv3ProfileOp;
 pub use policy_definition::PolicyDefinitionOp;
+pub use port_aggregate::PortAggregateOp;
+pub use port_aggregate_subinterface::PortAggregateSubinterfaceOp;
 pub use prefix_list::PrefixListOp;
 pub use routing_table::RoutingTableOp;
 pub use static_route::StaticRouteOp;
@@ -79,6 +83,8 @@ pub enum ConfigOp {
     Ospfv3Instance(Ospfv3InstanceOp),
     Ospfv3Area(Ospfv3AreaOp),
     Ospfv3Profile(Ospfv3ProfileOp),
+    PortAggregate(PortAggregateOp),
+    PortAggregateSubinterface(PortAggregateSubinterfaceOp),
 }
 
 impl ConfigOp {
@@ -111,6 +117,8 @@ impl ConfigOp {
             ConfigOp::Ospfv3Instance(op) => op.apply(config),
             ConfigOp::Ospfv3Area(op) => op.apply(config),
             ConfigOp::Ospfv3Profile(op) => op.apply(config),
+            ConfigOp::PortAggregate(op) => op.apply(config),
+            ConfigOp::PortAggregateSubinterface(op) => op.apply(config),
         }
     }
 }
@@ -204,6 +212,18 @@ pub enum OpError {
         instance: String,
         area_id: Ipv4Addr,
         name: String,
+    },
+    #[error("port aggregate '{0}' not found")]
+    PortAggregateNotFound(String),
+    #[error("subinterface with tag '{tag}' not found on port aggregate '{port_aggregate}'")]
+    PortAggregateSubinterfaceNotFound { port_aggregate: String, tag: u16 },
+    #[error(
+        "address '{address}' not found on port aggregate subinterface '{port_aggregate}.{tag}'"
+    )]
+    PortAggregateSubinterfaceAddressNotFound {
+        port_aggregate: String,
+        tag: u16,
+        address: IpNet,
     },
 }
 

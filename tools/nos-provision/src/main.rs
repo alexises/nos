@@ -21,9 +21,9 @@ use nos_proto::{
     AddressFamily, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, ConfigOp, Event,
     InterfaceOp, IpcCodec, OspfAreaOp, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstanceOp,
     OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp,
-    Redistribute, RedistributeSource, RedistributeTarget, Request, RoutingTableOp, SourceAddress,
-    StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase,
-    VlanTag,
+    PortAggregateMode, PortAggregateOp, Redistribute, RedistributeSource, RedistributeTarget,
+    Request, RoutingTableOp, SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp,
+    SwitchingProfileOp, TransactionBase, VlanTag,
 };
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -267,6 +267,31 @@ struct Args {
     /// `--switching-profile`.
     #[arg(long)]
     delete_switching_profile: bool,
+
+    /// If set, creates this port aggregate (a static, non-LACP Xor Linux
+    /// bond — the only mode this NOS supports so far) if missing, and
+    /// enslaves every `--enslave-interface-into-port-aggregate` member into
+    /// it (`PortAggregateOp::Ensure`, `InterfaceOp::SetPortAggregate`).
+    #[arg(long)]
+    port_aggregate: Option<String>,
+
+    /// If set (requires `--port-aggregate`), sets the aggregate's own mtu
+    /// (`PortAggregateOp::SetMtu`).
+    #[arg(long)]
+    port_aggregate_mtu: Option<u32>,
+
+    /// One interface name per repetition, ensured and enslaved into
+    /// `--port-aggregate` (`InterfaceOp::Ensure` + `InterfaceOp::SetPortAggregate`).
+    /// Only meaningful with `--port-aggregate` also set.
+    #[arg(long = "enslave-interface-into-port-aggregate")]
+    port_aggregate_members: Vec<String>,
+
+    /// If set (requires `--port-aggregate`, naming which one), deletes the
+    /// port aggregate outright instead of ensuring/enslaving into it
+    /// (`PortAggregateOp::Delete`) — for verifying the real kernel bond
+    /// device (and its members' enslavement) is torn down.
+    #[arg(long)]
+    delete_port_aggregate: bool,
 
     /// If set, ensures this OSPF instance, sets its router-id
     /// (`--ospf-router-id`, required alongside this), and associates it
@@ -787,6 +812,46 @@ async fn main() -> anyhow::Result<()> {
         ops.push(ConfigOp::Interface(InterfaceOp::ClearSwitchingProfile {
             name: args.interface.clone(),
         }));
+    }
+
+    if args.delete_port_aggregate {
+        let name = args
+            .port_aggregate
+            .clone()
+            .context("--delete-port-aggregate requires --port-aggregate to also be set")?;
+        // Clear each member's own reference first — committing the deletion
+        // while a member interface still points at this now-gone aggregate
+        // would fail commit-time validation (`port_aggregate_reference_valid`).
+        for member in &args.port_aggregate_members {
+            ops.push(ConfigOp::Interface(InterfaceOp::ClearPortAggregate {
+                name: member.clone(),
+            }));
+        }
+        ops.push(ConfigOp::PortAggregate(PortAggregateOp::Delete { name }));
+    } else if let Some(name) = args.port_aggregate.clone() {
+        ops.push(ConfigOp::PortAggregate(PortAggregateOp::Ensure {
+            name: name.clone(),
+            mode: PortAggregateMode::Xor,
+        }));
+        if let Some(mtu) = args.port_aggregate_mtu {
+            ops.push(ConfigOp::PortAggregate(PortAggregateOp::SetMtu {
+                name: name.clone(),
+                mtu,
+            }));
+        }
+        for member in &args.port_aggregate_members {
+            ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
+                name: member.clone(),
+            }));
+            ops.push(ConfigOp::Interface(InterfaceOp::SetPortAggregate {
+                name: member.clone(),
+                port_aggregate: name.clone(),
+            }));
+        }
+    } else if args.port_aggregate_mtu.is_some() || !args.port_aggregate_members.is_empty() {
+        bail!(
+            "--port-aggregate-mtu/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
+        );
     }
 
     if let Some(name) = args.ospf_instance.clone() {

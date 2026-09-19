@@ -74,6 +74,13 @@ fn switching_profile_str(iface: &Interface) -> String {
         .unwrap_or_else(|| "unset".to_string())
 }
 
+fn port_aggregate_str(iface: &Interface) -> String {
+    iface
+        .port_aggregate
+        .clone()
+        .unwrap_or_else(|| "unset".to_string())
+}
+
 fn ospf_profile_str(iface: &Interface) -> String {
     iface
         .ospf_profile
@@ -112,6 +119,13 @@ fn changed_fields(base: &Interface, candidate: &Interface) -> Vec<FieldDiff> {
             label: "switching-profile".to_string(),
             old: Some(switching_profile_str(base)),
             new: Some(switching_profile_str(candidate)),
+        });
+    }
+    if base.port_aggregate != candidate.port_aggregate {
+        fields.push(FieldDiff {
+            label: "port-aggregate".to_string(),
+            old: Some(port_aggregate_str(base)),
+            new: Some(port_aggregate_str(candidate)),
         });
     }
     if base.ospf_profile != candidate.ospf_profile {
@@ -153,6 +167,11 @@ fn removed_section(iface: &Interface) -> SectionDiff {
                 new: None,
             },
             FieldDiff {
+                label: "port-aggregate".to_string(),
+                old: Some(port_aggregate_str(iface)),
+                new: None,
+            },
+            FieldDiff {
                 label: "ospf-profile".to_string(),
                 old: Some(ospf_profile_str(iface)),
                 new: None,
@@ -189,6 +208,11 @@ fn added_section(iface: &Interface) -> SectionDiff {
                 new: Some(switching_profile_str(iface)),
             },
             FieldDiff {
+                label: "port-aggregate".to_string(),
+                old: None,
+                new: Some(port_aggregate_str(iface)),
+            },
+            FieldDiff {
                 label: "ospf-profile".to_string(),
                 old: None,
                 new: Some(ospf_profile_str(iface)),
@@ -221,6 +245,7 @@ mod tests {
             routing_table: routing_table.map(str::to_string),
             ospf_profile: None,
             switching_profile: None,
+            port_aggregate: None,
             mtu: None,
             subinterfaces: Vec::new(),
         }
@@ -311,6 +336,7 @@ mod tests {
             routing_table: None,
             ospf_profile: None,
             switching_profile: None,
+            port_aggregate: None,
             mtu: None,
             subinterfaces: Vec::new(),
         }];
@@ -324,6 +350,7 @@ mod tests {
             routing_table: None,
             ospf_profile: None,
             switching_profile: None,
+            port_aggregate: None,
             mtu: None,
             subinterfaces: Vec::new(),
         }];

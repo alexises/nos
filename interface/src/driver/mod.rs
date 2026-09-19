@@ -11,6 +11,7 @@
 pub mod bridge_registry;
 pub mod linux;
 pub mod noop;
+pub mod port_aggregate_registry;
 pub mod rib_client;
 
 use async_trait::async_trait;
@@ -19,7 +20,7 @@ use thiserror::Error;
 pub use linux::LinuxInterfaceDriver;
 pub use noop::NoopInterfaceDriver;
 
-use crate::state::{BroadcastDomainState, InterfaceState};
+use crate::state::{BroadcastDomainState, InterfaceState, PortAggregateState};
 
 #[derive(Debug, Error)]
 pub enum DriverError {
@@ -86,6 +87,28 @@ pub trait InterfaceDriver: Send + Sync {
     /// config outright) - deletes the bridge device. A no-op if no bridge
     /// was ever created for `domain`.
     async fn remove_broadcast_domain(&self, domain: &str) -> Result<(), DriverError>;
+
+    /// Ensures a bond device exists for `desired.name` (a `PortAggregate`
+    /// name), creating it if missing with `desired.mode`, then reconciles
+    /// its own `switching_profile`/`mtu`/`subinterfaces` onto the bond
+    /// device itself — the exact same reconciliation `apply` does for a
+    /// physical interface, since a `PortAggregate` has the identical config
+    /// surface. Called once per configured `PortAggregate` on every resync,
+    /// after every `ensure_broadcast_domain` call (a bond's own
+    /// `switching_profile` may enslave it into a bridge that must already
+    /// exist) and before any interface's `apply` (a member interface
+    /// enslaves into this bond by name). Returns the bond's real kernel
+    /// device name.
+    async fn ensure_port_aggregate(
+        &self,
+        desired: &PortAggregateState,
+    ) -> Result<String, DriverError>;
+
+    /// Called once per resync for every `PortAggregate` name present in the
+    /// previous resync but absent from the current one (removed from config
+    /// outright) - deletes the bond device. A no-op if no bond was ever
+    /// created for `name`.
+    async fn remove_port_aggregate(&self, name: &str) -> Result<(), DriverError>;
 
     /// Best-effort query of `kernel_interface`'s current kernel-assigned
     /// IPv6 link-local address (`fe80::/10` scope) — a pure read, never a

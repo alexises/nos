@@ -199,6 +199,7 @@ fn ensure_subinterface_mut<'a>(
             ospf_profile: None,
             ospfv3_profile: None,
             switching_profile: None,
+            port_aggregate: None,
             mtu: None,
             subinterfaces: Vec::new(),
         });
@@ -233,6 +234,7 @@ mod tests {
             ospf_profile: None,
             ospfv3_profile: None,
             switching_profile: None,
+            port_aggregate: None,
             mtu: None,
             subinterfaces,
         }

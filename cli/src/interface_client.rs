@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec};
+use nos_proto::{InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec, PortAggregateStatus};
 use thiserror::Error;
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -77,6 +77,45 @@ pub async fn get_interface(
         Some(Ok(InterfaceEvent::NotFound)) => Ok(None),
         Some(Ok(_)) => Err(InterfaceClientError::Daemon(
             "unexpected event in reply to GetInterface".to_string(),
+        )),
+        Some(Err(e)) => Err(InterfaceClientError::Io(e)),
+        None => Err(InterfaceClientError::ConnectionClosed),
+    }
+}
+
+/// Fetches every configured port aggregate's reconciled status.
+pub async fn get_port_aggregates(
+    interface_socket: &Path,
+) -> Result<Vec<PortAggregateStatus>, InterfaceClientError> {
+    let (mut reader, mut writer) = connect(interface_socket).await?;
+    writer.send(InterfaceRequest::GetPortAggregates).await?;
+    match reader.next().await {
+        Some(Ok(InterfaceEvent::PortAggregates(statuses))) => Ok(statuses),
+        Some(Ok(_)) => Err(InterfaceClientError::Daemon(
+            "unexpected event in reply to GetPortAggregates".to_string(),
+        )),
+        Some(Err(e)) => Err(InterfaceClientError::Io(e)),
+        None => Err(InterfaceClientError::ConnectionClosed),
+    }
+}
+
+/// Fetches one named port aggregate's reconciled status. `Ok(None)` means no
+/// such aggregate is configured.
+pub async fn get_port_aggregate(
+    interface_socket: &Path,
+    name: &str,
+) -> Result<Option<PortAggregateStatus>, InterfaceClientError> {
+    let (mut reader, mut writer) = connect(interface_socket).await?;
+    writer
+        .send(InterfaceRequest::GetPortAggregate {
+            name: name.to_string(),
+        })
+        .await?;
+    match reader.next().await {
+        Some(Ok(InterfaceEvent::PortAggregate(status))) => Ok(Some(status)),
+        Some(Ok(InterfaceEvent::NotFound)) => Ok(None),
+        Some(Ok(_)) => Err(InterfaceClientError::Daemon(
+            "unexpected event in reply to GetPortAggregate".to_string(),
         )),
         Some(Err(e)) => Err(InterfaceClientError::Io(e)),
         None => Err(InterfaceClientError::ConnectionClosed),

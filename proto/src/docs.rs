@@ -214,6 +214,16 @@ pub enum Topic {
     SetOspfProfileCryptoCurrentKey,
     /// `ConfigOp::OspfProfile(OspfProfileOp::ClearAuth)`
     ClearOspfProfileAuth,
+    /// `ConfigOp::PortAggregate(PortAggregateOp::Ensure)`
+    EnsurePortAggregate,
+    /// `ConfigOp::PortAggregate(PortAggregateOp::Delete)`
+    DeletePortAggregate,
+    /// `ConfigOp::PortAggregate(PortAggregateOp::SetMode)`
+    SetPortAggregateMode,
+    /// `ConfigOp::Interface(InterfaceOp::SetPortAggregate)`
+    SetInterfacePortAggregate,
+    /// `ConfigOp::Interface(InterfaceOp::ClearPortAggregate)`
+    ClearInterfacePortAggregate,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

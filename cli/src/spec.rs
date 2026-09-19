@@ -36,6 +36,7 @@ pub enum ArgKind {
     InterfaceName,
     BroadcastDomainName,
     SwitchingProfileName,
+    PortAggregateName,
 }
 
 /// Where a command's summary/detail text comes from.
@@ -79,6 +80,7 @@ pub enum Availability {
     /// shared, path-disambiguated token (see `SetTarget::MtuRelative`).
     ConfigurationInterfaceOrOspfProfile,
     ConfigurationSwitchingProfile,
+    ConfigurationPortAggregate,
     /// Any non-root navigation position — `BgpInstance`, `BgpPeerGroup`,
     /// `RoutingTable`, `StaticRoutingInstance`, `Interface`, or
     /// `Subinterface`.
@@ -118,6 +120,7 @@ pub fn availability_matches(availability: Availability, mode: &Mode) -> bool {
             path.interface().is_ok() || path.ospf_profile().is_ok() || path.ospfv3_profile().is_ok()
         }
         Availability::ConfigurationSwitchingProfile => path.switching_profile().is_ok(),
+        Availability::ConfigurationPortAggregate => path.port_aggregate().is_ok(),
         Availability::ConfigurationNested => matches!(
             path,
             Path::BgpInstance(_)
@@ -1193,6 +1196,54 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "delete broadcast-domain <domain>",
         Doc::FromConfig(Topic::RemoveSwitchingProfileMember),
         ConfigurationSwitchingProfile),
+    spec!(["edit" "port-aggregate" (PortAggregateName)],
+        "edit port-aggregate <name>",
+        Doc::FromConfig(Topic::EnsurePortAggregate),
+        Configuration),
+    spec!(["delete" "port-aggregate" (PortAggregateName)],
+        "delete port-aggregate <name>",
+        Doc::FromConfig(Topic::DeletePortAggregate),
+        Configuration),
+    spec!(["set" "port-aggregate" (PortAggregateName) "mode" "xor"],
+        "set port-aggregate <name> mode xor",
+        Doc::FromConfig(Topic::SetPortAggregateMode),
+        Configuration),
+    spec!(["set" "mode" "xor"],
+        "set mode xor",
+        Doc::FromConfig(Topic::SetPortAggregateMode),
+        ConfigurationPortAggregate),
+    spec!(["set" "interface" (InterfaceName) "port-aggregate" (PortAggregateName)],
+        "set interface <name> port-aggregate <aggregate>",
+        Doc::FromConfig(Topic::SetInterfacePortAggregate),
+        Configuration),
+    spec!(["set" "port-aggregate" (PortAggregateName)],
+        "set port-aggregate <aggregate>",
+        Doc::FromConfig(Topic::SetInterfacePortAggregate),
+        ConfigurationInterface),
+    spec!(["delete" "interface" (InterfaceName) "port-aggregate"],
+        "delete interface <name> port-aggregate",
+        Doc::FromConfig(Topic::ClearInterfacePortAggregate),
+        Configuration),
+    spec!(["delete" "port-aggregate"],
+        "delete port-aggregate",
+        Doc::FromConfig(Topic::ClearInterfacePortAggregate),
+        ConfigurationInterface),
+    spec!(["show" "port-aggregate"],
+        "show port-aggregate",
+        Doc::Local {
+            summary: "Show every port aggregate's reconciled status.",
+            detail: "Queries nos-interfaced (resolved via nos-watchdogd) for every configured \
+                     port aggregate's mode, switching-profile, mtu, and subinterfaces.",
+        },
+        Always),
+    spec!(["show" "port-aggregate" (PortAggregateName)],
+        "show port-aggregate <name>",
+        Doc::Local {
+            summary: "Show one port aggregate's reconciled status.",
+            detail: "Queries nos-interfaced (resolved via nos-watchdogd) for the named port \
+                     aggregate's mode, switching-profile, mtu, and subinterfaces.",
+        },
+        Always),
     spec!(["show" "interface"],
         "show interface",
         Doc::Local {

@@ -507,6 +507,7 @@ mod tests {
             ospf_profile: None,
             ospfv3_profile: ospfv3_profile.map(str::to_string),
             switching_profile: None,
+            port_aggregate: None,
             mtu: None,
             subinterfaces: Vec::new(),
         }

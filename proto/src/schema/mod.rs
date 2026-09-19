@@ -12,6 +12,7 @@ pub mod ospfv3_area;
 pub mod ospfv3_instance;
 pub mod ospfv3_profile;
 pub mod policy_definition;
+pub mod port_aggregate;
 pub mod prefix_list;
 pub mod routing_table;
 pub mod static_route;
@@ -40,6 +41,7 @@ pub use ospfv3_area::Ospfv3Area;
 pub use ospfv3_instance::Ospfv3Instance;
 pub use ospfv3_profile::Ospfv3Profile;
 pub use policy_definition::PolicyDefinition;
+pub use port_aggregate::{PortAggregate, PortAggregateMode};
 pub use prefix_list::{PrefixList, PrefixListEntry};
 pub use routing_table::{Redistribute, RedistributeSource, RedistributeTarget, RoutingTable};
 pub use static_route::StaticRoute;
@@ -102,6 +104,12 @@ pub struct Config {
     #[garde(dive)]
     pub switching_profiles: Vec<SwitchingProfile>,
 
+    #[garde(
+        dive,
+        custom(|aggregates, ctx: &Config| port_aggregate::valid_port_aggregates(aggregates, ctx))
+    )]
+    pub port_aggregates: Vec<PortAggregate>,
+
     #[serde(default = "default_hostname")]
     #[garde(length(min = 1, max = 253), custom(|h, _ctx: &Config| hostname_charset(h)))]
     pub hostname: String,
@@ -122,6 +130,7 @@ impl Default for Config {
             prefix_lists: Vec::new(),
             broadcast_domains: Vec::new(),
             switching_profiles: Vec::new(),
+            port_aggregates: Vec::new(),
             hostname: default_hostname(),
         }
     }

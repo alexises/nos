@@ -14,6 +14,7 @@ fn sample_status() -> InterfaceStatus {
         }],
         routing_table: Some("rt1".to_string()),
         switching_profile: None,
+        port_aggregate: None,
         mtu: 1500,
         subinterfaces: vec![],
     }

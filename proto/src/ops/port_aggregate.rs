@@ -1,0 +1,237 @@
+use serde::{Deserialize, Serialize};
+
+use crate::schema::{Config, PortAggregate, PortAggregateMode};
+
+use super::OpError;
+
+/// An edit to a single named `PortAggregate` within a transaction's
+/// in-progress config. Applied without validation, matching every other
+/// `Op`. No address/routing-table/ospf-profile variants — unlike
+/// `BroadcastDomainOp`, `PortAggregate` has no flat L3 fields; that config
+/// lives under its `subinterfaces` instead, edited via
+/// `PortAggregateSubinterfaceOp`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PortAggregateOp {
+    /// Creates the aggregate if it doesn't already exist (with `mode`);
+    /// no-op if it does. Backs `edit port-aggregate <name>`'s "create if
+    /// missing, else navigate to it" semantics.
+    Ensure {
+        name: String,
+        mode: PortAggregateMode,
+    },
+    SetSwitchingProfile {
+        name: String,
+        switching_profile: String,
+    },
+    ClearSwitchingProfile {
+        name: String,
+    },
+    SetMtu {
+        name: String,
+        mtu: u32,
+    },
+    ClearMtu {
+        name: String,
+    },
+    SetMode {
+        name: String,
+        mode: PortAggregateMode,
+    },
+    Delete {
+        name: String,
+    },
+}
+
+impl PortAggregateOp {
+    pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
+        match self {
+            PortAggregateOp::Ensure { name, mode } => {
+                if !config.port_aggregates.iter().any(|a| &a.name == name) {
+                    config.port_aggregates.push(PortAggregate {
+                        name: name.clone(),
+                        mode: *mode,
+                        switching_profile: None,
+                        mtu: None,
+                        subinterfaces: Vec::new(),
+                    });
+                }
+                Ok(())
+            }
+            PortAggregateOp::SetSwitchingProfile {
+                name,
+                switching_profile,
+            } => {
+                find_aggregate_mut(config, name)?.switching_profile =
+                    Some(switching_profile.clone());
+                Ok(())
+            }
+            PortAggregateOp::ClearSwitchingProfile { name } => {
+                find_aggregate_mut(config, name)?.switching_profile = None;
+                Ok(())
+            }
+            PortAggregateOp::SetMtu { name, mtu } => {
+                find_aggregate_mut(config, name)?.mtu = Some(*mtu);
+                Ok(())
+            }
+            PortAggregateOp::ClearMtu { name } => {
+                find_aggregate_mut(config, name)?.mtu = None;
+                Ok(())
+            }
+            PortAggregateOp::SetMode { name, mode } => {
+                find_aggregate_mut(config, name)?.mode = *mode;
+                Ok(())
+            }
+            PortAggregateOp::Delete { name } => {
+                let before = config.port_aggregates.len();
+                config.port_aggregates.retain(|a| &a.name != name);
+                if config.port_aggregates.len() == before {
+                    return Err(OpError::PortAggregateNotFound(name.clone()));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn find_aggregate_mut<'a>(
+    config: &'a mut Config,
+    name: &str,
+) -> Result<&'a mut PortAggregate, OpError> {
+    config
+        .port_aggregates
+        .iter_mut()
+        .find(|a| a.name == name)
+        .ok_or_else(|| OpError::PortAggregateNotFound(name.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn aggregate(name: &str) -> PortAggregate {
+        PortAggregate {
+            name: name.to_string(),
+            mode: PortAggregateMode::Xor,
+            switching_profile: None,
+            mtu: None,
+            subinterfaces: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ensure_creates_when_missing() {
+        let mut cfg = Config::default();
+        PortAggregateOp::Ensure {
+            name: "bond1".to_string(),
+            mode: PortAggregateMode::Xor,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.port_aggregates.len(), 1);
+        assert_eq!(cfg.port_aggregates[0].name, "bond1");
+        assert_eq!(cfg.port_aggregates[0].mode, PortAggregateMode::Xor);
+    }
+
+    #[test]
+    fn ensure_is_noop_when_present() {
+        let mut cfg = Config {
+            port_aggregates: vec![aggregate("bond1")],
+            ..Default::default()
+        };
+        PortAggregateOp::Ensure {
+            name: "bond1".to_string(),
+            mode: PortAggregateMode::Xor,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.port_aggregates.len(), 1);
+    }
+
+    #[test]
+    fn set_and_clear_switching_profile() {
+        let mut cfg = Config {
+            port_aggregates: vec![aggregate("bond1")],
+            ..Default::default()
+        };
+        PortAggregateOp::SetSwitchingProfile {
+            name: "bond1".to_string(),
+            switching_profile: "sp1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.port_aggregates[0].switching_profile.as_deref(),
+            Some("sp1")
+        );
+
+        PortAggregateOp::ClearSwitchingProfile {
+            name: "bond1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.port_aggregates[0].switching_profile, None);
+    }
+
+    #[test]
+    fn set_and_clear_mode() {
+        let mut cfg = Config {
+            port_aggregates: vec![aggregate("bond1")],
+            ..Default::default()
+        };
+        PortAggregateOp::SetMode {
+            name: "bond1".to_string(),
+            mode: PortAggregateMode::Xor,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.port_aggregates[0].mode, PortAggregateMode::Xor);
+    }
+
+    #[test]
+    fn set_and_clear_mtu() {
+        let mut cfg = Config {
+            port_aggregates: vec![aggregate("bond1")],
+            ..Default::default()
+        };
+        PortAggregateOp::SetMtu {
+            name: "bond1".to_string(),
+            mtu: 9000,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.port_aggregates[0].mtu, Some(9000));
+
+        PortAggregateOp::ClearMtu {
+            name: "bond1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.port_aggregates[0].mtu, None);
+    }
+
+    #[test]
+    fn delete_removes_existing() {
+        let mut cfg = Config {
+            port_aggregates: vec![aggregate("bond1"), aggregate("bond2")],
+            ..Default::default()
+        };
+        PortAggregateOp::Delete {
+            name: "bond1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.port_aggregates.len(), 1);
+        assert_eq!(cfg.port_aggregates[0].name, "bond2");
+    }
+
+    #[test]
+    fn delete_missing_errors() {
+        let mut cfg = Config::default();
+        let err = PortAggregateOp::Delete {
+            name: "bond1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap_err();
+        assert!(matches!(err, OpError::PortAggregateNotFound(n) if n == "bond1"));
+    }
+}
