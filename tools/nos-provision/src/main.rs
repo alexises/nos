@@ -173,6 +173,16 @@ struct Args {
     #[arg(long)]
     delete_loopback: bool,
 
+    /// If set, removes this address from `--routing-table`'s loopback
+    /// interface before applying `--loopback-address` (if also set) —
+    /// `InterfaceOp::AddAddress` only ever adds, and `crate::reconcile`'s
+    /// `resolve_loopback_prefix` reads `addresses[0]`, so reassigning a
+    /// loopback from one address to another (e.g. the `abr` scenario
+    /// repurposing the `ospf-spf` scenario's own loopback into a second
+    /// area) needs the old one actually removed, not just superseded.
+    #[arg(long)]
+    loopback_remove_address: Option<IpNet>,
+
     /// If set, attaches this OSPF profile name to `--routing-table`'s
     /// loopback interface (`InterfaceOp::SetOspfProfile`) — for verifying
     /// `nos-ospfd` originates a real stub-network Router-LSA link for it
@@ -503,6 +513,12 @@ async fn main() -> anyhow::Result<()> {
         bail!("--loopback-address and --delete-loopback are mutually exclusive");
     }
     let loopback_name = format!("loopback-{}", args.routing_table);
+    if let Some(address) = args.loopback_remove_address {
+        ops.push(ConfigOp::Interface(InterfaceOp::RemoveAddress {
+            name: loopback_name.clone(),
+            address,
+        }));
+    }
     if let Some(address) = args.loopback_address {
         ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
             name: loopback_name.clone(),

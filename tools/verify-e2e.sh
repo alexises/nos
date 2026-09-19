@@ -114,12 +114,21 @@
 # computes and pushes a real kernel route for it via nos-ribd -- see
 # ospf/CLAUDE.md's "ASBR and AS-external-LSA origination".
 #
+# An eighth, `abr` (requires `ospf-spf` to have already run), reassigns
+# router-b's own loopback into a real second OSPF area, making router-b a
+# genuine RFC 2328 ABR, confirming real Type-3 Summary-LSA origination and
+# translation: router-b actually originates one for its reassigned loopback,
+# router-a learns and installs it into its own (backbone-only) LSDB over the
+# real adjacency, and router-a's own SPF computes and pushes a real kernel
+# route for a prefix that is not in its own area at all -- see
+# ospf/CLAUDE.md's "ABR and Summary-LSA origination".
+#
 # nos-cli's interactive shell (reedline) can't be scripted over a plain
 # pipe, so provisioning goes through `nos-provision` (tools/nos-provision) —
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|ospf-aging|ospf-auth|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
+# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -212,6 +221,22 @@ OSPF_BROADCAST_ADDRESS_C=203.0.113.67/28
 # learn it purely via a real RFC 2328 §16 SPF computation, never a
 # directly-connected address.
 OSPF_SPF_LOOPBACK_ADDRESS=203.0.113.80/32
+# The `abr` scenario's own second OSPF area/profile and its destination
+# prefix -- reassigns router-b's own loopback (see OSPF_SPF_LOOPBACK_ADDRESS
+# above, from the `ospf-spf` scenario) from the backbone into a real second
+# area, making router-b a genuine RFC 2328 ABR (attached to areas
+# $OSPF_AREA and $OSPF_AREA_1 at once, purely as derived from live LSDB
+# state -- see ospf/CLAUDE.md's "ABR and Summary-LSA origination"), while
+# router-a stays in $OSPF_AREA only. A distinct address (a fifth host in the
+# same TEST-NET-3 block already used by loopback/svi/ospf-broadcast/ospf-spf)
+# is required, not just a re-profiled loopback at the same address --
+# nos-ribd/rib_push_client diffs by (prefix, next-hop), and reusing the exact
+# same prefix would recompute to the identical next-hop (still router-b's
+# own eth0.0 address), producing no new "added route" kernel event to assert
+# on at all.
+OSPF_AREA_1=0.0.0.1
+OSPF_PROFILE_AREA1=ospf-profile-area1
+OSPF_ABR_LOOPBACK_ADDRESS=203.0.113.96/32
 # The `ospf-aging` scenario's --lsa-age-multiplier: scales nos-ospfd's
 # per-second LSA-age-clock so RFC 2328 §14's real 1800s (LSRefreshTime) /
 # 3600s (MaxAge) timers resolve in CI-friendly seconds instead of tens of
@@ -634,6 +659,47 @@ provision_clear_ospf_loopback() {
     --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
     --peer "$peer_ip" \
     --clear-ospf-loopback-profile
+}
+
+# --- ABR / Summary-LSA scenario ---
+#
+# Requires `ospf-spf` to have already run (router-b's loopback interface,
+# `loopback-rt1`, already exists with $OSPF_SPF_LOOPBACK_ADDRESS attached and
+# its ospf-profile already cleared by `cmd_check_ospf_spf`'s own withdrawal
+# check). Ensures a second `OspfArea`/`OspfProfile` under router-b's existing
+# $OSPF_INSTANCE, then reassigns the loopback: removes the old
+# $OSPF_SPF_LOOPBACK_ADDRESS, adds $OSPF_ABR_LOOPBACK_ADDRESS, and attaches
+# $OSPF_PROFILE_AREA1 to it -- a genuinely new prefix, in a genuinely new
+# area, with no neighbor of its own. This makes router-b attached to 2 areas
+# at once -- a real RFC 2328 ABR by this NOS's purely-derived definition (no
+# config flag, see ospf/CLAUDE.md's "ABR and Summary-LSA origination") --
+# while router-a stays in $OSPF_AREA only, so any route it learns to
+# $OSPF_ABR_LOOPBACK_ADDRESS can only have arrived via a real Type-3
+# Summary-LSA translated across areas by router-b.
+#
+# No LSA-withdrawal verification here (Summary-LSAs have no withdrawal path
+# in this crate, same as every other LSA type -- they age out at MaxAge),
+# mirroring `asbr`'s own scope decision.
+provision_abr() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 ospf_instance=$6 ospf_router_id=$7
+  log "provisioning $name with a second ospf area ($OSPF_AREA_1) and a reassigned loopback (address=$OSPF_ABR_LOOPBACK_ADDRESS) -- real abr scenario"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --ospf-instance "$ospf_instance" \
+    --ospf-router-id "$ospf_router_id" \
+    --ospf-area "$OSPF_AREA_1" \
+    --ospf-profile "$OSPF_PROFILE_AREA1" \
+    --loopback-remove-address "$OSPF_SPF_LOOPBACK_ADDRESS" \
+    --loopback-address "$OSPF_ABR_LOOPBACK_ADDRESS" \
+    --ospf-loopback-profile "$OSPF_PROFILE_AREA1"
 }
 
 # --- L2 switching-profile scenario ---
@@ -1422,6 +1488,50 @@ cmd_check_ospf_spf() {
     || { log "router-a: FAILED to withdraw the spf-computed route"; return 1; }
 }
 
+# --- ABR / Summary-LSA scenario ---
+#
+# Requires `ospf-spf` to have already run (see `provision_abr`'s own
+# comment). Confirms real RFC 2328 multi-area ABR behavior: router-b
+# actually originates a Type-3 network-summary LSA for its reassigned
+# loopback, router-a learns and installs it into its own (backbone-only)
+# LSDB over the real adjacency, and router-a's own SPF computes and installs
+# a real kernel route for a prefix that is NOT in router-a's own area --
+# purely via router-b's ABR summary, never a direct intra-area path -- see
+# ospf/CLAUDE.md's "ABR and Summary-LSA origination". Type-4/ASBR-summary
+# behavior has no Docker phase of its own (this 2-router/2-area topology has
+# no cross-area ASBR to exercise it -- covered by unit tests only, same
+# ponytail-flagged scope decision `asbr` made for its own simplifications).
+cmd_check_abr() {
+  local originated_before installed_before
+  originated_before=$(docker logs router-b 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep -c "ospf lsa originated.*lsa_type=3" || true)
+  installed_before=$(docker logs router-a 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep -c "ospf lsa installed.*lsa_type=3" || true)
+
+  provision_abr router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID_B"
+
+  # Field order matches `link.rs`'s `install_self_originated`'s
+  # `info!(lsa_type, link_state_id, advertising_router, refreshed, "ospf lsa
+  # originated")` call site, same as `cmd_check_asbr`'s own check.
+  log "waiting for router-b to originate a real type-3 summary-lsa for $OSPF_ABR_LOOPBACK_ADDRESS (real abr behavior)"
+  wait_for_count_increase router-b "ospf lsa originated.*lsa_type=3" "$originated_before" 60 \
+    && log "router-b: originated a type-3 summary-lsa" \
+    || { log "router-b: FAILED to originate a type-3 summary-lsa"; return 1; }
+
+  log "waiting for router-a to learn router-b's type-3 summary-lsa into its own (backbone-only) lsdb"
+  wait_for_count_increase router-a "ospf lsa installed.*lsa_type=3" "$installed_before" 60 \
+    && log "router-a: installed router-b's type-3 summary-lsa" \
+    || { log "router-a: FAILED to learn the type-3 summary-lsa"; return 1; }
+
+  # $OSPF_ABR_LOOPBACK_ADDRESS is a fresh prefix never installed by any
+  # earlier phase, so (unlike a generic pre-count) a literal `0` baseline is
+  # correct here -- same as `cmd_check_ospf_spf`'s own check, and the same
+  # `add_route`/`Option<RouteSource>` rendering quirk as its and
+  # `cmd_check_asbr`'s checks.
+  log "waiting for router-a to compute (via ospf spf) and install a real kernel route to $OSPF_ABR_LOOPBACK_ADDRESS -- a prefix not in router-a's own area"
+  wait_for_count_increase router-a "added route prefix=$OSPF_ABR_LOOPBACK_ADDRESS.*source=Some(Ospf)" 0 60 \
+    && log "router-a: installed the abr-summarized route into the real kernel routing table" \
+    || { log "router-a: FAILED to install the abr-summarized route"; return 1; }
+}
+
 # --- Multi-router OSPF DR/BDR scenario (Stage 5) ---
 #
 # Adds a third router ("router-c") onto the same bd-ospf broadcast segment
@@ -2091,6 +2201,7 @@ cmd_group_ospf_suite() {
   cmd_check_asbr
   cmd_check_ospf_dr
   cmd_check_ospf_spf
+  cmd_check_abr
   cmd_check_ospf_auth
   cmd_check_ospf_aging
 }
@@ -2122,6 +2233,7 @@ case "${1:-}" in
   asbr) cmd_check_asbr ;;
   ospf-dr) cmd_check_ospf_dr ;;
   ospf-spf) cmd_check_ospf_spf ;;
+  abr) cmd_check_abr ;;
   ospf-aging) cmd_check_ospf_aging ;;
   ospf-auth) cmd_check_ospf_auth ;;
   logs) shift; cmd_logs "$@" ;;
@@ -2152,11 +2264,12 @@ case "${1:-}" in
     cmd_check_asbr
     cmd_check_ospf_dr
     cmd_check_ospf_spf
+    cmd_check_abr
     cmd_check_ospf_auth
     cmd_check_ospf_aging
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|ospf-aging|ospf-auth|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
     exit 2
     ;;
 esac

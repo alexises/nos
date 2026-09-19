@@ -1,11 +1,16 @@
 //! RFC 2328 §16.1/§16.2 SPF: pure Dijkstra over Router-LSA/Network-LSA
 //! vertices, next-hop derivation entirely from already-installed LSAs (no
 //! live neighbor-table dependency), plus stub-network leaf processing and a
-//! directly-connected filter. No I/O — `crate::link::LinkManager::
-//! compute_routes` is the only caller, feeding it one area's `Lsdb::all()`
-//! snapshot at a time (this NOS is single-area/intra-area only, see
-//! `ospf/CLAUDE.md`; a multi-area router just runs this once per area and
-//! merges the results).
+//! directly-connected filter, extended with a real, 2-area-scoped ABR
+//! mechanism (Type-3/Type-4 Summary-LSA collector passes — see
+//! `ospf/CLAUDE.md`'s "ABR and Summary-LSA origination"). No I/O —
+//! `crate::link::LinkManager::compute_routes` is the only caller of
+//! `compute`, feeding it one area's `Lsdb::all()` snapshot at a time and
+//! merging each area's own result (`RouteEntry`-per-prefix, cheaper wins on
+//! a prefix computed by more than one area — see that function's own doc
+//! comment). `intra_area_routes` is `crate::link::originate_summary_lsas`'s
+//! own per-area input for deciding what to summarize into a router's *other*
+//! areas.
 //!
 //! # Next-hop derivation (the fiddly part of real OSPF SPF)
 //! A point-to-point or transit-network Router-LSA link's `link_data` is
@@ -26,8 +31,9 @@ use std::sync::Arc;
 use ipnet::Ipv4Net;
 
 use crate::lsa::{
-    AsExternalLsaBody, Lsa, LsaBody, NetworkLsaBody, RouterLsaBody, LINK_TYPE_POINT_TO_POINT,
-    LINK_TYPE_STUB_NETWORK, LINK_TYPE_TRANSIT_NETWORK,
+    AsExternalLsaBody, Lsa, LsaBody, NetworkLsaBody, RouterLsaBody, SummaryLsaBody,
+    LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK, LINK_TYPE_TRANSIT_NETWORK,
+    LSA_TYPE_ASBR_SUMMARY, LSA_TYPE_AS_EXTERNAL, LSA_TYPE_NETWORK_SUMMARY,
 };
 
 /// `ponytail:` RFC 2328 §16.4's E1/E2 external-metric-type distinction is not
@@ -88,33 +94,66 @@ impl PartialOrd for HeapEntry {
     }
 }
 
-/// Runs RFC 2328 §16.1/§16.2 SPF from `root` over `lsas` (one area's
-/// worth), returning every non-directly-connected destination reachable —
-/// stub-network leaves and transit-network prefixes alike.
-pub fn compute(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<RouteEntry> {
-    let routers: HashMap<Ipv4Addr, &RouterLsaBody> = lsas
+/// Builds the `routers`/`networks` lookup maps `run_dijkstra` and every
+/// collector pass need — shared by `compute` and `intra_area_routes` so
+/// neither duplicates the filter.
+fn routers_and_networks(
+    lsas: &[Arc<Lsa>],
+) -> (
+    HashMap<Ipv4Addr, &RouterLsaBody>,
+    HashMap<Ipv4Addr, &NetworkLsaBody>,
+) {
+    let routers = lsas
         .iter()
         .filter_map(|l| match &l.body {
             LsaBody::Router(r) => Some((l.header.advertising_router, r)),
-            LsaBody::Network(_) | LsaBody::AsExternal(_) => None,
+            LsaBody::Network(_) | LsaBody::Summary(_) | LsaBody::AsExternal(_) => None,
         })
         .collect();
-    let networks: HashMap<Ipv4Addr, &NetworkLsaBody> = lsas
+    let networks = lsas
         .iter()
         .filter_map(|l| match &l.body {
             LsaBody::Network(n) => Some((l.header.link_state_id, n)),
-            LsaBody::Router(_) | LsaBody::AsExternal(_) => None,
+            LsaBody::Router(_) | LsaBody::Summary(_) | LsaBody::AsExternal(_) => None,
         })
         .collect();
-    // Plain `Vec`, not a `HashMap` keyed by advertising_router — one ASBR
-    // can originate more than one Type-5 for different prefixes.
+    (routers, networks)
+}
+
+/// Runs RFC 2328 §16.1/§16.2 SPF from `root` over `lsas` (one area's
+/// worth), returning every non-directly-connected destination reachable —
+/// stub-network leaves, transit-network prefixes, RFC 2328 §16.3 inter-area
+/// routes (Type-3 Summary-LSA) and §16.4 AS-external routes alike.
+pub fn compute(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<RouteEntry> {
+    let (routers, networks) = routers_and_networks(lsas);
+    // Plain `Vec`s, not `HashMap`s keyed by advertising_router — one ASBR/ABR
+    // can originate more than one Type-5/Type-3/Type-4 for different
+    // prefixes/ASBRs.
     let externals: Vec<(Ipv4Addr, Ipv4Addr, &AsExternalLsaBody)> = lsas
         .iter()
         .filter_map(|l| match &l.body {
             LsaBody::AsExternal(e) => {
                 Some((l.header.advertising_router, l.header.link_state_id, e))
             }
-            LsaBody::Router(_) | LsaBody::Network(_) => None,
+            LsaBody::Router(_) | LsaBody::Network(_) | LsaBody::Summary(_) => None,
+        })
+        .collect();
+    let network_summaries: Vec<(Ipv4Addr, Ipv4Addr, &SummaryLsaBody)> = lsas
+        .iter()
+        .filter_map(|l| match &l.body {
+            LsaBody::Summary(s) if l.header.lsa_type == LSA_TYPE_NETWORK_SUMMARY => {
+                Some((l.header.advertising_router, l.header.link_state_id, s))
+            }
+            _ => None,
+        })
+        .collect();
+    let asbr_summaries: Vec<(Ipv4Addr, Ipv4Addr, &SummaryLsaBody)> = lsas
+        .iter()
+        .filter_map(|l| match &l.body {
+            LsaBody::Summary(s) if l.header.lsa_type == LSA_TYPE_ASBR_SUMMARY => {
+                Some((l.header.advertising_router, l.header.link_state_id, s))
+            }
+            _ => None,
         })
         .collect();
 
@@ -123,9 +162,67 @@ pub fn compute(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<RouteEntry> {
 
     collect_network_routes(root, &routers, &networks, &dist, &next_hop, &mut out);
     collect_stub_routes(root, &routers, &dist, &next_hop, &mut out);
-    collect_external_routes(root, &externals, &dist, &next_hop, &mut out);
+    collect_summary_routes(root, &network_summaries, &dist, &next_hop, &mut out);
+    collect_external_routes(
+        root,
+        &externals,
+        &asbr_summaries,
+        &dist,
+        &next_hop,
+        &mut out,
+    );
 
     out.into_values().collect()
+}
+
+/// One area's intra-area-only view — the subset of RFC 2328 §16.1 SPF fit
+/// for re-summarization into another area (`crate::link::
+/// originate_summary_lsas`). Deliberately skips the external/summary
+/// collector passes: RFC 2328 forbids re-summarizing an already inter-area
+/// or already-external route — the mechanism that prevents trivial two-area
+/// routing loops. Only a genuinely intra-area prefix or a genuinely-in-this-
+/// area ASBR ever qualifies.
+///
+/// `ponytail:` root's own directly-attached *transit network* (as opposed to
+/// a stub network — see `collect_intra_area_stub_routes`) is not summarized
+/// — a router won't advertise reachability to a broadcast segment it's
+/// itself sitting on into its other areas. Real RFC 2328 ABRs do; this NOS's
+/// concrete ABR scenarios (a loopback stub, a redistributed prefix) never
+/// need it. Upgrade path: a root-attached-network variant mirroring
+/// `collect_intra_area_stub_routes`'s own root-inclusion, keyed off the
+/// root's own transit-network `RouterLink`s rather than `next_hop`, which
+/// (unlike a stub) is never populated for a vertex root itself sits on.
+pub struct IntraAreaRoutes {
+    pub routes: Vec<RouteEntry>,
+    /// Every router-id in this area that both originated at least one
+    /// Type-5 AS-external-LSA and is actually reachable via this area's own
+    /// Dijkstra (a real, in-this-area ASBR) — `(router_id, intra_area_distance)`.
+    pub asbrs: Vec<(Ipv4Addr, u32)>,
+}
+
+pub fn intra_area_routes(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> IntraAreaRoutes {
+    let (routers, networks) = routers_and_networks(lsas);
+    let (dist, next_hop) = run_dijkstra(root, &routers, &networks);
+
+    let mut out: HashMap<(Ipv4Addr, Ipv4Addr), RouteEntry> = HashMap::new();
+    collect_network_routes(root, &routers, &networks, &dist, &next_hop, &mut out);
+    collect_intra_area_stub_routes(root, &routers, &dist, &next_hop, &mut out);
+
+    let asbr_ids: HashSet<Ipv4Addr> = lsas
+        .iter()
+        .filter(|l| l.header.lsa_type == LSA_TYPE_AS_EXTERNAL)
+        .map(|l| l.header.advertising_router)
+        .filter(|&id| id != root)
+        .collect();
+    let asbrs = asbr_ids
+        .into_iter()
+        .filter_map(|id| dist.get(&Vertex::Router(id)).map(|&d| (id, d)))
+        .collect();
+
+    IntraAreaRoutes {
+        routes: out.into_values().collect(),
+        asbrs,
+    }
 }
 
 /// The Dijkstra core: standard lazy-deletion priority-queue shortest path,
@@ -350,12 +447,137 @@ fn collect_stub_routes(
     }
 }
 
+/// `intra_area_routes`'s own stub-network collector — unlike
+/// `collect_stub_routes` (used by `compute` for this router's own final
+/// route set, where a directly-connected destination is deliberately
+/// excluded since it's already a real kernel connected route), this
+/// **includes** root's own directly-attached stub networks: what's "already
+/// directly connected" from this area's own perspective is exactly what a
+/// real ABR must summarize into its *other* areas (e.g. this router's own
+/// loopback stub in area A becomes a Type-3 into area B). `next_hop` is
+/// irrelevant to a caller that only reads `.metric`/`.prefix` (see
+/// `LinkManager::originate_summary_lsas`), so root's own stubs use `root`
+/// itself as a placeholder next-hop. No mirrored-duplicate key filter is
+/// needed (unlike `collect_stub_routes`'s `root_advertises_stub` guard): a
+/// p2p subnet's own copy (distance 0 + local cost) and a neighbor's mirrored
+/// copy (link cost + neighbor's advertised cost) share the same
+/// `(link_id, link_data)` key, so `insert_best` already keeps the cheaper —
+/// always root's own — automatically.
+fn collect_intra_area_stub_routes(
+    root: Ipv4Addr,
+    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    dist: &HashMap<Vertex, u32>,
+    next_hop: &HashMap<Vertex, NextHop>,
+    out: &mut HashMap<(Ipv4Addr, Ipv4Addr), RouteEntry>,
+) {
+    for (&router_id, body) in routers {
+        let vertex = Vertex::Router(router_id);
+        let Some(&d) = dist.get(&vertex) else {
+            continue;
+        };
+        let nh = if router_id == root {
+            root
+        } else {
+            let Some(NextHop::Router(nh)) = next_hop.get(&vertex).copied() else {
+                continue;
+            };
+            nh
+        };
+        for link in &body.links {
+            if link.link_type != LINK_TYPE_STUB_NETWORK {
+                continue;
+            }
+            let key = (link.link_id, link.link_data);
+            insert_best(
+                out,
+                key,
+                RouteEntry {
+                    prefix: net_from(link.link_id, link.link_data),
+                    next_hop: nh,
+                    metric: d.saturating_add(u32::from(link.metric)),
+                },
+            );
+        }
+    }
+}
+
+/// RFC 2328 §16.3 inter-area routes from Type-3 Summary-LSAs. Mirrors
+/// `collect_external_routes` exactly: the summary's advertising router (the
+/// ABR that originated it, see `crate::link::originate_summary_lsas`) must
+/// already have a computed intra-area distance/next-hop in this area; the
+/// summary's own `metric` is simply added. `advertising_router == root` is
+/// guarded the same way `collect_external_routes` guards `asbr == root` —
+/// this router's own self-installed Type-3 must never produce a spurious
+/// route to its own summarized prefix via itself.
+fn collect_summary_routes(
+    root: Ipv4Addr,
+    summaries: &[(Ipv4Addr, Ipv4Addr, &SummaryLsaBody)],
+    dist: &HashMap<Vertex, u32>,
+    next_hop: &HashMap<Vertex, NextHop>,
+    out: &mut HashMap<(Ipv4Addr, Ipv4Addr), RouteEntry>,
+) {
+    for &(abr, link_state_id, s) in summaries {
+        if abr == root {
+            continue;
+        }
+        let vertex = Vertex::Router(abr);
+        let Some(&d) = dist.get(&vertex) else {
+            continue;
+        };
+        let Some(NextHop::Router(nh)) = next_hop.get(&vertex).copied() else {
+            continue;
+        };
+        let key = (link_state_id, s.network_mask);
+        insert_best(
+            out,
+            key,
+            RouteEntry {
+                prefix: net_from(link_state_id, s.network_mask),
+                next_hop: nh,
+                metric: d.saturating_add(s.metric),
+            },
+        );
+    }
+}
+
+/// Distance+next-hop to `asbr`. Prefers a direct intra-area Router-LSA
+/// vertex; if `asbr` has none (it's genuinely outside this area), falls back
+/// to an installed Type-4 ASBR-summary LSA for it in this area — cost is
+/// that summary's advertising ABR's own intra-area distance plus the
+/// summary's metric, next-hop is the ABR's own next-hop (packets to a
+/// foreign ASBR go via the ABR proxying reachability to it). Multiple
+/// Type-4s for the same `asbr` (from different ABRs) take the cheapest.
+fn asbr_distance(
+    asbr: Ipv4Addr,
+    asbr_summaries: &[(Ipv4Addr, Ipv4Addr, &SummaryLsaBody)],
+    dist: &HashMap<Vertex, u32>,
+    next_hop: &HashMap<Vertex, NextHop>,
+) -> Option<(u32, Ipv4Addr)> {
+    if let Some(&d) = dist.get(&Vertex::Router(asbr)) {
+        if let Some(NextHop::Router(nh)) = next_hop.get(&Vertex::Router(asbr)).copied() {
+            return Some((d, nh));
+        }
+    }
+    asbr_summaries
+        .iter()
+        .filter(|&&(_, target, _)| target == asbr)
+        .filter_map(|&(abr, _, s)| {
+            let &d = dist.get(&Vertex::Router(abr))?;
+            let NextHop::Router(nh) = next_hop.get(&Vertex::Router(abr)).copied()? else {
+                return None;
+            };
+            Some((d.saturating_add(s.metric), nh))
+        })
+        .min_by_key(|&(d, _)| d)
+}
+
 /// RFC 2328 §16.4 AS-external routes, restricted to this NOS's Type-1-only
 /// simplification (see `EXTERNAL_METRIC_CONSTANT`'s doc comment) and
 /// forwarding-address-`0.0.0.0`-only simplification (see
 /// `AsExternalLsaBody`'s doc comment): every external route's next-hop is
 /// always the advertising ASBR's own next-hop, and its cost is always the
-/// ASBR's intra-area distance plus the fixed external metric.
+/// ASBR's distance (direct intra-area, or via a Type-4 proxy — see
+/// `asbr_distance`) plus the fixed external metric.
 ///
 /// **Explicit `asbr == root` guard**: this router's own Type-5 LSA, once
 /// installed into its own area's LSDB (see `crate::link::
@@ -367,6 +589,7 @@ fn collect_stub_routes(
 fn collect_external_routes(
     root: Ipv4Addr,
     externals: &[(Ipv4Addr, Ipv4Addr, &AsExternalLsaBody)],
+    asbr_summaries: &[(Ipv4Addr, Ipv4Addr, &SummaryLsaBody)],
     dist: &HashMap<Vertex, u32>,
     next_hop: &HashMap<Vertex, NextHop>,
     out: &mut HashMap<(Ipv4Addr, Ipv4Addr), RouteEntry>,
@@ -375,11 +598,7 @@ fn collect_external_routes(
         if asbr == root {
             continue;
         }
-        let vertex = Vertex::Router(asbr);
-        let Some(&d) = dist.get(&vertex) else {
-            continue;
-        };
-        let Some(NextHop::Router(nh)) = next_hop.get(&vertex).copied() else {
+        let Some((d, nh)) = asbr_distance(asbr, asbr_summaries, dist, next_hop) else {
             continue;
         };
         // Same `(Ipv4Addr, Ipv4Addr)` key shape `collect_stub_routes` uses,
@@ -763,5 +982,229 @@ mod tests {
         let root_lsa = router_lsa(root, vec![]);
         let ext_lsa = as_external_lsa(addr(192, 0, 2, 0), addr(255, 255, 255, 0), root);
         assert!(compute(root, &[root_lsa, ext_lsa]).is_empty());
+    }
+
+    fn network_summary_lsa(
+        prefix: Ipv4Addr,
+        mask: Ipv4Addr,
+        advertising_router: Ipv4Addr,
+        metric: u32,
+    ) -> Arc<Lsa> {
+        Arc::new(Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type: LSA_TYPE_NETWORK_SUMMARY,
+                link_state_id: prefix,
+                advertising_router,
+                sequence_number: 1,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Summary(SummaryLsaBody {
+                network_mask: mask,
+                metric,
+            }),
+        })
+    }
+
+    fn asbr_summary_lsa(target_asbr: Ipv4Addr, advertising_abr: Ipv4Addr, metric: u32) -> Arc<Lsa> {
+        Arc::new(Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type: LSA_TYPE_ASBR_SUMMARY,
+                link_state_id: target_asbr,
+                advertising_router: advertising_abr,
+                sequence_number: 1,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Summary(SummaryLsaBody {
+                network_mask: Ipv4Addr::UNSPECIFIED,
+                metric,
+            }),
+        })
+    }
+
+    #[test]
+    fn intra_area_routes_excludes_external_and_summary_derived_routes() {
+        let root = router_id(1);
+        let asbr = router_id(2);
+        let border = router_id(3);
+        let net = addr(192, 168, 6, 0);
+        let mask = addr(255, 255, 255, 0);
+
+        let root_lsa = router_lsa(
+            root,
+            vec![
+                p2p(asbr, addr(10, 0, 0, 1), 1),
+                p2p(border, addr(10, 0, 1, 1), 1),
+                stub(net, mask, 5),
+            ],
+        );
+        let asbr_lsa = router_lsa(asbr, vec![p2p(root, addr(10, 0, 0, 2), 1)]);
+        let border_lsa = router_lsa(border, vec![p2p(root, addr(10, 0, 1, 2), 1)]);
+        let ext_lsa = as_external_lsa(addr(198, 51, 100, 0), addr(255, 255, 255, 0), asbr);
+        let summary_lsa_ = network_summary_lsa(addr(203, 0, 113, 0), mask, border, 10);
+
+        let view = intra_area_routes(
+            root,
+            &[root_lsa, asbr_lsa, border_lsa, ext_lsa, summary_lsa_],
+        );
+        // Only the genuine intra-area stub, never the external/summary route.
+        assert_eq!(view.routes.len(), 1);
+        assert_eq!(view.routes[0].prefix, "192.168.6.0/24".parse().unwrap());
+        // Only the genuine in-area ASBR, never the border router (no Type-5 of its own).
+        assert_eq!(view.asbrs, vec![(asbr, 1)]);
+    }
+
+    #[test]
+    fn intra_area_routes_excludes_asbr_unreachable_in_this_area() {
+        let root = router_id(1);
+        let asbr = router_id(2);
+        let root_lsa = router_lsa(root, vec![]);
+        let ext_lsa = as_external_lsa(addr(192, 0, 2, 0), addr(255, 255, 255, 0), asbr);
+        let view = intra_area_routes(root, &[root_lsa, ext_lsa]);
+        assert!(view.routes.is_empty());
+        assert!(view.asbrs.is_empty());
+    }
+
+    #[test]
+    fn type3_summary_route_uses_abr_distance_plus_summary_metric() {
+        let root = router_id(1);
+        let abr = router_id(2);
+        let net = addr(192, 0, 2, 0);
+        let mask = addr(255, 255, 255, 0);
+        let root_lsa = router_lsa(root, vec![p2p(abr, addr(10, 0, 0, 1), 5)]);
+        let abr_lsa = router_lsa(abr, vec![p2p(root, addr(10, 0, 0, 2), 5)]);
+        let summary_lsa_ = network_summary_lsa(net, mask, abr, 10);
+
+        let routes = compute(root, &[root_lsa, abr_lsa, summary_lsa_]);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].prefix, "192.0.2.0/24".parse().unwrap());
+        assert_eq!(routes[0].next_hop, addr(10, 0, 0, 2));
+        assert_eq!(routes[0].metric, 15);
+    }
+
+    #[test]
+    fn own_type3_summary_is_never_treated_as_a_route_to_self() {
+        let root = router_id(1);
+        let root_lsa = router_lsa(root, vec![]);
+        let summary_lsa_ =
+            network_summary_lsa(addr(192, 0, 2, 0), addr(255, 255, 255, 0), root, 10);
+        assert!(compute(root, &[root_lsa, summary_lsa_]).is_empty());
+    }
+
+    #[test]
+    fn type3_summary_tie_break_against_stub_route_keeps_cheaper() {
+        let root = router_id(1);
+        let stub_router = router_id(2);
+        let abr = router_id(3);
+        let net = addr(192, 0, 2, 0);
+        let mask = addr(255, 255, 255, 0);
+
+        // Via the stub-advertising router: cost 1 + 100 = 101.
+        let root_lsa = router_lsa(
+            root,
+            vec![
+                p2p(stub_router, addr(10, 0, 0, 1), 1),
+                p2p(abr, addr(10, 0, 1, 1), 1),
+            ],
+        );
+        let stub_router_lsa = router_lsa(
+            stub_router,
+            vec![p2p(root, addr(10, 0, 0, 2), 1), stub(net, mask, 100)],
+        );
+        // Via the ABR's summary: cost 1 + 10 = 11, cheaper.
+        let abr_lsa = router_lsa(abr, vec![p2p(root, addr(10, 0, 1, 2), 1)]);
+        let summary_lsa_ = network_summary_lsa(net, mask, abr, 10);
+
+        let routes = compute(root, &[root_lsa, stub_router_lsa, abr_lsa, summary_lsa_]);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].next_hop, addr(10, 0, 1, 2));
+        assert_eq!(routes[0].metric, 11);
+    }
+
+    #[test]
+    fn type4_summary_lets_foreign_asbr_be_reached_via_abr_proxy() {
+        let root = router_id(1);
+        let border = router_id(2);
+        let asbr = router_id(3); // genuinely in another area: no Router-LSA here at all
+        let net = addr(192, 0, 2, 0);
+        let mask = addr(255, 255, 255, 0);
+
+        let root_lsa = router_lsa(root, vec![p2p(border, addr(10, 0, 0, 1), 5)]);
+        let border_lsa = router_lsa(border, vec![p2p(root, addr(10, 0, 0, 2), 5)]);
+        let asbr_summary = asbr_summary_lsa(asbr, border, 10);
+        let ext_lsa = as_external_lsa(net, mask, asbr);
+
+        let routes = compute(root, &[root_lsa, border_lsa, asbr_summary, ext_lsa]);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].next_hop, addr(10, 0, 0, 2));
+        assert_eq!(routes[0].metric, 5 + 10 + EXTERNAL_METRIC_CONSTANT);
+    }
+
+    #[test]
+    fn direct_intra_area_asbr_beats_type4_proxy() {
+        let root = router_id(1);
+        let border = router_id(2);
+        let asbr = router_id(3);
+        let net = addr(192, 0, 2, 0);
+        let mask = addr(255, 255, 255, 0);
+
+        // Direct path to the ASBR: cost 1. Via the border router's (much
+        // pricier) Type-4 proxy: cost 5 + 10 = 15. Direct must win.
+        let root_lsa = router_lsa(
+            root,
+            vec![
+                p2p(asbr, addr(10, 0, 2, 1), 1),
+                p2p(border, addr(10, 0, 0, 1), 5),
+            ],
+        );
+        let asbr_lsa = router_lsa(asbr, vec![p2p(root, addr(10, 0, 2, 2), 1)]);
+        let border_lsa = router_lsa(border, vec![p2p(root, addr(10, 0, 0, 2), 5)]);
+        let asbr_summary = asbr_summary_lsa(asbr, border, 10);
+        let ext_lsa = as_external_lsa(net, mask, asbr);
+
+        let routes = compute(
+            root,
+            &[root_lsa, asbr_lsa, border_lsa, asbr_summary, ext_lsa],
+        );
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].next_hop, addr(10, 0, 2, 2));
+        assert_eq!(routes[0].metric, 1 + EXTERNAL_METRIC_CONSTANT);
+    }
+
+    #[test]
+    fn asbr_distance_prefers_cheapest_of_multiple_type4_proxies() {
+        let root = router_id(1);
+        let abr1 = router_id(2);
+        let abr2 = router_id(3);
+        let asbr = router_id(4);
+        let net = addr(192, 0, 2, 0);
+        let mask = addr(255, 255, 255, 0);
+
+        // Via abr1: 1 + 100 = 101. Via abr2: 1 + 1 = 2, cheaper.
+        let root_lsa = router_lsa(
+            root,
+            vec![
+                p2p(abr1, addr(10, 0, 0, 1), 1),
+                p2p(abr2, addr(10, 0, 1, 1), 1),
+            ],
+        );
+        let abr1_lsa = router_lsa(abr1, vec![p2p(root, addr(10, 0, 0, 2), 1)]);
+        let abr2_lsa = router_lsa(abr2, vec![p2p(root, addr(10, 0, 1, 2), 1)]);
+        let summary1 = asbr_summary_lsa(asbr, abr1, 100);
+        let summary2 = asbr_summary_lsa(asbr, abr2, 1);
+        let ext_lsa = as_external_lsa(net, mask, asbr);
+
+        let routes = compute(
+            root,
+            &[root_lsa, abr1_lsa, abr2_lsa, summary1, summary2, ext_lsa],
+        );
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].next_hop, addr(10, 0, 1, 2));
+        assert_eq!(routes[0].metric, 2 + EXTERNAL_METRIC_CONSTANT);
     }
 }

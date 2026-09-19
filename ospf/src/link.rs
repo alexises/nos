@@ -26,7 +26,8 @@ use crate::election::{self, Candidate};
 use crate::exchange::{self, AdjacencyData};
 use crate::lsa::{
     self, AsExternalLsaBody, Lsa, LsaBody, LsaHeader, LsaKey, NetworkLsaBody, RouterLink,
-    RouterLsaBody, LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK, LINK_TYPE_TRANSIT_NETWORK,
+    RouterLsaBody, SummaryLsaBody, LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK,
+    LINK_TYPE_TRANSIT_NETWORK,
 };
 use crate::lsdb::Lsdb;
 use crate::neighbor::{self, NeighborState};
@@ -1219,6 +1220,7 @@ impl LinkManager {
                         if let Some(router_id) = *background.router_id.lock().await {
                             background.originate_router_lsas(router_id).await;
                             background.originate_as_external_lsas(router_id).await;
+                            background.originate_summary_lsas(router_id).await;
                         }
                     }
                     _ = age_tick.tick() => {
@@ -1404,6 +1406,75 @@ impl LinkManager {
         }
     }
 
+    /// RFC 2328 §12.4.3-style self-origination of this router's own ABR
+    /// Summary-LSAs (Type-3 network-summary, Type-4 ASBR-summary) — see
+    /// `ospf/CLAUDE.md`'s "ABR and Summary-LSA origination". ABR-ness is
+    /// purely derived from live state (`self.lsdbs.keys().len() >= 2`),
+    /// mirroring how this crate already derives DR-ness/ASBR-ness from live
+    /// state rather than a config flag — no explicit "am I an ABR" field.
+    /// Run from the same tick as `originate_router_lsas`/
+    /// `originate_as_external_lsas`, after both, so this tick's freshest
+    /// Router-/AS-external-LSAs are what gets summarized. No new flooding
+    /// code needed — `flood_full_neighbors` already resends each link's own
+    /// area's full `Lsdb`, exactly as it already does for Type-5.
+    async fn originate_summary_lsas(&self, local_router_id: Ipv4Addr) {
+        let areas: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
+            .lsdbs
+            .lock()
+            .await
+            .iter()
+            .map(|(id, lsdb)| (*id, Arc::clone(lsdb)))
+            .collect();
+        if areas.len() < 2 {
+            return;
+        }
+
+        let mut per_area: HashMap<Ipv4Addr, spf::IntraAreaRoutes> = HashMap::new();
+        for (area_id, lsdb) in &areas {
+            let lsas = lsdb.lock().await.all();
+            per_area.insert(*area_id, spf::intra_area_routes(local_router_id, &lsas));
+        }
+
+        for (dest_area, dest_lsdb) in &areas {
+            let mut dest_lsdb = dest_lsdb.lock().await;
+            for (src_area, view) in &per_area {
+                if src_area == dest_area {
+                    continue;
+                }
+                for route in &view.routes {
+                    // ponytail: if the identical prefix happens to be
+                    // intra-area in more than one source area (a subnet
+                    // spanning areas — not a real topology), the last
+                    // src_area processed here (HashMap iteration order) wins;
+                    // not worth cross-area coordination machinery for a case
+                    // that shouldn't occur.
+                    install_self_originated(
+                        &mut dest_lsdb,
+                        local_router_id,
+                        lsa::LSA_TYPE_NETWORK_SUMMARY,
+                        route.prefix.network(),
+                        LsaBody::Summary(SummaryLsaBody {
+                            network_mask: route.prefix.netmask(),
+                            metric: route.metric,
+                        }),
+                    );
+                }
+                for &(asbr, dist) in &view.asbrs {
+                    install_self_originated(
+                        &mut dest_lsdb,
+                        local_router_id,
+                        lsa::LSA_TYPE_ASBR_SUMMARY,
+                        asbr,
+                        LsaBody::Summary(SummaryLsaBody {
+                            network_mask: Ipv4Addr::UNSPECIFIED,
+                            metric: dist,
+                        }),
+                    );
+                }
+            }
+        }
+    }
+
     /// Applies one `OspfRequest::RedistributeRoutes` update (`Full`/`Add`/
     /// `Remove`, pushed continuously by the owning `nos-ribd` instance) to
     /// the raw redistributed-prefix set. This is `OSPFv2` (IPv4-only,
@@ -1535,10 +1606,13 @@ impl LinkManager {
 
     /// Runs `crate::spf::compute` against every area's current LSDB and
     /// merges the results into one route set, for `crate::rib_push_client`.
-    /// Areas are logically disjoint in this NOS's single-area/intra-area
-    /// scope (no Summary-LSA/inter-area routing), so a plain overwrite on
-    /// key collision is fine. Empty if `router_id` hasn't been set yet
-    /// (before this instance's first `reconcile` call).
+    /// A router attached to 2+ areas (an ABR, see `originate_summary_lsas`)
+    /// can now legitimately compute the same destination prefix from more
+    /// than one area's own LSDB (e.g. via a summarized inter-area path in
+    /// one area and a direct path in another) — keeps whichever is cheaper,
+    /// the same min-metric tie-break `spf::insert_best` already applies
+    /// within one area. Empty if `router_id` hasn't been set yet (before
+    /// this instance's first `reconcile` call).
     pub async fn compute_routes(&self) -> Vec<spf::RouteEntry> {
         let Some(router_id) = *self.router_id.lock().await else {
             return Vec::new();
@@ -1548,7 +1622,14 @@ impl LinkManager {
         for lsdb in areas {
             let lsas = lsdb.lock().await.all();
             for entry in spf::compute(router_id, &lsas) {
-                merged.insert(entry.prefix, entry);
+                merged
+                    .entry(entry.prefix)
+                    .and_modify(|existing| {
+                        if entry.metric < existing.metric {
+                            *existing = entry.clone();
+                        }
+                    })
+                    .or_insert(entry);
             }
         }
         merged.into_values().collect()
@@ -2215,6 +2296,287 @@ mod tests {
         assert_eq!(body.links[0].link_type, LINK_TYPE_STUB_NETWORK);
         assert_eq!(body.links[0].link_id, Ipv4Addr::new(192, 168, 9, 0));
         assert_eq!(body.links[0].metric, 5);
+    }
+
+    #[tokio::test]
+    async fn originate_summary_lsas_installs_type3_into_every_other_area() {
+        let manager = LinkManager::new(1);
+        let area0 = Ipv4Addr::UNSPECIFIED;
+        let area1 = Ipv4Addr::new(0, 0, 0, 1);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let net0: Ipv4Net = "192.168.10.0/24".parse().unwrap();
+        let net1: Ipv4Net = "192.168.11.0/24".parse().unwrap();
+        manager
+            .reconcile(
+                Vec::new(),
+                HashMap::from([(area0, vec![(net0, 5)]), (area1, vec![(net1, 7)])]),
+                router_id,
+            )
+            .await;
+        manager.originate_router_lsas(router_id).await;
+        manager.originate_summary_lsas(router_id).await;
+
+        let lsdb0 = manager.lsdb_for(area0).await;
+        let key0 = LsaKey {
+            lsa_type: lsa::LSA_TYPE_NETWORK_SUMMARY,
+            link_state_id: net1.network(),
+            advertising_router: router_id,
+        };
+        let installed0 = lsdb0.lock().await.get(&key0).unwrap();
+        let LsaBody::Summary(body0) = &installed0.body else {
+            panic!("expected summary lsa")
+        };
+        assert_eq!(body0.metric, 7);
+
+        let lsdb1 = manager.lsdb_for(area1).await;
+        let key1 = LsaKey {
+            lsa_type: lsa::LSA_TYPE_NETWORK_SUMMARY,
+            link_state_id: net0.network(),
+            advertising_router: router_id,
+        };
+        let installed1 = lsdb1.lock().await.get(&key1).unwrap();
+        let LsaBody::Summary(body1) = &installed1.body else {
+            panic!("expected summary lsa")
+        };
+        assert_eq!(body1.metric, 5);
+    }
+
+    #[tokio::test]
+    async fn originate_summary_lsas_is_a_noop_with_only_one_area() {
+        let manager = LinkManager::new(1);
+        let area = Ipv4Addr::UNSPECIFIED;
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let net: Ipv4Net = "192.168.12.0/24".parse().unwrap();
+        manager
+            .reconcile(
+                Vec::new(),
+                HashMap::from([(area, vec![(net, 5)])]),
+                router_id,
+            )
+            .await;
+        manager.originate_router_lsas(router_id).await;
+        manager.originate_summary_lsas(router_id).await;
+
+        let lsdb = manager.lsdb_for(area).await;
+        let has_summary = lsdb
+            .lock()
+            .await
+            .all()
+            .iter()
+            .any(|l| l.header.lsa_type == lsa::LSA_TYPE_NETWORK_SUMMARY);
+        assert!(!has_summary);
+    }
+
+    #[tokio::test]
+    async fn originate_summary_lsas_installs_type4_for_reachable_asbr() {
+        let manager = LinkManager::new(1);
+        let area0 = Ipv4Addr::UNSPECIFIED;
+        let area1 = Ipv4Addr::new(0, 0, 0, 1);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let asbr = Ipv4Addr::new(2, 2, 2, 2);
+
+        let lsdb0 = manager.lsdb_for(area0).await;
+        lsdb0.lock().await.install(Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type: lsa::LSA_TYPE_ROUTER,
+                link_state_id: router_id,
+                advertising_router: router_id,
+                sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Router(RouterLsaBody {
+                flags: 0,
+                links: vec![RouterLink {
+                    link_id: asbr,
+                    link_data: Ipv4Addr::new(10, 0, 0, 1),
+                    link_type: LINK_TYPE_POINT_TO_POINT,
+                    metric: 5,
+                }],
+            }),
+        });
+        lsdb0.lock().await.install(Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type: lsa::LSA_TYPE_ROUTER,
+                link_state_id: asbr,
+                advertising_router: asbr,
+                sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Router(RouterLsaBody {
+                flags: 0,
+                links: vec![RouterLink {
+                    link_id: router_id,
+                    link_data: Ipv4Addr::new(10, 0, 0, 2),
+                    link_type: LINK_TYPE_POINT_TO_POINT,
+                    metric: 5,
+                }],
+            }),
+        });
+        lsdb0.lock().await.install(Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type: lsa::LSA_TYPE_AS_EXTERNAL,
+                link_state_id: Ipv4Addr::new(198, 51, 100, 0),
+                advertising_router: asbr,
+                sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::AsExternal(AsExternalLsaBody {
+                network_mask: Ipv4Addr::new(255, 255, 255, 0),
+                metric: 0,
+                forwarding_address: Ipv4Addr::UNSPECIFIED,
+                external_route_tag: 0,
+            }),
+        });
+        // Make area1 exist (empty) so this router is a real 2-area ABR.
+        manager.lsdb_for(area1).await;
+
+        manager.originate_summary_lsas(router_id).await;
+
+        let lsdb1 = manager.lsdb_for(area1).await;
+        let key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_ASBR_SUMMARY,
+            link_state_id: asbr,
+            advertising_router: router_id,
+        };
+        let installed = lsdb1.lock().await.get(&key).unwrap();
+        let LsaBody::Summary(body) = &installed.body else {
+            panic!("expected summary lsa")
+        };
+        assert_eq!(body.metric, 5);
+    }
+
+    #[tokio::test]
+    async fn compute_routes_keeps_cheaper_of_two_areas_computed_route_to_same_prefix() {
+        fn router_lsa(id: Ipv4Addr, link: RouterLink) -> Lsa {
+            Lsa {
+                header: LsaHeader {
+                    age: 0,
+                    options: 0,
+                    lsa_type: lsa::LSA_TYPE_ROUTER,
+                    link_state_id: id,
+                    advertising_router: id,
+                    sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+                    checksum: 0,
+                    length: 0,
+                },
+                body: LsaBody::Router(RouterLsaBody {
+                    flags: 0,
+                    links: vec![link],
+                }),
+            }
+        }
+
+        let manager = LinkManager::new(1);
+        let area0 = Ipv4Addr::UNSPECIFIED;
+        let area1 = Ipv4Addr::new(0, 0, 0, 1);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let w = Ipv4Addr::new(2, 2, 2, 2);
+        let v = Ipv4Addr::new(3, 3, 3, 3);
+        let prefix_net = Ipv4Addr::new(192, 168, 20, 0);
+        let mask = Ipv4Addr::new(255, 255, 255, 0);
+
+        // Area 0: root -> w (cost 3), w advertises the stub at cost 10. Total 13.
+        let lsdb0 = manager.lsdb_for(area0).await;
+        lsdb0.lock().await.install(router_lsa(
+            router_id,
+            RouterLink {
+                link_id: w,
+                link_data: Ipv4Addr::new(10, 0, 0, 1),
+                link_type: LINK_TYPE_POINT_TO_POINT,
+                metric: 3,
+            },
+        ));
+        lsdb0.lock().await.install(Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type: lsa::LSA_TYPE_ROUTER,
+                link_state_id: w,
+                advertising_router: w,
+                sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Router(RouterLsaBody {
+                flags: 0,
+                links: vec![
+                    RouterLink {
+                        link_id: router_id,
+                        link_data: Ipv4Addr::new(10, 0, 0, 2),
+                        link_type: LINK_TYPE_POINT_TO_POINT,
+                        metric: 3,
+                    },
+                    RouterLink {
+                        link_id: prefix_net,
+                        link_data: mask,
+                        link_type: LINK_TYPE_STUB_NETWORK,
+                        metric: 10,
+                    },
+                ],
+            }),
+        });
+
+        // Area 1: root -> v (cost 1), v advertises the same stub at cost 2. Total 3.
+        let lsdb1 = manager.lsdb_for(area1).await;
+        lsdb1.lock().await.install(router_lsa(
+            router_id,
+            RouterLink {
+                link_id: v,
+                link_data: Ipv4Addr::new(10, 0, 1, 1),
+                link_type: LINK_TYPE_POINT_TO_POINT,
+                metric: 1,
+            },
+        ));
+        lsdb1.lock().await.install(Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type: lsa::LSA_TYPE_ROUTER,
+                link_state_id: v,
+                advertising_router: v,
+                sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Router(RouterLsaBody {
+                flags: 0,
+                links: vec![
+                    RouterLink {
+                        link_id: router_id,
+                        link_data: Ipv4Addr::new(10, 0, 1, 2),
+                        link_type: LINK_TYPE_POINT_TO_POINT,
+                        metric: 1,
+                    },
+                    RouterLink {
+                        link_id: prefix_net,
+                        link_data: mask,
+                        link_type: LINK_TYPE_STUB_NETWORK,
+                        metric: 2,
+                    },
+                ],
+            }),
+        });
+
+        // `router_id` must be set for `compute_routes` to run at all.
+        manager
+            .reconcile(Vec::new(), HashMap::new(), router_id)
+            .await;
+
+        let routes = manager.compute_routes().await;
+        let route = routes
+            .iter()
+            .find(|r| r.prefix == Ipv4Net::new(prefix_net, 24).unwrap())
+            .unwrap();
+        assert_eq!(route.metric, 3);
     }
 
     #[tokio::test]

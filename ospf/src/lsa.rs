@@ -10,11 +10,12 @@
 //! link for a point-to-point interface's own subnet, real transit-network
 //! masks included.
 //!
-//! AS-external-LSA (type 5, Appendix A.4.5) is now implemented too, for
-//! ASBR-only redistribution (see `ospf/CLAUDE.md`'s "ASBR and AS-external-LSA
-//! origination") — Summary-LSAs (types 3/4) and multi-area ABR behavior
-//! remain out of scope, matching `ospf/CLAUDE.md`'s single-backbone-area
-//! ceiling.
+//! AS-external-LSA (type 5, Appendix A.4.5) is implemented for ASBR-only
+//! redistribution (see `ospf/CLAUDE.md`'s "ASBR and AS-external-LSA
+//! origination"), and Summary-LSA (types 3/4, Appendix A.4.4) is implemented
+//! for a real, 2-area-scoped ABR mechanism (see `ospf/CLAUDE.md`'s "ABR and
+//! Summary-LSA origination") — stub/NSSA areas, virtual links, and area-range
+//! aggregation remain out of scope.
 
 use std::cmp::Ordering;
 use std::net::Ipv4Addr;
@@ -23,6 +24,8 @@ use crate::packet::{read_ipv4, PacketError};
 
 pub const LSA_TYPE_ROUTER: u8 = 1;
 pub const LSA_TYPE_NETWORK: u8 = 2;
+pub const LSA_TYPE_NETWORK_SUMMARY: u8 = 3;
+pub const LSA_TYPE_ASBR_SUMMARY: u8 = 4;
 pub const LSA_TYPE_AS_EXTERNAL: u8 = 5;
 
 /// RFC 2328 §12.4.1's Router-LSA link types.
@@ -139,10 +142,27 @@ pub struct AsExternalLsaBody {
 /// `AsExternalLsaBody`'s doc comment.
 const EXTERNAL_METRIC_MASK: u32 = 0x00FF_FFFF;
 
+/// RFC 2328 Appendix A.4.4's Summary-LSA body — one wire shape backs both
+/// `LSA_TYPE_NETWORK_SUMMARY` (type 3) and `LSA_TYPE_ASBR_SUMMARY` (type 4);
+/// only `LsaHeader.lsa_type` plus `link_state_id`'s conventional meaning (a
+/// network's address for type 3, the ASBR's own router-id for type 4, with
+/// `network_mask` conventionally `0.0.0.0` for type 4) distinguish them —
+/// mirrors RFC 2328 itself, which defines an identical wire format for both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SummaryLsaBody {
+    pub network_mask: Ipv4Addr,
+    /// Low 24 bits only, reusing `EXTERNAL_METRIC_MASK` — RFC 2328 A.4.4's
+    /// metric field is also a 24-bit value following a 1-byte TOS field; no
+    /// TOS-metric list support, the same "# TOS metrics: none supported"
+    /// simplification `RouterLsaBody`'s own links already use.
+    pub metric: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LsaBody {
     Router(RouterLsaBody),
     Network(NetworkLsaBody),
+    Summary(SummaryLsaBody),
     AsExternal(AsExternalLsaBody),
 }
 
@@ -233,6 +253,12 @@ fn encode_body(body: &LsaBody) -> Vec<u8> {
             buf.extend_from_slice(&e.external_route_tag.to_be_bytes());
             buf
         }
+        LsaBody::Summary(s) => {
+            let mut buf = Vec::with_capacity(8);
+            buf.extend_from_slice(&s.network_mask.octets());
+            buf.extend_from_slice(&(s.metric & EXTERNAL_METRIC_MASK).to_be_bytes());
+            buf
+        }
     }
 }
 
@@ -291,6 +317,18 @@ fn decode_body(lsa_type: u8, data: &[u8]) -> Result<LsaBody, PacketError> {
                 metric,
                 forwarding_address,
                 external_route_tag,
+            }))
+        }
+        LSA_TYPE_NETWORK_SUMMARY | LSA_TYPE_ASBR_SUMMARY => {
+            if data.len() < 8 {
+                return Err(PacketError::TruncatedBody);
+            }
+            let network_mask = read_ipv4(data, 0);
+            let metric =
+                u32::from_be_bytes([data[4], data[5], data[6], data[7]]) & EXTERNAL_METRIC_MASK;
+            Ok(LsaBody::Summary(SummaryLsaBody {
+                network_mask,
+                metric,
             }))
         }
         other => Err(PacketError::UnknownLsaType(other)),
@@ -479,9 +517,9 @@ mod tests {
     #[test]
     fn unknown_lsa_type_is_rejected() {
         let mut lsa = router_lsa();
-        lsa.header.lsa_type = 4;
+        lsa.header.lsa_type = 6;
         let encoded = encode_lsa(&lsa);
-        assert_eq!(decode_lsa(&encoded), Err(PacketError::UnknownLsaType(4)));
+        assert_eq!(decode_lsa(&encoded), Err(PacketError::UnknownLsaType(6)));
     }
 
     fn as_external_lsa() -> Lsa {
@@ -542,6 +580,81 @@ mod tests {
             panic!("expected as-external lsa")
         };
         assert_eq!(e.metric, 20);
+    }
+
+    fn summary_lsa(lsa_type: u8, link_state_id: Ipv4Addr, network_mask: Ipv4Addr) -> Lsa {
+        Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type,
+                link_state_id,
+                advertising_router: Ipv4Addr::new(9, 9, 9, 9),
+                sequence_number: 0x8000_0001u32.cast_signed(),
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Summary(SummaryLsaBody {
+                network_mask,
+                metric: 20,
+            }),
+        }
+    }
+
+    #[test]
+    fn summary_lsa_type3_round_trips() {
+        let lsa = summary_lsa(
+            LSA_TYPE_NETWORK_SUMMARY,
+            Ipv4Addr::new(192, 0, 2, 0),
+            Ipv4Addr::new(255, 255, 255, 0),
+        );
+        let decoded = decode_lsa(&encode_lsa(&lsa)).unwrap();
+        assert_eq!(decoded.body, lsa.body);
+    }
+
+    #[test]
+    fn summary_lsa_type4_round_trips() {
+        // Type 4's link_state_id is conventionally the ASBR's own router-id
+        // and network_mask is conventionally unspecified — same body shape,
+        // proving one decode_body arm correctly serves both type bytes.
+        let lsa = summary_lsa(
+            LSA_TYPE_ASBR_SUMMARY,
+            Ipv4Addr::new(7, 7, 7, 7),
+            Ipv4Addr::UNSPECIFIED,
+        );
+        let decoded = decode_lsa(&encode_lsa(&lsa)).unwrap();
+        assert_eq!(decoded.body, lsa.body);
+        assert_eq!(decoded.header.lsa_type, LSA_TYPE_ASBR_SUMMARY);
+    }
+
+    /// Mirrors `as_external_lsa_metric_e_type_bit_masked_on_decode`: hand-crafts
+    /// raw wire bytes with a non-zero TOS byte in the metric word (bypassing
+    /// `encode_body`'s own masking) to prove `decode_body` masks it off
+    /// independently.
+    #[test]
+    fn summary_lsa_metric_tos_byte_masked_on_decode() {
+        let header = LsaHeader {
+            age: 0,
+            options: 0,
+            lsa_type: LSA_TYPE_NETWORK_SUMMARY,
+            link_state_id: Ipv4Addr::new(192, 0, 2, 0),
+            advertising_router: Ipv4Addr::new(9, 9, 9, 9),
+            sequence_number: 0x8000_0001u32.cast_signed(),
+            checksum: 0,
+            length: u16::try_from(LSA_HEADER_LEN + 8).unwrap(),
+        };
+        let mut buf = Vec::new();
+        encode_lsa_header(&mut buf, &header);
+        buf.extend_from_slice(&Ipv4Addr::new(255, 255, 255, 0).octets());
+        buf.extend_from_slice(&(0x0000_0014u32 | 0xFF00_0000u32).to_be_bytes()); // metric=20, TOS byte set
+        let checksum = lsa_checksum(&buf[2..]);
+        buf[16..18].copy_from_slice(&checksum.to_be_bytes());
+
+        let decoded = decode_lsa(&buf).unwrap();
+        let LsaBody::Summary(s) = decoded.body else {
+            panic!("expected summary lsa")
+        };
+        assert_eq!(s.metric, 20);
     }
 
     #[test]
