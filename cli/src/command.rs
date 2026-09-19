@@ -68,6 +68,7 @@ pub enum OspfProfileField {
     DeadInterval(u16),
     Cost(u16),
     Priority(u8),
+    Mtu(u16),
     NetworkType(NetworkType),
     SimplePassword(String),
     /// A new (or replacement) crypto key — `current` is set via the
@@ -154,6 +155,11 @@ pub enum SetTarget {
     },
     /// Context-relative — only valid while navigated into a BGP instance.
     Relative { field: BgpInstanceField },
+    /// `set mtu <n>` — ambiguous by token alone, shared between a physical
+    /// interface's own mtu and an `OspfProfile`'s mtu override, resolved by
+    /// `path` at resolve time (mirrors `Relative`'s BgpInstance/OspfInstance
+    /// sharing of `set router-id <ip>`).
+    MtuRelative(u16),
     /// A top-level scalar with no navigation context — works from anywhere
     /// in configuration mode, regardless of the current path.
     Hostname(String),
@@ -241,6 +247,11 @@ pub enum SetTarget {
     InterfaceRoutingTable { name: String, routing_table: String },
     /// Context-relative — only valid while navigated into an interface.
     InterfaceRoutingTableRelative { routing_table: String },
+    /// Fully-qualified — works from anywhere in configuration mode. Always
+    /// physical-interface-level, like `InterfaceSwitchingProfile` — `mtu` is
+    /// a link-layer property, not part of the per-subinterface addressing
+    /// split.
+    InterfaceMtu { name: String, mtu: u32 },
     /// Fully-qualified — works from anywhere in configuration mode.
     InterfaceSwitchingProfile {
         name: String,
@@ -429,6 +440,10 @@ pub enum DeleteTarget {
     /// `delete network-type` — only valid while navigated into an
     /// `OspfProfile`.
     NetworkType,
+    /// `delete mtu` — ambiguous by token alone, shared between a physical
+    /// interface's own mtu and an `OspfProfile`'s mtu override, resolved by
+    /// `path` at resolve time (mirrors `SetTarget::MtuRelative`).
+    MtuRelative,
     /// `delete routing-table <name> redistribute` — qualified clear.
     RoutingTableRedistribute {
         name: String,
@@ -467,6 +482,10 @@ pub enum DeleteTarget {
     /// `delete routing-table` — relative clear, only valid while navigated
     /// into an interface.
     InterfaceRoutingTableRelative,
+    /// `delete interface <name> mtu` — qualified clear.
+    InterfaceMtu {
+        name: String,
+    },
     /// `delete interface <name> switching-profile` — qualified clear.
     InterfaceSwitchingProfile {
         name: String,
@@ -1179,6 +1198,11 @@ fn parse_set(t: &[&str]) -> Option<Command> {
         ["routing-table", table] => Command::Set(SetTarget::InterfaceRoutingTableRelative {
             routing_table: (*table).to_string(),
         }),
+        ["interface", name, "mtu", mtu] => Command::Set(SetTarget::InterfaceMtu {
+            name: (*name).to_string(),
+            mtu: mtu.parse::<u32>().ok()?,
+        }),
+        ["mtu", mtu] => Command::Set(SetTarget::MtuRelative(mtu.parse::<u16>().ok()?)),
         ["interface", name, "switching-profile", profile] => {
             Command::Set(SetTarget::InterfaceSwitchingProfile {
                 name: (*name).to_string(),
@@ -1227,6 +1251,14 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 area_id: area_id.parse().ok()?,
                 name: (*name).to_string(),
                 field: OspfProfileField::Priority(n.parse::<u8>().ok()?),
+            })
+        }
+        ["ospf", "instance", instance, "area", area_id, "profile", name, "mtu", n] => {
+            Command::Set(SetTarget::OspfProfile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::Mtu(n.parse::<u16>().ok()?),
             })
         }
         ["ospf", "instance", instance, "area", area_id, "profile", name, "network-type", "point-to-point"] => {
@@ -1526,6 +1558,10 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
             })
         }
         ["routing-table"] => Command::Delete(DeleteTarget::InterfaceRoutingTableRelative),
+        ["interface", name, "mtu"] => Command::Delete(DeleteTarget::InterfaceMtu {
+            name: (*name).to_string(),
+        }),
+        ["mtu"] => Command::Delete(DeleteTarget::MtuRelative),
         ["interface", name, "switching-profile"] => {
             Command::Delete(DeleteTarget::InterfaceSwitchingProfile {
                 name: (*name).to_string(),
@@ -3043,6 +3079,40 @@ mod tests {
     }
 
     #[test]
+    fn set_interface_mtu_qualified() {
+        assert_eq!(
+            Command::parse("set interface eth0 mtu 9000"),
+            Command::Set(SetTarget::InterfaceMtu {
+                name: "eth0".to_string(),
+                mtu: 9000,
+            })
+        );
+    }
+
+    #[test]
+    fn set_mtu_relative_is_ambiguous_by_token_alone() {
+        // Resolved against `Path::Interface` or `Path::OspfProfile` at
+        // resolve time — see `SetTarget::MtuRelative`'s doc comment.
+        assert_eq!(
+            Command::parse("set mtu 9000"),
+            Command::Set(SetTarget::MtuRelative(9000))
+        );
+    }
+
+    #[test]
+    fn set_ospf_profile_mtu_qualified() {
+        assert_eq!(
+            Command::parse("set ospf instance o1 area 0.0.0.0 profile p1 mtu 1400"),
+            Command::Set(SetTarget::OspfProfile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+                field: OspfProfileField::Mtu(1400),
+            })
+        );
+    }
+
+    #[test]
     fn set_interface_switching_profile_qualified_and_relative() {
         assert_eq!(
             Command::parse("set interface eth0 switching-profile sp1"),
@@ -3198,6 +3268,24 @@ mod tests {
         assert_eq!(
             Command::parse("delete routing-table"),
             Command::Delete(DeleteTarget::InterfaceRoutingTableRelative)
+        );
+    }
+
+    #[test]
+    fn delete_interface_mtu_qualified() {
+        assert_eq!(
+            Command::parse("delete interface eth0 mtu"),
+            Command::Delete(DeleteTarget::InterfaceMtu {
+                name: "eth0".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn delete_mtu_relative_is_ambiguous_by_token_alone() {
+        assert_eq!(
+            Command::parse("delete mtu"),
+            Command::Delete(DeleteTarget::MtuRelative)
         );
     }
 

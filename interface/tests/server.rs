@@ -26,6 +26,7 @@ async fn sample_interfaces() -> Interfaces {
                 routing_table: None,
                 ospf_profile: None,
                 switching_profile: None,
+                mtu: None,
                 subinterfaces: vec![nos_proto::Subinterface {
                     tag: 0,
                     addresses: vec![sample_address()],
@@ -39,6 +40,7 @@ async fn sample_interfaces() -> Interfaces {
                 routing_table: None,
                 ospf_profile: None,
                 switching_profile: None,
+                mtu: None,
                 subinterfaces: vec![],
             },
         ],

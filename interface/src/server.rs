@@ -81,12 +81,18 @@ async fn dispatch(interfaces: &Arc<RwLock<Interfaces>>, req: InterfaceRequest) -
     }
 }
 
+/// Linux's own default MTU for a freshly created link — reported here when
+/// `Interface.mtu` is unset, since `nos-interfaced` never resets a link's
+/// MTU to a default (see `InterfaceState.mtu`'s doc comment).
+const DEFAULT_MTU: u32 = 1500;
+
 fn to_status(iface: InterfaceState) -> InterfaceStatus {
     InterfaceStatus {
         name: iface.name,
         addresses: iface.addresses,
         routing_table: iface.routing_table,
         switching_profile: iface.switching_profile,
+        mtu: iface.mtu.unwrap_or(DEFAULT_MTU),
         subinterfaces: iface
             .subinterfaces
             .into_iter()

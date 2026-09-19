@@ -94,6 +94,14 @@ pub struct LinkConfig {
     pub kernel_interface: String,
     pub network_type: NetworkType,
     pub priority: u8,
+    /// This link's effective MTU (`OspfProfile.mtu` if set, else the real
+    /// resolved interface MTU, else 1500 — see `reconcile::
+    /// resolve_effective_mtu`) — advertised in the wire's
+    /// `DbdPacket.interface_mtu` field and used to size real RFC 2328 §10.8
+    /// DBD pagination (`exchange::pop_chunk`'s `max_headers` budget) when
+    /// `LinkManager.dbd_max_headers` has no explicit test override. See
+    /// `ospf/CLAUDE.md`'s "Exchange" section.
+    pub mtu: u16,
     /// RFC 2328 Appendix D auth, resolved once per reconcile from
     /// `OspfProfile.auth` (see `reconcile.rs`). Fits this struct's existing
     /// "any field change restarts the link" rule with no special-casing —
@@ -252,7 +260,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
     let dbd = DbdPacket {
         router_id: local_router_id,
         area_id: cfg.area_id,
-        interface_mtu: 0, // never enforced by this NOS, on send or receive
+        interface_mtu: cfg.mtu,
         options: 0,
         init: true,
         more: true,
@@ -282,7 +290,7 @@ pub async fn run(
     local_router_id: Ipv4Addr,
     lsdb: Arc<Mutex<Lsdb>>,
     status: StatusHandle,
-    dbd_max_headers: usize,
+    dbd_max_headers: Option<usize>,
 ) {
     let socket = match OspfSocket::open(&cfg.kernel_interface, cfg.local_addr) {
         Ok(s) => s,
@@ -291,6 +299,11 @@ pub async fn run(
             return;
         }
     };
+    // `Some(n)` (from `--dbd-max-headers`, test/debug only) keeps that exact
+    // override; `None` (the real default) derives the pagination budget
+    // from this link's own effective MTU — see `exchange`'s module doc.
+    let dbd_max_headers =
+        dbd_max_headers.unwrap_or_else(|| exchange::mtu_based_max_headers(cfg.mtu));
 
     let mut hello_ticker =
         tokio::time::interval(Duration::from_secs(u64::from(cfg.hello_interval)));
@@ -672,6 +685,7 @@ async fn handle_dbd(
         dbd,
         &local_lsdb_headers,
         dbd_max_headers,
+        cfg.mtu,
     );
 
     Some(finish_neighbor_event(
@@ -1202,13 +1216,15 @@ pub struct LinkManager {
     /// resolve in seconds rather than tens of minutes. See `main.rs`'s
     /// `--lsa-age-multiplier`.
     age_multiplier: u16,
-    /// RFC 2328 §10.8's per-DBD-packet LSA-header budget, passed down into
-    /// every link's `run()`. A real production default
-    /// (`exchange::DEFAULT_DBD_MAX_HEADERS`), unlike `age_multiplier` —
-    /// `tools/verify-e2e.sh`'s `ospf-dbd-pagination` phase overrides it to a
-    /// tiny value to force multi-packet pagination deterministically over a
-    /// small lab LSDB. See `main.rs`'s `--dbd-max-headers`.
-    dbd_max_headers: usize,
+    /// RFC 2328 §10.8's per-DBD-packet LSA-header budget override, passed
+    /// down into every link's `run()`. `None` (the real production default)
+    /// derives the budget per-link from that link's own effective MTU
+    /// (`exchange::mtu_based_max_headers`); `Some(n)` — set only by
+    /// `tools/verify-e2e.sh`'s `ospf-dbd-pagination` phase, test/debug only —
+    /// forces every link to the same fixed value regardless of MTU, to
+    /// force multi-packet pagination deterministically over a small lab
+    /// LSDB. See `main.rs`'s `--dbd-max-headers`.
+    dbd_max_headers: Option<usize>,
     /// Raw (pre-policy) redistributed prefixes from `OspfRequest::
     /// RedistributeRoutes`. A `HashSet`, not a map — the `RedistributedRoute`
     /// gateway is never used: this router always originates with
@@ -1224,7 +1240,7 @@ pub struct LinkManager {
 }
 
 impl LinkManager {
-    pub fn new(age_multiplier: u16, dbd_max_headers: usize) -> Arc<Self> {
+    pub fn new(age_multiplier: u16, dbd_max_headers: Option<usize>) -> Arc<Self> {
         let manager = Arc::new(Self {
             links: Mutex::new(HashMap::new()),
             lsdbs: Mutex::new(HashMap::new()),
@@ -1957,6 +1973,7 @@ mod tests {
             kernel_interface: "eth0".to_string(),
             network_type: NetworkType::PointToPoint,
             priority: 1,
+            mtu: 1500,
             auth: LinkAuthConfig::None,
         }
     }
@@ -2305,7 +2322,7 @@ mod tests {
         // Regression test for the area-union fix: an area with only a
         // loopback stub network and no live `LinkConfig` must still get a
         // Router-LSA originated for it.
-        let manager = LinkManager::new(1, exchange::DEFAULT_DBD_MAX_HEADERS);
+        let manager = LinkManager::new(1, Some(exchange::DEFAULT_DBD_MAX_HEADERS));
         let area = Ipv4Addr::UNSPECIFIED;
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let subnet: Ipv4Net = "192.168.9.0/24".parse().unwrap();
@@ -2336,7 +2353,7 @@ mod tests {
 
     #[tokio::test]
     async fn originate_summary_lsas_installs_type3_into_every_other_area() {
-        let manager = LinkManager::new(1, exchange::DEFAULT_DBD_MAX_HEADERS);
+        let manager = LinkManager::new(1, Some(exchange::DEFAULT_DBD_MAX_HEADERS));
         let area0 = Ipv4Addr::UNSPECIFIED;
         let area1 = Ipv4Addr::new(0, 0, 0, 1);
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
@@ -2379,7 +2396,7 @@ mod tests {
 
     #[tokio::test]
     async fn originate_summary_lsas_is_a_noop_with_only_one_area() {
-        let manager = LinkManager::new(1, exchange::DEFAULT_DBD_MAX_HEADERS);
+        let manager = LinkManager::new(1, Some(exchange::DEFAULT_DBD_MAX_HEADERS));
         let area = Ipv4Addr::UNSPECIFIED;
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let net: Ipv4Net = "192.168.12.0/24".parse().unwrap();
@@ -2405,7 +2422,7 @@ mod tests {
 
     #[tokio::test]
     async fn originate_summary_lsas_installs_type4_for_reachable_asbr() {
-        let manager = LinkManager::new(1, exchange::DEFAULT_DBD_MAX_HEADERS);
+        let manager = LinkManager::new(1, Some(exchange::DEFAULT_DBD_MAX_HEADERS));
         let area0 = Ipv4Addr::UNSPECIFIED;
         let area1 = Ipv4Addr::new(0, 0, 0, 1);
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
@@ -2511,7 +2528,7 @@ mod tests {
             }
         }
 
-        let manager = LinkManager::new(1, exchange::DEFAULT_DBD_MAX_HEADERS);
+        let manager = LinkManager::new(1, Some(exchange::DEFAULT_DBD_MAX_HEADERS));
         let area0 = Ipv4Addr::UNSPECIFIED;
         let area1 = Ipv4Addr::new(0, 0, 0, 1);
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
@@ -2617,7 +2634,7 @@ mod tests {
 
     #[tokio::test]
     async fn database_summaries_flattens_every_area() {
-        let manager = LinkManager::new(1, exchange::DEFAULT_DBD_MAX_HEADERS);
+        let manager = LinkManager::new(1, Some(exchange::DEFAULT_DBD_MAX_HEADERS));
         let area = Ipv4Addr::UNSPECIFIED;
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let lsdb = manager.lsdb_for(area).await;

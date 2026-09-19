@@ -51,6 +51,11 @@ pub struct InterfaceState {
     /// unset (or names a profile that doesn't exist, which commit-time
     /// validation already prevents).
     pub switching_profile_members: Vec<(String, VlanTag)>,
+    /// The configured MTU, or `None` to leave whatever the kernel link
+    /// already has untouched — a link-layer property of the physical (or
+    /// loopback) interface itself, applying to every one of `subinterfaces`
+    /// uniformly (a VLAN sub-link has no MTU of its own).
+    pub mtu: Option<u32>,
     /// This (non-loopback) interface's per-tag L3 subinterfaces — see
     /// `SubinterfaceState`. Empty for a loopback interface.
     pub subinterfaces: Vec<SubinterfaceState>,
@@ -172,6 +177,7 @@ pub async fn build_from_config(
             routing_table: iface.routing_table.clone(),
             switching_profile: iface.switching_profile.clone(),
             switching_profile_members,
+            mtu: iface.mtu,
             subinterfaces,
         };
         trace!(
@@ -232,6 +238,7 @@ mod tests {
             routing_table: None,
             ospf_profile: None,
             switching_profile: None,
+            mtu: None,
             subinterfaces: Vec::new(),
         }
     }

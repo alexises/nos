@@ -70,6 +70,13 @@ fn priority_str(p: &OspfProfile) -> String {
         .map_or_else(|| "default (1)".to_string(), |pr| pr.to_string())
 }
 
+fn mtu_str(p: &OspfProfile) -> String {
+    p.mtu.map_or_else(
+        || "unset (uses real interface mtu)".to_string(),
+        |m| m.to_string(),
+    )
+}
+
 fn network_type_str(p: &OspfProfile) -> String {
     match p.network_type {
         None => "unset (derived from attach point)".to_string(),
@@ -136,6 +143,13 @@ fn changed_fields(base: &OspfProfile, candidate: &OspfProfile) -> Vec<FieldDiff>
             new: Some(priority_str(candidate)),
         });
     }
+    if base.mtu != candidate.mtu {
+        fields.push(FieldDiff {
+            label: "mtu".to_string(),
+            old: Some(mtu_str(base)),
+            new: Some(mtu_str(candidate)),
+        });
+    }
     if base.network_type != candidate.network_type {
         fields.push(FieldDiff {
             label: "network-type".to_string(),
@@ -164,6 +178,7 @@ mod tests {
             dead_interval: None,
             cost: None,
             priority: None,
+            mtu: None,
             network_type: None,
             auth: None,
         }

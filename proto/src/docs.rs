@@ -150,6 +150,10 @@ pub enum Topic {
     SetInterfaceSwitchingProfile,
     /// `ConfigOp::Interface(InterfaceOp::ClearSwitchingProfile)`
     ClearInterfaceSwitchingProfile,
+    /// `ConfigOp::Interface(InterfaceOp::SetMtu)`
+    SetInterfaceMtu,
+    /// `ConfigOp::Interface(InterfaceOp::ClearMtu)`
+    ClearInterfaceMtu,
     /// `ConfigOp::OspfInstance(OspfInstanceOp::Ensure)`
     EnsureOspfInstance,
     /// `ConfigOp::OspfInstance(OspfInstanceOp::SetRouterId)`
@@ -192,6 +196,10 @@ pub enum Topic {
     SetOspfProfilePriority,
     /// `ConfigOp::OspfProfile(OspfProfileOp::ClearPriority)`
     ClearOspfProfilePriority,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::SetMtu)`
+    SetOspfProfileMtu,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::ClearMtu)`
+    ClearOspfProfileMtu,
     /// `ConfigOp::OspfProfile(OspfProfileOp::SetNetworkType)`
     SetOspfProfileNetworkType,
     /// `ConfigOp::OspfProfile(OspfProfileOp::ClearNetworkType)`

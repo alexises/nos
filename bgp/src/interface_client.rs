@@ -79,6 +79,7 @@ mod tests {
                 }],
                 routing_table: None,
                 switching_profile: None,
+                mtu: 1500,
                 subinterfaces: vec![],
             }))
         });

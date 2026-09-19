@@ -491,11 +491,12 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         self.reconcile_tagged_subinterfaces(&desired.name, index, &tagged)
             .await?;
 
-        self.handle
-            .link()
-            .set(LinkUnspec::new_with_index(index).up().build())
-            .execute()
-            .await?;
+        let mut link_set = LinkUnspec::new_with_index(index).up();
+        if let Some(mtu) = desired.mtu {
+            link_set = link_set.mtu(mtu);
+            info!(interface = %desired.name, mtu, "applied interface mtu");
+        }
+        self.handle.link().set(link_set.build()).execute().await?;
         trace!(interface = %desired.name, "ensuring interface administratively up");
         Ok(())
     }

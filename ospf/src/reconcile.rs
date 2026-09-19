@@ -190,7 +190,7 @@ async fn resync(
                     warn!(instance = %instance, link = %link_name, "ospf link's vrf not resolvable yet");
                     continue;
                 };
-                let Some((local_addr, local_prefix_len)) =
+                let Some((local_addr, local_prefix_len, resolved_mtu)) =
                     resolve_local_address(watchdog_socket, &attach.interface, attach.tag).await
                 else {
                     warn!(instance = %instance, link = %link_name, "ospf link's local address not resolvable yet");
@@ -208,6 +208,7 @@ async fn resync(
                     kernel_interface: subinterface_kernel_interface(&attach.interface, attach.tag),
                     network_type: profile.network_type.unwrap_or(NetworkType::PointToPoint),
                     priority,
+                    mtu: resolve_effective_mtu(profile, Some(resolved_mtu)),
                     auth: auth.clone(),
                 });
             }
@@ -265,6 +266,7 @@ async fn resync(
                     kernel_interface,
                     network_type: profile.network_type.unwrap_or(NetworkType::Broadcast),
                     priority,
+                    mtu: resolve_effective_mtu(profile, None),
                     auth: auth.clone(),
                 });
             }
@@ -518,27 +520,52 @@ async fn resolve_vrf(watchdog_socket: &Path, table: &str) -> Option<String> {
     rib_client::get_vrf_name(&socket).await
 }
 
-/// Resolves a subinterface's tag-0-or-tagged local IPv4 address *and* its
-/// real subnet prefix length by asking `nos-interfaced` directly (resolved
-/// via the watchdog broker's `ServiceRef::Interfaces`, mirroring
-/// `resolve_vrf`'s `ServiceRef::RibTable` and `nos-ribd` query). The prefix
-/// length feeds `link::LinkConfig::local_prefix_len`, needed to originate a
-/// real stub-network Router-LSA link for this subnet (see `crate::spf`).
-/// `None` covers every "not resolvable right now" case uniformly, retried
-/// by the caller's periodic re-apply tick.
+/// Resolves a subinterface's tag-0-or-tagged local IPv4 address, its real
+/// subnet prefix length, and its parent interface's real MTU, by asking
+/// `nos-interfaced` directly (resolved via the watchdog broker's
+/// `ServiceRef::Interfaces`, mirroring `resolve_vrf`'s `ServiceRef::RibTable`
+/// and `nos-ribd` query). The prefix length feeds
+/// `link::LinkConfig::local_prefix_len`, needed to originate a real
+/// stub-network Router-LSA link for this subnet (see `crate::spf`); the MTU
+/// feeds `LinkConfig::mtu` (see `resolve_effective_mtu`) — MTU is a
+/// physical-interface-level property (`InterfaceStatus.mtu`), not a
+/// per-subinterface one, so it's read from the same already-fetched
+/// `InterfaceStatus` rather than a separate query. `None` covers every "not
+/// resolvable right now" case uniformly, retried by the caller's periodic
+/// re-apply tick.
 async fn resolve_local_address(
     watchdog_socket: &Path,
     interface: &str,
     tag: u16,
-) -> Option<(Ipv4Addr, u8)> {
+) -> Option<(Ipv4Addr, u8, u32)> {
     let socket = watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let status = interface_client::get_interface(&socket, interface).await?;
+    let mtu = status.mtu;
     let sub = status.subinterfaces.into_iter().find(|s| s.tag == tag)?;
     let net = sub.addresses.into_iter().next()?.address;
     match net.addr() {
-        std::net::IpAddr::V4(v4) => Some((v4, net.prefix_len())),
+        std::net::IpAddr::V4(v4) => Some((v4, net.prefix_len(), mtu)),
         std::net::IpAddr::V6(_) => None,
     }
+}
+
+/// Linux's own default MTU, used as the ultimate fallback when neither an
+/// `OspfProfile.mtu` override nor a real resolved interface MTU is
+/// available (a broadcast-domain bridge attach point, which has no
+/// per-domain MTU of its own — see root `CLAUDE.md`'s scope note on this).
+const DEFAULT_OSPF_MTU: u16 = 1500;
+
+/// Resolves the effective MTU OSPF uses for a link — for the wire's
+/// `DbdPacket.interface_mtu` field and DBD pagination sizing (see
+/// `ospf/CLAUDE.md`'s "Exchange" section) — as `profile.mtu` if set, else
+/// `resolved_mtu` (the link's real interface MTU, when one exists), else
+/// `DEFAULT_OSPF_MTU`.
+fn resolve_effective_mtu(profile: &nos_proto::OspfProfile, resolved_mtu: Option<u32>) -> u16 {
+    profile.mtu.unwrap_or_else(|| {
+        resolved_mtu
+            .and_then(|m| u16::try_from(m).ok())
+            .unwrap_or(DEFAULT_OSPF_MTU)
+    })
 }
 
 /// Resolves a loopback (`Interface.ospf_profile`) attach point's own
@@ -661,6 +688,7 @@ mod tests {
             routing_table: None,
             ospf_profile: ospf_profile.map(str::to_string),
             switching_profile: None,
+            mtu: None,
             subinterfaces: Vec::new(),
         }
     }

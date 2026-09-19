@@ -16,6 +16,11 @@ pub struct InterfaceStatus {
     pub addresses: Vec<InterfaceAddress>,
     pub routing_table: Option<String>,
     pub switching_profile: Option<String>,
+    /// This interface's configured MTU, or `1500` (Linux's own default) if
+    /// unset — reflects desired config like every other field here, applies
+    /// uniformly to every one of `subinterfaces` (MTU is a physical-link
+    /// property, inherited by VLAN sub-links, not set per tag).
+    pub mtu: u32,
     pub subinterfaces: Vec<SubinterfaceStatus>,
 }
 

@@ -261,6 +261,19 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Unsets the routing-table field on an interface (or subinterface), reverting to no \
              explicit association.",
         ),
+        Topic::SetInterfaceMtu => (
+            "Set an interface's MTU.",
+            "Sets the MTU (in bytes, 68-65535) on a physical or loopback interface — a \
+             link-layer property of the interface itself, applying uniformly to every one of \
+             its subinterfaces (a VLAN sub-link has no MTU of its own, unlike addresses/\
+             routing-table). Always targets the physical interface even when navigated into one \
+             of its subinterfaces.",
+        ),
+        Topic::ClearInterfaceMtu => (
+            "Clear an interface's MTU.",
+            "Unsets the mtu field on an interface, so `nos-interfaced` leaves whatever MTU the \
+             kernel link already has untouched rather than forcing a default.",
+        ),
         Topic::DeleteInterface => (
             "Delete an interface from the transaction.",
             "Removes an interface and all of its addresses/subinterfaces from the \
@@ -579,6 +592,20 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Clear an OSPF profile's Router Priority.",
             "Unsets the priority field on a profile, reverting to the default of 1.",
         ),
+        Topic::SetOspfProfileMtu => (
+            "Override the MTU OSPF believes this link has.",
+            "Sets the mtu field on a profile — what this NOS advertises in the DBD packet's own \
+             interface_mtu field and uses to size DBD pagination for every attach point using \
+             this profile, independent of the interface's real kernel MTU (mirrors real OSPF \
+             implementations' mtu-bytes-style override). Left unset, the attach point's real \
+             interface MTU (queried from nos-interfaced) is used instead, falling back to 1500 \
+             if unavailable.",
+        ),
+        Topic::ClearOspfProfileMtu => (
+            "Clear an OSPF profile's MTU override.",
+            "Unsets the mtu field on a profile, reverting to using the attach point's real \
+             interface MTU.",
+        ),
         Topic::SetOspfProfileNetworkType => (
             "Set an OSPF profile's network type.",
             "Sets the network-type field on a profile to point-to-point or broadcast, \
@@ -699,6 +726,8 @@ mod tests {
         Topic::RemoveInterfaceAddress,
         Topic::SetInterfaceRoutingTable,
         Topic::ClearInterfaceRoutingTable,
+        Topic::SetInterfaceMtu,
+        Topic::ClearInterfaceMtu,
         Topic::DeleteInterface,
         Topic::SetBgpPeerGroupHoldTime,
         Topic::ClearBgpPeerGroupHoldTime,
@@ -751,6 +780,8 @@ mod tests {
         Topic::ClearOspfProfileCost,
         Topic::SetOspfProfilePriority,
         Topic::ClearOspfProfilePriority,
+        Topic::SetOspfProfileMtu,
+        Topic::ClearOspfProfileMtu,
         Topic::SetOspfProfileNetworkType,
         Topic::ClearOspfProfileNetworkType,
         Topic::SetOspfProfileSimpleAuth,

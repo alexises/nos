@@ -40,6 +40,13 @@ pub enum InterfaceOp {
     ClearRoutingTable {
         name: String,
     },
+    SetMtu {
+        name: String,
+        mtu: u32,
+    },
+    ClearMtu {
+        name: String,
+    },
     SetOspfProfile {
         name: String,
         ospf_profile: String,
@@ -70,6 +77,7 @@ impl InterfaceOp {
                         routing_table: None,
                         ospf_profile: None,
                         switching_profile: None,
+                        mtu: None,
                         subinterfaces: Vec::new(),
                     });
                 }
@@ -111,6 +119,14 @@ impl InterfaceOp {
             }
             InterfaceOp::ClearRoutingTable { name } => {
                 find_interface_mut(config, name)?.routing_table = None;
+                Ok(())
+            }
+            InterfaceOp::SetMtu { name, mtu } => {
+                find_interface_mut(config, name)?.mtu = Some(*mtu);
+                Ok(())
+            }
+            InterfaceOp::ClearMtu { name } => {
+                find_interface_mut(config, name)?.mtu = None;
                 Ok(())
             }
             InterfaceOp::SetOspfProfile { name, ospf_profile } => {
@@ -167,6 +183,7 @@ mod tests {
             routing_table: None,
             ospf_profile: None,
             switching_profile: None,
+            mtu: None,
             subinterfaces: Vec::new(),
         }
     }
@@ -204,6 +221,7 @@ mod tests {
                 routing_table: None,
                 ospf_profile: None,
                 switching_profile: None,
+                mtu: None,
                 subinterfaces: Vec::new(),
             }],
             ..Default::default()
@@ -341,6 +359,28 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.interfaces[0].routing_table, None);
+    }
+
+    #[test]
+    fn set_and_clear_mtu() {
+        let mut cfg = Config {
+            interfaces: vec![interface("eth0")],
+            ..Default::default()
+        };
+        InterfaceOp::SetMtu {
+            name: "eth0".to_string(),
+            mtu: 9000,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].mtu, Some(9000));
+
+        InterfaceOp::ClearMtu {
+            name: "eth0".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].mtu, None);
     }
 
     #[test]

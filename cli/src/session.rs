@@ -522,6 +522,7 @@ const NO_CURRENT_SWITCHING_PROFILE: &str = "no current switching-profile — use
 const NO_CURRENT_OSPF_INSTANCE: &str = "no current ospf instance — use 'edit ospf instance <name>' or the fully-qualified 'set ospf instance <name> ...' form";
 const NO_CURRENT_OSPF_AREA: &str = "no current ospf area — use 'edit ospf instance <name> area <area-id>' or 'edit area <area-id>' while navigated into an ospf instance";
 const NO_CURRENT_OSPF_PROFILE: &str = "no current ospf profile — use 'edit ospf instance <name> area <area-id> profile <name>' or 'edit profile <name>' while navigated into an ospf area";
+const NO_CURRENT_INTERFACE_OR_OSPF_PROFILE: &str = "'mtu' is only valid while navigated into an interface or an ospf profile — use the fully-qualified 'set interface <name> mtu <n>' or 'set ospf instance <name> area <area-id> profile <name> mtu <n>' form";
 const ALREADY_AT_TOP: &str = "already at the top level";
 
 /// The three L3 attachment points `set address` / `set routing-table` (and
@@ -1061,6 +1062,36 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 after: PathAfter::Stay,
             }
         }
+        Command::Set(SetTarget::InterfaceMtu { name, mtu }) => Resolved::ApplyOp {
+            op: ConfigOp::Interface(InterfaceOp::SetMtu { name, mtu }),
+            after: PathAfter::Stay,
+        },
+        // `set mtu <n>`'s literal token sequence is shared between a
+        // physical interface's own mtu and an `OspfProfile`'s mtu override —
+        // see `SetTarget::MtuRelative`'s doc comment.
+        Command::Set(SetTarget::MtuRelative(mtu)) => match path {
+            Path::Interface(name) => Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::SetMtu {
+                    name: name.clone(),
+                    mtu: u32::from(mtu),
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::OspfProfile {
+                instance,
+                area_id,
+                name,
+            } => Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::SetMtu {
+                    instance: instance.clone(),
+                    area_id: *area_id,
+                    name: name.clone(),
+                    mtu,
+                }),
+                after: PathAfter::Stay,
+            },
+            _ => return Err(NO_CURRENT_INTERFACE_OR_OSPF_PROFILE),
+        },
 
         Command::Set(SetTarget::CommunityAliasValue { name, value }) => Resolved::ApplyOp {
             op: ConfigOp::CommunityAlias(CommunityAliasOp::SetValue { name, value }),
@@ -1361,6 +1392,31 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 name: path.interface()?.to_string(),
             }),
             after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::InterfaceMtu { name }) => Resolved::ApplyOp {
+            op: ConfigOp::Interface(InterfaceOp::ClearMtu { name }),
+            after: PathAfter::Stay,
+        },
+        // See `SetTarget::MtuRelative`'s doc comment — `delete mtu` is the
+        // same shared, path-disambiguated token.
+        Command::Delete(DeleteTarget::MtuRelative) => match path {
+            Path::Interface(name) => Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::ClearMtu { name: name.clone() }),
+                after: PathAfter::Stay,
+            },
+            Path::OspfProfile {
+                instance,
+                area_id,
+                name,
+            } => Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::ClearMtu {
+                    instance: instance.clone(),
+                    area_id: *area_id,
+                    name: name.clone(),
+                }),
+                after: PathAfter::Stay,
+            },
+            _ => return Err(NO_CURRENT_INTERFACE_OR_OSPF_PROFILE),
         },
         Command::Delete(DeleteTarget::CommunityAlias { name }) => Resolved::ApplyOp {
             op: ConfigOp::CommunityAlias(CommunityAliasOp::Delete { name }),
@@ -1793,6 +1849,12 @@ fn ospf_profile_set_op(
             area_id,
             name,
             priority,
+        },
+        OspfProfileField::Mtu(mtu) => OspfProfileOp::SetMtu {
+            instance,
+            area_id,
+            name,
+            mtu,
         },
         OspfProfileField::NetworkType(network_type) => OspfProfileOp::SetNetworkType {
             instance,
@@ -4041,6 +4103,118 @@ mod tests {
                 op: ConfigOp::Interface(InterfaceOp::SetSwitchingProfile {
                     name: "eth0".to_string(),
                     switching_profile: "sp1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_interface_mtu_qualified() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::InterfaceMtu {
+                    name: "eth0".to_string(),
+                    mtu: 9000,
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::SetMtu {
+                    name: "eth0".to_string(),
+                    mtu: 9000,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_mtu_relative_dispatches_by_path() {
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::MtuRelative(9000))
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Interface("eth0".to_string()), false),
+                Command::Set(SetTarget::MtuRelative(9000))
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::SetMtu {
+                    name: "eth0".to_string(),
+                    mtu: 9000,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode(
+                    "t1",
+                    Path::OspfProfile {
+                        instance: "o1".to_string(),
+                        area_id: "0.0.0.0".parse().unwrap(),
+                        name: "p1".to_string(),
+                    },
+                    false
+                ),
+                Command::Set(SetTarget::MtuRelative(1400))
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::SetMtu {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                    mtu: 1400,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn delete_mtu_relative_dispatches_by_path() {
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Delete(DeleteTarget::MtuRelative)
+            ),
+            Resolved::Error(_)
+        ));
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Interface("eth0".to_string()), false),
+                Command::Delete(DeleteTarget::MtuRelative)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::ClearMtu {
+                    name: "eth0".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode(
+                    "t1",
+                    Path::OspfProfile {
+                        instance: "o1".to_string(),
+                        area_id: "0.0.0.0".parse().unwrap(),
+                        name: "p1".to_string(),
+                    },
+                    false
+                ),
+                Command::Delete(DeleteTarget::MtuRelative)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::ClearMtu {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
                 }),
                 after: PathAfter::Stay,
             }

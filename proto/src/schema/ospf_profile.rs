@@ -160,6 +160,15 @@ pub struct OspfProfile {
     #[garde(skip)]
     pub priority: Option<u8>,
 
+    /// `None` resolves to the attach point's own real interface MTU (queried
+    /// from `nos-interfaced`), falling back to 1500 if unavailable.
+    /// Overrides what OSPF *believes* this link's MTU is — for the wire's
+    /// `DbdPacket.interface_mtu` field and DBD pagination sizing — independent
+    /// of the interface's real kernel MTU (mirrors real OSPF implementations'
+    /// `mtu-bytes`-style override). See `ospf/CLAUDE.md`'s "Exchange" section.
+    #[garde(skip)]
+    pub mtu: Option<u16>,
+
     /// `None` resolves per attach point: a `Subinterface`/loopback
     /// `Interface` attach point defaults to `PointToPoint`, a
     /// `BroadcastDomain` one defaults to `Broadcast` — resolved by
@@ -234,6 +243,7 @@ mod tests {
             dead_interval: None,
             cost: None,
             priority: None,
+            mtu: None,
             network_type: None,
             auth: None,
         }
@@ -322,6 +332,7 @@ mod tests {
             dead_interval,
             cost: None,
             priority: None,
+            mtu: None,
             network_type: None,
             auth: None,
         }

@@ -50,6 +50,12 @@ struct Args {
     #[arg(long)]
     delete_subinterface: bool,
 
+    /// If set, sets `--interface`'s own mtu (`InterfaceOp::SetMtu`) — for
+    /// verifying `nos-interfaced`'s Linux driver actually applies it to the
+    /// real kernel link.
+    #[arg(long)]
+    mtu: Option<u32>,
+
     #[arg(long, default_value = "rt1")]
     routing_table: String,
 
@@ -307,6 +313,13 @@ struct Args {
     /// a mismatched one on either side does not).
     #[arg(long)]
     ospf_crypto_key: Option<String>,
+
+    /// If set (requires `--ospf-profile`), overrides the MTU OSPF believes
+    /// this profile's links have (`OspfProfileOp::SetMtu`) — for verifying
+    /// real-MTU-driven DBD pagination independent of the interface's own
+    /// real kernel MTU.
+    #[arg(long)]
+    ospf_profile_mtu: Option<u16>,
 }
 
 #[tokio::main]
@@ -335,6 +348,12 @@ async fn main() -> anyhow::Result<()> {
     let mut ops = vec![ConfigOp::Interface(InterfaceOp::Ensure {
         name: args.interface.clone(),
     })];
+    if let Some(mtu) = args.mtu {
+        ops.push(ConfigOp::Interface(InterfaceOp::SetMtu {
+            name: args.interface.clone(),
+            mtu,
+        }));
+    }
     if args.delete_subinterface {
         ops.push(ConfigOp::Subinterface(SubinterfaceOp::Delete {
             interface: args.interface.clone(),
@@ -696,6 +715,14 @@ async fn main() -> anyhow::Result<()> {
                 area_id,
                 name: name.clone(),
             }));
+            if let Some(mtu) = args.ospf_profile_mtu {
+                ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetMtu {
+                    instance: instance.clone(),
+                    area_id,
+                    name: name.clone(),
+                    mtu,
+                }));
+            }
             if let Some(password) = args.ospf_simple_password.clone() {
                 ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetSimpleAuth {
                     instance: instance.clone(),
@@ -720,11 +747,16 @@ async fn main() -> anyhow::Result<()> {
             if args.ospf_crypto_key.is_some() {
                 bail!("--ospf-crypto-key requires --ospf-profile to also be set");
             }
+            if args.ospf_profile_mtu.is_some() {
+                bail!("--ospf-profile-mtu requires --ospf-profile to also be set");
+            }
         }
     } else if args.ospf_profile.is_some() {
         bail!("--ospf-profile requires --ospf-area to also be set");
     } else if args.ospf_simple_password.is_some() || args.ospf_crypto_key.is_some() {
         bail!("--ospf-simple-password/--ospf-crypto-key require --ospf-profile to also be set");
+    } else if args.ospf_profile_mtu.is_some() {
+        bail!("--ospf-profile-mtu requires --ospf-profile to also be set");
     }
 
     if let Some(profile) = args.ospf_interface_profile.clone() {

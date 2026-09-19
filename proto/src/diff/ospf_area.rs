@@ -87,6 +87,7 @@ mod tests {
             dead_interval: None,
             cost: None,
             priority: None,
+            mtu: None,
             network_type: None,
             auth: None,
         }

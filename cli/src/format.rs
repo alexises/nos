@@ -254,8 +254,11 @@ pub fn render_interface(iface: &Interface) -> String {
     let routing_table = iface.routing_table.as_deref().unwrap_or("unset");
     let ospf_profile = iface.ospf_profile.as_deref().unwrap_or("unset");
     let switching_profile = iface.switching_profile.as_deref().unwrap_or("unset");
+    let mtu = iface
+        .mtu
+        .map_or_else(|| "unset".to_string(), |m| m.to_string());
     let mut lines = vec![format!(
-        "interface {}: address [{addresses}], routing-table {routing_table}, ospf-profile {ospf_profile}, switching-profile {switching_profile}",
+        "interface {}: address [{addresses}], routing-table {routing_table}, ospf-profile {ospf_profile}, switching-profile {switching_profile}, mtu {mtu}",
         iface.name
     )];
     for sub in &iface.subinterfaces {
@@ -302,8 +305,8 @@ pub fn render_interface_status(status: &InterfaceStatus) -> String {
     let routing_table = status.routing_table.as_deref().unwrap_or("unset");
     let switching_profile = status.switching_profile.as_deref().unwrap_or("unset");
     let mut lines = vec![format!(
-        "interface {}: address [{addresses}], routing-table {routing_table}, switching-profile {switching_profile}",
-        status.name
+        "interface {}: address [{addresses}], routing-table {routing_table}, switching-profile {switching_profile}, mtu {}",
+        status.name, status.mtu
     )];
     for sub in &status.subinterfaces {
         lines.push(format!("  {}", render_subinterface_status(sub)));
@@ -1119,6 +1122,7 @@ mod tests {
             routing_table: None,
             ospf_profile: None,
             switching_profile: None,
+            mtu: Some(9000),
             subinterfaces: vec![
                 Subinterface {
                     tag: 0,
@@ -1139,7 +1143,7 @@ mod tests {
         };
         assert_eq!(
             render_interface(&iface),
-            "interface eth0: address [none], routing-table unset, ospf-profile unset, switching-profile unset\n\
+            "interface eth0: address [none], routing-table unset, ospf-profile unset, switching-profile unset, mtu 9000\n\
              \x20 subinterface 0: address [10.0.0.1/24], routing-table rt1, ospf-profile unset\n\
              \x20 subinterface 100: address [none], routing-table unset, ospf-profile unset"
         );
@@ -1159,11 +1163,12 @@ mod tests {
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
             switching_profile: None,
+            mtu: None,
             subinterfaces: Vec::new(),
         };
         assert_eq!(
             render_interface(&iface),
-            "interface loopback-rt1: address [10.0.0.1/32], routing-table rt1, ospf-profile unset, switching-profile unset"
+            "interface loopback-rt1: address [10.0.0.1/32], routing-table rt1, ospf-profile unset, switching-profile unset, mtu unset"
         );
     }
 
@@ -1222,6 +1227,7 @@ mod tests {
             routing_table: None,
             ospf_profile: None,
             switching_profile: None,
+            mtu: None,
             subinterfaces: vec![Subinterface {
                 tag: 100,
                 addresses: Vec::new(),
@@ -1476,6 +1482,7 @@ mod tests {
             dead_interval: None,
             cost: None,
             priority: None,
+            mtu: None,
             network_type: None,
             auth: None,
         }

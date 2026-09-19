@@ -163,8 +163,28 @@ pub struct Interface {
     #[garde(custom(|sp: &Option<String>, ctx: &Config| switching_profile_reference_valid(sp.as_ref(), ctx)))]
     pub switching_profile: Option<String>,
 
+    /// The link's MTU, in bytes. A link-layer property of the physical (or
+    /// loopback) interface itself — unlike `addresses`/`routing_table`, it's
+    /// not part of the loopback/physical addressing split (see
+    /// `valid_addressing_split`): a VLAN `Subinterface` has no `mtu` of its
+    /// own and always inherits this value. `None` leaves whatever MTU the
+    /// kernel link already has untouched (`nos-interfaced`'s Linux driver
+    /// never resets it to a default) rather than forcing 1500.
+    #[garde(custom(|m: &Option<u32>, _ctx: &Config| valid_mtu(*m)))]
+    pub mtu: Option<u32>,
+
     #[garde(dive, custom(|subs, _ctx: &Config| valid_subinterface_list(subs)))]
     pub subinterfaces: Vec<Subinterface>,
+}
+
+/// RFC 791's IPv4 minimum through Linux's practical link-layer ceiling.
+fn valid_mtu(mtu: Option<u32>) -> garde::Result {
+    match mtu {
+        Some(m) if !(68..=65535).contains(&m) => {
+            Err(garde::Error::new("mtu must be between 68 and 65535"))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Combines interface-name uniqueness (existing) with rejecting a literal
@@ -305,6 +325,7 @@ mod tests {
             routing_table: routing_table.map(str::to_string),
             ospf_profile: None,
             switching_profile: None,
+            mtu: None,
             subinterfaces: Vec::new(),
         }
     }
@@ -675,6 +696,7 @@ mod tests {
                         dead_interval: None,
                         cost: None,
                         priority: None,
+                        mtu: None,
                         network_type: None,
                         auth: None,
                     }],

@@ -70,6 +70,9 @@ pub enum Availability {
     /// switching-profile commands still use since that field stays
     /// interface-only.
     ConfigurationInterfaceOrSubinterface,
+    /// `Path::Interface` or `Path::OspfProfile` — `set`/`delete mtu`'s
+    /// shared, path-disambiguated token (see `SetTarget::MtuRelative`).
+    ConfigurationInterfaceOrOspfProfile,
     ConfigurationSwitchingProfile,
     /// Any non-root navigation position — `BgpInstance`, `BgpPeerGroup`,
     /// `RoutingTable`, `StaticRoutingInstance`, `Interface`, or
@@ -103,6 +106,9 @@ pub fn availability_matches(availability: Availability, mode: &Mode) -> bool {
         Availability::ConfigurationStaticRoutingInstance => path.static_routing_instance().is_ok(),
         Availability::ConfigurationInterface => path.interface().is_ok(),
         Availability::ConfigurationInterfaceOrSubinterface => path.l3_target().is_ok(),
+        Availability::ConfigurationInterfaceOrOspfProfile => {
+            path.interface().is_ok() || path.ospf_profile().is_ok()
+        }
         Availability::ConfigurationSwitchingProfile => path.switching_profile().is_ok(),
         Availability::ConfigurationNested => matches!(
             path,
@@ -636,6 +642,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Doc::FromConfig(Topic::SetOspfProfilePriority),
         Configuration),
     spec!(["set" "ospf" "instance" (OspfInstanceName) "area" (Plain) "profile" (OspfProfileName)
+           "mtu" (Plain)],
+        "set ospf instance <name> area <area-id> profile <profile-name> mtu <n>",
+        Doc::FromConfig(Topic::SetOspfProfileMtu),
+        Configuration),
+    spec!(["set" "ospf" "instance" (OspfInstanceName) "area" (Plain) "profile" (OspfProfileName)
            "network-type" "point-to-point"],
         "set ospf instance <name> area <area-id> profile <profile-name> network-type point-to-point",
         Doc::FromConfig(Topic::SetOspfProfileNetworkType),
@@ -1046,6 +1057,22 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "delete switching-profile",
         Doc::FromConfig(Topic::ClearInterfaceSwitchingProfile),
         ConfigurationInterface),
+    spec!(["set" "interface" (InterfaceName) "mtu" (Plain)],
+        "set interface <name> mtu <n>",
+        Doc::FromConfig(Topic::SetInterfaceMtu),
+        Configuration),
+    spec!(["set" "mtu" (Plain)],
+        "set mtu <n>",
+        Doc::FromConfig(Topic::SetInterfaceMtu),
+        ConfigurationInterfaceOrOspfProfile),
+    spec!(["delete" "interface" (InterfaceName) "mtu"],
+        "delete interface <name> mtu",
+        Doc::FromConfig(Topic::ClearInterfaceMtu),
+        Configuration),
+    spec!(["delete" "mtu"],
+        "delete mtu",
+        Doc::FromConfig(Topic::ClearInterfaceMtu),
+        ConfigurationInterfaceOrOspfProfile),
     spec!(["delete" "interface" (InterfaceName)],
         "delete interface <name>",
         Doc::FromConfig(Topic::DeleteInterface),

@@ -71,6 +71,17 @@ pub enum OspfProfileOp {
         area_id: Ipv4Addr,
         name: String,
     },
+    SetMtu {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        mtu: u16,
+    },
+    ClearMtu {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+    },
     SetNetworkType {
         instance: String,
         area_id: Ipv4Addr,
@@ -140,6 +151,7 @@ impl OspfProfileOp {
                         dead_interval: None,
                         cost: None,
                         priority: None,
+                        mtu: None,
                         network_type: None,
                         auth: None,
                     });
@@ -231,6 +243,23 @@ impl OspfProfileOp {
                 name,
             } => {
                 find_profile_mut(config, instance, *area_id, name)?.priority = None;
+                Ok(())
+            }
+            OspfProfileOp::SetMtu {
+                instance,
+                area_id,
+                name,
+                mtu,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.mtu = Some(*mtu);
+                Ok(())
+            }
+            OspfProfileOp::ClearMtu {
+                instance,
+                area_id,
+                name,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.mtu = None;
                 Ok(())
             }
             OspfProfileOp::SetNetworkType {
@@ -399,6 +428,7 @@ mod tests {
             dead_interval: None,
             cost: None,
             priority: None,
+            mtu: None,
             network_type: None,
             auth: None,
         }
@@ -644,6 +674,32 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.ospf_instances[0].areas[0].profiles[0].priority, None);
+    }
+
+    #[test]
+    fn set_and_clear_mtu() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        OspfProfileOp::SetMtu {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            mtu: 1400,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.ospf_instances[0].areas[0].profiles[0].mtu, Some(1400));
+
+        OspfProfileOp::ClearMtu {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.ospf_instances[0].areas[0].profiles[0].mtu, None);
     }
 
     #[test]

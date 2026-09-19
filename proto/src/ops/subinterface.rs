@@ -174,6 +174,7 @@ fn ensure_subinterface_mut<'a>(
             routing_table: None,
             ospf_profile: None,
             switching_profile: None,
+            mtu: None,
             subinterfaces: Vec::new(),
         });
     }
@@ -205,6 +206,7 @@ mod tests {
             routing_table: None,
             ospf_profile: None,
             switching_profile: None,
+            mtu: None,
             subinterfaces,
         }
     }

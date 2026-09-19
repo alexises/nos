@@ -81,6 +81,12 @@ fn ospf_profile_str(iface: &Interface) -> String {
         .unwrap_or_else(|| "unset".to_string())
 }
 
+fn mtu_str(iface: &Interface) -> String {
+    iface
+        .mtu
+        .map_or_else(|| "unset".to_string(), |m| m.to_string())
+}
+
 fn changed_fields(base: &Interface, candidate: &Interface) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     let mut base_addrs = base.addresses.clone();
@@ -115,6 +121,13 @@ fn changed_fields(base: &Interface, candidate: &Interface) -> Vec<FieldDiff> {
             new: Some(ospf_profile_str(candidate)),
         });
     }
+    if base.mtu != candidate.mtu {
+        fields.push(FieldDiff {
+            label: "mtu".to_string(),
+            old: Some(mtu_str(base)),
+            new: Some(mtu_str(candidate)),
+        });
+    }
     fields
 }
 
@@ -142,6 +155,11 @@ fn removed_section(iface: &Interface) -> SectionDiff {
             FieldDiff {
                 label: "ospf-profile".to_string(),
                 old: Some(ospf_profile_str(iface)),
+                new: None,
+            },
+            FieldDiff {
+                label: "mtu".to_string(),
+                old: Some(mtu_str(iface)),
                 new: None,
             },
         ],
@@ -175,6 +193,11 @@ fn added_section(iface: &Interface) -> SectionDiff {
                 old: None,
                 new: Some(ospf_profile_str(iface)),
             },
+            FieldDiff {
+                label: "mtu".to_string(),
+                old: None,
+                new: Some(mtu_str(iface)),
+            },
         ],
         subsections: subinterface::diff_subinterfaces(&[], &iface.subinterfaces),
     }
@@ -197,6 +220,7 @@ mod tests {
             routing_table: routing_table.map(str::to_string),
             ospf_profile: None,
             switching_profile: None,
+            mtu: None,
             subinterfaces: Vec::new(),
         }
     }
@@ -285,6 +309,7 @@ mod tests {
             routing_table: None,
             ospf_profile: None,
             switching_profile: None,
+            mtu: None,
             subinterfaces: Vec::new(),
         }];
         let candidate = vec![Interface {
@@ -296,6 +321,7 @@ mod tests {
             routing_table: None,
             ospf_profile: None,
             switching_profile: None,
+            mtu: None,
             subinterfaces: Vec::new(),
         }];
         let sections = diff_interfaces(&base, &candidate);

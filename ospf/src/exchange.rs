@@ -6,17 +6,17 @@
 //! up incrementally across many packets rather than swapped wholesale like
 //! `bgp::fsm`'s `RemoteInfo`.
 //!
-//! # ponytail: fixed per-packet header budget, not a live MTU probe
 //! Real RFC 2328 §10.8 pagination: the local LSDB summary is chunked into
-//! `max_headers`-sized pieces (a caller-supplied budget — see `link.rs`'s
-//! `--dbd-max-headers`, defaulting to `DEFAULT_DBD_MAX_HEADERS`), one chunk
-//! per DD sequence number, each acked before the next is sent, in both
-//! directions. What's still simplified: `max_headers` is a fixed
-//! conservative constant sized off a generic Ethernet MTU assumption, not
-//! derived from a live query of the link's real interface MTU (this NOS
-//! never enforces `DbdPacket.interface_mtu` on send or receive at all).
-//! Upgrade to a live-MTU-derived budget if a link with an unusually small
-//! MTU ever needs it.
+//! `max_headers`-sized pieces, one chunk per DD sequence number, each acked
+//! before the next is sent, in both directions. `max_headers` is normally
+//! derived per-link from that link's own effective MTU (`mtu_based_max_headers`,
+//! `link::LinkConfig.mtu` — see `reconcile::resolve_effective_mtu`), falling
+//! back to the fixed `DEFAULT_DBD_MAX_HEADERS` budget only when
+//! `link.rs`'s `--dbd-max-headers` CLI flag explicitly overrides it (test/debug
+//! use only, e.g. `tools/verify-e2e.sh ospf-dbd-pagination`'s deterministic
+//! pagination check). `DbdPacket.interface_mtu` is populated from that same
+//! effective MTU on send, but still never enforced/validated on receive —
+//! RFC 2328 allows disabling that check, and this NOS never implements it.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
@@ -31,8 +31,23 @@ use crate::packet::{DbdPacket, LsAckPacket, LsrPacket, LsuPacket};
 /// A conservative per-DBD-packet LSA-header budget: 1500-byte Ethernet MTU
 /// − 20 (IP) − 24 (OSPF common header) − 8 (`DBD_BODY_FIXED_LEN`) ≈ 1448
 /// bytes ÷ 20 (`LSA_HEADER_LEN`) ≈ 72, rounded down for crypto-auth trailer
-/// headroom. See this module's own `ponytail:` note above.
+/// headroom. Used as `link.rs`'s `--dbd-max-headers` CLI flag's own default
+/// value when a test/debug run wants a fixed override rather than the real
+/// MTU-derived budget (`mtu_based_max_headers`) — see this module's own doc
+/// comment above.
 pub const DEFAULT_DBD_MAX_HEADERS: usize = 64;
+
+/// Same formula `DEFAULT_DBD_MAX_HEADERS`'s doc comment spells out, applied
+/// to a real link's effective MTU instead of a fixed 1500 assumption —
+/// floored at 1 so a pathologically small MTU still makes progress one LSA
+/// header at a time rather than producing an empty/zero-sized chunk budget.
+pub fn mtu_based_max_headers(mtu: u16) -> usize {
+    (mtu as usize)
+        .saturating_sub(20 + 24 + 8)
+        .checked_div(lsa::LSA_HEADER_LEN)
+        .unwrap_or(0)
+        .max(1)
+}
 
 /// One neighbor's DBD/LSR/LSU exchange state, from `ExStart` onward.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -103,6 +118,7 @@ pub enum Action {
 /// `local_lsdb_headers` is a snapshot the caller takes from its LSDB before
 /// calling this — kept out of this function's own state so it stays free of
 /// any lock/await.
+#[allow(clippy::too_many_arguments)]
 pub fn on_dbd_received(
     adj: &mut AdjacencyData,
     state: NeighborState,
@@ -111,6 +127,7 @@ pub fn on_dbd_received(
     dbd: &DbdPacket,
     local_lsdb_headers: &[LsaHeader],
     max_headers: usize,
+    mtu: u16,
 ) -> Vec<Action> {
     match state {
         NeighborState::ExStart => on_dbd_in_exstart(
@@ -120,10 +137,16 @@ pub fn on_dbd_received(
             dbd,
             local_lsdb_headers,
             max_headers,
+            mtu,
         ),
-        NeighborState::Exchange => {
-            on_dbd_in_exchange(adj, local_router_id, dbd, local_lsdb_headers, max_headers)
-        }
+        NeighborState::Exchange => on_dbd_in_exchange(
+            adj,
+            local_router_id,
+            dbd,
+            local_lsdb_headers,
+            max_headers,
+            mtu,
+        ),
         // `Loading`/`Full`: ignore everything here, negotiation-shaped or
         // not. A genuine peer restart is instead caught via Hello — losing
         // 2-way already clears `adjacency` (see `link::handle_hello`) — so
@@ -148,6 +171,7 @@ fn on_dbd_in_exstart(
     dbd: &DbdPacket,
     local_lsdb_headers: &[LsaHeader],
     max_headers: usize,
+    mtu: u16,
 ) -> Vec<Action> {
     let is_negotiation_attempt = dbd.init && dbd.more && dbd.master;
 
@@ -189,8 +213,14 @@ fn on_dbd_in_exstart(
             // bare attempt itself (its own `lsa_headers` is empty, so this
             // is a no-op beyond adopting the seed) or the master's poll
             // arriving first (per this branch's own doc comment above).
-            let (reply, done) =
-                slave_process_poll(adj, local_router_id, dbd, local_lsdb_headers, max_headers);
+            let (reply, done) = slave_process_poll(
+                adj,
+                local_router_id,
+                dbd,
+                local_lsdb_headers,
+                max_headers,
+                mtu,
+            );
             let mut actions = vec![
                 Action::SendDbd(reply),
                 Action::NeighborEvent(Event::NegotiationDone),
@@ -239,8 +269,14 @@ fn on_dbd_in_exstart(
             // comment) — process it exactly like a normal in-`Exchange`
             // reply: extend the request list, then advance to our own
             // first real chunk if either side still has data.
-            let (maybe_poll, done) =
-                master_process_reply(adj, local_router_id, dbd, local_lsdb_headers, max_headers);
+            let (maybe_poll, done) = master_process_reply(
+                adj,
+                local_router_id,
+                dbd,
+                local_lsdb_headers,
+                max_headers,
+                mtu,
+            );
             let mut actions = Vec::new();
             if let Some(poll) = maybe_poll {
                 actions.push(Action::SendDbd(poll));
@@ -273,6 +309,7 @@ fn slave_process_poll(
     dbd: &DbdPacket,
     local_lsdb_headers: &[LsaHeader],
     max_headers: usize,
+    mtu: u16,
 ) -> (DbdPacket, bool) {
     adj.dd_sequence_number = dbd.dd_sequence_number;
     adj.request_list
@@ -281,7 +318,7 @@ fn slave_process_poll(
     let reply = DbdPacket {
         router_id: local_router_id,
         area_id: dbd.area_id,
-        interface_mtu: 0,
+        interface_mtu: mtu,
         options: 0,
         init: false,
         more,
@@ -309,6 +346,7 @@ fn master_process_reply(
     dbd: &DbdPacket,
     local_lsdb_headers: &[LsaHeader],
     max_headers: usize,
+    mtu: u16,
 ) -> (Option<DbdPacket>, bool) {
     adj.request_list
         .extend(compute_request_list(&dbd.lsa_headers, local_lsdb_headers));
@@ -326,7 +364,7 @@ fn master_process_reply(
     let poll = DbdPacket {
         router_id: local_router_id,
         area_id: dbd.area_id,
-        interface_mtu: 0,
+        interface_mtu: mtu,
         options: 0,
         init: false,
         more,
@@ -343,6 +381,7 @@ fn on_dbd_in_exchange(
     dbd: &DbdPacket,
     local_lsdb_headers: &[LsaHeader],
     max_headers: usize,
+    mtu: u16,
 ) -> Vec<Action> {
     // A negotiation-shaped packet (I=1,M=1,MS=1) here means the peer is
     // still retransmitting its very first message — its own view hasn't
@@ -365,8 +404,14 @@ fn on_dbd_in_exchange(
         if dbd.dd_sequence_number != adj.dd_sequence_number || dbd.master {
             return vec![Action::NeighborEvent(Event::SeqNumberMismatch)];
         }
-        let (maybe_poll, done) =
-            master_process_reply(adj, local_router_id, dbd, local_lsdb_headers, max_headers);
+        let (maybe_poll, done) = master_process_reply(
+            adj,
+            local_router_id,
+            dbd,
+            local_lsdb_headers,
+            max_headers,
+            mtu,
+        );
         let mut actions = Vec::new();
         if let Some(poll) = maybe_poll {
             actions.push(Action::SendDbd(poll));
@@ -383,8 +428,14 @@ fn on_dbd_in_exchange(
         if !dbd.master || dbd.dd_sequence_number != adj.dd_sequence_number.wrapping_add(1) {
             return vec![Action::NeighborEvent(Event::SeqNumberMismatch)];
         }
-        let (reply, done) =
-            slave_process_poll(adj, local_router_id, dbd, local_lsdb_headers, max_headers);
+        let (reply, done) = slave_process_poll(
+            adj,
+            local_router_id,
+            dbd,
+            local_lsdb_headers,
+            max_headers,
+            mtu,
+        );
         let mut actions = vec![Action::SendDbd(reply)];
         if done {
             actions.push(Action::NeighborEvent(Event::ExchangeDone {
@@ -528,6 +579,7 @@ mod tests {
             &dbd,
             &[],
             100,
+            1500,
         );
         assert!(!adj.is_master);
         assert_eq!(adj.dd_sequence_number, 42);
@@ -571,6 +623,7 @@ mod tests {
             &poll,
             &[],
             100,
+            1500,
         );
         assert!(!adj.is_master);
         assert_eq!(adj.dd_sequence_number, 42);
@@ -584,7 +637,7 @@ mod tests {
                 Action::SendDbd(DbdPacket {
                     router_id: router_id("9.9.9.9"),
                     area_id: Ipv4Addr::UNSPECIFIED,
-                    interface_mtu: 0,
+                    interface_mtu: 1500,
                     options: 0,
                     init: false,
                     more: false,
@@ -613,6 +666,7 @@ mod tests {
             &dbd,
             &[],
             100,
+            1500,
         );
         assert!(adj.is_master);
         assert_eq!(adj.dd_sequence_number, 7);
@@ -663,6 +717,7 @@ mod tests {
             &reply,
             &[],
             100,
+            1500,
         );
         assert!(adj.is_master);
         assert_eq!(adj.dd_sequence_number, 7, "must keep our own chosen seed");
@@ -705,6 +760,7 @@ mod tests {
             &reply,
             &[],
             100,
+            1500,
         );
         assert!(actions.is_empty());
     }
@@ -722,6 +778,7 @@ mod tests {
             &dbd,
             &[],
             100,
+            1500,
         );
         assert!(actions.is_empty());
     }
@@ -752,6 +809,7 @@ mod tests {
             &dbd,
             &[],
             100,
+            1500,
         );
         assert_eq!(
             actions,
@@ -793,6 +851,7 @@ mod tests {
             &dbd,
             &[],
             100,
+            1500,
         );
         assert_eq!(adj.dd_sequence_number, 6);
         // The slave must still send its own (empty) reply at the new
@@ -804,7 +863,7 @@ mod tests {
                 Action::SendDbd(DbdPacket {
                     router_id: router_id("9.9.9.9"),
                     area_id: Ipv4Addr::UNSPECIFIED,
-                    interface_mtu: 0,
+                    interface_mtu: 1500,
                     options: 0,
                     init: false,
                     more: false,
@@ -846,6 +905,7 @@ mod tests {
             &dbd,
             &[],
             100,
+            1500,
         );
         assert_eq!(adj.request_list, vec![neighbor_header.key()]);
         assert_eq!(
@@ -884,6 +944,7 @@ mod tests {
             &dbd,
             &[local],
             100,
+            1500,
         );
         assert!(adj.request_list.is_empty());
         assert_eq!(
@@ -929,6 +990,7 @@ mod tests {
             &empty_slave_reply(5),
             &[],
             1,
+            1500,
         );
         assert_eq!(adj.dd_sequence_number, 6);
         assert_eq!(adj.summary_remaining, VecDeque::from(vec![h2]));
@@ -937,7 +999,7 @@ mod tests {
             vec![Action::SendDbd(DbdPacket {
                 router_id: router_id("9.9.9.9"),
                 area_id: Ipv4Addr::UNSPECIFIED,
-                interface_mtu: 0,
+                interface_mtu: 1500,
                 options: 0,
                 init: false,
                 more: true,
@@ -956,6 +1018,7 @@ mod tests {
             &empty_slave_reply(6),
             &[],
             1,
+            1500,
         );
         assert_eq!(adj.dd_sequence_number, 7);
         assert!(adj.summary_remaining.is_empty());
@@ -964,7 +1027,7 @@ mod tests {
             vec![Action::SendDbd(DbdPacket {
                 router_id: router_id("9.9.9.9"),
                 area_id: Ipv4Addr::UNSPECIFIED,
-                interface_mtu: 0,
+                interface_mtu: 1500,
                 options: 0,
                 init: false,
                 more: false,
@@ -983,6 +1046,7 @@ mod tests {
             &empty_slave_reply(7),
             &[],
             1,
+            1500,
         );
         assert_eq!(
             actions,
@@ -1027,6 +1091,7 @@ mod tests {
             &master_poll(6, false),
             &[],
             1,
+            1500,
         );
         assert_eq!(adj.dd_sequence_number, 6);
         assert_eq!(adj.summary_remaining, VecDeque::from(vec![h2]));
@@ -1035,7 +1100,7 @@ mod tests {
             vec![Action::SendDbd(DbdPacket {
                 router_id: router_id("9.9.9.9"),
                 area_id: Ipv4Addr::UNSPECIFIED,
-                interface_mtu: 0,
+                interface_mtu: 1500,
                 options: 0,
                 init: false,
                 more: true,
@@ -1055,6 +1120,7 @@ mod tests {
             &master_poll(7, false),
             &[],
             1,
+            1500,
         );
         assert_eq!(adj.dd_sequence_number, 7);
         assert!(adj.summary_remaining.is_empty());
@@ -1064,7 +1130,7 @@ mod tests {
                 Action::SendDbd(DbdPacket {
                     router_id: router_id("9.9.9.9"),
                     area_id: Ipv4Addr::UNSPECIFIED,
-                    interface_mtu: 0,
+                    interface_mtu: 1500,
                     options: 0,
                     init: false,
                     more: false,
@@ -1113,6 +1179,7 @@ mod tests {
             &slave_reply(5, true, h_a),
             &[],
             100,
+            1500,
         );
         assert_eq!(adj.request_list, vec![h_a.key()]);
         assert_eq!(
@@ -1120,7 +1187,7 @@ mod tests {
             vec![Action::SendDbd(DbdPacket {
                 router_id: router_id("9.9.9.9"),
                 area_id: Ipv4Addr::UNSPECIFIED,
-                interface_mtu: 0,
+                interface_mtu: 1500,
                 options: 0,
                 init: false,
                 more: false,
@@ -1138,6 +1205,7 @@ mod tests {
             &slave_reply(6, false, h_b),
             &[],
             100,
+            1500,
         );
         assert_eq!(
             adj.request_list,
@@ -1178,6 +1246,7 @@ mod tests {
             &dbd,
             &[],
             100,
+            1500,
         );
         assert_eq!(
             actions,
@@ -1216,6 +1285,7 @@ mod tests {
             &dbd,
             &[],
             100,
+            1500,
         );
         assert_eq!(
             actions,
@@ -1243,6 +1313,7 @@ mod tests {
             &dbd,
             &[],
             100,
+            1500,
         );
         assert!(actions.is_empty());
         assert_eq!(adj.dd_sequence_number, 5, "must not adopt the stray seq");
@@ -1264,6 +1335,7 @@ mod tests {
             &dbd,
             &[],
             100,
+            1500,
         );
         assert!(actions.is_empty());
         assert_eq!(adj.dd_sequence_number, 5, "must not adopt the stray seq");
@@ -1285,6 +1357,7 @@ mod tests {
             &dbd,
             &[],
             100,
+            1500,
         );
         assert!(actions.is_empty());
     }
@@ -1302,6 +1375,7 @@ mod tests {
             &dbd,
             &[],
             100,
+            1500,
         );
         assert!(actions.is_empty());
     }

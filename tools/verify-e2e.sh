@@ -14,7 +14,10 @@
 # `loopback-rt1`, detected purely from that name — no separate config field)
 # actually gets a real dummy kernel device created (named from its routing
 # table's allocated kernel table id), enslaved into that table's VRF, and
-# addressed, then deleted again on removal, (via the `switching` subcommand)
+# addressed, then deleted again on removal, (via the `mtu` subcommand) that a
+# non-default MTU configured directly on an interface (a link-layer
+# property, not per-subinterface) actually gets applied to the real kernel
+# link by nos-interfaced's Linux driver, (via the `switching` subcommand)
 # that a real L2 switching profile trunking an interface into two broadcast
 # domains at two different local dot1q tags actually gets one real Linux
 # bridge device created per domain and one real 802.1q sub-interface per
@@ -134,12 +137,21 @@
 # logged) and that the adjacency still reaches Full correctly despite it --
 # see ospf/CLAUDE.md's "Exchange".
 #
+# A tenth, `ospf-mtu-pagination`, is the same scenario with no
+# --dbd-max-headers flag at all, launching its own router-a/router-b and
+# instead configuring a real OspfProfile.mtu override (the RFC 791 minimum,
+# 68 bytes) on their shared point-to-point profile, confirming the identical
+# real multi-packet DBD pagination and Full adjacency, driven purely by
+# `exchange::mtu_based_max_headers` resolving that override -- proving the
+# real production MTU-driven pagination path, not just the test-only CLI
+# override `ospf-dbd-pagination` exercises.
+#
 # nos-cli's interactive shell (reedline) can't be scripted over a plain
 # pipe, so provisioning goes through `nos-provision` (tools/nos-provision) —
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
+# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|mtu|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -261,6 +273,16 @@ OSPF_AGE_MULTIPLIER=180
 # accepts installing the resulting route even though nothing listens there.
 ASBR_PREFIX=192.0.2.128/25
 ASBR_GATEWAY=10.50.0.98
+# The `mtu` scenario's own non-default MTU for router-a's eth0 -- comfortably
+# above Ethernet's 1500-byte default (and below this docker network's own
+# link MTU) so a successful kernel apply is unambiguous.
+MTU_VALUE=9000
+# The `ospf-mtu-pagination` scenario's own OspfProfile.mtu override -- the
+# RFC 791 IPv4 minimum (68), which `exchange::mtu_based_max_headers` resolves
+# to a budget of exactly 1 header per DBD packet (same effective value the
+# `ospf-dbd-pagination` scenario forces via --dbd-max-headers=1), purely from
+# this config override, with no --dbd-max-headers CLI flag involved.
+OSPF_MTU_VALUE=68
 
 log() { echo "[verify-e2e] $*" >&2; }
 
@@ -470,6 +492,29 @@ provision_delete_loopback() {
     --delete-loopback
 }
 
+# --- Interface MTU scenario ---
+#
+# Configures a non-default MTU directly on router-a's own eth0 interface
+# (InterfaceOp::SetMtu -- a link-layer property, not per-subinterface, see
+# proto/CLAUDE.md), verifying nos-interfaced's Linux driver actually applies
+# it to the real kernel link.
+
+provision_mtu() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 mtu=$6
+  log "provisioning $name's eth0 with mtu=$mtu"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --mtu "$mtu"
+}
+
 # --- OSPF instance scenario ---
 #
 # Declares an OSPF instance on a router and associates it with the same
@@ -500,6 +545,30 @@ provision_ospf() {
     --ospf-area "$OSPF_AREA" \
     --ospf-profile "$OSPF_PROFILE" \
     --ospf-interface-profile "$OSPF_PROFILE"
+}
+
+# Same as `provision_ospf`, but also sets a real OspfProfile.mtu override
+# ($OSPF_MTU_VALUE) -- for the `ospf-mtu-pagination` scenario, verifying real
+# MTU-driven DBD pagination with no --dbd-max-headers CLI flag involved.
+provision_ospf_mtu() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 ospf_instance=$6 ospf_router_id=$7
+  log "provisioning $name with ospf instance $ospf_instance and profile mtu=$OSPF_MTU_VALUE"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --ospf-instance "$ospf_instance" \
+    --ospf-router-id "$ospf_router_id" \
+    --ospf-area "$OSPF_AREA" \
+    --ospf-profile "$OSPF_PROFILE" \
+    --ospf-interface-profile "$OSPF_PROFILE" \
+    --ospf-profile-mtu "$OSPF_MTU_VALUE"
 }
 
 # --- ASBR / AS-external-LSA scenario ---
@@ -538,6 +607,36 @@ provision_asbr() {
     --ospf-area "$OSPF_AREA" \
     --ospf-profile "$OSPF_PROFILE" \
     --ospf-interface-profile "$OSPF_PROFILE" \
+    --static-route "$ASBR_PREFIX" \
+    --static-gateway "$ASBR_GATEWAY" \
+    --redistribute-to-ospf
+}
+
+# Same as `provision_asbr`, but also sets a real OspfProfile.mtu override
+# ($OSPF_MTU_VALUE) -- for the `ospf-mtu-pagination` scenario, giving
+# router-a two distinct LSAs (its own Router-LSA plus a self-originated
+# Type-5) the same way `provision_asbr` does for the flag-based
+# `ospf-dbd-pagination` scenario, purely to guarantee a real second DBD round
+# (a single-LSA summary would still fit in one chunk even at max_headers=1).
+provision_asbr_mtu() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 ospf_instance=$6 ospf_router_id=$7
+  log "provisioning $name with a static route + 'redistribute from static to ospf' and profile mtu=$OSPF_MTU_VALUE"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --ospf-instance "$ospf_instance" \
+    --ospf-router-id "$ospf_router_id" \
+    --ospf-area "$OSPF_AREA" \
+    --ospf-profile "$OSPF_PROFILE" \
+    --ospf-interface-profile "$OSPF_PROFILE" \
+    --ospf-profile-mtu "$OSPF_MTU_VALUE" \
     --static-route "$ASBR_PREFIX" \
     --static-gateway "$ASBR_GATEWAY" \
     --redistribute-to-ospf
@@ -1256,6 +1355,15 @@ cmd_check_loopback() {
     || { log "router-a: FAILED to delete the loopback device"; return 1; }
 }
 
+cmd_check_mtu() {
+  provision_mtu router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$MTU_VALUE"
+
+  log "waiting for router-a to apply mtu=$MTU_VALUE to eth0"
+  wait_for_count_increase router-a "applied interface mtu interface=eth0 mtu=$MTU_VALUE" 0 60 \
+    && log "router-a: applied mtu $MTU_VALUE to eth0" \
+    || { log "router-a: FAILED to apply the interface mtu"; return 1; }
+}
+
 cmd_check_ospf() {
   provision_ospf router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID"
   provision_ospf router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID_B"
@@ -1695,6 +1803,57 @@ cmd_check_ospf_dbd_pagination() {
   fi
 
   log "waiting for router-a/router-b to still reach ospf full despite pagination"
+  wait_for_count_increase router-a "ospf neighbor reached full link=eth0.0 neighbor=$OSPF_ROUTER_ID_B" 0 60 \
+    && log "router-a: reached ospf full with $OSPF_ROUTER_ID_B" \
+    || { log "router-a: FAILED to reach ospf full"; return 1; }
+  wait_for_count_increase router-b "ospf neighbor reached full link=eth0.0 neighbor=$OSPF_ROUTER_ID" 0 60 \
+    && log "router-b: reached ospf full with $OSPF_ROUTER_ID" \
+    || { log "router-b: FAILED to reach ospf full"; return 1; }
+}
+
+# --- OSPF MTU-driven DBD pagination scenario ---
+#
+# Self-contained (own router-a/router-b), like `ospf-dbd-pagination`, but
+# launched with NO --dbd-max-headers CLI flag at all -- proving real DBD
+# pagination driven purely by a real OspfProfile.mtu override
+# ($OSPF_MTU_VALUE, the RFC 791 minimum), via `exchange::
+# mtu_based_max_headers`, rather than the test-only CLI override. router-a
+# also redistributes a static route into ospf (`provision_asbr_mtu`, the same
+# provisioning `ospf-dbd-pagination` uses via `provision_asbr`), purely to
+# give it two distinct LSAs already installed before the DBD exchange
+# starts, since a single-LSA summary still fits in one chunk even at
+# max_headers=1 -- see ospf/CLAUDE.md's "Exchange".
+cmd_up_ospf_mtu_pagination() {
+  ensure_env_up
+  start_router router-a "$IP_A"
+  start_router router-b "$IP_B"
+  wait_for_config_socket router-a
+  wait_for_config_socket router-b
+  provision_asbr_mtu router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID"
+  provision_ospf_mtu router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID_B"
+}
+
+cmd_check_ospf_mtu_pagination() {
+  cmd_up_ospf_mtu_pagination
+
+  log "waiting for router-a to apply its own eth0 profile mtu (no --dbd-max-headers flag involved)"
+  wait_for_count_increase router-a "ospf profile resolved instance=$OSPF_INSTANCE" 0 60 \
+    && log "router-a: resolved its ospf profile" \
+    || { log "router-a: FAILED to resolve its ospf profile"; return 1; }
+
+  # Same anchor `ospf-dbd-pagination` checks -- but this time nothing on
+  # either process's command line forced pagination; it can only have come
+  # from the real OspfProfile.mtu override resolving to a tiny max_headers.
+  log "waiting for a real multi-packet dbd chunk to be sent, driven purely by the mtu override"
+  if wait_for_count_increase router-a "ospf dbd chunk sent, more remaining" 0 60 \
+      || wait_for_count_increase router-b "ospf dbd chunk sent, more remaining" 0 60; then
+    log "pagination triggered by mtu override: a dbd chunk with more remaining was sent"
+  else
+    log "FAILED: no paginated dbd chunk was ever sent"
+    return 1
+  fi
+
+  log "waiting for router-a/router-b to still reach ospf full despite mtu-driven pagination"
   wait_for_count_increase router-a "ospf neighbor reached full link=eth0.0 neighbor=$OSPF_ROUTER_ID_B" 0 60 \
     && log "router-a: reached ospf full with $OSPF_ROUTER_ID_B" \
     || { log "router-a: FAILED to reach ospf full"; return 1; }
@@ -2237,6 +2396,7 @@ cmd_group_drivers() {
   cmd_up
   cmd_check_established
   cmd_check_loopback
+  cmd_check_mtu
   cmd_check_switching
   cmd_check_svi
   cmd_check_routed_subinterface
@@ -2265,6 +2425,7 @@ cmd_group_ospf_suite() {
   cmd_check_ospf_auth
   cmd_check_ospf_aging
   cmd_check_ospf_dbd_pagination
+  cmd_check_ospf_mtu_pagination
 }
 
 cmd_group_multi() {
@@ -2281,6 +2442,7 @@ case "${1:-}" in
   redistribute) cmd_check_redistribute ;;
   auth) cmd_check_auth ;;
   loopback) cmd_check_loopback ;;
+  mtu) cmd_check_mtu ;;
   switching) cmd_check_switching ;;
   svi) cmd_check_svi ;;
   routed-subinterface) cmd_check_routed_subinterface ;;
@@ -2298,6 +2460,7 @@ case "${1:-}" in
   ospf-aging) cmd_check_ospf_aging ;;
   ospf-auth) cmd_check_ospf_auth ;;
   ospf-dbd-pagination) cmd_check_ospf_dbd_pagination ;;
+  ospf-mtu-pagination) cmd_check_ospf_mtu_pagination ;;
   logs) shift; cmd_logs "$@" ;;
   down) cmd_down ;;
   base) cmd_group_base ;;
@@ -2313,6 +2476,7 @@ case "${1:-}" in
     cmd_check_redistribute
     cmd_check_auth
     cmd_check_loopback
+    cmd_check_mtu
     cmd_check_switching
     cmd_check_svi
     cmd_check_routed_subinterface
@@ -2330,9 +2494,10 @@ case "${1:-}" in
     cmd_check_ospf_auth
     cmd_check_ospf_aging
     cmd_check_ospf_dbd_pagination
+    cmd_check_ospf_mtu_pagination
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|mtu|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
     exit 2
     ;;
 esac
