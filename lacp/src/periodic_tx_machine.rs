@@ -1,19 +1,17 @@
 //! IEEE 802.1AX-2014 §6.4.13 Periodic Transmission Machine — how often this
 //! port sends an LACPDU.
 //!
-//! A port with no live partner (`Expired`/`Defaulted`) transmits at the Fast
-//! rate (1s), as 802.1AX does while the partner's timeout preference is
-//! still the (short) administrative default. Once `Current` it drops to Slow
-//! (30s). Fast-until-heard matters in practice: a port whose link comes up
-//! after its first send would otherwise sit silent for a full Slow interval
-//! before its partner ever hears it.
+//! Each end transmits at the rate the *other* end asks for (its advertised
+//! `Actor_State.LACP_Timeout`, i.e. its `LacpRate`): Fast (1s) if the partner
+//! asked for Fast, Slow (30s) otherwise. A port with no live partner
+//! (`Expired`/`Defaulted`) transmits Fast regardless, as 802.1AX does while
+//! the partner's timeout preference is still the (short) administrative
+//! default — fast-until-heard matters in practice, since a port whose link
+//! comes up after its first send would otherwise sit silent for a whole Slow
+//! interval before its partner ever hears it.
 //!
-//! `ponytail:` the rate is chosen only from *our* Receive state — never from
-//! the partner's advertised `LACP_Timeout` bit — and we always advertise the
-//! Long timeout ourselves. A partner that insists on Fast from us is
-//! therefore still sent Slow once `Current`; most implementations tolerate
-//! that. Upgrade path: honor the bit from `receive_machine::Event::
-//! LacpduReceived`.
+//! The mirror image — how long *we* wait for the partner's LACPDUs — follows
+//! our own rate and lives in `receive_machine` (`Current_While_Timer`).
 
 use std::time::Duration;
 
@@ -22,10 +20,13 @@ use crate::receive_machine::ReceiveState;
 pub const SLOW_PERIODIC_INTERVAL: Duration = Duration::from_secs(30);
 pub const FAST_PERIODIC_INTERVAL: Duration = Duration::from_secs(1);
 
-pub fn interval_for(receive_state: ReceiveState) -> Duration {
+/// `partner_wants_fast` is the partner's most recently advertised
+/// `LACP_Timeout` bit (`false` if none has been heard).
+pub fn interval_for(receive_state: ReceiveState, partner_wants_fast: bool) -> Duration {
     match receive_state {
-        ReceiveState::Current => SLOW_PERIODIC_INTERVAL,
         ReceiveState::Expired | ReceiveState::Defaulted => FAST_PERIODIC_INTERVAL,
+        ReceiveState::Current if partner_wants_fast => FAST_PERIODIC_INTERVAL,
+        ReceiveState::Current => SLOW_PERIODIC_INTERVAL,
     }
 }
 
@@ -34,12 +35,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fast_until_a_partner_is_heard_then_slow() {
-        assert_eq!(interval_for(ReceiveState::Expired), FAST_PERIODIC_INTERVAL);
+    fn always_fast_until_a_partner_is_heard() {
+        for partner_wants_fast in [false, true] {
+            assert_eq!(
+                interval_for(ReceiveState::Expired, partner_wants_fast),
+                FAST_PERIODIC_INTERVAL
+            );
+            assert_eq!(
+                interval_for(ReceiveState::Defaulted, partner_wants_fast),
+                FAST_PERIODIC_INTERVAL
+            );
+        }
+    }
+
+    #[test]
+    fn once_current_follows_the_partners_request() {
         assert_eq!(
-            interval_for(ReceiveState::Defaulted),
+            interval_for(ReceiveState::Current, false),
+            SLOW_PERIODIC_INTERVAL
+        );
+        assert_eq!(
+            interval_for(ReceiveState::Current, true),
             FAST_PERIODIC_INTERVAL
         );
-        assert_eq!(interval_for(ReceiveState::Current), SLOW_PERIODIC_INTERVAL);
     }
 }

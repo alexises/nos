@@ -19,11 +19,11 @@ use futures::{SinkExt, StreamExt};
 use ipnet::IpNet;
 use nos_proto::{
     AddressFamily, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, ConfigOp, Event,
-    InterfaceOp, IpcCodec, OspfAreaOp, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstanceOp,
-    OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp,
-    PortAggregateMode, PortAggregateOp, Redistribute, RedistributeSource, RedistributeTarget,
-    Request, RoutingTableOp, SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp,
-    SwitchingProfileOp, TransactionBase, VlanTag,
+    InterfaceOp, IpcCodec, LacpRate, OspfAreaOp, OspfCryptoAlgorithm, OspfCryptoKey,
+    OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
+    PolicyDefinitionOp, PortAggregateMode, PortAggregateOp, Redistribute, RedistributeSource,
+    RedistributeTarget, Request, RoutingTableOp, SourceAddress, StaticRouteOp,
+    StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase, VlanTag,
 };
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -42,6 +42,23 @@ impl From<PortAggregateModeArg> for PortAggregateMode {
         match mode {
             PortAggregateModeArg::Xor => PortAggregateMode::Xor,
             PortAggregateModeArg::Lacp => PortAggregateMode::Lacp,
+        }
+    }
+}
+
+/// Clap-facing mirror of `nos_proto::LacpRate`, for the same reason as
+/// `PortAggregateModeArg`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum LacpRateArg {
+    Slow,
+    Fast,
+}
+
+impl From<LacpRateArg> for LacpRate {
+    fn from(rate: LacpRateArg) -> Self {
+        match rate {
+            LacpRateArg::Slow => LacpRate::Slow,
+            LacpRateArg::Fast => LacpRate::Fast,
         }
     }
 }
@@ -298,6 +315,11 @@ struct Args {
     /// `--port-aggregate` also set.
     #[arg(long, value_enum, default_value_t = PortAggregateModeArg::Xor)]
     port_aggregate_mode: PortAggregateModeArg,
+
+    /// If set (requires `--port-aggregate`), sets the aggregate's LACP
+    /// timeout rate (`PortAggregateOp::SetLacpRate`).
+    #[arg(long, value_enum)]
+    lacp_rate: Option<LacpRateArg>,
 
     /// If set (requires `--port-aggregate`), sets the aggregate's own mtu
     /// (`PortAggregateOp::SetMtu`).
@@ -864,6 +886,12 @@ async fn main() -> anyhow::Result<()> {
             name: name.clone(),
             mode: args.port_aggregate_mode.into(),
         }));
+        if let Some(rate) = args.lacp_rate {
+            ops.push(ConfigOp::PortAggregate(PortAggregateOp::SetLacpRate {
+                name: name.clone(),
+                rate: rate.into(),
+            }));
+        }
         if let Some(mtu) = args.port_aggregate_mtu {
             ops.push(ConfigOp::PortAggregate(PortAggregateOp::SetMtu {
                 name: name.clone(),
@@ -879,9 +907,12 @@ async fn main() -> anyhow::Result<()> {
                 port_aggregate: name.clone(),
             }));
         }
-    } else if args.port_aggregate_mtu.is_some() || !args.port_aggregate_members.is_empty() {
+    } else if args.port_aggregate_mtu.is_some()
+        || args.lacp_rate.is_some()
+        || !args.port_aggregate_members.is_empty()
+    {
         bail!(
-            "--port-aggregate-mtu/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
+            "--port-aggregate-mtu/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
         );
     }
 

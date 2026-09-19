@@ -7,13 +7,18 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use nos_proto::LacpAggregateMembers;
+use nos_proto::{
+    LacpAggregateMembers, LacpMuxState, LacpPortStatus, LacpRate, LacpReceiveState,
+    PortAggregateLacpSummary,
+};
 use tokio::sync::{mpsc, watch, Notify};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::link::{self, LinkConfig, PortObservation};
 use crate::mux_machine::MuxState;
+use crate::packet::state_bit;
+use crate::receive_machine::ReceiveState;
 use crate::selection::{self, PortCandidate};
 
 /// 802.1AX defaults — no CLI-exposed knobs in v1 (see `lacp/CLAUDE.md`).
@@ -23,6 +28,11 @@ const ACTOR_PORT_PRIORITY: u16 = 32768;
 type SelectedTxs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 
 pub struct AggregateManager {
+    name: String,
+    /// The rate the currently-running member tasks were started with — a
+    /// change restarts them all (their advertised `LACP_Timeout` and timers
+    /// are fixed for a task's lifetime).
+    rate: Mutex<LacpRate>,
     /// Assigned once, sequentially, the first time `reconcile.rs` sees this
     /// aggregate name (see `reconcile.rs`) — not persisted, only needs to
     /// differ between simultaneously-active aggregates on this instance.
@@ -54,6 +64,8 @@ impl AggregateManager {
             push_tx,
         ));
         Arc::new(Self {
+            name: name.to_string(),
+            rate: Mutex::new(LacpRate::default()),
             key,
             members: Mutex::new(HashMap::new()),
             selected_txs,
@@ -66,8 +78,16 @@ impl AggregateManager {
 
     /// Diffs `desired_members` (real kernel interface names) against the
     /// currently-running set, spawning/stopping `link::run` tasks as needed.
-    pub fn reconcile(&self, mut desired_members: Vec<String>) {
+    /// A changed `rate` restarts every member (each renegotiates from
+    /// scratch, briefly dropping out of the active set).
+    pub fn reconcile(&self, mut desired_members: Vec<String>, rate: LacpRate) {
         desired_members.sort();
+        let rate_changed = {
+            let mut current = self.rate.lock().unwrap();
+            let changed = *current != rate;
+            *current = rate;
+            changed
+        };
 
         let mut members = self.members.lock().unwrap();
         let mut selected_txs = self.selected_txs.lock().unwrap();
@@ -75,7 +95,7 @@ impl AggregateManager {
 
         let to_remove: Vec<String> = members
             .keys()
-            .filter(|k| !desired_members.contains(k))
+            .filter(|k| rate_changed || !desired_members.contains(k))
             .cloned()
             .collect();
         for interface in to_remove {
@@ -102,6 +122,7 @@ impl AggregateManager {
                 actor_system_priority: ACTOR_SYSTEM_PRIORITY,
                 actor_key: self.key,
                 actor_port_priority: ACTOR_PORT_PRIORITY,
+                rate,
                 selected_rx,
             };
             let task = tokio::spawn(link::run(
@@ -114,6 +135,36 @@ impl AggregateManager {
         }
         drop((members, selected_txs, observations));
         self.changed.notify_one();
+    }
+
+    /// This aggregate's current LACP state, for `show lacp`.
+    pub fn summary(&self) -> PortAggregateLacpSummary {
+        let observations = self.observations.lock().unwrap();
+        let selected_txs = self.selected_txs.lock().unwrap();
+        let mut ports: Vec<LacpPortStatus> = observations
+            .iter()
+            .map(|(interface, obs)| LacpPortStatus {
+                interface: interface.clone(),
+                actor_port_number: obs.actor_port,
+                receive_state: wire_receive_state(obs.receive_state),
+                mux_state: wire_mux_state(obs.mux_state),
+                partner_system_id: obs.partner.map(|p| p.system),
+                partner_key: obs.partner.map(|p| p.key),
+                partner_port_number: obs.partner.map(|p| p.port),
+                selected: selected_txs.get(interface).is_some_and(|tx| *tx.borrow()),
+                synchronized: obs
+                    .partner
+                    .is_some_and(|p| p.has_state(state_bit::SYNCHRONIZATION)),
+            })
+            .collect();
+        ports.sort_by(|a, b| a.interface.cmp(&b.interface));
+        PortAggregateLacpSummary {
+            aggregate: self.name.clone(),
+            actor_system_id: self.system_id,
+            actor_key: self.key,
+            rate: *self.rate.lock().unwrap(),
+            ports,
+        }
     }
 
     /// Stops every member task and the selection loop — called when this
@@ -148,9 +199,9 @@ async fn selection_loop(
             .iter()
             .map(|(interface, obs)| PortCandidate {
                 interface: interface.clone(),
-                current: obs.current,
-                partner_system_id: obs.partner_system_id,
-                partner_key: obs.partner_key,
+                current: obs.current(),
+                partner_system_id: obs.partner.map(|p| p.system).unwrap_or_default(),
+                partner_key: obs.partner.map(|p| p.key).unwrap_or_default(),
             })
             .collect();
         let selected = selection::select(&candidates);
@@ -187,6 +238,24 @@ async fn selection_loop(
             }
             last_pushed = Some(active_members);
         }
+    }
+}
+
+fn wire_receive_state(state: ReceiveState) -> LacpReceiveState {
+    match state {
+        ReceiveState::Expired => LacpReceiveState::Expired,
+        ReceiveState::Defaulted => LacpReceiveState::Defaulted,
+        ReceiveState::Current => LacpReceiveState::Current,
+    }
+}
+
+fn wire_mux_state(state: MuxState) -> LacpMuxState {
+    match state {
+        MuxState::Detached => LacpMuxState::Detached,
+        MuxState::Waiting => LacpMuxState::Waiting,
+        MuxState::Attached => LacpMuxState::Attached,
+        MuxState::Collecting => LacpMuxState::Collecting,
+        MuxState::Distributing => LacpMuxState::Distributing,
     }
 }
 

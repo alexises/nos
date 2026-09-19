@@ -26,10 +26,25 @@ pub enum PortAggregateMode {
     Lacp,
 }
 
-/// A named Linux bonding device — static aggregation only, no LACP. Same
+/// How often this end asks its LACP partner to send LACPDUs (802.1AX's
+/// `LACP_Timeout`), and therefore how long it waits before declaring the
+/// partner gone: `Slow` is every 30s (90s to detect loss), `Fast` every 1s
+/// (3s to detect loss). Only meaningful for a `Lacp`-mode aggregate. Like
+/// Linux bonding's `lacp_rate`, it's a request to the partner — each end
+/// transmits at the rate the *other* end asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LacpRate {
+    #[default]
+    Slow,
+    Fast,
+}
+
+/// A named Linux bonding device, statically (`Xor`) or LACP-negotiated
+/// (`Lacp`). Same
 /// config surface as a *physical* `Interface` (never a loopback — bonding a
 /// loopback makes no sense): `switching_profile`/`mtu`/`subinterfaces`, all
-/// validated by the exact same helpers `Interface` uses, plus `mode`. All L3
+/// validated by the exact same helpers `Interface` uses, plus `mode`/
+/// `lacp_rate`. All L3
 /// config (addresses/routing-table/OSPF) lives under `subinterfaces` (tag 0
 /// for the untagged/native case), exactly like a physical `Interface` — a
 /// `PortAggregate` never gets the loopback-style flat `addresses`/
@@ -49,6 +64,12 @@ pub struct PortAggregate {
 
     #[garde(skip)]
     pub mode: PortAggregateMode,
+
+    /// See [`LacpRate`]. `#[serde(default)]` so a config persisted before
+    /// this field existed still loads.
+    #[serde(default)]
+    #[garde(skip)]
+    pub lacp_rate: LacpRate,
 
     /// Names a `SwitchingProfile` trunking this bond into one or more
     /// `BroadcastDomain`s — same field, same meaning, as
@@ -123,6 +144,7 @@ mod tests {
         PortAggregate {
             name: name.to_string(),
             mode: PortAggregateMode::Xor, // arbitrary — mode has no bearing on the validators tested here
+            lacp_rate: LacpRate::default(),
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),

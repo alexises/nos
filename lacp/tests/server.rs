@@ -1,0 +1,57 @@
+use std::sync::Arc;
+
+use futures::{SinkExt, StreamExt};
+use nos_lacp::aggregate::AggregateManager;
+use nos_lacp::reconcile::SharedAggregates;
+use nos_lacp::server;
+use nos_proto::{IpcCodec, LacpEvent, LacpRate, LacpRequest};
+use tokio::net::UnixStream;
+use tokio::sync::mpsc;
+use tokio_util::codec::{FramedRead, FramedWrite};
+
+async fn query(path: &std::path::Path) -> Vec<nos_proto::PortAggregateLacpSummary> {
+    let stream = UnixStream::connect(path).await.unwrap();
+    let (r, w) = stream.into_split();
+    let mut reader = FramedRead::new(r, IpcCodec::<LacpEvent>::default());
+    let mut writer = FramedWrite::new(w, IpcCodec::<LacpRequest>::default());
+    writer.send(LacpRequest::GetSummary).await.unwrap();
+    let LacpEvent::Summary(summaries) = reader.next().await.unwrap().unwrap();
+    summaries
+}
+
+#[tokio::test]
+async fn get_summary_lists_every_aggregate_sorted_with_its_rate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("lacp.sock");
+    let (push_tx, _push_rx) = mpsc::channel(4);
+
+    let aggregates = SharedAggregates::default();
+    for (name, key, rate) in [("bond-b", 2, LacpRate::Fast), ("bond-a", 1, LacpRate::Slow)] {
+        let manager = AggregateManager::new(name, key, push_tx.clone());
+        // No members: exercises the summary/rate plumbing without needing a
+        // raw socket (which needs CAP_NET_RAW).
+        manager.reconcile(Vec::new(), rate);
+        aggregates
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), Arc::clone(&manager));
+    }
+    let _server = server::start(&path, aggregates).unwrap();
+
+    let summaries = query(&path).await;
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].aggregate, "bond-a");
+    assert_eq!(summaries[0].rate, LacpRate::Slow);
+    assert_eq!(summaries[0].actor_key, 1);
+    assert_eq!(summaries[1].aggregate, "bond-b");
+    assert_eq!(summaries[1].rate, LacpRate::Fast);
+    assert!(summaries[0].ports.is_empty());
+}
+
+#[tokio::test]
+async fn get_summary_with_no_aggregates_is_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("lacp.sock");
+    let _server = server::start(&path, SharedAggregates::default()).unwrap();
+    assert!(query(&path).await.is_empty());
+}

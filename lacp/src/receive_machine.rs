@@ -24,12 +24,13 @@ pub enum ReceiveState {
 pub enum Event {
     /// The link task has just started (or restarted after a socket error).
     Started,
-    /// A valid LACPDU was received. `partner_wants_short_timeout` is the
-    /// sender's own advertised `Actor_State.LACP_Timeout` bit — it governs
-    /// how long *we* wait before assuming this partner has gone quiet
-    /// (802.1AX's Short/Long `Current_While_Timer`).
+    /// A valid LACPDU was received. `we_advertise_short_timeout` is *our
+    /// own* `Actor_State.LACP_Timeout` (`LacpRate::Fast`) — the rate we asked
+    /// the partner to send at, and therefore how long we wait before
+    /// assuming it has gone quiet (802.1AX's Short/Long `Current_While_Timer`
+    /// follows the actor's own setting, not the partner's).
     LacpduReceived {
-        partner_wants_short_timeout: bool,
+        we_advertise_short_timeout: bool,
     },
     CurrentWhileTimerExpired,
 }
@@ -70,10 +71,10 @@ pub fn step(state: ReceiveState, event: Event) -> (ReceiveState, Action) {
         (
             ReceiveState::Expired | ReceiveState::Current | ReceiveState::Defaulted,
             Event::LacpduReceived {
-                partner_wants_short_timeout,
+                we_advertise_short_timeout,
             },
         ) => {
-            let duration = if partner_wants_short_timeout {
+            let duration = if we_advertise_short_timeout {
                 TimerDuration::Short
             } else {
                 TimerDuration::Long
@@ -123,7 +124,7 @@ mod tests {
             let (next, _) = step(
                 state,
                 Event::LacpduReceived {
-                    partner_wants_short_timeout: true,
+                    we_advertise_short_timeout: true,
                 },
             );
             assert_eq!(next, ReceiveState::Current);
@@ -135,7 +136,7 @@ mod tests {
         let (_, action) = step(
             ReceiveState::Expired,
             Event::LacpduReceived {
-                partner_wants_short_timeout: true,
+                we_advertise_short_timeout: true,
             },
         );
         assert_eq!(action, Action::StartCurrentWhileTimer(TimerDuration::Short));
@@ -143,7 +144,7 @@ mod tests {
         let (_, action) = step(
             ReceiveState::Expired,
             Event::LacpduReceived {
-                partner_wants_short_timeout: false,
+                we_advertise_short_timeout: false,
             },
         );
         assert_eq!(action, Action::StartCurrentWhileTimer(TimerDuration::Long));

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use nos_proto::LacpRate;
 use tokio::sync::{watch, Notify};
 use tracing::{debug, info, warn};
 
@@ -24,6 +25,9 @@ pub struct LinkConfig {
     pub actor_system_priority: u16,
     pub actor_key: u16,
     pub actor_port_priority: u16,
+    /// How fast we ask the partner to send (our advertised `LACP_Timeout`),
+    /// and so how long we wait for it — see `receive_machine`.
+    pub rate: LacpRate,
     /// This aggregate's `selected_rx.borrow()` reflects Selection Logic's
     /// current verdict for this specific port — updated by `aggregate.rs`
     /// whenever it re-runs `selection::select` (on any port's observation
@@ -33,24 +37,20 @@ pub struct LinkConfig {
 
 /// One member port's currently-observed state, as reported up to
 /// `aggregate.rs` after every event that could change it — the input to
-/// both `selection::select` (needs `current`/partner identity) and the
-/// active-member-set computation (needs `mux_state`).
+/// `selection::select`, the active-member-set computation, and `show lacp`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PortObservation {
-    pub current: bool,
-    pub partner_system_id: [u8; 6],
-    pub partner_key: u16,
+    pub receive_state: ReceiveState,
     pub mux_state: MuxState,
+    pub actor_port: u16,
+    /// The partner's last recorded Actor information — `None` until a
+    /// LACPDU has been heard, and again once the Receive Machine gives up.
+    pub partner: Option<PortInfo>,
 }
 
-impl Default for PortObservation {
-    fn default() -> Self {
-        Self {
-            current: false,
-            partner_system_id: [0; 6],
-            partner_key: 0,
-            mux_state: MuxState::Detached,
-        }
+impl PortObservation {
+    pub fn current(&self) -> bool {
+        self.receive_state == ReceiveState::Current
     }
 }
 
@@ -106,6 +106,7 @@ pub async fn run(
         &observations,
         &changed,
         &config.interface,
+        port_number,
         receive_state,
         mux_state,
         partner,
@@ -119,7 +120,10 @@ pub async fn run(
                 last_sent = Some(pdu);
                 // Must move the deadline forward every time it fires, or the
                 // elapsed deadline re-fires immediately: a hot loop.
-                next_periodic_send = Instant::now() + interval_for(receive_state);
+                next_periodic_send = Instant::now() + interval_for(
+                    receive_state,
+                    partner.is_some_and(|p| p.has_state(state_bit::TIMEOUT)),
+                );
             }
             () = tokio::time::sleep_until(current_while_deadline.into()) => {
                 let (rs, action) = receive_machine::step(receive_state, receive_machine::Event::CurrentWhileTimerExpired);
@@ -135,7 +139,7 @@ pub async fn run(
                     apply_mux_action(mux_action, &mut wait_while_deadline);
                 }
                 info!(interface = %config.interface, receive_state = ?receive_state, "lacp receive machine transitioned");
-                report(&observations, &changed, &config.interface, receive_state, mux_state, partner);
+                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner);
                 send_if_changed(&socket, &config.interface, &mut last_sent, build_pdu(&config, port_number, receive_state, mux_state, partner));
             }
             () = tokio::time::sleep_until(wait_while_deadline.into()) => {
@@ -143,7 +147,7 @@ pub async fn run(
                 mux_state = ms;
                 apply_mux_action(action, &mut wait_while_deadline);
                 info!(interface = %config.interface, mux_state = ?mux_state, "lacp mux machine transitioned");
-                report(&observations, &changed, &config.interface, receive_state, mux_state, partner);
+                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner);
                 send_if_changed(&socket, &config.interface, &mut last_sent, build_pdu(&config, port_number, receive_state, mux_state, partner));
             }
             result = selected_rx.changed() => {
@@ -156,7 +160,7 @@ pub async fn run(
                 mux_state = ms;
                 apply_mux_action(action, &mut wait_while_deadline);
                 info!(interface = %config.interface, mux_state = ?mux_state, selected, "lacp mux machine transitioned");
-                report(&observations, &changed, &config.interface, receive_state, mux_state, partner);
+                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner);
                 send_if_changed(&socket, &config.interface, &mut last_sent, build_pdu(&config, port_number, receive_state, mux_state, partner));
             }
             recv = socket.recv() => {
@@ -171,7 +175,7 @@ pub async fn run(
                 let (rs, action) = receive_machine::step(
                     receive_state,
                     receive_machine::Event::LacpduReceived {
-                        partner_wants_short_timeout: pdu.actor.has_state(state_bit::TIMEOUT),
+                        we_advertise_short_timeout: config.rate == LacpRate::Fast,
                     },
                 );
                 receive_state = rs;
@@ -192,7 +196,7 @@ pub async fn run(
                     partner_system = ?pdu.actor.system,
                     "lacp lacpdu received"
                 );
-                report(&observations, &changed, &config.interface, receive_state, mux_state, partner);
+                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner);
                 send_if_changed(&socket, &config.interface, &mut last_sent, build_pdu(&config, port_number, receive_state, mux_state, partner));
             }
         }
@@ -242,15 +246,16 @@ fn report(
     observations: &Arc<Mutex<HashMap<String, PortObservation>>>,
     changed: &Arc<Notify>,
     interface: &str,
+    actor_port: u16,
     receive_state: ReceiveState,
     mux_state: MuxState,
     partner: Option<PortInfo>,
 ) {
     let observation = PortObservation {
-        current: receive_state == ReceiveState::Current,
-        partner_system_id: partner.map(|p| p.system).unwrap_or_default(),
-        partner_key: partner.map(|p| p.key).unwrap_or_default(),
+        receive_state,
         mux_state,
+        actor_port,
+        partner,
     };
     let mut observations = observations.lock().unwrap();
     // Only signal on a real change: `aggregate.rs` reacts to every
@@ -268,10 +273,13 @@ fn report(
 /// This port's own advertised `Actor_State` byte — see 802.1AX Table 6-4.
 /// `Activity`/`Aggregation` are always set (v1 has no Passive mode, no
 /// `Individual` aggregation — see `lacp/CLAUDE.md`'s deferred list);
-/// `Timeout` always advertises Long (v1 always transmits Slow, see
-/// `periodic_tx_machine`); the rest reflect the live state machines.
-fn actor_state_byte(receive_state: ReceiveState, mux_state: MuxState) -> u8 {
+/// `Timeout` is the aggregate's `LacpRate` (set = Fast, asking the partner
+/// to send every second); the rest reflect the live state machines.
+fn actor_state_byte(receive_state: ReceiveState, mux_state: MuxState, rate: LacpRate) -> u8 {
     let mut state = state_bit::ACTIVITY | state_bit::AGGREGATION;
+    if rate == LacpRate::Fast {
+        state |= state_bit::TIMEOUT;
+    }
     if matches!(
         mux_state,
         MuxState::Attached | MuxState::Collecting | MuxState::Distributing
@@ -305,7 +313,7 @@ fn build_pdu(
         key: config.actor_key,
         port_priority: config.actor_port_priority,
         port: port_number,
-        state: actor_state_byte(receive_state, mux_state),
+        state: actor_state_byte(receive_state, mux_state, config.rate),
     };
     // Before any LACPDU has ever been received, our own view of the
     // partner is all-zero/defaulted — 802.1AX's administrative default.
@@ -374,6 +382,7 @@ mod tests {
                 &observations,
                 &changed,
                 "eth1",
+                1,
                 ReceiveState::Expired,
                 MuxState::Detached,
                 None,
@@ -409,6 +418,13 @@ mod tests {
         let mut deadline = pending;
         apply_mux_action(action, &mut deadline);
         assert_eq!(deadline, pending);
+    }
+
+    #[test]
+    fn fast_rate_sets_the_advertised_timeout_bit_and_slow_clears_it() {
+        let state = |rate| actor_state_byte(ReceiveState::Current, MuxState::Detached, rate);
+        assert_ne!(state(LacpRate::Fast) & state_bit::TIMEOUT, 0);
+        assert_eq!(state(LacpRate::Slow) & state_bit::TIMEOUT, 0);
     }
 
     #[test]

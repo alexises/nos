@@ -472,6 +472,9 @@ pub enum Resolved {
     ShowPortAggregate {
         name: Option<String>,
     },
+    ShowLacp {
+        name: Option<String>,
+    },
     /// `show log [<source>] [--follow]` — data-plane, valid in any mode.
     ShowLog {
         source: Option<String>,
@@ -549,6 +552,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowRoute { table, address } => Resolved::ShowRoute { table, address },
         Command::ShowInterface { name } => Resolved::ShowInterface { name },
         Command::ShowPortAggregate { name } => Resolved::ShowPortAggregate { name },
+        Command::ShowLacp { name } => Resolved::ShowLacp { name },
         Command::ShowLog { source, follow } => Resolved::ShowLog { source, follow },
         Command::ShowBgpBrief => Resolved::ShowBgpBrief,
         Command::ShowOspfNeigh => Resolved::ShowOspfNeigh,
@@ -1469,6 +1473,17 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             }),
             after: PathAfter::Stay,
         },
+        Command::Set(SetTarget::PortAggregateLacpRate { name, rate }) => Resolved::ApplyOp {
+            op: ConfigOp::PortAggregate(PortAggregateOp::SetLacpRate { name, rate }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::PortAggregateLacpRateRelative { rate }) => Resolved::ApplyOp {
+            op: ConfigOp::PortAggregate(PortAggregateOp::SetLacpRate {
+                name: path.port_aggregate()?.to_string(),
+                rate,
+            }),
+            after: PathAfter::Stay,
+        },
         Command::Set(SetTarget::InterfacePortAggregate {
             name,
             port_aggregate,
@@ -2171,6 +2186,7 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
         | Command::ShowRoute { .. }
         | Command::ShowInterface { .. }
         | Command::ShowPortAggregate { .. }
+        | Command::ShowLacp { .. }
         | Command::ShowLog { .. }
         | Command::ShowBgpBrief
         | Command::ShowOspfNeigh
@@ -5567,6 +5583,45 @@ mod tests {
                     name: "bond1".to_string(),
                 }),
                 after: PathAfter::ToRoot,
+            }
+        );
+    }
+
+    #[test]
+    fn show_lacp_works_in_any_mode() {
+        assert_eq!(
+            resolve(&Mode::Operational, Command::ShowLacp { name: None }),
+            Resolved::ShowLacp { name: None }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::ShowLacp {
+                    name: Some("bond1".to_string()),
+                }
+            ),
+            Resolved::ShowLacp {
+                name: Some("bond1".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn set_lacp_rate_resolves_to_a_port_aggregate_op() {
+        let mode = config_mode("t1", Path::PortAggregate("bond1".to_string()), false);
+        assert_eq!(
+            resolve(
+                &mode,
+                Command::Set(SetTarget::PortAggregateLacpRateRelative {
+                    rate: nos_proto::LacpRate::Fast,
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::PortAggregate(PortAggregateOp::SetLacpRate {
+                    name: "bond1".to_string(),
+                    rate: nos_proto::LacpRate::Fast,
+                }),
+                after: PathAfter::Stay,
             }
         );
     }

@@ -54,7 +54,7 @@ pub use rib::{
 pub use schema::{
     loopback_table_name, AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpInstance, BgpPeer,
     BgpPeerGroup, BroadcastDomain, CommunityAlias, CommunityGroup, Config, Interface,
-    InterfaceAddress, NetworkType, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm,
+    InterfaceAddress, LacpRate, NetworkType, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm,
     OspfCryptoKey, OspfInstance, OspfProfile, Ospfv3Area, Ospfv3Instance, Ospfv3Profile,
     PolicyDefinition, PortAggregate, PortAggregateMode, PrefixList, PrefixListEntry, Redistribute,
     RedistributeSource, RedistributeTarget, RoutingTable, SourceAddress, StaticRoute,

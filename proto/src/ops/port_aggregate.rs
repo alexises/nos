@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Config, PortAggregate, PortAggregateMode};
+use crate::schema::{Config, LacpRate, PortAggregate, PortAggregateMode};
 
 use super::OpError;
 
@@ -37,6 +37,10 @@ pub enum PortAggregateOp {
         name: String,
         mode: PortAggregateMode,
     },
+    SetLacpRate {
+        name: String,
+        rate: LacpRate,
+    },
     Delete {
         name: String,
     },
@@ -50,6 +54,7 @@ impl PortAggregateOp {
                     config.port_aggregates.push(PortAggregate {
                         name: name.clone(),
                         mode: *mode,
+                        lacp_rate: LacpRate::default(),
                         switching_profile: None,
                         mtu: None,
                         subinterfaces: Vec::new(),
@@ -79,6 +84,10 @@ impl PortAggregateOp {
             }
             PortAggregateOp::SetMode { name, mode } => {
                 find_aggregate_mut(config, name)?.mode = *mode;
+                Ok(())
+            }
+            PortAggregateOp::SetLacpRate { name, rate } => {
+                find_aggregate_mut(config, name)?.lacp_rate = *rate;
                 Ok(())
             }
             PortAggregateOp::Delete { name } => {
@@ -112,6 +121,7 @@ mod tests {
         PortAggregate {
             name: name.to_string(),
             mode: PortAggregateMode::Xor,
+            lacp_rate: LacpRate::default(),
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
@@ -185,6 +195,22 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.port_aggregates[0].mode, PortAggregateMode::Xor);
+    }
+
+    #[test]
+    fn set_lacp_rate() {
+        let mut cfg = Config {
+            port_aggregates: vec![aggregate("bond1")],
+            ..Default::default()
+        };
+        assert_eq!(cfg.port_aggregates[0].lacp_rate, LacpRate::Slow);
+        PortAggregateOp::SetLacpRate {
+            name: "bond1".to_string(),
+            rate: LacpRate::Fast,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.port_aggregates[0].lacp_rate, LacpRate::Fast);
     }
 
     #[test]

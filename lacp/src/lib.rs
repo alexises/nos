@@ -14,5 +14,6 @@ pub mod periodic_tx_machine;
 pub mod receive_machine;
 pub mod reconcile;
 pub mod selection;
+pub mod server;
 pub mod socket;
 pub mod watchdog_client;

@@ -1,0 +1,60 @@
+use futures::{SinkExt, StreamExt};
+use nos_cli::lacp_client::get_summary;
+use nos_proto::{
+    IpcCodec, LacpEvent, LacpMuxState, LacpPortStatus, LacpRate, LacpReceiveState, LacpRequest,
+    PortAggregateLacpSummary,
+};
+use tokio::net::UnixListener;
+use tokio_util::codec::{FramedRead, FramedWrite};
+
+fn sample() -> PortAggregateLacpSummary {
+    PortAggregateLacpSummary {
+        aggregate: "bond1".to_string(),
+        actor_system_id: [2, 0, 0, 0, 0, 1],
+        actor_key: 1,
+        rate: LacpRate::Fast,
+        ports: vec![LacpPortStatus {
+            interface: "eth1".to_string(),
+            actor_port_number: 4,
+            receive_state: LacpReceiveState::Current,
+            mux_state: LacpMuxState::Distributing,
+            partner_system_id: Some([2, 0, 0, 0, 0, 2]),
+            partner_key: Some(1),
+            partner_port_number: Some(4),
+            selected: true,
+            synchronized: true,
+        }],
+    }
+}
+
+#[tokio::test]
+async fn get_summary_returns_summaries_on_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("lacp.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (r, w) = stream.into_split();
+        let mut reader = FramedRead::new(r, IpcCodec::<LacpRequest>::default());
+        let mut writer = FramedWrite::new(w, IpcCodec::<LacpEvent>::default());
+        let got = reader.next().await.unwrap().unwrap();
+        assert!(matches!(got, LacpRequest::GetSummary));
+        writer
+            .send(LacpEvent::Summary(vec![sample()]))
+            .await
+            .unwrap();
+    });
+
+    assert_eq!(get_summary(&path).await.unwrap(), vec![sample()]);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn get_summary_reports_a_connect_error_when_nothing_listens() {
+    let tmp = tempfile::tempdir().unwrap();
+    let err = get_summary(&tmp.path().join("missing.sock"))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("could not connect to nos-lacpd"));
+}

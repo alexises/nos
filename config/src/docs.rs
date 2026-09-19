@@ -520,6 +520,15 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              once negotiation with the partner confirms it, and is released again if the \
              negotiation lapses.",
         ),
+        Topic::SetPortAggregateLacpRate => (
+            "Set how fast a port aggregate's LACP partner is asked to send LACPDUs.",
+            "Updates the lacp-rate field on the named port aggregate in the transaction's \
+             in-progress config. The aggregate must already exist. `slow` asks the partner for \
+             an LACPDU every 30 seconds (a lost partner is noticed after 90); `fast` asks for one \
+             every second (noticed after 3). Only meaningful for a `lacp`-mode aggregate. Each \
+             end transmits at the rate the *other* end asks for, so both ends need `fast` for \
+             fast detection in both directions.",
+        ),
         Topic::SetInterfacePortAggregate => (
             "Associate an interface with a port aggregate as a bonded member.",
             "Points an interface at a port aggregate by name, making it a bonded member. The \
@@ -800,6 +809,7 @@ mod tests {
         Topic::EnsurePortAggregate,
         Topic::DeletePortAggregate,
         Topic::SetPortAggregateMode,
+        Topic::SetPortAggregateLacpRate,
         Topic::SetInterfacePortAggregate,
         Topic::ClearInterfacePortAggregate,
         Topic::EnsureOspfInstance,

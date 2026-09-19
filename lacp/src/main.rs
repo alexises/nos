@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_lacp::{interface_client, reconcile, watchdog_client};
+use nos_lacp::{interface_client, reconcile, server, watchdog_client};
 use nos_log_client::ForwardingLayer;
 use nos_proto::{LacpAggregateMembers, ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
@@ -27,9 +27,7 @@ struct Args {
     #[arg(long, default_value = DEFAULT_WATCHDOG_SOCKET)]
     watchdog_socket: PathBuf,
 
-    /// Unix socket to listen on for LACP status queries (e.g. from `nos
-    /// show lacp`) — unused until Stage 3 (`server.rs`) lands, accepted
-    /// now so `nos-watchdogd`'s spawn arguments don't need to change later.
+    /// Unix socket to listen on for LACP status queries (`nos show lacp`).
     #[arg(long, default_value = DEFAULT_LISTEN_SOCKET)]
     listen_socket: PathBuf,
 
@@ -69,7 +67,16 @@ async fn main() -> anyhow::Result<()> {
 
     let (push_tx, push_rx) = mpsc::channel::<LacpAggregateMembers>(16);
 
-    let reconcile_task = tokio::spawn(reconcile::run(config_socket, push_tx, shutdown_rx.clone()));
+    let aggregates = reconcile::SharedAggregates::default();
+    let server_task = server::start(&args.listen_socket, aggregates.clone())
+        .inspect_err(|e| tracing::error!(error = %e, "failed to start lacp IPC server"))
+        .context("starting lacp IPC server")?;
+    let reconcile_task = tokio::spawn(reconcile::run(
+        config_socket,
+        aggregates,
+        push_tx,
+        shutdown_rx.clone(),
+    ));
     let interface_client_task = tokio::spawn(interface_client::run(
         args.watchdog_socket.clone(),
         push_rx,
@@ -85,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = reconcile_task.await {
         warn!(error = %e, "reconcile task ended abnormally");
     }
+    server_task.abort();
     if let Err(e) = interface_client_task.await {
         warn!(error = %e, "interface_client task ended abnormally");
     }

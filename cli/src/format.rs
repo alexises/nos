@@ -4,13 +4,14 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
     BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
-    Interface, InterfaceAddress, InterfaceStatus, LinkInterfaceState, LogEntry, LogLevel,
-    LsaSummary, NeighborSummary, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm,
-    OspfInstance, OspfNeighborState, OspfProfile, Ospfv3Area, Ospfv3Instance, Ospfv3LsaSummary,
-    Ospfv3NeighborSummary, Ospfv3Profile, PeerSummary, PolicyDefinition, PortAggregate,
-    PortAggregateStatus, PrefixList, PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable,
-    SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface,
-    SubinterfaceStatus, SwitchingProfile, TransactionSnapshot, VlanTag,
+    Interface, InterfaceAddress, InterfaceStatus, LacpMuxState, LacpRate, LacpReceiveState,
+    LinkInterfaceState, LogEntry, LogLevel, LsaSummary, NeighborSummary, NextHopMode, OspfArea,
+    OspfAuth, OspfCryptoAlgorithm, OspfInstance, OspfNeighborState, OspfProfile, Ospfv3Area,
+    Ospfv3Instance, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Profile, PeerSummary,
+    PolicyDefinition, PortAggregate, PortAggregateLacpSummary, PortAggregateStatus, PrefixList,
+    PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, SourceAddress,
+    StaticRoute, StaticRoutingInstance, Subinterface, SubinterfaceStatus, SwitchingProfile,
+    TransactionSnapshot, VlanTag,
 };
 
 use crate::session::Path;
@@ -402,6 +403,79 @@ pub fn render_port_aggregate_statuses(statuses: &[PortAggregateStatus]) -> Strin
     statuses
         .iter()
         .map(render_port_aggregate_status)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_mac(mac: [u8; 6]) -> String {
+    mac.map(|b| format!("{b:02x}")).join(":")
+}
+
+fn render_lacp_port(port: &nos_proto::LacpPortStatus) -> String {
+    let receive = match port.receive_state {
+        LacpReceiveState::Initialize => "initialize",
+        LacpReceiveState::PortDisabled => "port-disabled",
+        LacpReceiveState::LacpDisabled => "lacp-disabled",
+        LacpReceiveState::Expired => "expired",
+        LacpReceiveState::Defaulted => "defaulted",
+        LacpReceiveState::Current => "current",
+    };
+    let mux = match port.mux_state {
+        LacpMuxState::Detached => "detached",
+        LacpMuxState::Waiting => "waiting",
+        LacpMuxState::Attached => "attached",
+        LacpMuxState::Collecting => "collecting",
+        LacpMuxState::Distributing => "distributing",
+    };
+    let partner = match (port.partner_system_id, port.partner_key) {
+        (Some(system), Some(key)) => format!(
+            "partner {} key {key} port {}",
+            format_mac(system),
+            port.partner_port_number.unwrap_or(0)
+        ),
+        _ => "partner none".to_string(),
+    };
+    format!(
+        "  {}: port {}, receive {receive}, mux {mux}, {partner}, selected {}, synchronized {}",
+        port.interface,
+        port.actor_port_number,
+        yes_no(port.selected),
+        yes_no(port.synchronized),
+    )
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+/// Render `nos-lacpd`'s per-aggregate LACP state, for `show lacp`.
+pub fn render_lacp_summaries(summaries: &[PortAggregateLacpSummary]) -> String {
+    if summaries.is_empty() {
+        return "no lacp port aggregates".to_string();
+    }
+    summaries
+        .iter()
+        .map(|s| {
+            let rate = match s.rate {
+                LacpRate::Slow => "slow",
+                LacpRate::Fast => "fast",
+            };
+            let mut lines = vec![format!(
+                "lacp {}: system {}, key {}, rate {rate}",
+                s.aggregate,
+                format_mac(s.actor_system_id),
+                s.actor_key
+            )];
+            if s.ports.is_empty() {
+                lines.push("  no member ports".to_string());
+            }
+            lines.extend(s.ports.iter().map(render_lacp_port));
+            lines.join("\n")
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1979,5 +2053,48 @@ mod tests {
             "ospf instance o1:\n  area 0.0.0.0 type 1 link-state-id 1.1.1.1 \
              advertising-router 1.1.1.1 sequence 0x80000001 age 42 checksum 0xabcd"
         );
+    }
+
+    #[test]
+    fn render_lacp_summaries_empty() {
+        assert_eq!(render_lacp_summaries(&[]), "no lacp port aggregates");
+    }
+
+    #[test]
+    fn render_lacp_summaries_shows_identity_rate_and_each_port() {
+        let summary = PortAggregateLacpSummary {
+            aggregate: "bond1".to_string(),
+            actor_system_id: [2, 0, 0, 0, 0, 0xab],
+            actor_key: 7,
+            rate: LacpRate::Fast,
+            ports: vec![
+                nos_proto::LacpPortStatus {
+                    interface: "eth1".to_string(),
+                    actor_port_number: 4,
+                    receive_state: LacpReceiveState::Current,
+                    mux_state: LacpMuxState::Distributing,
+                    partner_system_id: Some([2, 0, 0, 0, 0, 1]),
+                    partner_key: Some(3),
+                    partner_port_number: Some(9),
+                    selected: true,
+                    synchronized: true,
+                },
+                nos_proto::LacpPortStatus {
+                    interface: "eth2".to_string(),
+                    actor_port_number: 5,
+                    receive_state: LacpReceiveState::Defaulted,
+                    mux_state: LacpMuxState::Detached,
+                    partner_system_id: None,
+                    partner_key: None,
+                    partner_port_number: None,
+                    selected: false,
+                    synchronized: false,
+                },
+            ],
+        };
+        let out = render_lacp_summaries(&[summary]);
+        assert!(out.contains("lacp bond1: system 02:00:00:00:00:ab, key 7, rate fast"));
+        assert!(out.contains("eth1: port 4, receive current, mux distributing, partner 02:00:00:00:00:01 key 3 port 9, selected yes, synchronized yes"));
+        assert!(out.contains("eth2: port 5, receive defaulted, mux detached, partner none, selected no, synchronized no"));
     }
 }

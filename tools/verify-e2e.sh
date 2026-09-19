@@ -750,6 +750,7 @@ provision_lacp() {
     --peer "$peer_ip" \
     --port-aggregate "$LACP_AGGREGATE" \
     --port-aggregate-mode lacp \
+    --lacp-rate fast \
     --enslave-interface-into-port-aggregate eth1 \
     --enslave-interface-into-port-aggregate eth2
 }
@@ -1843,14 +1844,18 @@ cmd_check_lacp() {
   # actually detects the silence (real Receive Machine timeout, no packets
   # from the other end at all) and nos-interfaced actually releases eth2 from
   # its kernel bond as a result -- proving the LACP-gated enslavement is
-  # genuinely dynamic, not just applied once at provisioning time. Up to 90s
-  # (802.1AX's Long Current_While_Timer -- this implementation never
-  # advertises the Short rate, see lacp/CLAUDE.md) before the Receive Machine
-  # even notices, comfortably budgeted for here.
+  # genuinely dynamic, not just applied once at provisioning time. Both sides
+  # run `lacp-rate fast`, so router-a's Current_While_Timer is the Short 3s
+  # one: the 30s budgets below are far under the 90s Long timer, so passing
+  # them proves the fast rate is genuinely in effect, not just configured.
+  # The Expired baseline is taken here, not at 0, since a port also passes
+  # through Expired while first starting up.
+  local expired_base
+  expired_base=$(log_count router-a "interface=eth2 receive_state=Expired")
   provision_lacp_withdraw_eth2 router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A"
 
-  log "waiting for router-a's lacp receive machine to expire on eth2 (up to 110s, real 802.1ax timer)"
-  wait_for_count_increase router-a "interface=eth2 receive_state=Expired" 0 110 \
+  log "waiting for router-a's lacp receive machine to expire on eth2 (within 30s -- fast rate's 3s timer, not the 90s long one)"
+  wait_for_count_increase router-a "interface=eth2 receive_state=Expired" "$expired_base" 30 \
     && log "router-a: eth2 lacp receive machine expired" \
     || { log "router-a: FAILED -- eth2 receive machine never expired"; return 1; }
 

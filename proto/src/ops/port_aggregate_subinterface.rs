@@ -229,6 +229,7 @@ mod tests {
         PortAggregate {
             name: name.to_string(),
             mode: PortAggregateMode::Xor,
+            lacp_rate: crate::schema::LacpRate::default(),
             switching_profile: None,
             mtu: None,
             subinterfaces,

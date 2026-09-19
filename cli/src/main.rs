@@ -13,8 +13,8 @@ use nos_cli::help_menu::HelpMenu;
 use nos_cli::session::{self, Mode, PathAfter, Resolved};
 use nos_cli::spec::{self, Doc};
 use nos_cli::{
-    bgp_client, client, format, interface_client, log_client, ospf_client, ospfv3_client,
-    rib_client, watchdog_client,
+    bgp_client, client, format, interface_client, lacp_client, log_client, ospf_client,
+    ospfv3_client, rib_client, watchdog_client,
 };
 use nos_proto::{
     CommandDoc, ConfigOp, Event, LogEvent, PolicyDefinitionOp, ServiceRef, Topic,
@@ -783,6 +783,10 @@ async fn handle_action(
             show_port_aggregate(watchdog_socket, name.as_deref()).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowLacp { name } => {
+            show_lacp(watchdog_socket, name.as_deref()).await;
+            Outcome::Continue(mode)
+        }
         Resolved::ShowLog { source, follow } => {
             show_log(watchdog_socket, source, follow).await;
             Outcome::Continue(mode)
@@ -1043,6 +1047,39 @@ async fn show_interface(watchdog_socket: &Path, name: Option<&str>) {
 
 /// Same resolution and shape as `show_interface`, against `nos-interfaced`'s
 /// port-aggregate query instead.
+async fn show_lacp(watchdog_socket: &Path, name: Option<&str>) {
+    let lacp_socket =
+        match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Lacp).await {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                eprintln!("nos-lacpd is not running");
+                return;
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                return;
+            }
+        };
+
+    match lacp_client::get_summary(&lacp_socket).await {
+        Ok(summaries) => match name {
+            None => println!("{}", format::render_lacp_summaries(&summaries)),
+            Some(name) => {
+                let one: Vec<_> = summaries
+                    .into_iter()
+                    .filter(|s| s.aggregate == name)
+                    .collect();
+                if one.is_empty() {
+                    println!("lacp port aggregate '{name}' not found");
+                } else {
+                    println!("{}", format::render_lacp_summaries(&one));
+                }
+            }
+        },
+        Err(e) => eprintln!("error: {e}"),
+    }
+}
+
 async fn show_port_aggregate(watchdog_socket: &Path, name: Option<&str>) {
     let interface_socket =
         match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Interfaces).await {

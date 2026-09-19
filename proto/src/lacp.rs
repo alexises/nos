@@ -57,6 +57,8 @@ pub struct PortAggregateLacpSummary {
     pub aggregate: String,
     pub actor_system_id: [u8; 6],
     pub actor_key: u16,
+    /// The aggregate's configured `lacp-rate`.
+    pub rate: crate::schema::LacpRate,
     pub ports: Vec<LacpPortStatus>,
 }
 

@@ -1212,6 +1212,22 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "set port-aggregate <name> mode lacp",
         Doc::FromConfig(Topic::SetPortAggregateMode),
         Configuration),
+    spec!(["set" "port-aggregate" (PortAggregateName) "lacp-rate" "fast"],
+        "set port-aggregate <name> lacp-rate fast",
+        Doc::FromConfig(Topic::SetPortAggregateLacpRate),
+        Configuration),
+    spec!(["set" "port-aggregate" (PortAggregateName) "lacp-rate" "slow"],
+        "set port-aggregate <name> lacp-rate slow",
+        Doc::FromConfig(Topic::SetPortAggregateLacpRate),
+        Configuration),
+    spec!(["set" "lacp-rate" "fast"],
+        "set lacp-rate fast",
+        Doc::FromConfig(Topic::SetPortAggregateLacpRate),
+        ConfigurationPortAggregate),
+    spec!(["set" "lacp-rate" "slow"],
+        "set lacp-rate slow",
+        Doc::FromConfig(Topic::SetPortAggregateLacpRate),
+        ConfigurationPortAggregate),
     spec!(["set" "mode" "xor"],
         "set mode xor",
         Doc::FromConfig(Topic::SetPortAggregateMode),
@@ -1250,6 +1266,25 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             summary: "Show one port aggregate's reconciled status.",
             detail: "Queries nos-interfaced (resolved via nos-watchdogd) for the named port \
                      aggregate's mode, switching-profile, mtu, and subinterfaces.",
+        },
+        Always),
+    spec!(["show" "lacp"],
+        "show lacp",
+        Doc::Local {
+            summary: "Show every LACP port aggregate's negotiation state.",
+            detail: "Queries nos-lacpd (resolved via nos-watchdogd) for every lacp-mode port \
+                     aggregate's actor system id, key and rate, and each member port's \
+                     receive/mux machine state, partner identity, and whether it is selected \
+                     and synchronized.",
+        },
+        Always),
+    spec!(["show" "lacp" (PortAggregateName)],
+        "show lacp <name>",
+        Doc::Local {
+            summary: "Show one LACP port aggregate's negotiation state.",
+            detail: "Queries nos-lacpd (resolved via nos-watchdogd) for the named lacp-mode \
+                     port aggregate's actor identity and rate, and each member port's \
+                     receive/mux machine state and partner identity.",
         },
         Always),
     spec!(["show" "interface"],

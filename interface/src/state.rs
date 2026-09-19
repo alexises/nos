@@ -783,6 +783,7 @@ mod tests {
         nos_proto::PortAggregate {
             name: name.to_string(),
             mode: nos_proto::PortAggregateMode::Xor,
+            lacp_rate: nos_proto::LacpRate::default(),
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
@@ -840,6 +841,7 @@ mod tests {
         config.port_aggregates = vec![nos_proto::PortAggregate {
             name: "bond1".to_string(),
             mode,
+            lacp_rate: nos_proto::LacpRate::default(),
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),

@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -19,6 +19,10 @@ use tracing::{debug, info, warn};
 use crate::aggregate::AggregateManager;
 use crate::config_client;
 
+/// Every currently-configured `Lacp`-mode aggregate's manager, shared with
+/// `server.rs` so `show lacp` can read live state.
+pub type SharedAggregates = Arc<Mutex<HashMap<String, Arc<AggregateManager>>>>;
+
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 /// Same justification as `interface::reconcile::REAPPLY_INTERVAL`: cheap
@@ -28,11 +32,11 @@ const REAPPLY_INTERVAL: Duration = Duration::from_secs(10);
 
 pub async fn run(
     config_socket: PathBuf,
+    aggregates: SharedAggregates,
     push_tx: mpsc::Sender<LacpAggregateMembers>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let scopes = vec![DiffScope::Interfaces, DiffScope::PortAggregates];
-    let mut aggregates: HashMap<String, Arc<AggregateManager>> = HashMap::new();
     let mut next_key: u16 = 1;
 
     while !*shutdown.borrow() {
@@ -46,7 +50,7 @@ pub async fn run(
                     tokio::select! {
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(_))) => {
-                                resync(&config_socket, &mut aggregates, &mut next_key, &push_tx).await;
+                                resync(&config_socket, &aggregates, &mut next_key, &push_tx).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -59,7 +63,7 @@ pub async fn run(
                             }
                         },
                         _ = reapply.tick() => {
-                            resync(&config_socket, &mut aggregates, &mut next_key, &push_tx).await;
+                            resync(&config_socket, &aggregates, &mut next_key, &push_tx).await;
                         }
                         _ = shutdown.changed() => break,
                     }
@@ -80,7 +84,7 @@ pub async fn run(
         }
     }
 
-    for (_, agg) in aggregates.drain() {
+    for (_, agg) in aggregates.lock().unwrap().drain() {
         agg.shutdown();
     }
     info!("lacp reconciliation loop stopped");
@@ -88,7 +92,7 @@ pub async fn run(
 
 async fn resync(
     config_socket: &Path,
-    aggregates: &mut HashMap<String, Arc<AggregateManager>>,
+    aggregates: &SharedAggregates,
     next_key: &mut u16,
     push_tx: &mpsc::Sender<LacpAggregateMembers>,
 ) {
@@ -100,12 +104,15 @@ async fn resync(
         }
     };
 
-    let lacp_names: Vec<&str> = cfg
+    let lacp_aggregates: Vec<&nos_proto::PortAggregate> = cfg
         .port_aggregates
         .iter()
         .filter(|a| a.mode == PortAggregateMode::Lacp)
-        .map(|a| a.name.as_str())
         .collect();
+    let lacp_names: Vec<&str> = lacp_aggregates.iter().map(|a| a.name.as_str()).collect();
+
+    // No `.await` past this point: the lock is a plain std mutex.
+    let mut aggregates = aggregates.lock().unwrap();
 
     let gone: Vec<String> = aggregates
         .keys()
@@ -118,9 +125,10 @@ async fn resync(
         }
     }
 
-    for name in &lacp_names {
+    for agg_cfg in &lacp_aggregates {
+        let name = agg_cfg.name.as_str();
         let manager = aggregates
-            .entry((*name).to_string())
+            .entry(name.to_string())
             .or_insert_with(|| {
                 let key = *next_key;
                 *next_key += 1;
@@ -130,10 +138,10 @@ async fn resync(
         let members: Vec<String> = cfg
             .interfaces
             .iter()
-            .filter(|i| i.port_aggregate.as_deref() == Some(*name))
+            .filter(|i| i.port_aggregate.as_deref() == Some(name))
             .map(|i| i.name.clone())
             .collect();
-        manager.reconcile(members);
+        manager.reconcile(members, agg_cfg.lacp_rate);
     }
 
     debug!(count = lacp_names.len(), "reconciled lacp aggregates");

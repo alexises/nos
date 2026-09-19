@@ -224,6 +224,8 @@ pub enum Topic {
     SetInterfacePortAggregate,
     /// `ConfigOp::Interface(InterfaceOp::ClearPortAggregate)`
     ClearInterfacePortAggregate,
+    /// `ConfigOp::PortAggregate(PortAggregateOp::SetLacpRate)`
+    SetPortAggregateLacpRate,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

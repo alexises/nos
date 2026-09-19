@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
 use nos_proto::{
-    AddressFamily, BgpAoAlgorithm, NetworkType, NextHopMode, OspfCryptoAlgorithm,
+    AddressFamily, BgpAoAlgorithm, LacpRate, NetworkType, NextHopMode, OspfCryptoAlgorithm,
     PortAggregateMode, Redistribute, RedistributeSource, RedistributeTarget, SourceAddress,
     TransactionBase, VlanTag,
 };
@@ -367,6 +367,10 @@ pub enum SetTarget {
     /// Context-relative — only valid while navigated into a port aggregate.
     PortAggregateModeRelative { mode: PortAggregateMode },
     /// Fully-qualified — works from anywhere in configuration mode.
+    PortAggregateLacpRate { name: String, rate: LacpRate },
+    /// Context-relative — only valid while navigated into a port aggregate.
+    PortAggregateLacpRateRelative { rate: LacpRate },
+    /// Fully-qualified — works from anywhere in configuration mode.
     InterfacePortAggregate {
         name: String,
         port_aggregate: String,
@@ -691,6 +695,10 @@ pub enum Command {
     ShowPortAggregate {
         name: Option<String>,
     },
+    /// `show lacp` (every aggregate) or `show lacp <name>` (one).
+    ShowLacp {
+        name: Option<String>,
+    },
     /// `show log [<source>] [--follow]` — a one-shot buffer snapshot,
     /// optionally filtered to one source, or a live tail with `--follow`.
     ShowLog {
@@ -761,6 +769,14 @@ pub enum Command {
     Unknown(String),
 }
 
+fn parse_lacp_rate(token: &str) -> LacpRate {
+    if token == "fast" {
+        LacpRate::Fast
+    } else {
+        LacpRate::Slow
+    }
+}
+
 impl Command {
     pub fn parse(line: &str) -> Self {
         let trimmed = line.trim();
@@ -812,6 +828,10 @@ fn parse_show(t: &[&str]) -> Option<Command> {
         },
         ["port-aggregate"] => Command::ShowPortAggregate { name: None },
         ["port-aggregate", name] => Command::ShowPortAggregate {
+            name: Some((*name).to_string()),
+        },
+        ["lacp"] => Command::ShowLacp { name: None },
+        ["lacp", name] => Command::ShowLacp {
             name: Some((*name).to_string()),
         },
         ["log"] => Command::ShowLog {
@@ -1650,6 +1670,17 @@ fn parse_set(t: &[&str]) -> Option<Command> {
             name: (*name).to_string(),
             mode: PortAggregateMode::Lacp,
         }),
+        ["port-aggregate", name, "lacp-rate", rate @ ("fast" | "slow")] => {
+            Command::Set(SetTarget::PortAggregateLacpRate {
+                name: (*name).to_string(),
+                rate: parse_lacp_rate(rate),
+            })
+        }
+        ["lacp-rate", rate @ ("fast" | "slow")] => {
+            Command::Set(SetTarget::PortAggregateLacpRateRelative {
+                rate: parse_lacp_rate(rate),
+            })
+        }
         ["mode", "xor"] => Command::Set(SetTarget::PortAggregateModeRelative {
             mode: PortAggregateMode::Xor,
         }),
@@ -2093,6 +2124,41 @@ mod tests {
             Command::Delete(DeleteTarget::PortAggregate {
                 name: "bond1".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn show_lacp() {
+        assert_eq!(
+            Command::parse("show lacp"),
+            Command::ShowLacp { name: None }
+        );
+        assert_eq!(
+            Command::parse("show lacp bond1"),
+            Command::ShowLacp {
+                name: Some("bond1".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn set_lacp_rate() {
+        assert_eq!(
+            Command::parse("set port-aggregate bond1 lacp-rate fast"),
+            Command::Set(SetTarget::PortAggregateLacpRate {
+                name: "bond1".to_string(),
+                rate: LacpRate::Fast,
+            })
+        );
+        assert_eq!(
+            Command::parse("set lacp-rate slow"),
+            Command::Set(SetTarget::PortAggregateLacpRateRelative {
+                rate: LacpRate::Slow,
+            })
+        );
+        assert_eq!(
+            Command::parse("set lacp-rate medium"),
+            Command::Unknown("set lacp-rate medium".to_string())
         );
     }
 
