@@ -33,6 +33,10 @@ netlink-sys          = { version = "0.9", features = ["tokio_socket"] }
 fs2                 = "0.4"
 socket2             = { version = "0.5", features = ["all"] }
 libc                = "0.2"
+md-5                = "0.10"
+sha1                = "0.10"
+sha2                = "0.10"
+hmac                = "0.12"
 
 # test dependencies
 tempfile    = "3"

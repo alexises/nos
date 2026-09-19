@@ -196,6 +196,16 @@ pub enum Topic {
     SetOspfProfileNetworkType,
     /// `ConfigOp::OspfProfile(OspfProfileOp::ClearNetworkType)`
     ClearOspfProfileNetworkType,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::SetSimpleAuth)`
+    SetOspfProfileSimpleAuth,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::SetCryptoKey)`
+    SetOspfProfileCryptoKey,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::RemoveCryptoKey)`
+    RemoveOspfProfileCryptoKey,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::SetCryptoCurrentKey)`
+    SetOspfProfileCryptoCurrentKey,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::ClearAuth)`
+    ClearOspfProfileAuth,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

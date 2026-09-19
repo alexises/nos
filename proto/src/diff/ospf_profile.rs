@@ -1,4 +1,4 @@
-use crate::schema::{NetworkType, OspfProfile};
+use crate::schema::{NetworkType, OspfAuth, OspfCryptoAlgorithm, OspfProfile};
 
 use super::{DiffStatus, FieldDiff, SectionDiff};
 
@@ -78,6 +78,34 @@ fn network_type_str(p: &OspfProfile) -> String {
     }
 }
 
+/// Rendered in clear text, like every other field — see `OspfAuth`'s doc
+/// comment (mirrors `BgpAuth`'s own, in `diff::bgp_peer_group::auth_str`) on
+/// why secrets are never masked in this codebase.
+fn auth_str(p: &OspfProfile) -> String {
+    match &p.auth {
+        None => "none".to_string(),
+        Some(OspfAuth::Simple { password }) => format!("simple-password {password}"),
+        Some(OspfAuth::Crypto { keys }) => {
+            let rendered = keys
+                .iter()
+                .map(|k| {
+                    let algorithm = match k.algorithm {
+                        OspfCryptoAlgorithm::Md5 => "md5",
+                        OspfCryptoAlgorithm::HmacSha1 => "hmac-sha1",
+                        OspfCryptoAlgorithm::HmacSha256 => "hmac-sha256",
+                        OspfCryptoAlgorithm::HmacSha384 => "hmac-sha384",
+                        OspfCryptoAlgorithm::HmacSha512 => "hmac-sha512",
+                    };
+                    let flags = if k.is_current { " (current)" } else { "" };
+                    format!("key-id {} {algorithm} {}{flags}", k.key_id, k.key)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("crypto-keys [{rendered}]")
+        }
+    }
+}
+
 fn changed_fields(base: &OspfProfile, candidate: &OspfProfile) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     if base.hello_interval != candidate.hello_interval {
@@ -115,6 +143,13 @@ fn changed_fields(base: &OspfProfile, candidate: &OspfProfile) -> Vec<FieldDiff>
             new: Some(network_type_str(candidate)),
         });
     }
+    if base.auth != candidate.auth {
+        fields.push(FieldDiff {
+            label: "auth".to_string(),
+            old: Some(auth_str(base)),
+            new: Some(auth_str(candidate)),
+        });
+    }
     fields
 }
 
@@ -130,6 +165,7 @@ mod tests {
             cost: None,
             priority: None,
             network_type: None,
+            auth: None,
         }
     }
 
@@ -230,5 +266,23 @@ mod tests {
             Some("unset (derived from attach point)")
         );
         assert_eq!(sections[0].fields[0].new.as_deref(), Some("broadcast"));
+    }
+
+    #[test]
+    fn modified_auth_reports_only_that_field_in_clear_text() {
+        let base = vec![profile("p1")];
+        let mut modified = profile("p1");
+        modified.auth = Some(OspfAuth::Simple {
+            password: "abcdefgh".to_string(),
+        });
+        let sections = diff_ospf_profiles(&base, &[modified]);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].fields.len(), 1);
+        assert_eq!(sections[0].fields[0].label, "auth");
+        assert_eq!(sections[0].fields[0].old.as_deref(), Some("none"));
+        assert_eq!(
+            sections[0].fields[0].new.as_deref(),
+            Some("simple-password abcdefgh")
+        );
     }
 }

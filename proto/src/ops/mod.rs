@@ -174,6 +174,13 @@ pub enum OpError {
         area_id: Ipv4Addr,
         name: String,
     },
+    #[error("crypto key with key-id '{key_id}' not found in ospf profile '{name}' (area '{area_id}' of ospf instance '{instance}')")]
+    OspfCryptoKeyNotFound {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        key_id: u8,
+    },
 }
 
 #[cfg(test)]

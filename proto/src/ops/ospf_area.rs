@@ -120,6 +120,7 @@ mod tests {
                         cost: None,
                         priority: None,
                         network_type: None,
+                        auth: None,
                     }],
                 }],
             )],

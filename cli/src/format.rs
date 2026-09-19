@@ -5,10 +5,11 @@ use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
     BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
     Interface, InterfaceAddress, InterfaceStatus, LinkInterfaceState, LogEntry, LogLevel,
-    LsaSummary, NeighborSummary, NextHopMode, OspfArea, OspfInstance, OspfNeighborState,
-    OspfProfile, PeerSummary, PolicyDefinition, PrefixList, PrefixListEntry, PrefixRoutes,
-    RouteSourceKind, RoutingTable, SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance,
-    Subinterface, SubinterfaceStatus, SwitchingProfile, TransactionSnapshot, VlanTag,
+    LsaSummary, NeighborSummary, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm,
+    OspfInstance, OspfNeighborState, OspfProfile, PeerSummary, PolicyDefinition, PrefixList,
+    PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, SourceAddress,
+    StaticRoute, StaticRoutingInstance, Subinterface, SubinterfaceStatus, SwitchingProfile,
+    TransactionSnapshot, VlanTag,
 };
 
 use crate::session::Path;
@@ -146,7 +147,38 @@ pub fn render_ospf_area(area: &OspfArea) -> String {
 
 /// Render one OSPF profile as human-readable text.
 pub fn render_ospf_profile(profile: &OspfProfile) -> String {
-    format!("profile {}", profile.name)
+    format!(
+        "profile {}: auth {}",
+        profile.name,
+        render_ospf_auth(profile.auth.as_ref())
+    )
+}
+
+/// Rendered in clear text, like every other field — mirrors
+/// `render_bgp_auth`'s exact rationale.
+fn render_ospf_auth(auth: Option<&OspfAuth>) -> String {
+    match auth {
+        None => "none".to_string(),
+        Some(OspfAuth::Simple { password }) => format!("simple-password {password}"),
+        Some(OspfAuth::Crypto { keys }) => {
+            let rendered = keys
+                .iter()
+                .map(|k| {
+                    let algorithm = match k.algorithm {
+                        OspfCryptoAlgorithm::Md5 => "md5",
+                        OspfCryptoAlgorithm::HmacSha1 => "hmac-sha1",
+                        OspfCryptoAlgorithm::HmacSha256 => "hmac-sha256",
+                        OspfCryptoAlgorithm::HmacSha384 => "hmac-sha384",
+                        OspfCryptoAlgorithm::HmacSha512 => "hmac-sha512",
+                    };
+                    let flags = if k.is_current { " (current)" } else { "" };
+                    format!("key-id {} {algorithm} {}{flags}", k.key_id, k.key)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("crypto-keys [{rendered}]")
+        }
+    }
 }
 
 /// Render one routing table as human-readable text.
@@ -1435,6 +1467,57 @@ mod tests {
 
         pg.next_hop = Some(NextHopMode::Unchanged);
         assert!(render_bgp_peer_group(&pg, 65000).contains("next-hop unchanged"));
+    }
+
+    fn ospf_profile(name: &str) -> OspfProfile {
+        OspfProfile {
+            name: name.to_string(),
+            hello_interval: None,
+            dead_interval: None,
+            cost: None,
+            priority: None,
+            network_type: None,
+            auth: None,
+        }
+    }
+
+    #[test]
+    fn render_ospf_profile_with_no_auth() {
+        assert_eq!(
+            render_ospf_profile(&ospf_profile("p1")),
+            "profile p1: auth none"
+        );
+    }
+
+    #[test]
+    fn render_ospf_profile_with_simple_auth() {
+        let mut p = ospf_profile("p1");
+        p.auth = Some(OspfAuth::Simple {
+            password: "secret".to_string(),
+        });
+        assert_eq!(
+            render_ospf_profile(&p),
+            "profile p1: auth simple-password secret"
+        );
+    }
+
+    #[test]
+    fn render_ospf_profile_with_crypto_auth() {
+        use nos_proto::OspfCryptoKey;
+
+        let mut p = ospf_profile("p1");
+        p.auth = Some(OspfAuth::Crypto {
+            keys: vec![OspfCryptoKey {
+                key_id: 1,
+                algorithm: OspfCryptoAlgorithm::HmacSha256,
+                key: "secret".to_string(),
+                is_current: true,
+            }],
+        });
+        assert_eq!(
+            render_ospf_profile(&p),
+            "profile p1: auth crypto-keys [key-id 1 hmac-sha256 secret (current)]"
+        );
     }
 
     #[test]

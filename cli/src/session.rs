@@ -2,9 +2,10 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use nos_proto::{
     loopback_table_name, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp,
-    CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, OspfAreaOp, OspfInstanceOp,
-    OspfProfileOp, PolicyDefinitionOp, PrefixListEntry, PrefixListOp, RoutingTableOp,
-    StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase,
+    CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, OspfAreaOp, OspfCryptoKey,
+    OspfInstanceOp, OspfProfileOp, PolicyDefinitionOp, PrefixListEntry, PrefixListOp,
+    RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp,
+    TransactionBase,
 };
 
 use crate::command::{
@@ -1526,14 +1527,38 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 BgpPeerGroupOp::ClearConnectRetryTime { instance, name }
             })?
         }
-        Command::Delete(DeleteTarget::Auth) => peer_group_clear(path, |instance, name| {
-            BgpPeerGroupOp::ClearAuth { instance, name }
-        })?,
+        // `delete auth`'s literal token sequence is shared between a
+        // peer-group and an OSPF profile (see `DeleteTarget::Auth`'s doc
+        // comment) — resolved by path, mirroring `set router-id`'s
+        // precedent above.
+        Command::Delete(DeleteTarget::Auth) => match path {
+            Path::OspfProfile { .. } => {
+                ospf_profile_clear(path, |instance, area_id, name| OspfProfileOp::ClearAuth {
+                    instance,
+                    area_id,
+                    name,
+                })?
+            }
+            _ => peer_group_clear(path, |instance, name| BgpPeerGroupOp::ClearAuth {
+                instance,
+                name,
+            })?,
+        },
         Command::Delete(DeleteTarget::AoKey(send_id)) => {
             peer_group_clear(path, |instance, name| BgpPeerGroupOp::RemoveAoKey {
                 instance,
                 name,
                 send_id,
+            })?
+        }
+        Command::Delete(DeleteTarget::CryptoKey(key_id)) => {
+            ospf_profile_clear(path, |instance, area_id, name| {
+                OspfProfileOp::RemoveCryptoKey {
+                    instance,
+                    area_id,
+                    name,
+                    key_id,
+                }
             })?
         }
         Command::Delete(DeleteTarget::NextHop) => peer_group_clear(path, |instance, name| {
@@ -1774,6 +1799,33 @@ fn ospf_profile_set_op(
             area_id,
             name,
             network_type,
+        },
+        OspfProfileField::SimplePassword(password) => OspfProfileOp::SetSimpleAuth {
+            instance,
+            area_id,
+            name,
+            password,
+        },
+        OspfProfileField::CryptoKey {
+            key_id,
+            algorithm,
+            key,
+        } => OspfProfileOp::SetCryptoKey {
+            instance,
+            area_id,
+            name,
+            key: OspfCryptoKey {
+                key_id,
+                algorithm,
+                key,
+                is_current: false,
+            },
+        },
+        OspfProfileField::CryptoCurrentKey(key_id) => OspfProfileOp::SetCryptoCurrentKey {
+            instance,
+            area_id,
+            name,
+            key_id,
         },
     })
 }
@@ -2842,6 +2894,89 @@ mod tests {
                     instance: "r1".to_string(),
                     name: "pg1".to_string(),
                     send_id: 1,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    /// `delete auth` shares its token sequence with the peer-group one
+    /// above — confirms it's routed to `OspfProfileOp::ClearAuth` when the
+    /// path is navigated into an OSPF profile instead.
+    #[test]
+    fn delete_auth_routes_to_ospf_profile_when_navigated_into_one() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", ospf_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Delete(DeleteTarget::Auth)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::ClearAuth {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_ospf_profile_simple_password_and_crypto_key() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", ospf_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Set(SetTarget::OspfProfileRelative {
+                    field: OspfProfileField::SimplePassword("hunter2".to_string()),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::SetSimpleAuth {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                    password: "hunter2".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", ospf_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Set(SetTarget::OspfProfileRelative {
+                    field: OspfProfileField::CryptoKey {
+                        key_id: 1,
+                        algorithm: nos_proto::OspfCryptoAlgorithm::HmacSha256,
+                        key: "secret".to_string(),
+                    },
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::SetCryptoKey {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                    key: OspfCryptoKey {
+                        key_id: 1,
+                        algorithm: nos_proto::OspfCryptoAlgorithm::HmacSha256,
+                        key: "secret".to_string(),
+                        is_current: false,
+                    },
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", ospf_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Delete(DeleteTarget::CryptoKey(1))
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfProfile(OspfProfileOp::RemoveCryptoKey {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                    key_id: 1,
                 }),
                 after: PathAfter::Stay,
             }

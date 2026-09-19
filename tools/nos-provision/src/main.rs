@@ -19,10 +19,10 @@ use futures::{SinkExt, StreamExt};
 use ipnet::IpNet;
 use nos_proto::{
     AddressFamily, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, ConfigOp, Event,
-    InterfaceOp, IpcCodec, OspfAreaOp, OspfInstanceOp, OspfProfileOp, PolicyDefinitionOp,
-    Redistribute, RedistributeSource, RedistributeTarget, Request, RoutingTableOp, SourceAddress,
-    StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase,
-    VlanTag,
+    InterfaceOp, IpcCodec, OspfAreaOp, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstanceOp,
+    OspfProfileOp, PolicyDefinitionOp, Redistribute, RedistributeSource, RedistributeTarget,
+    Request, RoutingTableOp, SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp,
+    SwitchingProfileOp, TransactionBase, VlanTag,
 };
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -262,6 +262,23 @@ struct Args {
     /// `--switching-profile-member` to build the whole attach point.
     #[arg(long)]
     ospf_broadcast_domain_profile: Option<String>,
+
+    /// If set (requires `--ospf-profile`), configures an RFC 2328 Appendix
+    /// D.2 simple password on it (`OspfProfileOp::SetSimpleAuth`).
+    /// Mutually exclusive with `--ospf-crypto-key` (RFC 2328's Simple and
+    /// Cryptographic auth types are themselves mutually exclusive).
+    #[arg(long)]
+    ospf_simple_password: Option<String>,
+
+    /// If set (requires `--ospf-profile`), configures a single RFC 2328
+    /// Appendix D.3 / RFC 5709 cryptographic auth key on it
+    /// (`OspfProfileOp::SetCryptoKey`, marked current) — `<key-id>:
+    /// <algorithm>:<key>`, algorithm one of `md5`/`hmac-sha1`/
+    /// `hmac-sha256`/`hmac-sha384`/`hmac-sha512` — for verifying session
+    /// authentication end to end (matching keys on both routers establish;
+    /// a mismatched one on either side does not).
+    #[arg(long)]
+    ospf_crypto_key: Option<String>,
 }
 
 #[tokio::main]
@@ -625,13 +642,39 @@ async fn main() -> anyhow::Result<()> {
         }));
         if let Some(name) = args.ospf_profile.clone() {
             ops.push(ConfigOp::OspfProfile(OspfProfileOp::Ensure {
-                instance,
+                instance: instance.clone(),
                 area_id,
-                name,
+                name: name.clone(),
             }));
+            if let Some(password) = args.ospf_simple_password.clone() {
+                ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetSimpleAuth {
+                    instance: instance.clone(),
+                    area_id,
+                    name: name.clone(),
+                    password,
+                }));
+            }
+            if let Some(spec) = args.ospf_crypto_key.clone() {
+                let key = parse_ospf_crypto_key(&spec)?;
+                ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetCryptoKey {
+                    instance,
+                    area_id,
+                    name,
+                    key,
+                }));
+            }
+        } else {
+            if args.ospf_simple_password.is_some() {
+                bail!("--ospf-simple-password requires --ospf-profile to also be set");
+            }
+            if args.ospf_crypto_key.is_some() {
+                bail!("--ospf-crypto-key requires --ospf-profile to also be set");
+            }
         }
     } else if args.ospf_profile.is_some() {
         bail!("--ospf-profile requires --ospf-area to also be set");
+    } else if args.ospf_simple_password.is_some() || args.ospf_crypto_key.is_some() {
+        bail!("--ospf-simple-password/--ospf-crypto-key require --ospf-profile to also be set");
     }
 
     if let Some(profile) = args.ospf_interface_profile.clone() {
@@ -676,6 +719,35 @@ async fn main() -> anyhow::Result<()> {
 
     println!("provisioning complete");
     Ok(())
+}
+
+/// Parses `--ospf-crypto-key`'s `<key-id>:<algorithm>:<key>` shape into a
+/// single `OspfCryptoKey`, always marked current — this tool only ever
+/// provisions one active key at a time (rotation isn't part of the e2e
+/// scenario this flag exists for).
+fn parse_ospf_crypto_key(spec: &str) -> anyhow::Result<OspfCryptoKey> {
+    let mut parts = spec.splitn(3, ':');
+    let (Some(key_id), Some(algorithm), Some(key)) = (parts.next(), parts.next(), parts.next())
+    else {
+        bail!("--ospf-crypto-key must be <key-id>:<algorithm>:<key>, got '{spec}'");
+    };
+    let key_id = key_id
+        .parse::<u8>()
+        .with_context(|| format!("invalid --ospf-crypto-key key-id in '{spec}'"))?;
+    let algorithm = match algorithm {
+        "md5" => OspfCryptoAlgorithm::Md5,
+        "hmac-sha1" => OspfCryptoAlgorithm::HmacSha1,
+        "hmac-sha256" => OspfCryptoAlgorithm::HmacSha256,
+        "hmac-sha384" => OspfCryptoAlgorithm::HmacSha384,
+        "hmac-sha512" => OspfCryptoAlgorithm::HmacSha512,
+        other => bail!("unknown --ospf-crypto-key algorithm '{other}' in '{spec}'"),
+    };
+    Ok(OspfCryptoKey {
+        key_id,
+        algorithm,
+        key: key.to_string(),
+        is_current: true,
+    })
 }
 
 async fn send(

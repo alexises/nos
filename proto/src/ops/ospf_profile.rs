@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Config, NetworkType, OspfProfile};
+use crate::schema::{Config, NetworkType, OspfAuth, OspfCryptoKey, OspfProfile};
 
 use super::ospf_area::find_area_mut;
 use super::OpError;
@@ -82,6 +82,46 @@ pub enum OspfProfileOp {
         area_id: Ipv4Addr,
         name: String,
     },
+    /// Sets `auth` to a simple password, replacing any crypto keys (RFC
+    /// 2328's Simple and Cryptographic auth types are mutually exclusive).
+    SetSimpleAuth {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        password: String,
+    },
+    /// Upserts one crypto key by `key_id`. If `auth` isn't already `Crypto`
+    /// (unset, or `Simple`), starts a fresh key list with just this key.
+    SetCryptoKey {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        key: OspfCryptoKey,
+    },
+    /// Removes one crypto key by `key_id`. No-op if `auth` isn't `Crypto` or
+    /// the id isn't present — does not clear `auth` back to `None` even if
+    /// the list becomes empty; commit-time validation rejects an empty
+    /// `Crypto` list, so an explicit `ClearAuth` is required for that case.
+    RemoveCryptoKey {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        key_id: u8,
+    },
+    /// Marks one existing crypto key as the current key, clearing the flag
+    /// on every other key in the list.
+    SetCryptoCurrentKey {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        key_id: u8,
+    },
+    /// Unsets `auth` entirely, regardless of which mechanism was set.
+    ClearAuth {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+    },
 }
 
 impl OspfProfileOp {
@@ -101,6 +141,7 @@ impl OspfProfileOp {
                         cost: None,
                         priority: None,
                         network_type: None,
+                        auth: None,
                     });
                 }
                 Ok(())
@@ -210,8 +251,102 @@ impl OspfProfileOp {
                 find_profile_mut(config, instance, *area_id, name)?.network_type = None;
                 Ok(())
             }
+            OspfProfileOp::SetSimpleAuth {
+                instance,
+                area_id,
+                name,
+                password,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.auth = Some(OspfAuth::Simple {
+                    password: password.clone(),
+                });
+                Ok(())
+            }
+            OspfProfileOp::SetCryptoKey {
+                instance,
+                area_id,
+                name,
+                key,
+            } => {
+                let profile = find_profile_mut(config, instance, *area_id, name)?;
+                let keys = match &mut profile.auth {
+                    Some(OspfAuth::Crypto { keys }) => keys,
+                    Some(OspfAuth::Simple { .. }) | None => {
+                        profile.auth = Some(OspfAuth::Crypto { keys: Vec::new() });
+                        let Some(OspfAuth::Crypto { keys }) = &mut profile.auth else {
+                            unreachable!("just set to Crypto above")
+                        };
+                        keys
+                    }
+                };
+                match keys.iter_mut().find(|k| k.key_id == key.key_id) {
+                    Some(existing) => *existing = key.clone(),
+                    None => keys.push(key.clone()),
+                }
+                Ok(())
+            }
+            OspfProfileOp::RemoveCryptoKey {
+                instance,
+                area_id,
+                name,
+                key_id,
+            } => {
+                if let Some(OspfAuth::Crypto { keys }) =
+                    &mut find_profile_mut(config, instance, *area_id, name)?.auth
+                {
+                    keys.retain(|k| k.key_id != *key_id);
+                }
+                Ok(())
+            }
+            OspfProfileOp::SetCryptoCurrentKey {
+                instance,
+                area_id,
+                name,
+                key_id,
+            } => set_crypto_key_flag(config, instance, *area_id, name, *key_id),
+            OspfProfileOp::ClearAuth {
+                instance,
+                area_id,
+                name,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.auth = None;
+                Ok(())
+            }
         }
     }
+}
+
+/// Shared body of `SetCryptoCurrentKey`: sets `is_current = true` on the key
+/// matching `key_id` and `false` on every other key in the same `Crypto`
+/// list — mirrors `bgp_peer_group::set_ao_key_flag`.
+fn set_crypto_key_flag(
+    config: &mut Config,
+    instance: &str,
+    area_id: Ipv4Addr,
+    name: &str,
+    key_id: u8,
+) -> Result<(), OpError> {
+    let profile = find_profile_mut(config, instance, area_id, name)?;
+    let Some(OspfAuth::Crypto { keys }) = &mut profile.auth else {
+        return Err(OpError::OspfCryptoKeyNotFound {
+            instance: instance.to_string(),
+            area_id,
+            name: name.to_string(),
+            key_id,
+        });
+    };
+    if !keys.iter().any(|k| k.key_id == key_id) {
+        return Err(OpError::OspfCryptoKeyNotFound {
+            instance: instance.to_string(),
+            area_id,
+            name: name.to_string(),
+            key_id,
+        });
+    }
+    for key in keys.iter_mut() {
+        key.is_current = key.key_id == key_id;
+    }
+    Ok(())
 }
 
 fn find_profile_mut<'a>(
@@ -264,6 +399,16 @@ mod tests {
             cost: None,
             priority: None,
             network_type: None,
+            auth: None,
+        }
+    }
+
+    fn crypto_key(key_id: u8, is_current: bool) -> OspfCryptoKey {
+        OspfCryptoKey {
+            key_id,
+            algorithm: crate::schema::OspfCryptoAlgorithm::HmacSha256,
+            key: "secret".to_string(),
+            is_current,
         }
     }
 
@@ -530,5 +675,196 @@ mod tests {
             cfg.ospf_instances[0].areas[0].profiles[0].network_type,
             None
         );
+    }
+
+    #[test]
+    fn set_simple_auth() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        OspfProfileOp::SetSimpleAuth {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            password: "abcdefgh".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.ospf_instances[0].areas[0].profiles[0].auth,
+            Some(OspfAuth::Simple {
+                password: "abcdefgh".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn set_crypto_key_starts_fresh_list_over_simple_auth() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        OspfProfileOp::SetSimpleAuth {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            password: "abcdefgh".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        OspfProfileOp::SetCryptoKey {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            key: crypto_key(1, true),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.ospf_instances[0].areas[0].profiles[0].auth,
+            Some(OspfAuth::Crypto {
+                keys: vec![crypto_key(1, true)]
+            })
+        );
+    }
+
+    #[test]
+    fn set_crypto_key_upserts_by_key_id() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        OspfProfileOp::SetCryptoKey {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            key: crypto_key(1, true),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        let mut updated = crypto_key(1, true);
+        updated.key = "newsecret".to_string();
+        OspfProfileOp::SetCryptoKey {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            key: updated.clone(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.ospf_instances[0].areas[0].profiles[0].auth,
+            Some(OspfAuth::Crypto {
+                keys: vec![updated]
+            })
+        );
+    }
+
+    #[test]
+    fn remove_crypto_key() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        OspfProfileOp::SetCryptoKey {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            key: crypto_key(1, true),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        OspfProfileOp::RemoveCryptoKey {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            key_id: 1,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.ospf_instances[0].areas[0].profiles[0].auth,
+            Some(OspfAuth::Crypto { keys: vec![] })
+        );
+    }
+
+    #[test]
+    fn set_crypto_current_key_clears_flag_on_others() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        OspfProfileOp::SetCryptoKey {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            key: crypto_key(1, true),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        OspfProfileOp::SetCryptoKey {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            key: crypto_key(2, false),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        OspfProfileOp::SetCryptoCurrentKey {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            key_id: 2,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.ospf_instances[0].areas[0].profiles[0].auth,
+            Some(OspfAuth::Crypto {
+                keys: vec![crypto_key(1, false), crypto_key(2, true)]
+            })
+        );
+    }
+
+    #[test]
+    fn set_crypto_current_key_missing_errors() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        let err = OspfProfileOp::SetCryptoCurrentKey {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            key_id: 1,
+        }
+        .apply(&mut cfg)
+        .unwrap_err();
+        assert!(matches!(err, OpError::OspfCryptoKeyNotFound { .. }));
+    }
+
+    #[test]
+    fn clear_auth() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1", vec![area("0.0.0.0", vec![profile("p1")])])],
+            ..Default::default()
+        };
+        OspfProfileOp::SetSimpleAuth {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+            password: "abcdefgh".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        OspfProfileOp::ClearAuth {
+            instance: "o1".to_string(),
+            area_id: area_id("0.0.0.0"),
+            name: "p1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.ospf_instances[0].areas[0].profiles[0].auth, None);
     }
 }

@@ -1,6 +1,6 @@
 //! One OSPF link's driver, plus `LinkManager` — the OSPF analogue of
 //! `bgp::session::SessionManager`, much smaller since there's no shared
-//! listener, no auth, and no collision resolution: each link just owns its
+//! listener and no collision resolution: each link just owns its
 //! own raw socket, neighbor FSM(s), RFC 2328 §9.4 DR/BDR election on a
 //! `Broadcast` link, and — once a neighbor is eligible — RFC 2328
 //! §10.6-10.8's DBD/LSR/LSU/LSAck adjacency-forming exchange
@@ -26,7 +26,7 @@ use crate::lsa::{
 };
 use crate::lsdb::Lsdb;
 use crate::neighbor::{self, NeighborState};
-use crate::packet::{self, DbdPacket, LsAckPacket, LsrPacket, LsuPacket, OspfPacket};
+use crate::packet::{self, DbdPacket, LsAckPacket, LsrPacket, LsuPacket, OspfPacket, PacketError};
 use crate::socket::OspfSocket;
 use crate::spf;
 
@@ -89,6 +89,66 @@ pub struct LinkConfig {
     pub kernel_interface: String,
     pub network_type: NetworkType,
     pub priority: u8,
+    /// RFC 2328 Appendix D auth, resolved once per reconcile from
+    /// `OspfProfile.auth` (see `reconcile.rs`). Fits this struct's existing
+    /// "any field change restarts the link" rule with no special-casing —
+    /// an auth/key change simply restarts the link task, which re-sends
+    /// Hello with the new auth; a peer still on the old auth rejects it
+    /// until it's updated too, which is exactly the desired match/mismatch
+    /// behavior.
+    pub auth: LinkAuthConfig,
+}
+
+/// One link's resolved OSPF authentication — `OspfProfile.auth` translated
+/// into `packet.rs`'s own key-material shape.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkAuthConfig {
+    None,
+    Simple {
+        password: Vec<u8>,
+    },
+    /// `current_key_id` names which of `keys` actively signs outgoing
+    /// packets — guaranteed present by `OspfProfile.auth`'s own commit-time
+    /// validation (`valid_auth`: exactly one `is_current` key) by the time
+    /// this is built in `reconcile.rs`.
+    Crypto {
+        keys: Vec<(u8, packet::CryptoAlgorithm, Vec<u8>)>,
+        current_key_id: u8,
+    },
+}
+
+impl LinkAuthConfig {
+    fn as_policy(&self) -> packet::AuthPolicy<'_> {
+        match self {
+            LinkAuthConfig::None => packet::AuthPolicy::None,
+            LinkAuthConfig::Simple { password } => packet::AuthPolicy::Simple { password },
+            LinkAuthConfig::Crypto { keys, .. } => packet::AuthPolicy::Crypto { keys },
+        }
+    }
+
+    /// Builds what to sign an outgoing packet with, given this send's own
+    /// crypto sequence number (only meaningful for `Crypto`).
+    fn as_outgoing(&self, sequence: u32) -> packet::OutgoingAuth<'_> {
+        match self {
+            LinkAuthConfig::None => packet::OutgoingAuth::None,
+            LinkAuthConfig::Simple { password } => packet::OutgoingAuth::Simple { password },
+            LinkAuthConfig::Crypto {
+                keys,
+                current_key_id,
+            } => {
+                let (key_id, algorithm, key) = keys
+                    .iter()
+                    .find(|(id, _, _)| id == current_key_id)
+                    .expect("valid_auth guarantees current_key_id names a real key");
+                packet::OutgoingAuth::Crypto {
+                    key_id: *key_id,
+                    algorithm: *algorithm,
+                    key,
+                    sequence,
+                }
+            }
+        }
+    }
 }
 
 /// RFC 2328 §9.1's interface states — see `nos_proto::LinkInterfaceState`,
@@ -118,6 +178,11 @@ pub struct NeighborInfo {
     /// back to `Init`/`Down` (RFC 2328: losing 2-way tears down any
     /// adjacency, forcing a fresh negotiation on reconnect).
     pub adjacency: Option<AdjacencyData>,
+    /// RFC 2328 D.4.3's anti-replay crypto sequence number, last accepted
+    /// from this neighbor — `None` until its first Crypto-authenticated
+    /// packet. Only ever populated/checked when `LinkConfig.auth` is
+    /// `Crypto`; see `run()`'s receive loop.
+    pub last_crypto_seq: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -237,6 +302,13 @@ pub async fn run(
     let mut rxmt_sweep = tokio::time::interval(RXMT_INTERVAL);
     rxmt_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // RFC 2328 D.4.3's outgoing crypto sequence number — only meaningful
+    // when `cfg.auth` is `Crypto`, but harmless to always seed/advance.
+    // Floored at wall-clock seconds so it never regresses across a link
+    // restart (a fresh `next_crypto_seq` call always floors back up to
+    // "now" if the in-memory counter would otherwise be behind).
+    let mut next_seq = crypto_seq_floor();
+
     info!(link = %cfg.attach_point, vrf = %cfg.vrf, "ospf link driver started");
     if is_broadcast {
         info!(link = %cfg.attach_point, "ospf interface reached waiting");
@@ -245,49 +317,63 @@ pub async fn run(
     loop {
         tokio::select! {
             _ = hello_ticker.tick() => {
-                send_hello(&socket, &cfg, local_router_id, &status);
+                send_hello(&socket, &cfg, local_router_id, &status, &mut next_seq);
             }
             result = socket.recv_packet() => {
                 match result {
-                    Ok((source, data)) => match packet::decode(&data) {
-                        Ok(OspfPacket::Hello(hello)) => {
-                            let left_waiting = handle_hello(
-                                &cfg, local_router_id, &status, source, &hello,
-                                &mut p2p_dead_deadline, waiting,
-                            );
-                            if left_waiting {
-                                waiting = false;
+                    Ok((source, data)) => {
+                        let policy = cfg.auth.as_policy();
+                        match packet::decode(&data, &policy) {
+                            Ok(pkt) if !accept_crypto_sequence(&cfg, &status, &data, &pkt) => {
+                                warn!(
+                                    link = %cfg.attach_point, neighbor = %packet::router_id(&pkt),
+                                    "ospf packet crypto sequence number not increasing, dropping"
+                                );
                             }
-                            advance_adjacencies(&socket, &cfg, local_router_id, &status);
-                        }
-                        Ok(OspfPacket::Dbd(dbd)) => {
-                            if let Some(actions) =
-                                handle_dbd(&cfg, local_router_id, &status, &lsdb, &dbd).await
-                            {
-                                execute_actions(&socket, &cfg, local_router_id, &status, dbd.router_id, actions);
+                            Ok(OspfPacket::Hello(hello)) => {
+                                let left_waiting = handle_hello(
+                                    &cfg, local_router_id, &status, source, &hello,
+                                    &mut p2p_dead_deadline, waiting,
+                                );
+                                if left_waiting {
+                                    waiting = false;
+                                }
+                                advance_adjacencies(&socket, &cfg, local_router_id, &status, &mut next_seq);
                             }
-                        }
-                        Ok(OspfPacket::Lsr(lsr)) => {
-                            if let Some(actions) =
-                                handle_lsr(&cfg, local_router_id, &status, &lsdb, &lsr).await
-                            {
-                                execute_actions(&socket, &cfg, local_router_id, &status, lsr.router_id, actions);
+                            Ok(OspfPacket::Dbd(dbd)) => {
+                                if let Some(actions) =
+                                    handle_dbd(&cfg, local_router_id, &status, &lsdb, &dbd).await
+                                {
+                                    execute_actions(&socket, &cfg, local_router_id, &status, dbd.router_id, actions, &mut next_seq);
+                                }
                             }
-                        }
-                        Ok(OspfPacket::Lsu(lsu)) => {
-                            if let Some(actions) =
-                                handle_lsu(&cfg, local_router_id, &status, &lsdb, &lsu).await
-                            {
-                                execute_actions(&socket, &cfg, local_router_id, &status, lsu.router_id, actions);
+                            Ok(OspfPacket::Lsr(lsr)) => {
+                                if let Some(actions) =
+                                    handle_lsr(&cfg, local_router_id, &status, &lsdb, &lsr).await
+                                {
+                                    execute_actions(&socket, &cfg, local_router_id, &status, lsr.router_id, actions, &mut next_seq);
+                                }
                             }
+                            Ok(OspfPacket::Lsu(lsu)) => {
+                                if let Some(actions) =
+                                    handle_lsu(&cfg, local_router_id, &status, &lsdb, &lsu).await
+                                {
+                                    execute_actions(&socket, &cfg, local_router_id, &status, lsu.router_id, actions, &mut next_seq);
+                                }
+                            }
+                            Ok(OspfPacket::LsAck(ack)) => {
+                                handle_lsack(&status, &ack);
+                            }
+                            Err(e) => match e {
+                                PacketError::AuthTypeMismatch | PacketError::AuthFailed => {
+                                    warn!(link = %cfg.attach_point, error = %e, "ospf packet authentication failed");
+                                }
+                                _ => {
+                                    warn!(link = %cfg.attach_point, error = %e, "failed to decode ospf packet");
+                                }
+                            },
                         }
-                        Ok(OspfPacket::LsAck(ack)) => {
-                            handle_lsack(&status, &ack);
-                        }
-                        Err(e) => {
-                            warn!(link = %cfg.attach_point, error = %e, "failed to decode ospf packet");
-                        }
-                    },
+                    }
                     Err(e) => warn!(link = %cfg.attach_point, error = %e, "ospf recv error"),
                 }
             }
@@ -299,20 +385,77 @@ pub async fn run(
                 sweep_dead_neighbors(&cfg, &status);
                 if !waiting {
                     run_election(&cfg, local_router_id, &status);
-                    advance_adjacencies(&socket, &cfg, local_router_id, &status);
+                    advance_adjacencies(&socket, &cfg, local_router_id, &status, &mut next_seq);
                 }
             }
             () = tokio::time::sleep_until(wait_deadline), if waiting => {
                 waiting = false;
                 run_election(&cfg, local_router_id, &status);
-                advance_adjacencies(&socket, &cfg, local_router_id, &status);
+                advance_adjacencies(&socket, &cfg, local_router_id, &status, &mut next_seq);
             }
             _ = rxmt_sweep.tick() => {
-                retransmit_pending(&socket, &cfg, local_router_id, &status);
-                flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &status).await;
+                retransmit_pending(&socket, &cfg, local_router_id, &status, &mut next_seq);
+                flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &status, &mut next_seq).await;
             }
         }
     }
+}
+
+/// Wall-clock unix-seconds floor for the outgoing crypto sequence number —
+/// mirrors `initial_dd_sequence_number`'s use of `SystemTime`, but must
+/// specifically never regress (RFC 2328 D.4.3's anti-replay guarantee),
+/// which subsec-nanos-based randomness doesn't provide.
+fn crypto_seq_floor() -> u32 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX))
+}
+
+/// Bumps `counter` to the next value to sign an outgoing packet with:
+/// whichever is larger of one past its previous value or the current
+/// wall-clock floor — guarantees non-decreasing even across a link restart
+/// (a fresh process starts `counter` at `crypto_seq_floor()` again, always
+/// at or above any previously-sent value from a real clock that doesn't run
+/// backwards).
+fn next_crypto_seq(counter: &mut u32) -> u32 {
+    *counter = counter.saturating_add(1).max(crypto_seq_floor());
+    *counter
+}
+
+/// RFC 2328 D.4.3's anti-replay check: `true` if this packet should be
+/// dispatched, `false` if it must be silently dropped instead. Always `true`
+/// when `cfg.auth` isn't `Crypto` (nothing to check) or this is the first
+/// packet ever seen from this neighbor (no entry yet — `handle_hello`
+/// creates it). Kept in `link.rs`, not `packet.rs`: this is stateful
+/// per-neighbor bookkeeping, and `link.rs` already owns all such state (see
+/// `packet::crypto_sequence`'s doc comment).
+fn accept_crypto_sequence(
+    cfg: &LinkConfig,
+    status: &StatusHandle,
+    data: &[u8],
+    pkt: &OspfPacket,
+) -> bool {
+    if !matches!(cfg.auth, LinkAuthConfig::Crypto { .. }) {
+        return true;
+    }
+    let Some(seq) = packet::crypto_sequence(data) else {
+        return true;
+    };
+    let router_id = packet::router_id(pkt);
+    let last_seq = status
+        .borrow()
+        .neighbors
+        .get(&router_id)
+        .and_then(|n| n.last_crypto_seq);
+    if last_seq.is_some_and(|last| seq <= last) {
+        return false;
+    }
+    status.send_modify(|s| {
+        if let Some(n) = s.neighbors.get_mut(&router_id) {
+            n.last_crypto_seq = Some(seq);
+        }
+    });
+    true
 }
 
 fn send_hello(
@@ -320,6 +463,7 @@ fn send_hello(
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
+    next_seq: &mut u32,
 ) {
     let current = status.borrow();
     let neighbors: Vec<Ipv4Addr> = current
@@ -350,7 +494,8 @@ fn send_hello(
         backup_designated_router,
         neighbors,
     };
-    if let Err(e) = socket.send_multicast(&packet::encode_hello(&pkt)) {
+    let auth = cfg.auth.as_outgoing(next_crypto_seq(next_seq));
+    if let Err(e) = socket.send_multicast(&packet::encode_hello(&pkt, &auth)) {
         warn!(link = %cfg.attach_point, error = %e, "failed to send ospf hello");
     }
 }
@@ -408,6 +553,7 @@ fn handle_hello(
                 last_hello_received: Instant::now(),
                 address: source,
                 adjacency: None,
+                last_crypto_seq: None,
             });
         entry.state = new_state;
         entry.priority = hello.router_priority;
@@ -447,6 +593,7 @@ fn advance_adjacencies(
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
+    next_seq: &mut u32,
 ) {
     let snapshot = status.borrow().clone();
     let eligible: Vec<Ipv4Addr> = snapshot
@@ -471,7 +618,8 @@ fn advance_adjacencies(
             continue;
         };
         let (adj, dbd) = start_negotiation(cfg, local_router_id);
-        if let Err(e) = socket.send_unicast(neighbor_addr, &packet::encode_dbd(&dbd)) {
+        let auth = cfg.auth.as_outgoing(next_crypto_seq(next_seq));
+        if let Err(e) = socket.send_unicast(neighbor_addr, &packet::encode_dbd(&dbd, &auth)) {
             warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf dbd");
         }
         let new_state = neighbor::step(NeighborState::TwoWay, neighbor::Event::AdjacencyEligible);
@@ -686,6 +834,7 @@ fn execute_actions(
     status: &StatusHandle,
     neighbor_id: Ipv4Addr,
     actions: Vec<exchange::Action>,
+    next_seq: &mut u32,
 ) {
     let Some(neighbor_addr) = status
         .borrow()
@@ -696,31 +845,44 @@ fn execute_actions(
         return;
     };
     for action in actions {
+        // Each packet sent gets its own crypto sequence number — RFC 2328
+        // D.4.3's non-decreasing guarantee is per packet, not per action
+        // batch.
+        let auth = cfg.auth.as_outgoing(next_crypto_seq(next_seq));
         let (kind, payload) = match action {
-            exchange::Action::SendDbd(pkt) => ("dbd", packet::encode_dbd(&pkt)),
+            exchange::Action::SendDbd(pkt) => ("dbd", packet::encode_dbd(&pkt, &auth)),
             exchange::Action::SendLsr(requests) => (
                 "lsr",
-                packet::encode_lsr(&LsrPacket {
-                    router_id: local_router_id,
-                    area_id: cfg.area_id,
-                    requests,
-                }),
+                packet::encode_lsr(
+                    &LsrPacket {
+                        router_id: local_router_id,
+                        area_id: cfg.area_id,
+                        requests,
+                    },
+                    &auth,
+                ),
             ),
             exchange::Action::SendLsu(lsas) => (
                 "lsu",
-                packet::encode_lsu(&LsuPacket {
-                    router_id: local_router_id,
-                    area_id: cfg.area_id,
-                    lsas: lsas.iter().map(|l| (**l).clone()).collect(),
-                }),
+                packet::encode_lsu(
+                    &LsuPacket {
+                        router_id: local_router_id,
+                        area_id: cfg.area_id,
+                        lsas: lsas.iter().map(|l| (**l).clone()).collect(),
+                    },
+                    &auth,
+                ),
             ),
             exchange::Action::SendLsAck(lsa_headers) => (
                 "lsack",
-                packet::encode_lsack(&LsAckPacket {
-                    router_id: local_router_id,
-                    area_id: cfg.area_id,
-                    lsa_headers,
-                }),
+                packet::encode_lsack(
+                    &LsAckPacket {
+                        router_id: local_router_id,
+                        area_id: cfg.area_id,
+                        lsa_headers,
+                    },
+                    &auth,
+                ),
             ),
             exchange::Action::NeighborEvent(_) | exchange::Action::InstallAndFlood(_) => continue,
         };
@@ -742,12 +904,14 @@ fn retransmit_pending(
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
+    next_seq: &mut u32,
 ) {
     let snapshot = status.borrow().clone();
     for (neighbor_id, info) in &snapshot.neighbors {
         let Some(adj) = &info.adjacency else { continue };
         if let Some(dbd) = &adj.last_dbd_sent {
-            if let Err(e) = socket.send_unicast(info.address, &packet::encode_dbd(dbd)) {
+            let auth = cfg.auth.as_outgoing(next_crypto_seq(next_seq));
+            if let Err(e) = socket.send_unicast(info.address, &packet::encode_dbd(dbd, &auth)) {
                 warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf dbd");
             }
         }
@@ -763,7 +927,8 @@ fn retransmit_pending(
                 area_id: cfg.area_id,
                 requests: adj.request_list.clone(),
             };
-            if let Err(e) = socket.send_unicast(info.address, &packet::encode_lsr(&lsr)) {
+            let auth = cfg.auth.as_outgoing(next_crypto_seq(next_seq));
+            if let Err(e) = socket.send_unicast(info.address, &packet::encode_lsr(&lsr, &auth)) {
                 warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsr");
             }
         }
@@ -777,7 +942,8 @@ fn retransmit_pending(
                     .map(|l| (**l).clone())
                     .collect(),
             };
-            if let Err(e) = socket.send_unicast(info.address, &packet::encode_lsu(&lsu)) {
+            let auth = cfg.auth.as_outgoing(next_crypto_seq(next_seq));
+            if let Err(e) = socket.send_unicast(info.address, &packet::encode_lsu(&lsu, &auth)) {
                 warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsu");
             }
         }
@@ -808,6 +974,7 @@ async fn flood_full_neighbors(
     local_router_id: Ipv4Addr,
     lsdb: &Mutex<Lsdb>,
     status: &StatusHandle,
+    next_seq: &mut u32,
 ) {
     let full_neighbors: Vec<(Ipv4Addr, Ipv4Addr)> = status
         .borrow()
@@ -823,11 +990,20 @@ async fn flood_full_neighbors(
     if lsas.is_empty() {
         return;
     }
-    let payload = packet::encode_lsu(&LsuPacket {
-        router_id: local_router_id,
-        area_id: cfg.area_id,
-        lsas: lsas.iter().map(|l| (**l).clone()).collect(),
-    });
+    // One signed payload reused for every full neighbor — safe even under
+    // Crypto auth: RFC 2328 D.4.3's anti-replay check is per-neighbor on the
+    // receive side (`accept_crypto_sequence` keys on the sender's own
+    // `router_id`), so two different neighbors each independently accepting
+    // the same sequence number is correct, not a replay.
+    let auth = cfg.auth.as_outgoing(next_crypto_seq(next_seq));
+    let payload = packet::encode_lsu(
+        &LsuPacket {
+            router_id: local_router_id,
+            area_id: cfg.area_id,
+            lsas: lsas.iter().map(|l| (**l).clone()).collect(),
+        },
+        &auth,
+    );
     for (neighbor_id, neighbor_addr) in full_neighbors {
         if let Err(e) = socket.send_unicast(neighbor_addr, &payload) {
             warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsu");
@@ -1510,6 +1686,7 @@ mod tests {
             kernel_interface: "eth0".to_string(),
             network_type: NetworkType::PointToPoint,
             priority: 1,
+            auth: LinkAuthConfig::None,
         }
     }
 
@@ -1644,6 +1821,7 @@ mod tests {
             last_hello_received: Instant::now(),
             address,
             adjacency: None,
+            last_crypto_seq: None,
         }
     }
 

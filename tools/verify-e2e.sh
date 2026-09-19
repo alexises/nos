@@ -97,12 +97,21 @@
 # copy actually ages out and gets flushed at MaxAge purely on its own local
 # clock.
 #
+# A sixth, `ospf-auth` (requires `ospf` to have already run), configures a
+# real RFC 2328 Appendix D.3 / RFC 5709 HMAC-SHA-256 crypto key on
+# router-a/router-b's own eth0.0 point-to-point ospf-profile, confirming the
+# adjacency reaches/stays Full with matching keys, that a mismatched key on
+# either side produces a real logged digest-verification failure and blocks
+# any new Full adjacency (real per-packet HMAC verification, not
+# simulated), and that reverting to a matching key lets a fresh Full
+# adjacency form again.
+#
 # nos-cli's interactive shell (reedline) can't be scripted over a plain
 # pipe, so provisioning goes through `nos-provision` (tools/nos-provision) —
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|ospf-aging|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
+# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|ospf-aging|ospf-auth|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -439,6 +448,33 @@ provision_ospf() {
     --ospf-area "$OSPF_AREA" \
     --ospf-profile "$OSPF_PROFILE" \
     --ospf-interface-profile "$OSPF_PROFILE"
+}
+
+# Same as `provision_ospf`, but also sets a single RFC 2328 Appendix D.3 /
+# RFC 5709 crypto key ($crypto_key_spec, "<key-id>:<algorithm>:<key>") on
+# $OSPF_PROFILE -- for verifying OSPF session authentication end to end
+# (matching keys on both routers stay/reach full; a mismatched one on
+# either side does not). Requires `provision_ospf`/`cmd_check_ospf` to have
+# already committed $OSPF_PROFILE for $name.
+provision_ospf_auth() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 ospf_instance=$6 ospf_router_id=$7 crypto_key_spec=$8
+  log "provisioning $name with an ospf crypto key on $OSPF_PROFILE ($crypto_key_spec)"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --ospf-instance "$ospf_instance" \
+    --ospf-router-id "$ospf_router_id" \
+    --ospf-area "$OSPF_AREA" \
+    --ospf-profile "$OSPF_PROFILE" \
+    --ospf-interface-profile "$OSPF_PROFILE" \
+    --ospf-crypto-key "$crypto_key_spec"
 }
 
 # Same as `provision_ospf`, but never attaches the profile to eth0's own
@@ -1195,6 +1231,68 @@ cmd_check_ospf() {
     || { log "router-b: FAILED to reach ospf full on the broadcast link"; return 1; }
 }
 
+# --- OSPF authentication scenario ---
+#
+# Requires `ospf` to have already run (router-a/router-b's real p2p
+# adjacency over eth0.0, the same one already carrying $OSPF_PROFILE).
+# Configures a matching RFC 5709 HMAC-SHA-256 crypto key on both sides
+# (confirming the adjacency reaches/stays Full with real per-packet digest
+# verification, not simulated), then a mismatched key on router-a only
+# (confirming router-b logs a real digest-verification failure and no new
+# Full adjacency forms -- router-a's own link task restarts with empty
+# state on the config change and can never reach Full again while the
+# mismatch persists, since every Hello either side sends is rejected by the
+# other), then restores the matching key (confirming a fresh Full adjacency
+# forms again).
+ospf_full_count() {
+  local name=$1 neighbor=$2
+  # Strips ANSI escape codes first, same as `wait_for_count_increase` --
+  # this pattern spans a `field=value` boundary that colored output splits.
+  docker logs "$name" 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
+    | grep -c "ospf neighbor reached full link=eth0.0 neighbor=$neighbor" || true
+}
+
+cmd_check_ospf_auth() {
+  local key="topsecretkey"
+  provision_ospf_auth router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID" "1:hmac-sha256:$key"
+  provision_ospf_auth router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID_B" "1:hmac-sha256:$key"
+
+  log "waiting for router-a/router-b to (re-)reach ospf full with a matching hmac-sha256 crypto key"
+  wait_for_count_increase router-a "ospf neighbor reached full link=eth0.0 neighbor=$OSPF_ROUTER_ID_B" 0 60 \
+    && log "router-a: reached ospf full with a matching crypto key" \
+    || { log "router-a: FAILED to reach ospf full with a matching crypto key"; return 1; }
+  wait_for_count_increase router-b "ospf neighbor reached full link=eth0.0 neighbor=$OSPF_ROUTER_ID" 0 60 \
+    && log "router-b: reached ospf full with a matching crypto key" \
+    || { log "router-b: FAILED to reach ospf full with a matching crypto key"; return 1; }
+
+  local before_a
+  before_a=$(ospf_full_count router-a "$OSPF_ROUTER_ID_B")
+
+  log "reconfiguring router-a with a mismatched crypto key"
+  provision_ospf_auth router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID" "1:hmac-sha256:wrong-key"
+
+  log "waiting for router-b to log a real ospf digest-verification failure from router-a"
+  wait_for_count_increase router-b "ospf packet authentication failed link=eth0.0" 0 30 \
+    && log "router-b: logged an ospf authentication failure" \
+    || { log "router-b: FAILED to log an ospf authentication failure"; return 1; }
+
+  log "waiting 8s to confirm no new ospf full adjacency forms with mismatched crypto keys"
+  sleep 8
+  local after_a
+  after_a=$(ospf_full_count router-a "$OSPF_ROUTER_ID_B")
+  if [[ "$after_a" -gt "$before_a" ]]; then
+    log "FAILED: ospf reached full again despite mismatched crypto keys"
+    return 1
+  fi
+  log "confirmed: no new ospf full adjacency with mismatched crypto keys"
+
+  log "restoring the matching crypto key on router-a"
+  provision_ospf_auth router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID" "1:hmac-sha256:$key"
+  wait_for_count_increase router-a "ospf neighbor reached full link=eth0.0 neighbor=$OSPF_ROUTER_ID_B" "$before_a" 60 \
+    && log "router-a: re-reached ospf full after fixing the crypto key" \
+    || { log "router-a: FAILED to re-reach ospf full after fixing the crypto key"; return 1; }
+}
+
 # --- OSPF SPF route computation scenario ---
 #
 # Requires `ospf` to have already run (router-a/router-b's real p2p
@@ -1906,6 +2004,7 @@ cmd_group_ospf_suite() {
   cmd_check_ospf
   cmd_check_ospf_dr
   cmd_check_ospf_spf
+  cmd_check_ospf_auth
   cmd_check_ospf_aging
 }
 
@@ -1936,6 +2035,7 @@ case "${1:-}" in
   ospf-dr) cmd_check_ospf_dr ;;
   ospf-spf) cmd_check_ospf_spf ;;
   ospf-aging) cmd_check_ospf_aging ;;
+  ospf-auth) cmd_check_ospf_auth ;;
   logs) shift; cmd_logs "$@" ;;
   down) cmd_down ;;
   base) cmd_group_base ;;
@@ -1963,10 +2063,11 @@ case "${1:-}" in
     cmd_check_ospf
     cmd_check_ospf_dr
     cmd_check_ospf_spf
+    cmd_check_ospf_auth
     cmd_check_ospf_aging
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|ospf-aging|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|ospf-dr|ospf-spf|ospf-aging|ospf-auth|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
     exit 2
     ;;
 esac

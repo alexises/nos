@@ -6,13 +6,14 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use ipnet::Ipv4Net;
-use nos_proto::{DiffScope, Event, NetworkType, ServiceRef};
+use nos_proto::{DiffScope, Event, NetworkType, OspfAuth, OspfCryptoAlgorithm, ServiceRef};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::config_client;
 use crate::interface_client;
-use crate::link::{LinkConfig, LinkManager};
+use crate::link::{LinkAuthConfig, LinkConfig, LinkManager};
+use crate::packet;
 use crate::rib_client;
 use crate::watchdog_client;
 
@@ -169,6 +170,7 @@ async fn resync(
                 .dead_interval
                 .unwrap_or(nos_proto::DEAD_INTERVAL_DEFAULT);
             let priority = profile.priority.unwrap_or(nos_proto::PRIORITY_DEFAULT);
+            let auth = resolve_auth(profile);
 
             for attach in subinterface_attach_points(&cfg, &profile.name) {
                 let link_name = attach.display_name();
@@ -205,6 +207,7 @@ async fn resync(
                     kernel_interface: subinterface_kernel_interface(&attach.interface, attach.tag),
                     network_type: profile.network_type.unwrap_or(NetworkType::PointToPoint),
                     priority,
+                    auth: auth.clone(),
                 });
             }
 
@@ -261,6 +264,7 @@ async fn resync(
                     kernel_interface,
                     network_type: profile.network_type.unwrap_or(NetworkType::Broadcast),
                     priority,
+                    auth: auth.clone(),
                 });
             }
         }
@@ -477,6 +481,47 @@ fn subinterface_kernel_interface(interface: &str, tag: u16) -> String {
         interface.to_string()
     } else {
         format!("{interface}.{tag}")
+    }
+}
+
+/// Translates `OspfProfile.auth` into `link::LinkAuthConfig` — pure, no I/O,
+/// since `auth` is already fully present in the fetched `Config`.
+/// `current_key_id` is safe to pull from whichever key has `is_current` set
+/// without a fallback: `OspfProfile`'s own commit-time validation
+/// (`schema::ospf_profile::valid_auth`) already guarantees exactly one does
+/// whenever `auth` is `Crypto`.
+fn resolve_auth(profile: &nos_proto::OspfProfile) -> LinkAuthConfig {
+    match &profile.auth {
+        None => LinkAuthConfig::None,
+        Some(OspfAuth::Simple { password }) => LinkAuthConfig::Simple {
+            password: password.clone().into_bytes(),
+        },
+        Some(OspfAuth::Crypto { keys }) => {
+            let current_key_id = keys.iter().find(|k| k.is_current).map_or(0, |k| k.key_id);
+            LinkAuthConfig::Crypto {
+                keys: keys
+                    .iter()
+                    .map(|k| {
+                        (
+                            k.key_id,
+                            resolve_algorithm(k.algorithm),
+                            k.key.clone().into_bytes(),
+                        )
+                    })
+                    .collect(),
+                current_key_id,
+            }
+        }
+    }
+}
+
+fn resolve_algorithm(algorithm: OspfCryptoAlgorithm) -> packet::CryptoAlgorithm {
+    match algorithm {
+        OspfCryptoAlgorithm::Md5 => packet::CryptoAlgorithm::Md5,
+        OspfCryptoAlgorithm::HmacSha1 => packet::CryptoAlgorithm::HmacSha1,
+        OspfCryptoAlgorithm::HmacSha256 => packet::CryptoAlgorithm::HmacSha256,
+        OspfCryptoAlgorithm::HmacSha384 => packet::CryptoAlgorithm::HmacSha384,
+        OspfCryptoAlgorithm::HmacSha512 => packet::CryptoAlgorithm::HmacSha512,
     }
 }
 

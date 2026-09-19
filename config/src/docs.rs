@@ -590,6 +590,46 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Unsets the network-type field on a profile, reverting to the default derived \
              from each attach point's own kind.",
         ),
+        Topic::SetOspfProfileSimpleAuth => (
+            "Set an OSPF profile's simple password.",
+            "Sets a single RFC 2328 Appendix D.2 plaintext password (up to 8 bytes) on a \
+             profile's Hello/DBD/LSR/LSU/LSAck packets, replacing any crypto keys that were set \
+             — the two mechanisms are mutually exclusive. Stored clear-text, like every other \
+             field in this config.",
+        ),
+        Topic::SetOspfProfileCryptoKey => (
+            "Set (or replace) one of an OSPF profile's cryptographic auth keys.",
+            "Adds one RFC 2328 Appendix D.3 / RFC 5709 cryptographic auth key to a profile, \
+             identified by its key-id and algorithm (md5, hmac-sha1, hmac-sha256, hmac-sha384, \
+             or hmac-sha512) — adding a key with a key-id that already exists replaces it in \
+             place. If the profile's auth wasn't already crypto (unset, or a simple password), \
+             this starts a fresh key list containing just this key. Exactly one key across the \
+             whole list must be marked current, for the profile to validate at commit time — \
+             see set-ospf-profile-crypto-current-key. Stored clear-text, like every other field \
+             in this config.",
+        ),
+        Topic::RemoveOspfProfileCryptoKey => (
+            "Remove one of an OSPF profile's cryptographic auth keys by key-id.",
+            "Removes one crypto key from a profile's key list by key-id; a no-op if the \
+             profile's auth isn't crypto or no key has that key-id. Does not clear the \
+             profile's auth back to unset even if the list becomes empty — an empty crypto key \
+             list fails commit-time validation, so clear the auth explicitly instead if that's \
+             the intent.",
+        ),
+        Topic::SetOspfProfileCryptoCurrentKey => (
+            "Mark one of an OSPF profile's cryptographic auth keys as current.",
+            "Marks the crypto key with the given key-id as the current key — the one actively \
+             signing outgoing packets — clearing that flag on every other key in the same \
+             profile. Every configured key, current or not, is still accepted on receive, \
+             looked up by the wire's own key-id — this is what allows graceful key rotation. \
+             Fails if the profile's auth isn't crypto or no key has that key-id.",
+        ),
+        Topic::ClearOspfProfileAuth => (
+            "Clear an OSPF profile's authentication.",
+            "Unsets the auth field on a profile entirely, regardless of which mechanism \
+             (simple password or crypto keys) was set, reverting to RFC 2328 AuType 0 (no \
+             authentication).",
+        ),
         Topic::SetInterfaceOspfProfile => (
             "Associate an OSPF profile with an interface, subinterface, or broadcast domain.",
             "Points a loopback interface, a physical interface's subinterface, or a broadcast \
@@ -711,6 +751,11 @@ mod tests {
         Topic::ClearOspfProfilePriority,
         Topic::SetOspfProfileNetworkType,
         Topic::ClearOspfProfileNetworkType,
+        Topic::SetOspfProfileSimpleAuth,
+        Topic::SetOspfProfileCryptoKey,
+        Topic::RemoveOspfProfileCryptoKey,
+        Topic::SetOspfProfileCryptoCurrentKey,
+        Topic::ClearOspfProfileAuth,
     ];
 
     #[test]

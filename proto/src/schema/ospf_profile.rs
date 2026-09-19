@@ -27,6 +27,98 @@ pub enum NetworkType {
     Broadcast,
 }
 
+/// A profile's own authentication — RFC 2328 Appendix D. Mutually exclusive
+/// mechanisms, mirroring `BgpAuth`'s exact shape (`schema::bgp_peer_group`).
+/// Stored clear-text, like every field in this config. `OspfProfile.auth ==
+/// None` is RFC 2328's `AuType` 0 (Null) — no separate variant needed for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OspfAuth {
+    /// RFC 2328 Appendix D.2 — a single up-to-8-byte plaintext password,
+    /// carried directly in the OSPF header's 8-byte Authentication field.
+    Simple { password: String },
+    /// RFC 2328 Appendix D.3 / RFC 5709 — one or more keys, supporting
+    /// rotation via `key_id`/`is_current`, mirroring `BgpAoKey`.
+    Crypto { keys: Vec<OspfCryptoKey> },
+}
+
+/// One cryptographic auth key. `key_id` is the wire Key ID (RFC 2328 D.3);
+/// `is_current` marks the key actively signing outgoing packets (exactly
+/// one key must have this set) — every configured key is still accepted on
+/// receive, looked up by the wire's own Key ID (RFC 2328 D.5), which is how
+/// graceful key rollover works without dropping the adjacency.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OspfCryptoKey {
+    pub key_id: u8,
+    pub algorithm: OspfCryptoAlgorithm,
+    pub key: String,
+    pub is_current: bool,
+}
+
+/// RFC 2328 Appendix D's original Cryptographic authentication (plain MD5)
+/// plus RFC 5709's HMAC-SHA extension. The wire's `AuType` is `2` for all
+/// five — there's no separate "algorithm" field on the wire, so `key_id`
+/// alone must unambiguously determine which algorithm a receiver uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OspfCryptoAlgorithm {
+    Md5,
+    HmacSha1,
+    HmacSha256,
+    HmacSha384,
+    HmacSha512,
+}
+
+/// Maximum auth secret length this NOS accepts — mirrors
+/// `bgp_peer_group::MAX_AUTH_KEY_LEN`'s role (no RFC-mandated cap; HMAC
+/// itself accepts any key length).
+const MAX_AUTH_KEY_LEN: usize = 80;
+
+/// Simple password is a real 8-byte wire field (RFC 2328 D.2), not just a
+/// convention.
+const SIMPLE_PASSWORD_MAX_LEN: usize = 8;
+
+fn valid_auth(auth: Option<&OspfAuth>) -> garde::Result {
+    match auth {
+        None => Ok(()),
+        Some(OspfAuth::Simple { password }) => {
+            if password.is_empty() || password.len() > SIMPLE_PASSWORD_MAX_LEN {
+                return Err(garde::Error::new(
+                    "simple password must be 1 to 8 bytes long",
+                ));
+            }
+            Ok(())
+        }
+        Some(OspfAuth::Crypto { keys }) => {
+            if keys.is_empty() {
+                return Err(garde::Error::new(
+                    "crypto auth must have at least one key (or be cleared)",
+                ));
+            }
+            let mut seen_key_ids: Vec<u8> = Vec::new();
+            let mut current_count = 0;
+            for key in keys {
+                if key.key.is_empty() || key.key.len() > MAX_AUTH_KEY_LEN {
+                    return Err(garde::Error::new("crypto key must be 1 to 80 bytes long"));
+                }
+                if seen_key_ids.contains(&key.key_id) {
+                    return Err(garde::Error::new(
+                        "crypto key-id must be unique within a profile",
+                    ));
+                }
+                seen_key_ids.push(key.key_id);
+                if key.is_current {
+                    current_count += 1;
+                }
+            }
+            if current_count != 1 {
+                return Err(garde::Error::new(
+                    "crypto auth must have exactly one current key",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
 /// A named OSPF profile, declared inside an area (`OspfArea.profiles`) but
 /// referenced by bare name from any L3 attach point's `ospf_profile` field
 /// (`Interface`/`Subinterface`/`BroadcastDomain`) with no instance/area
@@ -79,6 +171,10 @@ pub struct OspfProfile {
     /// matching real OSPF's own allowance for this.
     #[garde(skip)]
     pub network_type: Option<NetworkType>,
+
+    /// `None` is RFC 2328 `AuType` 0 (Null) — no authentication.
+    #[garde(custom(|a: &Option<OspfAuth>, _ctx: &Config| valid_auth(a.as_ref())))]
+    pub auth: Option<OspfAuth>,
 }
 
 fn valid_cost(cost: Option<u16>) -> garde::Result {
@@ -129,7 +225,7 @@ mod tests {
 
     use crate::schema::{Config, OspfArea, OspfInstance};
 
-    use super::{NetworkType, OspfProfile};
+    use super::{NetworkType, OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfProfile};
 
     fn profile(name: &str) -> OspfProfile {
         OspfProfile {
@@ -139,6 +235,7 @@ mod tests {
             cost: None,
             priority: None,
             network_type: None,
+            auth: None,
         }
     }
 
@@ -225,6 +322,7 @@ mod tests {
             cost: None,
             priority: None,
             network_type: None,
+            auth: None,
         }
     }
 
@@ -305,5 +403,101 @@ mod tests {
             let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
             cfg.validate_with(&cfg).unwrap();
         }
+    }
+
+    fn crypto_key(key_id: u8, is_current: bool) -> OspfCryptoKey {
+        OspfCryptoKey {
+            key_id,
+            algorithm: OspfCryptoAlgorithm::HmacSha256,
+            key: "secret".to_string(),
+            is_current,
+        }
+    }
+
+    #[test]
+    fn no_auth_passes() {
+        let cfg = config_with(vec![instance(
+            "r1",
+            vec![area("0.0.0.0", vec![profile("p1")])],
+        )]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn valid_simple_password_passes() {
+        let mut p = profile("p1");
+        p.auth = Some(OspfAuth::Simple {
+            password: "abcdefgh".to_string(),
+        });
+        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn simple_password_over_8_bytes_fails() {
+        let mut p = profile("p1");
+        p.auth = Some(OspfAuth::Simple {
+            password: "123456789".to_string(),
+        });
+        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn empty_simple_password_fails() {
+        let mut p = profile("p1");
+        p.auth = Some(OspfAuth::Simple {
+            password: String::new(),
+        });
+        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn valid_crypto_keys_pass() {
+        let mut p = profile("p1");
+        p.auth = Some(OspfAuth::Crypto {
+            keys: vec![crypto_key(1, true), crypto_key(2, false)],
+        });
+        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn empty_crypto_keys_fails() {
+        let mut p = profile("p1");
+        p.auth = Some(OspfAuth::Crypto { keys: Vec::new() });
+        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn duplicate_crypto_key_id_fails() {
+        let mut p = profile("p1");
+        p.auth = Some(OspfAuth::Crypto {
+            keys: vec![crypto_key(1, true), crypto_key(1, false)],
+        });
+        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn no_current_crypto_key_fails() {
+        let mut p = profile("p1");
+        p.auth = Some(OspfAuth::Crypto {
+            keys: vec![crypto_key(1, false)],
+        });
+        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn two_current_crypto_keys_fails() {
+        let mut p = profile("p1");
+        p.auth = Some(OspfAuth::Crypto {
+            keys: vec![crypto_key(1, true), crypto_key(2, true)],
+        });
+        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+        assert!(cfg.validate_with(&cfg).is_err());
     }
 }

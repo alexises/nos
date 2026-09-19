@@ -2,8 +2,8 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
 use nos_proto::{
-    AddressFamily, BgpAoAlgorithm, NetworkType, NextHopMode, Redistribute, RedistributeSource,
-    RedistributeTarget, SourceAddress, TransactionBase, VlanTag,
+    AddressFamily, BgpAoAlgorithm, NetworkType, NextHopMode, OspfCryptoAlgorithm, Redistribute,
+    RedistributeSource, RedistributeTarget, SourceAddress, TransactionBase, VlanTag,
 };
 
 /// A single field edit targeting a BGP instance.
@@ -59,14 +59,25 @@ pub enum BgpPeerGroupField {
     ExportPolicy(String),
 }
 
-/// A single field edit targeting an `OspfProfile`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A single field edit targeting an `OspfProfile`. Not `Copy` — the auth
+/// variants carry owned `String` key material, mirroring
+/// `BgpPeerGroupField`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OspfProfileField {
     HelloInterval(u16),
     DeadInterval(u16),
     Cost(u16),
     Priority(u8),
     NetworkType(NetworkType),
+    SimplePassword(String),
+    /// A new (or replacement) crypto key — `current` is set via the
+    /// separate `CryptoCurrentKey` variant, not here.
+    CryptoKey {
+        key_id: u8,
+        algorithm: OspfCryptoAlgorithm,
+        key: String,
+    },
+    CryptoCurrentKey(u8),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,11 +330,20 @@ pub enum DeleteTarget {
     /// `delete connect-retry-time` — only valid while navigated into a
     /// peer-group.
     ConnectRetryTime,
-    /// `delete auth` — only valid while navigated into a peer-group.
+    /// `delete auth` — shared with an `OspfProfile`'s crypto/simple auth
+    /// (its schema has no field enum of its own to carry a separate
+    /// variant, mirroring `BgpInstanceField::RouterId`'s exact precedent) —
+    /// only valid while navigated into a peer-group or an OSPF profile,
+    /// resolved by path in `session::resolve_in_transaction`.
     Auth,
     /// `delete ao-key <send-id>` — only valid while navigated into a
-    /// peer-group.
+    /// peer-group. (An OSPF profile's crypto key removal is `delete
+    /// crypto-key <key-id>`, its own token, since `ao-key`'s literal isn't
+    /// shared.)
     AoKey(u8),
+    /// `delete crypto-key <key-id>` — only valid while navigated into an
+    /// `OspfProfile`.
+    CryptoKey(u8),
     /// `delete next-hop` — only valid while navigated into a peer-group.
     NextHop,
     /// `delete route-reflector-client` — only valid while navigated into a
@@ -1187,6 +1207,34 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 field: OspfProfileField::NetworkType(NetworkType::Broadcast),
             })
         }
+        ["ospf", "instance", instance, "area", area_id, "profile", name, "simple-password", password] => {
+            Command::Set(SetTarget::OspfProfile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::SimplePassword((*password).to_string()),
+            })
+        }
+        ["ospf", "instance", instance, "area", area_id, "profile", name, "crypto-key", key_id, algorithm, key] => {
+            Command::Set(SetTarget::OspfProfile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::CryptoKey {
+                    key_id: key_id.parse::<u8>().ok()?,
+                    algorithm: parse_ospf_crypto_algorithm(algorithm)?,
+                    key: (*key).to_string(),
+                },
+            })
+        }
+        ["ospf", "instance", instance, "area", area_id, "profile", name, "crypto-key", key_id, "current"] => {
+            Command::Set(SetTarget::OspfProfile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::CryptoCurrentKey(key_id.parse::<u8>().ok()?),
+            })
+        }
         ["hello-interval", n] => Command::Set(SetTarget::OspfProfileRelative {
             field: OspfProfileField::HelloInterval(n.parse::<u16>().ok()?),
         }),
@@ -1204,6 +1252,19 @@ fn parse_set(t: &[&str]) -> Option<Command> {
         }),
         ["network-type", "broadcast"] => Command::Set(SetTarget::OspfProfileRelative {
             field: OspfProfileField::NetworkType(NetworkType::Broadcast),
+        }),
+        ["simple-password", password] => Command::Set(SetTarget::OspfProfileRelative {
+            field: OspfProfileField::SimplePassword((*password).to_string()),
+        }),
+        ["crypto-key", key_id, algorithm, key] => Command::Set(SetTarget::OspfProfileRelative {
+            field: OspfProfileField::CryptoKey {
+                key_id: key_id.parse::<u8>().ok()?,
+                algorithm: parse_ospf_crypto_algorithm(algorithm)?,
+                key: (*key).to_string(),
+            },
+        }),
+        ["crypto-key", key_id, "current"] => Command::Set(SetTarget::OspfProfileRelative {
+            field: OspfProfileField::CryptoCurrentKey(key_id.parse::<u8>().ok()?),
         }),
         ["broadcast", "domain", name, "address", addr] => {
             Command::Set(SetTarget::BroadcastDomainAddress {
@@ -1390,6 +1451,9 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
         ["cost"] => Command::Delete(DeleteTarget::Cost),
         ["priority"] => Command::Delete(DeleteTarget::Priority),
         ["network-type"] => Command::Delete(DeleteTarget::NetworkType),
+        ["crypto-key", key_id] => {
+            Command::Delete(DeleteTarget::CryptoKey(key_id.parse::<u8>().ok()?))
+        }
         ["routing-table", name, "redistribute"] => {
             Command::Delete(DeleteTarget::RoutingTableRedistribute {
                 name: (*name).to_string(),
@@ -1543,6 +1607,17 @@ fn parse_ao_algorithm(token: &str) -> Option<BgpAoAlgorithm> {
     match token {
         "hmac-sha1" => Some(BgpAoAlgorithm::HmacSha1_96),
         "aes-cmac" => Some(BgpAoAlgorithm::AesCmac96),
+        _ => None,
+    }
+}
+
+fn parse_ospf_crypto_algorithm(token: &str) -> Option<OspfCryptoAlgorithm> {
+    match token {
+        "md5" => Some(OspfCryptoAlgorithm::Md5),
+        "hmac-sha1" => Some(OspfCryptoAlgorithm::HmacSha1),
+        "hmac-sha256" => Some(OspfCryptoAlgorithm::HmacSha256),
+        "hmac-sha384" => Some(OspfCryptoAlgorithm::HmacSha384),
+        "hmac-sha512" => Some(OspfCryptoAlgorithm::HmacSha512),
         _ => None,
     }
 }
@@ -2312,6 +2387,89 @@ mod tests {
         assert_eq!(
             Command::parse("delete network-type"),
             Command::Delete(DeleteTarget::NetworkType)
+        );
+    }
+
+    #[test]
+    fn set_ospf_simple_password_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set ospf instance o1 area 0.0.0.0 profile p1 simple-password hunter2"),
+            Command::Set(SetTarget::OspfProfile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+                field: OspfProfileField::SimplePassword("hunter2".to_string()),
+            })
+        );
+        assert_eq!(
+            Command::parse("set simple-password hunter2"),
+            Command::Set(SetTarget::OspfProfileRelative {
+                field: OspfProfileField::SimplePassword("hunter2".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn set_ospf_crypto_key_qualified_and_relative() {
+        assert_eq!(
+            Command::parse(
+                "set ospf instance o1 area 0.0.0.0 profile p1 crypto-key 1 hmac-sha256 secret"
+            ),
+            Command::Set(SetTarget::OspfProfile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+                field: OspfProfileField::CryptoKey {
+                    key_id: 1,
+                    algorithm: OspfCryptoAlgorithm::HmacSha256,
+                    key: "secret".to_string(),
+                },
+            })
+        );
+        assert_eq!(
+            Command::parse("set crypto-key 1 md5 secret"),
+            Command::Set(SetTarget::OspfProfileRelative {
+                field: OspfProfileField::CryptoKey {
+                    key_id: 1,
+                    algorithm: OspfCryptoAlgorithm::Md5,
+                    key: "secret".to_string(),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn set_ospf_crypto_key_bad_algorithm_is_unknown() {
+        assert_eq!(
+            Command::parse("set crypto-key 1 rot13 secret"),
+            Command::Unknown("set crypto-key 1 rot13 secret".to_string())
+        );
+    }
+
+    #[test]
+    fn set_ospf_crypto_current_key() {
+        assert_eq!(
+            Command::parse("set crypto-key 1 current"),
+            Command::Set(SetTarget::OspfProfileRelative {
+                field: OspfProfileField::CryptoCurrentKey(1),
+            })
+        );
+        assert_eq!(
+            Command::parse("set ospf instance o1 area 0.0.0.0 profile p1 crypto-key 1 current"),
+            Command::Set(SetTarget::OspfProfile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+                field: OspfProfileField::CryptoCurrentKey(1),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_ospf_crypto_key() {
+        assert_eq!(
+            Command::parse("delete crypto-key 1"),
+            Command::Delete(DeleteTarget::CryptoKey(1))
         );
     }
 

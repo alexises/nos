@@ -45,10 +45,10 @@ pub use rib::{
 pub use schema::{
     loopback_table_name, AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpInstance, BgpPeer,
     BgpPeerGroup, BroadcastDomain, CommunityAlias, CommunityGroup, Config, Interface,
-    InterfaceAddress, NetworkType, NextHopMode, OspfArea, OspfInstance, OspfProfile,
-    PolicyDefinition, PrefixList, PrefixListEntry, Redistribute, RedistributeSource,
-    RedistributeTarget, RoutingTable, SourceAddress, StaticRoute, StaticRoutingInstance,
-    Subinterface, SwitchingProfile, SwitchingProfileMember, VlanTag,
+    InterfaceAddress, NetworkType, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm,
+    OspfCryptoKey, OspfInstance, OspfProfile, PolicyDefinition, PrefixList, PrefixListEntry,
+    Redistribute, RedistributeSource, RedistributeTarget, RoutingTable, SourceAddress, StaticRoute,
+    StaticRoutingInstance, Subinterface, SwitchingProfile, SwitchingProfileMember, VlanTag,
     CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT, HELLO_INTERVAL_DEFAULT,
     HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX, PRIORITY_DEFAULT,
 };
