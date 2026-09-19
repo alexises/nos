@@ -50,4 +50,8 @@ impl InterfaceDriver for NoopInterfaceDriver {
         );
         Ok(())
     }
+
+    async fn link_local_address(&self, _kernel_interface: &str) -> Option<std::net::Ipv6Addr> {
+        None
+    }
 }

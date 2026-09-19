@@ -6,7 +6,8 @@ use nos_proto::{
     BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
     Interface, InterfaceAddress, InterfaceStatus, LinkInterfaceState, LogEntry, LogLevel,
     LsaSummary, NeighborSummary, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm,
-    OspfInstance, OspfNeighborState, OspfProfile, PeerSummary, PolicyDefinition, PrefixList,
+    OspfInstance, OspfNeighborState, OspfProfile, Ospfv3Area, Ospfv3Instance, Ospfv3LsaSummary,
+    Ospfv3NeighborSummary, Ospfv3Profile, PeerSummary, PolicyDefinition, PrefixList,
     PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, SourceAddress,
     StaticRoute, StaticRoutingInstance, Subinterface, SubinterfaceStatus, SwitchingProfile,
     TransactionSnapshot, VlanTag,
@@ -179,6 +180,38 @@ fn render_ospf_auth(auth: Option<&OspfAuth>) -> String {
             format!("crypto-keys [{rendered}]")
         }
     }
+}
+
+/// Render one `Ospfv3Instance` as human-readable text — mirrors
+/// `render_ospf_instance` exactly.
+pub fn render_ospfv3_instance(instance: &Ospfv3Instance) -> String {
+    let mut lines = vec![format!(
+        "ospfv3 instance {}: router-id {}",
+        instance.name, instance.router_id
+    )];
+    for area in &instance.areas {
+        for line in render_ospfv3_area(area).lines() {
+            lines.push(format!("  {line}"));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Render one `Ospfv3Area` as human-readable text — mirrors
+/// `render_ospf_area` exactly.
+pub fn render_ospfv3_area(area: &Ospfv3Area) -> String {
+    let mut lines = vec![format!("area {}", area.area_id)];
+    for profile in &area.profiles {
+        lines.push(format!("  {}", render_ospfv3_profile(profile)));
+    }
+    lines.join("\n")
+}
+
+/// Render one `Ospfv3Profile` as human-readable text — no `auth` field to
+/// render (no authentication in this NOS build's `OSPFv3` support), unlike
+/// `render_ospf_profile`.
+pub fn render_ospfv3_profile(profile: &Ospfv3Profile) -> String {
+    format!("profile {}", profile.name)
 }
 
 /// Render one routing table as human-readable text.
@@ -537,6 +570,64 @@ pub fn render_ospf_database(instance: &str, entries: &[LsaSummary]) -> String {
     lines.join("\n")
 }
 
+/// Render one `Ospfv3Instance`'s link/neighbor summaries, one line per
+/// neighbor — used for `show ospfv3 neigh`. Mirrors `render_ospf_neighbors`
+/// exactly, reusing the same `OspfNeighborState`/`LinkInterfaceState`
+/// renderers since `Ospfv3NeighborSummary` shares those types verbatim.
+pub fn render_ospfv3_neighbors(instance: &str, neighbors: &[Ospfv3NeighborSummary]) -> String {
+    if neighbors.is_empty() {
+        return format!("ospfv3 instance {instance}: no ospfv3 links configured");
+    }
+    let mut lines = vec![format!("ospfv3 instance {instance}:")];
+    for link in neighbors {
+        let neighbor_router_id = render_ip_or_dash(link.neighbor_router_id);
+        let last_hello = link
+            .last_hello_secs
+            .map_or_else(|| "-".to_string(), |s| format!("{s}s"));
+        let neighbor_priority = link
+            .neighbor_priority
+            .map_or_else(|| "-".to_string(), |p| p.to_string());
+        lines.push(format!(
+            "  {} area {} if-state {} neighbor {neighbor_router_id} {} last-hello {last_hello} \
+             hello-interval {} dead-interval {} priority {} neighbor-priority {neighbor_priority} \
+             dr {} bdr {}",
+            link.link,
+            link.area_id,
+            render_ospf_interface_state(link.interface_state),
+            render_ospf_neighbor_state(link.state),
+            link.hello_interval,
+            link.dead_interval,
+            link.priority,
+            render_ip_or_dash(link.dr),
+            render_ip_or_dash(link.bdr),
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Render one `Ospfv3Instance`'s installed-LSA headers, one line per LSA —
+/// used for `show ospfv3 database`. Mirrors `render_ospf_database` exactly.
+pub fn render_ospfv3_database(instance: &str, entries: &[Ospfv3LsaSummary]) -> String {
+    if entries.is_empty() {
+        return format!("ospfv3 instance {instance}: no LSAs installed");
+    }
+    let mut lines = vec![format!("ospfv3 instance {instance}:")];
+    for lsa in entries {
+        lines.push(format!(
+            "  area {} type {} link-state-id {} advertising-router {} \
+             sequence 0x{:08x} age {} checksum 0x{:04x}",
+            lsa.area_id,
+            lsa.lsa_type,
+            lsa.link_state_id,
+            lsa.advertising_router,
+            lsa.sequence_number,
+            lsa.age,
+            lsa.checksum,
+        ));
+    }
+    lines.join("\n")
+}
+
 /// Render one static routing instance as human-readable text, including any
 /// nested routes, each indented one level under the instance line.
 pub fn render_static_routing_instance(instance: &StaticRoutingInstance) -> String {
@@ -564,6 +655,11 @@ pub fn render_config(config: &Config) -> String {
         lines.push("no OSPF instances configured".to_string());
     } else {
         lines.extend(config.ospf_instances.iter().map(render_ospf_instance));
+    }
+    if config.ospfv3_instances.is_empty() {
+        lines.push("no OSPFv3 instances configured".to_string());
+    } else {
+        lines.extend(config.ospfv3_instances.iter().map(render_ospfv3_instance));
     }
     if config.static_routing_instances.is_empty() {
         lines.push("no static routing instances configured".to_string());
@@ -699,6 +795,44 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
                     )
                 },
                 render_ospf_profile,
+            ),
+        Path::Ospfv3Instance(name) => snapshot
+            .config
+            .ospfv3_instances
+            .iter()
+            .find(|i| &i.name == name)
+            .map_or_else(
+                || format!("ospfv3 instance '{name}' not found"),
+                render_ospfv3_instance,
+            ),
+        Path::Ospfv3Area { instance, area_id } => snapshot
+            .config
+            .ospfv3_instances
+            .iter()
+            .find(|i| &i.name == instance)
+            .and_then(|i| i.areas.iter().find(|a| a.area_id == *area_id))
+            .map_or_else(
+                || format!("ospfv3 area '{area_id}' not found in ospfv3 instance '{instance}'"),
+                render_ospfv3_area,
+            ),
+        Path::Ospfv3Profile {
+            instance,
+            area_id,
+            name,
+        } => snapshot
+            .config
+            .ospfv3_instances
+            .iter()
+            .find(|i| &i.name == instance)
+            .and_then(|i| i.areas.iter().find(|a| a.area_id == *area_id))
+            .and_then(|a| a.profiles.iter().find(|p| &p.name == name))
+            .map_or_else(
+                || {
+                    format!(
+                        "ospfv3 profile '{name}' not found in area '{area_id}' of ospfv3 instance '{instance}'"
+                    )
+                },
+                render_ospfv3_profile,
             ),
         Path::StaticRoutingInstance(name) => snapshot
             .config
@@ -924,6 +1058,9 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
     for section in &diff.ospf_instances {
         render_section(&mut lines, section, 0, color);
     }
+    for section in &diff.ospfv3_instances {
+        render_section(&mut lines, section, 0, color);
+    }
     for section in &diff.static_routing_instances {
         render_section(&mut lines, section, 0, color);
     }
@@ -1075,7 +1212,7 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(
             render_config(&cfg),
-            "hostname: nos\nno BGP instances configured\nno routing tables configured\nno OSPF instances configured\nno static routing instances configured\nno interfaces configured\n\
+            "hostname: nos\nno BGP instances configured\nno routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\nno interfaces configured\n\
              no community aliases configured\nno community groups configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured"
         );
@@ -1090,7 +1227,7 @@ mod tests {
         assert_eq!(
             render_config(&cfg),
             "hostname: nos\nbgp instance default: router-id 1.1.1.1, asn 65000, cluster-id default (= router-id)\n\
-             no routing tables configured\nno OSPF instances configured\nno static routing instances configured\n\
+             no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
              no community aliases configured\nno community groups configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured"
@@ -1107,7 +1244,7 @@ mod tests {
             render_config(&cfg),
             "hostname: nos\nbgp instance vrf-a: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)\n\
              bgp instance vrf-b: router-id 1.1.1.1, asn 65002, cluster-id default (= router-id)\n\
-             no routing tables configured\nno OSPF instances configured\nno static routing instances configured\n\
+             no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
              no community aliases configured\nno community groups configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured"
@@ -1117,6 +1254,7 @@ mod tests {
     #[test]
     fn render_interface_with_subinterfaces() {
         let iface = Interface {
+            ospfv3_profile: None,
             name: "eth0".to_string(),
             addresses: Vec::new(),
             routing_table: None,
@@ -1125,6 +1263,7 @@ mod tests {
             mtu: Some(9000),
             subinterfaces: vec![
                 Subinterface {
+                    ospfv3_profile: None,
                     tag: 0,
                     addresses: vec![InterfaceAddress {
                         address: "10.0.0.1/24".parse().unwrap(),
@@ -1134,6 +1273,7 @@ mod tests {
                     ospf_profile: None,
                 },
                 Subinterface {
+                    ospfv3_profile: None,
                     tag: 100,
                     addresses: Vec::new(),
                     routing_table: None,
@@ -1155,6 +1295,7 @@ mod tests {
     #[test]
     fn render_loopback_interface_stays_flat() {
         let iface = Interface {
+            ospfv3_profile: None,
             name: "loopback-rt1".to_string(),
             addresses: vec![InterfaceAddress {
                 address: "10.0.0.1/32".parse().unwrap(),
@@ -1190,7 +1331,7 @@ mod tests {
         assert_eq!(
             rendered,
             "transaction 'demo':\nhostname: nos\nbgp instance r1: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)\n\
-             no routing tables configured\nno OSPF instances configured\nno static routing instances configured\n\
+             no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
              no community aliases configured\nno community groups configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured"
@@ -1222,6 +1363,7 @@ mod tests {
     fn render_transaction_at_subinterface_found() {
         let mut snap = snapshot(false);
         snap.config.interfaces = vec![Interface {
+            ospfv3_profile: None,
             name: "eth0".to_string(),
             addresses: Vec::new(),
             routing_table: None,
@@ -1229,6 +1371,7 @@ mod tests {
             switching_profile: None,
             mtu: None,
             subinterfaces: vec![Subinterface {
+                ospfv3_profile: None,
                 tag: 100,
                 addresses: Vec::new(),
                 routing_table: Some("rt1".to_string()),

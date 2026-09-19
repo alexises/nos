@@ -58,6 +58,17 @@ pub enum BgpRouteUpdate {
 pub struct OspfRoute {
     pub prefix: IpNet,
     pub next_hop: IpAddr,
+    /// The local kernel interface (ifindex) `next_hop` is reachable over,
+    /// when the pushing daemon knows it — always `Some` from `nos-ospfv3d`
+    /// (RFC 5340 next-hops are link-local IPv6 addresses, which Linux's
+    /// netlink `RTM_NEWROUTE` rejects with EINVAL unless an outgoing
+    /// interface is given alongside the gateway; `OSPFv3`'s own SPF already
+    /// derives it, since a first-hop link-local address is only meaningful
+    /// relative to the specific local link it was learned on — see
+    /// `ospfv3::spf`'s module doc comment), always `None` from `nos-ospfd`
+    /// (RFC 2328 next-hops are ordinary routable IPv4 addresses, which the
+    /// kernel resolves via its own routing table without needing one).
+    pub interface_id: Option<u32>,
 }
 
 /// Sent by the owning `nos-ospfd` instance to `nos-ribd` over a persistent,

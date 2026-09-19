@@ -72,6 +72,7 @@ mod tests {
         let path = tmp.path().join("interface.sock");
         serve_once(&path, |_req| {
             Some(InterfaceEvent::Interface(InterfaceStatus {
+                link_local_address: None,
                 name: "eth0".to_string(),
                 addresses: vec![InterfaceAddress {
                     address: "10.0.0.1/24".parse().unwrap(),

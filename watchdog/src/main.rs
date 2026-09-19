@@ -52,6 +52,16 @@ struct Args {
     #[arg(long = "ospfd-arg", allow_hyphen_values = true)]
     ospfd_flags: Vec<String>,
 
+    /// Path to the nos-ospfv3d binary to supervise (one instance is spawned
+    /// per `OSPFv3` instance in the running config) — the RFC 5340 (IPv6)
+    /// counterpart of nos-ospfd, a fully independent daemon family.
+    #[arg(long, default_value = "/usr/local/bin/nos-ospfv3d")]
+    ospfv3d_bin: PathBuf,
+
+    /// Extra arguments forwarded to every nos-ospfv3d instance.
+    #[arg(long = "ospfv3d-arg", allow_hyphen_values = true)]
+    ospfv3d_flags: Vec<String>,
+
     /// Path to the nos-interfaced binary to supervise. Unlike nos-bgpd/
     /// nos-ribd, exactly one instance is always supervised regardless of how
     /// many interfaces are configured — see `interface/CLAUDE.md`.
@@ -206,6 +216,24 @@ async fn main() -> anyhow::Result<()> {
             endpoint: Some(Endpoint {
                 kind: EndpointKind::OspfInstance,
                 socket_prefix: "ospf",
+            }),
+            config_socket: args.config_socket.clone(),
+            log_socket: args.log_socket.clone(),
+            watchdog_listen_socket: args.listen_socket.clone(),
+            policy,
+            registry: registry.clone(),
+        },
+        Managed {
+            scope: DiffScope::Ospfv3Instances,
+            section: |d| &d.ospfv3_instances,
+            bin: args.ospfv3d_bin,
+            flags: args.ospfv3d_flags,
+            name_flag: "--instance",
+            daemon: "nos-ospfv3d",
+            noun: "OSPFv3 instance",
+            endpoint: Some(Endpoint {
+                kind: EndpointKind::Ospfv3Instance,
+                socket_prefix: "ospfv3",
             }),
             config_socket: args.config_socket.clone(),
             log_socket: args.log_socket.clone(),

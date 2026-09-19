@@ -31,6 +31,11 @@ pub enum ServiceRef {
     /// the instance's config key — resolved through the registry the same
     /// way as `RibTable`/`BgpInstance`.
     OspfInstance(String),
+    /// The `nos-ospfv3d` instance currently serving one `OSPFv3` instance,
+    /// named by the instance's config key — resolved through the registry
+    /// the same way as `OspfInstance`, a separate variant since v2/v3 are
+    /// two independent daemon families.
+    Ospfv3Instance(String),
 }
 
 /// Messages sent from a client to `nos-watchdogd`'s broker socket.

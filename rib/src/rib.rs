@@ -38,6 +38,13 @@ pub struct RibEntry {
     pub prefix: IpNet,
     pub gateway: IpAddr,
     pub source: RouteSource,
+    /// Mirrors `nos_proto::OspfRoute::interface_id` — the local kernel
+    /// interface `gateway` is reachable over, when known (always `Some`
+    /// for an `Ospf`-sourced entry pushed by `nos-ospfv3d`, always `None`
+    /// otherwise). Threaded down to `RibDriver::add_route`/`remove_route`,
+    /// required for Linux's netlink route install when `gateway` is an
+    /// IPv6 link-local address.
+    pub interface_id: Option<u32>,
 }
 
 /// Whether a mutation actually changed a prefix's *winning* candidate —
@@ -230,6 +237,7 @@ pub fn build_from_config(cfg: &Config, table_name: &str) -> Option<Rib> {
                     prefix: route.subnet,
                     gateway: route.gateway,
                     source: RouteSource::Static,
+                    interface_id: None,
                 });
             }
         } else {
@@ -268,6 +276,7 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
@@ -286,11 +295,13 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
         });
         rib.insert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
@@ -304,11 +315,13 @@ mod tests {
         let p1: IpNet = "10.0.0.0/24".parse().unwrap();
         let p2: IpNet = "10.0.1.0/24".parse().unwrap();
         rib.insert(RibEntry {
+            interface_id: None,
             prefix: p1,
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
         });
         rib.insert(RibEntry {
+            interface_id: None,
             prefix: p2,
             gateway: "10.0.1.1".parse().unwrap(),
             source: RouteSource::Static,
@@ -322,16 +335,19 @@ mod tests {
         let p1: IpNet = "10.0.1.0/24".parse().unwrap();
         let p2: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
+            interface_id: None,
             prefix: p1,
             gateway: "10.0.1.1".parse().unwrap(),
             source: RouteSource::Static,
         });
         rib.insert(RibEntry {
+            interface_id: None,
             prefix: p2,
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
         });
         rib.insert(RibEntry {
+            interface_id: None,
             prefix: p2,
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
@@ -354,11 +370,13 @@ mod tests {
         let broad: IpNet = "10.0.0.0/16".parse().unwrap();
         let narrow: IpNet = "10.0.1.0/24".parse().unwrap();
         rib.insert(RibEntry {
+            interface_id: None,
             prefix: broad,
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
         });
         rib.insert(RibEntry {
+            interface_id: None,
             prefix: narrow,
             gateway: "10.0.1.1".parse().unwrap(),
             source: RouteSource::Static,
@@ -383,6 +401,7 @@ mod tests {
     #[test]
     fn build_from_config_table_without_static_instance_is_empty() {
         let tables = vec![RoutingTable {
+            ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,
             ospf_instance: None,
@@ -398,6 +417,7 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
@@ -405,6 +425,7 @@ mod tests {
         rib.replace_source(
             RouteSource::Static,
             vec![RibEntry {
+                interface_id: None,
                 prefix,
                 gateway: "10.0.0.1".parse().unwrap(),
                 source: RouteSource::Static,
@@ -426,6 +447,7 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
@@ -439,16 +461,19 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
         });
         rib.upsert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
         });
         rib.upsert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.99".parse().unwrap(),
             source: RouteSource::Bgp,
@@ -472,6 +497,7 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         let entry = RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
@@ -488,6 +514,7 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
@@ -496,6 +523,7 @@ mod tests {
         // never becomes the winner — no kernel-visible change.
         assert_eq!(
             rib.upsert_and_diff(RibEntry {
+                interface_id: None,
                 prefix,
                 gateway: "10.0.0.9".parse().unwrap(),
                 source: RouteSource::Bgp,
@@ -509,6 +537,7 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         let bgp_entry = RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
@@ -516,12 +545,14 @@ mod tests {
         assert_eq!(
             rib.upsert_and_diff(bgp_entry),
             BestPathChange::Installed(RibEntry {
+                interface_id: None,
                 prefix,
                 gateway: "10.0.0.9".parse().unwrap(),
                 source: RouteSource::Bgp,
             })
         );
         let static_entry = RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
@@ -537,6 +568,7 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
@@ -552,11 +584,13 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
         });
         rib.insert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
@@ -573,11 +607,13 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
         });
         rib.insert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
@@ -585,6 +621,7 @@ mod tests {
         assert_eq!(
             rib.remove_and_diff(&prefix, RouteSource::Static),
             BestPathChange::Installed(RibEntry {
+                interface_id: None,
                 prefix,
                 gateway: "10.0.0.9".parse().unwrap(),
                 source: RouteSource::Bgp,
@@ -597,11 +634,13 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
         });
         rib.insert(RibEntry {
+            interface_id: None,
             prefix,
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
@@ -623,6 +662,7 @@ mod tests {
     #[test]
     fn build_from_config_resolves_static_routes() {
         let tables = vec![RoutingTable {
+            ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,
             ospf_instance: None,

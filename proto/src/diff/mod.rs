@@ -8,6 +8,9 @@ pub mod interface;
 pub mod ospf_area;
 pub mod ospf_instance;
 pub mod ospf_profile;
+pub mod ospfv3_area;
+pub mod ospfv3_instance;
+pub mod ospfv3_profile;
 pub mod policy_definition;
 pub mod prefix_list;
 pub mod routing_table;
@@ -71,6 +74,7 @@ pub struct ConfigDiff {
     pub bgp_instances: Vec<SectionDiff>,
     pub routing_tables: Vec<SectionDiff>,
     pub ospf_instances: Vec<SectionDiff>,
+    pub ospfv3_instances: Vec<SectionDiff>,
     pub static_routing_instances: Vec<SectionDiff>,
     pub interfaces: Vec<SectionDiff>,
     pub policy_definitions: Vec<SectionDiff>,
@@ -87,6 +91,7 @@ impl ConfigDiff {
             && self.bgp_instances.is_empty()
             && self.routing_tables.is_empty()
             && self.ospf_instances.is_empty()
+            && self.ospfv3_instances.is_empty()
             && self.static_routing_instances.is_empty()
             && self.interfaces.is_empty()
             && self.policy_definitions.is_empty()
@@ -120,6 +125,11 @@ impl ConfigDiff {
             },
             ospf_instances: if scopes.contains(&DiffScope::OspfInstances) {
                 self.ospf_instances.clone()
+            } else {
+                Vec::new()
+            },
+            ospfv3_instances: if scopes.contains(&DiffScope::Ospfv3Instances) {
+                self.ospfv3_instances.clone()
             } else {
                 Vec::new()
             },
@@ -183,6 +193,7 @@ pub enum DiffScope {
     BroadcastDomains,
     SwitchingProfiles,
     OspfInstances,
+    Ospfv3Instances,
 }
 
 /// Computes what changed between `base` (e.g. the running config) and
@@ -207,6 +218,10 @@ pub fn diff_configs(base: &Config, candidate: &Config) -> ConfigDiff {
         ospf_instances: ospf_instance::diff_ospf_instances(
             &base.ospf_instances,
             &candidate.ospf_instances,
+        ),
+        ospfv3_instances: ospfv3_instance::diff_ospfv3_instances(
+            &base.ospfv3_instances,
+            &candidate.ospfv3_instances,
         ),
         static_routing_instances: static_routing_instance::diff_static_routing_instances(
             &base.static_routing_instances,

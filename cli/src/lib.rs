@@ -7,6 +7,7 @@ pub mod help_menu;
 pub mod interface_client;
 pub mod log_client;
 pub mod ospf_client;
+pub mod ospfv3_client;
 pub mod rib_client;
 pub mod session;
 pub mod spec;

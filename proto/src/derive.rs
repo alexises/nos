@@ -20,6 +20,9 @@ pub fn sync_routing_table_refs(config: &mut Config) {
         instance.routing_table = None;
         instance.redistribute_policy = None;
     }
+    for instance in &mut config.ospfv3_instances {
+        instance.routing_table = None;
+    }
     for table in &config.routing_tables {
         if let Some(bgp_instance) = &table.bgp_instance {
             if let Some(instance) = config
@@ -47,6 +50,15 @@ pub fn sync_routing_table_refs(config: &mut Config) {
                     .as_ref()
                     .filter(|r| r.to == RedistributeTarget::Ospf)
                     .and_then(|r| r.policy.clone());
+            }
+        }
+        if let Some(ospfv3_instance) = &table.ospfv3_instance {
+            if let Some(instance) = config
+                .ospfv3_instances
+                .iter_mut()
+                .find(|i| &i.name == ospfv3_instance)
+            {
+                instance.routing_table = Some(table.name.clone());
             }
         }
     }
@@ -84,6 +96,7 @@ mod tests {
 
     fn table(name: &str, bgp_instance: Option<&str>) -> RoutingTable {
         RoutingTable {
+            ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),
             ospf_instance: None,

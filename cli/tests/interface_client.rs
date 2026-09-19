@@ -6,6 +6,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 
 fn sample_status() -> InterfaceStatus {
     InterfaceStatus {
+        link_local_address: None,
         name: "eth0".to_string(),
         addresses: vec![InterfaceAddress {
             address: "10.0.0.1/24".parse().unwrap(),

@@ -2,7 +2,8 @@ use garde::Validate;
 use serde::{Deserialize, Serialize};
 
 use crate::validators::{
-    ospf_profile_reference_valid, routing_table_reference_valid, unique_addresses, unique_in,
+    ospf_profile_reference_valid, ospfv3_profile_reference_valid, routing_table_reference_valid,
+    unique_addresses, unique_in,
 };
 
 use super::{Config, InterfaceAddress};
@@ -36,17 +37,28 @@ pub struct BroadcastDomain {
     /// `valid_broadcast_domains`.
     #[garde(custom(|p: &Option<String>, ctx: &Config| ospf_profile_reference_valid(p.as_ref(), ctx)))]
     pub ospf_profile: Option<String>,
+
+    /// Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see
+    /// `Subinterface.ospfv3_profile`'s doc comment for why this is a
+    /// separate field rather than a widened `ospf_profile`.
+    #[garde(custom(|p: &Option<String>, ctx: &Config| ospfv3_profile_reference_valid(p.as_ref(), ctx)))]
+    pub ospfv3_profile: Option<String>,
 }
 
-/// `ospf_profile`, if set, requires `routing_table` also set on the same
-/// domain — mirrors `interface::valid_addressing_split`'s equivalent check.
-/// Wired one level up on `Config.broadcast_domains` (alongside the
-/// field-level `dive`) since it needs to see a sibling field.
+/// `ospf_profile`/`ospfv3_profile`, if set, require `routing_table` also set
+/// on the same domain — mirrors `interface::valid_addressing_split`'s
+/// equivalent check. Wired one level up on `Config.broadcast_domains`
+/// (alongside the field-level `dive`) since it needs to see a sibling field.
 pub(crate) fn valid_broadcast_domains(domains: &[BroadcastDomain]) -> garde::Result {
     for d in domains {
         if d.ospf_profile.is_some() && d.routing_table.is_none() {
             return Err(garde::Error::new(
                 "ospf profile requires a routing-table on the same broadcast domain",
+            ));
+        }
+        if d.ospfv3_profile.is_some() && d.routing_table.is_none() {
+            return Err(garde::Error::new(
+                "ospfv3 profile requires a routing-table on the same broadcast domain",
             ));
         }
     }
@@ -60,6 +72,7 @@ mod tests {
 
     fn domain(name: &str) -> BroadcastDomain {
         BroadcastDomain {
+            ospfv3_profile: None,
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
@@ -69,6 +82,7 @@ mod tests {
 
     fn table(name: &str) -> RoutingTable {
         RoutingTable {
+            ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: None,
             ospf_instance: None,

@@ -13,17 +13,20 @@ fn sample_rib() -> Rib {
     let broad: nos_proto::IpNet = "10.0.0.0/16".parse().unwrap();
     let narrow: nos_proto::IpNet = "10.0.1.0/24".parse().unwrap();
     rib.insert(RibEntry {
+        interface_id: None,
         prefix: broad,
         gateway: "10.0.0.1".parse().unwrap(),
         source: RouteSource::Static,
     });
     // Two competing candidates for the same prefix, to prove ordering.
     rib.insert(RibEntry {
+        interface_id: None,
         prefix: narrow,
         gateway: "10.0.1.9".parse().unwrap(),
         source: RouteSource::Bgp,
     });
     rib.insert(RibEntry {
+        interface_id: None,
         prefix: narrow,
         gateway: "10.0.1.1".parse().unwrap(),
         source: RouteSource::Static,

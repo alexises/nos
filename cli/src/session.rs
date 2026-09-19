@@ -3,9 +3,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use nos_proto::{
     loopback_table_name, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp,
     CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, OspfAreaOp, OspfCryptoKey,
-    OspfInstanceOp, OspfProfileOp, PolicyDefinitionOp, PrefixListEntry, PrefixListOp,
-    RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp,
-    TransactionBase,
+    OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
+    PolicyDefinitionOp, PrefixListEntry, PrefixListOp, RoutingTableOp, StaticRouteOp,
+    StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase,
 };
 
 use crate::command::{
@@ -29,6 +29,16 @@ pub enum Path {
         area_id: Ipv4Addr,
     },
     OspfProfile {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+    },
+    Ospfv3Instance(String),
+    Ospfv3Area {
+        instance: String,
+        area_id: Ipv4Addr,
+    },
+    Ospfv3Profile {
         instance: String,
         area_id: Ipv4Addr,
         name: String,
@@ -184,6 +194,43 @@ fn interface_clear_ospf_profile_op(name: &str) -> ConfigOp {
     }
 }
 
+/// Same shape as `interface_set_ospf_profile_op`, joining `OSPFv3` instead.
+fn interface_set_ospfv3_profile_op(name: &str, ospfv3_profile: String) -> ConfigOp {
+    if let Some((interface, tag)) = split_subinterface(name) {
+        return ConfigOp::Subinterface(SubinterfaceOp::SetOspfv3Profile {
+            interface,
+            tag,
+            ospfv3_profile,
+        });
+    }
+    match loopback_table_name(name) {
+        Some(_) => ConfigOp::Interface(InterfaceOp::SetOspfv3Profile {
+            name: name.to_string(),
+            ospfv3_profile,
+        }),
+        None => ConfigOp::Subinterface(SubinterfaceOp::SetOspfv3Profile {
+            interface: name.to_string(),
+            tag: 0,
+            ospfv3_profile,
+        }),
+    }
+}
+
+fn interface_clear_ospfv3_profile_op(name: &str) -> ConfigOp {
+    if let Some((interface, tag)) = split_subinterface(name) {
+        return ConfigOp::Subinterface(SubinterfaceOp::ClearOspfv3Profile { interface, tag });
+    }
+    match loopback_table_name(name) {
+        Some(_) => ConfigOp::Interface(InterfaceOp::ClearOspfv3Profile {
+            name: name.to_string(),
+        }),
+        None => ConfigOp::Subinterface(SubinterfaceOp::ClearOspfv3Profile {
+            interface: name.to_string(),
+            tag: 0,
+        }),
+    }
+}
+
 /// The relative (`set address`, `set routing-table`, and their `delete`
 /// counterparts) counterparts to the four `interface_*_op` builders above:
 /// same ops, but targeting whichever L3 attachment point the path is
@@ -304,6 +351,43 @@ fn l3_clear_ospf_profile_op(target: L3Target<'_>) -> ConfigOp {
     }
 }
 
+/// Same shape as `l3_set_ospf_profile_op`, joining `OSPFv3` instead.
+fn l3_set_ospfv3_profile_op(target: L3Target<'_>, ospfv3_profile: String) -> ConfigOp {
+    match target {
+        L3Target::Interface(name) => interface_set_ospfv3_profile_op(name, ospfv3_profile),
+        L3Target::Subinterface { interface, tag } => {
+            ConfigOp::Subinterface(SubinterfaceOp::SetOspfv3Profile {
+                interface: interface.to_string(),
+                tag,
+                ospfv3_profile,
+            })
+        }
+        L3Target::BroadcastDomain(name) => {
+            ConfigOp::BroadcastDomain(BroadcastDomainOp::SetOspfv3Profile {
+                name: name.to_string(),
+                ospfv3_profile,
+            })
+        }
+    }
+}
+
+fn l3_clear_ospfv3_profile_op(target: L3Target<'_>) -> ConfigOp {
+    match target {
+        L3Target::Interface(name) => interface_clear_ospfv3_profile_op(name),
+        L3Target::Subinterface { interface, tag } => {
+            ConfigOp::Subinterface(SubinterfaceOp::ClearOspfv3Profile {
+                interface: interface.to_string(),
+                tag,
+            })
+        }
+        L3Target::BroadcastDomain(name) => {
+            ConfigOp::BroadcastDomain(BroadcastDomainOp::ClearOspfv3Profile {
+                name: name.to_string(),
+            })
+        }
+    }
+}
+
 /// Builds the `ConfigOp` (and its `Path`/error) for `edit interface <name>`:
 /// a dotted non-loopback name ensures the subinterface (cascading its
 /// parent interface); a bare name ensures the physical interface, unchanged.
@@ -398,6 +482,12 @@ pub enum Resolved {
     /// `show ospf database` — data-plane, valid in any mode. Router-wide (no
     /// instance argument), mirroring `ShowOspfNeigh`.
     ShowOspfDatabase,
+    /// `show ospfv3 neigh` — mirrors `ShowOspfNeigh`, across every
+    /// configured `Ospfv3Instance`.
+    ShowOspfv3Neigh,
+    /// `show ospfv3 database` — mirrors `ShowOspfDatabase`, across every
+    /// configured `Ospfv3Instance`.
+    ShowOspfv3Database,
     /// `clear bgp <instance> <peer> soft-in` — data-plane action, valid in
     /// any mode.
     ClearBgpSoftIn {
@@ -456,6 +546,8 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowBgpBrief => Resolved::ShowBgpBrief,
         Command::ShowOspfNeigh => Resolved::ShowOspfNeigh,
         Command::ShowOspfDatabase => Resolved::ShowOspfDatabase,
+        Command::ShowOspfv3Neigh => Resolved::ShowOspfv3Neigh,
+        Command::ShowOspfv3Database => Resolved::ShowOspfv3Database,
         Command::ClearBgpSoftIn { instance, peer } => Resolved::ClearBgpSoftIn { instance, peer },
         Command::Unknown(s) => {
             Resolved::Error(format!("unknown command: '{s}' (type 'help' for a list)"))
@@ -522,7 +614,14 @@ const NO_CURRENT_SWITCHING_PROFILE: &str = "no current switching-profile — use
 const NO_CURRENT_OSPF_INSTANCE: &str = "no current ospf instance — use 'edit ospf instance <name>' or the fully-qualified 'set ospf instance <name> ...' form";
 const NO_CURRENT_OSPF_AREA: &str = "no current ospf area — use 'edit ospf instance <name> area <area-id>' or 'edit area <area-id>' while navigated into an ospf instance";
 const NO_CURRENT_OSPF_PROFILE: &str = "no current ospf profile — use 'edit ospf instance <name> area <area-id> profile <name>' or 'edit profile <name>' while navigated into an ospf area";
-const NO_CURRENT_INTERFACE_OR_OSPF_PROFILE: &str = "'mtu' is only valid while navigated into an interface or an ospf profile — use the fully-qualified 'set interface <name> mtu <n>' or 'set ospf instance <name> area <area-id> profile <name> mtu <n>' form";
+const NO_CURRENT_OSPFV3_INSTANCE: &str = "no current ospfv3 instance — use 'edit ospfv3 instance <name>' or the fully-qualified 'set ospfv3 instance <name> ...' form";
+const NO_CURRENT_OSPFV3_AREA: &str = "no current ospfv3 area — use 'edit ospfv3 instance <name> area <area-id>' or 'edit area <area-id>' while navigated into an ospfv3 instance";
+const NO_CURRENT_OSPFV3_PROFILE: &str = "no current ospfv3 profile — use 'edit ospfv3 instance <name> area <area-id> profile <name>' or 'edit profile <name>' while navigated into an ospfv3 area";
+const NO_CURRENT_OSPF_OR_OSPFV3_INSTANCE: &str = "'area <area-id>' is only valid while navigated into an ospf instance or an ospfv3 instance — use the fully-qualified 'edit ospf instance <name> area <area-id>' or 'edit ospfv3 instance <name> area <area-id>' form";
+const NO_CURRENT_OSPF_OR_OSPFV3_AREA: &str = "'profile <name>' is only valid while navigated into an ospf area or an ospfv3 area — use the fully-qualified 'edit ospf instance <name> area <area-id> profile <name>' or 'edit ospfv3 instance <name> area <area-id> profile <name>' form";
+const NO_CURRENT_OSPF_OR_OSPFV3_PROFILE: &str =
+    "this field is only valid while navigated into an ospf profile or an ospfv3 profile";
+const NO_CURRENT_INTERFACE_OR_OSPF_PROFILE: &str = "'mtu' is only valid while navigated into an interface, an ospf profile, or an ospfv3 profile — use the fully-qualified 'set interface <name> mtu <n>', 'set ospf instance <name> area <area-id> profile <name> mtu <n>', or 'set ospfv3 instance <name> area <area-id> profile <name> mtu <n>' form";
 const ALREADY_AT_TOP: &str = "already at the top level";
 
 /// The three L3 attachment points `set address` / `set routing-table` (and
@@ -642,6 +741,31 @@ impl Path {
         }
     }
 
+    pub(crate) fn ospfv3_instance(&self) -> Result<&str, &'static str> {
+        match self {
+            Path::Ospfv3Instance(name) => Ok(name),
+            _ => Err(NO_CURRENT_OSPFV3_INSTANCE),
+        }
+    }
+
+    pub(crate) fn ospfv3_area(&self) -> Result<(&str, Ipv4Addr), &'static str> {
+        match self {
+            Path::Ospfv3Area { instance, area_id } => Ok((instance, *area_id)),
+            _ => Err(NO_CURRENT_OSPFV3_AREA),
+        }
+    }
+
+    pub(crate) fn ospfv3_profile(&self) -> Result<(&str, Ipv4Addr, &str), &'static str> {
+        match self {
+            Path::Ospfv3Profile {
+                instance,
+                area_id,
+                name,
+            } => Ok((instance, *area_id, name)),
+            _ => Err(NO_CURRENT_OSPFV3_PROFILE),
+        }
+    }
+
     pub(crate) fn l3_target(&self) -> Result<L3Target<'_>, &'static str> {
         match self {
             Path::Interface(name) => Ok(L3Target::Interface(name)),
@@ -714,16 +838,34 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             }),
             after: PathAfter::To(Path::OspfArea { instance, area_id }),
         },
-        Command::Edit(EditTarget::OspfAreaRelative { area_id }) => {
-            let instance = path.ospf_instance()?.to_string();
-            Resolved::ApplyOp {
-                op: ConfigOp::OspfArea(OspfAreaOp::Ensure {
-                    instance: instance.clone(),
-                    area_id,
-                }),
-                after: PathAfter::To(Path::OspfArea { instance, area_id }),
+        // Shared, path-disambiguated token with `edit ospfv3 instance <name>
+        // area <area-id>`'s own relative form — an `OspfArea`/`Ospfv3Area`
+        // have no field enum of their own to carry two separate
+        // `EditTarget` variants, mirroring `BgpInstanceField::RouterId`'s
+        // precedent.
+        Command::Edit(EditTarget::OspfAreaRelative { area_id }) => match path {
+            Path::OspfInstance(instance) => {
+                let instance = instance.clone();
+                Resolved::ApplyOp {
+                    op: ConfigOp::OspfArea(OspfAreaOp::Ensure {
+                        instance: instance.clone(),
+                        area_id,
+                    }),
+                    after: PathAfter::To(Path::OspfArea { instance, area_id }),
+                }
             }
-        }
+            Path::Ospfv3Instance(instance) => {
+                let instance = instance.clone();
+                Resolved::ApplyOp {
+                    op: ConfigOp::Ospfv3Area(Ospfv3AreaOp::Ensure {
+                        instance: instance.clone(),
+                        area_id,
+                    }),
+                    after: PathAfter::To(Path::Ospfv3Area { instance, area_id }),
+                }
+            }
+            _ => return Err(NO_CURRENT_OSPF_OR_OSPFV3_INSTANCE),
+        },
         Command::Edit(EditTarget::OspfProfile {
             instance,
             area_id,
@@ -740,22 +882,70 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 name,
             }),
         },
-        Command::Edit(EditTarget::OspfProfileRelative { name }) => {
-            let (instance, area_id) = path.ospf_area()?;
-            let instance = instance.to_string();
-            Resolved::ApplyOp {
-                op: ConfigOp::OspfProfile(OspfProfileOp::Ensure {
-                    instance: instance.clone(),
-                    area_id,
-                    name: name.clone(),
-                }),
-                after: PathAfter::To(Path::OspfProfile {
-                    instance,
-                    area_id,
-                    name,
-                }),
+        // Shared, path-disambiguated token — see `OspfAreaRelative`'s doc
+        // comment above.
+        Command::Edit(EditTarget::OspfProfileRelative { name }) => match path {
+            Path::OspfArea { instance, area_id } => {
+                let instance = instance.clone();
+                let area_id = *area_id;
+                Resolved::ApplyOp {
+                    op: ConfigOp::OspfProfile(OspfProfileOp::Ensure {
+                        instance: instance.clone(),
+                        area_id,
+                        name: name.clone(),
+                    }),
+                    after: PathAfter::To(Path::OspfProfile {
+                        instance,
+                        area_id,
+                        name,
+                    }),
+                }
             }
-        }
+            Path::Ospfv3Area { instance, area_id } => {
+                let instance = instance.clone();
+                let area_id = *area_id;
+                Resolved::ApplyOp {
+                    op: ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::Ensure {
+                        instance: instance.clone(),
+                        area_id,
+                        name: name.clone(),
+                    }),
+                    after: PathAfter::To(Path::Ospfv3Profile {
+                        instance,
+                        area_id,
+                        name,
+                    }),
+                }
+            }
+            _ => return Err(NO_CURRENT_OSPF_OR_OSPFV3_AREA),
+        },
+        Command::Edit(EditTarget::Ospfv3Instance { name }) => Resolved::ApplyOp {
+            op: ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::Ensure { name: name.clone() }),
+            after: PathAfter::To(Path::Ospfv3Instance(name)),
+        },
+        Command::Edit(EditTarget::Ospfv3Area { instance, area_id }) => Resolved::ApplyOp {
+            op: ConfigOp::Ospfv3Area(Ospfv3AreaOp::Ensure {
+                instance: instance.clone(),
+                area_id,
+            }),
+            after: PathAfter::To(Path::Ospfv3Area { instance, area_id }),
+        },
+        Command::Edit(EditTarget::Ospfv3Profile {
+            instance,
+            area_id,
+            name,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::Ensure {
+                instance: instance.clone(),
+                area_id,
+                name: name.clone(),
+            }),
+            after: PathAfter::To(Path::Ospfv3Profile {
+                instance,
+                area_id,
+                name,
+            }),
+        },
         Command::Edit(EditTarget::StaticRoutingInstance { name }) => Resolved::ApplyOp {
             op: ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Ensure {
                 name: name.clone(),
@@ -842,6 +1032,19 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                     "only 'set router-id <ip>' is valid on an ospf instance".to_string(),
                 ),
             },
+            // Same sharing, for an `Ospfv3Instance`.
+            Path::Ospfv3Instance(name) => match field {
+                BgpInstanceField::RouterId(router_id) => Resolved::ApplyOp {
+                    op: ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetRouterId {
+                        name: name.clone(),
+                        router_id,
+                    }),
+                    after: PathAfter::Stay,
+                },
+                BgpInstanceField::Asn(_) | BgpInstanceField::ClusterId(_) => Resolved::Error(
+                    "only 'set router-id <ip>' is valid on an ospfv3 instance".to_string(),
+                ),
+            },
             _ => return Err(NO_CURRENT_INSTANCE),
         },
         Command::Set(SetTarget::BgpPeerGroup {
@@ -868,13 +1071,48 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             op: ospf_profile_set_op(instance, area_id, name, field),
             after: PathAfter::Stay,
         },
-        Command::Set(SetTarget::OspfProfileRelative { field }) => {
-            let (instance, area_id, name) = path.ospf_profile()?;
-            Resolved::ApplyOp {
-                op: ospf_profile_set_op(instance.to_string(), area_id, name.to_string(), field),
+        // Shared, path-disambiguated token with `Ospfv3Profile`'s own
+        // relative fields — mirrors `OspfAreaRelative`'s precedent.
+        // `OspfProfileField::SimplePassword`/`CryptoKey`/`CryptoCurrentKey`
+        // have no `Ospfv3Profile` equivalent (no auth in this NOS build).
+        Command::Set(SetTarget::OspfProfileRelative { field }) => match path {
+            Path::OspfProfile {
+                instance,
+                area_id,
+                name,
+            } => Resolved::ApplyOp {
+                op: ospf_profile_set_op(instance.clone(), *area_id, name.clone(), field),
                 after: PathAfter::Stay,
-            }
-        }
+            },
+            Path::Ospfv3Profile {
+                instance,
+                area_id,
+                name,
+            } => match ospfv3_profile_set_op(instance.clone(), *area_id, name.clone(), &field) {
+                Ok(op) => Resolved::ApplyOp {
+                    op,
+                    after: PathAfter::Stay,
+                },
+                Err(msg) => Resolved::Error(msg),
+            },
+            _ => return Err(NO_CURRENT_OSPF_OR_OSPFV3_PROFILE),
+        },
+        Command::Set(SetTarget::Ospfv3Instance { name, router_id }) => Resolved::ApplyOp {
+            op: ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetRouterId { name, router_id }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::Ospfv3Profile {
+            instance,
+            area_id,
+            name,
+            field,
+        }) => match ospfv3_profile_set_op(instance, area_id, name, &field) {
+            Ok(op) => Resolved::ApplyOp {
+                op,
+                after: PathAfter::Stay,
+            },
+            Err(msg) => Resolved::Error(msg),
+        },
         Command::Set(SetTarget::BgpPeer {
             instance,
             remote_address,
@@ -943,6 +1181,25 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 op: ConfigOp::RoutingTable(RoutingTableOp::SetOspfInstance {
                     name: path.routing_table()?.to_string(),
                     ospf_instance,
+                }),
+                after: PathAfter::Stay,
+            }
+        }
+        Command::Set(SetTarget::RoutingTableOspfv3Instance {
+            name,
+            ospfv3_instance,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::RoutingTable(RoutingTableOp::SetOspfv3Instance {
+                name,
+                ospfv3_instance,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::RoutingTableOspfv3InstanceRelative { ospfv3_instance }) => {
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::SetOspfv3Instance {
+                    name: path.routing_table()?.to_string(),
+                    ospfv3_instance,
                 }),
                 after: PathAfter::Stay,
             }
@@ -1090,8 +1347,35 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 }),
                 after: PathAfter::Stay,
             },
+            Path::Ospfv3Profile {
+                instance,
+                area_id,
+                name,
+            } => Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetMtu {
+                    instance: instance.clone(),
+                    area_id: *area_id,
+                    name: name.clone(),
+                    mtu,
+                }),
+                after: PathAfter::Stay,
+            },
             _ => return Err(NO_CURRENT_INTERFACE_OR_OSPF_PROFILE),
         },
+
+        Command::Set(SetTarget::InterfaceOspfv3Profile {
+            name,
+            ospfv3_profile,
+        }) => Resolved::ApplyOp {
+            op: interface_set_ospfv3_profile_op(&name, ospfv3_profile),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::InterfaceOspfv3ProfileRelative { ospfv3_profile }) => {
+            Resolved::ApplyOp {
+                op: l3_set_ospfv3_profile_op(path.l3_target()?, ospfv3_profile),
+                after: PathAfter::Stay,
+            }
+        }
 
         Command::Set(SetTarget::CommunityAliasValue { name, value }) => Resolved::ApplyOp {
             op: ConfigOp::CommunityAlias(CommunityAliasOp::SetValue { name, value }),
@@ -1165,12 +1449,23 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             op: ConfigOp::OspfArea(OspfAreaOp::Delete { instance, area_id }),
             after: PathAfter::Stay,
         },
-        Command::Delete(DeleteTarget::OspfAreaRelative { area_id }) => Resolved::ApplyOp {
-            op: ConfigOp::OspfArea(OspfAreaOp::Delete {
-                instance: path.ospf_instance()?.to_string(),
-                area_id,
-            }),
-            after: PathAfter::Stay,
+        // Shared, path-disambiguated token — mirrors the `Edit` side above.
+        Command::Delete(DeleteTarget::OspfAreaRelative { area_id }) => match path {
+            Path::OspfInstance(instance) => Resolved::ApplyOp {
+                op: ConfigOp::OspfArea(OspfAreaOp::Delete {
+                    instance: instance.clone(),
+                    area_id,
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Ospfv3Instance(instance) => Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Area(Ospfv3AreaOp::Delete {
+                    instance: instance.clone(),
+                    area_id,
+                }),
+                after: PathAfter::Stay,
+            },
+            _ => return Err(NO_CURRENT_OSPF_OR_OSPFV3_INSTANCE),
         },
         Command::Delete(DeleteTarget::OspfProfile {
             instance,
@@ -1184,17 +1479,46 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             }),
             after: PathAfter::Stay,
         },
-        Command::Delete(DeleteTarget::OspfProfileRelative { name }) => {
-            let (instance, area_id) = path.ospf_area()?;
-            Resolved::ApplyOp {
+        // Shared, path-disambiguated token — mirrors the `Edit` side above.
+        Command::Delete(DeleteTarget::OspfProfileRelative { name }) => match path {
+            Path::OspfArea { instance, area_id } => Resolved::ApplyOp {
                 op: ConfigOp::OspfProfile(OspfProfileOp::Delete {
-                    instance: instance.to_string(),
-                    area_id,
+                    instance: instance.clone(),
+                    area_id: *area_id,
                     name,
                 }),
                 after: PathAfter::Stay,
-            }
-        }
+            },
+            Path::Ospfv3Area { instance, area_id } => Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::Delete {
+                    instance: instance.clone(),
+                    area_id: *area_id,
+                    name,
+                }),
+                after: PathAfter::Stay,
+            },
+            _ => return Err(NO_CURRENT_OSPF_OR_OSPFV3_AREA),
+        },
+        Command::Delete(DeleteTarget::Ospfv3Instance { name }) => Resolved::ApplyOp {
+            op: ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::Delete { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::Ospfv3Area { instance, area_id }) => Resolved::ApplyOp {
+            op: ConfigOp::Ospfv3Area(Ospfv3AreaOp::Delete { instance, area_id }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::Ospfv3Profile {
+            instance,
+            area_id,
+            name,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::Delete {
+                instance,
+                area_id,
+                name,
+            }),
+            after: PathAfter::Stay,
+        },
         Command::Delete(DeleteTarget::Current) => match path {
             Path::BgpInstance(name) => Resolved::ApplyOp {
                 op: ConfigOp::BgpInstance(BgpInstanceOp::Delete { name: name.clone() }),
@@ -1233,6 +1557,32 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                     name: name.clone(),
                 }),
                 after: PathAfter::To(Path::OspfArea {
+                    instance: instance.clone(),
+                    area_id: *area_id,
+                }),
+            },
+            Path::Ospfv3Instance(name) => Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::Delete { name: name.clone() }),
+                after: PathAfter::ToRoot,
+            },
+            Path::Ospfv3Area { instance, area_id } => Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Area(Ospfv3AreaOp::Delete {
+                    instance: instance.clone(),
+                    area_id: *area_id,
+                }),
+                after: PathAfter::To(Path::Ospfv3Instance(instance.clone())),
+            },
+            Path::Ospfv3Profile {
+                instance,
+                area_id,
+                name,
+            } => Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::Delete {
+                    instance: instance.clone(),
+                    area_id: *area_id,
+                    name: name.clone(),
+                }),
+                after: PathAfter::To(Path::Ospfv3Area {
                     instance: instance.clone(),
                     area_id: *area_id,
                 }),
@@ -1306,6 +1656,16 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             }),
             after: PathAfter::Stay,
         },
+        Command::Delete(DeleteTarget::RoutingTableOspfv3Instance { name }) => Resolved::ApplyOp {
+            op: ConfigOp::RoutingTable(RoutingTableOp::ClearOspfv3Instance { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::RoutingTableOspfv3InstanceRelative) => Resolved::ApplyOp {
+            op: ConfigOp::RoutingTable(RoutingTableOp::ClearOspfv3Instance {
+                name: path.routing_table()?.to_string(),
+            }),
+            after: PathAfter::Stay,
+        },
         Command::Delete(DeleteTarget::RoutingTableStaticRoutingInstance { name }) => {
             Resolved::ApplyOp {
                 op: ConfigOp::RoutingTable(RoutingTableOp::ClearStaticRoutingInstance { name }),
@@ -1373,6 +1733,14 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             op: l3_clear_ospf_profile_op(path.l3_target()?),
             after: PathAfter::Stay,
         },
+        Command::Delete(DeleteTarget::InterfaceOspfv3Profile { name }) => Resolved::ApplyOp {
+            op: interface_clear_ospfv3_profile_op(&name),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::InterfaceOspfv3ProfileRelative) => Resolved::ApplyOp {
+            op: l3_clear_ospfv3_profile_op(path.l3_target()?),
+            after: PathAfter::Stay,
+        },
         Command::Delete(DeleteTarget::BroadcastDomainAddress { name, address }) => {
             Resolved::ApplyOp {
                 op: ConfigOp::BroadcastDomain(BroadcastDomainOp::RemoveAddress { name, address }),
@@ -1410,6 +1778,18 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 name,
             } => Resolved::ApplyOp {
                 op: ConfigOp::OspfProfile(OspfProfileOp::ClearMtu {
+                    instance: instance.clone(),
+                    area_id: *area_id,
+                    name: name.clone(),
+                }),
+                after: PathAfter::Stay,
+            },
+            Path::Ospfv3Profile {
+                instance,
+                area_id,
+                name,
+            } => Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::ClearMtu {
                     instance: instance.clone(),
                     area_id: *area_id,
                     name: name.clone(),
@@ -1535,49 +1915,93 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 BgpPeerGroupOp::ClearKeepaliveInterval { instance, name }
             })?
         }
-        Command::Delete(DeleteTarget::HelloInterval) => {
-            ospf_profile_clear(path, |instance, area_id, name| {
+        // Each of these five is a shared, path-disambiguated token with the
+        // matching `Ospfv3ProfileOp::Clear*` — an `Ospfv3Profile` has the
+        // same non-auth fields as an `OspfProfile`, so `_` (any path other
+        // than `OspfProfile`) falls through to the `Ospfv3Profile` clear,
+        // whose own `path.ospfv3_profile()?` check inside
+        // `ospfv3_profile_clear` produces the right error otherwise —
+        // mirrors `DeleteTarget::Auth`'s exact precedent below.
+        Command::Delete(DeleteTarget::HelloInterval) => match path {
+            Path::OspfProfile { .. } => ospf_profile_clear(path, |instance, area_id, name| {
                 OspfProfileOp::ClearHelloInterval {
                     instance,
                     area_id,
                     name,
                 }
-            })?
-        }
-        Command::Delete(DeleteTarget::DeadInterval) => {
-            ospf_profile_clear(path, |instance, area_id, name| {
+            })?,
+            _ => ospfv3_profile_clear(path, |instance, area_id, name| {
+                Ospfv3ProfileOp::ClearHelloInterval {
+                    instance,
+                    area_id,
+                    name,
+                }
+            })?,
+        },
+        Command::Delete(DeleteTarget::DeadInterval) => match path {
+            Path::OspfProfile { .. } => ospf_profile_clear(path, |instance, area_id, name| {
                 OspfProfileOp::ClearDeadInterval {
                     instance,
                     area_id,
                     name,
                 }
-            })?
-        }
-        Command::Delete(DeleteTarget::Cost) => {
-            ospf_profile_clear(path, |instance, area_id, name| OspfProfileOp::ClearCost {
-                instance,
-                area_id,
-                name,
-            })?
-        }
-        Command::Delete(DeleteTarget::Priority) => {
-            ospf_profile_clear(path, |instance, area_id, name| {
+            })?,
+            _ => ospfv3_profile_clear(path, |instance, area_id, name| {
+                Ospfv3ProfileOp::ClearDeadInterval {
+                    instance,
+                    area_id,
+                    name,
+                }
+            })?,
+        },
+        Command::Delete(DeleteTarget::Cost) => match path {
+            Path::OspfProfile { .. } => {
+                ospf_profile_clear(path, |instance, area_id, name| OspfProfileOp::ClearCost {
+                    instance,
+                    area_id,
+                    name,
+                })?
+            }
+            _ => {
+                ospfv3_profile_clear(path, |instance, area_id, name| Ospfv3ProfileOp::ClearCost {
+                    instance,
+                    area_id,
+                    name,
+                })?
+            }
+        },
+        Command::Delete(DeleteTarget::Priority) => match path {
+            Path::OspfProfile { .. } => ospf_profile_clear(path, |instance, area_id, name| {
                 OspfProfileOp::ClearPriority {
                     instance,
                     area_id,
                     name,
                 }
-            })?
-        }
-        Command::Delete(DeleteTarget::NetworkType) => {
-            ospf_profile_clear(path, |instance, area_id, name| {
+            })?,
+            _ => ospfv3_profile_clear(path, |instance, area_id, name| {
+                Ospfv3ProfileOp::ClearPriority {
+                    instance,
+                    area_id,
+                    name,
+                }
+            })?,
+        },
+        Command::Delete(DeleteTarget::NetworkType) => match path {
+            Path::OspfProfile { .. } => ospf_profile_clear(path, |instance, area_id, name| {
                 OspfProfileOp::ClearNetworkType {
                     instance,
                     area_id,
                     name,
                 }
-            })?
-        }
+            })?,
+            _ => ospfv3_profile_clear(path, |instance, area_id, name| {
+                Ospfv3ProfileOp::ClearNetworkType {
+                    instance,
+                    area_id,
+                    name,
+                }
+            })?,
+        },
         Command::Delete(DeleteTarget::ConnectRetryTime) => {
             peer_group_clear(path, |instance, name| {
                 BgpPeerGroupOp::ClearConnectRetryTime { instance, name }
@@ -1680,6 +2104,8 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
         | Command::ShowBgpBrief
         | Command::ShowOspfNeigh
         | Command::ShowOspfDatabase
+        | Command::ShowOspfv3Neigh
+        | Command::ShowOspfv3Database
         | Command::ClearBgpSoftIn { .. }
         | Command::Unknown(_)
         | Command::Exit
@@ -1890,6 +2316,74 @@ fn ospf_profile_set_op(
             key_id,
         },
     })
+}
+
+/// `delete <field>` on the ospfv3 profile the path is currently navigated
+/// into — mirrors `ospf_profile_clear` exactly.
+fn ospfv3_profile_clear(
+    path: &Path,
+    op: impl FnOnce(String, Ipv4Addr, String) -> Ospfv3ProfileOp,
+) -> Result<Resolved, &'static str> {
+    let (instance, area_id, name) = path.ospfv3_profile()?;
+    Ok(Resolved::ApplyOp {
+        op: ConfigOp::Ospfv3Profile(op(instance.to_string(), area_id, name.to_string())),
+        after: PathAfter::Stay,
+    })
+}
+
+/// Mirrors `ospf_profile_set_op`, minus the auth fields — an `Ospfv3Profile`
+/// has no `SimplePassword`/`CryptoKey`/`CryptoCurrentKey` equivalent (no
+/// authentication in this NOS build's `OSPFv3` support), so those return an
+/// error instead of a `ConfigOp`.
+fn ospfv3_profile_set_op(
+    instance: String,
+    area_id: Ipv4Addr,
+    name: String,
+    field: &OspfProfileField,
+) -> Result<ConfigOp, String> {
+    Ok(ConfigOp::Ospfv3Profile(match *field {
+        OspfProfileField::HelloInterval(hello_interval) => Ospfv3ProfileOp::SetHelloInterval {
+            instance,
+            area_id,
+            name,
+            hello_interval,
+        },
+        OspfProfileField::DeadInterval(dead_interval) => Ospfv3ProfileOp::SetDeadInterval {
+            instance,
+            area_id,
+            name,
+            dead_interval,
+        },
+        OspfProfileField::Cost(cost) => Ospfv3ProfileOp::SetCost {
+            instance,
+            area_id,
+            name,
+            cost,
+        },
+        OspfProfileField::Priority(priority) => Ospfv3ProfileOp::SetPriority {
+            instance,
+            area_id,
+            name,
+            priority,
+        },
+        OspfProfileField::Mtu(mtu) => Ospfv3ProfileOp::SetMtu {
+            instance,
+            area_id,
+            name,
+            mtu,
+        },
+        OspfProfileField::NetworkType(network_type) => Ospfv3ProfileOp::SetNetworkType {
+            instance,
+            area_id,
+            name,
+            network_type,
+        },
+        OspfProfileField::SimplePassword(_)
+        | OspfProfileField::CryptoKey { .. }
+        | OspfProfileField::CryptoCurrentKey(_) => {
+            return Err("ospfv3 profiles support no authentication in this NOS build".to_string());
+        }
+    }))
 }
 
 #[cfg(test)]
@@ -4661,6 +5155,254 @@ mod tests {
                 }),
                 after: PathAfter::Stay,
             }
+        );
+    }
+
+    fn ospfv3_profile_path(instance: &str, area_id: &str, name: &str) -> Path {
+        Path::Ospfv3Profile {
+            instance: instance.to_string(),
+            area_id: area_id.parse().unwrap(),
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn edit_ospfv3_instance_area_profile_qualified_navigates() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Edit(EditTarget::Ospfv3Instance {
+                    name: "o1".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::Ensure {
+                    name: "o1".to_string()
+                }),
+                after: PathAfter::To(Path::Ospfv3Instance("o1".to_string())),
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Edit(EditTarget::Ospfv3Profile {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::Ensure {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                }),
+                after: PathAfter::To(ospfv3_profile_path("o1", "0.0.0.0", "p1")),
+            }
+        );
+    }
+
+    /// `edit area <area-id>` is the same `Command` regardless of whether the
+    /// user is navigated into an OSPF or an `OSPFv3` instance — the
+    /// riskiest part of the shared-token design, so it gets its own test.
+    #[test]
+    fn edit_area_relative_dispatches_between_ospf_and_ospfv3_instance() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::OspfInstance("o1".to_string()), false),
+                Command::Edit(EditTarget::OspfAreaRelative {
+                    area_id: "0.0.0.0".parse().unwrap(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::OspfArea(OspfAreaOp::Ensure {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                }),
+                after: PathAfter::To(Path::OspfArea {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                }),
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Ospfv3Instance("o1".to_string()), false),
+                Command::Edit(EditTarget::OspfAreaRelative {
+                    area_id: "0.0.0.0".parse().unwrap(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Area(Ospfv3AreaOp::Ensure {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                }),
+                after: PathAfter::To(Path::Ospfv3Area {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                }),
+            }
+        );
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Edit(EditTarget::OspfAreaRelative {
+                    area_id: "0.0.0.0".parse().unwrap(),
+                })
+            ),
+            Resolved::Error(_)
+        ));
+    }
+
+    #[test]
+    fn set_router_id_relative_dispatches_to_ospfv3_instance() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Ospfv3Instance("o1".to_string()), false),
+                Command::Set(SetTarget::Relative {
+                    field: BgpInstanceField::RouterId("2.2.2.2".parse().unwrap()),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetRouterId {
+                    name: "o1".to_string(),
+                    router_id: "2.2.2.2".parse().unwrap(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    /// `set ospfv3 instance <name> ... hello-interval <n>` (qualified) and
+    /// its shared-token relative form both dispatch to `Ospfv3ProfileOp`;
+    /// an auth field on the shared relative token is rejected instead of
+    /// silently landing on the wrong daemon's op.
+    #[test]
+    fn set_ospfv3_profile_fields_qualified_relative_and_rejects_auth() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::Set(SetTarget::Ospfv3Profile {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                    field: OspfProfileField::HelloInterval(5),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetHelloInterval {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                    hello_interval: 5,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", ospfv3_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Set(SetTarget::OspfProfileRelative {
+                    field: OspfProfileField::Cost(20),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetCost {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                    cost: 20,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert!(matches!(
+            resolve(
+                &config_mode("t1", ospfv3_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Set(SetTarget::OspfProfileRelative {
+                    field: OspfProfileField::SimplePassword("secret".to_string()),
+                })
+            ),
+            Resolved::Error(_)
+        ));
+    }
+
+    #[test]
+    fn delete_current_on_ospfv3_instance_area_and_profile() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Ospfv3Instance("o1".to_string()), false),
+                Command::Delete(DeleteTarget::Current)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::Delete {
+                    name: "o1".to_string()
+                }),
+                after: PathAfter::ToRoot,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", ospfv3_profile_path("o1", "0.0.0.0", "p1"), false),
+                Command::Delete(DeleteTarget::Current)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::Delete {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                    name: "p1".to_string(),
+                }),
+                after: PathAfter::To(Path::Ospfv3Area {
+                    instance: "o1".to_string(),
+                    area_id: "0.0.0.0".parse().unwrap(),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn set_and_delete_routing_table_ospfv3_instance() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::RoutingTable("rt1".to_string()), false),
+                Command::Set(SetTarget::RoutingTableOspfv3InstanceRelative {
+                    ospfv3_instance: "o1".to_string(),
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::SetOspfv3Instance {
+                    name: "rt1".to_string(),
+                    ospfv3_instance: "o1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::RoutingTable("rt1".to_string()), false),
+                Command::Delete(DeleteTarget::RoutingTableOspfv3InstanceRelative)
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::ClearOspfv3Instance {
+                    name: "rt1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn show_ospfv3_neigh_and_database_work_in_any_mode() {
+        assert_eq!(
+            resolve(&Mode::Operational, Command::ShowOspfv3Neigh),
+            Resolved::ShowOspfv3Neigh
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::ShowOspfv3Database
+            ),
+            Resolved::ShowOspfv3Database
         );
     }
 }

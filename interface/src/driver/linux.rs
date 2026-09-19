@@ -1,3 +1,4 @@
+use std::net::{IpAddr, Ipv6Addr};
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -592,6 +593,28 @@ impl InterfaceDriver for LinuxInterfaceDriver {
             info!(domain = %domain, bridge = %ifname, "deleted broadcast domain bridge");
         }
         Ok(())
+    }
+
+    async fn link_local_address(&self, kernel_interface: &str) -> Option<Ipv6Addr> {
+        let link = self.find_link(kernel_interface).await.ok()??;
+        let mut addrs = self
+            .handle
+            .address()
+            .get()
+            .set_link_index_filter(link.header.index)
+            .execute();
+        while let Ok(Some(msg)) = addrs.try_next().await {
+            if msg.header.scope != AddressScope::Link {
+                continue;
+            }
+            if let Some(IpAddr::V6(addr)) = msg.attributes.iter().find_map(|a| match a {
+                AddressAttribute::Address(ip) => Some(*ip),
+                _ => None,
+            }) {
+                return Some(addr);
+            }
+        }
+        None
     }
 }
 

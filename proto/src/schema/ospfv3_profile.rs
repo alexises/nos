@@ -1,0 +1,229 @@
+use garde::Validate;
+use serde::{Deserialize, Serialize};
+
+use super::{Config, NetworkType};
+
+/// A named `OSPFv3` profile, declared inside an area (`Ospfv3Area.profiles`)
+/// but referenced by bare name from any L3 attach point's `ospfv3_profile`
+/// field (`Interface`/`Subinterface`/`BroadcastDomain`) — mirrors
+/// `OspfProfile` exactly, minus its `auth` field: RFC 5340's 16-byte header
+/// has no authentication field at all (auth moved conceptually out-of-band —
+/// see the `OSPFv3` Phase 1 plan), so Phase 1 runs unauthenticated. Reuses
+/// `OspfProfile`'s `HELLO_INTERVAL_DEFAULT`/`DEAD_INTERVAL_DEFAULT`/
+/// `PRIORITY_DEFAULT`/`NetworkType` directly — those defaults and the
+/// point-to-point/broadcast distinction are unchanged by RFC 5340.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[garde(context(Config as ctx))]
+pub struct Ospfv3Profile {
+    #[garde(
+        length(min = 1, max = 64),
+        custom(|n, ctx: &Config| unique_name(n, ctx))
+    )]
+    pub name: String,
+
+    /// `None` defaults to `OspfProfile::HELLO_INTERVAL_DEFAULT` (10s).
+    #[garde(skip)]
+    pub hello_interval: Option<u16>,
+
+    /// `None` defaults to `OspfProfile::DEAD_INTERVAL_DEFAULT` (40s). When
+    /// both this and `hello_interval` are set, this must be strictly
+    /// greater — checked one level up on `Ospfv3Area.profiles`, mirroring
+    /// `ospf_profile::valid_profile_timers` exactly.
+    #[garde(skip)]
+    pub dead_interval: Option<u16>,
+
+    /// RFC 5340 §4.8 SPF metric. `None` defaults to `1`; `0` is rejected.
+    #[garde(custom(|c: &Option<u16>, _ctx: &Config| valid_cost(*c)))]
+    pub cost: Option<u16>,
+
+    /// `None` defaults to `1`. Governs RFC 5340 (via RFC 2328 §9.4) DR/BDR
+    /// election eligibility on a `Broadcast` attach point.
+    #[garde(skip)]
+    pub priority: Option<u8>,
+
+    /// `None` resolves to the attach point's own real interface MTU,
+    /// falling back to 1500 if unavailable — mirrors `OspfProfile.mtu`.
+    #[garde(skip)]
+    pub mtu: Option<u16>,
+
+    /// `None` resolves per attach point, exactly like `OspfProfile.network_type`.
+    #[garde(skip)]
+    pub network_type: Option<NetworkType>,
+}
+
+fn valid_cost(cost: Option<u16>) -> garde::Result {
+    match cost {
+        Some(0) => Err(garde::Error::new("cost must be between 1 and 65535")),
+        _ => Ok(()),
+    }
+}
+
+/// Profile names are unique across the whole config — mirrors
+/// `ospf_profile::unique_name` exactly, over `ospfv3_instances` instead.
+fn unique_name(name: &str, ctx: &Config) -> garde::Result {
+    let count = ctx
+        .ospfv3_instances
+        .iter()
+        .flat_map(|i| &i.areas)
+        .flat_map(|a| &a.profiles)
+        .filter(|p| p.name == name)
+        .count();
+    if count > 1 {
+        return Err(garde::Error::new("must be unique"));
+    }
+    Ok(())
+}
+
+/// Mirrors `ospf_profile::valid_profile_timers` exactly.
+pub(crate) fn valid_profile_timers(profiles: &[Ospfv3Profile]) -> garde::Result {
+    for p in profiles {
+        if let (Some(hello), Some(dead)) = (p.hello_interval, p.dead_interval) {
+            if dead <= hello {
+                return Err(garde::Error::new(
+                    "dead-interval must be greater than hello-interval when both are set",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use garde::Validate as _;
+
+    use crate::schema::{Config, Ospfv3Area, Ospfv3Instance};
+
+    use super::{NetworkType, Ospfv3Profile};
+
+    fn profile(name: &str) -> Ospfv3Profile {
+        Ospfv3Profile {
+            name: name.to_string(),
+            hello_interval: None,
+            dead_interval: None,
+            cost: None,
+            priority: None,
+            mtu: None,
+            network_type: None,
+        }
+    }
+
+    fn area(area_id: &str, profiles: Vec<Ospfv3Profile>) -> Ospfv3Area {
+        Ospfv3Area {
+            area_id: area_id.parse().unwrap(),
+            profiles,
+        }
+    }
+
+    fn instance(name: &str, areas: Vec<Ospfv3Area>) -> Ospfv3Instance {
+        Ospfv3Instance {
+            name: name.to_string(),
+            router_id: Ipv4Addr::new(1, 1, 1, 1),
+            areas,
+            routing_table: None,
+        }
+    }
+
+    fn config_with(instances: Vec<Ospfv3Instance>) -> Config {
+        Config {
+            ospfv3_instances: instances,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn valid_profile_passes() {
+        let cfg = config_with(vec![instance(
+            "r1",
+            vec![area("0.0.0.0", vec![profile("p1")])],
+        )]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn duplicate_name_within_same_area_fails() {
+        let cfg = config_with(vec![instance(
+            "r1",
+            vec![area("0.0.0.0", vec![profile("p1"), profile("p1")])],
+        )]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn duplicate_name_across_instances_fails() {
+        let cfg = config_with(vec![
+            instance("r1", vec![area("0.0.0.0", vec![profile("p1")])]),
+            instance("r2", vec![area("0.0.0.0", vec![profile("p1")])]),
+        ]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn distinct_names_pass() {
+        let cfg = config_with(vec![instance(
+            "r1",
+            vec![area("0.0.0.0", vec![profile("p1"), profile("p2")])],
+        )]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    fn profile_with_timers(
+        name: &str,
+        hello_interval: Option<u16>,
+        dead_interval: Option<u16>,
+    ) -> Ospfv3Profile {
+        Ospfv3Profile {
+            name: name.to_string(),
+            hello_interval,
+            dead_interval,
+            cost: None,
+            priority: None,
+            mtu: None,
+            network_type: None,
+        }
+    }
+
+    #[test]
+    fn dead_interval_greater_than_hello_interval_passes() {
+        let cfg = config_with(vec![instance(
+            "r1",
+            vec![area(
+                "0.0.0.0",
+                vec![profile_with_timers("p1", Some(10), Some(40))],
+            )],
+        )]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn dead_interval_not_greater_than_hello_interval_fails() {
+        let cfg = config_with(vec![instance(
+            "r1",
+            vec![area(
+                "0.0.0.0",
+                vec![profile_with_timers("p1", Some(10), Some(10))],
+            )],
+        )]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn zero_cost_fails() {
+        let mut p = profile("p1");
+        p.cost = Some(0);
+        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn either_network_type_passes() {
+        for network_type in [NetworkType::PointToPoint, NetworkType::Broadcast] {
+            let mut p = profile("p1");
+            p.network_type = Some(network_type);
+            let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+            cfg.validate_with(&cfg).unwrap();
+        }
+    }
+}

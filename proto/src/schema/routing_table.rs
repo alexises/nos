@@ -92,6 +92,14 @@ pub struct RoutingTable {
     #[garde(custom(|oi: &Option<String>, ctx: &Config| ospf_instance_reference_valid(oi.as_ref(), ctx)))]
     pub ospf_instance: Option<String>,
 
+    /// Same shape as `ospf_instance`, associating this table with an
+    /// `Ospfv3Instance` (RFC 5340) instead — a separate field, not a
+    /// widened `ospf_instance`, since `nos-ospfd`/`nos-ospfv3d` are two
+    /// independent daemons that can both legitimately claim the same table
+    /// (dual-stack OSPF on one VRF).
+    #[garde(custom(|oi: &Option<String>, ctx: &Config| ospfv3_instance_reference_valid(oi.as_ref(), ctx)))]
+    pub ospfv3_instance: Option<String>,
+
     /// `#[garde(skip)]`: the cross-field constraint (the referenced
     /// `bgp_instance`/`static_routing_instance` must actually be set on this
     /// same table) can't live in a per-field closure — garde's per-field
@@ -146,6 +154,33 @@ fn ospf_instance_reference_valid(ospf_instance: Option<&String>, ctx: &Config) -
     if claims > 1 {
         return Err(garde::Error::new(
             "ospf instance is already associated with another routing table",
+        ));
+    }
+    Ok(())
+}
+
+/// Same shape as `ospf_instance_reference_valid`, checked against
+/// `ctx.ospfv3_instances` instead.
+fn ospfv3_instance_reference_valid(
+    ospfv3_instance: Option<&String>,
+    ctx: &Config,
+) -> garde::Result {
+    let Some(name) = ospfv3_instance else {
+        return Ok(());
+    };
+    if !ctx.ospfv3_instances.iter().any(|i| &i.name == name) {
+        return Err(garde::Error::new(
+            "referenced ospfv3 instance does not exist",
+        ));
+    }
+    let claims = ctx
+        .routing_tables
+        .iter()
+        .filter(|t| t.ospfv3_instance.as_deref() == Some(name.as_str()))
+        .count();
+    if claims > 1 {
+        return Err(garde::Error::new(
+            "ospfv3 instance is already associated with another routing table",
         ));
     }
     Ok(())
@@ -240,6 +275,7 @@ mod tests {
 
     fn table(name: &str, bgp_instance: Option<&str>, sri: Option<&str>) -> RoutingTable {
         RoutingTable {
+            ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),
             ospf_instance: None,

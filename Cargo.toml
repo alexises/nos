@@ -1,5 +1,5 @@
 [workspace]
-members = ["proto", "config", "bgp", "rib", "interface", "log", "ospf", "cli", "watchdog", "tools/nos-provision", "tcp-auth", "rpl", "log-client"]
+members = ["proto", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tcp-auth", "rpl", "log-client"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -20,6 +20,7 @@ nos-proto          = { path = "proto" }
 nos-tcp-auth       = { path = "tcp-auth" }
 nos-rpl            = { path = "rpl" }
 nos-log-client     = { path = "log-client" }
+nos-ospf-common    = { path = "ospf-common" }
 clap               = { version = "4", features = ["derive"] }
 anyhow             = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

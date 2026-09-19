@@ -1267,11 +1267,38 @@ dependencies = [
  "libc",
  "md-5",
  "nos-log-client",
+ "nos-ospf-common",
  "nos-proto",
  "nos-rpl",
  "serde",
  "sha1",
  "sha2",
+ "socket2 0.5.10",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "nos-ospf-common"
+version = "0.1.0"
+
+[[package]]
+name = "nos-ospfv3"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "ipnet",
+ "libc",
+ "nos-log-client",
+ "nos-ospf-common",
+ "nos-proto",
+ "serde",
  "socket2 0.5.10",
  "tempfile",
  "thiserror 1.0.69",

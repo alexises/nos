@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::net::Ipv6Addr;
 
 use nos_proto::{Config, InterfaceAddress, VlanTag};
 use tracing::{debug, trace, warn};
@@ -14,6 +15,13 @@ pub struct SubinterfaceState {
     pub tag: u16,
     pub addresses: Vec<InterfaceAddress>,
     pub routing_table: Option<String>,
+    /// This subinterface's own kernel device's observed IPv6 link-local
+    /// address — see `nos_proto::SubinterfaceStatus.link_local_address`'s
+    /// doc comment. Queried via `driver.link_local_address` after `apply`,
+    /// against the same kernel device name `apply`/`reconcile_addresses`
+    /// use (the physical interface itself for `tag == 0`, else
+    /// `<interface>.<tag>`).
+    pub link_local_address: Option<Ipv6Addr>,
 }
 
 /// A `BroadcastDomain`'s desired state, mirroring `nos_proto::BroadcastDomain`
@@ -29,6 +37,10 @@ pub struct BroadcastDomainState {
     /// `None` on the value passed *into* that call (the driver is what
     /// determines it), `Some` once known.
     pub bridge_name: Option<String>,
+    /// This domain's own bridge device's observed IPv6 link-local address —
+    /// see `SubinterfaceState.link_local_address`'s doc comment. `None`
+    /// until `bridge_name` itself is known (queried against it once it is).
+    pub link_local_address: Option<Ipv6Addr>,
 }
 
 /// One interface's desired state, as reconciled from the running config.
@@ -124,9 +136,13 @@ pub async fn build_from_config(
             addresses: domain.addresses.clone(),
             routing_table: domain.routing_table.clone(),
             bridge_name: None,
+            link_local_address: None,
         };
         match driver.ensure_broadcast_domain(&state).await {
-            Ok(bridge_name) => state.bridge_name = Some(bridge_name),
+            Ok(bridge_name) => {
+                state.link_local_address = driver.link_local_address(&bridge_name).await;
+                state.bridge_name = Some(bridge_name);
+            }
             Err(e) => {
                 warn!(domain = %state.name, error = %e, "failed to ensure broadcast domain bridge");
             }
@@ -162,15 +178,20 @@ pub async fn build_from_config(
                     .collect()
             })
             .unwrap_or_default();
-        let subinterfaces = iface
-            .subinterfaces
-            .iter()
-            .map(|s| SubinterfaceState {
+        let mut subinterfaces = Vec::with_capacity(iface.subinterfaces.len());
+        for s in &iface.subinterfaces {
+            let kernel_interface = if s.tag == 0 {
+                iface.name.clone()
+            } else {
+                format!("{}.{}", iface.name, s.tag)
+            };
+            subinterfaces.push(SubinterfaceState {
                 tag: s.tag,
                 addresses: s.addresses.clone(),
                 routing_table: s.routing_table.clone(),
-            })
-            .collect();
+                link_local_address: driver.link_local_address(&kernel_interface).await,
+            });
+        }
         let state = InterfaceState {
             name: iface.name.clone(),
             addresses: iface.addresses.clone(),
@@ -237,6 +258,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
+            ospfv3_profile: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
@@ -294,6 +316,10 @@ mod tests {
                 .push(Call::RemoveDomain(domain.to_string()));
             Ok(())
         }
+
+        async fn link_local_address(&self, _kernel_interface: &str) -> Option<Ipv6Addr> {
+            None
+        }
     }
 
     #[tokio::test]
@@ -315,6 +341,7 @@ mod tests {
             addresses: vec![iface_addr.clone()],
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
+            ospfv3_profile: None,
         }];
         let interfaces =
             build_from_config(&cfg(vec![iface]), &NoopInterfaceDriver, &Interfaces::new()).await;
@@ -333,6 +360,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
+            ospfv3_profile: None,
         }];
         let interfaces =
             build_from_config(&cfg(vec![iface]), &NoopInterfaceDriver, &Interfaces::new()).await;
@@ -443,12 +471,14 @@ mod tests {
                 addresses: Vec::new(),
                 routing_table: None,
                 ospf_profile: None,
+                ospfv3_profile: None,
             },
             nos_proto::BroadcastDomain {
                 name: "bd2".to_string(),
                 addresses: Vec::new(),
                 routing_table: None,
                 ospf_profile: None,
+                ospfv3_profile: None,
             },
         ];
         build_from_config(&config, &driver, &Interfaces::new()).await;
@@ -474,6 +504,7 @@ mod tests {
             addresses: vec![addr.clone()],
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
+            ospfv3_profile: None,
         }];
         build_from_config(&config, &driver, &Interfaces::new()).await;
         let calls = driver.calls.lock().unwrap().clone();
@@ -482,6 +513,7 @@ mod tests {
             addresses: vec![addr],
             routing_table: Some("rt1".to_string()),
             bridge_name: None,
+            link_local_address: None,
         })));
     }
 
@@ -497,6 +529,7 @@ mod tests {
             addresses: vec![addr.clone()],
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
+            ospfv3_profile: None,
         }];
         let interfaces = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
         let domain = interfaces.get_domain("bd1").unwrap();
@@ -520,6 +553,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
+            ospfv3_profile: None,
         }];
         let previous = build_from_config(&config_with_domain, &driver, &Interfaces::new()).await;
 

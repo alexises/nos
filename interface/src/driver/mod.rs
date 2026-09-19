@@ -86,4 +86,16 @@ pub trait InterfaceDriver: Send + Sync {
     /// config outright) - deletes the bridge device. A no-op if no bridge
     /// was ever created for `domain`.
     async fn remove_broadcast_domain(&self, domain: &str) -> Result<(), DriverError>;
+
+    /// Best-effort query of `kernel_interface`'s current kernel-assigned
+    /// IPv6 link-local address (`fe80::/10` scope) — a pure read, never a
+    /// write, since NOS never touches kernel-auto-assigned addresses (see
+    /// `apply`'s address-reconciliation doc comment). `None` if the
+    /// interface doesn't exist yet or has no such address assigned yet.
+    /// Called by `state::build_from_config` after `apply`/
+    /// `ensure_broadcast_domain`, purely to surface it on
+    /// `InterfaceStatus`/`SubinterfaceStatus`/`BroadcastDomainStatus` for a
+    /// consumer with no kernel access of its own (`nos-ospfv3d`, sourcing
+    /// RFC 5340 Hello/Link-LSA traffic from it).
+    async fn link_local_address(&self, kernel_interface: &str) -> Option<std::net::Ipv6Addr>;
 }

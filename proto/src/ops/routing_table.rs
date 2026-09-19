@@ -46,6 +46,13 @@ pub enum RoutingTableOp {
     ClearOspfInstance {
         name: String,
     },
+    SetOspfv3Instance {
+        name: String,
+        ospfv3_instance: String,
+    },
+    ClearOspfv3Instance {
+        name: String,
+    },
 }
 
 impl RoutingTableOp {
@@ -57,6 +64,7 @@ impl RoutingTableOp {
                         name: name.clone(),
                         bgp_instance: None,
                         ospf_instance: None,
+                        ospfv3_instance: None,
                         static_routing_instance: None,
                         redistribute: None,
                     });
@@ -110,6 +118,17 @@ impl RoutingTableOp {
                 find_table_mut(config, name)?.ospf_instance = None;
                 Ok(())
             }
+            RoutingTableOp::SetOspfv3Instance {
+                name,
+                ospfv3_instance,
+            } => {
+                find_table_mut(config, name)?.ospfv3_instance = Some(ospfv3_instance.clone());
+                Ok(())
+            }
+            RoutingTableOp::ClearOspfv3Instance { name } => {
+                find_table_mut(config, name)?.ospfv3_instance = None;
+                Ok(())
+            }
         }
     }
 }
@@ -131,6 +150,7 @@ mod tests {
 
     fn table(name: &str) -> RoutingTable {
         RoutingTable {
+            ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: None,
             ospf_instance: None,
@@ -156,6 +176,7 @@ mod tests {
     fn ensure_is_noop_when_present() {
         let mut cfg = Config {
             routing_tables: vec![RoutingTable {
+                ospfv3_instance: None,
                 name: "rt1".to_string(),
                 bgp_instance: Some("r1".to_string()),
                 ospf_instance: None,

@@ -26,6 +26,10 @@ const ENODEV: i32 = 19;
 // closing the gap to BIRD/FRR/GoBGP.
 const MAX_CONCURRENT_ROUTE_OPS: usize = 64;
 
+/// A gateway plus (when known) the local kernel interface it's reachable
+/// over — see `RibEntry::interface_id`'s doc comment.
+type GatewayAndInterface = (IpAddr, Option<u32>);
+
 /// Real Linux backend: creates a VRF device + kernel routing table per
 /// routing table name (via `table_registry`'s persisted id allocation) and
 /// installs the winning route per prefix into it.
@@ -44,8 +48,11 @@ pub struct LinuxRibDriver {
     /// state; `apply_delta` is the only other writer, and only for
     /// prefixes it just itself installed/removed. A `std::sync::Mutex`,
     /// since every critical section here is a quick synchronous map
-    /// read/write, never held across an `.await`.
-    installed: Mutex<HashMap<u32, HashMap<IpNet, IpAddr>>>,
+    /// read/write, never held across an `.await`. The `Option<u32>`
+    /// alongside each gateway is `RibEntry::interface_id`, needed to
+    /// reconstruct a matching `RTM_DELROUTE` for a link-local IPv6 gateway
+    /// on the `apply_delta` removal path (see `add_route`'s doc comment).
+    installed: Mutex<HashMap<u32, HashMap<IpNet, GatewayAndInterface>>>,
 }
 
 impl LinuxRibDriver {
@@ -152,12 +159,24 @@ impl LinuxRibDriver {
         Ok(out)
     }
 
+    /// `interface_id`, when given, becomes `RTA_OIF` on the built route —
+    /// **required**, not optional, for an IPv6 gateway that's link-local
+    /// (`fe80::/10`): Linux's `RTM_NEWROUTE` rejects such a route with
+    /// `EINVAL` unless an outgoing interface is given alongside the
+    /// gateway, since a link-local address is only meaningful relative to
+    /// a specific link and the kernel has no other way to resolve which
+    /// one. `nos-ospfv3d`'s own SPF next-hops are always link-local (RFC
+    /// 5340 §4.8) and always carry a `Some` here; every other route source
+    /// passes `None` and needs none. Harmless to attach even when not
+    /// strictly required (a global-scope gateway route with an explicit
+    /// oif is still valid), so this never special-cases by address scope.
     async fn add_route(
         &self,
         table_id: u32,
         prefix: IpNet,
         gateway: IpAddr,
         source: Option<RouteSource>,
+        interface_id: Option<u32>,
     ) -> Result<(), DriverError> {
         match (prefix, gateway) {
             (IpNet::V4(prefix), IpAddr::V4(gateway)) => {
@@ -172,11 +191,14 @@ impl LinuxRibDriver {
                 info!(%prefix, %gateway, table_id, source = ?source, "added route");
             }
             (IpNet::V6(prefix), IpAddr::V6(gateway)) => {
-                let route = RouteMessageBuilder::<Ipv6Addr>::new()
+                let mut builder = RouteMessageBuilder::<Ipv6Addr>::new()
                     .destination_prefix(prefix.addr(), prefix.prefix_len())
                     .gateway(gateway)
-                    .table_id(table_id)
-                    .build();
+                    .table_id(table_id);
+                if let Some(interface_id) = interface_id {
+                    builder = builder.output_interface(interface_id);
+                }
+                let route = builder.build();
                 self.route_channel.add(route).await.inspect_err(|e| {
                     warn!(%prefix, %gateway, table_id, error = %e, "failed to add route");
                 })?;
@@ -196,12 +218,15 @@ impl LinuxRibDriver {
     /// installs one route per prefix per table (no ECMP). Used by
     /// `apply_delta`'s shadow-state-driven fast path; `reconcile_routes`'s
     /// full dump-diff path still reuses the exact dumped `RouteMessage`
-    /// instead, since it already has it on hand.
+    /// instead, since it already has it on hand. `interface_id` has the
+    /// same load-bearing role for a link-local IPv6 gateway as `add_route`'s
+    /// own doc comment describes.
     async fn remove_route(
         &self,
         table_id: u32,
         prefix: IpNet,
         gateway: IpAddr,
+        interface_id: Option<u32>,
     ) -> Result<(), DriverError> {
         match (prefix, gateway) {
             (IpNet::V4(prefix), IpAddr::V4(gateway)) => {
@@ -216,11 +241,14 @@ impl LinuxRibDriver {
                 info!(%prefix, %gateway, table_id, "removed route");
             }
             (IpNet::V6(prefix), IpAddr::V6(gateway)) => {
-                let route = RouteMessageBuilder::<Ipv6Addr>::new()
+                let mut builder = RouteMessageBuilder::<Ipv6Addr>::new()
                     .destination_prefix(prefix.addr(), prefix.prefix_len())
                     .gateway(gateway)
-                    .table_id(table_id)
-                    .build();
+                    .table_id(table_id);
+                if let Some(interface_id) = interface_id {
+                    builder = builder.output_interface(interface_id);
+                }
+                let route = builder.build();
                 self.route_channel.del(route).await.inspect_err(|e| {
                     warn!(%prefix, %gateway, table_id, error = %e, "failed to remove route");
                 })?;
@@ -242,7 +270,7 @@ impl LinuxRibDriver {
         table_id: u32,
         changes: &HashMap<IpNet, Option<RibEntry>>,
     ) -> Result<(), DriverError> {
-        let items: Vec<(IpNet, Option<IpAddr>, Option<RibEntry>)> = {
+        let items: Vec<(IpNet, Option<GatewayAndInterface>, Option<RibEntry>)> = {
             let installed = self.installed.lock().unwrap();
             let table_installed = installed.get(&table_id);
             changes
@@ -255,25 +283,33 @@ impl LinuxRibDriver {
         };
 
         stream::iter(items)
-            .map(|(prefix, old_gateway, new)| async move {
+            .map(|(prefix, old, new)| async move {
+                let old_gateway = old.map(|(gw, _)| gw);
                 let new_gateway = new.as_ref().map(|e| e.gateway);
-                if let Some(old_gw) = old_gateway {
+                if let Some((old_gw, old_ifid)) = old {
                     if Some(old_gw) != new_gateway {
-                        self.remove_route(table_id, prefix, old_gw).await?;
+                        self.remove_route(table_id, prefix, old_gw, old_ifid)
+                            .await?;
                     }
                 }
                 if let Some(entry) = &new {
                     if Some(entry.gateway) != old_gateway {
-                        self.add_route(table_id, prefix, entry.gateway, Some(entry.source))
-                            .await?;
+                        self.add_route(
+                            table_id,
+                            prefix,
+                            entry.gateway,
+                            Some(entry.source),
+                            entry.interface_id,
+                        )
+                        .await?;
                     }
                 }
 
                 let mut installed = self.installed.lock().unwrap();
                 let table_installed = installed.entry(table_id).or_default();
-                match new_gateway {
-                    Some(gateway) => {
-                        table_installed.insert(prefix, gateway);
+                match &new {
+                    Some(entry) => {
+                        table_installed.insert(prefix, (entry.gateway, entry.interface_id));
                     }
                     None => {
                         table_installed.remove(&prefix);
@@ -346,8 +382,13 @@ impl LinuxRibDriver {
 
         stream::iter(to_add)
             .map(|(prefix, gateway)| {
-                let source = best_routes.get(&prefix).map(|e| e.source);
-                async move { self.add_route(table_id, prefix, gateway, source).await }
+                let entry = best_routes.get(&prefix);
+                let source = entry.map(|e| e.source);
+                let interface_id = entry.and_then(|e| e.interface_id);
+                async move {
+                    self.add_route(table_id, prefix, gateway, source, interface_id)
+                        .await
+                }
             })
             .buffer_unordered(MAX_CONCURRENT_ROUTE_OPS)
             .try_for_each(|()| async { Ok(()) })
@@ -356,7 +397,14 @@ impl LinuxRibDriver {
         // The kernel now matches `desired` exactly — seed/correct
         // `apply_delta`'s shadow state from this ground truth, including on
         // `teardown` (an empty `desired` correctly clears it).
-        self.installed.lock().unwrap().insert(table_id, desired);
+        let installed_snapshot: HashMap<IpNet, GatewayAndInterface> = best_routes
+            .iter()
+            .map(|(prefix, entry)| (*prefix, (entry.gateway, entry.interface_id)))
+            .collect();
+        self.installed
+            .lock()
+            .unwrap()
+            .insert(table_id, installed_snapshot);
         Ok(())
     }
 }

@@ -209,6 +209,7 @@ mod tests {
 
     fn interface(name: &str, addresses: &[&str], routing_table: Option<&str>) -> Interface {
         Interface {
+            ospfv3_profile: None,
             name: name.to_string(),
             addresses: addresses
                 .iter()
@@ -301,6 +302,7 @@ mod tests {
     #[test]
     fn modified_label_only_lists_addresses_field() {
         let base = vec![Interface {
+            ospfv3_profile: None,
             name: "eth0".to_string(),
             addresses: vec![InterfaceAddress {
                 address: "10.0.0.1/24".parse().unwrap(),
@@ -313,6 +315,7 @@ mod tests {
             subinterfaces: Vec::new(),
         }];
         let candidate = vec![Interface {
+            ospfv3_profile: None,
             name: "eth0".to_string(),
             addresses: vec![InterfaceAddress {
                 address: "10.0.0.1/24".parse().unwrap(),
@@ -340,6 +343,7 @@ mod tests {
 
         let mut base_iface = interface("eth0", &[], None);
         base_iface.subinterfaces = vec![Subinterface {
+            ospfv3_profile: None,
             tag: 100,
             addresses: Vec::new(),
             routing_table: None,

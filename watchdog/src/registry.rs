@@ -16,6 +16,7 @@ pub struct EndpointRegistry {
     rib_tables: Arc<RwLock<HashMap<String, PathBuf>>>,
     bgp_instances: Arc<RwLock<HashMap<String, PathBuf>>>,
     ospf_instances: Arc<RwLock<HashMap<String, PathBuf>>>,
+    ospfv3_instances: Arc<RwLock<HashMap<String, PathBuf>>>,
 }
 
 /// Which of the registry's per-name maps an endpoint belongs to — one per
@@ -25,6 +26,7 @@ pub enum EndpointKind {
     RibTable,
     BgpInstance,
     OspfInstance,
+    Ospfv3Instance,
 }
 
 impl EndpointKind {
@@ -33,6 +35,7 @@ impl EndpointKind {
             EndpointKind::RibTable => "rib table",
             EndpointKind::BgpInstance => "bgp instance",
             EndpointKind::OspfInstance => "ospf instance",
+            EndpointKind::Ospfv3Instance => "ospfv3 instance",
         }
     }
 }
@@ -43,6 +46,7 @@ impl EndpointRegistry {
             EndpointKind::RibTable => &self.rib_tables,
             EndpointKind::BgpInstance => &self.bgp_instances,
             EndpointKind::OspfInstance => &self.ospf_instances,
+            EndpointKind::Ospfv3Instance => &self.ospfv3_instances,
         }
     }
 
@@ -84,6 +88,7 @@ impl EndpointRegistry {
             ServiceRef::RibTable(name) => (EndpointKind::RibTable, name),
             ServiceRef::BgpInstance(name) => (EndpointKind::BgpInstance, name),
             ServiceRef::OspfInstance(name) => (EndpointKind::OspfInstance, name),
+            ServiceRef::Ospfv3Instance(name) => (EndpointKind::Ospfv3Instance, name),
         };
         self.map(kind).read().await.get(name).cloned()
     }

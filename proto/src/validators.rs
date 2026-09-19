@@ -68,6 +68,30 @@ pub fn ospf_profile_reference_valid(
     Ok(())
 }
 
+/// If set, `ospfv3_profile` must name an existing `Ospfv3Profile`, flattened
+/// across every instance's areas — mirrors `ospf_profile_reference_valid`
+/// exactly, over `ctx.ospfv3_instances` instead.
+pub fn ospfv3_profile_reference_valid(
+    ospfv3_profile: Option<&String>,
+    ctx: &crate::schema::Config,
+) -> garde::Result {
+    let Some(name) = ospfv3_profile else {
+        return Ok(());
+    };
+    let exists = ctx
+        .ospfv3_instances
+        .iter()
+        .flat_map(|i| &i.areas)
+        .flat_map(|a| &a.profiles)
+        .any(|p| &p.name == name);
+    if !exists {
+        return Err(garde::Error::new(
+            "referenced ospfv3 profile does not exist",
+        ));
+    }
+    Ok(())
+}
+
 /// Returns a `garde` error unless `value` is composed only of ASCII
 /// letters, digits, and hyphens, with no leading or trailing hyphen.
 ///

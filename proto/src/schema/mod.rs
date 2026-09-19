@@ -8,6 +8,9 @@ pub mod interface;
 pub mod ospf_area;
 pub mod ospf_instance;
 pub mod ospf_profile;
+pub mod ospfv3_area;
+pub mod ospfv3_instance;
+pub mod ospfv3_profile;
 pub mod policy_definition;
 pub mod prefix_list;
 pub mod routing_table;
@@ -33,6 +36,9 @@ pub use ospf_profile::{
     NetworkType, OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfProfile, DEAD_INTERVAL_DEFAULT,
     HELLO_INTERVAL_DEFAULT, PRIORITY_DEFAULT,
 };
+pub use ospfv3_area::Ospfv3Area;
+pub use ospfv3_instance::Ospfv3Instance;
+pub use ospfv3_profile::Ospfv3Profile;
 pub use policy_definition::PolicyDefinition;
 pub use prefix_list::{PrefixList, PrefixListEntry};
 pub use routing_table::{Redistribute, RedistributeSource, RedistributeTarget, RoutingTable};
@@ -62,6 +68,9 @@ pub struct Config {
 
     #[garde(dive)]
     pub ospf_instances: Vec<OspfInstance>,
+
+    #[garde(dive)]
+    pub ospfv3_instances: Vec<Ospfv3Instance>,
 
     #[garde(dive)]
     pub static_routing_instances: Vec<StaticRoutingInstance>,
@@ -104,6 +113,7 @@ impl Default for Config {
             bgp_instances: Vec::new(),
             routing_tables: Vec::new(),
             ospf_instances: Vec::new(),
+            ospfv3_instances: Vec::new(),
             static_routing_instances: Vec::new(),
             interfaces: Vec::new(),
             policy_definitions: Vec::new(),

@@ -56,6 +56,12 @@ fn ospf_instance_str(t: &RoutingTable) -> String {
         .unwrap_or_else(|| "unset".to_string())
 }
 
+fn ospfv3_instance_str(t: &RoutingTable) -> String {
+    t.ospfv3_instance
+        .clone()
+        .unwrap_or_else(|| "unset".to_string())
+}
+
 fn redistribute_str(t: &RoutingTable) -> String {
     match &t.redistribute {
         None => "unset".to_string(),
@@ -91,6 +97,13 @@ fn changed_fields(base: &RoutingTable, candidate: &RoutingTable) -> Vec<FieldDif
             new: Some(ospf_instance_str(candidate)),
         });
     }
+    if base.ospfv3_instance != candidate.ospfv3_instance {
+        fields.push(FieldDiff {
+            label: "ospfv3-instance".to_string(),
+            old: Some(ospfv3_instance_str(base)),
+            new: Some(ospfv3_instance_str(candidate)),
+        });
+    }
     if base.redistribute != candidate.redistribute {
         fields.push(FieldDiff {
             label: "redistribute".to_string(),
@@ -120,6 +133,11 @@ fn removed_section(table: &RoutingTable) -> SectionDiff {
             FieldDiff {
                 label: "ospf-instance".to_string(),
                 old: Some(ospf_instance_str(table)),
+                new: None,
+            },
+            FieldDiff {
+                label: "ospfv3-instance".to_string(),
+                old: Some(ospfv3_instance_str(table)),
                 new: None,
             },
             FieldDiff {
@@ -154,6 +172,11 @@ fn added_section(table: &RoutingTable) -> SectionDiff {
                 new: Some(ospf_instance_str(table)),
             },
             FieldDiff {
+                label: "ospfv3-instance".to_string(),
+                old: None,
+                new: Some(ospfv3_instance_str(table)),
+            },
+            FieldDiff {
                 label: "redistribute".to_string(),
                 old: None,
                 new: Some(redistribute_str(table)),
@@ -169,6 +192,7 @@ mod tests {
 
     fn table(name: &str, bgp_instance: Option<&str>, sri: Option<&str>) -> RoutingTable {
         RoutingTable {
+            ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),
             ospf_instance: None,

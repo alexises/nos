@@ -683,6 +683,7 @@ mod tests {
 
     fn interface(name: &str, ospf_profile: Option<&str>) -> Interface {
         Interface {
+            ospfv3_profile: None,
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,
@@ -706,6 +707,7 @@ mod tests {
     fn finds_subinterface_attachment() {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
+            ospfv3_profile: None,
             tag: 100,
             addresses: Vec::new(),
             routing_table: None,
@@ -722,6 +724,7 @@ mod tests {
     fn finds_broadcast_domain_attachment() {
         let cfg = Config {
             broadcast_domains: vec![BroadcastDomain {
+                ospfv3_profile: None,
                 name: "bd1".to_string(),
                 addresses: Vec::new(),
                 routing_table: None,
@@ -745,6 +748,7 @@ mod tests {
     fn subinterface_attach_points_finds_routing_table() {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
+            ospfv3_profile: None,
             tag: 0,
             addresses: Vec::new(),
             routing_table: Some("rt1".to_string()),
@@ -765,6 +769,7 @@ mod tests {
         let cfg = Config {
             interfaces: vec![interface("loopback-rt1", Some("p1"))],
             broadcast_domains: vec![BroadcastDomain {
+                ospfv3_profile: None,
                 name: "bd1".to_string(),
                 addresses: Vec::new(),
                 routing_table: None,
@@ -779,6 +784,7 @@ mod tests {
     fn broadcast_domain_attach_points_finds_routing_table() {
         let cfg = Config {
             broadcast_domains: vec![BroadcastDomain {
+                ospfv3_profile: None,
                 name: "bd1".to_string(),
                 addresses: Vec::new(),
                 routing_table: Some("rt1".to_string()),
@@ -807,6 +813,7 @@ mod tests {
     fn loopback_attach_points_ignores_subinterface_and_broadcast_domain() {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
+            ospfv3_profile: None,
             tag: 0,
             addresses: Vec::new(),
             routing_table: Some("rt1".to_string()),
@@ -815,6 +822,7 @@ mod tests {
         let cfg = Config {
             interfaces: vec![iface],
             broadcast_domains: vec![BroadcastDomain {
+                ospfv3_profile: None,
                 name: "bd1".to_string(),
                 addresses: Vec::new(),
                 routing_table: None,
@@ -829,6 +837,7 @@ mod tests {
     fn broadcast_domain_attach_points_ignores_loopback_and_subinterface() {
         let mut iface = interface("eth0", None);
         iface.subinterfaces = vec![Subinterface {
+            ospfv3_profile: None,
             tag: 0,
             addresses: Vec::new(),
             routing_table: Some("rt1".to_string()),

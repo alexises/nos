@@ -43,6 +43,15 @@ pub enum BroadcastDomainOp {
     ClearOspfProfile {
         name: String,
     },
+    /// Same shape as `SetOspfProfile`/`ClearOspfProfile`, joining `OSPFv3`
+    /// (RFC 5340) instead.
+    SetOspfv3Profile {
+        name: String,
+        ospfv3_profile: String,
+    },
+    ClearOspfv3Profile {
+        name: String,
+    },
     Delete {
         name: String,
     },
@@ -58,6 +67,7 @@ impl BroadcastDomainOp {
                         addresses: Vec::new(),
                         routing_table: None,
                         ospf_profile: None,
+                        ospfv3_profile: None,
                     });
                 }
                 Ok(())
@@ -108,6 +118,17 @@ impl BroadcastDomainOp {
                 find_domain_mut(config, name)?.ospf_profile = None;
                 Ok(())
             }
+            BroadcastDomainOp::SetOspfv3Profile {
+                name,
+                ospfv3_profile,
+            } => {
+                find_domain_mut(config, name)?.ospfv3_profile = Some(ospfv3_profile.clone());
+                Ok(())
+            }
+            BroadcastDomainOp::ClearOspfv3Profile { name } => {
+                find_domain_mut(config, name)?.ospfv3_profile = None;
+                Ok(())
+            }
             BroadcastDomainOp::Delete { name } => {
                 let before = config.broadcast_domains.len();
                 config.broadcast_domains.retain(|d| &d.name != name);
@@ -137,6 +158,7 @@ mod tests {
 
     fn domain(name: &str) -> BroadcastDomain {
         BroadcastDomain {
+            ospfv3_profile: None,
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,

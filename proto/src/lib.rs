@@ -9,6 +9,7 @@ pub mod ipc;
 pub mod log;
 pub mod ops;
 pub mod ospf;
+pub mod ospfv3;
 pub mod paths;
 pub mod rib;
 pub mod schema;
@@ -31,12 +32,13 @@ pub use log::{LogEntry, LogEvent, LogLevel, LogRequest};
 pub use ops::{
     BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, CommunityAliasOp,
     CommunityGroupOp, ConfigOp, InterfaceOp, OpError, OspfAreaOp, OspfInstanceOp, OspfProfileOp,
-    PolicyDefinitionOp, PrefixListOp, RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp,
-    SubinterfaceOp, SwitchingProfileOp,
+    Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp, PrefixListOp,
+    RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp,
 };
 pub use ospf::{
     LinkInterfaceState, LsaSummary, NeighborSummary, OspfEvent, OspfNeighborState, OspfRequest,
 };
+pub use ospfv3::{Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request};
 pub use paths::{DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 pub use rib::{
     BgpRoute, BgpRouteUpdate, OspfRoute, OspfRouteUpdate, PrefixRoutes, RibEvent, RibRequest,
@@ -46,9 +48,10 @@ pub use schema::{
     loopback_table_name, AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpInstance, BgpPeer,
     BgpPeerGroup, BroadcastDomain, CommunityAlias, CommunityGroup, Config, Interface,
     InterfaceAddress, NetworkType, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm,
-    OspfCryptoKey, OspfInstance, OspfProfile, PolicyDefinition, PrefixList, PrefixListEntry,
-    Redistribute, RedistributeSource, RedistributeTarget, RoutingTable, SourceAddress, StaticRoute,
-    StaticRoutingInstance, Subinterface, SwitchingProfile, SwitchingProfileMember, VlanTag,
+    OspfCryptoKey, OspfInstance, OspfProfile, Ospfv3Area, Ospfv3Instance, Ospfv3Profile,
+    PolicyDefinition, PrefixList, PrefixListEntry, Redistribute, RedistributeSource,
+    RedistributeTarget, RoutingTable, SourceAddress, StaticRoute, StaticRoutingInstance,
+    Subinterface, SwitchingProfile, SwitchingProfileMember, VlanTag,
     CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT, HELLO_INTERVAL_DEFAULT,
     HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX, PRIORITY_DEFAULT,
 };

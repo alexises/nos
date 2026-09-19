@@ -282,6 +282,7 @@ mod tests {
 
     fn static_entry(prefix: &str, gateway: &str) -> RibEntry {
         RibEntry {
+            interface_id: None,
             prefix: prefix.parse().unwrap(),
             gateway: gateway.parse().unwrap(),
             source: RouteSource::Static,
@@ -298,6 +299,7 @@ mod tests {
     #[test]
     fn no_redistribute_rule_publishes_bgp_instance_with_empty_routes() {
         let table = RoutingTable {
+            ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
             ospf_instance: None,
@@ -317,6 +319,7 @@ mod tests {
     #[test]
     fn active_rule_redistributes_static_ipv4_routes() {
         let table = RoutingTable {
+            ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
             ospf_instance: None,
@@ -345,6 +348,7 @@ mod tests {
     #[test]
     fn active_rule_skips_bgp_sourced_routes() {
         let table = RoutingTable {
+            ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
             ospf_instance: None,
@@ -361,6 +365,7 @@ mod tests {
         routes.insert(
             prefix,
             RibEntry {
+                interface_id: None,
                 prefix,
                 gateway: "10.0.0.9".parse().unwrap(),
                 source: RouteSource::Bgp,
@@ -374,6 +379,7 @@ mod tests {
     #[test]
     fn active_rule_redistributes_static_ipv6_routes_too() {
         let table = RoutingTable {
+            ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
             ospf_instance: None,
@@ -387,6 +393,7 @@ mod tests {
         let cfg = cfg_with_table(table);
         let mut routes = HashMap::new();
         let entry = RibEntry {
+            interface_id: None,
             prefix: "2001:db8::/32".parse().unwrap(),
             gateway: "2001:db8::1".parse().unwrap(),
             source: RouteSource::Static,
@@ -413,6 +420,7 @@ mod tests {
     #[test]
     fn ospf_no_redistribute_rule_publishes_ospf_instance_with_empty_routes() {
         let table = RoutingTable {
+            ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,
             ospf_instance: Some("ospf1".into()),
@@ -432,6 +440,7 @@ mod tests {
     #[test]
     fn ospf_active_rule_redistributes_static_ipv4_routes() {
         let table = RoutingTable {
+            ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,
             ospf_instance: Some("ospf1".into()),
@@ -456,6 +465,7 @@ mod tests {
     #[test]
     fn ospf_active_rule_skips_bgp_sourced_routes() {
         let table = RoutingTable {
+            ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,
             ospf_instance: Some("ospf1".into()),
@@ -472,6 +482,7 @@ mod tests {
         routes.insert(
             prefix,
             RibEntry {
+                interface_id: None,
                 prefix,
                 gateway: "10.0.0.9".parse().unwrap(),
                 source: RouteSource::Bgp,
@@ -485,6 +496,7 @@ mod tests {
     #[test]
     fn ospf_rule_does_not_redistribute_when_target_is_bgp() {
         let table = RoutingTable {
+            ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
             ospf_instance: Some("ospf1".into()),

@@ -30,6 +30,8 @@ pub enum ArgKind {
     RoutingTableName,
     OspfInstanceName,
     OspfProfileName,
+    Ospfv3InstanceName,
+    Ospfv3ProfileName,
     StaticRoutingInstanceName,
     InterfaceName,
     BroadcastDomainName,
@@ -60,6 +62,9 @@ pub enum Availability {
     ConfigurationOspfInstance,
     ConfigurationOspfArea,
     ConfigurationOspfProfile,
+    ConfigurationOspfv3Instance,
+    ConfigurationOspfv3Area,
+    ConfigurationOspfv3Profile,
     ConfigurationStaticRoutingInstance,
     ConfigurationInterface,
     /// `Path::Interface`, `Path::Subinterface`, or `Path::BroadcastDomain` —
@@ -100,14 +105,17 @@ pub fn availability_matches(availability: Availability, mode: &Mode) -> bool {
         Availability::ConfigurationInstance => path.bgp_instance().is_ok(),
         Availability::ConfigurationPeerGroup => path.peer_group().is_ok(),
         Availability::ConfigurationRoutingTable => path.routing_table().is_ok(),
-        Availability::ConfigurationOspfInstance => matches!(path, Path::OspfInstance(_)),
-        Availability::ConfigurationOspfArea => matches!(path, Path::OspfArea { .. }),
+        Availability::ConfigurationOspfInstance => path.ospf_instance().is_ok(),
+        Availability::ConfigurationOspfArea => path.ospf_area().is_ok(),
         Availability::ConfigurationOspfProfile => path.ospf_profile().is_ok(),
+        Availability::ConfigurationOspfv3Instance => path.ospfv3_instance().is_ok(),
+        Availability::ConfigurationOspfv3Area => path.ospfv3_area().is_ok(),
+        Availability::ConfigurationOspfv3Profile => path.ospfv3_profile().is_ok(),
         Availability::ConfigurationStaticRoutingInstance => path.static_routing_instance().is_ok(),
         Availability::ConfigurationInterface => path.interface().is_ok(),
         Availability::ConfigurationInterfaceOrSubinterface => path.l3_target().is_ok(),
         Availability::ConfigurationInterfaceOrOspfProfile => {
-            path.interface().is_ok() || path.ospf_profile().is_ok()
+            path.interface().is_ok() || path.ospf_profile().is_ok() || path.ospfv3_profile().is_ok()
         }
         Availability::ConfigurationSwitchingProfile => path.switching_profile().is_ok(),
         Availability::ConfigurationNested => matches!(
@@ -118,6 +126,9 @@ pub fn availability_matches(availability: Availability, mode: &Mode) -> bool {
                 | Path::OspfInstance(_)
                 | Path::OspfArea { .. }
                 | Path::OspfProfile { .. }
+                | Path::Ospfv3Instance(_)
+                | Path::Ospfv3Area { .. }
+                | Path::Ospfv3Profile { .. }
                 | Path::StaticRoutingInstance(_)
                 | Path::Interface(_)
                 | Path::Subinterface { .. }
@@ -727,6 +738,287 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "delete network-type",
         Doc::FromConfig(Topic::ClearOspfProfileNetworkType),
         ConfigurationOspfProfile),
+    spec!(["edit" "ospfv3" "instance" (Ospfv3InstanceName)],
+        "edit ospfv3 instance <name>",
+        Doc::Local {
+            summary: "Create (if missing) and navigate into an OSPFv3 (RFC 5340) instance.",
+            detail: "Mirrors 'edit ospf instance <name>' for OSPFv3.",
+        },
+        Configuration),
+    spec!(["set" "ospfv3" "instance" (Ospfv3InstanceName) "router-id" (Plain)],
+        "set ospfv3 instance <name> router-id <router-id>",
+        Doc::Local {
+            summary: "Set an OSPFv3 instance's router-id.",
+            detail: "Mirrors 'set ospf instance <name> router-id <router-id>' for OSPFv3.",
+        },
+        Configuration),
+    spec!(["set" "router-id" (Plain)],
+        "set router-id <router-id>",
+        Doc::Local {
+            summary: "Set the current OSPFv3 instance's router-id.",
+            detail: "Shares its token sequence with the same relative command on a BGP \
+                     instance or an OSPF instance; which one applies is resolved by the \
+                     current navigation position.",
+        },
+        ConfigurationOspfv3Instance),
+    spec!(["delete" "ospfv3" "instance" (Ospfv3InstanceName)],
+        "delete ospfv3 instance <name>",
+        Doc::Local {
+            summary: "Delete an OSPFv3 instance.",
+            detail: "Mirrors 'delete ospf instance <name>' for OSPFv3.",
+        },
+        Configuration),
+    spec!(["edit" "ospfv3" "instance" (Ospfv3InstanceName) "area" (Plain)],
+        "edit ospfv3 instance <name> area <area-id>",
+        Doc::Local {
+            summary: "Create (if missing) and navigate into an OSPFv3 area.",
+            detail: "Mirrors 'edit ospf instance <name> area <area-id>' for OSPFv3.",
+        },
+        Configuration),
+    spec!(["edit" "area" (Plain)],
+        "edit area <area-id>",
+        Doc::Local {
+            summary: "Create (if missing) and navigate into an area of the current instance.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     instance; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Instance),
+    spec!(["delete" "ospfv3" "instance" (Ospfv3InstanceName) "area" (Plain)],
+        "delete ospfv3 instance <name> area <area-id>",
+        Doc::Local {
+            summary: "Delete an OSPFv3 area.",
+            detail: "Mirrors 'delete ospf instance <name> area <area-id>' for OSPFv3.",
+        },
+        Configuration),
+    spec!(["delete" "area" (Plain)],
+        "delete area <area-id>",
+        Doc::Local {
+            summary: "Delete an area of the current instance.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     instance; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Instance),
+    spec!(["edit" "ospfv3" "instance" (Ospfv3InstanceName) "area" (Plain) "profile" (Ospfv3ProfileName)],
+        "edit ospfv3 instance <name> area <area-id> profile <profile-name>",
+        Doc::Local {
+            summary: "Create (if missing) and navigate into an OSPFv3 profile.",
+            detail: "Mirrors 'edit ospf instance <name> area <area-id> profile <profile-name>' \
+                     for OSPFv3.",
+        },
+        Configuration),
+    spec!(["edit" "profile" (Ospfv3ProfileName)],
+        "edit profile <profile-name>",
+        Doc::Local {
+            summary: "Create (if missing) and navigate into a profile of the current area.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     area; which one applies is resolved by the current navigation position.",
+        },
+        ConfigurationOspfv3Area),
+    spec!(["delete" "ospfv3" "instance" (Ospfv3InstanceName) "area" (Plain) "profile" (Ospfv3ProfileName)],
+        "delete ospfv3 instance <name> area <area-id> profile <profile-name>",
+        Doc::Local {
+            summary: "Delete an OSPFv3 profile.",
+            detail: "Mirrors 'delete ospf instance <name> area <area-id> profile \
+                     <profile-name>' for OSPFv3.",
+        },
+        Configuration),
+    spec!(["delete" "profile" (Ospfv3ProfileName)],
+        "delete profile <profile-name>",
+        Doc::Local {
+            summary: "Delete a profile of the current area.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     area; which one applies is resolved by the current navigation position.",
+        },
+        ConfigurationOspfv3Area),
+    spec!(["set" "ospfv3" "instance" (Ospfv3InstanceName) "area" (Plain) "profile" (Ospfv3ProfileName)
+           "hello-interval" (Plain)],
+        "set ospfv3 instance <name> area <area-id> profile <profile-name> hello-interval <n>",
+        Doc::Local {
+            summary: "Set an OSPFv3 profile's hello-interval.",
+            detail: "Mirrors the OSPF equivalent for OSPFv3.",
+        },
+        Configuration),
+    spec!(["set" "ospfv3" "instance" (Ospfv3InstanceName) "area" (Plain) "profile" (Ospfv3ProfileName)
+           "dead-interval" (Plain)],
+        "set ospfv3 instance <name> area <area-id> profile <profile-name> dead-interval <n>",
+        Doc::Local {
+            summary: "Set an OSPFv3 profile's dead-interval.",
+            detail: "Mirrors the OSPF equivalent for OSPFv3.",
+        },
+        Configuration),
+    spec!(["set" "ospfv3" "instance" (Ospfv3InstanceName) "area" (Plain) "profile" (Ospfv3ProfileName)
+           "cost" (Plain)],
+        "set ospfv3 instance <name> area <area-id> profile <profile-name> cost <n>",
+        Doc::Local {
+            summary: "Set an OSPFv3 profile's cost.",
+            detail: "Mirrors the OSPF equivalent for OSPFv3.",
+        },
+        Configuration),
+    spec!(["set" "ospfv3" "instance" (Ospfv3InstanceName) "area" (Plain) "profile" (Ospfv3ProfileName)
+           "priority" (Plain)],
+        "set ospfv3 instance <name> area <area-id> profile <profile-name> priority <n>",
+        Doc::Local {
+            summary: "Set an OSPFv3 profile's priority.",
+            detail: "Mirrors the OSPF equivalent for OSPFv3.",
+        },
+        Configuration),
+    spec!(["set" "ospfv3" "instance" (Ospfv3InstanceName) "area" (Plain) "profile" (Ospfv3ProfileName)
+           "mtu" (Plain)],
+        "set ospfv3 instance <name> area <area-id> profile <profile-name> mtu <n>",
+        Doc::Local {
+            summary: "Override an OSPFv3 profile's mtu.",
+            detail: "Mirrors the OSPF equivalent for OSPFv3.",
+        },
+        Configuration),
+    spec!(["set" "ospfv3" "instance" (Ospfv3InstanceName) "area" (Plain) "profile" (Ospfv3ProfileName)
+           "network-type" "point-to-point"],
+        "set ospfv3 instance <name> area <area-id> profile <profile-name> network-type point-to-point",
+        Doc::Local {
+            summary: "Override an OSPFv3 profile's network type to point-to-point.",
+            detail: "Mirrors the OSPF equivalent for OSPFv3.",
+        },
+        Configuration),
+    spec!(["set" "ospfv3" "instance" (Ospfv3InstanceName) "area" (Plain) "profile" (Ospfv3ProfileName)
+           "network-type" "broadcast"],
+        "set ospfv3 instance <name> area <area-id> profile <profile-name> network-type broadcast",
+        Doc::Local {
+            summary: "Override an OSPFv3 profile's network type to broadcast.",
+            detail: "Mirrors the OSPF equivalent for OSPFv3.",
+        },
+        Configuration),
+    spec!(["set" "hello-interval" (Plain)],
+        "set hello-interval <n>",
+        Doc::Local {
+            summary: "Set the current profile's hello-interval.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     profile; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Profile),
+    spec!(["set" "dead-interval" (Plain)],
+        "set dead-interval <n>",
+        Doc::Local {
+            summary: "Set the current profile's dead-interval.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     profile; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Profile),
+    spec!(["set" "cost" (Plain)],
+        "set cost <n>",
+        Doc::Local {
+            summary: "Set the current profile's cost.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     profile; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Profile),
+    spec!(["set" "priority" (Plain)],
+        "set priority <n>",
+        Doc::Local {
+            summary: "Set the current profile's priority.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     profile; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Profile),
+    spec!(["set" "network-type" "point-to-point"],
+        "set network-type point-to-point",
+        Doc::Local {
+            summary: "Override the current profile's network type to point-to-point.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     profile; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Profile),
+    spec!(["set" "network-type" "broadcast"],
+        "set network-type broadcast",
+        Doc::Local {
+            summary: "Override the current profile's network type to broadcast.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     profile; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Profile),
+    spec!(["delete" "hello-interval"],
+        "delete hello-interval",
+        Doc::Local {
+            summary: "Clear the current profile's hello-interval override.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     profile; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Profile),
+    spec!(["delete" "dead-interval"],
+        "delete dead-interval",
+        Doc::Local {
+            summary: "Clear the current profile's dead-interval override.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     profile; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Profile),
+    spec!(["delete" "cost"],
+        "delete cost",
+        Doc::Local {
+            summary: "Clear the current profile's cost override.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     profile; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Profile),
+    spec!(["delete" "priority"],
+        "delete priority",
+        Doc::Local {
+            summary: "Clear the current profile's priority override.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     profile; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Profile),
+    spec!(["delete" "network-type"],
+        "delete network-type",
+        Doc::Local {
+            summary: "Clear the current profile's network-type override.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     profile; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Profile),
+    spec!(["set" "interface" (InterfaceName) "ospfv3" (Ospfv3ProfileName)],
+        "set interface <name> ospfv3 <profile-name>",
+        Doc::Local {
+            summary: "Join OSPFv3 (RFC 5340) under a profile on this attach point.",
+            detail: "Mirrors 'set interface <name> ospf <profile-name>' for OSPFv3 — requires \
+                     a routing-table already set on the same attach point, checked at commit \
+                     time.",
+        },
+        Configuration),
+    spec!(["set" "ospfv3" (Ospfv3ProfileName)],
+        "set ospfv3 <profile-name>",
+        Doc::Local {
+            summary: "Join OSPFv3 under a profile on the current attach point.",
+            detail: "Context-relative form of 'set interface <name> ospfv3 <profile-name>' — \
+                     valid while navigated into a loopback interface, a subinterface, or a \
+                     broadcast domain.",
+        },
+        ConfigurationInterfaceOrSubinterface),
+    spec!(["delete" "interface" (InterfaceName) "ospfv3"],
+        "delete interface <name> ospfv3",
+        Doc::Local {
+            summary: "Clear an interface's OSPFv3 profile association.",
+            detail: "Mirrors 'delete interface <name> ospf' for OSPFv3.",
+        },
+        Configuration),
+    spec!(["delete" "ospfv3"],
+        "delete ospfv3",
+        Doc::Local {
+            summary: "Clear the current attach point's OSPFv3 profile association.",
+            detail: "Context-relative form of 'delete interface <name> ospfv3'.",
+        },
+        ConfigurationInterfaceOrSubinterface),
     spec!(["set" "routing-table" (RoutingTableName) "bgp-instance" (BgpInstanceName)],
         "set routing-table <name> bgp-instance <instance>",
         Doc::FromConfig(Topic::SetRoutingTableBgpInstance),
@@ -758,6 +1050,35 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     spec!(["delete" "ospf-instance"],
         "delete ospf-instance",
         Doc::FromConfig(Topic::ClearRoutingTableOspfInstance),
+        ConfigurationRoutingTable),
+    spec!(["set" "routing-table" (RoutingTableName) "ospfv3-instance" (Ospfv3InstanceName)],
+        "set routing-table <name> ospfv3-instance <instance>",
+        Doc::Local {
+            summary: "Associate an OSPFv3 instance with a routing table.",
+            detail: "Mirrors 'set routing-table <name> ospf-instance <instance>' for OSPFv3.",
+        },
+        Configuration),
+    spec!(["set" "ospfv3-instance" (Ospfv3InstanceName)],
+        "set ospfv3-instance <instance>",
+        Doc::Local {
+            summary: "Associate an OSPFv3 instance with the current routing table.",
+            detail: "Context-relative form of 'set routing-table <name> ospfv3-instance \
+                     <instance>'.",
+        },
+        ConfigurationRoutingTable),
+    spec!(["delete" "routing-table" (RoutingTableName) "ospfv3-instance"],
+        "delete routing-table <name> ospfv3-instance",
+        Doc::Local {
+            summary: "Clear a routing table's OSPFv3 instance association.",
+            detail: "Mirrors 'delete routing-table <name> ospf-instance' for OSPFv3.",
+        },
+        Configuration),
+    spec!(["delete" "ospfv3-instance"],
+        "delete ospfv3-instance",
+        Doc::Local {
+            summary: "Clear the current routing table's OSPFv3 instance association.",
+            detail: "Context-relative form of 'delete routing-table <name> ospfv3-instance'.",
+        },
         ConfigurationRoutingTable),
     spec!(["set" "routing-table" (RoutingTableName) "static-routing-instance"
            (StaticRoutingInstanceName)],
@@ -949,6 +1270,23 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      link-state-id, advertising router, sequence number, age, checksum). An \
                      instance whose nos-ospfd isn't running is reported individually rather \
                      than aborting the whole command.",
+        },
+        Always),
+    spec!(["show" "ospfv3" "neigh"],
+        "show ospfv3 neigh",
+        Doc::Local {
+            summary: "Show a one-line-per-neighbor OSPFv3 adjacency summary across every instance.",
+            detail: "Mirrors 'show ospf neigh' for OSPFv3 (RFC 5340): queries every configured \
+                     Ospfv3Instance's nos-ospfv3d (each resolved via nos-watchdogd) for its \
+                     links' current neighbor state, interface state, last-hello age, and \
+                     elected DR/BDR.",
+        },
+        Always),
+    spec!(["show" "ospfv3" "database"],
+        "show ospfv3 database",
+        Doc::Local {
+            summary: "Show every installed LSA's header across every OSPFv3 instance.",
+            detail: "Mirrors 'show ospf database' for OSPFv3 (RFC 5340).",
         },
         Always),
     spec!(["clear" "bgp" (BgpInstanceName) (Plain) "soft-in"],

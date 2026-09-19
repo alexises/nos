@@ -3,7 +3,8 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 use crate::validators::{
-    ospf_profile_reference_valid, routing_table_reference_valid, unique_addresses, unique_in,
+    ospf_profile_reference_valid, ospfv3_profile_reference_valid, routing_table_reference_valid,
+    unique_addresses, unique_in,
 };
 
 use super::{Config, VlanTag};
@@ -64,6 +65,14 @@ pub struct Subinterface {
     /// `valid_subinterface_ospf_profile_requires_routing_table`.
     #[garde(custom(|p: &Option<String>, ctx: &Config| ospf_profile_reference_valid(p.as_ref(), ctx)))]
     pub ospf_profile: Option<String>,
+
+    /// Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a
+    /// separate field, not a widened `ospf_profile`, so one subinterface can
+    /// run v2 and v3 simultaneously (real dual-stack routers do this
+    /// routinely). Also requires `routing_table` set on this same
+    /// subinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.
+    #[garde(custom(|p: &Option<String>, ctx: &Config| ospfv3_profile_reference_valid(p.as_ref(), ctx)))]
+    pub ospfv3_profile: Option<String>,
 }
 
 fn valid_subinterface_tag(tag: u16) -> garde::Result {
@@ -102,6 +111,11 @@ fn valid_subinterface_ospf_profile_requires_routing_table(
         if sub.ospf_profile.is_some() && sub.routing_table.is_none() {
             return Err(garde::Error::new(
                 "ospf profile requires a routing-table on the same subinterface",
+            ));
+        }
+        if sub.ospfv3_profile.is_some() && sub.routing_table.is_none() {
+            return Err(garde::Error::new(
+                "ospfv3 profile requires a routing-table on the same subinterface",
             ));
         }
     }
@@ -159,6 +173,12 @@ pub struct Interface {
     /// like `routing_table`.
     #[garde(custom(|p: &Option<String>, ctx: &Config| ospf_profile_reference_valid(p.as_ref(), ctx)))]
     pub ospf_profile: Option<String>,
+
+    /// Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see
+    /// `Subinterface.ospfv3_profile`'s doc comment for why this is a
+    /// separate field rather than a widened `ospf_profile`.
+    #[garde(custom(|p: &Option<String>, ctx: &Config| ospfv3_profile_reference_valid(p.as_ref(), ctx)))]
+    pub ospfv3_profile: Option<String>,
 
     #[garde(custom(|sp: &Option<String>, ctx: &Config| switching_profile_reference_valid(sp.as_ref(), ctx)))]
     pub switching_profile: Option<String>,
@@ -244,9 +264,15 @@ fn valid_addressing_split(interfaces: &[Interface]) -> garde::Result {
                     "ospf profile requires a routing-table on the same interface",
                 ));
             }
+            if iface.ospfv3_profile.is_some() && iface.routing_table.is_none() {
+                return Err(garde::Error::new(
+                    "ospfv3 profile requires a routing-table on the same interface",
+                ));
+            }
         } else if !iface.addresses.is_empty()
             || iface.routing_table.is_some()
             || iface.ospf_profile.is_some()
+            || iface.ospfv3_profile.is_some()
         {
             return Err(garde::Error::new(
                 "physical interface must configure addresses/routing-table/ospf-profile on a subinterface (e.g. '.0'), not directly on the interface",
@@ -314,6 +340,7 @@ mod tests {
 
     fn interface(name: &str, addresses: &[&str], routing_table: Option<&str>) -> Interface {
         Interface {
+            ospfv3_profile: None,
             name: name.to_string(),
             addresses: addresses
                 .iter()
@@ -336,6 +363,7 @@ mod tests {
     fn physical_with_l3(name: &str, addresses: &[&str], routing_table: Option<&str>) -> Interface {
         let mut iface = interface(name, &[], None);
         iface.subinterfaces = vec![Subinterface {
+            ospfv3_profile: None,
             tag: 0,
             addresses: addresses
                 .iter()
@@ -352,6 +380,7 @@ mod tests {
 
     fn table(name: &str) -> RoutingTable {
         RoutingTable {
+            ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: None,
             ospf_instance: None,
@@ -505,6 +534,7 @@ mod tests {
     fn duplicate_address_different_label_still_conflicts() {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![Subinterface {
+            ospfv3_profile: None,
             tag: 0,
             addresses: vec![
                 InterfaceAddress {
@@ -527,6 +557,7 @@ mod tests {
     fn loopback_with_subinterfaces_fails() {
         let mut iface = interface("loopback-rt1", &[], None);
         iface.subinterfaces = vec![Subinterface {
+            ospfv3_profile: None,
             tag: 100,
             addresses: Vec::new(),
             routing_table: None,
@@ -556,12 +587,14 @@ mod tests {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![
             Subinterface {
+                ospfv3_profile: None,
                 tag: 100,
                 addresses: Vec::new(),
                 routing_table: None,
                 ospf_profile: None,
             },
             Subinterface {
+                ospfv3_profile: None,
                 tag: 100,
                 addresses: Vec::new(),
                 routing_table: None,
@@ -576,6 +609,7 @@ mod tests {
     fn subinterface_tag_4095_fails() {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![Subinterface {
+            ospfv3_profile: None,
             tag: 4095,
             addresses: Vec::new(),
             routing_table: None,
@@ -590,12 +624,14 @@ mod tests {
         let mut iface = interface("eth0", &[], None);
         iface.subinterfaces = vec![
             Subinterface {
+                ospfv3_profile: None,
                 tag: 0,
                 addresses: Vec::new(),
                 routing_table: None,
                 ospf_profile: None,
             },
             Subinterface {
+                ospfv3_profile: None,
                 tag: 4094,
                 addresses: Vec::new(),
                 routing_table: None,
@@ -625,6 +661,7 @@ mod tests {
 
     fn domain(name: &str) -> crate::schema::BroadcastDomain {
         crate::schema::BroadcastDomain {
+            ospfv3_profile: None,
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,

@@ -13,8 +13,8 @@ use nos_cli::help_menu::HelpMenu;
 use nos_cli::session::{self, Mode, PathAfter, Resolved};
 use nos_cli::spec::{self, Doc};
 use nos_cli::{
-    bgp_client, client, format, interface_client, log_client, ospf_client, rib_client,
-    watchdog_client,
+    bgp_client, client, format, interface_client, log_client, ospf_client, ospfv3_client,
+    rib_client, watchdog_client,
 };
 use nos_proto::{
     CommandDoc, ConfigOp, Event, LogEvent, PolicyDefinitionOp, ServiceRef, Topic,
@@ -92,6 +92,26 @@ impl NosPrompt {
                     },
                 ..
             } => format!("({transaction}/ospf:{instance}/area:{area_id}/profile:{name})"),
+            Mode::Configuration {
+                transaction,
+                path: session::Path::Ospfv3Instance(name),
+                ..
+            } => format!("({transaction}/ospfv3:{name})"),
+            Mode::Configuration {
+                transaction,
+                path: session::Path::Ospfv3Area { instance, area_id },
+                ..
+            } => format!("({transaction}/ospfv3:{instance}/area:{area_id})"),
+            Mode::Configuration {
+                transaction,
+                path:
+                    session::Path::Ospfv3Profile {
+                        instance,
+                        area_id,
+                        name,
+                    },
+                ..
+            } => format!("({transaction}/ospfv3:{instance}/area:{area_id}/profile:{name})"),
             Mode::Configuration {
                 transaction,
                 path: session::Path::StaticRoutingInstance(name),
@@ -459,6 +479,54 @@ fn completer_for(socket: &Path, cache: DocCache, mode: &Mode) -> Box<dyn Complet
         Mode::Operational => Box::new(Vec::new),
     };
 
+    let ospfv3_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
+        Mode::Configuration { transaction, .. } => {
+            let transaction = transaction.clone();
+            let socket = socket.to_path_buf();
+            Box::new(move || {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(client::get_transaction(&socket, &transaction))
+                })
+                .map(|snap| {
+                    snap.config
+                        .ospfv3_instances
+                        .into_iter()
+                        .map(|i| i.name)
+                        .collect()
+                })
+                .unwrap_or_default()
+            })
+        }
+        Mode::Operational => Box::new(Vec::new),
+    };
+
+    // Deliberately flat/global, mirroring `ospf_profile_name_source`'s own
+    // reasoning.
+    let ospfv3_profile_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
+        Mode::Configuration { transaction, .. } => {
+            let transaction = transaction.clone();
+            let socket = socket.to_path_buf();
+            Box::new(move || {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(client::get_transaction(&socket, &transaction))
+                })
+                .map(|snap| {
+                    snap.config
+                        .ospfv3_instances
+                        .into_iter()
+                        .flat_map(|i| i.areas)
+                        .flat_map(|a| a.profiles)
+                        .map(|p| p.name)
+                        .collect()
+                })
+                .unwrap_or_default()
+            })
+        }
+        Mode::Operational => Box::new(Vec::new),
+    };
+
     Box::new(NosCompleter::new(
         mode.clone(),
         doc_source,
@@ -471,6 +539,8 @@ fn completer_for(socket: &Path, cache: DocCache, mode: &Mode) -> Box<dyn Complet
         broadcast_domain_name_source,
         switching_profile_name_source,
         ospf_profile_name_source,
+        ospfv3_instance_name_source,
+        ospfv3_profile_name_source,
     ))
 }
 
@@ -695,6 +765,14 @@ async fn handle_action(
         }
         Resolved::ShowOspfDatabase => {
             show_ospf_database(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowOspfv3Neigh => {
+            show_ospfv3_neigh(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ShowOspfv3Database => {
+            show_ospfv3_database(socket, watchdog_socket).await;
             Outcome::Continue(mode)
         }
         Resolved::ClearBgpSoftIn { instance, peer } => {
@@ -1098,6 +1176,82 @@ async fn show_ospf_database(config_socket: &Path, watchdog_socket: &Path) {
                 Err(e) => eprintln!("error: {e}"),
             },
             Ok(None) => println!("ospf instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {e}"),
+        }
+    }
+}
+
+/// `show ospfv3 neigh` — mirrors `show_ospf_neigh` exactly, over every
+/// configured `Ospfv3Instance`.
+async fn show_ospfv3_neigh(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+
+    if cfg.ospfv3_instances.is_empty() {
+        println!("no ospfv3 instances configured");
+        return;
+    }
+
+    for instance in &cfg.ospfv3_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::Ospfv3Instance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(ospfv3_socket)) => match ospfv3_client::get_neighbors(&ospfv3_socket).await {
+                Ok(neighbors) => {
+                    println!(
+                        "{}",
+                        format::render_ospfv3_neighbors(&instance.name, &neighbors)
+                    );
+                }
+                Err(e) => eprintln!("error: {e}"),
+            },
+            Ok(None) => println!("ospfv3 instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {e}"),
+        }
+    }
+}
+
+/// `show ospfv3 database` — mirrors `show_ospf_database` exactly, over every
+/// configured `Ospfv3Instance`.
+async fn show_ospfv3_database(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+
+    if cfg.ospfv3_instances.is_empty() {
+        println!("no ospfv3 instances configured");
+        return;
+    }
+
+    for instance in &cfg.ospfv3_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::Ospfv3Instance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(ospfv3_socket)) => match ospfv3_client::get_database(&ospfv3_socket).await {
+                Ok(entries) => {
+                    println!(
+                        "{}",
+                        format::render_ospfv3_database(&instance.name, &entries)
+                    );
+                }
+                Err(e) => eprintln!("error: {e}"),
+            },
+            Ok(None) => println!("ospfv3 instance '{}' is not running", instance.name),
             Err(e) => eprintln!("error: {e}"),
         }
     }

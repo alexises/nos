@@ -151,7 +151,22 @@
 # a small standalone tool that speaks nos-configd's IPC protocol directly,
 # reusing nos-proto's own types for wire compatibility.
 #
-# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|mtu|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
+# An eleventh, `ospfv3` (RFC 5340, IPv6 OSPF), configures a parallel
+# Ospfv3Instance/area/profile on the same eth0.0 attach point (a second,
+# independent protocol instance alongside OSPFv2, no conflict), confirming
+# the identical real Hello/DBD/LSR/LSU/LSAck exchange reaches 2-Way then
+# Full over a real IPv6 raw protocol-89 socket, and that attaching the
+# profile to router-a's own loopback (a destination with no neighbor of its
+# own) gets router-b's real RFC 5340 SPF computation to derive the correct
+# IPv6 next-hop purely from the LSDB's Link-LSAs and push a real kernel
+# route via nos-ribd. A twelfth, `ospfv3-dr` (requires `ospfv3` AND
+# `ospf-dr` to have already run), attaches the profile a second time to the
+# same bd-ospf bridge `ospf-dr` already stood up a third router on,
+# confirming the identical real RFC 2328 §9.4 DR/BDR election and §8
+# DrOther-to-DR/BDR Full-adjacency restriction hold over the new address
+# family too.
+#
+# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|mtu|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -163,6 +178,12 @@ PROVISION_BIN="$REPO/target/docker-verify/release/nos-provision"
 IMAGE=nos:local
 NET=nos-verify-net
 SUBNET=10.50.0.0/24
+# A fixed ULA (RFC 4193) block for the docker network's own IPv6 subnet --
+# see ensure_network's own comment. Never assigned to nos's own config
+# directly (every OSPFv3_* address below lives in a distinct block, see
+# their own comments) -- this is purely so the network itself, and thus each
+# container's eth0, has IPv6 enabled at the kernel level at all.
+SUBNET6=fd00:10:50::/64
 IP_A=10.50.0.2
 IP_B=10.50.0.3
 IP_C=10.50.0.4
@@ -284,6 +305,44 @@ MTU_VALUE=9000
 # this config override, with no --dbd-max-headers CLI flag involved.
 OSPF_MTU_VALUE=68
 
+# --- OSPFv3 (RFC 5340) scenario variables ---
+#
+# Every address below lives in RFC 3849's documentation block (2001:db8::/32)
+# -- distinct sub-prefixes per attach point, mirroring how the OSPFv2
+# scenarios above each get their own TEST-NET-{1,2,3} sub-block, and all of
+# them distinct from $SUBNET6 (the docker network's own IPv6 subnet, never
+# itself assigned to nos's config).
+OSPFV3_INSTANCE=ospfv3-1
+OSPFV3_ROUTER_ID=9.9.9.9
+OSPFV3_ROUTER_ID_B=9.9.9.10
+# Same area/profile-naming convention as $OSPF_AREA/$OSPF_PROFILE, on eth0's
+# own tag-0 subinterface -- the same attach point already carrying
+# $OSPF_PROFILE (OSPFv2) and the BGP session's own IPv4 address; a
+# BgpInstance/OspfInstance/Ospfv3Instance can all reference the same
+# routing-table/attach-point simultaneously, no conflict.
+OSPFV3_AREA=0.0.0.0
+OSPFV3_PROFILE=ospfv3-profile1
+OSPFV3_ADDRESS_A=2001:db8:1::1/64
+OSPFV3_ADDRESS_B=2001:db8:1::2/64
+# router-a's loopback prefix -- OSPFv3 only ever advertises IPv6 prefixes,
+# so this is a second (IPv6) address on the same loopback-rt1 interface the
+# OSPFv2 `loopback` scenario already may have created (a distinct address
+# family, never colliding with $LOOPBACK_ADDRESS). A destination with no
+# neighbor of its own, so router-b can only ever learn it via a real RFC
+# 5340 SPF computation, never a directly-connected address.
+OSPFV3_LOOPBACK_ADDRESS=2001:db8:2::1/128
+# The `ospfv3-dr` scenario's own broadcast-link addresses -- reuses the OSPFv2
+# `ospf`/`ospf-dr` scenarios' own bd-ospf bridge/switching-profile (a
+# BroadcastDomain carries independent `ospf_profile`/`ospfv3_profile`
+# fields, so both protocols run over the same real Linux bridge with no
+# conflict) rather than building a second one.
+OSPFV3_BROADCAST_ADDRESS_A=2001:db8:3::1/64
+OSPFV3_BROADCAST_ADDRESS_B=2001:db8:3::2/64
+OSPFV3_BROADCAST_ADDRESS_C=2001:db8:3::3/64
+# Deliberately lower than both $OSPFV3_ROUTER_ID/$OSPFV3_ROUTER_ID_B, same
+# incumbent-stickiness rationale as $OSPF_ROUTER_ID_C.
+OSPFV3_ROUTER_ID_C=9.9.9.8
+
 log() { echo "[verify-e2e] $*" >&2; }
 
 build_provision_tool() {
@@ -302,8 +361,26 @@ build_image() {
 
 ensure_network() {
   if ! docker network inspect "$NET" >/dev/null 2>&1; then
-    log "creating network $NET ($SUBNET)"
-    docker network create --subnet "$SUBNET" "$NET" >/dev/null
+    log "creating network $NET ($SUBNET, $SUBNET6)"
+    # --ipv6 + a fixed ULA subnet: needed even for the ospfv3/ospfv3-dr
+    # phases' point-to-point link alone -- Docker disables IPv6 entirely on
+    # a container's veth (net.ipv6.conf.eth0.disable_ipv6=1) unless the
+    # network itself was created dual-stack, which would also kill
+    # nos-ospfv3d's link-local-multicast (FF02::5) Hello exchange, not just
+    # routed/ULA traffic. This can fail if the Docker daemon itself wasn't
+    # started with IPv6 support (see /etc/docker/daemon.json's
+    # "ipv6"/"fixed-cidr-v6" -- a fresh host/CI runner may need this set
+    # once) -- an external prerequisite this script can't itself fix, so on
+    # failure it falls back to the original IPv4-only network rather than
+    # aborting every phase over it: every non-ospfv3 phase (including the
+    # existing base/drivers/rpl/multi CI matrix jobs) never touches IPv6 at
+    # all and must keep working on a host without it: only ospfv3/ospfv3-dr
+    # actually need $SUBNET6, and they'll fail clearly (containers with no
+    # IPv6 configured) rather than mysteriously if it's missing.
+    if ! docker network create --subnet "$SUBNET" --ipv6 --subnet "$SUBNET6" "$NET" >/dev/null 2>&1; then
+      log "warning: dual-stack network create failed (Docker daemon may lack IPv6 support) -- falling back to IPv4-only; ospfv3/ospfv3-dr will not work on this host"
+      docker network create --subnet "$SUBNET" "$NET" >/dev/null
+    fi
   fi
 }
 
@@ -769,6 +846,107 @@ provision_clear_ospf_loopback() {
     --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
     --peer "$peer_ip" \
     --clear-ospf-loopback-profile
+}
+
+# --- OSPFv3 (RFC 5340) scenario ---
+#
+# Mirrors the OSPFv2 `ospf`/`ospf-dr` provisioning functions above, over the
+# same eth0.0 point-to-point attach point (already carrying the BGP
+# session's own IPv4 address and, if `ospf` has already run, $OSPF_PROFILE
+# too -- a second, independent protocol instance on the same subinterface,
+# no conflict) plus $own_ip6 as a second (IPv6) address on it.
+provision_ospfv3() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 own_ip6=$6 ospfv3_instance=$7 ospfv3_router_id=$8
+  log "provisioning $name with ospfv3 instance $ospfv3_instance (router-id=$ospfv3_router_id, address=$own_ip6)"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --ospfv3-address "$own_ip6" \
+    --ospfv3-instance "$ospfv3_instance" \
+    --ospfv3-router-id "$ospfv3_router_id" \
+    --ospfv3-area "$OSPFV3_AREA" \
+    --ospfv3-profile "$OSPFV3_PROFILE" \
+    --ospfv3-interface-profile "$OSPFV3_PROFILE"
+}
+
+# Ensures router-a's loopback interface and attaches $OSPFV3_PROFILE to it
+# (a second, IPv6 address on the same `loopback-rt1` interface the OSPFv2
+# `loopback` scenario may already have created) -- a destination with no
+# neighbor of its own, exercising real RFC 5340 SPF next-hop/prefix
+# derivation purely from the LSDB. Requires `provision_ospfv3` to have
+# already committed $OSPFV3_PROFILE for $name.
+provision_ospfv3_loopback() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 loopback_addr6=$6
+  log "provisioning $name with a loopback interface joined to ospfv3 (address=$loopback_addr6, profile=$OSPFV3_PROFILE)"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --ospfv3-loopback-address "$loopback_addr6" \
+    --ospfv3-loopback-profile "$OSPFV3_PROFILE"
+}
+
+# Same as `provision_ospfv3`, but never attaches the profile to eth0's own
+# tag-0 subinterface -- for the `ospfv3-dr` scenario's router-c, mirroring
+# `provision_ospf_instance_only`'s exact rationale (raw sockets have no
+# per-peer demux, so a second unwanted point-to-point adjacency on eth0.0
+# would otherwise form between router-c and router-a/router-b).
+provision_ospfv3_instance_only() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 ospfv3_instance=$6 ospfv3_router_id=$7
+  log "provisioning $name with ospfv3 instance $ospfv3_instance (router-id=$ospfv3_router_id), no point-to-point attach point"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --ospfv3-instance "$ospfv3_instance" \
+    --ospfv3-router-id "$ospfv3_router_id" \
+    --ospfv3-area "$OSPFV3_AREA" \
+    --ospfv3-profile "$OSPFV3_PROFILE"
+}
+
+# Attaches $OSPFV3_PROFILE to the OSPFv2 `ospf`/`ospf-dr` scenarios' own
+# bd-ospf bridge too (a second, independent protocol on the same real Linux
+# bridge -- see this section's own doc comment) -- a second (IPv6) address
+# on the same SVI `provision_ospf_broadcast` already addresses. Requires
+# `provision_ospf_broadcast` to have already trunked $name's eth0 into
+# $OSPF_BROADCAST_DOMAIN, and `provision_ospfv3` to have committed
+# $OSPFV3_PROFILE for $name.
+provision_ospfv3_broadcast() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5 svi_addr6=$6
+  log "provisioning $name with an ospfv3 broadcast-domain link ($OSPF_BROADCAST_DOMAIN, address=$svi_addr6)"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --routing-table rt1 \
+    --broadcast-domain "$OSPF_BROADCAST_DOMAIN" \
+    --ospfv3-broadcast-domain-svi-address "$svi_addr6" \
+    --ospfv3-broadcast-domain-profile "$OSPFV3_PROFILE"
 }
 
 # --- ABR / Summary-LSA scenario ---
@@ -1471,6 +1649,160 @@ cmd_check_ospf() {
   wait_for_count_increase router-b "ospf neighbor reached full link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPF_ROUTER_ID" 0 60 \
     && log "router-b: reached ospf full with $OSPF_ROUTER_ID on the broadcast link" \
     || { log "router-b: FAILED to reach ospf full on the broadcast link"; return 1; }
+}
+
+# --- OSPFv3 (RFC 5340) scenario ---
+#
+# Mirrors `cmd_check_ospf`'s point-to-point half exactly, over the real
+# IPv6 Hello/DBD/LSR/LSU/LSAck exchange on eth0.0 -- reaching 2-Way then
+# Full, with a real self-originated Router-LSA/Link-LSA/Intra-Area-Prefix-LSA
+# flooded and installed on the other side -- then attaches router-a's own
+# loopback (a destination with no neighbor of its own) and confirms
+# router-b's own real RFC 5340 §4.8 SPF computation derives the correct
+# IPv6 next-hop purely from the LSDB's Link-LSAs (never a live neighbor
+# table) and pushes a real kernel route for it via nos-ribd.
+cmd_check_ospfv3() {
+  provision_ospfv3 router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPFV3_ADDRESS_A" "$OSPFV3_INSTANCE" "$OSPFV3_ROUTER_ID"
+  provision_ospfv3 router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" "$OSPFV3_ADDRESS_B" "$OSPFV3_INSTANCE" "$OSPFV3_ROUTER_ID_B"
+
+  # Confirms nos-watchdogd actually spawned a real nos-ospfv3d process for
+  # the new Ospfv3Instance (not just that config accepted it) -- mirrors
+  # cmd_check_ospf's own first check. Field order matches
+  # ospfv3/src/reconcile.rs's `info!(instance, router_id, routing_table,
+  # area_count, "ospfv3 instance config resolved")` call site.
+  log "waiting for nos-ospfv3d to resolve its own instance config"
+  wait_for_count_increase router-a "ospfv3 instance config resolved instance=$OSPFV3_INSTANCE" 0 60 \
+    && log "router-a: nos-ospfv3d resolved $OSPFV3_INSTANCE (router-id=$OSPFV3_ROUTER_ID, routing-table=rt1)" \
+    || { log "router-a: FAILED to see nos-ospfv3d resolve its instance config"; return 1; }
+
+  log "waiting for nos-ospfv3d to resolve its area/profile config"
+  wait_for_count_increase router-a "ospfv3 area resolved instance=$OSPFV3_INSTANCE area=$OSPFV3_AREA" 0 60 \
+    && log "router-a: nos-ospfv3d resolved area $OSPFV3_AREA" \
+    || { log "router-a: FAILED to see nos-ospfv3d resolve its area config"; return 1; }
+  wait_for_count_increase router-a "ospfv3 profile resolved instance=$OSPFV3_INSTANCE area=$OSPFV3_AREA profile=$OSPFV3_PROFILE" 0 60 \
+    && log "router-a: nos-ospfv3d resolved profile $OSPFV3_PROFILE" \
+    || { log "router-a: FAILED to see nos-ospfv3d resolve its profile config"; return 1; }
+
+  # Real RFC 5340 Hello exchange over a real VRF-scoped raw IPv6 protocol-89
+  # socket, reaching 2-Way on both sides. Field order matches `link.rs`'s
+  # `info!(link, neighbor, "ospfv3 neighbor reached two-way")` call site.
+  log "waiting for router-a/router-b to reach ospfv3 2-way"
+  wait_for_count_increase router-a "ospfv3 neighbor reached two-way link=eth0.0 neighbor=$OSPFV3_ROUTER_ID_B" 0 60 \
+    && log "router-a: reached ospfv3 2-way with $OSPFV3_ROUTER_ID_B" \
+    || { log "router-a: FAILED to reach ospfv3 2-way"; return 1; }
+  wait_for_count_increase router-b "ospfv3 neighbor reached two-way link=eth0.0 neighbor=$OSPFV3_ROUTER_ID" 0 60 \
+    && log "router-b: reached ospfv3 2-way with $OSPFV3_ROUTER_ID" \
+    || { log "router-b: FAILED to reach ospfv3 2-way"; return 1; }
+
+  log "waiting for router-a/router-b to reach ospfv3 full"
+  wait_for_count_increase router-a "ospfv3 neighbor reached full link=eth0.0 neighbor=$OSPFV3_ROUTER_ID_B" 0 60 \
+    && log "router-a: reached ospfv3 full with $OSPFV3_ROUTER_ID_B" \
+    || { log "router-a: FAILED to reach ospfv3 full"; return 1; }
+  wait_for_count_increase router-b "ospfv3 neighbor reached full link=eth0.0 neighbor=$OSPFV3_ROUTER_ID" 0 60 \
+    && log "router-b: reached ospfv3 full with $OSPFV3_ROUTER_ID" \
+    || { log "router-b: FAILED to reach ospfv3 full"; return 1; }
+
+  # Confirms real LSA content actually flows over the wire and gets
+  # installed into the receiving side's LSDB. Field order matches
+  # `link.rs`'s `info!(link, neighbor, lsa_type, link_state_id,
+  # advertising_router, "ospfv3 lsa installed")` call site.
+  log "waiting for router-a/router-b to install a real lsa learned from each other"
+  wait_for_count_increase router-a "ospfv3 lsa installed.*neighbor=$OSPFV3_ROUTER_ID_B" 0 60 \
+    && log "router-a: installed an lsa learned from $OSPFV3_ROUTER_ID_B" \
+    || { log "router-a: FAILED to install an lsa"; return 1; }
+  wait_for_count_increase router-b "ospfv3 lsa installed.*neighbor=$OSPFV3_ROUTER_ID" 0 60 \
+    && log "router-b: installed an lsa learned from $OSPFV3_ROUTER_ID" \
+    || { log "router-b: FAILED to install an lsa"; return 1; }
+
+  local route_before
+  route_before=$(docker logs router-b 2>&1 | sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep -c "added route" || true)
+
+  provision_ospfv3_loopback router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPFV3_LOOPBACK_ADDRESS"
+
+  log "waiting for router-a to originate a real intra-area-prefix-lsa for its loopback"
+  wait_for_count_increase router-a "ospfv3 lsa originated" 0 60 \
+    && log "router-a: originated an lsa for its loopback prefix" \
+    || { log "router-a: FAILED to originate a loopback lsa"; return 1; }
+
+  log "waiting for router-b to learn router-a's loopback lsa"
+  wait_for_count_increase router-b "ospfv3 lsa installed.*neighbor=$OSPFV3_ROUTER_ID" 1 60 \
+    && log "router-b: installed router-a's loopback lsa into its own lsdb" \
+    || { log "router-b: FAILED to learn the loopback lsa"; return 1; }
+
+  # Same `add_route`/`Option<RouteSource>` rendering quirk as
+  # `cmd_check_ospf_spf`'s own check -- a fresh, never-before-installed
+  # IPv6 prefix, so router-b's own real RFC 5340 §16 SPF computation is the
+  # only possible source of this kernel route.
+  log "waiting for router-b to compute (via ospfv3 spf) and install a real kernel route to $OSPFV3_LOOPBACK_ADDRESS"
+  wait_for_count_increase router-b "added route prefix=$OSPFV3_LOOPBACK_ADDRESS.*source=Some(Ospf)" "$route_before" 60 \
+    && log "router-b: installed the ospfv3-computed route into the real kernel routing table" \
+    || { log "router-b: FAILED to install the ospfv3-computed route"; return 1; }
+}
+
+# --- Multi-router OSPFv3 DR/BDR scenario ---
+#
+# Requires `ospfv3` AND `ospf-dr` to have already run -- the latter, not
+# just the former, because this reuses router-c's already-running container
+# from `ospf-dr` rather than starting a fresh one: router-c's OSPFv2 config
+# lives only in nos-configd's in-memory state (never `--save`d), so
+# restarting its container here would silently wipe it. Otherwise mirrors
+# `cmd_check_ospf_dr` exactly, over the same bd-ospf bridge OSPFv2's own
+# `ospf`/`ospf-dr` scenarios already trunked router-a/router-b/router-c's
+# eth0 into -- reused as-is (a BroadcastDomain carries independent
+# `ospf_profile`/`ospfv3_profile` fields, so both protocols'
+# Hello/election/adjacency run over the same real Linux bridge with no
+# conflict). router-c's OSPFv3 router-id ($OSPFV3_ROUTER_ID_C) is
+# deliberately lower than both router-a's
+# and router-b's, for the identical RFC 2328 §9.4 incumbent-stickiness
+# reason `cmd_check_ospf_dr` documents.
+cmd_check_ospfv3_dr() {
+  provision_ospfv3_instance_only router-c "$ASN_C" "$RID_C" "$IP_C" "$IP_A" "$OSPFV3_INSTANCE" "$OSPFV3_ROUTER_ID_C"
+  provision_ospfv3_broadcast router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPFV3_BROADCAST_ADDRESS_A"
+  provision_ospfv3_broadcast router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" "$OSPFV3_BROADCAST_ADDRESS_B"
+  provision_ospfv3_broadcast router-c "$ASN_C" "$RID_C" "$IP_C" "$IP_A" "$OSPFV3_BROADCAST_ADDRESS_C"
+
+  log "waiting for router-a/router-b to reach ospfv3 2-way on the broadcast link"
+  wait_for_count_increase router-a "ospfv3 neighbor reached two-way link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPFV3_ROUTER_ID_B" 0 60 \
+    && log "router-a: reached ospfv3 2-way with $OSPFV3_ROUTER_ID_B on the broadcast link" \
+    || { log "router-a: FAILED to reach ospfv3 2-way on the broadcast link"; return 1; }
+  wait_for_count_increase router-b "ospfv3 neighbor reached two-way link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPFV3_ROUTER_ID" 0 60 \
+    && log "router-b: reached ospfv3 2-way with $OSPFV3_ROUTER_ID on the broadcast link" \
+    || { log "router-b: FAILED to reach ospfv3 2-way on the broadcast link"; return 1; }
+
+  log "waiting for router-a/router-b to elect a dr/backup on the ospfv3 broadcast link"
+  wait_for_count_increase router-b "ospfv3 interface became dr link=broadcast-domain:$OSPF_BROADCAST_DOMAIN dr=$OSPFV3_ROUTER_ID_B" 0 60 \
+    && log "router-b: became dr" \
+    || { log "router-b: FAILED to become dr"; return 1; }
+  wait_for_count_increase router-a "ospfv3 interface became backup link=broadcast-domain:$OSPF_BROADCAST_DOMAIN dr=$OSPFV3_ROUTER_ID_B bdr=$OSPFV3_ROUTER_ID" 0 60 \
+    && log "router-a: became backup" \
+    || { log "router-a: FAILED to become backup"; return 1; }
+
+  log "waiting for router-c to reach ospfv3 2-way with router-a and router-b on the broadcast link"
+  wait_for_count_increase router-c "ospfv3 neighbor reached two-way link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPFV3_ROUTER_ID" 0 60 \
+    && log "router-c: reached ospfv3 2-way with $OSPFV3_ROUTER_ID (router-a)" \
+    || { log "router-c: FAILED to reach ospfv3 2-way with router-a"; return 1; }
+  wait_for_count_increase router-c "ospfv3 neighbor reached two-way link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPFV3_ROUTER_ID_B" 0 60 \
+    && log "router-c: reached ospfv3 2-way with $OSPFV3_ROUTER_ID_B (router-b)" \
+    || { log "router-c: FAILED to reach ospfv3 2-way with router-b"; return 1; }
+
+  log "waiting for router-c to settle as dr-other (router-b stays dr, router-a stays backup)"
+  wait_for_count_increase router-c "ospfv3 interface became dr-other link=broadcast-domain:$OSPF_BROADCAST_DOMAIN dr=$OSPFV3_ROUTER_ID_B bdr=$OSPFV3_ROUTER_ID" 0 60 \
+    && log "router-c: became dr-other" \
+    || { log "router-c: FAILED to become dr-other"; return 1; }
+
+  log "waiting for router-a/router-b/router-c to reach ospfv3 full with each other as required"
+  wait_for_count_increase router-c "ospfv3 neighbor reached full link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPFV3_ROUTER_ID" 0 60 \
+    && log "router-c: reached ospfv3 full with $OSPFV3_ROUTER_ID (router-a, backup)" \
+    || { log "router-c: FAILED to reach ospfv3 full with router-a"; return 1; }
+  wait_for_count_increase router-c "ospfv3 neighbor reached full link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPFV3_ROUTER_ID_B" 0 60 \
+    && log "router-c: reached ospfv3 full with $OSPFV3_ROUTER_ID_B (router-b, dr)" \
+    || { log "router-c: FAILED to reach ospfv3 full with router-b"; return 1; }
+  wait_for_count_increase router-a "ospfv3 neighbor reached full link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPFV3_ROUTER_ID_C" 0 60 \
+    && log "router-a: reached ospfv3 full with $OSPFV3_ROUTER_ID_C (router-c, dr-other)" \
+    || { log "router-a: FAILED to reach ospfv3 full with router-c"; return 1; }
+  wait_for_count_increase router-b "ospfv3 neighbor reached full link=broadcast-domain:$OSPF_BROADCAST_DOMAIN neighbor=$OSPFV3_ROUTER_ID_C" 0 60 \
+    && log "router-b: reached ospfv3 full with $OSPFV3_ROUTER_ID_C (router-c, dr-other)" \
+    || { log "router-b: FAILED to reach ospfv3 full with router-c"; return 1; }
 }
 
 cmd_check_asbr() {
@@ -2426,6 +2758,8 @@ cmd_group_ospf_suite() {
   cmd_check_ospf_aging
   cmd_check_ospf_dbd_pagination
   cmd_check_ospf_mtu_pagination
+  cmd_check_ospfv3
+  cmd_check_ospfv3_dr
 }
 
 cmd_group_multi() {
@@ -2461,6 +2795,8 @@ case "${1:-}" in
   ospf-auth) cmd_check_ospf_auth ;;
   ospf-dbd-pagination) cmd_check_ospf_dbd_pagination ;;
   ospf-mtu-pagination) cmd_check_ospf_mtu_pagination ;;
+  ospfv3) cmd_check_ospfv3 ;;
+  ospfv3-dr) cmd_check_ospfv3_dr ;;
   logs) shift; cmd_logs "$@" ;;
   down) cmd_down ;;
   base) cmd_group_base ;;
@@ -2495,9 +2831,11 @@ case "${1:-}" in
     cmd_check_ospf_aging
     cmd_check_ospf_dbd_pagination
     cmd_check_ospf_mtu_pagination
+    cmd_check_ospfv3
+    cmd_check_ospfv3_dr
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|mtu|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|mtu|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
     exit 2
     ;;
 esac

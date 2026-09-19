@@ -20,9 +20,10 @@ use ipnet::IpNet;
 use nos_proto::{
     AddressFamily, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, ConfigOp, Event,
     InterfaceOp, IpcCodec, OspfAreaOp, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstanceOp,
-    OspfProfileOp, PolicyDefinitionOp, Redistribute, RedistributeSource, RedistributeTarget,
-    Request, RoutingTableOp, SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp,
-    SwitchingProfileOp, TransactionBase, VlanTag,
+    OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp,
+    Redistribute, RedistributeSource, RedistributeTarget, Request, RoutingTableOp, SourceAddress,
+    StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase,
+    VlanTag,
 };
 use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -320,6 +321,56 @@ struct Args {
     /// real kernel MTU.
     #[arg(long)]
     ospf_profile_mtu: Option<u16>,
+
+    /// If set, adds this IPv6 address to `--interface`'s
+    /// `--subinterface-tag` subinterface alongside `--address` — `OSPFv3`
+    /// (RFC 5340) needs a real IPv6 prefix on the link, distinct from
+    /// `--address`'s own (typically IPv4, for BGP) subnet.
+    #[arg(long)]
+    ospfv3_address: Option<IpNet>,
+
+    /// Same shape as `--ospf-instance`/`--ospf-router-id`, joining `OSPFv3`
+    /// instead (`RoutingTableOp::SetOspfv3Instance`).
+    #[arg(long)]
+    ospfv3_instance: Option<String>,
+    #[arg(long)]
+    ospfv3_router_id: Option<Ipv4Addr>,
+
+    /// Same shape as `--ospf-area` (requires `--ospfv3-instance`).
+    #[arg(long)]
+    ospfv3_area: Option<Ipv4Addr>,
+    /// Same shape as `--ospf-profile` (requires `--ospfv3-area`).
+    #[arg(long)]
+    ospfv3_profile: Option<String>,
+    /// Same shape as `--ospf-interface-profile`, joining `OSPFv3` instead
+    /// (`SubinterfaceOp::SetOspfv3Profile`).
+    #[arg(long)]
+    ospfv3_interface_profile: Option<String>,
+    /// Same shape as `--ospf-broadcast-domain-profile`, joining `OSPFv3`
+    /// instead (`BroadcastDomainOp::SetOspfv3Profile`).
+    #[arg(long)]
+    ospfv3_broadcast_domain_profile: Option<String>,
+
+    /// If set, adds this IPv6 address to `--routing-table`'s loopback
+    /// interface (`loopback-<routing-table>`) alongside `--loopback-address`
+    /// — `OSPFv3` only ever advertises IPv6 prefixes.
+    #[arg(long)]
+    ospfv3_loopback_address: Option<IpNet>,
+
+    /// Same shape as `--ospf-loopback-profile`, joining `OSPFv3` instead.
+    /// Mutually exclusive with `--clear-ospfv3-loopback-profile`.
+    #[arg(long)]
+    ospfv3_loopback_profile: Option<String>,
+
+    /// Same shape as `--clear-ospf-loopback-profile`, joining `OSPFv3`
+    /// instead. Mutually exclusive with `--ospfv3-loopback-profile`.
+    #[arg(long)]
+    clear_ospfv3_loopback_profile: bool,
+
+    /// If set, adds this IPv6 address to `--broadcast-domain`'s SVI
+    /// alongside `--broadcast-domain-svi-address`.
+    #[arg(long)]
+    ospfv3_broadcast_domain_svi_address: Option<IpNet>,
 }
 
 #[tokio::main]
@@ -371,6 +422,14 @@ async fn main() -> anyhow::Result<()> {
             tag: args.subinterface_tag,
             routing_table: args.routing_table.clone(),
         }));
+        if let Some(address) = args.ospfv3_address {
+            ops.push(ConfigOp::Subinterface(SubinterfaceOp::AddAddress {
+                interface: args.interface.clone(),
+                tag: args.subinterface_tag,
+                address,
+                label: None,
+            }));
+        }
     }
     ops.extend([
         ConfigOp::RoutingTable(RoutingTableOp::Ensure {
@@ -574,6 +633,41 @@ async fn main() -> anyhow::Result<()> {
     }
     if args.clear_ospf_loopback_profile {
         ops.push(ConfigOp::Interface(InterfaceOp::ClearOspfProfile {
+            name: loopback_name.clone(),
+        }));
+    }
+
+    // Same shape as `--ospf-loopback-profile`, joining `OSPFv3` instead —
+    // `--ospfv3-loopback-address` adds a second (IPv6) address to the same
+    // loopback interface `--loopback-address` (typically IPv4) already
+    // ensures, since `OSPFv3` only ever advertises IPv6 prefixes.
+    if args.ospfv3_loopback_profile.is_some() && args.clear_ospfv3_loopback_profile {
+        bail!(
+            "--ospfv3-loopback-profile and --clear-ospfv3-loopback-profile are mutually exclusive"
+        );
+    }
+    if let Some(address) = args.ospfv3_loopback_address {
+        ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
+            name: loopback_name.clone(),
+        }));
+        ops.push(ConfigOp::Interface(InterfaceOp::AddAddress {
+            name: loopback_name.clone(),
+            address,
+            label: None,
+        }));
+    }
+    if let Some(profile) = args.ospfv3_loopback_profile.clone() {
+        ops.push(ConfigOp::Interface(InterfaceOp::SetRoutingTable {
+            name: loopback_name.clone(),
+            routing_table: args.routing_table.clone(),
+        }));
+        ops.push(ConfigOp::Interface(InterfaceOp::SetOspfv3Profile {
+            name: loopback_name.clone(),
+            ospfv3_profile: profile,
+        }));
+    }
+    if args.clear_ospfv3_loopback_profile {
+        ops.push(ConfigOp::Interface(InterfaceOp::ClearOspfv3Profile {
             name: loopback_name,
         }));
     }
@@ -603,6 +697,20 @@ async fn main() -> anyhow::Result<()> {
     if args.delete_broadcast_domain_svi {
         ops.push(ConfigOp::BroadcastDomain(BroadcastDomainOp::Delete {
             name: args.broadcast_domain.clone(),
+        }));
+    }
+
+    // Adds a second (IPv6) address to `--broadcast-domain`'s SVI alongside
+    // `--broadcast-domain-svi-address` — same dual-stack rationale as
+    // `--ospfv3-address`/`--ospfv3-loopback-address`.
+    if let Some(address) = args.ospfv3_broadcast_domain_svi_address {
+        ops.push(ConfigOp::BroadcastDomain(BroadcastDomainOp::Ensure {
+            name: args.broadcast_domain.clone(),
+        }));
+        ops.push(ConfigOp::BroadcastDomain(BroadcastDomainOp::AddAddress {
+            name: args.broadcast_domain.clone(),
+            address,
+            label: None,
         }));
     }
 
@@ -772,6 +880,62 @@ async fn main() -> anyhow::Result<()> {
             BroadcastDomainOp::SetOspfProfile {
                 name: args.broadcast_domain.clone(),
                 ospf_profile: profile,
+            },
+        ));
+    }
+
+    if let Some(name) = args.ospfv3_instance.clone() {
+        let router_id = args
+            .ospfv3_router_id
+            .context("--ospfv3-router-id is required when --ospfv3-instance is set")?;
+        ops.push(ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::Ensure {
+            name: name.clone(),
+        }));
+        ops.push(ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetRouterId {
+            name: name.clone(),
+            router_id,
+        }));
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetOspfv3Instance {
+            name: args.routing_table.clone(),
+            ospfv3_instance: name,
+        }));
+    } else if args.ospfv3_router_id.is_some() {
+        bail!("--ospfv3-router-id requires --ospfv3-instance to also be set");
+    }
+
+    if let Some(area_id) = args.ospfv3_area {
+        let instance = args
+            .ospfv3_instance
+            .clone()
+            .context("--ospfv3-area requires --ospfv3-instance to also be set")?;
+        ops.push(ConfigOp::Ospfv3Area(Ospfv3AreaOp::Ensure {
+            instance: instance.clone(),
+            area_id,
+        }));
+        if let Some(name) = args.ospfv3_profile.clone() {
+            ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::Ensure {
+                instance,
+                area_id,
+                name,
+            }));
+        }
+    } else if args.ospfv3_profile.is_some() {
+        bail!("--ospfv3-profile requires --ospfv3-area to also be set");
+    }
+
+    if let Some(profile) = args.ospfv3_interface_profile.clone() {
+        ops.push(ConfigOp::Subinterface(SubinterfaceOp::SetOspfv3Profile {
+            interface: args.interface.clone(),
+            tag: args.subinterface_tag,
+            ospfv3_profile: profile,
+        }));
+    }
+
+    if let Some(profile) = args.ospfv3_broadcast_domain_profile.clone() {
+        ops.push(ConfigOp::BroadcastDomain(
+            BroadcastDomainOp::SetOspfv3Profile {
+                name: args.broadcast_domain.clone(),
+                ospfv3_profile: profile,
             },
         ));
     }

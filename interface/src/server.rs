@@ -100,8 +100,13 @@ fn to_status(iface: InterfaceState) -> InterfaceStatus {
                 tag: s.tag,
                 addresses: s.addresses,
                 routing_table: s.routing_table,
+                link_local_address: s.link_local_address,
             })
             .collect(),
+        // A loopback interface's own flat L3 config has no live link-local
+        // Hello exchange to source (see `InterfaceState`'s doc comment) —
+        // never populated for this attach-point kind.
+        link_local_address: None,
     }
 }
 
@@ -111,5 +116,6 @@ fn to_domain_status(domain: BroadcastDomainState) -> BroadcastDomainStatus {
         addresses: domain.addresses,
         routing_table: domain.routing_table,
         bridge_name: domain.bridge_name,
+        link_local_address: domain.link_local_address,
     }
 }

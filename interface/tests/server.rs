@@ -21,6 +21,7 @@ async fn sample_interfaces() -> Interfaces {
     let cfg = nos_proto::Config {
         interfaces: vec![
             nos_proto::Interface {
+                ospfv3_profile: None,
                 name: "eth0".to_string(),
                 addresses: vec![],
                 routing_table: None,
@@ -28,6 +29,7 @@ async fn sample_interfaces() -> Interfaces {
                 switching_profile: None,
                 mtu: None,
                 subinterfaces: vec![nos_proto::Subinterface {
+                    ospfv3_profile: None,
                     tag: 0,
                     addresses: vec![sample_address()],
                     routing_table: Some("rt1".to_string()),
@@ -35,6 +37,7 @@ async fn sample_interfaces() -> Interfaces {
                 }],
             },
             nos_proto::Interface {
+                ospfv3_profile: None,
                 name: "eth1".to_string(),
                 addresses: vec![],
                 routing_table: None,

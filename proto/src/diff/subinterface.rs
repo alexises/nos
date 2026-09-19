@@ -154,6 +154,7 @@ mod tests {
 
     fn sub(tag: u16, addresses: &[&str], routing_table: Option<&str>) -> Subinterface {
         Subinterface {
+            ospfv3_profile: None,
             tag,
             addresses: addresses
                 .iter()

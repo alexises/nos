@@ -8,6 +8,9 @@ pub mod interface;
 pub mod ospf_area;
 pub mod ospf_instance;
 pub mod ospf_profile;
+pub mod ospfv3_area;
+pub mod ospfv3_instance;
+pub mod ospfv3_profile;
 pub mod policy_definition;
 pub mod prefix_list;
 pub mod routing_table;
@@ -26,6 +29,9 @@ pub use interface::InterfaceOp;
 pub use ospf_area::OspfAreaOp;
 pub use ospf_instance::OspfInstanceOp;
 pub use ospf_profile::OspfProfileOp;
+pub use ospfv3_area::Ospfv3AreaOp;
+pub use ospfv3_instance::Ospfv3InstanceOp;
+pub use ospfv3_profile::Ospfv3ProfileOp;
 pub use policy_definition::PolicyDefinitionOp;
 pub use prefix_list::PrefixListOp;
 pub use routing_table::RoutingTableOp;
@@ -70,6 +76,9 @@ pub enum ConfigOp {
     OspfInstance(OspfInstanceOp),
     OspfArea(OspfAreaOp),
     OspfProfile(OspfProfileOp),
+    Ospfv3Instance(Ospfv3InstanceOp),
+    Ospfv3Area(Ospfv3AreaOp),
+    Ospfv3Profile(Ospfv3ProfileOp),
 }
 
 impl ConfigOp {
@@ -99,6 +108,9 @@ impl ConfigOp {
             ConfigOp::OspfInstance(op) => op.apply(config),
             ConfigOp::OspfArea(op) => op.apply(config),
             ConfigOp::OspfProfile(op) => op.apply(config),
+            ConfigOp::Ospfv3Instance(op) => op.apply(config),
+            ConfigOp::Ospfv3Area(op) => op.apply(config),
+            ConfigOp::Ospfv3Profile(op) => op.apply(config),
         }
     }
 }
@@ -180,6 +192,18 @@ pub enum OpError {
         area_id: Ipv4Addr,
         name: String,
         key_id: u8,
+    },
+    #[error("ospfv3 instance '{0}' not found")]
+    Ospfv3InstanceNotFound(String),
+    #[error("ospfv3 area '{area_id}' not found in ospfv3 instance '{instance}'")]
+    Ospfv3AreaNotFound { instance: String, area_id: Ipv4Addr },
+    #[error(
+        "ospfv3 profile '{name}' not found in area '{area_id}' of ospfv3 instance '{instance}'"
+    )]
+    Ospfv3ProfileNotFound {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
     },
 }
 

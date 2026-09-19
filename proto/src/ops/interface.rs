@@ -54,6 +54,13 @@ pub enum InterfaceOp {
     ClearOspfProfile {
         name: String,
     },
+    SetOspfv3Profile {
+        name: String,
+        ospfv3_profile: String,
+    },
+    ClearOspfv3Profile {
+        name: String,
+    },
     SetSwitchingProfile {
         name: String,
         switching_profile: String,
@@ -76,6 +83,7 @@ impl InterfaceOp {
                         addresses: Vec::new(),
                         routing_table: None,
                         ospf_profile: None,
+                        ospfv3_profile: None,
                         switching_profile: None,
                         mtu: None,
                         subinterfaces: Vec::new(),
@@ -137,6 +145,17 @@ impl InterfaceOp {
                 find_interface_mut(config, name)?.ospf_profile = None;
                 Ok(())
             }
+            InterfaceOp::SetOspfv3Profile {
+                name,
+                ospfv3_profile,
+            } => {
+                find_interface_mut(config, name)?.ospfv3_profile = Some(ospfv3_profile.clone());
+                Ok(())
+            }
+            InterfaceOp::ClearOspfv3Profile { name } => {
+                find_interface_mut(config, name)?.ospfv3_profile = None;
+                Ok(())
+            }
             InterfaceOp::SetSwitchingProfile {
                 name,
                 switching_profile,
@@ -182,6 +201,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
+            ospfv3_profile: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
@@ -216,6 +236,7 @@ mod tests {
     fn ensure_is_noop_when_present() {
         let mut cfg = Config {
             interfaces: vec![Interface {
+                ospfv3_profile: None,
                 name: "eth0".to_string(),
                 addresses: vec![iface_addr("10.0.0.1/24")],
                 routing_table: None,

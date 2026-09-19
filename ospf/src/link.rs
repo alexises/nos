@@ -1149,7 +1149,19 @@ fn run_election(cfg: &LinkConfig, local_router_id: Ipv4Addr, status: &StatusHand
         InterfaceState::DrOther
     };
 
-    if snapshot.interface_state != new_interface_state {
+    // Re-logs whenever the reported role *or* the dr/bdr router-ids behind
+    // it change — not just on an `InterfaceState` variant change. A router
+    // can stay `DrOther` (or `Backup`) across more than one election pass
+    // while a neighbor's own declared role is still converging (RFC 2328
+    // §9.4's own "recompute twice" refinement, which `election.rs`'s
+    // single-pass simplification defers to a later Hello-driven rerun
+    // instead) — without this, the log would freeze on that first,
+    // not-yet-converged dr/bdr pair even though `status.send_modify` below
+    // keeps the real state (and thus real adjacency-eligibility decisions)
+    // correct throughout.
+    if (snapshot.interface_state, snapshot.dr, snapshot.bdr)
+        != (new_interface_state, result.dr, result.bdr)
+    {
         match new_interface_state {
             InterfaceState::Dr => {
                 info!(link = %cfg.attach_point, dr = %local_router_id, "ospf interface became dr");

@@ -17,6 +17,7 @@ tracing-subscriber = { workspace = true }
 nos-proto          = { workspace = true }
 nos-log-client     = { workspace = true }
 nos-rpl            = { workspace = true }
+nos-ospf-common    = { workspace = true }
 tokio-util         = { workspace = true }
 futures            = { workspace = true }
 socket2            = { workspace = true }

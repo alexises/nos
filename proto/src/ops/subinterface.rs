@@ -57,6 +57,17 @@ pub enum SubinterfaceOp {
         interface: String,
         tag: u16,
     },
+    /// Same shape as `SetOspfProfile`/`ClearOspfProfile`, joining `OSPFv3`
+    /// (RFC 5340) instead.
+    SetOspfv3Profile {
+        interface: String,
+        tag: u16,
+        ospfv3_profile: String,
+    },
+    ClearOspfv3Profile {
+        interface: String,
+        tag: u16,
+    },
     Delete {
         interface: String,
         tag: u16,
@@ -129,6 +140,19 @@ impl SubinterfaceOp {
                 find_subinterface_mut(config, interface, *tag)?.ospf_profile = None;
                 Ok(())
             }
+            SubinterfaceOp::SetOspfv3Profile {
+                interface,
+                tag,
+                ospfv3_profile,
+            } => {
+                ensure_subinterface_mut(config, interface, *tag)?.ospfv3_profile =
+                    Some(ospfv3_profile.clone());
+                Ok(())
+            }
+            SubinterfaceOp::ClearOspfv3Profile { interface, tag } => {
+                find_subinterface_mut(config, interface, *tag)?.ospfv3_profile = None;
+                Ok(())
+            }
             SubinterfaceOp::Delete { interface, tag } => {
                 let iface = find_interface_mut(config, interface)?;
                 let before = iface.subinterfaces.len();
@@ -173,6 +197,7 @@ fn ensure_subinterface_mut<'a>(
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
+            ospfv3_profile: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
@@ -185,6 +210,7 @@ fn ensure_subinterface_mut<'a>(
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
+            ospfv3_profile: None,
         });
     }
     Ok(iface
@@ -205,6 +231,7 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
+            ospfv3_profile: None,
             switching_profile: None,
             mtu: None,
             subinterfaces,
@@ -260,6 +287,7 @@ mod tests {
                     }],
                     routing_table: None,
                     ospf_profile: None,
+                    ospfv3_profile: None,
                 }],
             )],
             ..Default::default()
@@ -475,12 +503,14 @@ mod tests {
                         addresses: Vec::new(),
                         routing_table: None,
                         ospf_profile: None,
+                        ospfv3_profile: None,
                     },
                     Subinterface {
                         tag: 100,
                         addresses: Vec::new(),
                         routing_table: None,
                         ospf_profile: None,
+                        ospfv3_profile: None,
                     },
                 ],
             )],

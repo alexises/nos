@@ -102,6 +102,7 @@ mod tests {
 
     fn domain(name: &str) -> BroadcastDomain {
         BroadcastDomain {
+            ospfv3_profile: None,
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,

@@ -120,6 +120,25 @@ pub enum EditTarget {
     OspfProfileRelative {
         name: String,
     },
+    /// Fully-qualified — works from anywhere in configuration mode. `edit
+    /// area <area-id>`/`edit profile <name>` (`OspfAreaRelative`/
+    /// `OspfProfileRelative` above) are shared, path-disambiguated tokens
+    /// between `OSPFv2` and `OSPFv3` — see `Path::ospf_instance`'s doc
+    /// comment in `session.rs`.
+    Ospfv3Instance {
+        name: String,
+    },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    Ospfv3Area {
+        instance: String,
+        area_id: Ipv4Addr,
+    },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    Ospfv3Profile {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+    },
     StaticRoutingInstance {
         name: String,
     },
@@ -200,6 +219,13 @@ pub enum SetTarget {
     RoutingTableOspfInstance { name: String, ospf_instance: String },
     /// Context-relative — only valid while navigated into a routing table.
     RoutingTableOspfInstanceRelative { ospf_instance: String },
+    /// Same shape as `RoutingTableOspfInstance`, joining `OSPFv3` instead.
+    RoutingTableOspfv3Instance {
+        name: String,
+        ospfv3_instance: String,
+    },
+    /// Context-relative — only valid while navigated into a routing table.
+    RoutingTableOspfv3InstanceRelative { ospfv3_instance: String },
     /// Fully-qualified — works from anywhere in configuration mode. No
     /// context-relative form — see `BgpInstanceField`'s doc comment on why
     /// `set router-id <ip>` while navigated into an `OspfInstance` reuses
@@ -215,6 +241,22 @@ pub enum SetTarget {
     },
     /// Context-relative — only valid while navigated into an `OspfProfile`.
     OspfProfileRelative { field: OspfProfileField },
+    /// Fully-qualified — works from anywhere in configuration mode. No
+    /// context-relative form of its own — the relative
+    /// `hello-interval`/`dead-interval`/`cost`/`priority`/`network-type`/
+    /// `mtu` tokens are shared with `OspfProfileRelative`/`MtuRelative`
+    /// above, disambiguated by `path` at resolve time (an `Ospfv3Profile`
+    /// has no `auth`, so `SimplePassword`/`CryptoKey`/`CryptoCurrentKey`
+    /// resolve to an error there).
+    Ospfv3Instance { name: String, router_id: Ipv4Addr },
+    /// Fully-qualified `Ospfv3Profile` field edit — works from anywhere in
+    /// configuration mode.
+    Ospfv3Profile {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        field: OspfProfileField,
+    },
     /// Fully-qualified — works from anywhere in configuration mode.
     RoutingTableRedistribute {
         name: String,
@@ -264,6 +306,15 @@ pub enum SetTarget {
     /// Context-relative — only valid while navigated into a loopback
     /// interface, a subinterface, or a broadcast domain.
     InterfaceOspfProfileRelative { ospf_profile: String },
+    /// Same shape as `InterfaceOspfProfile`, joining `OSPFv3` instead — its
+    /// own token (`ospfv3` vs `ospf`), not shared/ambiguous.
+    InterfaceOspfv3Profile {
+        name: String,
+        ospfv3_profile: String,
+    },
+    /// Context-relative — only valid while navigated into a loopback
+    /// interface, a subinterface, or a broadcast domain.
+    InterfaceOspfv3ProfileRelative { ospfv3_profile: String },
     /// Fully-qualified — works from anywhere in configuration mode.
     CommunityAliasValue { name: String, value: String },
     /// Context-relative — only valid while navigated into a community-alias.
@@ -401,6 +452,13 @@ pub enum DeleteTarget {
     /// `delete ospf-instance` — relative clear, only valid while navigated
     /// into a routing table.
     RoutingTableOspfInstanceRelative,
+    /// `delete routing-table <name> ospfv3-instance` — qualified clear.
+    RoutingTableOspfv3Instance {
+        name: String,
+    },
+    /// `delete ospfv3-instance` — relative clear, only valid while navigated
+    /// into a routing table.
+    RoutingTableOspfv3InstanceRelative,
     OspfInstance {
         name: String,
     },
@@ -426,8 +484,24 @@ pub enum DeleteTarget {
     OspfProfileRelative {
         name: String,
     },
+    /// `delete ospfv3 instance <name>` — qualified.
+    Ospfv3Instance {
+        name: String,
+    },
+    /// `delete ospfv3 instance <name> area <area-id>` — qualified.
+    Ospfv3Area {
+        instance: String,
+        area_id: Ipv4Addr,
+    },
+    /// `delete ospfv3 instance <name> area <area-id> profile <profile-name>`
+    /// — qualified.
+    Ospfv3Profile {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+    },
     /// `delete hello-interval` — only valid while navigated into an
-    /// `OspfProfile`.
+    /// `OspfProfile` or an `Ospfv3Profile` (disambiguated by path).
     HelloInterval,
     /// `delete dead-interval` — only valid while navigated into an
     /// `OspfProfile`.
@@ -500,6 +574,13 @@ pub enum DeleteTarget {
     /// `delete ospf` — relative clear, only valid while navigated into a
     /// loopback interface, a subinterface, or a broadcast domain.
     InterfaceOspfProfileRelative,
+    /// `delete interface <name> ospfv3` — qualified clear.
+    InterfaceOspfv3Profile {
+        name: String,
+    },
+    /// `delete ospfv3` — relative clear, only valid while navigated into a
+    /// loopback interface, a subinterface, or a broadcast domain.
+    InterfaceOspfv3ProfileRelative,
     CommunityAlias {
         name: String,
     },
@@ -591,6 +672,12 @@ pub enum Command {
     /// `show ospf database` — every installed LSA's header, across every
     /// configured OSPF instance.
     ShowOspfDatabase,
+    /// `show ospfv3 neigh` — mirrors `ShowOspfNeigh`, across every
+    /// configured `Ospfv3Instance`.
+    ShowOspfv3Neigh,
+    /// `show ospfv3 database` — mirrors `ShowOspfDatabase`, across every
+    /// configured `Ospfv3Instance`.
+    ShowOspfv3Database,
     /// `clear bgp <instance> <peer> soft-in` — ask `<peer>`'s live session
     /// on `<instance>` to resend its routes (RFC 2918 route refresh).
     ClearBgpSoftIn {
@@ -708,6 +795,8 @@ fn parse_show(t: &[&str]) -> Option<Command> {
         ["bgp", "brief"] => Command::ShowBgpBrief,
         ["ospf", "neigh"] => Command::ShowOspfNeigh,
         ["ospf", "database"] => Command::ShowOspfDatabase,
+        ["ospfv3", "neigh"] => Command::ShowOspfv3Neigh,
+        ["ospfv3", "database"] => Command::ShowOspfv3Database,
         ["source"] => Command::ShowSource,
         _ => return None,
     })
@@ -751,6 +840,22 @@ fn parse_edit(t: &[&str]) -> Option<Command> {
         ["profile", name] => Command::Edit(EditTarget::OspfProfileRelative {
             name: (*name).to_string(),
         }),
+        ["ospfv3", "instance", name] => Command::Edit(EditTarget::Ospfv3Instance {
+            name: (*name).to_string(),
+        }),
+        ["ospfv3", "instance", instance, "area", area_id] => {
+            Command::Edit(EditTarget::Ospfv3Area {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse::<Ipv4Addr>().ok()?,
+            })
+        }
+        ["ospfv3", "instance", instance, "area", area_id, "profile", name] => {
+            Command::Edit(EditTarget::Ospfv3Profile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse::<Ipv4Addr>().ok()?,
+                name: (*name).to_string(),
+            })
+        }
         ["static-routing-instance", name] => Command::Edit(EditTarget::StaticRoutingInstance {
             name: (*name).to_string(),
         }),
@@ -1078,7 +1183,22 @@ fn parse_set(t: &[&str]) -> Option<Command> {
         ["ospf-instance", instance] => Command::Set(SetTarget::RoutingTableOspfInstanceRelative {
             ospf_instance: (*instance).to_string(),
         }),
+        ["routing-table", name, "ospfv3-instance", instance] => {
+            Command::Set(SetTarget::RoutingTableOspfv3Instance {
+                name: (*name).to_string(),
+                ospfv3_instance: (*instance).to_string(),
+            })
+        }
+        ["ospfv3-instance", instance] => {
+            Command::Set(SetTarget::RoutingTableOspfv3InstanceRelative {
+                ospfv3_instance: (*instance).to_string(),
+            })
+        }
         ["ospf", "instance", name, "router-id", ip] => Command::Set(SetTarget::OspfInstance {
+            name: (*name).to_string(),
+            router_id: ip.parse::<Ipv4Addr>().ok()?,
+        }),
+        ["ospfv3", "instance", name, "router-id", ip] => Command::Set(SetTarget::Ospfv3Instance {
             name: (*name).to_string(),
             router_id: ip.parse::<Ipv4Addr>().ok()?,
         }),
@@ -1221,6 +1341,13 @@ fn parse_set(t: &[&str]) -> Option<Command> {
         ["ospf", profile] => Command::Set(SetTarget::InterfaceOspfProfileRelative {
             ospf_profile: (*profile).to_string(),
         }),
+        ["interface", name, "ospfv3", profile] => Command::Set(SetTarget::InterfaceOspfv3Profile {
+            name: (*name).to_string(),
+            ospfv3_profile: (*profile).to_string(),
+        }),
+        ["ospfv3", profile] => Command::Set(SetTarget::InterfaceOspfv3ProfileRelative {
+            ospfv3_profile: (*profile).to_string(),
+        }),
         ["ospf", "instance", instance, "area", area_id, "profile", name, "hello-interval", n] => {
             Command::Set(SetTarget::OspfProfile {
                 instance: (*instance).to_string(),
@@ -1303,6 +1430,62 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 area_id: area_id.parse().ok()?,
                 name: (*name).to_string(),
                 field: OspfProfileField::CryptoCurrentKey(key_id.parse::<u8>().ok()?),
+            })
+        }
+        ["ospfv3", "instance", instance, "area", area_id, "profile", name, "hello-interval", n] => {
+            Command::Set(SetTarget::Ospfv3Profile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::HelloInterval(n.parse::<u16>().ok()?),
+            })
+        }
+        ["ospfv3", "instance", instance, "area", area_id, "profile", name, "dead-interval", n] => {
+            Command::Set(SetTarget::Ospfv3Profile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::DeadInterval(n.parse::<u16>().ok()?),
+            })
+        }
+        ["ospfv3", "instance", instance, "area", area_id, "profile", name, "cost", n] => {
+            Command::Set(SetTarget::Ospfv3Profile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::Cost(n.parse::<u16>().ok()?),
+            })
+        }
+        ["ospfv3", "instance", instance, "area", area_id, "profile", name, "priority", n] => {
+            Command::Set(SetTarget::Ospfv3Profile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::Priority(n.parse::<u8>().ok()?),
+            })
+        }
+        ["ospfv3", "instance", instance, "area", area_id, "profile", name, "mtu", n] => {
+            Command::Set(SetTarget::Ospfv3Profile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::Mtu(n.parse::<u16>().ok()?),
+            })
+        }
+        ["ospfv3", "instance", instance, "area", area_id, "profile", name, "network-type", "point-to-point"] => {
+            Command::Set(SetTarget::Ospfv3Profile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::NetworkType(NetworkType::PointToPoint),
+            })
+        }
+        ["ospfv3", "instance", instance, "area", area_id, "profile", name, "network-type", "broadcast"] => {
+            Command::Set(SetTarget::Ospfv3Profile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::NetworkType(NetworkType::Broadcast),
             })
         }
         ["hello-interval", n] => Command::Set(SetTarget::OspfProfileRelative {
@@ -1494,6 +1677,12 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
             })
         }
         ["ospf-instance"] => Command::Delete(DeleteTarget::RoutingTableOspfInstanceRelative),
+        ["routing-table", name, "ospfv3-instance"] => {
+            Command::Delete(DeleteTarget::RoutingTableOspfv3Instance {
+                name: (*name).to_string(),
+            })
+        }
+        ["ospfv3-instance"] => Command::Delete(DeleteTarget::RoutingTableOspfv3InstanceRelative),
         ["ospf", "instance", name] => Command::Delete(DeleteTarget::OspfInstance {
             name: (*name).to_string(),
         }),
@@ -1516,6 +1705,22 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
         ["profile", name] => Command::Delete(DeleteTarget::OspfProfileRelative {
             name: (*name).to_string(),
         }),
+        ["ospfv3", "instance", name] => Command::Delete(DeleteTarget::Ospfv3Instance {
+            name: (*name).to_string(),
+        }),
+        ["ospfv3", "instance", instance, "area", area_id] => {
+            Command::Delete(DeleteTarget::Ospfv3Area {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse::<Ipv4Addr>().ok()?,
+            })
+        }
+        ["ospfv3", "instance", instance, "area", area_id, "profile", name] => {
+            Command::Delete(DeleteTarget::Ospfv3Profile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse::<Ipv4Addr>().ok()?,
+                name: (*name).to_string(),
+            })
+        }
         ["hello-interval"] => Command::Delete(DeleteTarget::HelloInterval),
         ["dead-interval"] => Command::Delete(DeleteTarget::DeadInterval),
         ["cost"] => Command::Delete(DeleteTarget::Cost),
@@ -1572,6 +1777,10 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
             name: (*name).to_string(),
         }),
         ["ospf"] => Command::Delete(DeleteTarget::InterfaceOspfProfileRelative),
+        ["interface", name, "ospfv3"] => Command::Delete(DeleteTarget::InterfaceOspfv3Profile {
+            name: (*name).to_string(),
+        }),
+        ["ospfv3"] => Command::Delete(DeleteTarget::InterfaceOspfv3ProfileRelative),
         ["community-alias", name] => Command::Delete(DeleteTarget::CommunityAlias {
             name: (*name).to_string(),
         }),
@@ -3446,6 +3655,183 @@ mod tests {
                 cidr: "10.0.0.0/8".parse().unwrap(),
                 range: None,
             })
+        );
+    }
+
+    #[test]
+    fn show_ospfv3_neigh_and_database() {
+        assert_eq!(
+            Command::parse("show ospfv3 neigh"),
+            Command::ShowOspfv3Neigh
+        );
+        assert_eq!(
+            Command::parse("show ospfv3 database"),
+            Command::ShowOspfv3Database
+        );
+    }
+
+    #[test]
+    fn edit_ospfv3_instance() {
+        assert_eq!(
+            Command::parse("edit ospfv3 instance o1"),
+            Command::Edit(EditTarget::Ospfv3Instance {
+                name: "o1".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn edit_ospfv3_area_qualified_and_relative_shares_ospf_token() {
+        assert_eq!(
+            Command::parse("edit ospfv3 instance o1 area 0.0.0.0"),
+            Command::Edit(EditTarget::Ospfv3Area {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+            })
+        );
+        // The relative form is the same token sequence (and Command) as
+        // OSPFv2's — disambiguated by path at resolve time, not parse time.
+        assert_eq!(
+            Command::parse("edit area 0.0.0.0"),
+            Command::Edit(EditTarget::OspfAreaRelative {
+                area_id: "0.0.0.0".parse().unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn edit_ospfv3_profile_qualified_and_relative_shares_ospf_token() {
+        assert_eq!(
+            Command::parse("edit ospfv3 instance o1 area 0.0.0.0 profile p1"),
+            Command::Edit(EditTarget::Ospfv3Profile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("edit profile p1"),
+            Command::Edit(EditTarget::OspfProfileRelative {
+                name: "p1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn set_ospfv3_instance_router_id() {
+        assert_eq!(
+            Command::parse("set ospfv3 instance o1 router-id 2.2.2.2"),
+            Command::Set(SetTarget::Ospfv3Instance {
+                name: "o1".to_string(),
+                router_id: "2.2.2.2".parse().unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn set_ospfv3_profile_fields_qualified() {
+        assert_eq!(
+            Command::parse("set ospfv3 instance o1 area 0.0.0.0 profile p1 hello-interval 5"),
+            Command::Set(SetTarget::Ospfv3Profile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+                field: OspfProfileField::HelloInterval(5),
+            })
+        );
+        assert_eq!(
+            Command::parse(
+                "set ospfv3 instance o1 area 0.0.0.0 profile p1 network-type point-to-point"
+            ),
+            Command::Set(SetTarget::Ospfv3Profile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+                field: OspfProfileField::NetworkType(NetworkType::PointToPoint),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_ospfv3_instance_area_profile_qualified() {
+        assert_eq!(
+            Command::parse("delete ospfv3 instance o1"),
+            Command::Delete(DeleteTarget::Ospfv3Instance {
+                name: "o1".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete ospfv3 instance o1 area 0.0.0.0"),
+            Command::Delete(DeleteTarget::Ospfv3Area {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete ospfv3 instance o1 area 0.0.0.0 profile p1"),
+            Command::Delete(DeleteTarget::Ospfv3Profile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn set_interface_ospfv3_profile_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set interface eth0 ospfv3 p1"),
+            Command::Set(SetTarget::InterfaceOspfv3Profile {
+                name: "eth0".to_string(),
+                ospfv3_profile: "p1".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("set ospfv3 p1"),
+            Command::Set(SetTarget::InterfaceOspfv3ProfileRelative {
+                ospfv3_profile: "p1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn delete_interface_ospfv3_profile_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("delete interface eth0 ospfv3"),
+            Command::Delete(DeleteTarget::InterfaceOspfv3Profile {
+                name: "eth0".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete ospfv3"),
+            Command::Delete(DeleteTarget::InterfaceOspfv3ProfileRelative)
+        );
+    }
+
+    #[test]
+    fn set_and_delete_routing_table_ospfv3_instance_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set routing-table rt1 ospfv3-instance o1"),
+            Command::Set(SetTarget::RoutingTableOspfv3Instance {
+                name: "rt1".to_string(),
+                ospfv3_instance: "o1".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("set ospfv3-instance o1"),
+            Command::Set(SetTarget::RoutingTableOspfv3InstanceRelative {
+                ospfv3_instance: "o1".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete routing-table rt1 ospfv3-instance"),
+            Command::Delete(DeleteTarget::RoutingTableOspfv3Instance {
+                name: "rt1".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete ospfv3-instance"),
+            Command::Delete(DeleteTarget::RoutingTableOspfv3InstanceRelative)
         );
     }
 }

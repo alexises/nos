@@ -163,7 +163,11 @@ async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>)
 fn to_routes(routes: &HashMap<IpNet, IpAddr>) -> Vec<OspfRoute> {
     routes
         .iter()
-        .map(|(&prefix, &next_hop)| OspfRoute { prefix, next_hop })
+        .map(|(&prefix, &next_hop)| OspfRoute {
+            prefix,
+            next_hop,
+            interface_id: None,
+        })
         .collect()
 }
 
@@ -179,7 +183,11 @@ fn diff_routes(
     let mut updates = Vec::new();
     for (&prefix, &next_hop) in new_routes {
         if last_sent.get(&prefix) != Some(&next_hop) {
-            updates.push(OspfRouteUpdate::Add(OspfRoute { prefix, next_hop }));
+            updates.push(OspfRouteUpdate::Add(OspfRoute {
+                prefix,
+                next_hop,
+                interface_id: None,
+            }));
         }
     }
     for prefix in last_sent.keys() {
@@ -219,6 +227,7 @@ mod tests {
         assert_eq!(
             diff_routes(&last_sent, &new_routes),
             vec![OspfRouteUpdate::Add(OspfRoute {
+                interface_id: None,
                 prefix: "10.0.0.0/24".parse().unwrap(),
                 next_hop: "10.0.0.2".parse().unwrap(),
             })]
@@ -242,6 +251,7 @@ mod tests {
         updates.sort_by_key(|u| format!("{u:?}"));
         let mut expected = vec![
             OspfRouteUpdate::Add(OspfRoute {
+                interface_id: None,
                 prefix: "10.0.2.0/24".parse().unwrap(),
                 next_hop: "10.0.2.1".parse().unwrap(),
             }),

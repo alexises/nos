@@ -14,7 +14,7 @@ COPY . .
 # "nos-bgp/dhat-heap" to build nos-bgpd with dhat heap profiling — see
 # bgp/CLAUDE.md's "Memory profiling" note.
 ARG CARGO_FEATURES=
-RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-watchdogd --bin nos
+RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-watchdogd --bin nos
 
 FROM debian:bookworm-slim AS runtime
 
@@ -29,6 +29,7 @@ COPY --from=builder /app/target/release/nos-ribd       /usr/local/bin/nos-ribd
 COPY --from=builder /app/target/release/nos-interfaced /usr/local/bin/nos-interfaced
 COPY --from=builder /app/target/release/nos-logd       /usr/local/bin/nos-logd
 COPY --from=builder /app/target/release/nos-ospfd      /usr/local/bin/nos-ospfd
+COPY --from=builder /app/target/release/nos-ospfv3d    /usr/local/bin/nos-ospfv3d
 COPY --from=builder /app/target/release/nos-watchdogd  /usr/local/bin/nos-watchdogd
 COPY --from=builder /app/target/release/nos            /usr/local/bin/nos
 
@@ -41,6 +42,8 @@ COPY --from=builder /app/target/release/nos            /usr/local/bin/nos
 # port 179 (<1024) as the unprivileged `nos` user.
 # nos-ospfd needs CAP_NET_RAW too, for its own VRF-scoped (SO_BINDTODEVICE)
 # raw protocol-89 socket used to send/receive OSPF Hello packets.
+# nos-ospfv3d needs CAP_NET_RAW for the same reason, over a raw IPv6
+# protocol-89 socket instead (RFC 5340 Hello/DBD/LSR/LSU/LSAck).
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libcap2-bin \
@@ -48,6 +51,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && setcap 'cap_net_admin,cap_net_raw=eip' /usr/local/bin/nos-interfaced \
     && setcap 'cap_net_raw,cap_net_bind_service=eip' /usr/local/bin/nos-bgpd \
     && setcap 'cap_net_raw=eip' /usr/local/bin/nos-ospfd \
+    && setcap 'cap_net_raw=eip' /usr/local/bin/nos-ospfv3d \
     && apt-get purge -y --auto-remove libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
