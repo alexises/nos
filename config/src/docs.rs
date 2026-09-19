@@ -274,6 +274,23 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Unsets the mtu field on an interface, so `nos-interfaced` leaves whatever MTU the \
              kernel link already has untouched rather than forcing a default.",
         ),
+        Topic::SetInterfaceLldpTransmit => (
+            "Enable or disable LLDP transmit on an interface.",
+            "`set` makes nos-lldpd periodically send IEEE 802.1AB LLDPDUs (chassis/port \
+             identity, system name/description, capabilities) out this physical interface so \
+             directly-connected neighbors can discover it; `delete` turns it off again, \
+             sending a final shutdown LLDPDU so neighbors drop this system immediately. \
+             Independent of lldp receive. Physical interfaces only — rejected on a loopback \
+             at commit time.",
+        ),
+        Topic::SetInterfaceLldpReceive => (
+            "Enable or disable LLDP receive on an interface.",
+            "`set` makes nos-lldpd listen for neighbors' LLDPDUs on this physical interface \
+             and record them, visible via `show lldp neighbors`; entries age out when their \
+             advertised TTL lapses. `delete` turns it off and forgets this interface's \
+             neighbors. Independent of lldp transmit. Physical interfaces only — rejected on \
+             a loopback at commit time.",
+        ),
         Topic::DeleteInterface => (
             "Delete an interface from the transaction.",
             "Removes an interface and all of its addresses/subinterfaces from the \
@@ -773,6 +790,8 @@ mod tests {
         Topic::ClearInterfaceRoutingTable,
         Topic::SetInterfaceMtu,
         Topic::ClearInterfaceMtu,
+        Topic::SetInterfaceLldpTransmit,
+        Topic::SetInterfaceLldpReceive,
         Topic::DeleteInterface,
         Topic::SetBgpPeerGroupHoldTime,
         Topic::ClearBgpPeerGroupHoldTime,

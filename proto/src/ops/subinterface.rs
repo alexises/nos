@@ -201,6 +201,8 @@ fn ensure_subinterface_mut<'a>(
             switching_profile: None,
             port_aggregate: None,
             mtu: None,
+            lldp_transmit: false,
+            lldp_receive: false,
             subinterfaces: Vec::new(),
         });
     }
@@ -236,6 +238,8 @@ mod tests {
             switching_profile: None,
             port_aggregate: None,
             mtu: None,
+            lldp_transmit: false,
+            lldp_receive: false,
             subinterfaces,
         }
     }

@@ -154,6 +154,10 @@ pub enum Topic {
     SetInterfaceMtu,
     /// `ConfigOp::Interface(InterfaceOp::ClearMtu)`
     ClearInterfaceMtu,
+    /// `ConfigOp::Interface(InterfaceOp::SetLldpTransmit)`
+    SetInterfaceLldpTransmit,
+    /// `ConfigOp::Interface(InterfaceOp::SetLldpReceive)`
+    SetInterfaceLldpReceive,
     /// `ConfigOp::OspfInstance(OspfInstanceOp::Ensure)`
     EnsureOspfInstance,
     /// `ConfigOp::OspfInstance(OspfInstanceOp::SetRouterId)`

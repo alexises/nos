@@ -169,6 +169,21 @@ pub enum EditTarget {
     },
 }
 
+/// Which half of LLDP a `set`/`delete ... lldp <direction>` command toggles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LldpDirection {
+    Transmit,
+    Receive,
+}
+
+fn parse_lldp_direction(token: &str) -> LldpDirection {
+    if token == "transmit" {
+        LldpDirection::Transmit
+    } else {
+        LldpDirection::Receive
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetTarget {
     /// Fully-qualified — works from anywhere in configuration mode.
@@ -298,6 +313,15 @@ pub enum SetTarget {
     /// a link-layer property, not part of the per-subinterface addressing
     /// split.
     InterfaceMtu { name: String, mtu: u32 },
+    /// `set interface <name> lldp transmit|receive` — fully-qualified.
+    /// Physical-interface-level, like `InterfaceMtu`.
+    InterfaceLldp {
+        name: String,
+        direction: LldpDirection,
+    },
+    /// `set lldp transmit|receive` — context-relative, only valid while
+    /// navigated into an interface.
+    InterfaceLldpRelative { direction: LldpDirection },
     /// Fully-qualified — works from anywhere in configuration mode.
     InterfaceSwitchingProfile {
         name: String,
@@ -582,6 +606,16 @@ pub enum DeleteTarget {
     InterfaceMtu {
         name: String,
     },
+    /// `delete interface <name> lldp transmit|receive` — qualified disable.
+    InterfaceLldp {
+        name: String,
+        direction: LldpDirection,
+    },
+    /// `delete lldp transmit|receive` — relative disable, only valid while
+    /// navigated into an interface.
+    InterfaceLldpRelative {
+        direction: LldpDirection,
+    },
     /// `delete interface <name> switching-profile` — qualified clear.
     InterfaceSwitchingProfile {
         name: String,
@@ -699,6 +733,8 @@ pub enum Command {
     ShowLacp {
         name: Option<String>,
     },
+    /// `show lldp neighbors` — every LLDP neighbor heard on any interface.
+    ShowLldpNeighbors,
     /// `show log [<source>] [--follow]` — a one-shot buffer snapshot,
     /// optionally filtered to one source, or a live tail with `--follow`.
     ShowLog {
@@ -830,6 +866,7 @@ fn parse_show(t: &[&str]) -> Option<Command> {
         ["port-aggregate", name] => Command::ShowPortAggregate {
             name: Some((*name).to_string()),
         },
+        ["lldp", "neighbors"] => Command::ShowLldpNeighbors,
         ["lacp"] => Command::ShowLacp { name: None },
         ["lacp", name] => Command::ShowLacp {
             name: Some((*name).to_string()),
@@ -1379,6 +1416,17 @@ fn parse_set(t: &[&str]) -> Option<Command> {
         ["routing-table", table] => Command::Set(SetTarget::InterfaceRoutingTableRelative {
             routing_table: (*table).to_string(),
         }),
+        ["interface", name, "lldp", dir @ ("transmit" | "receive")] => {
+            Command::Set(SetTarget::InterfaceLldp {
+                name: (*name).to_string(),
+                direction: parse_lldp_direction(dir),
+            })
+        }
+        ["lldp", dir @ ("transmit" | "receive")] => {
+            Command::Set(SetTarget::InterfaceLldpRelative {
+                direction: parse_lldp_direction(dir),
+            })
+        }
         ["interface", name, "mtu", mtu] => Command::Set(SetTarget::InterfaceMtu {
             name: (*name).to_string(),
             mtu: mtu.parse::<u32>().ok()?,
@@ -1858,6 +1906,17 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
             })
         }
         ["routing-table"] => Command::Delete(DeleteTarget::InterfaceRoutingTableRelative),
+        ["interface", name, "lldp", dir @ ("transmit" | "receive")] => {
+            Command::Delete(DeleteTarget::InterfaceLldp {
+                name: (*name).to_string(),
+                direction: parse_lldp_direction(dir),
+            })
+        }
+        ["lldp", dir @ ("transmit" | "receive")] => {
+            Command::Delete(DeleteTarget::InterfaceLldpRelative {
+                direction: parse_lldp_direction(dir),
+            })
+        }
         ["interface", name, "mtu"] => Command::Delete(DeleteTarget::InterfaceMtu {
             name: (*name).to_string(),
         }),
@@ -2124,6 +2183,52 @@ mod tests {
             Command::Delete(DeleteTarget::PortAggregate {
                 name: "bond1".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn show_lldp_neighbors() {
+        assert_eq!(
+            Command::parse("show lldp neighbors"),
+            Command::ShowLldpNeighbors
+        );
+        assert_eq!(
+            Command::parse("show lldp"),
+            Command::Unknown("show lldp".to_string())
+        );
+    }
+
+    #[test]
+    fn set_and_delete_lldp_qualified_and_relative() {
+        assert_eq!(
+            Command::parse("set interface eth1 lldp transmit"),
+            Command::Set(SetTarget::InterfaceLldp {
+                name: "eth1".to_string(),
+                direction: LldpDirection::Transmit,
+            })
+        );
+        assert_eq!(
+            Command::parse("set lldp receive"),
+            Command::Set(SetTarget::InterfaceLldpRelative {
+                direction: LldpDirection::Receive,
+            })
+        );
+        assert_eq!(
+            Command::parse("delete interface eth1 lldp receive"),
+            Command::Delete(DeleteTarget::InterfaceLldp {
+                name: "eth1".to_string(),
+                direction: LldpDirection::Receive,
+            })
+        );
+        assert_eq!(
+            Command::parse("delete lldp transmit"),
+            Command::Delete(DeleteTarget::InterfaceLldpRelative {
+                direction: LldpDirection::Transmit,
+            })
+        );
+        assert_eq!(
+            Command::parse("set lldp both"),
+            Command::Unknown("set lldp both".to_string())
         );
     }
 

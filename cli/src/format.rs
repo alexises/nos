@@ -292,8 +292,10 @@ pub fn render_interface(iface: &Interface) -> String {
         .mtu
         .map_or_else(|| "unset".to_string(), |m| m.to_string());
     let mut lines = vec![format!(
-        "interface {}: address [{addresses}], routing-table {routing_table}, ospf-profile {ospf_profile}, switching-profile {switching_profile}, mtu {mtu}",
-        iface.name
+        "interface {}: address [{addresses}], routing-table {routing_table}, ospf-profile {ospf_profile}, switching-profile {switching_profile}, mtu {mtu}, lldp-transmit {}, lldp-receive {}",
+        iface.name,
+        on_off(iface.lldp_transmit),
+        on_off(iface.lldp_receive),
     )];
     for sub in &iface.subinterfaces {
         lines.push(format!("  {}", render_subinterface(sub)));
@@ -442,6 +444,45 @@ fn render_lacp_port(port: &nos_proto::LacpPortStatus) -> String {
         yes_no(port.selected),
         yes_no(port.synchronized),
     )
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+/// Render `nos-lldpd`'s neighbor table, for `show lldp neighbors`.
+pub fn render_lldp_neighbors(neighbors: &[nos_proto::LldpNeighbor]) -> String {
+    if neighbors.is_empty() {
+        return "no lldp neighbors".to_string();
+    }
+    neighbors
+        .iter()
+        .map(|n| {
+            let capabilities = if n.capabilities.is_empty() {
+                "none".to_string()
+            } else {
+                n.capabilities.join(",")
+            };
+            let description = n
+                .port_description
+                .as_deref()
+                .filter(|d| *d != n.port_id)
+                .map_or_else(String::new, |d| format!(" ({d})"));
+            format!(
+                "{}: neighbor {}, chassis {}, port {}{description}, capabilities {capabilities}, ttl {}s",
+                n.local_interface,
+                n.system_name.as_deref().unwrap_or("unnamed"),
+                n.chassis_id,
+                n.port_id,
+                n.ttl_remaining_secs,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn yes_no(value: bool) -> &'static str {
@@ -1399,6 +1440,8 @@ mod tests {
             switching_profile: None,
             port_aggregate: None,
             mtu: Some(9000),
+            lldp_transmit: false,
+            lldp_receive: false,
             subinterfaces: vec![
                 Subinterface {
                     ospfv3_profile: None,
@@ -1421,7 +1464,7 @@ mod tests {
         };
         assert_eq!(
             render_interface(&iface),
-            "interface eth0: address [none], routing-table unset, ospf-profile unset, switching-profile unset, mtu 9000\n\
+            "interface eth0: address [none], routing-table unset, ospf-profile unset, switching-profile unset, mtu 9000, lldp-transmit off, lldp-receive off\n\
              \x20 subinterface 0: address [10.0.0.1/24], routing-table rt1, ospf-profile unset\n\
              \x20 subinterface 100: address [none], routing-table unset, ospf-profile unset"
         );
@@ -1444,11 +1487,13 @@ mod tests {
             switching_profile: None,
             port_aggregate: None,
             mtu: None,
+            lldp_transmit: false,
+            lldp_receive: false,
             subinterfaces: Vec::new(),
         };
         assert_eq!(
             render_interface(&iface),
-            "interface loopback-rt1: address [10.0.0.1/32], routing-table rt1, ospf-profile unset, switching-profile unset, mtu unset"
+            "interface loopback-rt1: address [10.0.0.1/32], routing-table rt1, ospf-profile unset, switching-profile unset, mtu unset, lldp-transmit off, lldp-receive off"
         );
     }
 
@@ -1511,6 +1556,8 @@ mod tests {
             switching_profile: None,
             port_aggregate: None,
             mtu: None,
+            lldp_transmit: false,
+            lldp_receive: false,
             subinterfaces: vec![Subinterface {
                 ospfv3_profile: None,
                 tag: 100,
@@ -2052,6 +2099,45 @@ mod tests {
             render_ospf_database("o1", &[lsa]),
             "ospf instance o1:\n  area 0.0.0.0 type 1 link-state-id 1.1.1.1 \
              advertising-router 1.1.1.1 sequence 0x80000001 age 42 checksum 0xabcd"
+        );
+    }
+
+    #[test]
+    fn render_interface_shows_lldp_flags() {
+        let mut iface = Interface {
+            name: "eth1".to_string(),
+            addresses: Vec::new(),
+            routing_table: None,
+            ospf_profile: None,
+            ospfv3_profile: None,
+            switching_profile: None,
+            port_aggregate: None,
+            mtu: None,
+            lldp_transmit: true,
+            lldp_receive: false,
+            subinterfaces: Vec::new(),
+        };
+        assert!(render_interface(&iface).ends_with("lldp-transmit on, lldp-receive off"));
+        iface.lldp_receive = true;
+        assert!(render_interface(&iface).ends_with("lldp-transmit on, lldp-receive on"));
+    }
+
+    #[test]
+    fn render_lldp_neighbors_empty_and_populated() {
+        assert_eq!(render_lldp_neighbors(&[]), "no lldp neighbors");
+        let neighbor = nos_proto::LldpNeighbor {
+            local_interface: "eth1".to_string(),
+            chassis_id: "02:00:00:00:00:02".to_string(),
+            port_id: "eth1".to_string(),
+            port_description: Some("uplink".to_string()),
+            system_name: Some("router-b".to_string()),
+            system_description: None,
+            capabilities: vec!["router".to_string()],
+            ttl_remaining_secs: 117,
+        };
+        assert_eq!(
+            render_lldp_neighbors(&[neighbor]),
+            "eth1: neighbor router-b, chassis 02:00:00:00:00:02, port eth1 (uplink), capabilities router, ttl 117s"
         );
     }
 

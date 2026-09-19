@@ -169,9 +169,17 @@
 # same bd-ospf bridge `ospf-dr` already stood up a third router on,
 # confirming the identical real RFC 2328 §9.4 DR/BDR election and §8
 # DrOther-to-DR/BDR Full-adjacency restriction hold over the new address
-# family too.
+# family too. A thirteenth, `lldp` (IEEE 802.1AB), reuses the `lacp` scenario's
+# direct veth pairs (a Linux bridge never forwards LLDP's 01:80:C2:00:00:0E
+# address either) and enables `lldp transmit`/`lldp receive` on both routers'
+# eth1, confirming nos-lldpd runs a real LLDPDU exchange over a real raw
+# AF_PACKET socket and learns the other router's System Name and port id,
+# then that turning transmit off on one side makes it send a real TTL-0
+# shutdown LLDPDU that the other side acts on immediately (not after the 120s
+# TTL), that transmit coming back is learned again, and that dropping receive
+# restarts the link as transmit-only.
 #
-# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|mtu|port-aggregate|lacp|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
+# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|mtu|port-aggregate|lacp|lldp|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -716,6 +724,17 @@ ip_in() {
 
 lacp_link_veths() {
   ensure_netns_helper
+  # The `port-aggregate` scenario leaves both routers attached to its
+  # NET_BOND1/NET_BOND2 docker networks, whose eth1/eth2 would otherwise be
+  # reused below in place of a veth -- and no LACPDU/LLDPDU can cross a docker
+  # bridge. Detach them first (a no-op when that scenario never ran), so the
+  # `lacp` and `lldp` scenarios get a real wire whatever ran before them.
+  local router net
+  for router in router-a router-b; do
+    for net in "$NET_BOND1" "$NET_BOND2"; do
+      docker network disconnect "$net" "$router" >/dev/null 2>&1 || true
+    done
+  done
   local pid_a pid_b iface
   pid_a=$(docker inspect -f '{{.State.Pid}}' router-a)
   pid_b=$(docker inspect -f '{{.State.Pid}}' router-b)
@@ -1874,6 +1893,101 @@ cmd_check_lacp() {
   wait_for_count_increase router-b "deleted port aggregate bond port_aggregate=$LACP_AGGREGATE bond=" 0 60 \
     && log "router-b: deleted $LACP_AGGREGATE" \
     || { log "router-b: FAILED to delete the lacp port aggregate bond device"; return 1; }
+
+  lacp_unlink_veths
+}
+
+# ---------------------------------------------------------------------------
+# LLDP scenario
+# ---------------------------------------------------------------------------
+# Enables `lldp transmit`/`lldp receive` on both routers' eth1 (the veth pair
+# `lacp_link_veths` creates -- a plain L2 wire, since a Linux bridge never
+# forwards LLDP's 01:80:C2:00:00:0E address) and verifies nos-lldpd's real
+# LLDPDU exchange over a real raw AF_PACKET socket.
+
+# Base provisioning (address/asn/peer, hostname = container name so each router
+# advertises a distinct LLDP System Name) plus any extra nos-provision flags
+# after the fifth argument.
+provision_lldp() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  shift 5
+  log "provisioning $name: $*"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    --hostname "$name" \
+    "$@"
+}
+
+cmd_check_lldp() {
+  # Baselines first, so an earlier phase's identical log lines never count.
+  local learned_a_base learned_b_base removed_a_base started_a_base stopped_a_base=0
+  learned_a_base=$(log_count router-a "lldp neighbor learned interface=eth1 .* system_name=router-b")
+  learned_b_base=$(log_count router-b "lldp neighbor learned interface=eth1 .* system_name=router-a")
+  removed_a_base=$(log_count router-a "lldp neighbor removed interface=eth1 .* reason=\"shutdown\"")
+  started_a_base=$(log_count router-a "lldp link started interface=eth1 transmit=true receive=false")
+
+  lacp_link_veths
+  provision_lldp router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" \
+    --lldp-transmit-interface eth1 --lldp-receive-interface eth1
+  provision_lldp router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" \
+    --lldp-transmit-interface eth1 --lldp-receive-interface eth1
+
+  log "waiting for both routers' nos-lldpd to learn the other over the real veth"
+  wait_for_count_increase router-a "lldp neighbor learned interface=eth1 .* port_id=eth1 system_name=router-b" "$learned_a_base" 60 \
+    && log "router-a: learned router-b via lldp on eth1" \
+    || { log "router-a: FAILED to learn router-b via lldp"; return 1; }
+  wait_for_count_increase router-b "lldp neighbor learned interface=eth1 .* port_id=eth1 system_name=router-a" "$learned_b_base" 60 \
+    && log "router-b: learned router-a via lldp on eth1" \
+    || { log "router-b: FAILED to learn router-a via lldp"; return 1; }
+
+  # router-b stops transmitting: its link restarts, and on the way out sends a
+  # real TTL-0 shutdown LLDPDU. router-a must drop router-b on receiving it --
+  # within seconds, far under the 120s TTL, so this proves shutdown handling
+  # rather than aging.
+  provision_lldp router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" --no-lldp-transmit-interface eth1
+  log "waiting for router-a to act on router-b's shutdown LLDPDU (within 30s, not the 120s TTL)"
+  wait_for_count_increase router-a "lldp neighbor removed interface=eth1 .* reason=\"shutdown\"" "$removed_a_base" 30 \
+    && log "router-a: removed router-b on its shutdown LLDPDU" \
+    || { log "router-a: FAILED to remove router-b on shutdown"; return 1; }
+
+  # Transmit comes back: router-a must learn router-b again (the shutdown
+  # emptied its table), and router-b -- which restarted with an empty table --
+  # learns router-a well inside router-a's 30s transmit interval, because
+  # learning a *new* neighbor triggers an immediate reply.
+  learned_a_base=$(log_count router-a "lldp neighbor learned interface=eth1 .* system_name=router-b")
+  learned_b_base=$(log_count router-b "lldp neighbor learned interface=eth1 .* system_name=router-a")
+  provision_lldp router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" --lldp-transmit-interface eth1
+  wait_for_count_increase router-a "lldp neighbor learned interface=eth1 .* system_name=router-b" "$learned_a_base" 30 \
+    && log "router-a: learned router-b again after it resumed transmitting" \
+    || { log "router-a: FAILED to re-learn router-b"; return 1; }
+  wait_for_count_increase router-b "lldp neighbor learned interface=eth1 .* system_name=router-a" "$learned_b_base" 15 \
+    && log "router-b: re-learned router-a" \
+    || { log "router-b: FAILED to re-learn router-a"; return 1; }
+
+  # Drop receive on router-a: its link restarts as transmit-only.
+  provision_lldp router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" --no-lldp-receive-interface eth1
+  wait_for_count_increase router-a "lldp link started interface=eth1 transmit=true receive=false" "$started_a_base" 30 \
+    && log "router-a: eth1 link restarted transmit-only" \
+    || { log "router-a: FAILED to restart eth1 as transmit-only"; return 1; }
+
+  # Tear down: disable everything and confirm router-a's link goes away. (The
+  # baseline is taken here, not at the start: every restart above also logs a
+  # "link stopped" line.)
+  stopped_a_base=$(log_count router-a "lldp link stopped interface=eth1")
+  provision_lldp router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" --no-lldp-transmit-interface eth1
+  provision_lldp router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" \
+    --no-lldp-transmit-interface eth1 --no-lldp-receive-interface eth1
+  wait_for_count_increase router-a "lldp link stopped interface=eth1" "$stopped_a_base" 30 \
+    && log "router-a: lldp link on eth1 stopped" \
+    || { log "router-a: FAILED to stop the eth1 lldp link"; return 1; }
 
   lacp_unlink_veths
 }
@@ -3067,6 +3181,7 @@ cmd_group_drivers() {
   cmd_check_mtu
   cmd_check_port_aggregate
   cmd_check_lacp
+  cmd_check_lldp
   cmd_check_switching
   cmd_check_svi
   cmd_check_routed_subinterface
@@ -3117,6 +3232,7 @@ case "${1:-}" in
   mtu) cmd_check_mtu ;;
   port-aggregate) cmd_check_port_aggregate ;;
   lacp) cmd_check_lacp ;;
+  lldp) cmd_check_lldp ;;
   switching) cmd_check_switching ;;
   svi) cmd_check_svi ;;
   routed-subinterface) cmd_check_routed_subinterface ;;
@@ -3155,6 +3271,7 @@ case "${1:-}" in
     cmd_check_mtu
     cmd_check_port_aggregate
     cmd_check_lacp
+    cmd_check_lldp
     cmd_check_switching
     cmd_check_svi
     cmd_check_routed_subinterface
@@ -3177,7 +3294,7 @@ case "${1:-}" in
     cmd_check_ospfv3_dr
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|mtu|port-aggregate|lacp|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|mtu|port-aggregate|lacp|lldp|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
     exit 2
     ;;
 esac

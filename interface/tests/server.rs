@@ -29,6 +29,8 @@ async fn sample_interfaces() -> Interfaces {
                 switching_profile: None,
                 port_aggregate: None,
                 mtu: None,
+                lldp_transmit: false,
+                lldp_receive: false,
                 subinterfaces: vec![nos_proto::Subinterface {
                     ospfv3_profile: None,
                     tag: 0,
@@ -46,6 +48,8 @@ async fn sample_interfaces() -> Interfaces {
                 switching_profile: None,
                 port_aggregate: None,
                 mtu: None,
+                lldp_transmit: false,
+                lldp_receive: false,
                 subinterfaces: vec![],
             },
         ],

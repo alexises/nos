@@ -40,6 +40,9 @@ pub enum ServiceRef {
     /// `Log` rather than through the registry — there is exactly one LACP
     /// engine regardless of how many `Lacp`-mode `PortAggregate`s exist.
     Lacp,
+    /// The single `nos-lldpd` instance, resolved directly like `Lacp` — one
+    /// LLDP engine handles every LLDP-enabled interface.
+    Lldp,
 }
 
 /// Messages sent from a client to `nos-watchdogd`'s broker socket.

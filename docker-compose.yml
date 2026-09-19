@@ -19,7 +19,8 @@ services:
     # socket. nos-ospfv3d needs NET_RAW for the same reason, over a raw
     # IPv6 protocol-89 socket instead. nos-lacpd also needs NET_RAW, for its
     # own raw AF_PACKET slow-protocols socket per member port (real LACPDU
-    # exchange). Both NET_RAW/NET_BIND_SERVICE are already in Docker's default
+    # exchange), and nos-lldpd for its own raw AF_PACKET socket per
+    # LLDP-enabled interface. Both NET_RAW/NET_BIND_SERVICE are already in Docker's default
     # capability set, so this is belt-and-suspenders — listed explicitly,
     # like NET_ADMIN above, so the container's actual capability
     # requirements aren't silently implicit.

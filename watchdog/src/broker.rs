@@ -21,6 +21,7 @@ pub fn start(
     interfaces_socket: PathBuf,
     log_socket: PathBuf,
     lacp_socket: PathBuf,
+    lldp_socket: PathBuf,
 ) -> std::io::Result<JoinHandle<()>> {
     if listen_socket.exists() {
         std::fs::remove_file(listen_socket)?;
@@ -34,6 +35,7 @@ pub fn start(
         interfaces_socket,
         log_socket,
         lacp_socket,
+        lldp_socket,
     )))
 }
 
@@ -44,6 +46,7 @@ async fn accept_loop(
     interfaces_socket: PathBuf,
     log_socket: PathBuf,
     lacp_socket: PathBuf,
+    lldp_socket: PathBuf,
 ) {
     loop {
         match listener.accept().await {
@@ -55,6 +58,7 @@ async fn accept_loop(
                     interfaces_socket.clone(),
                     log_socket.clone(),
                     lacp_socket.clone(),
+                    lldp_socket.clone(),
                 ));
             }
             Err(e) => {
@@ -72,6 +76,7 @@ async fn handle_connection(
     interfaces_socket: PathBuf,
     log_socket: PathBuf,
     lacp_socket: PathBuf,
+    lldp_socket: PathBuf,
 ) {
     let (read_half, write_half) = stream.into_split();
     let mut reader = FramedRead::new(read_half, IpcCodec::<WatchdogRequest>::default());
@@ -87,6 +92,7 @@ async fn handle_connection(
                         &interfaces_socket,
                         &log_socket,
                         &lacp_socket,
+                        &lldp_socket,
                     )
                     .await
                 {

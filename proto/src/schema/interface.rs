@@ -203,6 +203,19 @@ pub struct Interface {
     #[garde(custom(|m: &Option<u32>, _ctx: &Config| valid_mtu(*m)))]
     pub mtu: Option<u32>,
 
+    /// Whether `nos-lldpd` transmits LLDPDUs (IEEE 802.1AB) on this link.
+    /// Physical interfaces only — see `valid_lldp_physical_only`. `serde(default)`
+    /// so on-disk config saved before this field existed still loads.
+    #[serde(default)]
+    #[garde(skip)]
+    pub lldp_transmit: bool,
+
+    /// Whether `nos-lldpd` receives and records neighbors' LLDPDUs on this
+    /// link. Independent of `lldp_transmit`.
+    #[serde(default)]
+    #[garde(skip)]
+    pub lldp_receive: bool,
+
     #[garde(dive, custom(|subs, _ctx: &Config| valid_subinterface_list(subs)))]
     pub subinterfaces: Vec<Subinterface>,
 }
@@ -372,12 +385,26 @@ fn valid_port_aggregate_membership(interfaces: &[Interface]) -> garde::Result {
     Ok(())
 }
 
+/// LLDP runs on a physical link — a loopback has no wire to speak it on.
+fn valid_lldp_physical_only(interfaces: &[Interface]) -> garde::Result {
+    for iface in interfaces {
+        if (iface.lldp_transmit || iface.lldp_receive) && loopback_table_name(&iface.name).is_some()
+        {
+            return Err(garde::Error::new(
+                "lldp can only be enabled on a physical interface, not a loopback",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Umbrella `Config.interfaces`-level validator combining the cross-field
 /// checks above — see each for details.
 pub(crate) fn valid_interfaces(interfaces: &[Interface], ctx: &Config) -> garde::Result {
     valid_addressing_split(interfaces)?;
     valid_subinterface_and_switching_profile_tags(interfaces, ctx)?;
     valid_port_aggregate_membership(interfaces)?;
+    valid_lldp_physical_only(interfaces)?;
     Ok(())
 }
 
@@ -403,6 +430,8 @@ mod tests {
             switching_profile: None,
             port_aggregate: None,
             mtu: None,
+            lldp_transmit: false,
+            lldp_receive: false,
             subinterfaces: Vec::new(),
         }
     }
@@ -880,6 +909,26 @@ mod tests {
         cfg.port_aggregates = vec![aggregate("bond1")];
         cfg.switching_profiles = vec![profile("sp1", vec![])];
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn lldp_on_physical_interface_passes() {
+        let mut iface = interface("eth0", &[], None);
+        iface.lldp_transmit = true;
+        iface.lldp_receive = true;
+        let cfg = config_with(vec![iface], vec![]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn lldp_on_loopback_fails() {
+        for (tx, rx) in [(true, false), (false, true)] {
+            let mut iface = interface("loopback-rt1", &[], None);
+            iface.lldp_transmit = tx;
+            iface.lldp_receive = rx;
+            let cfg = config_with(vec![iface], vec![table("rt1")]);
+            assert!(cfg.validate_with(&cfg).is_err());
+        }
     }
 
     #[test]

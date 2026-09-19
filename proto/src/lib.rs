@@ -7,6 +7,7 @@ pub mod docs;
 pub mod interface;
 pub mod ipc;
 pub mod lacp;
+pub mod lldp;
 pub mod log;
 pub mod ops;
 pub mod ospf;
@@ -34,6 +35,7 @@ pub use lacp::{
     LacpEvent, LacpMuxState, LacpPortStatus, LacpReceiveState, LacpRequest,
     PortAggregateLacpSummary,
 };
+pub use lldp::{LldpEvent, LldpNeighbor, LldpRequest};
 pub use log::{LogEntry, LogEvent, LogLevel, LogRequest};
 pub use ops::{
     BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, CommunityAliasOp,

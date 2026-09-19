@@ -47,6 +47,16 @@ pub enum InterfaceOp {
     ClearMtu {
         name: String,
     },
+    /// `set`/`delete interface <name> lldp transmit` — one op with a flag
+    /// rather than a `Set`/`Clear` pair, since a bool has no value to clear.
+    SetLldpTransmit {
+        name: String,
+        enabled: bool,
+    },
+    SetLldpReceive {
+        name: String,
+        enabled: bool,
+    },
     SetOspfProfile {
         name: String,
         ospf_profile: String,
@@ -94,6 +104,8 @@ impl InterfaceOp {
                         switching_profile: None,
                         port_aggregate: None,
                         mtu: None,
+                        lldp_transmit: false,
+                        lldp_receive: false,
                         subinterfaces: Vec::new(),
                     });
                 }
@@ -143,6 +155,14 @@ impl InterfaceOp {
             }
             InterfaceOp::ClearMtu { name } => {
                 find_interface_mut(config, name)?.mtu = None;
+                Ok(())
+            }
+            InterfaceOp::SetLldpTransmit { name, enabled } => {
+                find_interface_mut(config, name)?.lldp_transmit = *enabled;
+                Ok(())
+            }
+            InterfaceOp::SetLldpReceive { name, enabled } => {
+                find_interface_mut(config, name)?.lldp_receive = *enabled;
                 Ok(())
             }
             InterfaceOp::SetOspfProfile { name, ospf_profile } => {
@@ -224,6 +244,8 @@ mod tests {
             switching_profile: None,
             port_aggregate: None,
             mtu: None,
+            lldp_transmit: false,
+            lldp_receive: false,
             subinterfaces: Vec::new(),
         }
     }
@@ -264,6 +286,8 @@ mod tests {
                 switching_profile: None,
                 port_aggregate: None,
                 mtu: None,
+                lldp_transmit: false,
+                lldp_receive: false,
                 subinterfaces: Vec::new(),
             }],
             ..Default::default()
@@ -401,6 +425,37 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.interfaces[0].routing_table, None);
+    }
+
+    #[test]
+    fn set_lldp_transmit_and_receive_independently() {
+        let mut cfg = Config {
+            interfaces: vec![interface("eth0")],
+            ..Default::default()
+        };
+        InterfaceOp::SetLldpTransmit {
+            name: "eth0".to_string(),
+            enabled: true,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert!(cfg.interfaces[0].lldp_transmit);
+        assert!(!cfg.interfaces[0].lldp_receive);
+
+        InterfaceOp::SetLldpReceive {
+            name: "eth0".to_string(),
+            enabled: true,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        InterfaceOp::SetLldpTransmit {
+            name: "eth0".to_string(),
+            enabled: false,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert!(!cfg.interfaces[0].lldp_transmit);
+        assert!(cfg.interfaces[0].lldp_receive);
     }
 
     #[test]

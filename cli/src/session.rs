@@ -9,8 +9,8 @@ use nos_proto::{
 };
 
 use crate::command::{
-    BgpInstanceField, BgpPeerGroupField, Command, DeleteTarget, EditTarget, OspfProfileField,
-    SetTarget,
+    BgpInstanceField, BgpPeerGroupField, Command, DeleteTarget, EditTarget, LldpDirection,
+    OspfProfileField, SetTarget,
 };
 
 /// Navigation position within the transaction's config tree.
@@ -475,6 +475,8 @@ pub enum Resolved {
     ShowLacp {
         name: Option<String>,
     },
+    /// `show lldp neighbors` — data-plane, valid in any mode.
+    ShowLldpNeighbors,
     /// `show log [<source>] [--follow]` — data-plane, valid in any mode.
     ShowLog {
         source: Option<String>,
@@ -553,6 +555,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowInterface { name } => Resolved::ShowInterface { name },
         Command::ShowPortAggregate { name } => Resolved::ShowPortAggregate { name },
         Command::ShowLacp { name } => Resolved::ShowLacp { name },
+        Command::ShowLldpNeighbors => Resolved::ShowLldpNeighbors,
         Command::ShowLog { source, follow } => Resolved::ShowLog { source, follow },
         Command::ShowBgpBrief => Resolved::ShowBgpBrief,
         Command::ShowOspfNeigh => Resolved::ShowOspfNeigh,
@@ -1345,6 +1348,14 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 after: PathAfter::Stay,
             }
         }
+        Command::Set(SetTarget::InterfaceLldp { name, direction }) => Resolved::ApplyOp {
+            op: lldp_op(name, direction, true),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::InterfaceLldpRelative { direction }) => Resolved::ApplyOp {
+            op: lldp_op(path.interface()?.to_string(), direction, true),
+            after: PathAfter::Stay,
+        },
         Command::Set(SetTarget::InterfaceMtu { name, mtu }) => Resolved::ApplyOp {
             op: ConfigOp::Interface(InterfaceOp::SetMtu { name, mtu }),
             after: PathAfter::Stay,
@@ -1832,6 +1843,14 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             }),
             after: PathAfter::Stay,
         },
+        Command::Delete(DeleteTarget::InterfaceLldp { name, direction }) => Resolved::ApplyOp {
+            op: lldp_op(name, direction, false),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::InterfaceLldpRelative { direction }) => Resolved::ApplyOp {
+            op: lldp_op(path.interface()?.to_string(), direction, false),
+            after: PathAfter::Stay,
+        },
         Command::Delete(DeleteTarget::InterfaceMtu { name }) => Resolved::ApplyOp {
             op: ConfigOp::Interface(InterfaceOp::ClearMtu { name }),
             after: PathAfter::Stay,
@@ -2187,6 +2206,7 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
         | Command::ShowInterface { .. }
         | Command::ShowPortAggregate { .. }
         | Command::ShowLacp { .. }
+        | Command::ShowLldpNeighbors
         | Command::ShowLog { .. }
         | Command::ShowBgpBrief
         | Command::ShowOspfNeigh
@@ -2329,6 +2349,15 @@ fn ospf_profile_clear(
     Ok(Resolved::ApplyOp {
         op: ConfigOp::OspfProfile(op(instance.to_string(), area_id, name.to_string())),
         after: PathAfter::Stay,
+    })
+}
+
+/// `set`/`delete ... lldp transmit|receive` — the two directions are the same
+/// op on different fields, `enabled` being `true` for `set`, `false` for `delete`.
+fn lldp_op(name: String, direction: LldpDirection, enabled: bool) -> ConfigOp {
+    ConfigOp::Interface(match direction {
+        LldpDirection::Transmit => InterfaceOp::SetLldpTransmit { name, enabled },
+        LldpDirection::Receive => InterfaceOp::SetLldpReceive { name, enabled },
     })
 }
 
@@ -5585,6 +5614,68 @@ mod tests {
                 after: PathAfter::ToRoot,
             }
         );
+    }
+
+    #[test]
+    fn show_lldp_neighbors_works_in_any_mode() {
+        assert_eq!(
+            resolve(&Mode::Operational, Command::ShowLldpNeighbors),
+            Resolved::ShowLldpNeighbors
+        );
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::Root, false),
+                Command::ShowLldpNeighbors
+            ),
+            Resolved::ShowLldpNeighbors
+        );
+    }
+
+    #[test]
+    fn set_and_delete_lldp_resolve_to_interface_ops() {
+        let root = config_mode("t1", Path::Root, false);
+        assert_eq!(
+            resolve(
+                &root,
+                Command::Set(SetTarget::InterfaceLldp {
+                    name: "eth1".to_string(),
+                    direction: LldpDirection::Transmit,
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::SetLldpTransmit {
+                    name: "eth1".to_string(),
+                    enabled: true,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        let in_interface = config_mode("t1", Path::Interface("eth1".to_string()), false);
+        assert_eq!(
+            resolve(
+                &in_interface,
+                Command::Delete(DeleteTarget::InterfaceLldpRelative {
+                    direction: LldpDirection::Receive,
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Interface(InterfaceOp::SetLldpReceive {
+                    name: "eth1".to_string(),
+                    enabled: false,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        // The relative form needs a current interface.
+        assert!(matches!(
+            resolve(
+                &root,
+                Command::Set(SetTarget::InterfaceLldpRelative {
+                    direction: LldpDirection::Transmit,
+                })
+            ),
+            Resolved::Error(_)
+        ));
     }
 
     #[test]

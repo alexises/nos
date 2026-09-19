@@ -13,8 +13,8 @@ use nos_cli::help_menu::HelpMenu;
 use nos_cli::session::{self, Mode, PathAfter, Resolved};
 use nos_cli::spec::{self, Doc};
 use nos_cli::{
-    bgp_client, client, format, interface_client, lacp_client, log_client, ospf_client,
-    ospfv3_client, rib_client, watchdog_client,
+    bgp_client, client, format, interface_client, lacp_client, lldp_client, log_client,
+    ospf_client, ospfv3_client, rib_client, watchdog_client,
 };
 use nos_proto::{
     CommandDoc, ConfigOp, Event, LogEvent, PolicyDefinitionOp, ServiceRef, Topic,
@@ -787,6 +787,10 @@ async fn handle_action(
             show_lacp(watchdog_socket, name.as_deref()).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowLldpNeighbors => {
+            show_lldp_neighbors(watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
         Resolved::ShowLog { source, follow } => {
             show_log(watchdog_socket, source, follow).await;
             Outcome::Continue(mode)
@@ -1076,6 +1080,28 @@ async fn show_lacp(watchdog_socket: &Path, name: Option<&str>) {
                 }
             }
         },
+        Err(e) => eprintln!("error: {e}"),
+    }
+}
+
+/// Same resolution and shape as `show_lacp`, against `nos-lldpd`'s neighbor
+/// query.
+async fn show_lldp_neighbors(watchdog_socket: &Path) {
+    let lldp_socket =
+        match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Lldp).await {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                eprintln!("nos-lldpd is not running");
+                return;
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                return;
+            }
+        };
+
+    match lldp_client::get_neighbors(&lldp_socket).await {
+        Ok(neighbors) => println!("{}", format::render_lldp_neighbors(&neighbors)),
         Err(e) => eprintln!("error: {e}"),
     }
 }

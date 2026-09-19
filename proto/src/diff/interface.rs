@@ -94,6 +94,10 @@ fn mtu_str(iface: &Interface) -> String {
         .map_or_else(|| "unset".to_string(), |m| m.to_string())
 }
 
+fn on_off(enabled: bool) -> String {
+    if enabled { "on" } else { "off" }.to_string()
+}
+
 fn changed_fields(base: &Interface, candidate: &Interface) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     let mut base_addrs = base.addresses.clone();
@@ -142,6 +146,20 @@ fn changed_fields(base: &Interface, candidate: &Interface) -> Vec<FieldDiff> {
             new: Some(mtu_str(candidate)),
         });
     }
+    if base.lldp_transmit != candidate.lldp_transmit {
+        fields.push(FieldDiff {
+            label: "lldp-transmit".to_string(),
+            old: Some(on_off(base.lldp_transmit)),
+            new: Some(on_off(candidate.lldp_transmit)),
+        });
+    }
+    if base.lldp_receive != candidate.lldp_receive {
+        fields.push(FieldDiff {
+            label: "lldp-receive".to_string(),
+            old: Some(on_off(base.lldp_receive)),
+            new: Some(on_off(candidate.lldp_receive)),
+        });
+    }
     fields
 }
 
@@ -179,6 +197,16 @@ fn removed_section(iface: &Interface) -> SectionDiff {
             FieldDiff {
                 label: "mtu".to_string(),
                 old: Some(mtu_str(iface)),
+                new: None,
+            },
+            FieldDiff {
+                label: "lldp-transmit".to_string(),
+                old: Some(on_off(iface.lldp_transmit)),
+                new: None,
+            },
+            FieldDiff {
+                label: "lldp-receive".to_string(),
+                old: Some(on_off(iface.lldp_receive)),
                 new: None,
             },
         ],
@@ -222,6 +250,16 @@ fn added_section(iface: &Interface) -> SectionDiff {
                 old: None,
                 new: Some(mtu_str(iface)),
             },
+            FieldDiff {
+                label: "lldp-transmit".to_string(),
+                old: None,
+                new: Some(on_off(iface.lldp_transmit)),
+            },
+            FieldDiff {
+                label: "lldp-receive".to_string(),
+                old: None,
+                new: Some(on_off(iface.lldp_receive)),
+            },
         ],
         subsections: subinterface::diff_subinterfaces(&[], &iface.subinterfaces),
     }
@@ -247,6 +285,8 @@ mod tests {
             switching_profile: None,
             port_aggregate: None,
             mtu: None,
+            lldp_transmit: false,
+            lldp_receive: false,
             subinterfaces: Vec::new(),
         }
     }
@@ -338,6 +378,8 @@ mod tests {
             switching_profile: None,
             port_aggregate: None,
             mtu: None,
+            lldp_transmit: false,
+            lldp_receive: false,
             subinterfaces: Vec::new(),
         }];
         let candidate = vec![Interface {
@@ -352,6 +394,8 @@ mod tests {
             switching_profile: None,
             port_aggregate: None,
             mtu: None,
+            lldp_transmit: false,
+            lldp_receive: false,
             subinterfaces: Vec::new(),
         }];
         let sections = diff_interfaces(&base, &candidate);

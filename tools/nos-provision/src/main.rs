@@ -339,6 +339,30 @@ struct Args {
     #[arg(long = "clear-port-aggregate-member")]
     clear_port_aggregate_members: Vec<String>,
 
+    /// If set, sets the top-level hostname (`ConfigOp::SetHostname`) — what
+    /// `nos-lldpd` advertises as its System Name.
+    #[arg(long)]
+    hostname: Option<String>,
+
+    /// One interface name per repetition: ensured, then `lldp transmit`
+    /// enabled (`InterfaceOp::SetLldpTransmit`) — for verifying `nos-lldpd`
+    /// really advertises on that link.
+    #[arg(long = "lldp-transmit-interface")]
+    lldp_transmit_interfaces: Vec<String>,
+
+    /// Same as `--lldp-transmit-interface`, for `lldp receive`.
+    #[arg(long = "lldp-receive-interface")]
+    lldp_receive_interfaces: Vec<String>,
+
+    /// One interface name per repetition: `lldp transmit` disabled again
+    /// (`SetLldpTransmit { enabled: false }`), leaving `lldp receive` alone.
+    #[arg(long = "no-lldp-transmit-interface")]
+    no_lldp_transmit_interfaces: Vec<String>,
+
+    /// Same as `--no-lldp-transmit-interface`, for `lldp receive`.
+    #[arg(long = "no-lldp-receive-interface")]
+    no_lldp_receive_interfaces: Vec<String>,
+
     /// If set (requires `--port-aggregate`, naming which one), deletes the
     /// port aggregate outright instead of ensuring/enslaving into it
     /// (`PortAggregateOp::Delete`) — for verifying the real kernel bond
@@ -919,6 +943,48 @@ async fn main() -> anyhow::Result<()> {
     for member in &args.clear_port_aggregate_members {
         ops.push(ConfigOp::Interface(InterfaceOp::ClearPortAggregate {
             name: member.clone(),
+        }));
+    }
+
+    if let Some(hostname) = args.hostname.clone() {
+        ops.push(ConfigOp::SetHostname(hostname));
+    }
+
+    // (interface, transmit-or-receive, enabled) — each interface is ensured
+    // first, since the toggle ops require it to already exist.
+    let lldp_toggles = args
+        .lldp_transmit_interfaces
+        .iter()
+        .map(|i| (i, true, true))
+        .chain(
+            args.lldp_receive_interfaces
+                .iter()
+                .map(|i| (i, false, true)),
+        )
+        .chain(
+            args.no_lldp_transmit_interfaces
+                .iter()
+                .map(|i| (i, true, false)),
+        )
+        .chain(
+            args.no_lldp_receive_interfaces
+                .iter()
+                .map(|i| (i, false, false)),
+        );
+    for (name, transmit, enabled) in lldp_toggles {
+        ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
+            name: name.clone(),
+        }));
+        ops.push(ConfigOp::Interface(if transmit {
+            InterfaceOp::SetLldpTransmit {
+                name: name.clone(),
+                enabled,
+            }
+        } else {
+            InterfaceOp::SetLldpReceive {
+                name: name.clone(),
+                enabled,
+            }
         }));
     }
 

@@ -116,6 +116,23 @@ struct Args {
     #[arg(long, default_value = "/run/nos/lacp.sock")]
     lacpd_listen_socket: PathBuf,
 
+    /// Path to the nos-lldpd binary to supervise. Like nos-lacpd, exactly
+    /// one instance is always supervised regardless of how many interfaces
+    /// have LLDP enabled — see `lldp/CLAUDE.md`.
+    #[arg(long, default_value = "/usr/local/bin/nos-lldpd")]
+    lldpd_bin: PathBuf,
+
+    /// Extra arguments forwarded to nos-lldpd.
+    #[arg(long = "lldpd-arg", allow_hyphen_values = true)]
+    lldpd_flags: Vec<String>,
+
+    /// Unix socket nos-lldpd listens on for LLDP neighbor queries (e.g. from
+    /// `nos show lldp neighbors`). Also served out as the resolved address
+    /// for `ServiceRef::Lldp` broker queries, the same way
+    /// `--lacpd-listen-socket` is for `ServiceRef::Lacp`.
+    #[arg(long, default_value = "/run/nos/lldp.sock")]
+    lldpd_listen_socket: PathBuf,
+
     /// Path to nos-configd's IPC Unix socket, used by the watchdog itself to
     /// subscribe to BGP instance and routing table changes. Independent of
     /// `--configd-arg`, which is an opaque pass-through to the child — if
@@ -298,6 +315,23 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     )));
 
+    let lldpd_args = std::iter::once("--listen-socket".to_string())
+        .chain(std::iter::once(
+            args.lldpd_listen_socket.display().to_string(),
+        ))
+        .chain(std::iter::once("--watchdog-socket".to_string()))
+        .chain(std::iter::once(args.listen_socket.display().to_string()))
+        .chain(std::iter::once("--log-socket".to_string()))
+        .chain(std::iter::once(args.log_socket.display().to_string()))
+        .chain(args.lldpd_flags)
+        .collect();
+    let lldpd_spec = ProcessSpec::new("nos-lldpd", args.lldpd_bin, lldpd_args);
+    tasks.push(tokio::spawn(supervise_one(
+        lldpd_spec,
+        policy,
+        shutdown_rx.clone(),
+    )));
+
     let broker_task = broker::start(
         &args.listen_socket,
         registry,
@@ -305,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
         args.interfaced_listen_socket,
         args.log_socket,
         args.lacpd_listen_socket,
+        args.lldpd_listen_socket,
     )
     .inspect_err(|e| tracing::error!(error = %e, "failed to start broker IPC server"))
     .context("starting broker IPC server")?;

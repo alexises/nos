@@ -1,0 +1,285 @@
+//! Steady-state loop: subscribes to `Interfaces`/`Hostname` diffs purely as a
+//! resync trigger, always re-fetching the whole config — same shape as
+//! `nos-lacp`'s `reconcile::run`. Runs one `link::run` task per interface with
+//! `lldp transmit` and/or `lldp receive` set, restarting a link whose flags or
+//! advertised System Name changed and respawning one that ended on its own.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use futures::StreamExt;
+use nos_proto::{Config, DiffScope, Event};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio::time::sleep;
+use tracing::{debug, info, warn};
+
+use crate::config_client;
+use crate::link::{self, LinkConfig, SharedNeighbors};
+
+const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+
+/// Same justification as `nos-lacp`'s: cheap insurance against a missed diff,
+/// and what retries a link whose interface didn't exist yet when it was first
+/// configured.
+const REAPPLY_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How long a stopping link gets to send its shutdown LLDPDU before it is
+/// aborted.
+const STOP_GRACE: Duration = Duration::from_secs(2);
+
+struct LinkHandle {
+    cfg: LinkConfig,
+    stop: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
+impl LinkHandle {
+    async fn stop(mut self) {
+        let _ = self.stop.send(true);
+        if tokio::time::timeout(STOP_GRACE, &mut self.task)
+            .await
+            .is_err()
+        {
+            self.task.abort();
+        }
+    }
+}
+
+struct Links {
+    neighbors: SharedNeighbors,
+    handles: HashMap<String, LinkHandle>,
+}
+
+impl Links {
+    async fn reconcile(&mut self, desired: Vec<LinkConfig>) {
+        let stale: Vec<String> = self
+            .handles
+            .iter()
+            .filter(|(name, h)| {
+                h.task.is_finished()
+                    || desired.iter().find(|d| &d.interface == *name) != Some(&h.cfg)
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in stale {
+            if let Some(handle) = self.handles.remove(&name) {
+                handle.stop().await;
+            }
+        }
+        for cfg in desired {
+            if !self.handles.contains_key(&cfg.interface) {
+                let handle = self.spawn(cfg);
+                self.handles.insert(handle.cfg.interface.clone(), handle);
+            }
+        }
+    }
+
+    fn spawn(&self, cfg: LinkConfig) -> LinkHandle {
+        let (stop, stop_rx) = watch::channel(false);
+        let neighbors = self.neighbors.clone();
+        let link_cfg = cfg.clone();
+        let task = tokio::spawn(async move {
+            if let Err(e) = link::run(link_cfg.clone(), neighbors, stop_rx).await {
+                warn!(interface = %link_cfg.interface, error = %e, "lldp link ended");
+            }
+        });
+        LinkHandle { cfg, stop, task }
+    }
+
+    async fn shutdown(&mut self) {
+        for (_, handle) in self.handles.drain() {
+            handle.stop().await;
+        }
+    }
+}
+
+/// Every interface that should currently be running LLDP.
+fn desired_links(cfg: &Config, chassis_mac: [u8; 6]) -> Vec<LinkConfig> {
+    cfg.interfaces
+        .iter()
+        .filter(|i| i.lldp_transmit || i.lldp_receive)
+        .map(|i| LinkConfig {
+            interface: i.name.clone(),
+            transmit: i.lldp_transmit,
+            receive: i.lldp_receive,
+            system_name: cfg.hostname.clone(),
+            chassis_mac,
+        })
+        .collect()
+}
+
+pub async fn run(
+    config_socket: PathBuf,
+    neighbors: SharedNeighbors,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let scopes = vec![DiffScope::Interfaces, DiffScope::Hostname];
+    let chassis_mac = local_system_id();
+    let mut links = Links {
+        neighbors,
+        handles: HashMap::new(),
+    };
+
+    while !*shutdown.borrow() {
+        match config_client::subscribe_diff(&config_socket, scopes.clone()).await {
+            Ok(mut reader) => {
+                info!(socket = %config_socket.display(), "connected to nos-configd diff stream");
+                let mut reapply = tokio::time::interval(REAPPLY_INTERVAL);
+                reapply.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                reapply.tick().await;
+                loop {
+                    tokio::select! {
+                        event = reader.next() => match event {
+                            Some(Ok(Event::Diff(_))) => {
+                                resync(&config_socket, &mut links, chassis_mac).await;
+                            }
+                            Some(Ok(_)) => {}
+                            Some(Err(e)) => {
+                                warn!(error = %e, "error reading diff stream, reconnecting");
+                                break;
+                            }
+                            None => {
+                                warn!(socket = %config_socket.display(), "diff stream closed, reconnecting");
+                                break;
+                            }
+                        },
+                        _ = reapply.tick() => {
+                            resync(&config_socket, &mut links, chassis_mac).await;
+                        }
+                        _ = shutdown.changed() => break,
+                    }
+                }
+            }
+            Err(e) => warn!(
+                error = %e,
+                socket = %config_socket.display(),
+                "failed to connect to nos-configd"
+            ),
+        }
+
+        if *shutdown.borrow() {
+            break;
+        }
+        if wait_or_shutdown(RECONNECT_DELAY, &mut shutdown).await {
+            break;
+        }
+    }
+
+    links.shutdown().await;
+    info!("lldp reconciliation loop stopped");
+}
+
+async fn resync(config_socket: &Path, links: &mut Links, chassis_mac: [u8; 6]) {
+    let cfg = match config_client::fetch_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            warn!(error = %e, "failed to fetch running config, keeping previous state");
+            return;
+        }
+    };
+    let desired = desired_links(&cfg, chassis_mac);
+    let count = desired.len();
+    links.reconcile(desired).await;
+    debug!(count, "reconciled lldp links");
+}
+
+/// This machine's chassis identity: a locally-administered unicast MAC derived
+/// from stable per-machine identity (hostname + machine-id), the same scheme
+/// as `nos-lacp`'s Actor System ID. `ponytail:` two machines sharing both
+/// (e.g. cloned images with the default hostname) would collide and ignore
+/// each other as "our own frame"; upgrade path is a persisted random id file.
+fn local_system_id() -> [u8; 6] {
+    let read = |path: &str| std::fs::read_to_string(path).unwrap_or_default();
+    derive_system_id(
+        read("/proc/sys/kernel/hostname").trim(),
+        read("/etc/machine-id").trim(),
+    )
+}
+
+fn derive_system_id(hostname: &str, machine_id: &str) -> [u8; 6] {
+    // FNV-1a — no dependency needed for a non-cryptographic 48-bit spread.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in hostname.bytes().chain([0]).chain(machine_id.bytes()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    let b = hash.to_be_bytes();
+    // 0x02: locally administered, unicast.
+    [0x02, b[3], b[4], b[5], b[6], b[7]]
+}
+
+/// Local copy of `nos-watchdog::supervisor::wait_or_shutdown` — not imported,
+/// per the star-dependency rule.
+async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>) -> bool {
+    tokio::select! {
+        () = sleep(delay) => false,
+        _ = shutdown.changed() => *shutdown.borrow(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nos_proto::Interface;
+
+    fn iface(name: &str, tx: bool, rx: bool) -> Interface {
+        Interface {
+            name: name.to_string(),
+            addresses: Vec::new(),
+            routing_table: None,
+            ospf_profile: None,
+            ospfv3_profile: None,
+            switching_profile: None,
+            port_aggregate: None,
+            mtu: None,
+            lldp_transmit: tx,
+            lldp_receive: rx,
+            subinterfaces: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn only_lldp_enabled_interfaces_get_a_link_carrying_hostname_and_flags() {
+        let cfg = Config {
+            hostname: "router-a".to_string(),
+            interfaces: vec![
+                iface("eth0", false, false),
+                iface("eth1", true, false),
+                iface("eth2", false, true),
+                iface("eth3", true, true),
+            ],
+            ..Default::default()
+        };
+        let links = desired_links(&cfg, [2, 0, 0, 0, 0, 1]);
+        let names: Vec<_> = links.iter().map(|l| l.interface.as_str()).collect();
+        assert_eq!(names, ["eth1", "eth2", "eth3"]);
+        assert!(links[0].transmit && !links[0].receive);
+        assert!(!links[1].transmit && links[1].receive);
+        assert!(links.iter().all(|l| l.system_name == "router-a"));
+    }
+
+    #[test]
+    fn a_hostname_or_flag_change_makes_the_link_config_differ() {
+        let mut cfg = Config {
+            hostname: "a".to_string(),
+            interfaces: vec![iface("eth1", true, true)],
+            ..Default::default()
+        };
+        let before = desired_links(&cfg, [2, 0, 0, 0, 0, 1]);
+        cfg.hostname = "b".to_string();
+        assert_ne!(before, desired_links(&cfg, [2, 0, 0, 0, 0, 1]));
+        cfg.hostname = "a".to_string();
+        cfg.interfaces[0].lldp_receive = false;
+        assert_ne!(before, desired_links(&cfg, [2, 0, 0, 0, 0, 1]));
+    }
+
+    #[test]
+    fn system_id_is_stable_distinct_and_locally_administered_unicast() {
+        let a = derive_system_id("router-a", "m1");
+        assert_eq!(a, derive_system_id("router-a", "m1"));
+        assert_ne!(a, derive_system_id("router-b", "m1"));
+        assert_eq!(a[0], 0x02);
+    }
+}

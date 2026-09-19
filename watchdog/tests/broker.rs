@@ -14,6 +14,7 @@ async fn resolves_config_and_registered_rib_table() {
     let interfaces_socket = PathBuf::from("/run/nos/interface.sock");
     let log_socket = PathBuf::from("/run/nos/log.sock");
     let lacp_socket = PathBuf::from("/run/nos/lacp.sock");
+    let lldp_socket = PathBuf::from("/run/nos/lldp.sock");
 
     let registry = EndpointRegistry::default();
     registry
@@ -31,6 +32,7 @@ async fn resolves_config_and_registered_rib_table() {
         interfaces_socket.clone(),
         log_socket.clone(),
         lacp_socket.clone(),
+        lldp_socket.clone(),
     )
     .unwrap();
 
@@ -94,4 +96,13 @@ async fn resolves_config_and_registered_rib_table() {
         .unwrap();
     let event = reader.next().await.unwrap().unwrap();
     assert!(matches!(event, WatchdogEvent::Endpoint(p) if p == lacp_socket));
+
+    writer
+        .send(WatchdogRequest::ResolveEndpoint {
+            service: ServiceRef::Lldp,
+        })
+        .await
+        .unwrap();
+    let event = reader.next().await.unwrap().unwrap();
+    assert!(matches!(event, WatchdogEvent::Endpoint(p) if p == lldp_socket));
 }
