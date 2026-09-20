@@ -1,10 +1,8 @@
 use std::path::Path;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{Config, DiffScope, Event, IpcCodec, Request};
+use nos_proto::{Config, DiffScope, Event, IpcCodec, Request, Role};
 use thiserror::Error;
-use tokio::net::unix::OwnedReadHalf;
-use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 #[derive(Debug, Error)]
@@ -17,7 +15,7 @@ pub enum ConfigClientError {
     ConnectionClosed,
 }
 
-type Reader = FramedRead<OwnedReadHalf, IpcCodec<Event>>;
+type Reader = FramedRead<tokio::io::ReadHalf<nos_pki::Stream>, IpcCodec<Event>>;
 
 /// One-shot fetch of the current running config, its own connection closed
 /// after use. Mirrors `nos-cli`'s `client::fetch_running_config` and
@@ -25,8 +23,8 @@ type Reader = FramedRead<OwnedReadHalf, IpcCodec<Event>>;
 /// rather than imported — component crates form a star around `nos-proto`,
 /// never depending on each other.
 pub async fn fetch_config(socket_path: &Path) -> Result<Config, ConfigClientError> {
-    let stream = UnixStream::connect(socket_path).await?;
-    let (r, w) = stream.into_split();
+    let stream = nos_pki::connect(socket_path, Role::Configd, "").await?;
+    let (r, w) = tokio::io::split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<Event>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<Request>::default());
     writer.send(Request::Get).await?;
@@ -49,8 +47,8 @@ pub async fn subscribe_diff(
     socket_path: &Path,
     scopes: Vec<DiffScope>,
 ) -> Result<Reader, ConfigClientError> {
-    let stream = UnixStream::connect(socket_path).await?;
-    let (r, w) = stream.into_split();
+    let stream = nos_pki::connect(socket_path, Role::Configd, "").await?;
+    let (r, w) = tokio::io::split(stream);
     let reader = FramedRead::new(r, IpcCodec::<Event>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<Request>::default());
     writer.send(Request::SubscribeDiff { scopes }).await?;

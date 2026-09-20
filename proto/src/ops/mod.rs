@@ -21,6 +21,7 @@ pub mod static_route;
 pub mod static_routing_instance;
 pub mod subinterface;
 pub mod switching_profile;
+pub mod user;
 
 pub use bgp_instance::BgpInstanceOp;
 pub use bgp_peer::BgpPeerOp;
@@ -45,6 +46,7 @@ pub use static_route::StaticRouteOp;
 pub use static_routing_instance::StaticRoutingInstanceOp;
 pub use subinterface::SubinterfaceOp;
 pub use switching_profile::SwitchingProfileOp;
+pub use user::UserOp;
 
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -88,6 +90,7 @@ pub enum ConfigOp {
     PortAggregate(PortAggregateOp),
     PortAggregateSubinterface(PortAggregateSubinterfaceOp),
     Lldp(LldpOp),
+    User(UserOp),
 }
 
 impl ConfigOp {
@@ -123,6 +126,7 @@ impl ConfigOp {
             ConfigOp::PortAggregate(op) => op.apply(config),
             ConfigOp::PortAggregateSubinterface(op) => op.apply(config),
             ConfigOp::Lldp(op) => op.apply(config),
+            ConfigOp::User(op) => op.apply(config),
         }
     }
 }
@@ -156,6 +160,8 @@ pub enum OpError {
     InterfaceAddressNotFound { name: String, address: IpNet },
     #[error("policy definition '{0}' not found")]
     PolicyDefinitionNotFound(String),
+    #[error("user '{0}' not found")]
+    UserNotFound(String),
     #[error("community alias '{0}' not found")]
     CommunityAliasNotFound(String),
     #[error("community group '{0}' not found")]

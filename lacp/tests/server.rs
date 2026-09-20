@@ -4,14 +4,18 @@ use futures::{SinkExt, StreamExt};
 use nos_lacp::aggregate::AggregateManager;
 use nos_lacp::reconcile::SharedAggregates;
 use nos_lacp::server;
+use nos_pki::testing::shared;
 use nos_proto::{IpcCodec, LacpEvent, LacpRate, LacpRequest};
-use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 async fn query(path: &std::path::Path) -> Vec<nos_proto::PortAggregateLacpSummary> {
-    let stream = UnixStream::connect(path).await.unwrap();
-    let (r, w) = stream.into_split();
+    let stream = shared()
+        .identity("user", "tester")
+        .connect(path, &nos_pki::PeerId::new("lacpd", ""))
+        .await
+        .unwrap();
+    let (r, w) = tokio::io::split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<LacpEvent>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<LacpRequest>::default());
     writer.send(LacpRequest::GetSummary).await.unwrap();
@@ -36,7 +40,7 @@ async fn get_summary_lists_every_aggregate_sorted_with_its_rate() {
             .unwrap()
             .insert(name.to_string(), Arc::clone(&manager));
     }
-    let _server = server::start(&path, aggregates).unwrap();
+    let _server = server::start(&path, aggregates, &shared().identity("lacpd", "")).unwrap();
 
     let summaries = query(&path).await;
     assert_eq!(summaries.len(), 2);
@@ -52,6 +56,11 @@ async fn get_summary_lists_every_aggregate_sorted_with_its_rate() {
 async fn get_summary_with_no_aggregates_is_empty() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("lacp.sock");
-    let _server = server::start(&path, SharedAggregates::default()).unwrap();
+    let _server = server::start(
+        &path,
+        SharedAggregates::default(),
+        &shared().identity("lacpd", ""),
+    )
+    .unwrap();
     assert!(query(&path).await.is_empty());
 }

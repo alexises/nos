@@ -3,8 +3,8 @@ use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
 use nos_interface::driver::NoopInterfaceDriver;
 use nos_interface::{server, Interfaces};
+use nos_pki::testing::shared;
 use nos_proto::{InterfaceAddress, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec};
-use tokio::net::UnixStream;
 use tokio::sync::RwLock;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -63,11 +63,15 @@ async fn sample_interfaces() -> Interfaces {
 async fn connect(
     path: &std::path::Path,
 ) -> (
-    FramedRead<tokio::net::unix::OwnedReadHalf, IpcCodec<InterfaceEvent>>,
-    FramedWrite<tokio::net::unix::OwnedWriteHalf, IpcCodec<InterfaceRequest>>,
+    FramedRead<tokio::io::ReadHalf<nos_pki::Stream>, IpcCodec<InterfaceEvent>>,
+    FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<InterfaceRequest>>,
 ) {
-    let stream = UnixStream::connect(path).await.unwrap();
-    let (r, w) = stream.into_split();
+    let stream = shared()
+        .identity("user", "tester")
+        .connect(path, &nos_pki::PeerId::new("interfaced", ""))
+        .await
+        .unwrap();
+    let (r, w) = tokio::io::split(stream);
     (
         FramedRead::new(r, IpcCodec::<InterfaceEvent>::default()),
         FramedWrite::new(w, IpcCodec::<InterfaceRequest>::default()),
@@ -79,7 +83,13 @@ async fn get_interfaces_returns_every_interface_sorted_by_name() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("interface.sock");
     let interfaces = Arc::new(RwLock::new(sample_interfaces().await));
-    let _server = server::start(&path, interfaces, Arc::new(NoopInterfaceDriver)).unwrap();
+    let _server = server::start(
+        &path,
+        interfaces,
+        Arc::new(NoopInterfaceDriver),
+        &shared().identity("interfaced", ""),
+    )
+    .unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     writer.send(InterfaceRequest::GetInterfaces).await.unwrap();
@@ -98,7 +108,13 @@ async fn get_interface_returns_matching_status() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("interface.sock");
     let interfaces = Arc::new(RwLock::new(sample_interfaces().await));
-    let _server = server::start(&path, interfaces, Arc::new(NoopInterfaceDriver)).unwrap();
+    let _server = server::start(
+        &path,
+        interfaces,
+        Arc::new(NoopInterfaceDriver),
+        &shared().identity("interfaced", ""),
+    )
+    .unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     writer
@@ -128,7 +144,13 @@ async fn get_interface_missing_returns_not_found() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("interface.sock");
     let interfaces = Arc::new(RwLock::new(sample_interfaces().await));
-    let _server = server::start(&path, interfaces, Arc::new(NoopInterfaceDriver)).unwrap();
+    let _server = server::start(
+        &path,
+        interfaces,
+        Arc::new(NoopInterfaceDriver),
+        &shared().identity("interfaced", ""),
+    )
+    .unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     writer

@@ -14,7 +14,7 @@ COPY . .
 # "nos-bgp/dhat-heap" to build nos-bgpd with dhat heap profiling — see
 # bgp/CLAUDE.md's "Memory profiling" note.
 ARG CARGO_FEATURES=
-RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-restd --bin nos-watchdogd --bin nos
+RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-restd --bin nos-watchdogd --bin nos --bin nos-provision
 
 FROM debian:bookworm-slim AS runtime
 
@@ -35,6 +35,9 @@ COPY --from=builder /app/target/release/nos-lldpd      /usr/local/bin/nos-lldpd
 COPY --from=builder /app/target/release/nos-restd      /usr/local/bin/nos-restd
 COPY --from=builder /app/target/release/nos-watchdogd  /usr/local/bin/nos-watchdogd
 COPY --from=builder /app/target/release/nos            /usr/local/bin/nos
+# A scriptable client (logs in like `nos` does) — for `nos-e2e`'s login checks
+# and for operators who want to provision without the interactive shell.
+COPY --from=builder /app/target/release/nos-provision  /usr/local/bin/nos-provision
 
 # nos-ribd/nos-interfaced's Linux drivers need CAP_NET_ADMIN/CAP_NET_RAW to
 # program the kernel (VRF devices, addresses, routes) via rtnetlink, even

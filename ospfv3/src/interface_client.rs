@@ -2,9 +2,8 @@ use std::path::Path;
 
 use futures::{SinkExt, StreamExt};
 use nos_proto::{
-    BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec,
+    BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec, Role,
 };
-use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::trace;
 
@@ -22,11 +21,11 @@ use tracing::trace;
 /// distinguished from that. Reimplemented rather than imported from
 /// `nos-ospf`/`nos-bgp`, per the root `CLAUDE.md`'s star dependency graph.
 pub async fn get_interface(interface_socket: &Path, name: &str) -> Option<InterfaceStatus> {
-    let Ok(stream) = UnixStream::connect(interface_socket).await else {
+    let Ok(stream) = nos_pki::connect(interface_socket, Role::Interfaced, "").await else {
         trace!(socket = %interface_socket.display(), "failed to connect to nos-interfaced");
         return None;
     };
-    let (r, w) = stream.into_split();
+    let (r, w) = tokio::io::split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<InterfaceEvent>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<InterfaceRequest>::default());
     writer
@@ -52,11 +51,11 @@ pub async fn get_broadcast_domain(
     interface_socket: &Path,
     name: &str,
 ) -> Option<BroadcastDomainStatus> {
-    let Ok(stream) = UnixStream::connect(interface_socket).await else {
+    let Ok(stream) = nos_pki::connect(interface_socket, Role::Interfaced, "").await else {
         trace!(socket = %interface_socket.display(), "failed to connect to nos-interfaced");
         return None;
     };
-    let (r, w) = stream.into_split();
+    let (r, w) = tokio::io::split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<InterfaceEvent>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<InterfaceRequest>::default());
     writer

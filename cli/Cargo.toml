@@ -7,6 +7,7 @@ edition = "2021"
 workspace = true
 
 [dependencies]
+nos-pki            = { workspace = true }
 tokio      = { workspace = true }
 nos-proto  = { workspace = true }
 ipnet      = { workspace = true }
@@ -18,10 +19,12 @@ thiserror  = { workspace = true }
 reedline   = { workspace = true }
 chrono     = { workspace = true }
 nos-rpl    = { workspace = true }
+rpassword  = { workspace = true }
 
 [[bin]]
 name = "nos"
 path = "src/main.rs"
 
 [dev-dependencies]
+nos-pki  = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }

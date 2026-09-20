@@ -15,7 +15,9 @@ tracing    = { workspace = true }
 thiserror  = { workspace = true }
 garde      = { workspace = true }
 nos-proto  = { workspace = true }
+nos-password = { workspace = true }
 nos-log-client     = { workspace = true }
+nos-pki            = { workspace = true }
 tokio-util = { workspace = true }
 futures            = { workspace = true }
 clap               = { workspace = true }
@@ -28,5 +30,6 @@ name = "nos-configd"
 path = "src/main.rs"
 
 [dev-dependencies]
+nos-pki  = { workspace = true, features = ["testing"] }
 insta    = { workspace = true }
 proptest = { workspace = true }

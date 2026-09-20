@@ -1,7 +1,7 @@
 use futures::{SinkExt, StreamExt};
 use nos_cli::interface_client::{get_interface, get_interfaces};
+use nos_pki::testing::shared;
 use nos_proto::{InterfaceAddress, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec};
-use tokio::net::UnixListener;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 fn sample_status() -> InterfaceStatus {
@@ -20,9 +20,13 @@ fn sample_status() -> InterfaceStatus {
     }
 }
 
-async fn serve_once(listener: UnixListener, expected: InterfaceRequest, reply: InterfaceEvent) {
-    let (stream, _) = listener.accept().await.unwrap();
-    let (r, w) = stream.into_split();
+async fn serve_once(
+    listener: nos_pki::Listener,
+    expected: InterfaceRequest,
+    reply: InterfaceEvent,
+) {
+    let (stream, _) = listener.accept().await.unwrap().handshake().await.unwrap();
+    let (r, w) = tokio::io::split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<InterfaceRequest>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<InterfaceEvent>::default());
 
@@ -35,7 +39,7 @@ async fn serve_once(listener: UnixListener, expected: InterfaceRequest, reply: I
 async fn get_interfaces_returns_statuses_on_success() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("interface.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("interfaced", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,
@@ -53,7 +57,7 @@ async fn get_interfaces_returns_statuses_on_success() {
 async fn get_interface_returns_status_on_success() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("interface.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("interfaced", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,
@@ -73,7 +77,7 @@ async fn get_interface_returns_status_on_success() {
 async fn get_interface_returns_none_on_not_found() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("interface.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("interfaced", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,

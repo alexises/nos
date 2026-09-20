@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec, PortAggregateStatus};
+use nos_proto::{
+    InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec, PortAggregateStatus, Role,
+};
 use thiserror::Error;
-use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 #[derive(Debug, Error)]
@@ -26,18 +27,18 @@ async fn connect(
     interface_socket: &Path,
 ) -> Result<
     (
-        FramedRead<tokio::net::unix::OwnedReadHalf, IpcCodec<InterfaceEvent>>,
-        FramedWrite<tokio::net::unix::OwnedWriteHalf, IpcCodec<InterfaceRequest>>,
+        FramedRead<tokio::io::ReadHalf<nos_pki::Stream>, IpcCodec<InterfaceEvent>>,
+        FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<InterfaceRequest>>,
     ),
     InterfaceClientError,
 > {
-    let stream = UnixStream::connect(interface_socket)
+    let stream = nos_pki::connect(interface_socket, Role::Interfaced, "")
         .await
         .map_err(|source| InterfaceClientError::Connect {
             path: interface_socket.to_path_buf(),
             source,
         })?;
-    let (r, w) = stream.into_split();
+    let (r, w) = tokio::io::split(stream);
     Ok((
         FramedRead::new(r, IpcCodec::<InterfaceEvent>::default()),
         FramedWrite::new(w, IpcCodec::<InterfaceRequest>::default()),

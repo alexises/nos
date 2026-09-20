@@ -17,8 +17,7 @@ use std::time::Duration;
 
 use futures::SinkExt;
 use ipnet::IpNet;
-use nos_proto::{IpcCodec, OspfRequest, RedistributeUpdate, RedistributedRoute, ServiceRef};
-use tokio::net::UnixStream;
+use nos_proto::{IpcCodec, OspfRequest, RedistributeUpdate, RedistributedRoute, Role, ServiceRef};
 use tokio::sync::watch;
 use tokio_util::codec::FramedWrite;
 use tracing::{debug, warn};
@@ -88,7 +87,7 @@ async fn run(
             continue;
         };
 
-        let stream = match UnixStream::connect(&ospf_socket).await {
+        let stream = match nos_pki::connect(&ospf_socket, Role::Ospfd, &name).await {
             Ok(stream) => stream,
             Err(e) => {
                 warn!(

@@ -21,8 +21,7 @@ use std::time::Duration;
 
 use futures::SinkExt;
 use ipnet::IpNet;
-use nos_proto::{BgpRoute, BgpRouteUpdate, IpcCodec, RibRequest, ServiceRef};
-use tokio::net::UnixStream;
+use nos_proto::{BgpRoute, BgpRouteUpdate, IpcCodec, RibRequest, Role, ServiceRef};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::codec::FramedWrite;
@@ -73,7 +72,7 @@ async fn run(
             continue;
         };
 
-        let stream = match UnixStream::connect(&rib_socket).await {
+        let stream = match nos_pki::connect(&rib_socket, Role::Ribd, &table).await {
             Ok(stream) => stream,
             Err(e) => {
                 warn!(

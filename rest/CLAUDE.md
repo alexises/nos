@@ -1,6 +1,10 @@
 # nos-rest — REST API daemon (`nos-restd`)
 
-An HTTP+JSON management API for the whole system: every `nos-cli` `show` query and the full transaction/config-editing surface. One process per `RoutingTable` that has `rest-api` pinned to it, listening on **one configured address inside that table's VRF**. **There is no authentication** — the VRF and the pinned address are the only access boundary, so pin it to a management address.
+An HTTP+JSON management API for the whole system: every `nos-cli` `show` query and the full transaction/config-editing surface. One process per `RoutingTable` that has `rest-api` pinned to it, listening on **one configured address inside that table's VRF**. **Every request needs HTTP Basic credentials of a user in `Config.users`** (see `auth.rs` and root `CLAUDE.md`'s "User authentication"); the VRF and pinned address are a second boundary, so still pin it to a management address.
+
+## Authentication (`auth.rs`)
+
+`axum::middleware::from_fn_with_state(daemons, basic_auth)` is the **last** `.layer(..)` in `api::router`, so it wraps every route — the merged Swagger UI, `/openapi.json` and the SSE stream included. Per request it decodes `Authorization: Basic`, fetches the running config from `nos-configd` (the same per-request `Get` every handler uses, so a committed user change is effective on the next request), and verifies with `nos_password::verify_or_dummy` on `spawn_blocking` (an unknown user still costs a full argon2 verify — no user enumeration by timing). Failure is `401` + `WWW-Authenticate: Basic realm="nos"`; an unreachable `nos-configd` is `503` (fail closed). An open SSE stream is authenticated at connect time only. `ApiDoc` declares the `basic` security scheme (`BasicAuthScheme`, a `utoipa::Modify`) and a global `security` requirement, so Swagger UI offers "Authorize". Users appear in the generated config tree like any section (`/v1/transactions/{tx}/user/{name}`); a clear `password` in a `PUT` is hashed by `nos-configd`, and `GET /config` returns the hashes (behind auth). ponytail: one config `Get` + one argon2 verify per request; add a short-TTL credential cache only if that is measured to matter.
 
 ## Pinning and supervision
 

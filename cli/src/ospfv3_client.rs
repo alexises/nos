@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request};
+use nos_proto::{
+    IpcCodec, Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request, Role,
+};
 use thiserror::Error;
-use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 #[derive(Debug, Error)]
@@ -26,19 +27,18 @@ async fn connect(
     ospfv3_socket: &Path,
 ) -> Result<
     (
-        FramedRead<tokio::net::unix::OwnedReadHalf, IpcCodec<Ospfv3Event>>,
-        FramedWrite<tokio::net::unix::OwnedWriteHalf, IpcCodec<Ospfv3Request>>,
+        FramedRead<tokio::io::ReadHalf<nos_pki::Stream>, IpcCodec<Ospfv3Event>>,
+        FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<Ospfv3Request>>,
     ),
     Ospfv3ClientError,
 > {
-    let stream =
-        UnixStream::connect(ospfv3_socket)
-            .await
-            .map_err(|source| Ospfv3ClientError::Connect {
-                path: ospfv3_socket.to_path_buf(),
-                source,
-            })?;
-    let (r, w) = stream.into_split();
+    let stream = nos_pki::connect_role(ospfv3_socket, Role::Ospfv3d)
+        .await
+        .map_err(|source| Ospfv3ClientError::Connect {
+            path: ospfv3_socket.to_path_buf(),
+            source,
+        })?;
+    let (r, w) = tokio::io::split(stream);
     Ok((
         FramedRead::new(r, IpcCodec::<Ospfv3Event>::default()),
         FramedWrite::new(w, IpcCodec::<Ospfv3Request>::default()),

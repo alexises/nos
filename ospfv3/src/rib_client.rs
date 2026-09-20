@@ -1,8 +1,7 @@
 use std::path::Path;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, RibEvent, RibRequest};
-use tokio::net::UnixStream;
+use nos_proto::{IpcCodec, RibEvent, RibRequest, Role};
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::trace;
 
@@ -17,11 +16,11 @@ use tracing::trace;
 /// distinguished from that. Reimplemented rather than imported from
 /// `nos-ospf`/`nos-bgp`, per the root `CLAUDE.md`'s star dependency graph.
 pub async fn get_vrf_name(rib_socket: &Path) -> Option<String> {
-    let Ok(stream) = UnixStream::connect(rib_socket).await else {
+    let Ok(stream) = nos_pki::connect_role(rib_socket, Role::Ribd).await else {
         trace!(socket = %rib_socket.display(), "failed to connect to nos-ribd for vrf name");
         return None;
     };
-    let (r, w) = stream.into_split();
+    let (r, w) = tokio::io::split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
     writer.send(RibRequest::GetVrfName).await.ok()?;
@@ -36,13 +35,15 @@ pub async fn get_vrf_name(rib_socket: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::net::UnixListener;
 
     fn serve_once(path: &Path, reply: impl Fn(RibRequest) -> Option<RibEvent> + Send + 'static) {
-        let listener = UnixListener::bind(path).unwrap();
+        let listener = nos_pki::testing::shared()
+            .identity("ribd", "rt1")
+            .listen(path)
+            .unwrap();
         tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (r, w) = stream.into_split();
+            let (stream, _) = listener.accept().await.unwrap().handshake().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
             let mut reader = FramedRead::new(r, IpcCodec::<RibRequest>::default());
             let mut writer = FramedWrite::new(w, IpcCodec::<RibEvent>::default());
             if let Some(Ok(req)) = reader.next().await {

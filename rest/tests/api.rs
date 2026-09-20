@@ -7,37 +7,41 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{Method, Request as HttpRequest, StatusCode};
+use axum::http::{header, Method, Request as HttpRequest, StatusCode};
 use axum::Router;
+use base64::Engine as _;
 use futures::{SinkExt, StreamExt};
 use nos_config::{Config, ConfigStore, ListenAddr};
+use nos_pki::testing::shared;
 use nos_proto::{
     BgpEvent, BgpInstance, BgpRequest, IpcCodec, LogEntry, LogEvent, LogLevel, LogRequest,
-    PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind, ServiceRef, WatchdogEvent,
-    WatchdogRequest,
+    PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind, ServiceRef, User,
+    WatchdogEvent, WatchdogRequest,
 };
 use nos_rest::{api, ipc::Daemons};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::net::UnixListener;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tower::ServiceExt;
 
 /// Serves `handler` on `path`, one reply per request, forever.
-fn serve<Req, Ev>(path: &Path, handler: impl Fn(Req) -> Ev + Send + Sync + 'static)
-where
+fn serve<Req, Ev>(
+    path: &Path,
+    (role, name): (&str, &str),
+    handler: impl Fn(Req) -> Ev + Send + Sync + 'static,
+) where
     Req: DeserializeOwned + Send + 'static,
     Ev: Serialize + Send + 'static,
 {
-    let listener = UnixListener::bind(path).unwrap();
+    let listener = shared().identity(role, name).listen(path).unwrap();
     let handler = Arc::new(handler);
     tokio::spawn(async move {
         loop {
-            let (stream, _) = listener.accept().await.unwrap();
+            let (stream, _) = listener.accept().await.unwrap().handshake().await.unwrap();
             let handler = handler.clone();
             tokio::spawn(async move {
-                let (r, w) = stream.into_split();
+                let (r, w) = tokio::io::split(stream);
                 let mut reader = FramedRead::new(r, IpcCodec::<Req>::default());
                 let mut writer = FramedWrite::new(w, IpcCodec::<Ev>::default());
                 while let Some(Ok(req)) = reader.next().await {
@@ -48,6 +52,17 @@ where
             });
         }
     });
+}
+
+/// The one user every fixture's config starts with (clear text here —
+/// `ConfigStore::new` hashes it, like a seeded config file).
+const USER: &str = "tester";
+const PASSWORD: &str = "secret";
+
+/// `Authorization: Basic` value for `user:password`.
+fn basic(user: &str, password: &str) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+    format!("Basic {encoded}")
 }
 
 struct Fixture {
@@ -61,20 +76,36 @@ struct Fixture {
 async fn fixture(services: Vec<(ServiceRef, PathBuf)>) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let config_socket = dir.path().join("config.sock");
-    ConfigStore::new(Config::default(), None)
-        .start_ipc_server(&ListenAddr::Unix(config_socket.clone()))
+    let config = Config {
+        users: vec![User {
+            name: USER.to_string(),
+            password: PASSWORD.to_string(),
+        }],
+        ..Config::default()
+    };
+    ConfigStore::new(config, None)
+        .start_ipc_server(
+            &ListenAddr::Unix(config_socket.clone()),
+            &shared().identity("configd", ""),
+        )
         .unwrap();
 
     let watchdog_socket = dir.path().join("watchdog.sock");
-    serve(&watchdog_socket, move |req: WatchdogRequest| {
-        let WatchdogRequest::ResolveEndpoint { service } = req;
-        services
-            .iter()
-            .find(|(s, _)| *s == service)
-            .map_or(WatchdogEvent::NotAvailable, |(_, p)| {
-                WatchdogEvent::Endpoint(p.clone())
-            })
-    });
+    serve(
+        &watchdog_socket,
+        ("watchdog", ""),
+        move |req: WatchdogRequest| {
+            let WatchdogRequest::ResolveEndpoint { service } = req else {
+                panic!("the fake broker only resolves endpoints");
+            };
+            services
+                .iter()
+                .find(|(s, _)| *s == service)
+                .map_or(WatchdogEvent::NotAvailable, |(_, p)| {
+                    WatchdogEvent::Endpoint(p.clone())
+                })
+        },
+    );
     let app = api::router(Daemons {
         watchdog_socket: Arc::new(watchdog_socket),
         config_socket: Arc::new(config_socket),
@@ -83,9 +114,22 @@ async fn fixture(services: Vec<(ServiceRef, PathBuf)>) -> Fixture {
 }
 
 async fn send(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
-    let req = HttpRequest::builder()
-        .method(method)
-        .uri(uri)
+    send_as(app, method, uri, body, Some(&basic(USER, PASSWORD))).await
+}
+
+/// Like `send`, with an explicit `Authorization` header (or none).
+async fn send_as(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+    authorization: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut builder = HttpRequest::builder().method(method).uri(uri);
+    if let Some(a) = authorization {
+        builder = builder.header(header::AUTHORIZATION, a);
+    }
+    let req = builder
         .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -121,7 +165,7 @@ async fn transaction_lifecycle_over_the_config_tree() {
     let f = fixture(vec![]).await;
     let app = &f.app;
 
-    let (s, snap) = send(app, Method::POST, "/v1/transactions/t1?base=blank", None).await;
+    let (s, snap) = send(app, Method::POST, "/v1/transactions/t1?base=current", None).await;
     assert_eq!(s, StatusCode::CREATED);
     assert_eq!(snap["dirty"], false);
     // Resuming reports 200, not 201.
@@ -309,7 +353,7 @@ async fn errors_map_to_statuses_and_leave_the_transaction_intact() {
 async fn show_routes_via_the_broker_and_missing_daemons_are_503() {
     let dir = tempfile::tempdir().unwrap();
     let rib = dir.path().join("rib.sock");
-    serve(&rib, |req: RibRequest| match req {
+    serve(&rib, ("ribd", "rt1"), |req: RibRequest| match req {
         RibRequest::GetRoutes => RibEvent::Routes(vec![PrefixRoutes {
             prefix: "10.0.0.0/8".parse().unwrap(),
             candidates: vec![RouteEntry {
@@ -345,7 +389,7 @@ async fn show_routes_via_the_broker_and_missing_daemons_are_503() {
 async fn router_wide_show_reports_each_instance_that_is_not_running() {
     let f = fixture(vec![]).await;
     let app = &f.app;
-    send(app, Method::POST, "/v1/transactions/t4?base=blank", None).await;
+    send(app, Method::POST, "/v1/transactions/t4?base=current", None).await;
     send(
         app,
         Method::PUT,
@@ -401,12 +445,12 @@ fn log_entry(source: &str, message: &str) -> LogEntry {
 /// A fake `nos-logd`: a `Tail` gets a backlog of two entries, then one
 /// streamed line, then the connection closes (which ends the SSE stream).
 fn serve_logd(path: &Path) {
-    let listener = UnixListener::bind(path).unwrap();
+    let listener = shared().identity("logd", "").listen(path).unwrap();
     tokio::spawn(async move {
         loop {
-            let (stream, _) = listener.accept().await.unwrap();
+            let (stream, _) = listener.accept().await.unwrap().handshake().await.unwrap();
             tokio::spawn(async move {
-                let (r, w) = stream.into_split();
+                let (r, w) = tokio::io::split(stream);
                 let mut reader = FramedRead::new(r, IpcCodec::<LogRequest>::default());
                 let mut writer = FramedWrite::new(w, IpcCodec::<LogEvent>::default());
                 if let Some(Ok(LogRequest::Tail { source })) = reader.next().await {
@@ -437,6 +481,7 @@ async fn follow_logs_streams_backlog_then_live_lines_as_sse() {
 
     let req = HttpRequest::builder()
         .uri("/v1/logs/follow?source=nos-x")
+        .header(header::AUTHORIZATION, basic(USER, PASSWORD))
         .body(Body::empty())
         .unwrap();
     let resp = f.app.clone().oneshot(req).await.unwrap();
@@ -458,6 +503,7 @@ async fn follow_logs_streams_backlog_then_live_lines_as_sse() {
     // `limit` trims the backlog only: the newest backlog entry and the live line remain.
     let req = HttpRequest::builder()
         .uri("/v1/logs/follow?limit=1")
+        .header(header::AUTHORIZATION, basic(USER, PASSWORD))
         .body(Body::empty())
         .unwrap();
     let resp = f.app.clone().oneshot(req).await.unwrap();
@@ -483,7 +529,7 @@ async fn follow_logs_streams_backlog_then_live_lines_as_sse() {
 async fn clear_bgp_soft_in_maps_the_daemons_reply_to_a_status() {
     let dir = tempfile::tempdir().unwrap();
     let bgpd = dir.path().join("bgp.sock");
-    serve(&bgpd, |req: BgpRequest| match req {
+    serve(&bgpd, ("bgpd", "r1"), |req: BgpRequest| match req {
         BgpRequest::SendRouteRefresh { peer } if peer.to_string() == "192.0.2.1" => {
             BgpEvent::RouteRefreshSent
         }
@@ -551,4 +597,105 @@ async fn clear_bgp_soft_in_maps_the_daemons_reply_to_a_status() {
         .0,
         StatusCode::METHOD_NOT_ALLOWED
     );
+}
+
+#[tokio::test]
+async fn every_route_requires_valid_basic_credentials() {
+    let f = fixture(vec![]).await;
+    let app = &f.app;
+
+    for uri in [
+        "/v1/config",
+        "/openapi.json",
+        "/swagger-ui/",
+        "/v1/logs/follow",
+    ] {
+        let (s, _) = send_as(app, Method::GET, uri, None, None).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{uri} without credentials");
+        let (s, _) = send_as(app, Method::GET, uri, None, Some(&basic(USER, "wrong"))).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{uri} with a wrong password");
+        let (s, _) = send_as(
+            app,
+            Method::GET,
+            uri,
+            None,
+            Some(&basic("nobody", PASSWORD)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{uri} with an unknown user");
+    }
+
+    let req = HttpRequest::builder()
+        .uri("/v1/config")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.headers()[header::WWW_AUTHENTICATE],
+        r#"Basic realm="nos""#
+    );
+
+    for uri in ["/v1/config", "/openapi.json"] {
+        let (s, _) = send(app, Method::GET, uri, None).await;
+        assert_eq!(s, StatusCode::OK, "{uri} with valid credentials");
+    }
+    // The OpenAPI document advertises the scheme.
+    let (_, doc) = send(app, Method::GET, "/openapi.json", None).await;
+    assert_eq!(
+        doc["components"]["securitySchemes"]["basic"]["scheme"],
+        "basic"
+    );
+    assert_eq!(doc["security"], json!([{"basic": []}]));
+}
+
+#[tokio::test]
+async fn a_password_set_over_the_config_tree_is_hashed_and_takes_effect_on_commit() {
+    let f = fixture(vec![]).await;
+    let app = &f.app;
+
+    send(app, Method::POST, "/v1/transactions/t1", None).await;
+    let (s, _) = send(
+        app,
+        Method::PUT,
+        "/v1/transactions/t1/user/bob",
+        Some(json!({"name": "bob", "password": "bobpw"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, snap) = send(app, Method::GET, "/v1/transactions/t1/user/bob", None).await;
+    assert!(
+        snap["password"].as_str().unwrap().starts_with("$argon2id$"),
+        "clear text must never be stored: {snap}"
+    );
+    // Not usable until committed.
+    let (s, _) = send_as(
+        app,
+        Method::GET,
+        "/v1/config",
+        None,
+        Some(&basic("bob", "bobpw")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    let (s, _) = send(app, Method::POST, "/v1/transactions/t1/commit", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send_as(
+        app,
+        Method::GET,
+        "/v1/config",
+        None,
+        Some(&basic("bob", "bobpw")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send_as(
+        app,
+        Method::GET,
+        "/v1/config",
+        None,
+        Some(&basic("bob", "nope")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 }

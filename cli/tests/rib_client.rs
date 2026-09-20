@@ -1,7 +1,7 @@
 use futures::{SinkExt, StreamExt};
 use nos_cli::rib_client::{get_routes, lookup};
+use nos_pki::testing::shared;
 use nos_proto::{IpcCodec, PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind};
-use tokio::net::UnixListener;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 fn sample_prefix_routes() -> PrefixRoutes {
@@ -14,9 +14,9 @@ fn sample_prefix_routes() -> PrefixRoutes {
     }
 }
 
-async fn serve_once(listener: UnixListener, expected: RibRequest, reply: RibEvent) {
-    let (stream, _) = listener.accept().await.unwrap();
-    let (r, w) = stream.into_split();
+async fn serve_once(listener: nos_pki::Listener, expected: RibRequest, reply: RibEvent) {
+    let (stream, _) = listener.accept().await.unwrap().handshake().await.unwrap();
+    let (r, w) = tokio::io::split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<RibRequest>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<RibEvent>::default());
 
@@ -29,7 +29,7 @@ async fn serve_once(listener: UnixListener, expected: RibRequest, reply: RibEven
 async fn get_routes_returns_routes_on_success() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("rib.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("ribd", "rt1").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,
@@ -47,7 +47,7 @@ async fn get_routes_returns_routes_on_success() {
 async fn lookup_returns_none_on_no_match() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("rib.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("ribd", "rt1").listen(&path).unwrap();
     let addr = "192.168.0.1".parse().unwrap();
 
     let server = tokio::spawn(serve_once(
@@ -66,7 +66,7 @@ async fn lookup_returns_none_on_no_match() {
 async fn get_routes_returns_daemon_error() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("rib.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("ribd", "rt1").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,

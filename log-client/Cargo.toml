@@ -8,6 +8,7 @@ workspace = true
 
 [dependencies]
 nos-proto          = { workspace = true }
+nos-pki            = { workspace = true }
 futures            = { workspace = true }
 tokio              = { workspace = true }
 tokio-util         = { workspace = true }

@@ -5,6 +5,7 @@ use clap::Parser;
 use nos_log_client::ForwardingLayer;
 use nos_ospf::link::LinkManager;
 use nos_ospf::{reconcile, rib_push_client, server, watchdog_client};
+use nos_pki::Identity;
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
@@ -61,6 +62,8 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // Handed over by nos-watchdogd on stdin; there is no plaintext fallback.
+    let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     tracing_subscriber::registry()
@@ -72,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
         .with(ForwardingLayer::install(
             format!("nos-ospfd[{}]", args.instance),
             args.log_socket.clone(),
+            identity.clone(),
             shutdown_rx.clone(),
         ))
         .init();
@@ -108,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
         routing_table_rx,
         shutdown_rx,
     );
-    let server_task = server::start(&listen_socket, args.instance.clone(), links)
+    let server_task = server::start(&listen_socket, args.instance.clone(), links, &identity)
         .inspect_err(|e| {
             tracing::error!(instance = %args.instance, error = %e, "failed to start OSPF IPC server");
         })

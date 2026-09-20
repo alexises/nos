@@ -6,6 +6,7 @@ use nos_proto::{
     OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
     PolicyDefinitionOp, PortAggregateOp, PrefixListEntry, PrefixListOp, RoutingTableOp,
     StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase,
+    UserOp,
 };
 
 use crate::command::{
@@ -1036,6 +1037,14 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
         // valid from anywhere in configuration mode.
         Command::Set(SetTarget::Hostname(name)) => Resolved::ApplyOp {
             op: ConfigOp::SetHostname(name),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::UserPassword { name, password }) => Resolved::ApplyOp {
+            op: ConfigOp::User(UserOp::SetPassword { name, password }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::User { name }) => Resolved::ApplyOp {
+            op: ConfigOp::User(UserOp::Delete { name }),
             after: PathAfter::Stay,
         },
         Command::Set(SetTarget::Relative { field }) => match path {
@@ -2832,6 +2841,26 @@ mod tests {
             ),
             Resolved::ApplyOp {
                 op: ConfigOp::SetHostname("router1".to_string()),
+                after: PathAfter::Stay,
+            }
+        );
+    }
+
+    #[test]
+    fn set_user_password_works_from_anywhere() {
+        assert_eq!(
+            resolve(
+                &config_mode("t1", Path::BgpInstance("r1".to_string()), false),
+                Command::Set(SetTarget::UserPassword {
+                    name: "alice".to_string(),
+                    password: "pw".to_string()
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::User(UserOp::SetPassword {
+                    name: "alice".to_string(),
+                    password: "pw".to_string()
+                }),
                 after: PathAfter::Stay,
             }
         );

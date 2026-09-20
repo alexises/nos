@@ -2,15 +2,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
+use nos_pki::{Identity, Incoming, Listener, Stream};
 use nos_proto::{
     BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec,
-    PortAggregateStatus, SubinterfaceStatus,
+    PortAggregateStatus, Role, SubinterfaceStatus,
 };
-use tokio::net::UnixListener;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::driver::InterfaceDriver;
 use crate::state::{BroadcastDomainState, InterfaceState, Interfaces, PortAggregateState};
@@ -32,21 +32,40 @@ pub fn start(
     listen_socket: &Path,
     interfaces: Arc<RwLock<Interfaces>>,
     driver: Arc<dyn InterfaceDriver>,
+    identity: &Identity,
 ) -> std::io::Result<JoinHandle<()>> {
-    if listen_socket.exists() {
-        std::fs::remove_file(listen_socket)?;
-    }
-    let listener = UnixListener::bind(listen_socket)?;
+    let listener = identity.listen(listen_socket)?;
     info!(socket = %listen_socket.display(), "interface IPC server listening");
     let ctx = Arc::new(Context { interfaces, driver });
     Ok(tokio::spawn(accept_loop(listener, ctx)))
 }
 
-async fn accept_loop(listener: UnixListener, ctx: Arc<Context>) {
+/// Status queries: people, the REST API on their behalf, and the routing
+/// daemons that resolve an interface's address (`nos-bgpd`'s `source-address`,
+/// the OSPF daemons' link addressing). The LACP member
+/// push rewrites kernel bond membership, so it is `nos-lacpd`'s alone. No
+/// wildcard arm: a new request must be classified.
+fn allowed(role: Role, req: &InterfaceRequest) -> bool {
+    match req {
+        InterfaceRequest::GetInterfaces
+        | InterfaceRequest::GetInterface { .. }
+        | InterfaceRequest::GetBroadcastDomain { .. }
+        | InterfaceRequest::GetPortAggregates
+        | InterfaceRequest::GetPortAggregate { .. } => {
+            matches!(
+                role,
+                Role::User | Role::Restd | Role::Bgpd | Role::Ospfd | Role::Ospfv3d
+            )
+        }
+        InterfaceRequest::PushLacpMembers(_) => role == Role::Lacpd,
+    }
+}
+
+async fn accept_loop(listener: Listener, ctx: Arc<Context>) {
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
-                tokio::spawn(handle_connection(stream, ctx.clone()));
+            Ok(incoming) => {
+                tokio::spawn(serve(incoming, ctx.clone()));
             }
             Err(e) => {
                 error!(error = %e, "interface IPC accept loop terminated");
@@ -56,13 +75,27 @@ async fn accept_loop(listener: UnixListener, ctx: Arc<Context>) {
     }
 }
 
-async fn handle_connection(stream: tokio::net::UnixStream, ctx: Arc<Context>) {
-    let (read_half, write_half) = stream.into_split();
+async fn serve(incoming: Incoming, ctx: Arc<Context>) {
+    match incoming.handshake_as(Role::parse).await {
+        Ok((stream, role, name)) => handle_connection(stream, role, name, ctx).await,
+        Err(e) => debug!(error = %e, "interface IPC handshake refused"),
+    }
+}
+
+async fn handle_connection(stream: Stream, role: Role, name: String, ctx: Arc<Context>) {
+    let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<InterfaceRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<InterfaceEvent>::default());
 
     while let Some(msg) = reader.next().await {
         let event = match msg {
+            Ok(req) if !allowed(role, &req) => {
+                warn!(
+                    role = role.as_str(), name = %name,
+                    "interface request refused: this role may not send it"
+                );
+                break;
+            }
             Ok(req) => dispatch(&ctx, req).await,
             Err(e) => {
                 warn!(error = %e, "interface IPC read error");
@@ -199,5 +232,29 @@ fn to_port_aggregate_status(agg: PortAggregateState) -> PortAggregateStatus {
             .collect(),
         link_local_address: agg.link_local_address,
         bond_name: agg.bond_name,
+    }
+}
+
+#[cfg(test)]
+mod authz_tests {
+    use super::*;
+
+    #[test]
+    fn only_lacpd_may_rewrite_bond_membership() {
+        let push = InterfaceRequest::PushLacpMembers(nos_proto::LacpAggregateMembers {
+            aggregate: String::new(),
+            active_members: Vec::new(),
+        });
+        for role in Role::ALL {
+            assert_eq!(allowed(role, &push), role == Role::Lacpd, "{role:?} push");
+            assert_eq!(
+                allowed(role, &InterfaceRequest::GetInterfaces),
+                matches!(
+                    role,
+                    Role::User | Role::Restd | Role::Bgpd | Role::Ospfd | Role::Ospfv3d
+                ),
+                "{role:?} query"
+            );
+        }
     }
 }

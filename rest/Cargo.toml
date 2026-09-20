@@ -7,6 +7,7 @@ edition = "2021"
 workspace = true
 
 [dependencies]
+nos-pki            = { workspace = true }
 tokio              = { workspace = true }
 tracing            = { workspace = true }
 clap               = { workspace = true }
@@ -25,12 +26,15 @@ percent-encoding   = { workspace = true }
 utoipa             = { workspace = true }
 utoipa-axum        = { workspace = true }
 utoipa-swagger-ui  = { workspace = true }
+nos-password       = { workspace = true }
+base64             = { workspace = true }
 
 [[bin]]
 name = "nos-restd"
 path = "src/main.rs"
 
 [dev-dependencies]
+nos-pki  = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }
 tower    = { version = "0.5", features = ["util"] }
 nos-config = { path = "../config" }

@@ -2,12 +2,10 @@ use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
 use nos_proto::{
-    CommandDoc, Config, ConfigDiff, ConfigOp, Event, IpcCodec, Request, Topic, TransactionBase,
-    TransactionSnapshot,
+    CommandDoc, Config, ConfigDiff, ConfigOp, Event, IpcCodec, Request, Role, Topic,
+    TransactionBase, TransactionSnapshot,
 };
 use thiserror::Error;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 #[derive(Debug, Error)]
@@ -26,18 +24,18 @@ pub enum ClientError {
     Daemon(String),
 }
 
-type Reader = FramedRead<OwnedReadHalf, IpcCodec<Event>>;
-type Writer = FramedWrite<OwnedWriteHalf, IpcCodec<Request>>;
+type Reader = FramedRead<tokio::io::ReadHalf<nos_pki::Stream>, IpcCodec<Event>>;
+type Writer = FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<Request>>;
 
 /// Dials `nos-configd` for a single request/reply exchange.
 async fn connect(socket_path: &Path) -> Result<(Reader, Writer), ClientError> {
-    let stream = UnixStream::connect(socket_path)
+    let stream = nos_pki::connect(socket_path, Role::Configd, "")
         .await
         .map_err(|source| ClientError::Connect {
             path: socket_path.to_path_buf(),
             source,
         })?;
-    let (r, w) = stream.into_split();
+    let (r, w) = tokio::io::split(stream);
     Ok((
         FramedRead::new(r, IpcCodec::<Event>::default()),
         FramedWrite::new(w, IpcCodec::<Request>::default()),

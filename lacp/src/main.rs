@@ -4,6 +4,7 @@ use anyhow::Context;
 use clap::Parser;
 use nos_lacp::{interface_client, reconcile, server, watchdog_client};
 use nos_log_client::ForwardingLayer;
+use nos_pki::Identity;
 use nos_proto::{LacpAggregateMembers, ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{mpsc, watch};
@@ -39,6 +40,8 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // Handed over by nos-watchdogd on stdin; there is no plaintext fallback.
+    let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     tracing_subscriber::registry()
         .with(
@@ -49,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
         .with(ForwardingLayer::install(
             "nos-lacpd",
             args.log_socket.clone(),
+            identity.clone(),
             shutdown_rx.clone(),
         ))
         .init();
@@ -68,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let (push_tx, push_rx) = mpsc::channel::<LacpAggregateMembers>(16);
 
     let aggregates = reconcile::SharedAggregates::default();
-    let server_task = server::start(&args.listen_socket, aggregates.clone())
+    let server_task = server::start(&args.listen_socket, aggregates.clone(), &identity)
         .inspect_err(|e| tracing::error!(error = %e, "failed to start lacp IPC server"))
         .context("starting lacp IPC server")?;
     let reconcile_task = tokio::spawn(reconcile::run(

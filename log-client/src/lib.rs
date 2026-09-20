@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::SinkExt;
-use nos_proto::{IpcCodec, LogEntry, LogLevel, LogRequest};
-use tokio::net::UnixStream;
+use nos_pki::{Identity, PeerId};
+use nos_proto::{IpcCodec, LogEntry, LogLevel, LogRequest, Role};
 use tokio::sync::{mpsc, watch};
 use tokio_util::codec::FramedWrite;
 use tracing_subscriber::layer::Context;
@@ -40,10 +40,11 @@ impl ForwardingLayer {
     pub fn install(
         source: impl Into<String>,
         log_socket: PathBuf,
+        identity: Identity,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-        tokio::spawn(run(log_socket, rx, shutdown));
+        tokio::spawn(run(log_socket, identity, rx, shutdown));
         Self {
             source: source.into(),
             tx,
@@ -109,11 +110,13 @@ fn to_level(level: tracing::Level) -> LogLevel {
 /// ever read — `Push` gets none (see `nos_proto::log`).
 async fn run(
     log_socket: PathBuf,
+    identity: Identity,
     mut rx: mpsc::Receiver<LogEntry>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let logd = PeerId::new(Role::Logd.as_str(), "");
     while !*shutdown.borrow() {
-        let Ok(stream) = UnixStream::connect(&log_socket).await else {
+        let Ok(stream) = identity.connect(&log_socket, &logd).await else {
             if wait_or_shutdown(RETRY_DELAY, &mut shutdown).await {
                 return;
             }

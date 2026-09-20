@@ -12,8 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use futures::SinkExt;
-use nos_proto::{InterfaceRequest, IpcCodec, LacpAggregateMembers, ServiceRef};
-use tokio::net::UnixStream;
+use nos_proto::{InterfaceRequest, IpcCodec, LacpAggregateMembers, Role, ServiceRef};
 use tokio::sync::{mpsc, watch};
 use tokio_util::codec::FramedWrite;
 use tracing::{info, warn};
@@ -34,7 +33,7 @@ pub async fn run(
 ) {
     let mut cache: HashMap<String, Vec<String>> = HashMap::new();
     let mut writer: Option<
-        FramedWrite<tokio::net::unix::OwnedWriteHalf, IpcCodec<InterfaceRequest>>,
+        FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<InterfaceRequest>>,
     > = None;
 
     loop {
@@ -48,9 +47,9 @@ pub async fn run(
             else {
                 return;
             };
-            match UnixStream::connect(&socket).await {
+            match nos_pki::connect(&socket, Role::Interfaced, "").await {
                 Ok(stream) => {
-                    let (_r, w) = stream.into_split();
+                    let (_r, w) = tokio::io::split(stream);
                     let mut w = FramedWrite::new(w, IpcCodec::<InterfaceRequest>::default());
                     let mut ok = true;
                     for (aggregate, active_members) in &cache {
@@ -99,7 +98,7 @@ pub async fn run(
 }
 
 async fn send_push(
-    writer: &mut FramedWrite<tokio::net::unix::OwnedWriteHalf, IpcCodec<InterfaceRequest>>,
+    writer: &mut FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<InterfaceRequest>>,
     aggregate: String,
     active_members: Vec<String>,
 ) -> std::io::Result<()> {

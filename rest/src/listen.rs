@@ -14,9 +14,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{DiffScope, Event, IpcCodec, Request, RestApi, RibEvent, RibRequest, ServiceRef};
+use nos_proto::{
+    DiffScope, Event, IpcCodec, Request, RestApi, RibEvent, RibRequest, Role, ServiceRef,
+};
 use socket2::SockRef;
-use tokio::net::{TcpListener, TcpSocket, UnixStream};
+use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -73,10 +75,10 @@ impl Listener {
     /// re-established if the subscription later drops — the 1s tick still
     /// converges, just later. ponytail: resubscribe if that latency matters.
     async fn config_trigger(&self) -> Option<tokio::sync::mpsc::Receiver<()>> {
-        let stream = UnixStream::connect(&*self.daemons.config_socket)
+        let stream = nos_pki::connect(&self.daemons.config_socket, Role::Configd, "")
             .await
             .ok()?;
-        let (r, w) = stream.into_split();
+        let (r, w) = tokio::io::split(stream);
         let mut writer = FramedWrite::new(w, IpcCodec::<Request>::default());
         writer
             .send(Request::SubscribeDiff {
@@ -160,7 +162,7 @@ impl Listener {
             &ServiceRef::RibTable(self.table.clone()),
         )
         .await?;
-        match call::<_, RibEvent>(&socket, RibRequest::GetVrfName).await {
+        match call::<_, RibEvent>(&socket, Role::Ribd, &self.table, RibRequest::GetVrfName).await {
             Ok(RibEvent::VrfName(name)) => name,
             _ => None,
         }

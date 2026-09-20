@@ -217,6 +217,8 @@ pub enum SetTarget {
     /// A top-level scalar with no navigation context — works from anywhere
     /// in configuration mode, regardless of the current path.
     Hostname(String),
+    /// `set user <name> password <clear>` — creates the user if missing.
+    UserPassword { name: String, password: String },
     /// Fully-qualified peer-group field edit — works from anywhere in
     /// configuration mode.
     BgpPeerGroup {
@@ -442,6 +444,9 @@ pub enum SetTarget {
 pub enum DeleteTarget {
     /// Bare `delete` — deletes whatever the current navigation context is.
     Current,
+    User {
+        name: String,
+    },
     BgpInstance {
         name: String,
     },
@@ -1059,6 +1064,10 @@ fn parse_set(t: &[&str]) -> Option<Command> {
             field: BgpInstanceField::ClusterId(ip.parse::<Ipv4Addr>().ok()?),
         }),
         ["hostname", name] => Command::Set(SetTarget::Hostname((*name).to_string())),
+        ["user", name, "password", password] => Command::Set(SetTarget::UserPassword {
+            name: (*name).to_string(),
+            password: (*password).to_string(),
+        }),
         ["bgp", "instance", instance, "peer-group", group, "remote-as", n] => {
             Command::Set(SetTarget::BgpPeerGroup {
                 instance: (*instance).to_string(),
@@ -1849,6 +1858,9 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
             line: n.parse::<usize>().ok()?,
         },
         [] => Command::Delete(DeleteTarget::Current),
+        ["user", name] => Command::Delete(DeleteTarget::User {
+            name: (*name).to_string(),
+        }),
         ["bgp", "instance", name] => Command::Delete(DeleteTarget::BgpInstance {
             name: (*name).to_string(),
         }),
@@ -2688,6 +2700,23 @@ mod tests {
         assert_eq!(
             Command::parse("set hostname router1"),
             Command::Set(SetTarget::Hostname("router1".to_string()))
+        );
+    }
+
+    #[test]
+    fn set_and_delete_user() {
+        assert_eq!(
+            Command::parse("set user alice password s3cret"),
+            Command::Set(SetTarget::UserPassword {
+                name: "alice".to_string(),
+                password: "s3cret".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete user alice"),
+            Command::Delete(DeleteTarget::User {
+                name: "alice".to_string()
+            })
         );
     }
 

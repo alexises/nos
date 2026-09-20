@@ -21,7 +21,7 @@ pub mod validators;
 pub use bgp::{
     BgpEvent, BgpRequest, BgpSessionState, PeerSummary, RedistributeUpdate, RedistributedRoute,
 };
-pub use broker::{ServiceRef, WatchdogEvent, WatchdogRequest};
+pub use broker::{Role, ServiceRef, WatchdogEvent, WatchdogRequest};
 pub use codec::IpcCodec;
 pub use derive::sync_routing_table_refs;
 pub use diff::{diff_configs, ConfigDiff, DiffScope, DiffStatus, FieldDiff, SectionDiff};
@@ -43,13 +43,16 @@ pub use ops::{
     CommunityGroupOp, ConfigOp, InterfaceOp, LldpOp, OpError, OspfAreaOp, OspfInstanceOp,
     OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp,
     PortAggregateOp, PortAggregateSubinterfaceOp, PrefixListOp, RoutingTableOp, StaticRouteOp,
-    StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp,
+    StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, UserOp,
 };
 pub use ospf::{
     LinkInterfaceState, LsaSummary, NeighborSummary, OspfEvent, OspfNeighborState, OspfRequest,
 };
 pub use ospfv3::{Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request};
-pub use paths::{DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
+pub use paths::{
+    DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_PKI_CA, DEFAULT_PKI_DIR,
+    DEFAULT_WATCHDOG_SOCKET,
+};
 pub use rib::{
     BgpRoute, BgpRouteUpdate, OspfRoute, OspfRouteUpdate, PrefixRoutes, RibEvent, RibRequest,
     RouteEntry, RouteSourceKind,
@@ -62,7 +65,7 @@ pub use schema::{
     Ospfv3Instance, Ospfv3Profile, PolicyDefinition, PortAggregate, PortAggregateMode, PrefixList,
     PrefixListEntry, Redistribute, RedistributeSource, RedistributeTarget, RestApi, RoutingTable,
     SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface, SwitchingProfile,
-    SwitchingProfileMember, VlanTag, CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT,
-    HELLO_INTERVAL_DEFAULT, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX, PRIORITY_DEFAULT,
-    REST_API_PORT_DEFAULT,
+    SwitchingProfileMember, User, VlanTag, CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT,
+    HELLO_INTERVAL_DEFAULT, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX,
+    PASSWORD_HASH_PREFIX, PRIORITY_DEFAULT, REST_API_PORT_DEFAULT,
 };

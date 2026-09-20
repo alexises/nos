@@ -5,31 +5,46 @@
 use std::path::Path;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, LacpEvent, LacpRequest, PortAggregateLacpSummary};
-use tokio::net::UnixListener;
+use nos_pki::{Identity, Incoming, Listener, Stream};
+use nos_proto::{IpcCodec, LacpEvent, LacpRequest, PortAggregateLacpSummary, Role};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::reconcile::SharedAggregates;
 
 pub fn start(
     listen_socket: &Path,
     aggregates: SharedAggregates,
+    identity: &Identity,
 ) -> std::io::Result<JoinHandle<()>> {
-    if listen_socket.exists() {
-        std::fs::remove_file(listen_socket)?;
-    }
-    let listener = UnixListener::bind(listen_socket)?;
+    let listener = identity.listen(listen_socket)?;
     info!(socket = %listen_socket.display(), "lacp IPC server listening");
     Ok(tokio::spawn(accept_loop(listener, aggregates)))
 }
 
-async fn accept_loop(listener: UnixListener, aggregates: SharedAggregates) {
+/// The only request is a read-only summary: for people, and `Restd` on their
+/// behalf.
+fn may_query(role: Role) -> bool {
+    matches!(role, Role::User | Role::Restd)
+}
+
+async fn serve(incoming: Incoming, aggregates: SharedAggregates) {
+    match incoming.handshake_as(Role::parse).await {
+        Ok((stream, role, _)) if may_query(role) => handle_connection(stream, aggregates).await,
+        Ok((_, role, name)) => warn!(
+            role = role.as_str(), name = %name,
+            "lacp query refused: this role may not send it"
+        ),
+        Err(e) => debug!(error = %e, "lacp IPC handshake refused"),
+    }
+}
+
+async fn accept_loop(listener: Listener, aggregates: SharedAggregates) {
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
-                tokio::spawn(handle_connection(stream, aggregates.clone()));
+            Ok(incoming) => {
+                tokio::spawn(serve(incoming, aggregates.clone()));
             }
             Err(e) => {
                 error!(error = %e, "lacp IPC accept loop terminated");
@@ -39,8 +54,8 @@ async fn accept_loop(listener: UnixListener, aggregates: SharedAggregates) {
     }
 }
 
-async fn handle_connection(stream: tokio::net::UnixStream, aggregates: SharedAggregates) {
-    let (read_half, write_half) = stream.into_split();
+async fn handle_connection(stream: Stream, aggregates: SharedAggregates) {
+    let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<LacpRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<LacpEvent>::default());
 

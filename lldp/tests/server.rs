@@ -5,13 +5,17 @@ use nos_lldp::link::SharedNeighbors;
 use nos_lldp::neighbor::NeighborTable;
 use nos_lldp::packet::{Id, Lldpdu, CHASSIS_SUBTYPE_MAC, PORT_SUBTYPE_IF_NAME};
 use nos_lldp::server;
+use nos_pki::testing::shared;
 use nos_proto::{IpcCodec, LldpEvent, LldpNeighbor, LldpRequest};
-use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 async fn query(path: &std::path::Path) -> Vec<LldpNeighbor> {
-    let stream = UnixStream::connect(path).await.unwrap();
-    let (r, w) = stream.into_split();
+    let stream = shared()
+        .identity("user", "tester")
+        .connect(path, &nos_pki::PeerId::new("lldpd", ""))
+        .await
+        .unwrap();
+    let (r, w) = tokio::io::split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<LldpEvent>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<LldpRequest>::default());
     writer.send(LldpRequest::GetNeighbors).await.unwrap();
@@ -49,7 +53,7 @@ async fn get_neighbors_lists_every_interface_sorted() {
         table.apply(pdu(chassis, "eth0", name), now);
         neighbors.lock().unwrap().insert(iface.to_string(), table);
     }
-    let _server = server::start(&path, neighbors).unwrap();
+    let _server = server::start(&path, neighbors, &shared().identity("lldpd", "")).unwrap();
 
     let all = query(&path).await;
     assert_eq!(all.len(), 2);
@@ -65,6 +69,11 @@ async fn get_neighbors_lists_every_interface_sorted() {
 async fn get_neighbors_with_no_links_is_empty() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("lldp.sock");
-    let _server = server::start(&path, SharedNeighbors::default()).unwrap();
+    let _server = server::start(
+        &path,
+        SharedNeighbors::default(),
+        &shared().identity("lldpd", ""),
+    )
+    .unwrap();
     assert!(query(&path).await.is_empty());
 }

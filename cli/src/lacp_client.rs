@@ -1,9 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, LacpEvent, LacpRequest, PortAggregateLacpSummary};
+use nos_proto::{IpcCodec, LacpEvent, LacpRequest, PortAggregateLacpSummary, Role};
 use thiserror::Error;
-use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 #[derive(Debug, Error)]
@@ -24,14 +23,13 @@ pub enum LacpClientError {
 pub async fn get_summary(
     lacp_socket: &Path,
 ) -> Result<Vec<PortAggregateLacpSummary>, LacpClientError> {
-    let stream =
-        UnixStream::connect(lacp_socket)
-            .await
-            .map_err(|source| LacpClientError::Connect {
-                path: lacp_socket.to_path_buf(),
-                source,
-            })?;
-    let (r, w) = stream.into_split();
+    let stream = nos_pki::connect(lacp_socket, Role::Lacpd, "")
+        .await
+        .map_err(|source| LacpClientError::Connect {
+            path: lacp_socket.to_path_buf(),
+            source,
+        })?;
+    let (r, w) = tokio::io::split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<LacpEvent>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<LacpRequest>::default());
     writer.send(LacpRequest::GetSummary).await?;

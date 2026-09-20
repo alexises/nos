@@ -5,6 +5,7 @@
 // `nos-configd`) and forwards one existing nos-proto request.
 
 pub mod api;
+pub mod auth;
 pub mod clear;
 pub mod error;
 pub mod ipc;

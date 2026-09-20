@@ -6,6 +6,7 @@ use clap::Parser;
 use nos_interface::driver::{InterfaceDriver, LinuxInterfaceDriver, NoopInterfaceDriver};
 use nos_interface::{reconcile, server, watchdog_client, Interfaces};
 use nos_log_client::ForwardingLayer;
+use nos_pki::Identity;
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{watch, RwLock};
@@ -85,6 +86,8 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // Handed over by nos-watchdogd on stdin; there is no plaintext fallback.
+    let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     tracing_subscriber::registry()
         // `RUST_LOG` support: defaults to `trace`, i.e. exactly the
@@ -99,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
         .with(ForwardingLayer::install(
             "nos-interfaced",
             args.log_socket.clone(),
+            identity.clone(),
             shutdown_rx.clone(),
         ))
         .init();
@@ -143,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
         driver.clone(),
         shutdown_rx,
     ));
-    let server_task = server::start(&args.listen_socket, interfaces, driver)
+    let server_task = server::start(&args.listen_socket, interfaces, driver, &identity)
         .inspect_err(|e| tracing::error!(error = %e, "failed to start interface IPC server"))
         .context("starting interface IPC server")?;
 

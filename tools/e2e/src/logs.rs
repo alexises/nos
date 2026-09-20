@@ -15,6 +15,8 @@ use nos_proto::LogEntry;
 use regex::Regex;
 use tokio::task::JoinHandle;
 
+use crate::consts::{E2E_PASSWORD, E2E_USER};
+
 #[derive(Default)]
 struct Store {
     lines: Vec<String>,
@@ -136,7 +138,8 @@ async fn follow_forever(base: String, store: Arc<Mutex<Store>>) {
     // `limit` trims the backlog to the most recent N; ask for "everything".
     let url = format!("{base}/v1/logs/follow?limit=100000000");
     loop {
-        if let Ok(resp) = client.get(&url).send().await {
+        let request = client.get(&url).basic_auth(E2E_USER, Some(E2E_PASSWORD));
+        if let Ok(resp) = request.send().await {
             if resp.status().is_success() {
                 read_stream(resp, &store).await;
             }

@@ -1,10 +1,10 @@
 use futures::{SinkExt, StreamExt};
 use nos_cli::lacp_client::get_summary;
+use nos_pki::testing::shared;
 use nos_proto::{
     IpcCodec, LacpEvent, LacpMuxState, LacpPortStatus, LacpRate, LacpReceiveState, LacpRequest,
     PortAggregateLacpSummary,
 };
-use tokio::net::UnixListener;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 fn sample() -> PortAggregateLacpSummary {
@@ -31,11 +31,11 @@ fn sample() -> PortAggregateLacpSummary {
 async fn get_summary_returns_summaries_on_success() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("lacp.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("lacpd", "").listen(&path).unwrap();
 
     let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (r, w) = stream.into_split();
+        let (stream, _) = listener.accept().await.unwrap().handshake().await.unwrap();
+        let (r, w) = tokio::io::split(stream);
         let mut reader = FramedRead::new(r, IpcCodec::<LacpRequest>::default());
         let mut writer = FramedWrite::new(w, IpcCodec::<LacpEvent>::default());
         let got = reader.next().await.unwrap().unwrap();

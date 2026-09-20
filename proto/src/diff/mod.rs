@@ -20,6 +20,7 @@ pub mod static_route;
 pub mod static_routing_instance;
 pub mod subinterface;
 pub mod switching_profile;
+pub mod user;
 
 use serde::{Deserialize, Serialize};
 
@@ -93,6 +94,7 @@ pub struct ConfigDiff {
     pub port_aggregates: Vec<SectionDiff>,
     /// Field-level: `Config.lldp` is one singleton section, not a keyed list.
     pub lldp: Vec<FieldDiff>,
+    pub users: Vec<SectionDiff>,
 }
 
 impl ConfigDiff {
@@ -112,6 +114,7 @@ impl ConfigDiff {
             && self.switching_profiles.is_empty()
             && self.port_aggregates.is_empty()
             && self.lldp.is_empty()
+            && self.users.is_empty()
     }
 
     /// A copy of this diff keeping only the sections/fields covered by
@@ -195,6 +198,11 @@ impl ConfigDiff {
             } else {
                 Vec::new()
             },
+            users: if scopes.contains(&DiffScope::Users) {
+                self.users.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -219,6 +227,7 @@ pub enum DiffScope {
     Ospfv3Instances,
     PortAggregates,
     Lldp,
+    Users,
 }
 
 /// Computes what changed between `base` (e.g. the running config) and
@@ -279,6 +288,7 @@ pub fn diff_configs(base: &Config, candidate: &Config) -> ConfigDiff {
             &candidate.port_aggregates,
         ),
         lldp: lldp::diff_lldp(&base.lldp, &candidate.lldp),
+        users: user::diff_users(&base.users, &candidate.users),
     }
 }
 

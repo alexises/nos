@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Parser;
 use nos_log_client::ForwardingLayer;
+use nos_pki::Identity;
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use nos_rib::{
     bgp_client, ospf_client, reconcile, server, watchdog_client, LinuxRibDriver, NoopRibDriver,
@@ -86,6 +87,8 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // Handed over by nos-watchdogd on stdin; there is no plaintext fallback.
+    let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     tracing_subscriber::registry()
         // `RUST_LOG` support: defaults to `trace`, i.e. exactly the
@@ -100,10 +103,11 @@ async fn main() -> anyhow::Result<()> {
         .with(ForwardingLayer::install(
             format!("nos-ribd[{}]", args.table),
             args.log_socket.clone(),
+            identity.clone(),
             shutdown_rx.clone(),
         ))
         .init();
-    info!(table = %args.table, "nos-ribd starting");
+    info!(table = %args.table, peer = ?identity.peer(), "nos-ribd starting");
 
     let listen_socket = args
         .listen_socket
@@ -145,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
         ospf_redistribute_tx,
         shutdown_rx,
     ));
-    let server_task = server::start(&listen_socket, args.table.clone(), rib, driver)
+    let server_task = server::start(&listen_socket, args.table.clone(), rib, driver, &identity)
         .inspect_err(|e| {
             tracing::error!(table = %args.table, error = %e, "failed to start RIB IPC server");
         })

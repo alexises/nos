@@ -19,6 +19,7 @@ pub mod routing_table;
 pub mod static_route;
 pub mod static_routing_instance;
 pub mod switching_profile;
+pub mod user;
 
 pub use bgp_instance::BgpInstance;
 pub use bgp_peer::BgpPeer;
@@ -52,6 +53,7 @@ pub use routing_table::{
 pub use static_route::StaticRoute;
 pub use static_routing_instance::StaticRoutingInstance;
 pub use switching_profile::{SwitchingProfile, SwitchingProfileMember, VlanTag};
+pub use user::{User, PASSWORD_HASH_PREFIX};
 
 use garde::Validate;
 use serde::{Deserialize, Serialize};
@@ -125,6 +127,12 @@ pub struct Config {
     #[serde(default)]
     #[garde(custom(|l: &LldpSettings, _ctx: &Config| l.check()))]
     pub lldp: LldpSettings,
+
+    /// Local users allowed to log in. `serde(default)` so on-disk config saved
+    /// before this field existed still loads (`nos-configd` then seeds `admin`).
+    #[serde(default)]
+    #[garde(dive)]
+    pub users: Vec<User>,
 }
 
 impl Default for Config {
@@ -145,6 +153,7 @@ impl Default for Config {
             port_aggregates: Vec::new(),
             hostname: default_hostname(),
             lldp: LldpSettings::default(),
+            users: Vec::new(),
         }
     }
 }

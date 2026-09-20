@@ -140,6 +140,8 @@ impl Router {
     ) -> anyhow::Result<Self> {
         let mut flags = seed_flags.unwrap_or_else(|| id.base_flags());
         flags.extend(strings(&[
+            "--user",
+            &format!("{E2E_USER}={E2E_PASSWORD}"),
             "--rest-api-address",
             id.ip,
             "--rest-api-port",
@@ -183,14 +185,30 @@ impl Router {
         bail!("{}: REST API never came up on {}", self.name(), self.base())
     }
 
-    /// One HTTP call; `(status, body)`. Only a transport failure is an `Err`.
+    /// One HTTP call as the harness's own user; `(status, body)`. Only a
+    /// transport failure is an `Err`.
     pub async fn rest(
         &self,
         method: Method,
         path: &str,
         body: Option<&str>,
     ) -> anyhow::Result<(u16, String)> {
+        self.rest_as(method, path, body, Some((E2E_USER, E2E_PASSWORD)))
+            .await
+    }
+
+    /// Like `rest`, with explicit HTTP Basic credentials (or none).
+    pub async fn rest_as(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&str>,
+        credentials: Option<(&str, &str)>,
+    ) -> anyhow::Result<(u16, String)> {
         let mut req = self.http.request(method, format!("{}{path}", self.base()));
+        if let Some((user, password)) = credentials {
+            req = req.basic_auth(user, Some(password));
+        }
         if let Some(b) = body {
             req = req
                 .header("content-type", "application/json")

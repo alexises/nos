@@ -1,5 +1,5 @@
 [workspace]
-members = ["proto", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tools/e2e", "tcp-auth", "rpl", "log-client", "l2-socket", "lacp", "lldp", "rest"]
+members = ["proto", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tools/e2e", "tcp-auth", "rpl", "log-client", "l2-socket", "lacp", "lldp", "rest", "password", "pki"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -22,6 +22,8 @@ bollard     = "0.21"
 tar         = "0.4"
 nos-proto          = { path = "proto" }
 nos-tcp-auth       = { path = "tcp-auth" }
+nos-password       = { path = "password" }
+nos-pki            = { path = "pki" }
 nos-l2-socket      = { path = "l2-socket" }
 nos-rpl            = { path = "rpl" }
 nos-log-client     = { path = "log-client" }
@@ -50,11 +52,25 @@ utoipa-axum         = "0.2"
 # lives in a management VRF) and no GitHub download at build time.
 utoipa-swagger-ui   = { version = "9", features = ["axum", "vendored"] }
 percent-encoding    = "2"
+rpassword           = "7"
+base64              = "0.22"
+rustls              = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls        = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rcgen               = { version = "0.13", features = ["x509-parser"] }
+x509-parser         = "0.16"
+arc-swap            = "1"
+time                = "0.3"
 
 # test dependencies
 tempfile    = "3"
 proptest    = "1"
 insta       = "1"
+
+# argon2 is deliberately slow; unoptimized it makes every password test take seconds.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
 
 [workspace.lints.rust]
 unsafe_code = "warn"

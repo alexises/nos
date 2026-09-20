@@ -3,6 +3,13 @@
 //! distinct sub-block per scenario so log lines from different phases are
 //! never confusable.
 
+/// The user every router's *seeded* config carries, and what the harness
+/// authenticates its REST calls as (HTTP Basic).
+pub const E2E_USER: &str = "e2e";
+pub const E2E_PASSWORD: &str = "e2e-password";
+/// The `rest` phase's throwaway user for password-change checks.
+pub const REST_USER: &str = "rest-user";
+
 pub const NET: &str = "nos-verify-net";
 /// Two extra single-purpose docker networks, connected only to router-a, for
 /// `port-aggregate` — bonding needs >=2 real distinct links, which no other
@@ -99,3 +106,10 @@ pub const REST_PORT: u16 = 8080;
 /// Not assigned to any interface, so binding it fails with EADDRNOTAVAIL.
 pub const REST_ABSENT_ADDRESS: &str = "10.50.0.77";
 pub const REST_TX: &str = "rest-e2e";
+
+/// `pki-rotation` runs the watchdog with certificates this short-lived and a
+/// rotation this frequent, so a daemon that never applied a rotation would be
+/// holding an *expired* certificate within seconds. Rotation must come well
+/// inside the lifetime (the watchdog refuses a config where it doesn't).
+pub const PKI_LEAF_LIFETIME_SECS: u64 = 20;
+pub const PKI_ROTATE_EVERY_SECS: u64 = 6;

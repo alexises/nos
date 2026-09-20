@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context as _;
 use clap::Parser;
 use futures::StreamExt;
 use nos_cli::command::Command;
@@ -16,6 +17,7 @@ use nos_cli::{
     bgp_client, client, format, interface_client, lacp_client, lldp_client, log_client,
     ospf_client, ospfv3_client, rib_client, watchdog_client,
 };
+use nos_pki::Identity;
 use nos_proto::{
     CommandDoc, ConfigOp, Event, LogEvent, PolicyDefinitionOp, ServiceRef, Topic,
     DEFAULT_CONFIG_SOCKET,
@@ -38,6 +40,12 @@ struct Args {
     /// instance's address — rather than assuming a hardcoded default.
     #[arg(long, default_value = nos_proto::DEFAULT_WATCHDOG_SOCKET)]
     watchdog_socket: PathBuf,
+
+    /// The public CA certificate `nos-watchdogd` publishes — the trust anchor
+    /// every daemon connection is checked against. It authenticates the
+    /// watchdog to this shell and grants nothing.
+    #[arg(long, default_value = nos_proto::DEFAULT_PKI_CA)]
+    pki_ca: PathBuf,
 }
 
 /// Placeholder shown until the daemon is reachable — see `subscribe_hostname_task`.
@@ -621,6 +629,17 @@ async fn main() -> anyhow::Result<()> {
     let mut mode = Mode::Operational;
     let doc_cache: DocCache = Arc::new(Mutex::new(HashMap::new()));
 
+    // Trust the watchdog's CA, log in through it (it checks the password and
+    // certifies a key we generate here), and only then talk to any daemon.
+    let ca = std::fs::read(&args.pki_ca).with_context(|| {
+        format!(
+            "cannot read the ipc trust anchor {} — is nos-watchdogd running, with its /run/nos shared with this shell?",
+            args.pki_ca.display()
+        )
+    })?;
+    let identity = Identity::anonymous_from_pem(&ca).context("the ipc trust anchor is unusable")?;
+    nos_pki::install(identity.clone());
+    login(&args.watchdog_socket, &identity).await?;
     let config_socket = resolve_config_socket(&args.watchdog_socket).await;
 
     let completion_menu = ColumnarMenu::default().with_name("completion_menu");
@@ -692,6 +711,72 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// How many wrong username/password pairs are tolerated before the shell exits.
+const LOGIN_ATTEMPTS: usize = 3;
+
+/// Prompts for a username and password (no echo) and logs in through
+/// `nos-watchdogd`: it checks them against the running config's users and, if
+/// they match, certifies a key generated here — the certificate is held in
+/// memory only and renewed in the background. Fails closed: with the watchdog
+/// unreachable there is nobody to authenticate to, so the shell refuses to
+/// start. The password check no longer happens in this process at all, and the
+/// password hashes never leave the daemons.
+async fn login(watchdog_socket: &Path, identity: &Identity) -> anyhow::Result<()> {
+    for _ in 0..LOGIN_ATTEMPTS {
+        print!("login: ");
+        std::io::stdout().flush()?;
+        let mut name = String::new();
+        if std::io::stdin().read_line(&mut name)? == 0 {
+            anyhow::bail!("no login supplied");
+        }
+        let name = name.trim();
+        let password = rpassword::prompt_password("password: ")?;
+        let (csr, key) = nos_pki::generate_csr()?;
+        match watchdog_client::login(watchdog_socket, name, &password, csr).await {
+            Ok(issued) => {
+                identity.set_certificate(issued.cert_der, key)?;
+                keep_certificate_fresh(
+                    watchdog_socket.to_path_buf(),
+                    identity.clone(),
+                    issued.lifetime,
+                );
+                return Ok(());
+            }
+            Err(watchdog_client::WatchdogClientError::Denied(_)) => eprintln!("login incorrect"),
+            Err(e) => anyhow::bail!("cannot log in: {e}"),
+        }
+    }
+    anyhow::bail!("too many failed login attempts")
+}
+
+/// Renews the session's certificate at half its lifetime, with no password
+/// (the still-valid certificate is the proof), retrying every 30s if the
+/// watchdog can't be reached.
+// ponytail: if renewal keeps failing until the certificate expires, commands
+// start failing with connection errors and the user restarts the shell. A
+// re-prompt for the password instead would need the prompt owned by the loop.
+fn keep_certificate_fresh(
+    watchdog_socket: PathBuf,
+    identity: Identity,
+    lifetime: std::time::Duration,
+) {
+    const RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+    tokio::spawn(async move {
+        let mut next = lifetime;
+        loop {
+            tokio::time::sleep(next / 2).await;
+            let renewed = async {
+                let (csr, key) = nos_pki::generate_csr().ok()?;
+                let issued = watchdog_client::renew(&watchdog_socket, csr).await.ok()?;
+                identity.set_certificate(issued.cert_der, key).ok()?;
+                Some(issued.lifetime)
+            }
+            .await;
+            next = renewed.unwrap_or(RETRY);
+        }
+    });
 }
 
 /// Resolves nos-configd's address via nos-watchdogd's broker, once at

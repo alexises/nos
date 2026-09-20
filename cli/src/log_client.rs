@@ -1,10 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, LogEntry, LogEvent, LogRequest};
+use nos_proto::{IpcCodec, LogEntry, LogEvent, LogRequest, Role};
 use thiserror::Error;
-use tokio::net::unix::OwnedReadHalf;
-use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 #[derive(Debug, Error)]
@@ -23,25 +21,24 @@ pub enum LogClientError {
     Daemon(String),
 }
 
-type Reader = FramedRead<OwnedReadHalf, IpcCodec<LogEvent>>;
+type Reader = FramedRead<tokio::io::ReadHalf<nos_pki::Stream>, IpcCodec<LogEvent>>;
 
 async fn connect(
     log_socket: &Path,
 ) -> Result<
     (
         Reader,
-        FramedWrite<tokio::net::unix::OwnedWriteHalf, IpcCodec<LogRequest>>,
+        FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<LogRequest>>,
     ),
     LogClientError,
 > {
-    let stream =
-        UnixStream::connect(log_socket)
-            .await
-            .map_err(|source| LogClientError::Connect {
-                path: log_socket.to_path_buf(),
-                source,
-            })?;
-    let (r, w) = stream.into_split();
+    let stream = nos_pki::connect(log_socket, Role::Logd, "")
+        .await
+        .map_err(|source| LogClientError::Connect {
+            path: log_socket.to_path_buf(),
+            source,
+        })?;
+    let (r, w) = tokio::io::split(stream);
     Ok((
         FramedRead::new(r, IpcCodec::<LogEvent>::default()),
         FramedWrite::new(w, IpcCodec::<LogRequest>::default()),

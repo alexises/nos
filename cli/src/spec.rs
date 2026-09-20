@@ -274,6 +274,22 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "delete cluster-id",
         Doc::FromConfig(Topic::ClearBgpInstanceClusterId),
         ConfigurationInstance),
+    spec!(["set" "user" (Plain) "password" (Plain)],
+        "set user <name> password <clear>",
+        Doc::Local {
+            summary: "Create a user or change its password.",
+            detail: "Users log in to the shell and authenticate every REST request. The password \
+                     is stored as an argon2id hash; setting the same password again leaves the \
+                     stored hash (and the diff) unchanged. Every user is a full administrator.",
+        },
+        Configuration),
+    spec!(["delete" "user" (Plain)],
+        "delete user <name>",
+        Doc::Local {
+            summary: "Delete a user.",
+            detail: "Committing a config with no users left is refused, so you cannot lock yourself out.",
+        },
+        Configuration),
     spec!(["set" "hostname" (Plain)],
         "set hostname <name>",
         Doc::FromConfig(Topic::SetHostname),
@@ -1087,9 +1103,9 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "set routing-table <name> rest-api address <ip>",
         Doc::Local {
             summary: "Pin the REST API (nos-restd) to a routing table on the given address.",
-            detail: "nos-restd listens on <ip> inside the table's VRF, port 8080. There is no \
-                     authentication — the VRF and address are the only access boundary. The \
-                     address must be a specific unicast address already configured on an \
+            detail: "nos-restd listens on <ip> inside the table's VRF, port 8080. Every request \
+                     needs HTTP Basic credentials of a configured user ('set user <name> \
+                     password <clear>'). The address must be a specific unicast address already configured on an \
                      interface in that VRF; until it is, nos-restd keeps retrying the bind.",
         },
         Configuration),

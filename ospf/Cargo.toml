@@ -7,6 +7,7 @@ edition = "2021"
 workspace = true
 
 [dependencies]
+nos-pki            = { workspace = true }
 tokio              = { workspace = true }
 serde              = { workspace = true }
 tracing            = { workspace = true }
@@ -33,4 +34,5 @@ name = "nos-ospfd"
 path = "src/main.rs"
 
 [dev-dependencies]
+nos-pki  = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }

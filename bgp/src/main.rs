@@ -5,6 +5,7 @@ use clap::Parser;
 use nos_bgp::session::SessionManager;
 use nos_bgp::{reconcile, rib_push_client, server, watchdog_client};
 use nos_log_client::ForwardingLayer;
+use nos_pki::Identity;
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
@@ -59,6 +60,9 @@ async fn main() -> anyhow::Result<()> {
         .file_name(args.profile_memory_out.clone())
         .build();
 
+    // Handed over by nos-watchdogd on stdin; there is no plaintext fallback.
+    let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
+
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     tracing_subscriber::registry()
         // Without this there's no way to turn the log volume down at all —
@@ -76,10 +80,11 @@ async fn main() -> anyhow::Result<()> {
         .with(ForwardingLayer::install(
             format!("nos-bgpd[{}]", args.instance),
             args.log_socket.clone(),
+            identity.clone(),
             shutdown_rx.clone(),
         ))
         .init();
-    info!(instance = %args.instance, "nos-bgpd starting");
+    info!(instance = %args.instance, peer = ?identity.peer(), "nos-bgpd starting");
     #[cfg(feature = "dhat-heap")]
     info!(out = %args.profile_memory_out.display(), "memory profiling enabled (dhat)");
 
@@ -111,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
         sessions.clone(),
         shutdown_rx,
     ));
-    let server_task = server::start(&listen_socket, args.instance.clone(), sessions)
+    let server_task = server::start(&listen_socket, args.instance.clone(), sessions, &identity)
         .inspect_err(|e| {
             tracing::error!(instance = %args.instance, error = %e, "failed to start BGP IPC server");
         })

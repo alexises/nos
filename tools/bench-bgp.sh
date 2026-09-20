@@ -657,6 +657,7 @@ provision_nos_peer() {
     -v "${DUT}-run:/run/nos" \
     "$NOS_IMAGE" \
     --config-socket /run/nos/config.sock \
+    --login-user admin --login-password admin \
     --address "$DUT_IP/24" \
     --asn "$DUT_AS" \
     --router-id "$DUT_IP" \

@@ -838,6 +838,8 @@ pub fn render_config(config: &Config) -> String {
     if config.lldp != nos_proto::LldpSettings::default() {
         lines.push(render_lldp_settings(&config.lldp));
     }
+    // Names only — a user's password (hash) is never displayed.
+    lines.extend(config.users.iter().map(|u| format!("user {}", u.name)));
     if config.bgp_instances.is_empty() {
         lines.push("no BGP instances configured".to_string());
     } else {
@@ -1263,6 +1265,9 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         render_field_diff(&mut lines, field, "", color);
     }
 
+    for section in &diff.users {
+        render_section(&mut lines, section, 0, color);
+    }
     for section in &diff.bgp_instances {
         render_section(&mut lines, section, 0, color);
     }
@@ -2260,5 +2265,19 @@ mod tests {
         assert!(out.contains("lacp bond1: system 02:00:00:00:00:ab, key 7, rate fast"));
         assert!(out.contains("eth1: port 4, receive current, mux distributing, partner 02:00:00:00:00:01 key 3 port 9, selected yes, synchronized yes"));
         assert!(out.contains("eth2: port 5, receive defaulted, mux detached, partner none, selected no, synchronized no"));
+    }
+
+    #[test]
+    fn render_config_shows_user_names_but_never_the_password() {
+        let config = Config {
+            users: vec![nos_proto::User {
+                name: "alice".to_string(),
+                password: "$argon2id$secret-hash".to_string(),
+            }],
+            ..Config::default()
+        };
+        let text = render_config(&config);
+        assert!(text.contains("user alice"));
+        assert!(!text.contains("argon2id") && !text.contains("secret-hash"));
     }
 }

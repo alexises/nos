@@ -4,11 +4,11 @@
 
 use std::time::Duration;
 
-use anyhow::bail;
+use anyhow::{bail, Context as _};
 use reqwest::Method;
 
 use crate::consts::*;
-use crate::router::{log, strings, R};
+use crate::router::{log, strings, Router, R};
 use crate::world::World;
 
 pub async fn loopback(w: &mut World) -> anyhow::Result<()> {
@@ -503,6 +503,22 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
 
+    // Authentication: every route refuses missing or wrong credentials (HTTP
+    // Basic, checked against the hashed `users` in nos-configd's config).
+    for (path, credentials) in [
+        ("/v1/config", None),
+        ("/v1/config", Some((E2E_USER, "wrong-password"))),
+        ("/v1/config", Some(("nobody", E2E_PASSWORD))),
+        ("/openapi.json", None),
+        ("/swagger-ui/", None),
+    ] {
+        let (status, _) = a.rest_as(Method::GET, path, None, credentials).await?;
+        if status != 401 {
+            bail!("router-a: GET {path} as {credentials:?} -> {status}, want 401");
+        }
+    }
+    log("router-a: REST refuses missing/wrong credentials with 401");
+
     // Show endpoints, answered by other daemons (config, rib, bgp, interface).
     let config = a.rest_expect(Method::GET, "/v1/config", None, 200).await?;
     let config: serde_json::Value = serde_json::from_str(&config)?;
@@ -664,7 +680,12 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     let url = format!("http://{IP_A}:{REST_PORT}/v1/logs/follow?source=nos-configd&limit=1");
     let stream = tokio::spawn(async move {
         let mut text = String::new();
-        let Ok(resp) = reqwest::get(&url).await else {
+        let Ok(resp) = reqwest::Client::new()
+            .get(&url)
+            .basic_auth(E2E_USER, Some(E2E_PASSWORD))
+            .send()
+            .await
+        else {
             return text;
         };
         let mut chunks = futures::StreamExt::boxed(resp.bytes_stream());
@@ -687,7 +708,89 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     }
     log("router-a: log follow streamed a live entry over sse");
 
+    rest_users(a).await?;
     rest_destructive(w).await
+}
+
+/// A clear password set through the config tree is stored as a hash; setting
+/// the same one again changes nothing (no diff, identical hash); a different
+/// one replaces it and the old one stops working.
+async fn rest_users(a: &Router) -> anyhow::Result<()> {
+    let tx = format!("/v1/transactions/{REST_TX}");
+    let user = format!("{tx}/user/{REST_USER}");
+    let set = |password: &str| format!(r#"{{"name":"{REST_USER}","password":"{password}"}}"#);
+    let login = |password: &'static str| async move {
+        a.rest_as(Method::GET, "/v1/config", None, Some((REST_USER, password)))
+            .await
+            .map(|(status, _)| status)
+    };
+    let stored_hash = || async {
+        let config = a.rest_expect(Method::GET, "/v1/config", None, 200).await?;
+        let config: serde_json::Value = serde_json::from_str(&config)?;
+        config["users"]
+            .as_array()
+            .and_then(|users| users.iter().find(|u| u["name"] == REST_USER))
+            .and_then(|u| u["password"].as_str().map(str::to_string))
+            .with_context(|| format!("no user {REST_USER} in /v1/config"))
+    };
+
+    a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        .await?;
+    a.rest_expect(Method::PUT, &user, Some(&set("first")), 200)
+        .await?;
+    a.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+        .await?;
+    let hash = stored_hash().await?;
+    if !hash.starts_with("$argon2id$") || hash.contains("first") {
+        bail!("router-a: password is not stored as an argon2id hash: {hash}");
+    }
+    if login("first").await? != 200 {
+        bail!("router-a: the new user cannot log in with its password");
+    }
+
+    // Same clear password again: empty diff, identical hash after commit.
+    a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        .await?;
+    a.rest_expect(Method::PUT, &user, Some(&set("first")), 200)
+        .await?;
+    let diff = a
+        .rest_expect(Method::GET, &format!("{tx}/diff"), None, 200)
+        .await?;
+    let diff: serde_json::Value = serde_json::from_str(&diff)?;
+    if diff["users"].as_array().is_none_or(|u| !u.is_empty()) {
+        bail!("router-a: re-setting the same password shows a diff: {diff}");
+    }
+    a.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+        .await?;
+    if stored_hash().await? != hash {
+        bail!("router-a: re-setting the same password changed its hash");
+    }
+    log("router-a: re-setting the same password left the hash and diff unchanged");
+
+    // A different password replaces it; the old one stops working.
+    a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        .await?;
+    a.rest_expect(Method::PUT, &user, Some(&set("second")), 200)
+        .await?;
+    a.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+        .await?;
+    if stored_hash().await? == hash {
+        bail!("router-a: a different password kept the old hash");
+    }
+    if login("first").await? != 401 || login("second").await? != 200 {
+        bail!("router-a: after the change only the new password should log in");
+    }
+
+    a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        .await?;
+    a.rest_expect(Method::DELETE, &user, None, 204).await?;
+    a.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
+        .await?;
+    if login("second").await? != 401 {
+        bail!("router-a: a deleted user can still log in");
+    }
+    log("router-a: user password change and deletion verified over REST");
+    Ok(())
 }
 
 /// The two checks that sever the very channel they are driven over, run on a

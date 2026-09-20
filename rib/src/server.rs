@@ -3,15 +3,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
+use nos_pki::{Identity, Incoming, Listener};
 use nos_proto::{
-    BgpRouteUpdate, IpNet, IpcCodec, OspfRouteUpdate, PrefixRoutes, RibEvent, RibRequest,
+    BgpRouteUpdate, IpNet, IpcCodec, OspfRouteUpdate, PrefixRoutes, RibEvent, RibRequest, Role,
     RouteEntry, RouteSourceKind,
 };
-use tokio::net::UnixListener;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::driver::RibDriver;
 use crate::rib::{BestPathChange, Rib, RibEntry, RouteSource};
@@ -34,21 +34,40 @@ pub fn start(
     table: String,
     rib: Arc<RwLock<Rib>>,
     driver: Arc<dyn RibDriver>,
+    identity: &Identity,
 ) -> std::io::Result<JoinHandle<()>> {
-    if listen_socket.exists() {
-        std::fs::remove_file(listen_socket)?;
-    }
-    let listener = UnixListener::bind(listen_socket)?;
+    let listener = identity.listen(listen_socket)?;
     info!(table = %table, socket = %listen_socket.display(), "RIB IPC server listening");
     let ctx = Arc::new(Context { table, rib, driver });
     Ok(tokio::spawn(accept_loop(listener, ctx)))
 }
 
-async fn accept_loop(listener: UnixListener, ctx: Arc<Context>) {
+/// Who may send what. Route pushes are the sensitive part — they become
+/// kernel routes — so each is reserved for the one daemon family that owns
+/// that source. No wildcard arm: a new request must be classified.
+// ponytail: role-level only. `bgpd/r2` could still push into `rt1`; binding
+// an instance to its table needs a config lookup — add it if that matters.
+fn allowed(role: Role, req: &RibRequest) -> bool {
+    match req {
+        RibRequest::GetRoutes | RibRequest::Lookup { .. } => {
+            matches!(role, Role::User | Role::Restd)
+        }
+        RibRequest::GetVrfName | RibRequest::GetTableId => matches!(
+            role,
+            Role::User | Role::Restd | Role::Interfaced | Role::Bgpd | Role::Ospfd | Role::Ospfv3d
+        ),
+        RibRequest::PushBgpRoutes(_) => role == Role::Bgpd,
+        // `nos-ospfv3d` shares the OSPF route source: its SPF results are
+        // pushed with the same request.
+        RibRequest::PushOspfRoutes(_) => matches!(role, Role::Ospfd | Role::Ospfv3d),
+    }
+}
+
+async fn accept_loop(listener: Listener, ctx: Arc<Context>) {
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
-                tokio::spawn(handle_connection(stream, ctx.clone()));
+            Ok(incoming) => {
+                tokio::spawn(serve(incoming, ctx.clone()));
             }
             Err(e) => {
                 error!(table = %ctx.table, error = %e, "RIB IPC accept loop terminated");
@@ -58,13 +77,27 @@ async fn accept_loop(listener: UnixListener, ctx: Arc<Context>) {
     }
 }
 
-async fn handle_connection(stream: tokio::net::UnixStream, ctx: Arc<Context>) {
-    let (read_half, write_half) = stream.into_split();
+async fn serve(incoming: Incoming, ctx: Arc<Context>) {
+    match incoming.handshake_as(Role::parse).await {
+        Ok((stream, role, name)) => handle_connection(stream, role, name, ctx).await,
+        Err(e) => debug!(table = %ctx.table, error = %e, "RIB IPC handshake refused"),
+    }
+}
+
+async fn handle_connection(stream: nos_pki::Stream, role: Role, name: String, ctx: Arc<Context>) {
+    let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<RibRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<RibEvent>::default());
 
     while let Some(msg) = reader.next().await {
         let event = match msg {
+            Ok(req) if !allowed(role, &req) => {
+                warn!(
+                    table = %ctx.table, role = role.as_str(), name = %name,
+                    "RIB request refused: this role may not send it"
+                );
+                break;
+            }
             Ok(req) => dispatch(&ctx, req).await,
             Err(e) => {
                 warn!(table = %ctx.table, error = %e, "RIB IPC read error");
@@ -285,5 +318,37 @@ fn to_source_kind(source: RouteSource) -> RouteSourceKind {
         RouteSource::Static => RouteSourceKind::Static,
         RouteSource::Bgp => RouteSourceKind::Bgp,
         RouteSource::Ospf => RouteSourceKind::Ospf,
+    }
+}
+
+#[cfg(test)]
+mod authz_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_owning_daemon_family_may_push_routes() {
+        for role in Role::ALL {
+            assert_eq!(
+                allowed(role, &RibRequest::PushBgpRoutes(vec![])),
+                role == Role::Bgpd
+            );
+            assert_eq!(
+                allowed(role, &RibRequest::PushOspfRoutes(vec![])),
+                matches!(role, Role::Ospfd | Role::Ospfv3d)
+            );
+        }
+    }
+
+    #[test]
+    fn route_queries_are_for_people_and_the_rest_api() {
+        for role in Role::ALL {
+            let expected = matches!(role, Role::User | Role::Restd);
+            assert_eq!(allowed(role, &RibRequest::GetRoutes), expected, "{role:?}");
+        }
+        // The daemons that resolve a VRF through this instance.
+        for role in [Role::Interfaced, Role::Bgpd, Role::Ospfd, Role::Ospfv3d] {
+            assert!(allowed(role, &RibRequest::GetVrfName), "{role:?}");
+        }
+        assert!(!allowed(Role::Lacpd, &RibRequest::GetVrfName));
     }
 }

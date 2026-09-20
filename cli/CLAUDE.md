@@ -6,6 +6,10 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 
 `nos-cli` depends only on `nos-proto` for wire types (`Config`, `Request`, `Event`, `IpcCodec`, `CommandDoc`, `Topic`, `ServiceRef`, `WatchdogRequest`/`WatchdogEvent`, `RibRequest`/`RibEvent`, `InterfaceRequest`/`InterfaceEvent`, `LogRequest`/`LogEvent`, `BgpRequest`/`BgpEvent`, `OspfRequest`/`OspfEvent`, `LacpRequest`/`LacpEvent`, `LldpRequest`/`LldpEvent`) — it does **not** depend on `nos-config` internals, matching the rule in the root `CLAUDE.md` that client components never depend on the config daemon directly. It dials each daemon's Unix socket the same way any future component client would.
 
+## Login
+
+`main.rs` first reads the watchdog's public `ca.crt` (`--pki-ca`, default `/run/nos/pki/ca.crt`) as its trust anchor and installs an anonymous `nos_pki::Identity`; then `main.rs::login` prompts `login:` (stdin) and `password:` (no echo, `rpassword`), generates a keypair + CSR, and sends `WatchdogRequest::Login` to `nos-watchdogd` (`watchdog_client::login`), which checks the password against the running config's users and certifies the key as `user/<name>` (3 attempts, then exit 1). The certificate lives in memory only (`Identity::set_certificate`) and `keep_certificate_fresh` renews it at half-life via `RenewCert`, with no password. It **fails closed** — no reachable watchdog, no shell. Every daemon client here dials with `nos_pki::connect`/`connect_role`; `nos-cli` no longer sees password hashes at all. `set user <name> password <clear>` / `delete user <name>` edit the users; `show config` prints `user <name>` only and `diff` shows a user's password as `<hidden>`/`<changed>`, never a hash. See root `CLAUDE.md`, "IPC security". `set user <name> password <clear>` / `delete user <name>` edit the users; `show config` prints `user <name>` only and `diff` shows a user's password as `<hidden>`/`<changed>`, never a hash.
+
 ## Modules
 
 | Module | Role |

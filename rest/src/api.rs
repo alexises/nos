@@ -13,6 +13,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use utoipa_swagger_ui::{Config, SwaggerUi};
 
+use crate::auth::{basic_auth, BasicAuthScheme};
 use crate::ipc::Daemons;
 use crate::{clear, openapi, show, tx};
 
@@ -21,10 +22,12 @@ use crate::{clear, openapi, show, tx};
     info(
         title = "NOS REST API",
         description = "Every `show` query and the transaction/config editing surface of the NOS \
-            shell. There is no authentication: the API listens on one address inside one VRF. \
-            The config tree is the URL tree — `/v1/transactions/{tx}` is the whole in-progress \
+            shell. Every request needs HTTP Basic credentials of a user in the config \
+            (`set user <name> password <clear>`). The config tree is the URL tree — `/v1/transactions/{tx}` is the whole in-progress \
             config and each path below it a subsection; `diff` and `commit` are reserved."
     ),
+    modifiers(&BasicAuthScheme),
+    security(("basic" = [])),
     tags(
         (name = "show", description = "Read-only operational state"),
         (name = "transactions", description = "Named config transactions"),
@@ -88,5 +91,8 @@ pub fn router(daemons: Daemons) -> Router {
         // Swagger UI reads the route above (not a `utoipa` struct of its own),
         // so it shows the generated config-tree paths too.
         .merge(SwaggerUi::new("/swagger-ui").config(Config::from("/openapi.json")))
-        .with_state(daemons)
+        .with_state(daemons.clone())
+        // Last, so it wraps every route above — the merged Swagger UI, the
+        // OpenAPI document and the SSE log stream included.
+        .layer(axum::middleware::from_fn_with_state(daemons, basic_auth))
 }

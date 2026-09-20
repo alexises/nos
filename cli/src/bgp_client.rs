@@ -2,9 +2,8 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{BgpEvent, BgpRequest, IpcCodec, PeerSummary};
+use nos_proto::{BgpEvent, BgpRequest, IpcCodec, PeerSummary, Role};
 use thiserror::Error;
-use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 #[derive(Debug, Error)]
@@ -27,19 +26,18 @@ async fn connect(
     bgp_socket: &Path,
 ) -> Result<
     (
-        FramedRead<tokio::net::unix::OwnedReadHalf, IpcCodec<BgpEvent>>,
-        FramedWrite<tokio::net::unix::OwnedWriteHalf, IpcCodec<BgpRequest>>,
+        FramedRead<tokio::io::ReadHalf<nos_pki::Stream>, IpcCodec<BgpEvent>>,
+        FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<BgpRequest>>,
     ),
     BgpClientError,
 > {
-    let stream =
-        UnixStream::connect(bgp_socket)
-            .await
-            .map_err(|source| BgpClientError::Connect {
-                path: bgp_socket.to_path_buf(),
-                source,
-            })?;
-    let (r, w) = stream.into_split();
+    let stream = nos_pki::connect_role(bgp_socket, Role::Bgpd)
+        .await
+        .map_err(|source| BgpClientError::Connect {
+            path: bgp_socket.to_path_buf(),
+            source,
+        })?;
+    let (r, w) = tokio::io::split(stream);
     Ok((
         FramedRead::new(r, IpcCodec::<BgpEvent>::default()),
         FramedWrite::new(w, IpcCodec::<BgpRequest>::default()),

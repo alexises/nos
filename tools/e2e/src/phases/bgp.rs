@@ -11,7 +11,7 @@ use crate::world::World;
 
 /// `--static-route` + `--redistribute` flags: router-a (or a client) redistributes
 /// `REDISTRIBUTE_PREFIX` from static into bgp.
-fn redistribute() -> Vec<&'static str> {
+pub(super) fn redistribute() -> Vec<&'static str> {
     vec![
         "--static-route",
         REDISTRIBUTE_PREFIX,
@@ -25,7 +25,7 @@ fn loc_rib() -> String {
     format!("loc-rib best path for {REDISTRIBUTE_PREFIX} updated")
 }
 
-fn learned() -> String {
+pub(super) fn learned() -> String {
     format!("learned route for {REDISTRIBUTE_PREFIX} into adj-rib-in")
 }
 

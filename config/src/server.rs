@@ -1,89 +1,79 @@
 use std::fmt;
-use std::net::SocketAddr;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::str::FromStr;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{Event, IpcCodec, Request};
-use tokio::net::{TcpListener, UnixListener};
+use nos_pki::{Identity, Incoming, Listener, PeerId};
+use nos_proto::{Event, IpcCodec, Request, Role};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, error, info, warn};
 
+use crate::authz;
 use crate::store::{CommitUpdate, ConfigStore};
 
-/// Where the IPC server binds.
+/// Where the IPC server binds: a Unix socket path (absolute or relative to
+/// the CWD), e.g. `/run/nos/config.sock`.
 ///
-/// Parsed from a string: tries `SocketAddr` first (IPv4 or IPv6); if that
-/// fails the whole string is used as a Unix socket path (absolute or relative).
-///
-/// Examples:
-///   `127.0.0.1:9000`          → TCP
-///   `[::1]:9000`              → TCP (IPv6)
-///   `/run/nos/config.sock`    → Unix (absolute)
-///   `config.sock`             → Unix (relative to CWD)
+/// There is deliberately no TCP variant: every connection is mutually
+/// authenticated TLS over a Unix socket, and a network listener would need
+/// its own answer to "who may reach it".
 #[derive(Debug, Clone)]
 pub enum ListenAddr {
     Unix(PathBuf),
-    Tcp(SocketAddr),
 }
 
 impl FromStr for ListenAddr {
     type Err = std::convert::Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if let Ok(addr) = s.parse::<SocketAddr>() {
-            return Ok(ListenAddr::Tcp(addr));
-        }
         Ok(ListenAddr::Unix(PathBuf::from(s)))
     }
 }
 
 impl fmt::Display for ListenAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ListenAddr::Tcp(addr) => write!(f, "{addr}"),
-            ListenAddr::Unix(path) => write!(f, "unix:{}", path.display()),
-        }
+        let ListenAddr::Unix(path) = self;
+        write!(f, "unix:{}", path.display())
+    }
+}
+
+/// Who is on the other end of one connection, from its certificate.
+struct Caller {
+    role: Role,
+    name: String,
+}
+
+impl Caller {
+    fn from_peer(peer: PeerId) -> Option<Self> {
+        Some(Self {
+            role: Role::parse(&peer.role)?,
+            name: peer.name,
+        })
     }
 }
 
 /// Binds the given address and spawns the IPC accept loop.
 ///
 /// Returns a `JoinHandle` the caller must keep alive for the server to run.
-pub fn start(addr: &ListenAddr, store: ConfigStore) -> std::io::Result<JoinHandle<()>> {
-    match addr {
-        ListenAddr::Unix(path) => {
-            if path.exists() {
-                std::fs::remove_file(path)?;
-            }
-            let listener = UnixListener::bind(path)?;
-            info!(listen = %addr, "config IPC server listening");
-            Ok(tokio::spawn(accept_loop_unix(listener, store)))
-        }
-        ListenAddr::Tcp(addr) => {
-            // TcpListener::bind is async, so we bind inside the spawned task.
-            let addr = *addr;
-            Ok(tokio::spawn(async move {
-                match TcpListener::bind(addr).await {
-                    Ok(listener) => {
-                        info!(listen = %addr, "config IPC server listening");
-                        accept_loop_tcp(listener, store).await;
-                    }
-                    Err(e) => error!(error = %e, listen = %addr, "IPC TCP bind failed"),
-                }
-            }))
-        }
-    }
+pub fn start(
+    addr: &ListenAddr,
+    store: ConfigStore,
+    identity: &Identity,
+) -> std::io::Result<JoinHandle<()>> {
+    let ListenAddr::Unix(path) = addr;
+    let listener = identity.listen(path)?;
+    info!(listen = %addr, "config IPC server listening");
+    Ok(tokio::spawn(accept_loop(listener, store)))
 }
 
-async fn accept_loop_unix(listener: UnixListener, store: ConfigStore) {
+async fn accept_loop(listener: Listener, store: ConfigStore) {
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
-                tokio::spawn(handle_connection(stream, store.clone()));
+            Ok(incoming) => {
+                tokio::spawn(serve(incoming, store.clone()));
             }
             Err(e) => {
                 error!(error = %e, "IPC accept loop terminated");
@@ -93,18 +83,21 @@ async fn accept_loop_unix(listener: UnixListener, store: ConfigStore) {
     }
 }
 
-async fn accept_loop_tcp(listener: TcpListener, store: ConfigStore) {
-    loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                tokio::spawn(handle_connection(stream, store.clone()));
-            }
-            Err(e) => {
-                error!(error = %e, "IPC TCP accept loop terminated");
-                break;
-            }
+/// One connection, handshake to hang-up. The handshake runs here, in the
+/// connection's own task, so a slow peer never stalls the accept loop.
+async fn serve(incoming: Incoming, store: ConfigStore) {
+    let (stream, peer) = match incoming.handshake().await {
+        Ok(ok) => ok,
+        Err(e) => {
+            debug!(error = %e, "IPC tls handshake failed");
+            return;
         }
-    }
+    };
+    let Some(caller) = peer.and_then(Caller::from_peer) else {
+        warn!("IPC peer's certificate carries no recognised role, dropping it");
+        return;
+    };
+    handle_connection(stream, caller, store).await;
 }
 
 /// Handles every `Request` variant except `Subscribe`/`Unsubscribe`, which
@@ -175,7 +168,7 @@ async fn dispatch_request(store: &ConfigStore, req: Request) -> Option<Event> {
     })
 }
 
-async fn handle_connection<S>(stream: S, store: ConfigStore)
+async fn handle_connection<S>(stream: S, caller: Caller, store: ConfigStore)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -218,7 +211,7 @@ where
                     }
                 };
                 let flow =
-                    on_request(req, &store, &mut writer, &sub_tx, &mut sub_task).await;
+                    on_request(req, &caller, &store, &mut writer, &sub_tx, &mut sub_task).await;
                 if flow.is_break() {
                     break;
                 }
@@ -238,6 +231,7 @@ where
 /// gone (a write failed) and the connection should close.
 async fn on_request<S>(
     req: Request,
+    caller: &Caller,
     store: &ConfigStore,
     writer: &mut FramedWrite<tokio::io::WriteHalf<S>, IpcCodec<Event>>,
     sub_tx: &mpsc::Sender<Event>,
@@ -246,6 +240,19 @@ async fn on_request<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
+    if !authz::allowed(caller.role, &req) {
+        // `Request`'s Debug never prints a password (`UserOp` hides it).
+        let shown = format!("{req:?}");
+        warn!(
+            role = caller.role.as_str(), name = %caller.name,
+            request = %shown.chars().take(80).collect::<String>(),
+            "config request refused: this role may not send it"
+        );
+        let _ = writer
+            .send(Event::Error("permission denied".to_string()))
+            .await;
+        return ControlFlow::Break(());
+    }
     let reply = match req {
         Request::Subscribe => {
             let forwarder = spawn_forwarder(store, sub_tx.clone(), |u| {

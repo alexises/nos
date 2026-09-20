@@ -1,7 +1,7 @@
 use futures::{SinkExt, StreamExt};
 use nos_cli::lldp_client::get_neighbors;
+use nos_pki::testing::shared;
 use nos_proto::{IpcCodec, LldpEvent, LldpNeighbor, LldpRequest};
-use tokio::net::UnixListener;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 fn sample() -> LldpNeighbor {
@@ -22,11 +22,11 @@ fn sample() -> LldpNeighbor {
 async fn get_neighbors_returns_neighbors_on_success() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("lldp.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("lldpd", "").listen(&path).unwrap();
 
     let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (r, w) = stream.into_split();
+        let (stream, _) = listener.accept().await.unwrap().handshake().await.unwrap();
+        let (r, w) = tokio::io::split(stream);
         let mut reader = FramedRead::new(r, IpcCodec::<LldpRequest>::default());
         let mut writer = FramedWrite::new(w, IpcCodec::<LldpEvent>::default());
         let got = reader.next().await.unwrap().unwrap();

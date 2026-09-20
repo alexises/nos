@@ -2,9 +2,8 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, PrefixRoutes, RibEvent, RibRequest};
+use nos_proto::{IpcCodec, PrefixRoutes, RibEvent, RibRequest, Role};
 use thiserror::Error;
-use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 #[derive(Debug, Error)]
@@ -27,19 +26,18 @@ async fn connect(
     rib_socket: &Path,
 ) -> Result<
     (
-        FramedRead<tokio::net::unix::OwnedReadHalf, IpcCodec<RibEvent>>,
-        FramedWrite<tokio::net::unix::OwnedWriteHalf, IpcCodec<RibRequest>>,
+        FramedRead<tokio::io::ReadHalf<nos_pki::Stream>, IpcCodec<RibEvent>>,
+        FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<RibRequest>>,
     ),
     RibClientError,
 > {
-    let stream =
-        UnixStream::connect(rib_socket)
-            .await
-            .map_err(|source| RibClientError::Connect {
-                path: rib_socket.to_path_buf(),
-                source,
-            })?;
-    let (r, w) = stream.into_split();
+    let stream = nos_pki::connect_role(rib_socket, Role::Ribd)
+        .await
+        .map_err(|source| RibClientError::Connect {
+            path: rib_socket.to_path_buf(),
+            source,
+        })?;
+    let (r, w) = tokio::io::split(stream);
     Ok((
         FramedRead::new(r, IpcCodec::<RibEvent>::default()),
         FramedWrite::new(w, IpcCodec::<RibRequest>::default()),

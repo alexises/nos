@@ -6,12 +6,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{Config, Event, IpcCodec, Request, ServiceRef};
+use nos_proto::{Config, Event, IpcCodec, Request, Role, ServiceRef};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::UnixStream;
+use tokio::io::{split, ReadHalf, WriteHalf};
 use tokio_util::codec::{FramedRead, FramedWrite};
+
+type Stream = nos_pki::Stream;
 
 use crate::error::{ApiError, ApiResult};
 use crate::watchdog_client::resolve_once;
@@ -24,16 +25,22 @@ pub struct Daemons {
     pub config_socket: Arc<PathBuf>,
 }
 
-/// Sends `req` to `socket` and returns the first event of the reply.
-pub async fn call<Req, Ev>(socket: &Path, req: Req) -> ApiResult<Ev>
+/// Sends `req` to the daemon at `socket` — which must prove it is
+/// `role`/`name` — and returns the first event of the reply.
+pub async fn call<Req, Ev>(
+    socket: &Path,
+    role: impl AsRef<str>,
+    name: &str,
+    req: Req,
+) -> ApiResult<Ev>
 where
     Req: Serialize,
     Ev: DeserializeOwned,
 {
-    let stream = UnixStream::connect(socket).await.map_err(|e| {
+    let stream = nos_pki::connect(socket, role, name).await.map_err(|e| {
         ApiError::Unavailable(format!("cannot reach daemon at {}: {e}", socket.display()))
     })?;
-    let (r, w) = stream.into_split();
+    let (r, w) = split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<Ev>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<Req>::default());
     writer
@@ -55,19 +62,21 @@ where
 /// connection as the client leaving.
 pub async fn open_stream<Req, Ev>(
     socket: &Path,
+    role: impl AsRef<str>,
+    name: &str,
     req: Req,
 ) -> ApiResult<(
-    FramedRead<OwnedReadHalf, IpcCodec<Ev>>,
-    FramedWrite<OwnedWriteHalf, IpcCodec<Req>>,
+    FramedRead<ReadHalf<Stream>, IpcCodec<Ev>>,
+    FramedWrite<WriteHalf<Stream>, IpcCodec<Req>>,
 )>
 where
     Req: Serialize,
     Ev: DeserializeOwned,
 {
-    let stream = UnixStream::connect(socket).await.map_err(|e| {
+    let stream = nos_pki::connect(socket, role, name).await.map_err(|e| {
         ApiError::Unavailable(format!("cannot reach daemon at {}: {e}", socket.display()))
     })?;
-    let (r, w) = stream.into_split();
+    let (r, w) = split(stream);
     let reader = FramedRead::new(r, IpcCodec::<Ev>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<Req>::default());
     writer
@@ -87,7 +96,7 @@ impl Daemons {
         let socket = resolve_once(&self.watchdog_socket, &service)
             .await
             .ok_or_else(|| ApiError::Unavailable(format!("{service:?} is not running")))?;
-        call(&socket, req).await
+        call(&socket, service.role(), service.instance(), req).await
     }
 
     /// Resolves `service` through the watchdog broker, then `open_stream`s it.
@@ -96,8 +105,8 @@ impl Daemons {
         service: ServiceRef,
         req: Req,
     ) -> ApiResult<(
-        FramedRead<OwnedReadHalf, IpcCodec<Ev>>,
-        FramedWrite<OwnedWriteHalf, IpcCodec<Req>>,
+        FramedRead<ReadHalf<Stream>, IpcCodec<Ev>>,
+        FramedWrite<WriteHalf<Stream>, IpcCodec<Req>>,
     )>
     where
         Req: Serialize,
@@ -106,12 +115,12 @@ impl Daemons {
         let socket = resolve_once(&self.watchdog_socket, &service)
             .await
             .ok_or_else(|| ApiError::Unavailable(format!("{service:?} is not running")))?;
-        open_stream(&socket, req).await
+        open_stream(&socket, service.role(), service.instance(), req).await
     }
 
     /// One request to `nos-configd`, with its `Event::Error` mapped to a status.
     pub async fn config(&self, req: Request) -> ApiResult<Event> {
-        match call::<_, Event>(&self.config_socket, req).await? {
+        match call::<_, Event>(&self.config_socket, Role::Configd, "", req).await? {
             Event::Error(msg) => Err(ApiError::from_config(msg)),
             ev => Ok(ev),
         }

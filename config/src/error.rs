@@ -6,6 +6,8 @@ use thiserror::Error;
 pub enum ConfigError {
     #[error("validation failed:\n{0}")]
     Validation(#[from] garde::Report),
+    #[error("refusing to commit: it would remove every user and lock everyone out")]
+    NoUsersLeft,
     #[error("no transaction named '{0}'")]
     TransactionNotFound(String),
     #[error("edit failed: {0}")]

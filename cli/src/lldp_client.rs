@@ -1,9 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, LldpEvent, LldpNeighbor, LldpRequest};
+use nos_proto::{IpcCodec, LldpEvent, LldpNeighbor, LldpRequest, Role};
 use thiserror::Error;
-use tokio::net::UnixStream;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 #[derive(Debug, Error)]
@@ -22,14 +21,13 @@ pub enum LldpClientError {
 
 /// Fetches every neighbor `nos-lldpd` currently knows, across every interface.
 pub async fn get_neighbors(lldp_socket: &Path) -> Result<Vec<LldpNeighbor>, LldpClientError> {
-    let stream =
-        UnixStream::connect(lldp_socket)
-            .await
-            .map_err(|source| LldpClientError::Connect {
-                path: lldp_socket.to_path_buf(),
-                source,
-            })?;
-    let (r, w) = stream.into_split();
+    let stream = nos_pki::connect(lldp_socket, Role::Lldpd, "")
+        .await
+        .map_err(|source| LldpClientError::Connect {
+            path: lldp_socket.to_path_buf(),
+            source,
+        })?;
+    let (r, w) = tokio::io::split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<LldpEvent>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<LldpRequest>::default());
     writer.send(LldpRequest::GetNeighbors).await?;

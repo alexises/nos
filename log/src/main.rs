@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use nos_log::{persistence, server, LogStore};
+use nos_pki::Identity;
 use nos_proto::DEFAULT_LOG_SOCKET;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
@@ -39,6 +40,9 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
+    // Handed over by nos-watchdogd on stdin; there is no plaintext fallback.
+    let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
+    info!(peer = ?identity.peer(), "ipc identity loaded");
     info!(
         listen_socket = %args.listen_socket.display(),
         capacity = args.capacity,
@@ -58,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let server_task =
-        server::start(&args.listen_socket, store).context("starting log IPC server")?;
+        server::start(&args.listen_socket, store, &identity).context("starting log IPC server")?;
 
     wait_for_shutdown_signal()
         .await

@@ -2,11 +2,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, Ospfv3Event, Ospfv3Request};
-use tokio::net::UnixListener;
+use nos_pki::{Identity, Incoming, Listener, Stream};
+use nos_proto::{IpcCodec, Ospfv3Event, Ospfv3Request, Role};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::link::LinkManager;
 
@@ -17,20 +17,37 @@ pub fn start(
     listen_socket: &Path,
     instance: String,
     links: Arc<LinkManager>,
+    identity: &Identity,
 ) -> std::io::Result<JoinHandle<()>> {
-    if listen_socket.exists() {
-        std::fs::remove_file(listen_socket)?;
-    }
-    let listener = UnixListener::bind(listen_socket)?;
+    let listener = identity.listen(listen_socket)?;
     info!(instance = %instance, socket = %listen_socket.display(), "OSPFv3 IPC server listening");
     Ok(tokio::spawn(accept_loop(listener, instance, links)))
 }
 
-async fn accept_loop(listener: UnixListener, instance: String, links: Arc<LinkManager>) {
+/// Every request here is a read-only query: for people, and `Restd` on their
+/// behalf. Nothing else has a reason to ask, so nothing else gets in.
+fn may_query(role: Role) -> bool {
+    matches!(role, Role::User | Role::Restd)
+}
+
+async fn serve(incoming: Incoming, instance: String, links: Arc<LinkManager>) {
+    match incoming.handshake_as(Role::parse).await {
+        Ok((stream, role, _)) if may_query(role) => {
+            handle_connection(stream, instance, links).await;
+        }
+        Ok((_, role, name)) => warn!(
+            instance = %instance, role = role.as_str(), name = %name,
+            "OSPFv3 query refused: this role may not send it"
+        ),
+        Err(e) => debug!(instance = %instance, error = %e, "OSPFv3 IPC handshake refused"),
+    }
+}
+
+async fn accept_loop(listener: Listener, instance: String, links: Arc<LinkManager>) {
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
-                tokio::spawn(handle_connection(stream, instance.clone(), links.clone()));
+            Ok(incoming) => {
+                tokio::spawn(serve(incoming, instance.clone(), links.clone()));
             }
             Err(e) => {
                 error!(instance = %instance, error = %e, "OSPFv3 IPC accept loop terminated");
@@ -40,12 +57,8 @@ async fn accept_loop(listener: UnixListener, instance: String, links: Arc<LinkMa
     }
 }
 
-async fn handle_connection(
-    stream: tokio::net::UnixStream,
-    instance: String,
-    links: Arc<LinkManager>,
-) {
-    let (read_half, write_half) = stream.into_split();
+async fn handle_connection(stream: Stream, instance: String, links: Arc<LinkManager>) {
+    let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<Ospfv3Request>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<Ospfv3Event>::default());
 

@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_config::{persistence, ConfigStore, ListenAddr};
+use nos_config::{persistence, users, ConfigStore, ListenAddr};
 use nos_log_client::ForwardingLayer;
+use nos_pki::Identity;
 use nos_proto::DEFAULT_LOG_SOCKET;
 use tokio::sync::watch;
 use tracing_subscriber::layer::SubscriberExt;
@@ -12,9 +13,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[derive(Parser)]
 #[command(name = "nos-configd", about = "NOS configuration daemon")]
 struct Args {
-    /// Where to listen for IPC connections.
-    /// Accepts a Unix socket path (/run/nos/config.sock, config.sock)
-    /// or a TCP address (127.0.0.1:9000, `[::1]:9000`).
+    /// Unix socket path to listen on for IPC connections
+    /// (/run/nos/config.sock, config.sock). TLS only — no TCP.
     #[arg(long, default_value = "/run/nos/config.sock")]
     listen: ListenAddr,
 
@@ -34,6 +34,8 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // Handed over by nos-watchdogd on stdin; there is no plaintext fallback.
+    let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
     // No graceful-shutdown signal of its own (see the bare `ctrl_c()` wait
     // below) — this channel exists purely so the forwarder's reconnect loop
     // has something to stop on if it's ever given one; kept alive for the
@@ -52,21 +54,24 @@ async fn main() -> anyhow::Result<()> {
         .with(ForwardingLayer::install(
             "nos-configd",
             args.log_socket.clone(),
+            identity.clone(),
             shutdown_rx,
         ))
         .init();
 
-    let initial = persistence::load_or_default(&args.config_file)
+    let mut initial = persistence::load_or_default(&args.config_file)
         .with_context(|| format!("failed to load config from {}", args.config_file.display()))?;
+    users::seed_default_user(&mut initial);
 
     let store = ConfigStore::new(initial, Some(args.config_file.clone()));
     let _handle = store
-        .start_ipc_server(&args.listen)
+        .start_ipc_server(&args.listen, &identity)
         .inspect_err(|e| {
             tracing::error!(error = %e, listen = %args.listen, "failed to bind config IPC server");
         })
         .with_context(|| format!("failed to bind {}", args.listen))?;
 
+    tracing::info!(peer = ?identity.peer(), "ipc identity loaded");
     tracing::info!(config_file = %args.config_file.display(), "config file path");
 
     tokio::signal::ctrl_c()

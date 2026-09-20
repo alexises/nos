@@ -2,11 +2,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, OspfEvent, OspfRequest};
-use tokio::net::UnixListener;
+use nos_pki::{Identity, Incoming, Listener, Stream};
+use nos_proto::{IpcCodec, OspfEvent, OspfRequest, Role};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::link::LinkManager;
 
@@ -18,20 +18,29 @@ pub fn start(
     listen_socket: &Path,
     instance: String,
     links: Arc<LinkManager>,
+    identity: &Identity,
 ) -> std::io::Result<JoinHandle<()>> {
-    if listen_socket.exists() {
-        std::fs::remove_file(listen_socket)?;
-    }
-    let listener = UnixListener::bind(listen_socket)?;
+    let listener = identity.listen(listen_socket)?;
     info!(instance = %instance, socket = %listen_socket.display(), "OSPF IPC server listening");
     Ok(tokio::spawn(accept_loop(listener, instance, links)))
 }
 
-async fn accept_loop(listener: UnixListener, instance: String, links: Arc<LinkManager>) {
+/// Neighbor and database queries are for people (and `Restd` on their behalf);
+/// the redistribution feed is `nos-ribd`'s alone. No wildcard arm.
+fn allowed(role: Role, req: &OspfRequest) -> bool {
+    match req {
+        OspfRequest::GetNeighbors | OspfRequest::GetDatabase => {
+            matches!(role, Role::User | Role::Restd)
+        }
+        OspfRequest::RedistributeRoutes(_) => role == Role::Ribd,
+    }
+}
+
+async fn accept_loop(listener: Listener, instance: String, links: Arc<LinkManager>) {
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
-                tokio::spawn(handle_connection(stream, instance.clone(), links.clone()));
+            Ok(incoming) => {
+                tokio::spawn(serve(incoming, instance.clone(), links.clone()));
             }
             Err(e) => {
                 error!(instance = %instance, error = %e, "OSPF IPC accept loop terminated");
@@ -41,12 +50,21 @@ async fn accept_loop(listener: UnixListener, instance: String, links: Arc<LinkMa
     }
 }
 
+async fn serve(incoming: Incoming, instance: String, links: Arc<LinkManager>) {
+    match incoming.handshake_as(Role::parse).await {
+        Ok((stream, role, name)) => handle_connection(stream, role, name, instance, links).await,
+        Err(e) => debug!(instance = %instance, error = %e, "OSPF IPC handshake refused"),
+    }
+}
+
 async fn handle_connection(
-    stream: tokio::net::UnixStream,
+    stream: Stream,
+    role: Role,
+    name: String,
     instance: String,
     links: Arc<LinkManager>,
 ) {
-    let (read_half, write_half) = stream.into_split();
+    let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<OspfRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<OspfEvent>::default());
 
@@ -58,6 +76,13 @@ async fn handle_connection(
                 break;
             }
         };
+        if !allowed(role, &req) {
+            warn!(
+                instance = %instance, role = role.as_str(), name = %name,
+                "OSPF request refused: this role may not send it"
+            );
+            break;
+        }
         trace!(instance = %instance, request = ?req, "serving OSPF query");
         match req {
             OspfRequest::GetNeighbors => {
@@ -75,6 +100,24 @@ async fn handle_connection(
             OspfRequest::RedistributeRoutes(update) => {
                 links.apply_redistribute_update(update).await;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod authz_tests {
+    use super::*;
+
+    #[test]
+    fn only_ribd_feeds_redistribution_and_only_people_query() {
+        let feed = OspfRequest::RedistributeRoutes(nos_proto::RedistributeUpdate::Full(vec![]));
+        for role in Role::ALL {
+            assert_eq!(allowed(role, &feed), role == Role::Ribd, "{role:?} feed");
+            assert_eq!(
+                allowed(role, &OspfRequest::GetNeighbors),
+                matches!(role, Role::User | Role::Restd),
+                "{role:?} query"
+            );
         }
     }
 }

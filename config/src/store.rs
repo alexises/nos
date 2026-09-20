@@ -11,6 +11,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, info};
 
 use crate::error::ConfigError;
+use crate::users::hash_clear_passwords;
 
 const BROADCAST_CAPACITY: usize = 16;
 
@@ -49,6 +50,8 @@ impl ConfigStore {
     pub fn new(initial: Config, config_path: Option<PathBuf>) -> Self {
         let mut initial = initial;
         sync_routing_table_refs(&mut initial);
+        // A clear-text password seeded in the file (or by `seed_default_user`) is hashed here.
+        hash_clear_passwords(&mut initial.users, &[]);
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self(Arc::new(Inner {
             running: RwLock::new(initial),
@@ -124,7 +127,9 @@ impl ConfigStore {
             .get_mut(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
         debug!(transaction = %name, ?op, "applying op");
+        let users_before = txn.config.users.clone();
         op.apply(&mut txn.config)?;
+        self.hash_users(&mut txn.config, &users_before).await;
         txn.dirty = true;
         Ok(TransactionSnapshot {
             name: name.to_string(),
@@ -149,12 +154,14 @@ impl ConfigStore {
         let txn = txs
             .get_mut(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        let users_before = txn.config.users.clone();
         let mut doc = serde_json::to_value(&txn.config)?;
         match value {
             Some(json) => config_path::set(&mut doc, path, serde_json::from_str(json)?)?,
             None => config_path::remove(&mut doc, path)?,
         }
         txn.config = serde_json::from_value(doc)?;
+        self.hash_users(&mut txn.config, &users_before).await;
         txn.dirty = true;
         debug!(transaction = %name, path = %path.join("/"), remove = value.is_none(), "set transaction path");
         Ok(TransactionSnapshot {
@@ -163,6 +170,14 @@ impl ConfigStore {
             dirty: true,
             resumed: true,
         })
+    }
+
+    /// Hashes any clear-text password `config` now holds, reusing a matching
+    /// hash from the transaction's previous users or the running config.
+    /// Caller holds the `transactions` lock (lock order: transactions, running).
+    async fn hash_users(&self, config: &mut Config, users_before: &[nos_proto::User]) {
+        let running = self.0.running.read().await;
+        hash_clear_passwords(&mut config.users, &[users_before, &running.users]);
     }
 
     pub async fn get_transaction(&self, name: &str) -> Result<TransactionSnapshot, ConfigError> {
@@ -189,6 +204,9 @@ impl ConfigStore {
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
         // Pass the config itself as the validation context (cross-reference checks).
         txn.config.validate_with(&txn.config)?;
+        if txn.config.users.is_empty() && !self.0.running.read().await.users.is_empty() {
+            return Err(ConfigError::NoUsersLeft);
+        }
         let mut config = txn.config.clone();
         sync_routing_table_refs(&mut config);
         txs.remove(name);
@@ -243,8 +261,9 @@ impl ConfigStore {
     pub fn start_ipc_server(
         &self,
         addr: &crate::server::ListenAddr,
+        identity: &nos_pki::Identity,
     ) -> std::io::Result<tokio::task::JoinHandle<()>> {
-        crate::server::start(addr, self.clone())
+        crate::server::start(addr, self.clone(), identity)
     }
 }
 
@@ -726,5 +745,113 @@ mod tests {
         let running = store.running_snapshot().await;
         assert_eq!(running.static_routing_instances.len(), 1);
         assert_eq!(running.static_routing_instances[0].routes.len(), 1);
+    }
+
+    fn set_password_op(name: &str, password: &str) -> ConfigOp {
+        ConfigOp::User(nos_proto::UserOp::SetPassword {
+            name: name.to_string(),
+            password: password.to_string(),
+        })
+    }
+
+    async fn commit_password(store: &ConfigStore, tx: &str, name: &str, password: &str) {
+        store.open_transaction(tx, TransactionBase::Current).await;
+        store
+            .apply_op(tx, set_password_op(name, password))
+            .await
+            .unwrap();
+        store.commit_transaction(tx).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clear_password_is_hashed_and_resetting_the_same_one_is_no_diff() {
+        let store = ConfigStore::new(Config::default(), None);
+        commit_password(&store, "t1", "alice", "hunter2").await;
+        let hash = store.running_snapshot().await.users[0].password.clone();
+        assert!(nos_password::verify("hunter2", &hash));
+
+        // Same clear password again: hash untouched, so the transaction diff is empty.
+        store.open_transaction("t2", TransactionBase::Current).await;
+        let snap = store
+            .apply_op("t2", set_password_op("alice", "hunter2"))
+            .await
+            .unwrap();
+        assert_eq!(snap.config.users[0].password, hash);
+        assert!(store.diff_transaction("t2").await.unwrap().is_empty());
+        store.discard_transaction("t2").await.unwrap();
+
+        // A different password does change it, and shows up as a (hidden) diff.
+        store.open_transaction("t3", TransactionBase::Current).await;
+        store
+            .apply_op("t3", set_password_op("alice", "other"))
+            .await
+            .unwrap();
+        let diff = store.diff_transaction("t3").await.unwrap();
+        assert_eq!(diff.users.len(), 1);
+        assert_ne!(
+            store.get_transaction("t3").await.unwrap().config.users[0].password,
+            hash
+        );
+    }
+
+    #[tokio::test]
+    async fn reverting_to_the_running_password_inside_a_transaction_is_no_diff() {
+        let store = ConfigStore::new(Config::default(), None);
+        commit_password(&store, "t1", "alice", "one").await;
+        store.open_transaction("t2", TransactionBase::Current).await;
+        store
+            .apply_op("t2", set_password_op("alice", "two"))
+            .await
+            .unwrap();
+        store
+            .apply_op("t2", set_password_op("alice", "one"))
+            .await
+            .unwrap();
+        assert!(store.diff_transaction("t2").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_password_set_through_a_path_put_is_hashed() {
+        let store = ConfigStore::new(Config::default(), None);
+        store.open_transaction("t", TransactionBase::Blank).await;
+        let snap = store
+            .set_transaction_path(
+                "t",
+                &segs("user/bob"),
+                Some(r#"{"name":"bob","password":"pw"}"#),
+            )
+            .await
+            .unwrap();
+        assert!(nos_password::verify("pw", &snap.config.users[0].password));
+    }
+
+    #[tokio::test]
+    async fn clear_password_seeded_at_startup_is_hashed() {
+        let mut cfg = Config::default();
+        crate::users::seed_default_user(&mut cfg);
+        let store = ConfigStore::new(cfg, None);
+        let users = store.running_snapshot().await.users;
+        assert!(nos_password::verify("admin", &users[0].password));
+    }
+
+    #[tokio::test]
+    async fn commit_that_removes_every_user_is_refused() {
+        let store = ConfigStore::new(Config::default(), None);
+        commit_password(&store, "t1", "alice", "pw").await;
+        store.open_transaction("t2", TransactionBase::Current).await;
+        store
+            .apply_op(
+                "t2",
+                ConfigOp::User(nos_proto::UserOp::Delete {
+                    name: "alice".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.commit_transaction("t2").await,
+            Err(ConfigError::NoUsersLeft)
+        ));
+        assert_eq!(store.running_snapshot().await.users.len(), 1);
     }
 }

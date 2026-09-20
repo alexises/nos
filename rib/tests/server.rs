@@ -2,9 +2,10 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
+use nos_pki::testing::shared;
+use nos_pki::Stream;
 use nos_proto::{IpcCodec, PrefixRoutes, RibEvent, RibRequest, RouteSourceKind};
 use nos_rib::{server, NoopRibDriver, Rib, RibEntry, RouteSource};
-use tokio::net::UnixStream;
 use tokio::sync::RwLock;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -34,14 +35,21 @@ fn sample_rib() -> Rib {
     rib
 }
 
-async fn connect(
-    path: &std::path::Path,
-) -> (
-    FramedRead<tokio::net::unix::OwnedReadHalf, IpcCodec<RibEvent>>,
-    FramedWrite<tokio::net::unix::OwnedWriteHalf, IpcCodec<RibRequest>>,
-) {
-    let stream = UnixStream::connect(path).await.unwrap();
-    let (r, w) = stream.into_split();
+type Reader = FramedRead<tokio::io::ReadHalf<Stream>, IpcCodec<RibEvent>>;
+type Writer = FramedWrite<tokio::io::WriteHalf<Stream>, IpcCodec<RibRequest>>;
+
+/// Connects as a person, who may query but never push routes.
+async fn connect(path: &std::path::Path) -> (Reader, Writer) {
+    connect_as(path, "user", "tester").await
+}
+
+async fn connect_as(path: &std::path::Path, role: &str, name: &str) -> (Reader, Writer) {
+    let stream = shared()
+        .identity(role, name)
+        .connect(path, &nos_pki::PeerId::new("ribd", "rt1"))
+        .await
+        .unwrap();
+    let (r, w) = tokio::io::split(stream);
     (
         FramedRead::new(r, IpcCodec::<RibEvent>::default()),
         FramedWrite::new(w, IpcCodec::<RibRequest>::default()),
@@ -53,7 +61,14 @@ async fn get_routes_returns_sorted_prefixes_with_ranked_candidates() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("rib.sock");
     let rib = Arc::new(RwLock::new(sample_rib()));
-    let _server = server::start(&path, "rt1".to_string(), rib, Arc::new(NoopRibDriver)).unwrap();
+    let _server = server::start(
+        &path,
+        "rt1".to_string(),
+        rib,
+        Arc::new(NoopRibDriver),
+        &shared().identity("ribd", "rt1"),
+    )
+    .unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     writer.send(RibRequest::GetRoutes).await.unwrap();
@@ -76,7 +91,14 @@ async fn lookup_matches_longest_prefix() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("rib.sock");
     let rib = Arc::new(RwLock::new(sample_rib()));
-    let _server = server::start(&path, "rt1".to_string(), rib, Arc::new(NoopRibDriver)).unwrap();
+    let _server = server::start(
+        &path,
+        "rt1".to_string(),
+        rib,
+        Arc::new(NoopRibDriver),
+        &shared().identity("ribd", "rt1"),
+    )
+    .unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     let addr: IpAddr = "10.0.1.5".parse().unwrap();
@@ -95,7 +117,14 @@ async fn lookup_with_no_covering_prefix_returns_no_match() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("rib.sock");
     let rib = Arc::new(RwLock::new(sample_rib()));
-    let _server = server::start(&path, "rt1".to_string(), rib, Arc::new(NoopRibDriver)).unwrap();
+    let _server = server::start(
+        &path,
+        "rt1".to_string(),
+        rib,
+        Arc::new(NoopRibDriver),
+        &shared().identity("ribd", "rt1"),
+    )
+    .unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     let addr: IpAddr = "192.168.0.1".parse().unwrap();
@@ -183,7 +212,14 @@ async fn get_vrf_name_returns_the_drivers_answer() {
     let path = tmp.path().join("rib.sock");
     let rib = Arc::new(RwLock::new(sample_rib()));
     let driver: Arc<dyn nos_rib::RibDriver> = Arc::new(FakeVrfDriver(Some("vrf100".to_string())));
-    let _server = server::start(&path, "rt1".to_string(), rib, driver).unwrap();
+    let _server = server::start(
+        &path,
+        "rt1".to_string(),
+        rib,
+        driver,
+        &shared().identity("ribd", "rt1"),
+    )
+    .unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     writer.send(RibRequest::GetVrfName).await.unwrap();
@@ -198,7 +234,14 @@ async fn get_vrf_name_is_none_when_the_driver_has_no_vrf_yet() {
     let path = tmp.path().join("rib.sock");
     let rib = Arc::new(RwLock::new(sample_rib()));
     let driver: Arc<dyn nos_rib::RibDriver> = Arc::new(FakeVrfDriver(None));
-    let _server = server::start(&path, "rt1".to_string(), rib, driver).unwrap();
+    let _server = server::start(
+        &path,
+        "rt1".to_string(),
+        rib,
+        driver,
+        &shared().identity("ribd", "rt1"),
+    )
+    .unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     writer.send(RibRequest::GetVrfName).await.unwrap();
@@ -213,7 +256,14 @@ async fn get_table_id_returns_the_drivers_answer() {
     let path = tmp.path().join("rib.sock");
     let rib = Arc::new(RwLock::new(sample_rib()));
     let driver: Arc<dyn nos_rib::RibDriver> = Arc::new(FakeTableIdDriver(Some(100)));
-    let _server = server::start(&path, "rt1".to_string(), rib, driver).unwrap();
+    let _server = server::start(
+        &path,
+        "rt1".to_string(),
+        rib,
+        driver,
+        &shared().identity("ribd", "rt1"),
+    )
+    .unwrap();
 
     let (mut reader, mut writer) = connect(&path).await;
     writer.send(RibRequest::GetTableId).await.unwrap();
@@ -228,9 +278,16 @@ async fn get_table_id_is_none_when_the_driver_has_no_id_yet() {
     let path = tmp.path().join("rib.sock");
     let rib = Arc::new(RwLock::new(sample_rib()));
     let driver: Arc<dyn nos_rib::RibDriver> = Arc::new(FakeTableIdDriver(None));
-    let _server = server::start(&path, "rt1".to_string(), rib, driver).unwrap();
+    let _server = server::start(
+        &path,
+        "rt1".to_string(),
+        rib,
+        driver,
+        &shared().identity("ribd", "rt1"),
+    )
+    .unwrap();
 
-    let (mut reader, mut writer) = connect(&path).await;
+    let (mut reader, mut writer) = connect_as(&path, "bgpd", "r1").await;
     writer.send(RibRequest::GetTableId).await.unwrap();
     let event = reader.next().await.unwrap().unwrap();
 
@@ -289,9 +346,16 @@ async fn push_bgp_routes_full_inserts_into_shared_rib_and_applies_to_driver() {
     let path = tmp.path().join("rib.sock");
     let rib = Arc::new(RwLock::new(Rib::new()));
     let driver = Arc::new(RecordingDriver::default());
-    let _server = server::start(&path, "rt1".to_string(), rib.clone(), driver.clone()).unwrap();
+    let _server = server::start(
+        &path,
+        "rt1".to_string(),
+        rib.clone(),
+        driver.clone(),
+        &shared().identity("ribd", "rt1"),
+    )
+    .unwrap();
 
-    let (_reader, mut writer) = connect(&path).await;
+    let (_reader, mut writer) = connect_as(&path, "bgpd", "r1").await;
     let prefix: nos_proto::IpNet = "203.0.113.0/24".parse().unwrap();
     let next_hop: IpAddr = "203.0.113.1".parse().unwrap();
     writer
@@ -317,9 +381,16 @@ async fn push_bgp_routes_add_only_calls_apply_delta_when_the_winner_changes() {
     let path = tmp.path().join("rib.sock");
     let rib = Arc::new(RwLock::new(Rib::new()));
     let driver = Arc::new(RecordingDriver::default());
-    let _server = server::start(&path, "rt1".to_string(), rib.clone(), driver.clone()).unwrap();
+    let _server = server::start(
+        &path,
+        "rt1".to_string(),
+        rib.clone(),
+        driver.clone(),
+        &shared().identity("ribd", "rt1"),
+    )
+    .unwrap();
 
-    let (_reader, mut writer) = connect(&path).await;
+    let (_reader, mut writer) = connect_as(&path, "bgpd", "r1").await;
     let prefix: nos_proto::IpNet = "203.0.113.0/24".parse().unwrap();
     let next_hop: IpAddr = "203.0.113.1".parse().unwrap();
     let route = nos_proto::BgpRoute { prefix, next_hop };
@@ -368,5 +439,44 @@ async fn push_bgp_routes_add_only_calls_apply_delta_when_the_winner_changes() {
         applied.len(),
         2,
         "the unchanged re-send must not have triggered apply_delta"
+    );
+}
+
+/// The kernel-route write path is closed to everyone but the owning daemon
+/// family: a person, or another family's daemon, is disconnected and no
+/// route lands.
+#[tokio::test]
+async fn route_pushes_from_the_wrong_role_are_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rib.sock");
+    let rib = Arc::new(RwLock::new(Rib::new()));
+    let _server = server::start(
+        &path,
+        "rt1".to_string(),
+        rib.clone(),
+        Arc::new(NoopRibDriver),
+        &shared().identity("ribd", "rt1"),
+    )
+    .unwrap();
+
+    for (role, name) in [("user", "alice"), ("ospfd", "o1"), ("restd", "rt1")] {
+        let (mut reader, mut writer) = connect_as(&path, role, name).await;
+        writer
+            .send(RibRequest::PushBgpRoutes(vec![
+                nos_proto::BgpRouteUpdate::Add(nos_proto::BgpRoute {
+                    prefix: "10.9.0.0/24".parse().unwrap(),
+                    next_hop: "10.0.0.1".parse().unwrap(),
+                }),
+            ]))
+            .await
+            .unwrap();
+        assert!(
+            reader.next().await.is_none_or(|r| r.is_err()),
+            "{role} should have been disconnected"
+        );
+    }
+    assert!(
+        rib.read().await.all_routes().is_empty(),
+        "no refused push may land a route"
     );
 }

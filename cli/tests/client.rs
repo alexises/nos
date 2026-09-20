@@ -5,11 +5,11 @@ use nos_cli::client::{
     apply_op, commit_transaction, describe, discard_transaction, fetch_running_config,
     get_transaction, open_transaction, save_running_config, subscribe, ClientError,
 };
+use nos_pki::testing::shared;
 use nos_proto::{
     BgpInstance, BgpInstanceOp, CommandDoc, Config, ConfigOp, Event, IpcCodec, Request, Topic,
     TransactionBase, TransactionSnapshot,
 };
-use tokio::net::UnixListener;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 fn sample_config() -> Config {
@@ -39,9 +39,9 @@ fn sample_snapshot() -> TransactionSnapshot {
 
 /// Accepts a single connection, reads one `Request`, asserts it matches
 /// `expected`, and replies with the given `Event`.
-async fn serve_once(listener: UnixListener, expected: Request, reply: Event) {
-    let (stream, _) = listener.accept().await.unwrap();
-    let (r, w) = stream.into_split();
+async fn serve_once(listener: nos_pki::Listener, expected: Request, reply: Event) {
+    let (stream, _) = listener.accept().await.unwrap().handshake().await.unwrap();
+    let (r, w) = tokio::io::split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<Request>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<Event>::default());
 
@@ -54,7 +54,7 @@ async fn serve_once(listener: UnixListener, expected: Request, reply: Event) {
 async fn returns_config_on_success() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,
@@ -72,7 +72,7 @@ async fn returns_config_on_success() {
 async fn returns_daemon_error() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,
@@ -99,7 +99,7 @@ async fn returns_connect_error_for_missing_socket() {
 async fn subscribe_returns_initial_snapshot_then_committed_update() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let updated = Config {
         hostname: "router1".to_string(),
@@ -108,8 +108,8 @@ async fn subscribe_returns_initial_snapshot_then_committed_update() {
     let server = tokio::spawn({
         let updated = updated.clone();
         async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (r, w) = stream.into_split();
+            let (stream, _) = listener.accept().await.unwrap().handshake().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
             let mut reader = FramedRead::new(r, IpcCodec::<Request>::default());
             let mut writer = FramedWrite::new(w, IpcCodec::<Event>::default());
 
@@ -134,7 +134,7 @@ async fn subscribe_returns_initial_snapshot_then_committed_update() {
 async fn save_returns_ok_on_success() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(listener, Request::Save, Event::Saved));
 
@@ -147,7 +147,7 @@ async fn save_returns_ok_on_success() {
 async fn save_returns_daemon_error() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,
@@ -174,7 +174,7 @@ async fn save_returns_connect_error_for_missing_socket() {
 async fn open_transaction_returns_snapshot_on_success() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,
@@ -198,7 +198,7 @@ async fn open_transaction_returns_snapshot_on_success() {
 async fn open_transaction_returns_daemon_error() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,
@@ -221,7 +221,7 @@ async fn open_transaction_returns_daemon_error() {
 async fn apply_op_returns_snapshot_on_success() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let op = ConfigOp::BgpInstance(BgpInstanceOp::Ensure {
         name: "r1".to_string(),
@@ -245,7 +245,7 @@ async fn apply_op_returns_snapshot_on_success() {
 async fn apply_op_returns_daemon_error() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let op = ConfigOp::BgpInstance(BgpInstanceOp::Delete {
         name: "r1".to_string(),
@@ -269,7 +269,7 @@ async fn apply_op_returns_daemon_error() {
 async fn get_transaction_returns_snapshot_on_success() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,
@@ -289,7 +289,7 @@ async fn get_transaction_returns_snapshot_on_success() {
 async fn get_transaction_returns_daemon_error() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,
@@ -309,7 +309,7 @@ async fn get_transaction_returns_daemon_error() {
 async fn commit_transaction_returns_ok_on_success() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,
@@ -328,7 +328,7 @@ async fn commit_transaction_returns_ok_on_success() {
 async fn commit_transaction_returns_daemon_error() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,
@@ -348,7 +348,7 @@ async fn commit_transaction_returns_daemon_error() {
 async fn discard_transaction_returns_ok_on_success() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,
@@ -367,7 +367,7 @@ async fn discard_transaction_returns_ok_on_success() {
 async fn discard_transaction_returns_daemon_error() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,
@@ -387,7 +387,7 @@ async fn discard_transaction_returns_daemon_error() {
 async fn describe_returns_doc_on_success() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let doc = CommandDoc {
         topic: Topic::SetHostname,
@@ -413,7 +413,7 @@ async fn describe_returns_doc_on_success() {
 async fn describe_returns_daemon_error() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("config.sock");
-    let listener = UnixListener::bind(&path).unwrap();
+    let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let server = tokio::spawn(serve_once(
         listener,

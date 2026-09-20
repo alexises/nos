@@ -1,20 +1,62 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, ServiceRef, WatchdogEvent, WatchdogRequest};
-use nos_watchdog::{broker, EndpointKind, EndpointRegistry};
-use tokio::net::UnixStream;
+use nos_pki::{generate_csr, Identity, PeerId};
+use nos_proto::{
+    Config, Event, IpcCodec, Request, Role, ServiceRef, User, WatchdogEvent, WatchdogRequest,
+};
+use nos_watchdog::broker::{self, Sockets};
+use nos_watchdog::{EndpointKind, EndpointRegistry, Pki};
+use tokio::io::split;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-#[tokio::test]
-async fn resolves_config_and_registered_rib_table() {
+struct Env {
+    tmp: tempfile::TempDir,
+    pki: Arc<Pki>,
+    broker: PathBuf,
+    users: Arc<Mutex<Vec<User>>>,
+}
+
+/// A broker plus a stand-in `nos-configd` (a real TLS server holding the
+/// `configd` identity) answering `Get` with `users`.
+async fn env(users: Vec<User>) -> Env {
     let tmp = tempfile::tempdir().unwrap();
-    let broker_socket = tmp.path().join("watchdog.sock");
-    let config_socket = PathBuf::from("/run/nos/config.sock");
-    let interfaces_socket = PathBuf::from("/run/nos/interface.sock");
-    let log_socket = PathBuf::from("/run/nos/log.sock");
-    let lacp_socket = PathBuf::from("/run/nos/lacp.sock");
-    let lldp_socket = PathBuf::from("/run/nos/lldp.sock");
+    let pki = Pki::start(
+        tmp.path(),
+        Duration::from_secs(60),
+        Duration::from_secs(30),
+        Duration::from_secs(120),
+    )
+    .unwrap();
+    let users = Arc::new(Mutex::new(users));
+
+    let config_socket = tmp.path().join("config.sock");
+    let configd = Identity::from_bundle(&pki.mint(Role::Configd, "").unwrap()).unwrap();
+    let listener = configd.listen(&config_socket).unwrap();
+    let served = users.clone();
+    tokio::spawn(async move {
+        loop {
+            let incoming = listener.accept().await.unwrap();
+            let served = served.clone();
+            tokio::spawn(async move {
+                let Ok((stream, _)) = incoming.handshake().await else {
+                    return;
+                };
+                let (r, w) = split(stream);
+                let mut reader = FramedRead::new(r, IpcCodec::<Request>::default());
+                let mut writer = FramedWrite::new(w, IpcCodec::<Event>::default());
+                while let Some(Ok(Request::Get)) = reader.next().await {
+                    let config = Config {
+                        users: served.lock().unwrap().clone(),
+                        ..Config::default()
+                    };
+                    writer.send(Event::Config(config)).await.unwrap();
+                }
+            });
+        }
+    });
 
     let registry = EndpointRegistry::default();
     registry
@@ -24,85 +66,241 @@ async fn resolves_config_and_registered_rib_table() {
             PathBuf::from("/run/nos/rib-rt1.sock"),
         )
         .await;
-
-    let _server = broker::start(
+    let broker_socket = tmp.path().join("watchdog.sock");
+    let task = broker::start(
         &broker_socket,
         registry,
-        config_socket.clone(),
-        interfaces_socket.clone(),
-        log_socket.clone(),
-        lacp_socket.clone(),
-        lldp_socket.clone(),
+        Sockets {
+            config: config_socket,
+            interfaces: PathBuf::from("/run/nos/interface.sock"),
+            log: PathBuf::from("/run/nos/log.sock"),
+            lacp: PathBuf::from("/run/nos/lacp.sock"),
+            lldp: PathBuf::from("/run/nos/lldp.sock"),
+        },
+        pki.clone(),
     )
     .unwrap();
+    std::mem::forget(task); // runs for the test's lifetime
+    Env {
+        tmp,
+        pki,
+        broker: broker_socket,
+        users,
+    }
+}
 
-    let stream = UnixStream::connect(&broker_socket).await.unwrap();
-    let (r, w) = stream.into_split();
-    let mut reader = FramedRead::new(r, IpcCodec::<WatchdogEvent>::default());
-    let mut writer = FramedWrite::new(w, IpcCodec::<WatchdogRequest>::default());
+fn user(name: &str, password: &str) -> User {
+    User {
+        name: name.to_string(),
+        password: nos_password::hash(password),
+    }
+}
 
-    writer
-        .send(WatchdogRequest::ResolveEndpoint {
+impl Env {
+    /// What `nos-cli` does before it has logged in: trust `ca.crt`, present nothing.
+    fn anonymous(&self) -> Identity {
+        Identity::anonymous_from_pem(&std::fs::read(self.tmp.path().join("ca.crt")).unwrap())
+            .unwrap()
+    }
+
+    fn daemon(&self, role: Role, name: &str) -> Identity {
+        Identity::from_bundle(&self.pki.mint(role, name).unwrap()).unwrap()
+    }
+}
+
+type Conn = (
+    FramedRead<tokio::io::ReadHalf<nos_pki::Stream>, IpcCodec<WatchdogEvent>>,
+    FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<WatchdogRequest>>,
+);
+
+async fn dial(identity: &Identity, path: &Path) -> Conn {
+    let stream = identity
+        .connect(path, &PeerId::new(Role::Watchdog.as_str(), ""))
+        .await
+        .unwrap();
+    let (r, w) = split(stream);
+    (
+        FramedRead::new(r, IpcCodec::<WatchdogEvent>::default()),
+        FramedWrite::new(w, IpcCodec::<WatchdogRequest>::default()),
+    )
+}
+
+async fn ask(conn: &mut Conn, request: WatchdogRequest) -> WatchdogEvent {
+    conn.1.send(request).await.unwrap();
+    conn.0.next().await.unwrap().unwrap()
+}
+
+fn login(user: &str, password: &str, csr: Vec<u8>) -> WatchdogRequest {
+    WatchdogRequest::Login {
+        user: user.to_string(),
+        password: password.to_string(),
+        csr_der: csr,
+    }
+}
+
+#[tokio::test]
+async fn resolves_config_and_registered_rib_table() {
+    let e = env(vec![]).await;
+    let mut conn = dial(&e.daemon(Role::Bgpd, "r1"), &e.broker).await;
+
+    let event = ask(
+        &mut conn,
+        WatchdogRequest::ResolveEndpoint {
             service: ServiceRef::Config,
-        })
-        .await
-        .unwrap();
-    let event = reader.next().await.unwrap().unwrap();
-    assert!(matches!(event, WatchdogEvent::Endpoint(p) if p == config_socket));
+        },
+    )
+    .await;
+    assert!(matches!(event, WatchdogEvent::Endpoint(p) if p.ends_with("config.sock")));
 
-    writer
-        .send(WatchdogRequest::ResolveEndpoint {
+    let event = ask(
+        &mut conn,
+        WatchdogRequest::ResolveEndpoint {
             service: ServiceRef::RibTable("rt1".to_string()),
-        })
-        .await
-        .unwrap();
-    let event = reader.next().await.unwrap().unwrap();
-    assert!(
-        matches!(event, WatchdogEvent::Endpoint(p) if p == std::path::Path::new("/run/nos/rib-rt1.sock"))
-    );
+        },
+    )
+    .await;
+    assert!(matches!(event, WatchdogEvent::Endpoint(p) if p == Path::new("/run/nos/rib-rt1.sock")));
 
-    writer
-        .send(WatchdogRequest::ResolveEndpoint {
-            service: ServiceRef::RibTable("unknown".to_string()),
-        })
-        .await
-        .unwrap();
-    let event = reader.next().await.unwrap().unwrap();
+    let event = ask(
+        &mut conn,
+        WatchdogRequest::ResolveEndpoint {
+            service: ServiceRef::RibTable("nope".to_string()),
+        },
+    )
+    .await;
     assert!(matches!(event, WatchdogEvent::NotAvailable));
+}
 
-    writer
-        .send(WatchdogRequest::ResolveEndpoint {
-            service: ServiceRef::Interfaces,
-        })
-        .await
-        .unwrap();
-    let event = reader.next().await.unwrap().unwrap();
-    assert!(matches!(event, WatchdogEvent::Endpoint(p) if p == interfaces_socket));
+#[tokio::test]
+async fn an_unauthenticated_peer_can_only_log_in() {
+    let e = env(vec![]).await;
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    let event = ask(
+        &mut conn,
+        WatchdogRequest::ResolveEndpoint {
+            service: ServiceRef::Config,
+        },
+    )
+    .await;
+    assert!(matches!(event, WatchdogEvent::Denied(_)), "{event:?}");
+    let event = ask(&mut conn, WatchdogRequest::RenewCert { csr_der: vec![] }).await;
+    assert!(matches!(event, WatchdogEvent::Denied(_)), "{event:?}");
+}
 
-    writer
-        .send(WatchdogRequest::ResolveEndpoint {
-            service: ServiceRef::Log,
-        })
-        .await
-        .unwrap();
-    let event = reader.next().await.unwrap().unwrap();
-    assert!(matches!(event, WatchdogEvent::Endpoint(p) if p == log_socket));
+#[tokio::test]
+async fn login_issues_a_certificate_for_the_authenticated_user_on_the_callers_key() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let (csr, key) = generate_csr().unwrap();
+    let id = e.anonymous();
+    let mut conn = dial(&id, &e.broker).await;
 
-    writer
-        .send(WatchdogRequest::ResolveEndpoint {
-            service: ServiceRef::Lacp,
-        })
-        .await
-        .unwrap();
-    let event = reader.next().await.unwrap().unwrap();
-    assert!(matches!(event, WatchdogEvent::Endpoint(p) if p == lacp_socket));
+    let WatchdogEvent::Issued {
+        cert_der,
+        lifetime_secs,
+    } = ask(&mut conn, login("alice", "s3cret", csr)).await
+    else {
+        panic!("login refused");
+    };
+    assert_eq!(lifetime_secs, 120);
 
-    writer
-        .send(WatchdogRequest::ResolveEndpoint {
-            service: ServiceRef::Lldp,
-        })
-        .await
-        .unwrap();
-    let event = reader.next().await.unwrap().unwrap();
-    assert!(matches!(event, WatchdogEvent::Endpoint(p) if p == lldp_socket));
+    id.set_certificate(cert_der, key).unwrap();
+    assert_eq!(id.peer(), Some(PeerId::new("user", "alice")));
+
+    // …and the broker now treats that same identity as authenticated.
+    let mut conn = dial(&id, &e.broker).await;
+    let event = ask(
+        &mut conn,
+        WatchdogRequest::ResolveEndpoint {
+            service: ServiceRef::Config,
+        },
+    )
+    .await;
+    assert!(matches!(event, WatchdogEvent::Endpoint(_)), "{event:?}");
+}
+
+#[tokio::test]
+async fn wrong_password_and_unknown_user_are_indistinguishable_and_slow() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    let (csr, _) = generate_csr().unwrap();
+
+    let started = Instant::now();
+    let wrong = ask(&mut conn, login("alice", "nope", csr.clone())).await;
+    let unknown = ask(&mut conn, login("mallory", "s3cret", csr)).await;
+    let (WatchdogEvent::Denied(a), WatchdogEvent::Denied(b)) = (wrong, unknown) else {
+        panic!("a bad login was accepted");
+    };
+    assert_eq!(a, b, "the reply must not reveal which usernames exist");
+    assert!(
+        started.elapsed() >= Duration::from_secs(2),
+        "each failure should cost a delay"
+    );
+}
+
+#[tokio::test]
+async fn three_failed_logins_drop_the_connection() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    let (csr, _) = generate_csr().unwrap();
+    for _ in 0..3 {
+        let event = ask(&mut conn, login("alice", "nope", csr.clone())).await;
+        assert!(matches!(event, WatchdogEvent::Denied(_)));
+    }
+    conn.1.send(login("alice", "s3cret", csr)).await.ok();
+    assert!(
+        conn.0.next().await.is_none_or(|r| r.is_err()),
+        "connection should be closed"
+    );
+}
+
+#[tokio::test]
+async fn a_garbage_csr_is_refused_after_a_correct_password() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    let event = ask(&mut conn, login("alice", "s3cret", b"not a csr".to_vec())).await;
+    assert!(matches!(event, WatchdogEvent::Denied(_)), "{event:?}");
+}
+
+#[tokio::test]
+async fn a_user_can_renew_until_they_are_deleted_and_daemons_cannot_renew_at_all() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let id = e.anonymous();
+    let (csr, key) = generate_csr().unwrap();
+    let WatchdogEvent::Issued { cert_der, .. } = ask(
+        &mut dial(&id, &e.broker).await,
+        login("alice", "s3cret", csr),
+    )
+    .await
+    else {
+        panic!("login refused");
+    };
+    id.set_certificate(cert_der, key).unwrap();
+
+    let (csr, key) = generate_csr().unwrap();
+    let mut conn = dial(&id, &e.broker).await;
+    let WatchdogEvent::Issued { cert_der, .. } =
+        ask(&mut conn, WatchdogRequest::RenewCert { csr_der: csr }).await
+    else {
+        panic!("renewal refused");
+    };
+    id.set_certificate(cert_der, key).unwrap();
+    assert_eq!(id.peer(), Some(PeerId::new("user", "alice")));
+
+    let (csr, _) = generate_csr().unwrap();
+    let daemon = ask(
+        &mut dial(&e.daemon(Role::Bgpd, "r1"), &e.broker).await,
+        WatchdogRequest::RenewCert {
+            csr_der: csr.clone(),
+        },
+    )
+    .await;
+    assert!(matches!(daemon, WatchdogEvent::Denied(_)), "{daemon:?}");
+
+    e.users.lock().unwrap().clear();
+    let gone = ask(
+        &mut dial(&id, &e.broker).await,
+        WatchdogRequest::RenewCert { csr_der: csr },
+    )
+    .await;
+    assert!(matches!(gone, WatchdogEvent::Denied(_)), "{gone:?}");
 }

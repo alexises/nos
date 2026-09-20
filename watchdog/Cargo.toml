@@ -17,11 +17,14 @@ nos-proto          = { workspace = true }
 nos-log-client     = { workspace = true }
 futures            = { workspace = true }
 tokio-util         = { workspace = true }
+nos-pki            = { workspace = true }
+nos-password       = { workspace = true }
 
 [[bin]]
 name = "nos-watchdogd"
 path = "src/main.rs"
 
 [dev-dependencies]
+nos-pki  = { workspace = true, features = ["testing"] }
 proptest = { workspace = true }
 tempfile = { workspace = true }

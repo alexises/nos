@@ -7,15 +7,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use nos_proto::{ConfigDiff, DiffScope, DiffStatus, Event, SectionDiff};
+use nos_proto::{ConfigDiff, DiffScope, DiffStatus, Event, Role, SectionDiff};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::config_client;
+use crate::pki::Pki;
 use crate::registry::{EndpointKind, EndpointRegistry};
 use crate::supervisor::{supervise_one, wait_or_shutdown, BackoffPolicy, ProcessSpec};
 
@@ -47,6 +49,8 @@ pub struct Managed {
     pub name_flag: &'static str,
     /// Binary name, for `ProcessSpec` and every log line.
     pub daemon: &'static str,
+    /// The role each instance's certificate asserts (its name is the object's).
+    pub role: Role,
     /// What one object is called, for log lines: `"BGP instance"`.
     pub noun: &'static str,
     /// `None` for a daemon family with no IPC query listener to register —
@@ -65,6 +69,7 @@ pub struct Managed {
     pub watchdog_listen_socket: PathBuf,
     pub policy: BackoffPolicy,
     pub registry: EndpointRegistry,
+    pub pki: Arc<Pki>,
 }
 
 struct InstanceHandle {
@@ -81,7 +86,8 @@ pub async fn manage(m: Managed, mut shutdown: watch::Receiver<bool>) {
     let mut instances: HashMap<String, InstanceHandle> = HashMap::new();
 
     while !*shutdown.borrow() {
-        match config_client::subscribe_diff(&m.config_socket, vec![m.scope]).await {
+        match config_client::subscribe_diff(&m.pki.identity, &m.config_socket, vec![m.scope]).await
+        {
             Ok(reader) => {
                 info!("connected to nos-configd diff stream");
                 if follow(reader, &mut instances, &m, &mut shutdown).await {
@@ -245,7 +251,8 @@ async fn spawn_instance(instances: &mut HashMap<String, InstanceHandle>, name: &
     args.extend(m.flags.iter().cloned());
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let spec = ProcessSpec::new(format!("{}[{name}]", m.daemon), m.bin.clone(), args);
+    let spec = ProcessSpec::new(format!("{}[{name}]", m.daemon), m.bin.clone(), args)
+        .with_identity(m.pki.clone(), m.role, name);
     info!(name = %name, "spawning {} for new {}", m.daemon, m.noun);
     let task = tokio::spawn(supervise_one(spec, m.policy, shutdown_rx));
     instances.insert(name.to_string(), InstanceHandle { shutdown_tx, task });
@@ -301,6 +308,14 @@ mod tests {
             watchdog_listen_socket: PathBuf::from("/nonexistent"),
             policy: BackoffPolicy::default(),
             registry: EndpointRegistry::default(),
+            role: Role::Ribd,
+            pki: Pki::start(
+                tempfile::tempdir().unwrap().path(),
+                Duration::from_secs(60),
+                Duration::from_secs(30),
+                Duration::from_secs(60),
+            )
+            .unwrap(),
         }
     }
 

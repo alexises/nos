@@ -2,8 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, ServiceRef, WatchdogEvent, WatchdogRequest};
-use tokio::net::UnixStream;
+use nos_proto::{IpcCodec, Role, ServiceRef, WatchdogEvent, WatchdogRequest};
 use tokio::sync::watch;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::warn;
@@ -14,8 +13,10 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// One-shot resolve of `service` against `nos-watchdogd`'s broker socket.
 pub async fn resolve_once(watchdog_socket: &Path, service: &ServiceRef) -> Option<PathBuf> {
-    let stream = UnixStream::connect(watchdog_socket).await.ok()?;
-    let (r, w) = stream.into_split();
+    let stream = nos_pki::connect(watchdog_socket, Role::Watchdog, "")
+        .await
+        .ok()?;
+    let (r, w) = tokio::io::split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<WatchdogEvent>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<WatchdogRequest>::default());
     writer

@@ -2,11 +2,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{BgpEvent, BgpRequest, IpcCodec};
-use tokio::net::UnixListener;
+use nos_pki::{Identity, Incoming, Listener, Stream};
+use nos_proto::{BgpEvent, BgpRequest, IpcCodec, Role};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::collision::FsmCommand;
 use crate::session::SessionManager;
@@ -19,24 +19,29 @@ pub fn start(
     listen_socket: &Path,
     instance: String,
     sessions: Arc<SessionManager>,
+    identity: &Identity,
 ) -> std::io::Result<JoinHandle<()>> {
-    if listen_socket.exists() {
-        std::fs::remove_file(listen_socket)?;
-    }
-    let listener = UnixListener::bind(listen_socket)?;
+    let listener = identity.listen(listen_socket)?;
     info!(instance = %instance, socket = %listen_socket.display(), "BGP IPC server listening");
     Ok(tokio::spawn(accept_loop(listener, instance, sessions)))
 }
 
-async fn accept_loop(listener: UnixListener, instance: String, sessions: Arc<SessionManager>) {
+/// Session queries and `clear bgp` are for people (and `Restd` on their
+/// behalf); the redistribution feed is `nos-ribd`'s alone. No wildcard arm.
+fn allowed(role: Role, req: &BgpRequest) -> bool {
+    match req {
+        BgpRequest::GetSummary | BgpRequest::SendRouteRefresh { .. } => {
+            matches!(role, Role::User | Role::Restd)
+        }
+        BgpRequest::RedistributeRoutes(_) => role == Role::Ribd,
+    }
+}
+
+async fn accept_loop(listener: Listener, instance: String, sessions: Arc<SessionManager>) {
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
-                tokio::spawn(handle_connection(
-                    stream,
-                    instance.clone(),
-                    sessions.clone(),
-                ));
+            Ok(incoming) => {
+                tokio::spawn(serve(incoming, instance.clone(), sessions.clone()));
             }
             Err(e) => {
                 error!(instance = %instance, error = %e, "BGP IPC accept loop terminated");
@@ -51,12 +56,21 @@ async fn accept_loop(listener: UnixListener, instance: String, sessions: Arc<Ses
 /// over one long-lived connection, mirroring `nos-logd`'s handling of
 /// `LogRequest::Push`) gets no reply at all, so the loop just keeps reading
 /// further requests on the same connection.
+async fn serve(incoming: Incoming, instance: String, sessions: Arc<SessionManager>) {
+    match incoming.handshake_as(Role::parse).await {
+        Ok((stream, role, name)) => handle_connection(stream, role, name, instance, sessions).await,
+        Err(e) => debug!(instance = %instance, error = %e, "BGP IPC handshake refused"),
+    }
+}
+
 async fn handle_connection(
-    stream: tokio::net::UnixStream,
+    stream: Stream,
+    role: Role,
+    name: String,
     instance: String,
     sessions: Arc<SessionManager>,
 ) {
-    let (read_half, write_half) = stream.into_split();
+    let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<BgpRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<BgpEvent>::default());
 
@@ -68,6 +82,13 @@ async fn handle_connection(
                 break;
             }
         };
+        if !allowed(role, &req) {
+            warn!(
+                instance = %instance, role = role.as_str(), name = %name,
+                "BGP request refused: this role may not send it"
+            );
+            break;
+        }
         trace!(instance = %instance, request = ?req, "serving BGP query");
         match req {
             BgpRequest::GetSummary => {
@@ -92,6 +113,30 @@ async fn handle_connection(
                     break;
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod authz_tests {
+    use super::*;
+
+    #[test]
+    fn only_ribd_feeds_redistribution_and_only_people_query() {
+        for role in Role::ALL {
+            assert_eq!(
+                allowed(
+                    role,
+                    &BgpRequest::RedistributeRoutes(nos_proto::RedistributeUpdate::Full(vec![]))
+                ),
+                role == Role::Ribd,
+                "{role:?} redistribute"
+            );
+            assert_eq!(
+                allowed(role, &BgpRequest::GetSummary),
+                matches!(role, Role::User | Role::Restd),
+                "{role:?} summary"
+            );
         }
     }
 }

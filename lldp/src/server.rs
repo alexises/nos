@@ -6,28 +6,46 @@ use std::path::Path;
 use std::time::Instant;
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{IpcCodec, LldpEvent, LldpNeighbor, LldpRequest};
-use tokio::net::UnixListener;
+use nos_pki::{Identity, Incoming, Listener, Stream};
+use nos_proto::{IpcCodec, LldpEvent, LldpNeighbor, LldpRequest, Role};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::link::SharedNeighbors;
 
-pub fn start(listen_socket: &Path, neighbors: SharedNeighbors) -> std::io::Result<JoinHandle<()>> {
-    if listen_socket.exists() {
-        std::fs::remove_file(listen_socket)?;
-    }
-    let listener = UnixListener::bind(listen_socket)?;
+pub fn start(
+    listen_socket: &Path,
+    neighbors: SharedNeighbors,
+    identity: &Identity,
+) -> std::io::Result<JoinHandle<()>> {
+    let listener = identity.listen(listen_socket)?;
     info!(socket = %listen_socket.display(), "lldp IPC server listening");
     Ok(tokio::spawn(accept_loop(listener, neighbors)))
 }
 
-async fn accept_loop(listener: UnixListener, neighbors: SharedNeighbors) {
+/// The only request is a read-only neighbor query: for people, and `Restd` on
+/// their behalf.
+fn may_query(role: Role) -> bool {
+    matches!(role, Role::User | Role::Restd)
+}
+
+async fn serve(incoming: Incoming, neighbors: SharedNeighbors) {
+    match incoming.handshake_as(Role::parse).await {
+        Ok((stream, role, _)) if may_query(role) => handle_connection(stream, neighbors).await,
+        Ok((_, role, name)) => warn!(
+            role = role.as_str(), name = %name,
+            "lldp query refused: this role may not send it"
+        ),
+        Err(e) => debug!(error = %e, "lldp IPC handshake refused"),
+    }
+}
+
+async fn accept_loop(listener: Listener, neighbors: SharedNeighbors) {
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
-                tokio::spawn(handle_connection(stream, neighbors.clone()));
+            Ok(incoming) => {
+                tokio::spawn(serve(incoming, neighbors.clone()));
             }
             Err(e) => {
                 error!(error = %e, "lldp IPC accept loop terminated");
@@ -37,8 +55,8 @@ async fn accept_loop(listener: UnixListener, neighbors: SharedNeighbors) {
     }
 }
 
-async fn handle_connection(stream: tokio::net::UnixStream, neighbors: SharedNeighbors) {
-    let (read_half, write_half) = stream.into_split();
+async fn handle_connection(stream: Stream, neighbors: SharedNeighbors) {
+    let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<LldpRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<LldpEvent>::default());
 

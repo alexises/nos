@@ -20,8 +20,10 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 |------|------|------|
 | `ConfigStore` | `store.rs` | Cheap `Clone` handle (`Arc<Inner>`) over `running: RwLock<Config>` + `transactions: Mutex<HashMap<String, Transaction>>` + `broadcast::Sender<Arc<CommitUpdate>>` + `config_path` |
 | `CommitUpdate` | `store.rs` | Internal (never sent over the wire directly) — one commit's `{ config: Config, diff: ConfigDiff }`, broadcast together so `Subscribe` and `SubscribeDiff` connections can each take the half they need |
-| `ConfigError` | `error.rs` | `Validation`, `TransactionNotFound`, `Op`, `PersistenceNotConfigured`, `Io`, `Persistence`, `Serialization` |
-| `server::start()` | `server.rs` | Binds `UnixListener`, spawns per-connection tasks, each holding a cloned `ConfigStore` |
+| `ConfigError` | `error.rs` | `Validation`, `NoUsersLeft` (a commit may not remove every user), `TransactionNotFound`, `Op`, `PersistenceNotConfigured`, `Io`, `Persistence`, `Serialization` |
+| `server::start()` | `server.rs` | Binds a TLS `nos_pki::Listener` on a Unix socket (`ListenAddr::Unix` only — the TCP listener was removed, since it would bypass mTLS), spawns per-connection tasks (handshake inside the task) each holding a cloned `ConfigStore` and the peer's role/name from its certificate |
+| `authz::allowed()` | `authz.rs` | Pure per-request allow-list: config reads (`Get`/`Subscribe*`/`Describe`) for every authenticated daemon and `User`; edits/`Save` for `User`/`Restd` only. No wildcard arm — a new `Request` variant won't compile until classified. A refused request gets `Event::Error("permission denied")` and the connection is closed |
+| `users::{hash_clear_passwords, seed_default_user}` | `users.rs` | Replaces clear-text `User.password`s with argon2id hashes (reusing an earlier hash the clear text still verifies against, so re-setting a password is no diff); called by `ConfigStore` after every edit and on load. `seed_default_user` adds `admin`/`admin` when there are no users (called from `main.rs`) |
 | `persistence::{save_to_disk, load_or_default}` | `persistence.rs` | Serialize/atomically write, and load-with-fallback, the config file |
 
 ## ConfigStore API
@@ -40,7 +42,7 @@ store.commit_transaction(name).await            // validate → promote to runni
 store.discard_transaction(name).await           // remove transaction without touching running
 store.diff_transaction(name).await              // Result<ConfigDiff, ConfigError> — running vs. transaction, no validation
 
-store.start_ipc_server(&addr)                   // bind socket, start accept loop
+store.start_ipc_server(&addr, &identity)        // bind TLS socket, start accept loop
 ```
 
 Lock ordering: always lock `transactions` before `running` to avoid deadlock.

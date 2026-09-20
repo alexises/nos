@@ -23,7 +23,7 @@ use nos_proto::{
     OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
     PolicyDefinitionOp, PortAggregateMode, PortAggregateOp, Redistribute, RedistributeSource,
     RedistributeTarget, RoutingTableOp, SourceAddress, StaticRouteOp, StaticRoutingInstanceOp,
-    SubinterfaceOp, SwitchingProfileOp, VlanTag,
+    SubinterfaceOp, SwitchingProfileOp, UserOp, VlanTag,
 };
 
 /// Clap-facing mirror of `nos_proto::PortAggregateMode` — `clap::ValueEnum`
@@ -358,6 +358,12 @@ pub struct Args {
     #[arg(long = "clear-port-aggregate-member")]
     pub clear_port_aggregate_members: Vec<String>,
 
+    /// One `<name>=<clear password>` per repetition: creates the user or sets
+    /// its password (`UserOp::SetPassword`). `nos-configd` hashes it on load /
+    /// on apply. The first `=` separates the two, so a password may contain `=`.
+    #[arg(long = "user", value_parser = parse_user)]
+    pub users: Vec<(String, String)>,
+
     /// If set, sets the top-level hostname (`ConfigOp::SetHostname`) — what
     /// `nos-lldpd` advertises as its System Name.
     #[arg(long)]
@@ -517,6 +523,12 @@ pub struct Args {
 /// Builds the ordered `ConfigOp` list for one provisioning invocation — pure,
 /// so a caller can apply it over IPC (this crate's bin) or locally onto a
 /// `Config` (`nos-e2e`, which then PUTs the result over the REST API).
+fn parse_user(s: &str) -> Result<(String, String), String> {
+    s.split_once('=')
+        .map(|(n, p)| (n.to_string(), p.to_string()))
+        .ok_or_else(|| "expected <name>=<password>".to_string())
+}
+
 pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     let mut ops = vec![ConfigOp::Interface(InterfaceOp::Ensure {
         name: args.interface.clone(),
@@ -979,6 +991,13 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
 
     if let Some(hostname) = args.hostname.clone() {
         ops.push(ConfigOp::SetHostname(hostname));
+    }
+
+    for (name, password) in &args.users {
+        ops.push(ConfigOp::User(UserOp::SetPassword {
+            name: name.clone(),
+            password: password.clone(),
+        }));
     }
 
     // (interface, transmit-or-receive, enabled) — each interface is ensured
