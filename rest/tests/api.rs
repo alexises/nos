@@ -12,8 +12,9 @@ use axum::Router;
 use futures::{SinkExt, StreamExt};
 use nos_config::{Config, ConfigStore, ListenAddr};
 use nos_proto::{
-    BgpInstance, IpcCodec, PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind,
-    ServiceRef, WatchdogEvent, WatchdogRequest,
+    BgpEvent, BgpInstance, BgpRequest, IpcCodec, LogEntry, LogEvent, LogLevel, LogRequest,
+    PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind, ServiceRef, WatchdogEvent,
+    WatchdogRequest,
 };
 use nos_rest::{api, ipc::Daemons};
 use serde::de::DeserializeOwned;
@@ -374,4 +375,170 @@ async fn serves_its_openapi_document() {
     assert!(paths
         .contains_key("/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}"));
     assert!(paths.contains_key("/v1/routes/{table}"));
+}
+
+fn log_entry(source: &str, message: &str) -> LogEntry {
+    LogEntry {
+        timestamp_ms: 1,
+        level: LogLevel::Info,
+        source: source.to_string(),
+        target: "t".to_string(),
+        message: message.to_string(),
+        fields: vec![],
+    }
+}
+
+/// A fake `nos-logd`: a `Tail` gets a backlog of two entries, then one
+/// streamed line, then the connection closes (which ends the SSE stream).
+fn serve_logd(path: &Path) {
+    let listener = UnixListener::bind(path).unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let (r, w) = stream.into_split();
+                let mut reader = FramedRead::new(r, IpcCodec::<LogRequest>::default());
+                let mut writer = FramedWrite::new(w, IpcCodec::<LogEvent>::default());
+                if let Some(Ok(LogRequest::Tail { source })) = reader.next().await {
+                    let src = source.unwrap_or_else(|| "any".to_string());
+                    writer
+                        .send(LogEvent::Logs(vec![
+                            log_entry(&src, "old-1"),
+                            log_entry(&src, "old-2"),
+                        ]))
+                        .await
+                        .unwrap();
+                    writer
+                        .send(LogEvent::Line(log_entry(&src, "live-1")))
+                        .await
+                        .unwrap();
+                }
+            });
+        }
+    });
+}
+
+#[tokio::test]
+async fn follow_logs_streams_backlog_then_live_lines_as_sse() {
+    let dir = tempfile::tempdir().unwrap();
+    let logd = dir.path().join("log.sock");
+    serve_logd(&logd);
+    let f = fixture(vec![(ServiceRef::Log, logd)]).await;
+
+    let req = HttpRequest::builder()
+        .uri("/v1/logs/follow?source=nos-x")
+        .body(Body::empty())
+        .unwrap();
+    let resp = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "text/event-stream");
+    let body = String::from_utf8(
+        axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(body.matches("event: log").count(), 3, "{body}");
+    assert!(
+        body.contains("old-1") && body.contains("live-1") && body.contains("nos-x"),
+        "{body}"
+    );
+
+    // `limit` trims the backlog only: the newest backlog entry and the live line remain.
+    let req = HttpRequest::builder()
+        .uri("/v1/logs/follow?limit=1")
+        .body(Body::empty())
+        .unwrap();
+    let resp = f.app.clone().oneshot(req).await.unwrap();
+    let body = String::from_utf8(
+        axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        !body.contains("old-1") && body.contains("old-2") && body.contains("live-1"),
+        "{body}"
+    );
+
+    // Without a running nos-logd it is a plain 503, not a hung stream.
+    let f = fixture(vec![]).await;
+    let (s, _) = send(&f.app, Method::GET, "/v1/logs/follow", None).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn clear_bgp_soft_in_maps_the_daemons_reply_to_a_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let bgpd = dir.path().join("bgp.sock");
+    serve(&bgpd, |req: BgpRequest| match req {
+        BgpRequest::SendRouteRefresh { peer } if peer.to_string() == "192.0.2.1" => {
+            BgpEvent::RouteRefreshSent
+        }
+        _ => BgpEvent::PeerNotFound,
+    });
+    let f = fixture(vec![(ServiceRef::BgpInstance("r1".into()), bgpd)]).await;
+
+    let (s, v) = send(
+        &f.app,
+        Method::POST,
+        "/v1/bgp/r1/peer/192.0.2.1/soft-in",
+        None,
+    )
+    .await;
+    assert_eq!(
+        (s, v),
+        (
+            StatusCode::OK,
+            json!({ "instance": "r1", "peer": "192.0.2.1", "route_refresh": "sent" })
+        )
+    );
+    // No Established session (or unknown peer): 404. Unknown instance: 503. Bad address: 400.
+    assert_eq!(
+        send(
+            &f.app,
+            Method::POST,
+            "/v1/bgp/r1/peer/192.0.2.9/soft-in",
+            None
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        send(
+            &f.app,
+            Method::POST,
+            "/v1/bgp/r2/peer/192.0.2.1/soft-in",
+            None
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        send(
+            &f.app,
+            Method::POST,
+            "/v1/bgp/r1/peer/not-an-ip/soft-in",
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    // It is an action, not a query.
+    assert_eq!(
+        send(
+            &f.app,
+            Method::GET,
+            "/v1/bgp/r1/peer/192.0.2.1/soft-in",
+            None
+        )
+        .await
+        .0,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
 }

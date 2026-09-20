@@ -2073,7 +2073,7 @@ cmd_check_lldp() {
 # a real nos-restd for the pinned table, it binds address:port in the VRF, show
 # endpoints return live data from other daemons, a transaction driven purely
 # over the config-tree URLs (a scalar, a whole list element, a %2F-encoded key)
-# commits into the real running config, the OpenAPI document is served, an
+# commits into the real running config, `show log --follow` streams a live entry over SSE, `clear bgp … soft-in` (a POST) makes nos-bgpd send a real route-refresh, the OpenAPI document is served, an
 # address not (yet) configured on the VRF is retried rather than fatal, and
 # unpinning stops the process and closes the port.
 
@@ -2155,7 +2155,19 @@ cmd_check_rest() {
   rest_expect GET "$base/v1/interfaces" 200 "" '"eth0"' || return 1
   rest_expect GET "$base/v1/bgp/summary" 200 "" '"instance":"r1"' || return 1
   rest_expect GET "$base/v1/routes/nonexistent-table" 503 || return 1
+  rest_expect GET "$base/v1/logs?source=nos-configd&limit=3" 200 "" '"source":"nos-configd"' || return 1
   log "router-a: show endpoints answered over http"
+
+  # `clear bgp r1 <peer> soft-in` as a POST: the Established session to
+  # router-b really gets a ROUTE-REFRESH (only nos-bgpd logs this line), and
+  # a peer with no session is a 404.
+  local refresh_base
+  refresh_base=$(log_count router-a "bgp: sent route refresh request to peer peer=$IP_B")
+  rest_expect POST "$base/v1/bgp/r1/peer/$IP_B/soft-in" 200 "" '"route_refresh":"sent"' || return 1
+  wait_for_count_increase router-a "bgp: sent route refresh request to peer peer=$IP_B" "$refresh_base" 30 \
+    && log "router-a: soft-in over http made nos-bgpd send a real route-refresh" \
+    || { log "router-a: FAILED to see the route-refresh sent"; return 1; }
+  rest_expect POST "$base/v1/bgp/r1/peer/10.50.0.99/soft-in" 404 || return 1
 
   # A transaction driven purely through the config-tree URLs.
   rest_expect POST "$base$tx?base=current" 201 || return 1
@@ -2192,6 +2204,27 @@ cmd_check_rest() {
 
   rest_expect GET "$base/openapi.json" 200 "" '/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}' || return 1
   log "router-a: openapi document served"
+
+  # `show log --follow`: an SSE stream that carries a *live* entry, not just the
+  # backlog. Follow nos-configd, then commit an (empty) transaction so it logs
+  # "config committed" while the stream is open. curl ends by its own
+  # --max-time (exit 28), the expected end of an endless stream.
+  local follow_out follow_pid
+  follow_out=$(mktemp)
+  curl -sS -N --max-time 6 "$base/v1/logs/follow?source=nos-configd&limit=1" >"$follow_out" 2>/dev/null &
+  follow_pid=$!
+  sleep 2
+  rest_expect POST "$base$tx?base=current" 201 || return 1
+  rest_expect POST "$base$tx/commit" 200 || return 1
+  wait "$follow_pid" || true
+  if [[ "$(<"$follow_out")" != *"event: log"* || "$(<"$follow_out")" != *"config committed"* ]]; then
+    log "FAILED: the log follow stream carried no live 'config committed' entry:"
+    cat "$follow_out"
+    rm -f "$follow_out"
+    return 1
+  fi
+  rm -f "$follow_out"
+  log "router-a: log follow streamed a live entry over sse"
 
   # An address that is not on the VRF (yet) is retried, not fatal: the old
   # listener is dropped, the new bind fails with EADDRNOTAVAIL, nothing crashes.

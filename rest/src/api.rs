@@ -13,7 +13,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::ipc::Daemons;
-use crate::{openapi, show, tx};
+use crate::{clear, openapi, show, tx};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -26,7 +26,8 @@ use crate::{openapi, show, tx};
     ),
     tags(
         (name = "show", description = "Read-only operational state"),
-        (name = "transactions", description = "Named config transactions")
+        (name = "transactions", description = "Named config transactions"),
+        (name = "clear", description = "Operator actions on live state (never config)")
     )
 )]
 struct ApiDoc;
@@ -44,11 +45,13 @@ fn openapi_routes() -> (Router<Daemons>, utoipa::openapi::OpenApi) {
         .routes(routes!(show::lacp_one))
         .routes(routes!(show::lldp_neighbors))
         .routes(routes!(show::logs))
+        .routes(routes!(show::logs_follow))
         .routes(routes!(show::bgp_summary))
         .routes(routes!(show::ospf_neighbors))
         .routes(routes!(show::ospf_database))
         .routes(routes!(show::ospfv3_neighbors))
         .routes(routes!(show::ospfv3_database))
+        .routes(routes!(clear::bgp_soft_in))
         // `diff` and `commit` are static routes, so they win over the
         // `{*path}` wildcard below — which makes them reserved first
         // segments (no config section has those names).

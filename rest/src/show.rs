@@ -3,8 +3,12 @@
 
 use std::net::IpAddr;
 
+use std::convert::Infallible;
+
 use axum::extract::{Path, Query, State};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::Json;
+use futures::{Stream, StreamExt};
 use nos_proto::{
     BgpEvent, BgpRequest, Config, InterfaceEvent, InterfaceRequest, InterfaceStatus, LacpEvent,
     LacpRequest, LldpEvent, LldpNeighbor, LldpRequest, LogEntry, LogEvent, LogRequest, LsaSummary,
@@ -184,6 +188,64 @@ pub type OspfNeighborsReport = Vec<InstanceReport<Vec<NeighborSummary>>>;
 pub type OspfDatabaseReport = Vec<InstanceReport<Vec<LsaSummary>>>;
 pub type Ospfv3NeighborsReport = Vec<InstanceReport<Vec<Ospfv3NeighborSummary>>>;
 pub type Ospfv3DatabaseReport = Vec<InstanceReport<Vec<Ospfv3LsaSummary>>>;
+
+#[derive(Deserialize)]
+pub struct FollowQuery {
+    source: Option<String>,
+    limit: Option<usize>,
+}
+
+/// `show log --follow`: a Server-Sent Events stream. The buffer as it stands
+/// (trimmed to the most recent `limit`, if given) is sent first, then each new
+/// entry as it is logged, until the client disconnects. Every entry is a `log`
+/// event whose data is the JSON `LogEntry`; a daemon-side failure is an `error`
+/// event with the message as data.
+#[utoipa::path(
+    get, path = "/v1/logs/follow", tag = "show", summary = "Follow the log (Server-Sent Events)",
+    params(
+        ("source" = Option<String>, Query, description = "only entries from this source"),
+        ("limit" = Option<usize>, Query, description = "trim the initial backlog to the most recent N entries")
+    ),
+    responses(
+        (status = 200, content_type = "text/event-stream", body = String,
+         description = "`event: log` per entry, data = a JSON LogEntry"),
+        (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")
+    )
+)]
+pub async fn logs_follow(
+    State(d): State<Daemons>,
+    Query(q): Query<FollowQuery>,
+) -> ApiResult<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
+    let (reader, writer) = d
+        .open_stream::<_, LogEvent>(ServiceRef::Log, LogRequest::Tail { source: q.source })
+        .await?;
+    let mut backlog_limit = q.limit;
+    let events = reader.flat_map(move |item| {
+        let entries: Vec<SseEvent> = match item {
+            Ok(LogEvent::Logs(mut v)) => {
+                if let Some(n) = backlog_limit.take() {
+                    v.drain(..v.len().saturating_sub(n));
+                }
+                v.iter().filter_map(log_event).collect()
+            }
+            Ok(LogEvent::Line(e)) => log_event(&e).into_iter().collect(),
+            Ok(LogEvent::Error(m)) => vec![SseEvent::default().event("error").data(m)],
+            Err(e) => vec![SseEvent::default().event("error").data(e.to_string())],
+        };
+        futures::stream::iter(entries.into_iter().map(Ok))
+    });
+    // Holding the write half until the stream is dropped keeps the daemon's
+    // side of the tail subscription open.
+    let events = events.map(move |e| {
+        let _keep_open = &writer;
+        e
+    });
+    Ok(Sse::new(events).keep_alive(KeepAlive::default()))
+}
+
+fn log_event(entry: &LogEntry) -> Option<SseEvent> {
+    SseEvent::default().event("log").json_data(entry).ok()
+}
 
 /// One instance's answer to a router-wide query: its payload, or why it has none.
 #[derive(Serialize, ToSchema)]
