@@ -48,7 +48,7 @@ Unlike `interface::driver::port_aggregate_registry`'s YAML-backed bond-id alloca
 
 ## Robustness rules learned the hard way (each has a regression test)
 
-Every one of these was a real hot loop or stall found by running `tools/verify-e2e.sh lacp` against real containers:
+Every one of these was a real hot loop or stall found by running `nos-e2e lacp` against real containers:
 
 - **Never leave an elapsed deadline armed.** `link::run` uses `sleep_until(deadline)` arms; a deadline left in the past re-fires on every loop iteration, flooding the log and the wire. Handling any timer-expiry event must move its deadline forward (`apply_mux_action`/`apply_receive_action`) — but `Action::None` must *not* disarm a still-pending timer.
 - **Ignore our own frames.** An `AF_PACKET` socket also receives its own outgoing frames (`socket::payload_of_foreign_frame` drops them by source MAC); otherwise a port negotiates with itself.
@@ -80,10 +80,10 @@ Every one of these was a real hot loop or stall found by running `tools/verify-e
 | `config_client.rs` / `watchdog_client.rs` | Own reimplementations (`fetch_config`/`subscribe_diff`, `resolve_with_retry`/`resolve_once`) — per the root `CLAUDE.md`'s star dependency graph, not shared with `nos-interfaced`/`nos-bgp`/etc |
 | `reconcile.rs` | Steady-state loop: subscribes to `DiffScope::{Interfaces, PortAggregates}` purely as a resync trigger, always re-fetching the whole config, filters `port_aggregates` for `mode == Lacp`, resolves each one's member set from `Interface.port_aggregate`, drives one `AggregateManager` per name (creating/`shutdown`-ing as aggregates are added/removed from config) — plus a fixed 10s safety-net tick, mirroring `interface::reconcile`'s shape |
 
-## `tools/verify-e2e.sh lacp`
+## `nos-e2e lacp`
 
 Real two-container verification (see root `CLAUDE.md`'s "Two-router end-to-end verification"): both routers get a real `Lacp`-mode `PortAggregate` over two member links, proving real LACPDU exchange converges both sides' Mux Machines to `Distributing` on both links and that `nos-interfaced` only then enslaves each negotiated member into the real kernel bond. Both routers run `lacp-rate fast`, then the phase withdraws `eth2` from router-b's aggregate by config (router-b stops speaking LACP on it; the link stays up) and confirms router-a's own Receive Machine timeout and the resulting kernel-level release **within 30s** — far under the 90s Long timer, so passing proves the fast rate is really in effect — before tearing the aggregate down.
 
 `show lacp` itself isn't exercised by the e2e phase: `nos-cli` has no scriptable one-shot mode (see root `CLAUDE.md`), so the `LacpRequest::GetSummary` round trip is covered by `lacp/tests/server.rs` (real socket, real `AggregateManager`) and `cli/tests/lacp_client.rs`.
 
-**The member links are direct veth pairs between the two containers' network namespaces, not docker networks** (unlike the static `port-aggregate` phase): a docker network is a Linux bridge, and a Linux bridge never forwards the `01:80:C2:00:00:02` slow-protocols address (the kernel refuses to enable it — it's in the restricted link-local group range), so no LACPDU could ever cross one. A throwaway privileged helper container with iproute2 creates the pairs (`ensure_netns_helper`/`lacp_link_veths`). The link-loss check withdraws a member by config rather than taking a link down because each `nos-interfaced` re-applies "admin up" on every 10s resync, which would undo a `link set down`.
+**The member links are direct veth pairs between the two containers' network namespaces, not docker networks** (unlike the static `port-aggregate` phase): a docker network is a Linux bridge, and a Linux bridge never forwards the `01:80:C2:00:00:02` slow-protocols address (the kernel refuses to enable it — it's in the restricted link-local group range), so no LACPDU could ever cross one. A throwaway privileged helper container with iproute2 creates the pairs (`World::link_veths`). The link-loss check withdraws a member by config rather than taking a link down because each `nos-interfaced` re-applies "admin up" on every 10s resync, which would undo a `link set down`.

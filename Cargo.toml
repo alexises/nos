@@ -1,5 +1,5 @@
 [workspace]
-members = ["proto", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tcp-auth", "rpl", "log-client", "l2-socket", "lacp", "lldp", "rest"]
+members = ["proto", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tools/e2e", "tcp-auth", "rpl", "log-client", "l2-socket", "lacp", "lldp", "rest"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -16,6 +16,10 @@ postcard    = { version = "1", features = ["alloc"] }
 chrono      = { version = "0.4", default-features = false, features = ["std"] }
 tokio-util  = { version = "0.7", features = ["codec"] }
 futures     = "0.3"
+reqwest     = { version = "0.13", default-features = false, features = ["json", "stream"] }
+regex       = "1"
+bollard     = "0.21"
+tar         = "0.4"
 nos-proto          = { path = "proto" }
 nos-tcp-auth       = { path = "tcp-auth" }
 nos-l2-socket      = { path = "l2-socket" }

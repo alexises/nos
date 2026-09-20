@@ -1,11 +1,11 @@
 name: verify-e2e
 
 # Real end-to-end verification against a real kernel (BGP/OSPF/RPL/interface
-# drivers) via tools/verify-e2e.sh. Too slow/privileged for every PR — like
+# drivers) via tools/e2e (`nos-e2e`). Too slow/privileged for every PR — like
 # ci.yml's `mutants` job, this only runs on a schedule or manual dispatch.
 # Each group is self-contained (its own `up` + checks + teardown) and runs on
 # its own independent runner, so there's no collision between the hardcoded
-# container names/network tools/verify-e2e.sh uses.
+# container names/network nos-e2e uses.
 on:
   workflow_dispatch:
   schedule:
@@ -28,4 +28,4 @@ jobs:
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - run: tools/verify-e2e.sh ${{ matrix.group }}
+      - run: cargo run --release -p nos-e2e -- ${{ matrix.group }}

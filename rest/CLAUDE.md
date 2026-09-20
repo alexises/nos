@@ -39,4 +39,4 @@ Show (GET, the daemon's own reply payload as JSON): `/config`, `/routes/{table}[
 
 ## Testing
 
-`tests/api.rs` drives the real router (via `tower::ServiceExt::oneshot`) against a **real** `nos-config` `ConfigStore` behind its own IPC server — so the path-set semantics tested are the shipped ones — plus a fake broker and fake `nos-ribd`. The listener itself needs `CAP_NET_RAW` and a VRF, so it is covered only by `tools/verify-e2e.sh rest`.
+`tests/api.rs` drives the real router (via `tower::ServiceExt::oneshot`) against a **real** `nos-config` `ConfigStore` behind its own IPC server — so the path-set semantics tested are the shipped ones — plus a fake broker and fake `nos-ribd`. The listener itself needs `CAP_NET_RAW` and a VRF, so it is covered only by `nos-e2e rest`.

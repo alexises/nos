@@ -15,6 +15,10 @@ clap       = { workspace = true }
 anyhow     = { workspace = true }
 ipnet      = { workspace = true }
 
+[lib]
+name = "nos_provision"
+path = "src/lib.rs"
+
 [[bin]]
 name = "nos-provision"
 path = "src/main.rs"
