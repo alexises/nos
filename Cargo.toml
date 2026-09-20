@@ -42,6 +42,9 @@ hmac                = "0.12"
 axum                = "0.8"
 utoipa              = { version = "5", features = ["axum_extras"] }
 utoipa-axum         = "0.2"
+# `vendored`: the UI assets ship inside the crate — no CDN at runtime (the API
+# lives in a management VRF) and no GitHub download at build time.
+utoipa-swagger-ui   = { version = "9", features = ["axum", "vendored"] }
 percent-encoding    = "2"
 
 # test dependencies

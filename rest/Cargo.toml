@@ -24,6 +24,7 @@ axum               = { workspace = true }
 percent-encoding   = { workspace = true }
 utoipa             = { workspace = true }
 utoipa-axum        = { workspace = true }
+utoipa-swagger-ui  = { workspace = true }
 
 [[bin]]
 name = "nos-restd"

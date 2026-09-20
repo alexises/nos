@@ -183,7 +183,7 @@
 # restarts the link as transmit-only. A fourteenth, `rest`, pins the REST API
 # (nos-restd) to router-a's rt1 on eth0's address and drives it over real HTTP
 # from the host: show endpoints, a whole config-tree transaction committed
-# through the URLs, the OpenAPI document, retry of an address not on the VRF,
+# through the URLs, the OpenAPI document and its Swagger UI, retry of an address not on the VRF,
 # and the watchdog stopping the process once the table is unpinned.
 #
 # Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|mtu|port-aggregate|lacp|lldp|switching|svi|routed-subinterface|source-address|rest|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
@@ -2204,6 +2204,8 @@ cmd_check_rest() {
 
   rest_expect GET "$base/openapi.json" 200 "" '/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}' || return 1
   log "router-a: openapi document served"
+  rest_expect GET "$base/swagger-ui/" 200 "" 'Swagger UI' || return 1
+  log "router-a: swagger ui served"
 
   # `show log --follow`: an SSE stream that carries a *live* entry, not just the
   # backlog. Follow nos-configd, then commit an (empty) transaction so it logs

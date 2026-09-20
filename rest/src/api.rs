@@ -1,7 +1,7 @@
 //! The router. Show and transaction-root operations are registered together
 //! with their `#[utoipa::path]` docs (`routes!`), so the spec and the router
 //! can't disagree; the wildcard config-tree routes are documented by
-//! `openapi::document`.
+//! `openapi::document`. Swagger UI is served at `/swagger-ui/`.
 
 use std::sync::Arc;
 
@@ -11,6 +11,7 @@ use serde_json::Value;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
+use utoipa_swagger_ui::{Config, SwaggerUi};
 
 use crate::ipc::Daemons;
 use crate::{clear, openapi, show, tx};
@@ -84,5 +85,8 @@ pub fn router(daemons: Daemons) -> Router {
             "/openapi.json",
             get(move || async move { Json((*doc).clone()) }),
         )
+        // Swagger UI reads the route above (not a `utoipa` struct of its own),
+        // so it shows the generated config-tree paths too.
+        .merge(SwaggerUi::new("/swagger-ui").config(Config::from("/openapi.json")))
         .with_state(daemons)
 }

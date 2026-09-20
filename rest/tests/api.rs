@@ -377,6 +377,16 @@ async fn serves_its_openapi_document() {
     assert!(paths.contains_key("/v1/routes/{table}"));
 }
 
+#[tokio::test]
+async fn serves_swagger_ui_from_vendored_assets() {
+    let f = fixture(vec![]).await;
+    let (s, html) = send(&f.app, Method::GET, "/swagger-ui/", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(html.as_str().unwrap().contains("Swagger UI"));
+    let (s, _) = send(&f.app, Method::GET, "/swagger-ui/swagger-ui.css", None).await;
+    assert_eq!(s, StatusCode::OK);
+}
+
 fn log_entry(source: &str, message: &str) -> LogEntry {
     LogEntry {
         timestamp_ms: 1,
