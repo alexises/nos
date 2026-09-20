@@ -401,6 +401,7 @@ mod tests {
     #[test]
     fn build_from_config_table_without_static_instance_is_empty() {
         let tables = vec![RoutingTable {
+            rest_api: None,
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,
@@ -662,6 +663,7 @@ mod tests {
     #[test]
     fn build_from_config_resolves_static_routes() {
         let tables = vec![RoutingTable {
+            rest_api: None,
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,

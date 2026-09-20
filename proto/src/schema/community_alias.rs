@@ -10,6 +10,7 @@ use super::Config;
 /// script), referenced by bare name from an RPL policy script's
 /// `.contains(..)`/`.add(..)`/`.remove(..)` — see root `CLAUDE.md`'s RPL
 /// section.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct CommunityAlias {

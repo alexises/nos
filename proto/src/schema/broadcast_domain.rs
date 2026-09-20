@@ -17,6 +17,7 @@ use super::{Config, InterfaceAddress};
 /// it). The bridge device and whatever interfaces are enslaved into it as L2
 /// members are separate Linux links, so there is no conflict between this
 /// and any member's own VRF assignment.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct BroadcastDomain {
@@ -82,6 +83,7 @@ mod tests {
 
     fn table(name: &str) -> RoutingTable {
         RoutingTable {
+            rest_api: None,
             ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: None,

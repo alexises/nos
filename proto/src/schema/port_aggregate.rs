@@ -12,6 +12,7 @@ use super::{Config, Subinterface, VlanTag};
 /// does **not** map to the kernel's own `Ieee8023Ad` bonding mode); the
 /// difference is only which control plane decides which members are
 /// actually enslaved into it.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PortAggregateMode {
     /// Static: every member named by an `Interface.port_aggregate`
@@ -32,6 +33,7 @@ pub enum PortAggregateMode {
 /// (3s to detect loss). Only meaningful for a `Lacp`-mode aggregate. Like
 /// Linux bonding's `lacp_rate`, it's a request to the partner — each end
 /// transmits at the rate the *other* end asks for.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum LacpRate {
     #[default]
@@ -53,6 +55,7 @@ pub enum LacpRate {
 /// field to this aggregate's name — the same reference-by-name shape
 /// `Interface.switching_profile` already uses for L2 trunk membership —
 /// rather than this type holding a member list itself.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct PortAggregate {
@@ -199,6 +202,7 @@ mod tests {
         }];
         let mut cfg = config_with(vec![agg]);
         cfg.routing_tables = vec![crate::schema::RoutingTable {
+            rest_api: None,
             ospfv3_instance: None,
             name: "rt1".to_string(),
             bgp_instance: None,

@@ -21,6 +21,7 @@ pub const PRIORITY_DEFAULT: u8 = 1;
 /// Which RFC 2328 network type an attach point using this profile runs.
 /// `OspfProfile.network_type` is `Option` — see its doc comment for how an
 /// unset value is resolved.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NetworkType {
     PointToPoint,
@@ -31,6 +32,7 @@ pub enum NetworkType {
 /// mechanisms, mirroring `BgpAuth`'s exact shape (`schema::bgp_peer_group`).
 /// Stored clear-text, like every field in this config. `OspfProfile.auth ==
 /// None` is RFC 2328's `AuType` 0 (Null) — no separate variant needed for it.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OspfAuth {
     /// RFC 2328 Appendix D.2 — a single up-to-8-byte plaintext password,
@@ -46,6 +48,7 @@ pub enum OspfAuth {
 /// one key must have this set) — every configured key is still accepted on
 /// receive, looked up by the wire's own Key ID (RFC 2328 D.5), which is how
 /// graceful key rollover works without dropping the adjacency.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OspfCryptoKey {
     pub key_id: u8,
@@ -58,6 +61,7 @@ pub struct OspfCryptoKey {
 /// plus RFC 5709's HMAC-SHA extension. The wire's `AuType` is `2` for all
 /// five — there's no separate "algorithm" field on the wire, so `key_id`
 /// alone must unambiguously determine which algorithm a receiver uses.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OspfCryptoAlgorithm {
     Md5,
@@ -124,6 +128,7 @@ fn valid_auth(auth: Option<&OspfAuth>) -> garde::Result {
 /// (`Interface`/`Subinterface`/`BroadcastDomain`) with no instance/area
 /// qualifier — so, like `BgpPeerGroup.name`, its uniqueness is enforced
 /// globally across the whole config, not just within its owning area.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct OspfProfile {

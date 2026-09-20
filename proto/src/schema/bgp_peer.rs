@@ -8,10 +8,12 @@ use super::Config;
 /// Associates a remote address with a peer-group, by name — the bulk of
 /// session config (remote-as, source-address, address-families) lives on
 /// the referenced `BgpPeerGroup`, not here.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct BgpPeer {
     #[garde(custom(|addr, ctx: &Config| unique_remote_address(addr, ctx)))]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub remote_address: IpAddr,
 
     #[garde(custom(|name, ctx: &Config| peer_group_exists(name, ctx)))]

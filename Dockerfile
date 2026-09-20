@@ -14,7 +14,7 @@ COPY . .
 # "nos-bgp/dhat-heap" to build nos-bgpd with dhat heap profiling — see
 # bgp/CLAUDE.md's "Memory profiling" note.
 ARG CARGO_FEATURES=
-RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-watchdogd --bin nos
+RUN cargo build --release ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin nos-configd --bin nos-bgpd --bin nos-ribd --bin nos-interfaced --bin nos-logd --bin nos-ospfd --bin nos-ospfv3d --bin nos-lacpd --bin nos-lldpd --bin nos-restd --bin nos-watchdogd --bin nos
 
 FROM debian:bookworm-slim AS runtime
 
@@ -32,6 +32,7 @@ COPY --from=builder /app/target/release/nos-ospfd      /usr/local/bin/nos-ospfd
 COPY --from=builder /app/target/release/nos-ospfv3d    /usr/local/bin/nos-ospfv3d
 COPY --from=builder /app/target/release/nos-lacpd      /usr/local/bin/nos-lacpd
 COPY --from=builder /app/target/release/nos-lldpd      /usr/local/bin/nos-lldpd
+COPY --from=builder /app/target/release/nos-restd      /usr/local/bin/nos-restd
 COPY --from=builder /app/target/release/nos-watchdogd  /usr/local/bin/nos-watchdogd
 COPY --from=builder /app/target/release/nos            /usr/local/bin/nos
 
@@ -51,6 +52,8 @@ COPY --from=builder /app/target/release/nos            /usr/local/bin/nos
 # CAP_NET_ADMIN, since it never touches rtnetlink (see lacp/CLAUDE.md).
 # nos-lldpd needs CAP_NET_RAW for the same reason, over a raw AF_PACKET
 # socket per LLDP-enabled interface (see lldp/CLAUDE.md).
+# nos-restd needs CAP_NET_RAW for SO_BINDTODEVICE, to bind its HTTP listener
+# inside its routing table's VRF (see rest/CLAUDE.md).
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libcap2-bin \
@@ -61,6 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && setcap 'cap_net_raw=eip' /usr/local/bin/nos-ospfv3d \
     && setcap 'cap_net_raw=eip' /usr/local/bin/nos-lacpd \
     && setcap 'cap_net_raw=eip' /usr/local/bin/nos-lldpd \
+    && setcap 'cap_net_raw=eip' /usr/local/bin/nos-restd \
     && apt-get purge -y --auto-remove libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 

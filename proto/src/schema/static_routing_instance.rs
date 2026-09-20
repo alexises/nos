@@ -8,6 +8,7 @@ use super::{Config, StaticRoute};
 /// A named container of static routes. Carries no reference to any routing
 /// table — only `RoutingTable.static_routing_instance` names it, never the
 /// other way around.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct StaticRoutingInstance {

@@ -14,15 +14,18 @@ use super::Config;
 /// `routes` field (`static_routing_instance::unique_subnets`), not here — a
 /// `StaticRoute` in isolation has no notion of which instance owns it under
 /// garde's whole-`Config` validation context.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct StaticRoute {
     // Structurally valid by construction; per-instance uniqueness lives on
     // the owning `StaticRoutingInstance.routes` field instead.
     #[garde(skip)]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub subnet: IpNet,
 
     #[garde(custom(gateway_matches_subnet_family(self.subnet)))]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub gateway: IpAddr,
 }
 

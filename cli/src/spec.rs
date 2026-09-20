@@ -1083,6 +1083,54 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             detail: "Context-relative form of 'delete routing-table <name> ospfv3-instance'.",
         },
         ConfigurationRoutingTable),
+    spec!(["set" "routing-table" (RoutingTableName) "rest-api" "address" (Plain)],
+        "set routing-table <name> rest-api address <ip>",
+        Doc::Local {
+            summary: "Pin the REST API (nos-restd) to a routing table on the given address.",
+            detail: "nos-restd listens on <ip> inside the table's VRF, port 8080. There is no \
+                     authentication — the VRF and address are the only access boundary. The \
+                     address must be a specific unicast address already configured on an \
+                     interface in that VRF; until it is, nos-restd keeps retrying the bind.",
+        },
+        Configuration),
+    spec!(["set" "routing-table" (RoutingTableName) "rest-api" "address" (Plain) "port" (Plain)],
+        "set routing-table <name> rest-api address <ip> port <port>",
+        Doc::Local {
+            summary: "Pin the REST API (nos-restd) to a routing table on the given address and port.",
+            detail: "Same as 'set routing-table <name> rest-api address <ip>', with an explicit \
+                     TCP port instead of the default 8080.",
+        },
+        Configuration),
+    spec!(["set" "rest-api" "address" (Plain)],
+        "set rest-api address <ip>",
+        Doc::Local {
+            summary: "Pin the REST API to the current routing table on the given address.",
+            detail: "Context-relative form of 'set routing-table <name> rest-api address <ip>'.",
+        },
+        ConfigurationRoutingTable),
+    spec!(["set" "rest-api" "address" (Plain) "port" (Plain)],
+        "set rest-api address <ip> port <port>",
+        Doc::Local {
+            summary: "Pin the REST API to the current routing table on the given address and port.",
+            detail: "Context-relative form of 'set routing-table <name> rest-api address <ip> \
+                     port <port>'.",
+        },
+        ConfigurationRoutingTable),
+    spec!(["delete" "routing-table" (RoutingTableName) "rest-api"],
+        "delete routing-table <name> rest-api",
+        Doc::Local {
+            summary: "Unpin the REST API from a routing table (stops its nos-restd).",
+            detail: "Clears the table's rest-api setting; nos-watchdogd stops the table's \
+                     nos-restd process.",
+        },
+        Configuration),
+    spec!(["delete" "rest-api"],
+        "delete rest-api",
+        Doc::Local {
+            summary: "Unpin the REST API from the current routing table.",
+            detail: "Context-relative form of 'delete routing-table <name> rest-api'.",
+        },
+        ConfigurationRoutingTable),
     spec!(["set" "routing-table" (RoutingTableName) "static-routing-instance"
            (StaticRoutingInstanceName)],
         "set routing-table <name> static-routing-instance <instance>",

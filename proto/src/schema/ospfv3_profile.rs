@@ -12,6 +12,7 @@ use super::{Config, NetworkType};
 /// `OspfProfile`'s `HELLO_INTERVAL_DEFAULT`/`DEAD_INTERVAL_DEFAULT`/
 /// `PRIORITY_DEFAULT`/`NetworkType` directly — those defaults and the
 /// point-to-point/broadcast distinction are unchanged by RFC 5340.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct Ospfv3Profile {

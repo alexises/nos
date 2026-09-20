@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +10,7 @@ use super::Config;
 /// The source side of a `Redistribute` rule. Only `Static` exists today —
 /// see `Redistribute`'s doc comment for why this is an enum rather than a
 /// bare marker.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RedistributeSource {
     Static,
@@ -29,6 +32,7 @@ impl std::fmt::Display for RedistributeSource {
 
 /// The target side of a `Redistribute` rule — `Bgp` or `Ospf`. See
 /// `Redistribute`'s doc comment.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RedistributeTarget {
     Bgp,
@@ -57,6 +61,7 @@ impl std::fmt::Display for RedistributeTarget {
 /// `RedistributeSource`/`RedistributeTarget`, not a shape change here.
 /// `Vec<Redistribute>` is the documented follow-up if multiple simultaneous
 /// rules are ever needed.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Redistribute {
     pub from: RedistributeSource,
@@ -70,10 +75,42 @@ pub struct Redistribute {
     pub policy: Option<String>,
 }
 
+/// Where `nos-restd` listens for a routing table: one specific address
+/// inside the table's VRF. There is deliberately no wildcard — an
+/// unauthenticated management API must be pinned to one reachable address.
+/// Whether the address is actually configured on an interface in the VRF is
+/// operational state, not validated at commit: `nos-restd` retries the bind.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestApi {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub address: IpAddr,
+    pub port: u16,
+}
+
+/// Default `RestApi.port` when `nos-cli` is given none.
+pub const REST_API_PORT_DEFAULT: u16 = 8080;
+
+fn rest_api_valid(rest_api: Option<&RestApi>) -> garde::Result {
+    let Some(r) = rest_api else {
+        return Ok(());
+    };
+    if r.address.is_unspecified() || r.address.is_multicast() {
+        return Err(garde::Error::new(
+            "rest api address must be a specific unicast address",
+        ));
+    }
+    if r.port == 0 {
+        return Err(garde::Error::new("rest api port must be 1-65535"));
+    }
+    Ok(())
+}
+
 /// A named routing table, optionally associated with one BGP instance and
 /// one static routing instance. The reference lives only on the table —
 /// `BgpInstance`/`StaticRoutingInstance` have no notion of which table(s)
 /// reference them.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct RoutingTable {
@@ -108,6 +145,13 @@ pub struct RoutingTable {
     /// reason `BgpPeerGroup`'s timer check is wired on `BgpInstance.peer_groups`.
     #[garde(skip)]
     pub redistribute: Option<Redistribute>,
+
+    /// Pins a `nos-restd` to this table: it listens on `rest_api.address`
+    /// inside this table's VRF. `serde(default)` so on-disk config saved
+    /// before this field existed still loads.
+    #[serde(default)]
+    #[garde(custom(|r: &Option<RestApi>, _ctx: &Config| rest_api_valid(r.as_ref())))]
+    pub rest_api: Option<RestApi>,
 }
 
 /// If set, `bgp_instance` must name an existing `BgpInstance` (cf.
@@ -275,6 +319,7 @@ mod tests {
 
     fn table(name: &str, bgp_instance: Option<&str>, sri: Option<&str>) -> RoutingTable {
         RoutingTable {
+            rest_api: None,
             ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),

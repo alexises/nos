@@ -50,6 +50,16 @@ pub enum Request {
     /// that touches at least one requested scope — other commits are not
     /// sent at all.
     SubscribeDiff { scopes: Vec<DiffScope> },
+    /// Sets (`value` = `Some(json)`) or removes (`value` = `None`) the
+    /// subsection of a named transaction's in-progress config addressed by
+    /// `path` — see `nos_proto::config_path` for the path grammar. An empty
+    /// `path` addresses the whole config. Like `ApplyOp`, never validates;
+    /// replies with `Event::Transaction`.
+    SetTransactionPath {
+        name: String,
+        path: Vec<String>,
+        value: Option<String>,
+    },
 }
 
 /// Messages sent from the config daemon to a component client.
@@ -92,6 +102,7 @@ pub enum TransactionBase {
 
 /// A named transaction's current state, returned after `OpenTransaction`,
 /// `ApplyOp`, and `GetTransaction`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionSnapshot {
     pub name: String,

@@ -9,12 +9,14 @@ use super::{Config, Ospfv3Profile};
 /// One `OSPFv3` area within an `Ospfv3Instance`, keyed by its dotted-quad area
 /// id — mirrors `OspfArea` exactly. Unique only within its owning instance,
 /// enforced on the parent's `areas` field (`ospfv3_instance::unique_area_ids`).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct Ospfv3Area {
     // Ipv4Addr is structurally valid by construction; uniqueness lives on
     // the owning Ospfv3Instance.areas field instead.
     #[garde(skip)]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub area_id: Ipv4Addr,
 
     #[garde(

@@ -96,6 +96,7 @@ mod tests {
 
     fn table(name: &str, bgp_instance: Option<&str>) -> RoutingTable {
         RoutingTable {
+            rest_api: None,
             ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),

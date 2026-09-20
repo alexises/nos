@@ -13,6 +13,7 @@ use super::Config;
 /// every member. No nesting — a member must be an existing alias name or a
 /// literal, never another group's name (not requested, see root
 /// `CLAUDE.md`'s RPL section).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct CommunityGroup {

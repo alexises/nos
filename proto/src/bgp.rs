@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 /// not a real state in `nos-bgp::fsm`, which only models `OpenSent`/
 /// `OpenConfirm`/`Established`, but is the natural "nothing established yet"
 /// value to report over this protocol.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BgpSessionState {
     Idle,
@@ -23,12 +24,15 @@ pub enum BgpSessionState {
 }
 
 /// One configured peer's one-line summary, for `show bgp brief`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerSummary {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub remote_address: IpAddr,
     pub peer_group: String,
     /// Known only once negotiated (i.e. at least `OpenConfirm`).
     pub remote_as: Option<u32>,
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub remote_bgp_id: Option<Ipv4Addr>,
     pub state: BgpSessionState,
     /// Seconds since the session reached `Established`. `None` unless
@@ -45,9 +49,12 @@ pub struct PeerSummary {
 /// BGP RIB engine always applies next-hop-self and never reads it. `prefix`
 /// and `gateway` are always the same address family (v4/v6 alike, inferred
 /// from `prefix`'s own `IpNet` variant — no separate AFI tag needed).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RedistributedRoute {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub prefix: IpNet,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub gateway: IpAddr,
 }
 

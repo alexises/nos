@@ -53,6 +53,13 @@ pub struct Managed {
     /// every family managed here (`nos-bgpd`, `nos-ribd`, `nos-ospfd`)
     /// currently has one, so `main.rs` always passes `Some` today.
     pub endpoint: Option<Endpoint>,
+    /// `None` (every family but one): a process per section, always. `Some`:
+    /// a process only while the section carries a `FieldDiff` with this label
+    /// whose new value is set — for a daemon that is *opt-in per object*
+    /// (`nos-restd` on a `RoutingTable`'s `rest-api` field) rather than one
+    /// per object. This is what lets a field flip on an existing object
+    /// (`Modified`) spawn or stop a process.
+    pub claim_label: Option<&'static str>,
     pub config_socket: PathBuf,
     pub log_socket: PathBuf,
     pub watchdog_listen_socket: PathBuf,
@@ -141,6 +148,25 @@ where
     }
 }
 
+/// Whether `section` says its object currently wants a process under
+/// `m.claim_label`: `Some(true)` = claimed, `Some(false)` = the label is
+/// present but unset/removed, `None` = this section doesn't mention it.
+/// Meaningless (and never called) when `m.claim_label` is `None`.
+fn claim(m: &Managed, section: &SectionDiff) -> Option<bool> {
+    let label = m.claim_label?;
+    section
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .map(|f| f.new.as_deref().is_some_and(|v| v != "unset"))
+}
+
+/// A section that is `Added` (or part of a fresh connection's initial
+/// snapshot) wants a process unless this family is opt-in and unclaimed.
+fn wanted_when_added(m: &Managed, section: &SectionDiff) -> bool {
+    m.claim_label.is_none() || claim(m, section) == Some(true)
+}
+
 /// Reconciles the full set of currently-wanted names (all `Added` by
 /// construction — see `manage`'s doc comment) against what's already
 /// supervised: spawns anything missing, stops anything no longer wanted.
@@ -149,7 +175,11 @@ async fn sync_from_initial(
     sections: &[SectionDiff],
     m: &Managed,
 ) {
-    let wanted: HashSet<&str> = sections.iter().map(|s| s.name.as_str()).collect();
+    let wanted: HashSet<&str> = sections
+        .iter()
+        .filter(|s| wanted_when_added(m, s))
+        .map(|s| s.name.as_str())
+        .collect();
 
     let stale: Vec<String> = instances
         .keys()
@@ -171,7 +201,8 @@ async fn sync_from_initial(
 /// missing (idempotent), `Removed` stops if present, `Modified` is a no-op at
 /// this level — every one of these daemons independently subscribes to config
 /// and re-resolves its own state on each relevant diff, so a parameter change
-/// never needs a process restart here.
+/// never needs a process restart here. The one exception is an opt-in family
+/// (`claim_label`): `Modified` that flips the claim spawns or stops.
 async fn apply_diff(
     instances: &mut HashMap<String, InstanceHandle>,
     sections: &[SectionDiff],
@@ -180,12 +211,18 @@ async fn apply_diff(
     for section in sections {
         match section.status {
             DiffStatus::Added => {
-                if !instances.contains_key(&section.name) {
+                if wanted_when_added(m, section) && !instances.contains_key(&section.name) {
                     spawn_instance(instances, &section.name, m).await;
                 }
             }
             DiffStatus::Removed => stop_instance(instances, &section.name, m).await,
-            DiffStatus::Modified => {}
+            DiffStatus::Modified => match claim(m, section) {
+                Some(true) if !instances.contains_key(&section.name) => {
+                    spawn_instance(instances, &section.name, m).await;
+                }
+                Some(false) => stop_instance(instances, &section.name, m).await,
+                _ => {}
+            },
         }
     }
 }
@@ -241,4 +278,151 @@ async fn shutdown_all(instances: HashMap<String, InstanceHandle>, m: &Managed) {
         }
     }))
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn managed(claim_label: Option<&'static str>) -> Managed {
+        Managed {
+            scope: DiffScope::RoutingTables,
+            section: |d| &d.routing_tables,
+            // Exits immediately; only the `instances` bookkeeping is under test.
+            bin: PathBuf::from("/bin/true"),
+            flags: Vec::new(),
+            name_flag: "--table",
+            daemon: "test-daemon",
+            noun: "thing",
+            endpoint: None,
+            claim_label,
+            config_socket: PathBuf::from("/nonexistent"),
+            log_socket: PathBuf::from("/nonexistent"),
+            watchdog_listen_socket: PathBuf::from("/nonexistent"),
+            policy: BackoffPolicy::default(),
+            registry: EndpointRegistry::default(),
+        }
+    }
+
+    /// What a section says about the `rest-api` field.
+    #[derive(Clone, Copy)]
+    enum Claim {
+        /// The section doesn't mention the field.
+        Silent,
+        /// Field present, new value `"unset"` (or any other text).
+        Is(&'static str),
+        /// Field present with no new value (the table was removed).
+        Gone,
+    }
+
+    fn section(name: &str, status: DiffStatus, claim: Claim) -> SectionDiff {
+        let new = match claim {
+            Claim::Silent => None,
+            Claim::Is(v) => Some(Some(v.to_string())),
+            Claim::Gone => Some(None),
+        };
+        SectionDiff {
+            header: format!("routing-table {name}"),
+            name: name.to_string(),
+            status,
+            fields: new
+                .map(|new| nos_proto::FieldDiff {
+                    label: "rest-api".to_string(),
+                    old: None,
+                    new,
+                })
+                .into_iter()
+                .collect(),
+            subsections: Vec::new(),
+        }
+    }
+
+    fn names(instances: &HashMap<String, InstanceHandle>) -> Vec<&str> {
+        let mut n: Vec<&str> = instances.keys().map(String::as_str).collect();
+        n.sort_unstable();
+        n
+    }
+
+    #[tokio::test]
+    async fn opt_in_family_follows_the_claim_field() {
+        let m = managed(Some("rest-api"));
+        let mut inst = HashMap::new();
+
+        // Initial snapshot: only the claimed table gets a process.
+        sync_from_initial(
+            &mut inst,
+            &[
+                section("rt1", DiffStatus::Added, Claim::Is("10.0.0.1:8080")),
+                section("rt2", DiffStatus::Added, Claim::Is("unset")),
+            ],
+            &m,
+        )
+        .await;
+        assert_eq!(names(&inst), ["rt1"]);
+
+        // Flip on an existing table spawns; flip off stops; unrelated
+        // modification changes nothing.
+        apply_diff(
+            &mut inst,
+            &[section(
+                "rt2",
+                DiffStatus::Modified,
+                Claim::Is("10.0.0.2:80"),
+            )],
+            &m,
+        )
+        .await;
+        assert_eq!(names(&inst), ["rt1", "rt2"]);
+        apply_diff(
+            &mut inst,
+            &[section("rt1", DiffStatus::Modified, Claim::Is("unset"))],
+            &m,
+        )
+        .await;
+        assert_eq!(names(&inst), ["rt2"]);
+        apply_diff(
+            &mut inst,
+            &[section("rt2", DiffStatus::Modified, Claim::Silent)],
+            &m,
+        )
+        .await;
+        assert_eq!(names(&inst), ["rt2"]);
+
+        // A table added already-claimed spawns; removal stops.
+        apply_diff(
+            &mut inst,
+            &[section("rt3", DiffStatus::Added, Claim::Is("[::1]:80"))],
+            &m,
+        )
+        .await;
+        apply_diff(
+            &mut inst,
+            &[section("rt2", DiffStatus::Removed, Claim::Gone)],
+            &m,
+        )
+        .await;
+        assert_eq!(names(&inst), ["rt3"]);
+
+        shutdown_all(inst, &m).await;
+    }
+
+    #[tokio::test]
+    async fn family_without_claim_label_still_spawns_per_section() {
+        let m = managed(None);
+        let mut inst = HashMap::new();
+        apply_diff(
+            &mut inst,
+            &[section("rt1", DiffStatus::Added, Claim::Silent)],
+            &m,
+        )
+        .await;
+        apply_diff(
+            &mut inst,
+            &[section("rt1", DiffStatus::Modified, Claim::Is("unset"))],
+            &m,
+        )
+        .await;
+        assert_eq!(names(&inst), ["rt1"]);
+        shutdown_all(inst, &m).await;
+    }
 }

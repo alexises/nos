@@ -30,8 +30,10 @@ pub fn loopback_table_name(name: &str) -> Option<&str> {
 /// One address on an interface, with an optional label. The label is
 /// stored from commit time onward but not yet applied to the kernel by any
 /// driver (no `ip addr ... label` call) — schema/plumbing only for now.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct InterfaceAddress {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub address: IpNet,
     pub label: Option<String>,
 }
@@ -47,6 +49,7 @@ pub struct InterfaceAddress {
 /// claims tag 0, a `Dot1q(n)` member claims tag `n`) must be disjoint — see
 /// `valid_subinterface_and_switching_profile_tags`. Loopback interfaces
 /// never have any `Subinterface`s — see `valid_addressing_split`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct Subinterface {
@@ -153,6 +156,7 @@ pub(crate) fn valid_subinterface_list(subinterfaces: &[Subinterface]) -> garde::
 /// `Config.interfaces` (`valid_interfaces`) since it needs to see sibling
 /// fields — the same reason `RoutingTable`'s redistribute rule is wired on
 /// `Config.routing_tables`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct Interface {
@@ -468,6 +472,7 @@ mod tests {
 
     fn table(name: &str) -> RoutingTable {
         RoutingTable {
+            rest_api: None,
             ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: None,

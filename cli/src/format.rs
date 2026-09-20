@@ -230,8 +230,12 @@ pub fn render_routing_table(table: &RoutingTable) -> String {
         ),
         None => "unset".to_string(),
     };
+    let rest_api = table
+        .rest_api
+        .as_ref()
+        .map_or("unset".to_string(), |r| format!("{}:{}", r.address, r.port));
     format!(
-        "routing-table {}: bgp-instance {bgp_instance}, ospf-instance {ospf_instance}, static-routing-instance {static_routing_instance}, redistribute {redistribute_str}",
+        "routing-table {}: bgp-instance {bgp_instance}, ospf-instance {ospf_instance}, static-routing-instance {static_routing_instance}, redistribute {redistribute_str}, rest-api {rest_api}",
         table.name
     )
 }

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 /// subtype as `aa:bb:..`, an interface-name subtype as its text, anything
 /// else as hex) — this type is deliberately not a faithful copy of the
 /// 802.1AB subtype/value pair, since nothing downstream needs to interpret it.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LldpNeighbor {
     pub local_interface: String,

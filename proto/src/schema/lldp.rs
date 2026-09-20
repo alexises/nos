@@ -16,6 +16,7 @@ pub const TX_INTERVAL_MAX_SECS: u16 = 3600;
 pub const TX_HOLD_MAX: u8 = 100;
 
 /// System-wide LLDP settings. `None` for a timer means the 802.1AB default.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LldpSettings {
     /// `msgTxInterval`: seconds between periodic LLDPDUs.
@@ -24,6 +25,7 @@ pub struct LldpSettings {
     pub tx_hold: Option<u8>,
     /// Advertised in the Management Address TLV on every LLDP-enabled link.
     /// Taken as configured — not checked against any interface's addresses.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub management_address: Option<IpAddr>,
 }
 
@@ -76,6 +78,7 @@ impl LldpSettings {
 
 /// Which 802.1AB destination group an interface's LLDPDUs use. Both ends of a
 /// link must agree: a frame to a different group is never seen.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LldpDestination {
     /// `01:80:C2:00:00:0E` — link-local, never forwarded by any bridge.

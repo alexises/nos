@@ -4,7 +4,7 @@ use ipnet::IpNet;
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, LacpRate, LldpDestination, NetworkType, NextHopMode,
     OspfCryptoAlgorithm, PortAggregateMode, Redistribute, RedistributeSource, RedistributeTarget,
-    SourceAddress, TransactionBase, VlanTag,
+    SourceAddress, TransactionBase, VlanTag, REST_API_PORT_DEFAULT,
 };
 
 /// A single field edit targeting a BGP instance.
@@ -261,6 +261,15 @@ pub enum SetTarget {
     },
     /// Context-relative — only valid while navigated into a routing table.
     RoutingTableOspfv3InstanceRelative { ospfv3_instance: String },
+    /// `set routing-table <name> rest-api address <ip> [port <n>]` — pins
+    /// `nos-restd` to the table. `port` is already defaulted by the parser.
+    RoutingTableRestApi {
+        name: String,
+        address: IpAddr,
+        port: u16,
+    },
+    /// Context-relative — only valid while navigated into a routing table.
+    RoutingTableRestApiRelative { address: IpAddr, port: u16 },
     /// Fully-qualified — works from anywhere in configuration mode. No
     /// context-relative form — see `BgpInstanceField`'s doc comment on why
     /// `set router-id <ip>` while navigated into an `OspfInstance` reuses
@@ -531,6 +540,13 @@ pub enum DeleteTarget {
     /// `delete ospfv3-instance` — relative clear, only valid while navigated
     /// into a routing table.
     RoutingTableOspfv3InstanceRelative,
+    /// `delete routing-table <name> rest-api` — qualified clear.
+    RoutingTableRestApi {
+        name: String,
+    },
+    /// `delete rest-api` — relative clear, only valid while navigated into a
+    /// routing table.
+    RoutingTableRestApiRelative,
     OspfInstance {
         name: String,
     },
@@ -1326,6 +1342,30 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 ospfv3_instance: (*instance).to_string(),
             })
         }
+        ["routing-table", name, "rest-api", "address", address] => {
+            Command::Set(SetTarget::RoutingTableRestApi {
+                name: (*name).to_string(),
+                address: address.parse().ok()?,
+                port: REST_API_PORT_DEFAULT,
+            })
+        }
+        ["routing-table", name, "rest-api", "address", address, "port", port] => {
+            Command::Set(SetTarget::RoutingTableRestApi {
+                name: (*name).to_string(),
+                address: address.parse().ok()?,
+                port: port.parse().ok()?,
+            })
+        }
+        ["rest-api", "address", address] => Command::Set(SetTarget::RoutingTableRestApiRelative {
+            address: address.parse().ok()?,
+            port: REST_API_PORT_DEFAULT,
+        }),
+        ["rest-api", "address", address, "port", port] => {
+            Command::Set(SetTarget::RoutingTableRestApiRelative {
+                address: address.parse().ok()?,
+                port: port.parse().ok()?,
+            })
+        }
         ["ospf", "instance", name, "router-id", ip] => Command::Set(SetTarget::OspfInstance {
             name: (*name).to_string(),
             router_id: ip.parse::<Ipv4Addr>().ok()?,
@@ -1880,6 +1920,10 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
             })
         }
         ["ospfv3-instance"] => Command::Delete(DeleteTarget::RoutingTableOspfv3InstanceRelative),
+        ["routing-table", name, "rest-api"] => Command::Delete(DeleteTarget::RoutingTableRestApi {
+            name: (*name).to_string(),
+        }),
+        ["rest-api"] => Command::Delete(DeleteTarget::RoutingTableRestApiRelative),
         ["ospf", "instance", name] => Command::Delete(DeleteTarget::OspfInstance {
             name: (*name).to_string(),
         }),
@@ -4272,6 +4316,40 @@ mod tests {
         assert_eq!(
             Command::parse("delete ospfv3-instance"),
             Command::Delete(DeleteTarget::RoutingTableOspfv3InstanceRelative)
+        );
+    }
+
+    #[test]
+    fn set_and_delete_routing_table_rest_api() {
+        let addr: IpAddr = "10.0.0.1".parse().unwrap();
+        assert_eq!(
+            Command::parse("set routing-table rt1 rest-api address 10.0.0.1"),
+            Command::Set(SetTarget::RoutingTableRestApi {
+                name: "rt1".to_string(),
+                address: addr,
+                port: 8080,
+            })
+        );
+        assert_eq!(
+            Command::parse("set rest-api address 10.0.0.1 port 9000"),
+            Command::Set(SetTarget::RoutingTableRestApiRelative {
+                address: addr,
+                port: 9000,
+            })
+        );
+        assert!(matches!(
+            Command::parse("set rest-api address not-an-ip"),
+            Command::Unknown(_)
+        ));
+        assert_eq!(
+            Command::parse("delete routing-table rt1 rest-api"),
+            Command::Delete(DeleteTarget::RoutingTableRestApi {
+                name: "rt1".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete rest-api"),
+            Command::Delete(DeleteTarget::RoutingTableRestApiRelative)
         );
     }
 }

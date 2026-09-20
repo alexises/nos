@@ -8,6 +8,7 @@ use crate::validators::unique_in;
 use super::bgp_peer_group;
 use super::{BgpPeer, BgpPeerGroup, Config};
 
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct BgpInstance {
@@ -19,6 +20,7 @@ pub struct BgpInstance {
 
     // Ipv4Addr is structurally valid by construction; no additional garde rule needed.
     #[garde(skip)]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub router_id: Ipv4Addr,
 
     // RFC 6793: ASN 0 and 4_294_967_295 are reserved.
@@ -39,6 +41,7 @@ pub struct BgpInstance {
     /// convention. Only meaningful when at least one peer-group has
     /// `route_reflector_client` set; harmless (unused) otherwise.
     #[garde(skip)]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub cluster_id: Option<Ipv4Addr>,
 
     /// The name of the `RoutingTable` that claims this instance (i.e. the

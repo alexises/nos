@@ -11,12 +11,14 @@ use super::{Config, OspfProfile};
 /// instance — never referenced from outside `OspfInstance`, unlike
 /// `OspfProfile.name` — so uniqueness is enforced on the parent's `areas`
 /// field (`ospf_instance::unique_area_ids`), not here.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct OspfArea {
     // Ipv4Addr is structurally valid by construction; uniqueness lives on
     // the owning OspfInstance.areas field instead.
     #[garde(skip)]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub area_id: Ipv4Addr,
 
     #[garde(

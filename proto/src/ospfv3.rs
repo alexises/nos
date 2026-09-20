@@ -15,13 +15,16 @@ use crate::ospf::{LinkInterfaceState, OspfNeighborState};
 /// One neighbor's summary row, for `show ospfv3 neigh` — mirrors
 /// `ospf::NeighborSummary` exactly (nothing in it is an address field beyond
 /// router-ids, so it needs no IPv6-specific fields either).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ospfv3NeighborSummary {
     /// The attach point's display name, matching `nos-ospfv3d`'s own
     /// `"<interface>.<tag>"`/`"broadcast-domain:<name>"` convention.
     pub link: String,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub area_id: Ipv4Addr,
     pub interface_state: LinkInterfaceState,
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub neighbor_router_id: Option<Ipv4Addr>,
     pub state: OspfNeighborState,
     pub last_hello_secs: Option<u64>,
@@ -29,18 +32,24 @@ pub struct Ospfv3NeighborSummary {
     pub dead_interval: u16,
     pub priority: u8,
     pub neighbor_priority: Option<u8>,
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub dr: Option<Ipv4Addr>,
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub bdr: Option<Ipv4Addr>,
 }
 
 /// One installed LSA's header fields, for `show ospfv3 database` — mirrors
 /// `ospf::LsaSummary`, with `lsa_type` widened to `u16`: RFC 5340's LS Type
 /// word carries the U-bit/S2/S1 scope bits alongside the function code.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ospfv3LsaSummary {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub area_id: Ipv4Addr,
     pub lsa_type: u16,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub link_state_id: Ipv4Addr,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub advertising_router: Ipv4Addr,
     pub sequence_number: i32,
     pub age: u16,

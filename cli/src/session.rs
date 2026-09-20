@@ -1233,6 +1233,28 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 after: PathAfter::Stay,
             }
         }
+        Command::Set(SetTarget::RoutingTableRestApi {
+            name,
+            address,
+            port,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::RoutingTable(RoutingTableOp::SetRestApi {
+                name,
+                address,
+                port,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::RoutingTableRestApiRelative { address, port }) => {
+            Resolved::ApplyOp {
+                op: ConfigOp::RoutingTable(RoutingTableOp::SetRestApi {
+                    name: path.routing_table()?.to_string(),
+                    address,
+                    port,
+                }),
+                after: PathAfter::Stay,
+            }
+        }
         Command::Set(SetTarget::OspfInstance { name, router_id }) => Resolved::ApplyOp {
             op: ConfigOp::OspfInstance(OspfInstanceOp::SetRouterId { name, router_id }),
             after: PathAfter::Stay,
@@ -1768,6 +1790,16 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
         },
         Command::Delete(DeleteTarget::RoutingTableOspfv3InstanceRelative) => Resolved::ApplyOp {
             op: ConfigOp::RoutingTable(RoutingTableOp::ClearOspfv3Instance {
+                name: path.routing_table()?.to_string(),
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::RoutingTableRestApi { name }) => Resolved::ApplyOp {
+            op: ConfigOp::RoutingTable(RoutingTableOp::ClearRestApi { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::RoutingTableRestApiRelative) => Resolved::ApplyOp {
+            op: ConfigOp::RoutingTable(RoutingTableOp::ClearRestApi {
                 name: path.routing_table()?.to_string(),
             }),
             after: PathAfter::Stay,

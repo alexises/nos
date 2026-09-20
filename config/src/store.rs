@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use garde::Validate as _;
 use nos_proto::{
-    diff_configs, sync_routing_table_refs, Config, ConfigDiff, ConfigOp, TransactionBase,
-    TransactionSnapshot,
+    config_path, diff_configs, sync_routing_table_refs, Config, ConfigDiff, ConfigOp,
+    TransactionBase, TransactionSnapshot,
 };
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, info};
@@ -126,6 +126,37 @@ impl ConfigStore {
         debug!(transaction = %name, ?op, "applying op");
         op.apply(&mut txn.config)?;
         txn.dirty = true;
+        Ok(TransactionSnapshot {
+            name: name.to_string(),
+            config: txn.config.clone(),
+            dirty: true,
+            resumed: true,
+        })
+    }
+
+    /// Sets or removes the subsection of a named transaction's in-progress
+    /// config addressed by `path` (see `nos_proto::config_path`). Atomic under
+    /// the transactions lock, and all-or-nothing: the edit is applied to a
+    /// JSON copy which must still deserialize as a `Config` before it
+    /// replaces the transaction's config. Never runs `garde` validation.
+    pub async fn set_transaction_path(
+        &self,
+        name: &str,
+        path: &[String],
+        value: Option<&str>,
+    ) -> Result<TransactionSnapshot, ConfigError> {
+        let mut txs = self.0.transactions.lock().await;
+        let txn = txs
+            .get_mut(name)
+            .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        let mut doc = serde_json::to_value(&txn.config)?;
+        match value {
+            Some(json) => config_path::set(&mut doc, path, serde_json::from_str(json)?)?,
+            None => config_path::remove(&mut doc, path)?,
+        }
+        txn.config = serde_json::from_value(doc)?;
+        txn.dirty = true;
+        debug!(transaction = %name, path = %path.join("/"), remove = value.is_none(), "set transaction path");
         Ok(TransactionSnapshot {
             name: name.to_string(),
             config: txn.config.clone(),
@@ -277,12 +308,77 @@ mod tests {
         })
     }
 
+    fn segs(p: &str) -> Vec<String> {
+        p.split('/')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn set_transaction_path_sets_subsection_and_marks_dirty() {
+        let store = ConfigStore::new(Config::default(), None);
+        store.open_transaction("t", TransactionBase::Blank).await;
+        let body = serde_json::to_string(&instance("r1", 65000)).unwrap();
+        let snap = store
+            .set_transaction_path("t", &segs("bgp-instance/r1"), Some(&body))
+            .await
+            .unwrap();
+        assert!(snap.dirty);
+        assert_eq!(snap.config.bgp_instances.len(), 1);
+
+        let snap = store
+            .set_transaction_path("t", &segs("hostname"), Some("\"rest-host\""))
+            .await
+            .unwrap();
+        assert_eq!(snap.config.hostname, "rest-host");
+
+        let snap = store
+            .set_transaction_path("t", &segs("bgp-instance/r1"), None)
+            .await
+            .unwrap();
+        assert!(snap.config.bgp_instances.is_empty());
+        assert!(store.running_snapshot().await.bgp_instances.is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_transaction_path_whole_config_and_failures_leave_it_untouched() {
+        let store = ConfigStore::new(Config::default(), None);
+        store.open_transaction("t", TransactionBase::Blank).await;
+        let whole = Config {
+            hostname: "whole".to_string(),
+            bgp_instances: vec![instance("r1", 1)],
+            ..Default::default()
+        };
+        store
+            .set_transaction_path("t", &[], Some(&serde_json::to_string(&whole).unwrap()))
+            .await
+            .unwrap();
+
+        // Type mismatch: rejected, transaction unchanged.
+        assert!(store
+            .set_transaction_path("t", &segs("hostname"), Some("42"))
+            .await
+            .is_err());
+        // Unknown path / unknown transaction.
+        assert!(store
+            .set_transaction_path("t", &segs("nope"), Some("1"))
+            .await
+            .is_err());
+        assert!(store
+            .set_transaction_path("missing", &[], Some("{}"))
+            .await
+            .is_err());
+        assert_eq!(store.get_transaction("t").await.unwrap().config, whole);
+    }
+
     #[tokio::test]
     async fn new_derives_routing_table_refs_from_initial_config() {
         let store = ConfigStore::new(
             Config {
                 bgp_instances: vec![instance("r1", 65000)],
                 routing_tables: vec![nos_proto::RoutingTable {
+                    rest_api: None,
                     ospfv3_instance: None,
                     name: "rt1".to_string(),
                     bgp_instance: Some("r1".to_string()),

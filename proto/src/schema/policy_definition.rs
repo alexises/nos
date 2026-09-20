@@ -11,6 +11,7 @@ use super::Config;
 /// consumer (`nos-bgpd`) compiles and caches its own bytecode locally,
 /// matching the existing "each daemon re-resolves its own state from config
 /// diffs" idiom, rather than `nos-proto` carrying a bytecode wire format.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct PolicyDefinition {

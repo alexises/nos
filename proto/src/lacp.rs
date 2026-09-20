@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 802.1AX §6.4.12 Receive Machine states.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LacpReceiveState {
     Initialize,
@@ -21,6 +22,7 @@ pub enum LacpReceiveState {
 /// 802.1AX §6.4.15 Mux Machine states. `Distributing` is the only state in
 /// which this port belongs in the aggregate's active-member set pushed to
 /// `nos-interfaced` (`nos_proto::interface::LacpAggregateMembers`).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LacpMuxState {
     Detached,
@@ -31,6 +33,7 @@ pub enum LacpMuxState {
 }
 
 /// One member port's current LACP state, for `show lacp`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LacpPortStatus {
     pub interface: String,
@@ -52,6 +55,7 @@ pub struct LacpPortStatus {
 }
 
 /// One `PortAggregate`'s LACP engine state, for `show lacp [<name>]`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortAggregateLacpSummary {
     pub aggregate: String,

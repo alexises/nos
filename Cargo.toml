@@ -1,5 +1,5 @@
 [workspace]
-members = ["proto", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tcp-auth", "rpl", "log-client", "l2-socket", "lacp", "lldp"]
+members = ["proto", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tcp-auth", "rpl", "log-client", "l2-socket", "lacp", "lldp", "rest"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -39,6 +39,10 @@ md-5                = "0.10"
 sha1                = "0.10"
 sha2                = "0.10"
 hmac                = "0.12"
+axum                = "0.8"
+utoipa              = { version = "5", features = ["axum_extras"] }
+utoipa-axum         = "0.2"
+percent-encoding    = "2"
 
 # test dependencies
 tempfile    = "3"

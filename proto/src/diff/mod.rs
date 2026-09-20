@@ -27,6 +27,7 @@ use crate::schema::Config;
 
 /// Whether a diffed section is wholly new, wholly gone, or has some fields
 /// changed within it.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiffStatus {
     Added,
@@ -37,6 +38,7 @@ pub enum DiffStatus {
 /// One changed (or added/removed) field — either a top-level scalar or one
 /// field within a `SectionDiff`. Values are pre-formatted strings; the
 /// client only needs to display them, never interpret them.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldDiff {
     pub label: String,
@@ -48,6 +50,7 @@ pub struct FieldDiff {
 
 /// A single named/keyed section (e.g. one BGP instance) that changed between
 /// two configs, and the specific fields within it that did.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SectionDiff {
     /// Context line identifying the section, e.g. "bgp instance foo" —
@@ -64,12 +67,14 @@ pub struct SectionDiff {
     pub fields: Vec<FieldDiff>,
     /// Nested sections one level deeper (e.g. a BGP instance's peer-groups
     /// and peers). Empty for a section with no nested collections.
+    #[cfg_attr(feature = "openapi", schema(no_recursion))]
     pub subsections: Vec<SectionDiff>,
 }
 
 /// The structural difference between two `Config` values. Only what changed
 /// is included — no unchanged section or field is ever present, so a client
 /// can render this directly as a minimal, context-aware diff.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigDiff {
     pub hostname: Option<FieldDiff>,
@@ -196,6 +201,7 @@ impl ConfigDiff {
 
 /// Which top-level `ConfigDiff` sections a diff subscriber cares about — see
 /// `Request::SubscribeDiff`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiffScope {
     Hostname,

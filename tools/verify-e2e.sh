@@ -180,9 +180,13 @@
 # pair never does, then that turning transmit off on one side makes it send a real TTL-0
 # shutdown LLDPDU that the other side acts on immediately (not after the 120s
 # TTL), that transmit coming back is learned again, and that dropping receive
-# restarts the link as transmit-only.
+# restarts the link as transmit-only. A fourteenth, `rest`, pins the REST API
+# (nos-restd) to router-a's rt1 on eth0's address and drives it over real HTTP
+# from the host: show endpoints, a whole config-tree transaction committed
+# through the URLs, the OpenAPI document, retry of an address not on the VRF,
+# and the watchdog stopping the process once the table is unpinned.
 #
-# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|mtu|port-aggregate|lacp|lldp|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
+# Usage: tools/verify-e2e.sh {up|established|reconnect|collision|redistribute|auth|loopback|mtu|port-aggregate|lacp|lldp|switching|svi|routed-subinterface|source-address|rest|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -2060,6 +2064,173 @@ cmd_check_lldp() {
   lacp_unlink_veths
 }
 
+# ---------------------------------------------------------------------------
+# REST API scenario
+# ---------------------------------------------------------------------------
+# Pins the REST API (nos-restd) to router-a's rt1 on router-a's own eth0
+# address, and verifies -- over real HTTP from the host, across the docker
+# bridge into a listener bound inside rt1's VRF -- that: nos-watchdogd spawns
+# a real nos-restd for the pinned table, it binds address:port in the VRF, show
+# endpoints return live data from other daemons, a transaction driven purely
+# over the config-tree URLs (a scalar, a whole list element, a %2F-encoded key)
+# commits into the real running config, the OpenAPI document is served, an
+# address not (yet) configured on the VRF is retried rather than fatal, and
+# unpinning stops the process and closes the port.
+
+REST_PORT=8080
+# Not assigned to any interface, so binding it fails with EADDRNOTAVAIL.
+REST_ABSENT_ADDRESS=10.50.0.77
+REST_TX=rest-e2e
+
+provision_rest() {
+  local name=$1 asn=$2 router_id=$3 own_ip=$4 peer_ip=$5
+  shift 5
+  log "provisioning $name: $*"
+  docker run --rm --entrypoint /usr/local/bin/nos-provision \
+    -v "$PROVISION_BIN:/usr/local/bin/nos-provision:ro,z" \
+    -v "${name}-run:/run/nos" \
+    "$IMAGE" \
+    --config-socket /run/nos/config.sock \
+    --address "${own_ip}/24" \
+    --asn "$asn" \
+    --router-id "$router_id" \
+    --remote-as "$( [[ $asn == "$ASN_A" ]] && echo "$ASN_B" || echo "$ASN_A" )" \
+    --peer "$peer_ip" \
+    "$@"
+}
+
+# rest_call METHOD URL [BODY] -- sets REST_STATUS / REST_BODY (never fails).
+rest_call() {
+  local method=$1 url=$2 body=${3-} out
+  if [[ -n "$body" ]]; then
+    out=$(curl -sS --max-time 5 -X "$method" -H 'content-type: application/json' \
+      --data "$body" -w '\n%{http_code}' "$url" 2>&1) || true
+  else
+    out=$(curl -sS --max-time 5 -X "$method" -w '\n%{http_code}' "$url" 2>&1) || true
+  fi
+  REST_STATUS=${out##*$'\n'}
+  REST_BODY=${out%$'\n'*}
+}
+
+# rest_expect METHOD URL STATUS [BODY] [BODY_PATTERN] -- asserts the status
+# and, if given, that the body contains BODY_PATTERN (fixed-string match).
+rest_expect() {
+  local method=$1 url=$2 want=$3 body=${4-} pattern=${5-}
+  rest_call "$method" "$url" "$body"
+  if [[ "$REST_STATUS" != "$want" ]]; then
+    log "FAILED: $method $url -> $REST_STATUS (want $want): $REST_BODY"
+    return 1
+  fi
+  if [[ -n "$pattern" && "$REST_BODY" != *"$pattern"* ]]; then
+    log "FAILED: $method $url body lacks '$pattern': $REST_BODY"
+    return 1
+  fi
+}
+
+cmd_check_rest() {
+  local base="http://$IP_A:$REST_PORT" tx="/v1/transactions/$REST_TX"
+  command -v curl >/dev/null || { log "curl is required on the host for the rest scenario"; return 1; }
+
+  local spawn_base listen_base
+  spawn_base=$(log_count router-a "spawning nos-restd for new REST API")
+  listen_base=$(log_count router-a "rest api listening table=rt1 .* address=$IP_A port=$REST_PORT")
+  provision_rest router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" \
+    --rest-api-address "$IP_A" --rest-api-port "$REST_PORT"
+
+  # Only nos-watchdogd logs the first, only nos-restd itself the second: the
+  # process really was spawned for the newly-pinned table, and really bound
+  # inside rt1's VRF.
+  wait_for_count_increase router-a "spawning nos-restd for new REST API" "$spawn_base" 60 \
+    && log "router-a: watchdog spawned nos-restd for rt1" \
+    || { log "router-a: FAILED to see nos-restd spawned"; return 1; }
+  wait_for_count_increase router-a "rest api listening table=rt1 .* address=$IP_A port=$REST_PORT" "$listen_base" 60 \
+    && log "router-a: nos-restd listening on $IP_A:$REST_PORT inside rt1's vrf" \
+    || { log "router-a: FAILED to see nos-restd listening"; return 1; }
+
+  # Show endpoints, answered by other daemons (config, rib, bgp, interface).
+  local orig_hostname
+  rest_expect GET "$base/v1/config" 200 "" '"hostname"' || return 1
+  orig_hostname=$(sed -E 's/.*"hostname":"([^"]*)".*/\1/' <<<"$REST_BODY")
+  rest_expect GET "$base/v1/routes/rt1" 200 || return 1
+  rest_expect GET "$base/v1/interfaces" 200 "" '"eth0"' || return 1
+  rest_expect GET "$base/v1/bgp/summary" 200 "" '"instance":"r1"' || return 1
+  rest_expect GET "$base/v1/routes/nonexistent-table" 503 || return 1
+  log "router-a: show endpoints answered over http"
+
+  # A transaction driven purely through the config-tree URLs.
+  rest_expect POST "$base$tx?base=current" 201 || return 1
+  rest_expect PUT "$base$tx/hostname" 200 '"rest-host"' '"rest-host"' || return 1
+  rest_expect PUT "$base$tx/prefix-list/rest-pl" 200 \
+    '{"name":"rest-pl","entries":[{"cidr":"10.0.0.0/8","range":null}]}' '"rest-pl"' || return 1
+  # A key containing '/' travels as one percent-encoded segment.
+  rest_expect GET "$base$tx/prefix-list/rest-pl/entry/10.0.0.0%2F8" 200 "" '"10.0.0.0/8"' || return 1
+  rest_expect PUT "$base$tx/hostname" 400 '{"bad":true}' || return 1
+  rest_expect GET "$base$tx/diff" 200 || return 1
+  # Nothing is running yet.
+  rest_expect GET "$base/v1/config" 200 || return 1
+  if [[ "$REST_BODY" == *rest-pl* ]]; then
+    log "FAILED: uncommitted transaction leaked into the running config"; return 1
+  fi
+  rest_expect POST "$base$tx/commit" 200 "" "\"committed\":\"$REST_TX\"" || return 1
+  rest_expect GET "$base/v1/config" 200 "" '"rest-pl"' || return 1
+  [[ "$REST_BODY" == *'"hostname":"rest-host"'* ]] \
+    || { log "FAILED: committed hostname not in the running config"; return 1; }
+  log "router-a: rest-driven transaction committed into the running config"
+
+  # Undo it the same way, exercising DELETE on a subsection and on the tx.
+  rest_expect POST "$base$tx?base=current" 201 || return 1
+  rest_expect DELETE "$base$tx/prefix-list/rest-pl" 204 || return 1
+  rest_expect PUT "$base$tx/hostname" 200 "\"$orig_hostname\"" || return 1
+  rest_expect POST "$base$tx/commit" 200 || return 1
+  rest_expect GET "$base/v1/config" 200 || return 1
+  if [[ "$REST_BODY" == *rest-pl* ]]; then
+    log "FAILED: rest-pl still present after DELETE + commit"; return 1
+  fi
+  rest_expect POST "$base$tx?base=blank" 201 || return 1
+  rest_expect DELETE "$base$tx" 204 || return 1
+  rest_expect GET "$base$tx" 404 || return 1
+
+  rest_expect GET "$base/openapi.json" 200 "" '/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}' || return 1
+  log "router-a: openapi document served"
+
+  # An address that is not on the VRF (yet) is retried, not fatal: the old
+  # listener is dropped, the new bind fails with EADDRNOTAVAIL, nothing crashes.
+  local stopped_base absent_base
+  stopped_base=$(log_count router-a "rest api stopped listening")
+  absent_base=$(log_count router-a "rest api not listening yet")
+  provision_rest router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" \
+    --rest-api-address "$REST_ABSENT_ADDRESS" --rest-api-port "$REST_PORT"
+  wait_for_count_increase router-a "rest api stopped listening" "$stopped_base" 30 \
+    && log "router-a: nos-restd dropped the listener when its address changed" \
+    || { log "router-a: FAILED to see the listener dropped"; return 1; }
+  wait_for_count_increase router-a "rest api not listening yet" "$absent_base" 30 \
+    && log "router-a: nos-restd retries an address that is not on the vrf" \
+    || { log "router-a: FAILED to see the not-listening-yet retry"; return 1; }
+
+  # Back to a real address, then unpin: the watchdog stops the process and
+  # the port closes.
+  listen_base=$(log_count router-a "rest api listening table=rt1 .* address=$IP_A port=$REST_PORT")
+  provision_rest router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" \
+    --rest-api-address "$IP_A" --rest-api-port "$REST_PORT"
+  wait_for_count_increase router-a "rest api listening table=rt1 .* address=$IP_A port=$REST_PORT" "$listen_base" 30 \
+    && log "router-a: nos-restd listening again on $IP_A" \
+    || { log "router-a: FAILED to rebind on the real address"; return 1; }
+  rest_expect GET "$base/v1/config" 200 || return 1
+
+  local removed_base
+  removed_base=$(log_count router-a "REST API removed from config, stopping nos-restd")
+  provision_rest router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" --clear-rest-api
+  wait_for_count_increase router-a "REST API removed from config, stopping nos-restd" "$removed_base" 30 \
+    && log "router-a: watchdog stopped nos-restd after the table was unpinned" \
+    || { log "router-a: FAILED to see nos-restd stopped"; return 1; }
+  sleep 2
+  rest_call GET "$base/v1/config"
+  if [[ "$REST_STATUS" == 200 ]]; then
+    log "FAILED: the rest api still answers after being unpinned"; return 1
+  fi
+  log "router-a: the rest api port is closed after unpinning"
+}
+
 cmd_check_ospf() {
   provision_ospf router-a "$ASN_A" "$RID_A" "$IP_A" "$IP_B" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID"
   provision_ospf router-b "$ASN_B" "$RID_B" "$IP_B" "$IP_A" "$OSPF_INSTANCE" "$OSPF_ROUTER_ID_B"
@@ -3254,6 +3425,7 @@ cmd_group_drivers() {
   cmd_check_svi
   cmd_check_routed_subinterface
   cmd_check_source_address
+  cmd_check_rest
 }
 
 cmd_group_rpl() {
@@ -3305,6 +3477,7 @@ case "${1:-}" in
   svi) cmd_check_svi ;;
   routed-subinterface) cmd_check_routed_subinterface ;;
   source-address) cmd_check_source_address ;;
+  rest) cmd_check_rest ;;
   policy) cmd_check_policy ;;
   redistribute-policy) cmd_check_redistribute_policy ;;
   communities) cmd_check_communities ;;
@@ -3344,6 +3517,7 @@ case "${1:-}" in
     cmd_check_svi
     cmd_check_routed_subinterface
     cmd_check_source_address
+    cmd_check_rest
     cmd_check_policy
     cmd_check_redistribute_policy
     cmd_check_communities
@@ -3362,7 +3536,7 @@ case "${1:-}" in
     cmd_check_ospfv3_dr
     ;;
   *)
-    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|mtu|port-aggregate|lacp|lldp|switching|svi|routed-subinterface|source-address|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
+    echo "usage: $0 {up|established|reconnect|collision|redistribute|auth|loopback|mtu|port-aggregate|lacp|lldp|switching|svi|routed-subinterface|source-address|rest|policy|redistribute-policy|communities|reflector|route-server|ospf|asbr|ospf-dr|ospf-spf|abr|ospf-aging|ospf-auth|ospf-dbd-pagination|ospf-mtu-pagination|ospfv3|ospfv3-dr|logs [n]|down|base|drivers|rpl|ospf-suite|multi|all}" >&2
     exit 2
     ;;
 esac

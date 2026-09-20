@@ -1,6 +1,8 @@
+use std::net::IpAddr;
+
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Config, Redistribute, RoutingTable};
+use crate::schema::{Config, Redistribute, RestApi, RoutingTable};
 
 use super::OpError;
 
@@ -53,6 +55,15 @@ pub enum RoutingTableOp {
     ClearOspfv3Instance {
         name: String,
     },
+    /// Pins `nos-restd` to this table, listening on `address:port` in its VRF.
+    SetRestApi {
+        name: String,
+        address: IpAddr,
+        port: u16,
+    },
+    ClearRestApi {
+        name: String,
+    },
 }
 
 impl RoutingTableOp {
@@ -61,6 +72,7 @@ impl RoutingTableOp {
             RoutingTableOp::Ensure { name } => {
                 if !config.routing_tables.iter().any(|t| &t.name == name) {
                     config.routing_tables.push(RoutingTable {
+                        rest_api: None,
                         name: name.clone(),
                         bgp_instance: None,
                         ospf_instance: None,
@@ -129,6 +141,21 @@ impl RoutingTableOp {
                 find_table_mut(config, name)?.ospfv3_instance = None;
                 Ok(())
             }
+            RoutingTableOp::SetRestApi {
+                name,
+                address,
+                port,
+            } => {
+                find_table_mut(config, name)?.rest_api = Some(RestApi {
+                    address: *address,
+                    port: *port,
+                });
+                Ok(())
+            }
+            RoutingTableOp::ClearRestApi { name } => {
+                find_table_mut(config, name)?.rest_api = None;
+                Ok(())
+            }
         }
     }
 }
@@ -150,6 +177,7 @@ mod tests {
 
     fn table(name: &str) -> RoutingTable {
         RoutingTable {
+            rest_api: None,
             ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: None,
@@ -176,6 +204,7 @@ mod tests {
     fn ensure_is_noop_when_present() {
         let mut cfg = Config {
             routing_tables: vec![RoutingTable {
+                rest_api: None,
                 ospfv3_instance: None,
                 name: "rt1".to_string(),
                 bgp_instance: Some("r1".to_string()),
@@ -261,6 +290,35 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.routing_tables[0].ospf_instance, None);
+    }
+
+    #[test]
+    fn set_and_clear_rest_api() {
+        let mut cfg = Config {
+            routing_tables: vec![table("rt1")],
+            ..Default::default()
+        };
+        RoutingTableOp::SetRestApi {
+            name: "rt1".to_string(),
+            address: "10.0.0.1".parse().unwrap(),
+            port: 8080,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.routing_tables[0].rest_api,
+            Some(RestApi {
+                address: "10.0.0.1".parse().unwrap(),
+                port: 8080
+            })
+        );
+
+        RoutingTableOp::ClearRestApi {
+            name: "rt1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.routing_tables[0].rest_api, None);
     }
 
     #[test]

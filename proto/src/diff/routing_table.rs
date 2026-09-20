@@ -34,6 +34,11 @@ pub fn diff_routing_tables(base: &[RoutingTable], candidate: &[RoutingTable]) ->
     sections
 }
 
+/// The `FieldDiff` label `nos-watchdogd` keys on to decide whether a routing
+/// table currently wants a `nos-restd` — a table's `Added`/`Modified`
+/// section carries it with `new` = `"unset"` when the API is not pinned.
+pub const REST_API_LABEL: &str = "rest-api";
+
 fn header_for(name: &str) -> String {
     format!("routing-table {name}")
 }
@@ -74,6 +79,13 @@ fn redistribute_str(t: &RoutingTable) -> String {
     }
 }
 
+fn rest_api_str(t: &RoutingTable) -> String {
+    match &t.rest_api {
+        None => "unset".to_string(),
+        Some(r) => format!("{}:{}", r.address, r.port),
+    }
+}
+
 fn changed_fields(base: &RoutingTable, candidate: &RoutingTable) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     if base.bgp_instance != candidate.bgp_instance {
@@ -111,6 +123,13 @@ fn changed_fields(base: &RoutingTable, candidate: &RoutingTable) -> Vec<FieldDif
             new: Some(redistribute_str(candidate)),
         });
     }
+    if base.rest_api != candidate.rest_api {
+        fields.push(FieldDiff {
+            label: REST_API_LABEL.to_string(),
+            old: Some(rest_api_str(base)),
+            new: Some(rest_api_str(candidate)),
+        });
+    }
     fields
 }
 
@@ -143,6 +162,11 @@ fn removed_section(table: &RoutingTable) -> SectionDiff {
             FieldDiff {
                 label: "redistribute".to_string(),
                 old: Some(redistribute_str(table)),
+                new: None,
+            },
+            FieldDiff {
+                label: REST_API_LABEL.to_string(),
+                old: Some(rest_api_str(table)),
                 new: None,
             },
         ],
@@ -181,6 +205,11 @@ fn added_section(table: &RoutingTable) -> SectionDiff {
                 old: None,
                 new: Some(redistribute_str(table)),
             },
+            FieldDiff {
+                label: REST_API_LABEL.to_string(),
+                old: None,
+                new: Some(rest_api_str(table)),
+            },
         ],
         subsections: Vec::new(),
     }
@@ -192,6 +221,7 @@ mod tests {
 
     fn table(name: &str, bgp_instance: Option<&str>, sri: Option<&str>) -> RoutingTable {
         RoutingTable {
+            rest_api: None,
             ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),
@@ -243,6 +273,24 @@ mod tests {
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].fields.len(), 1);
         assert_eq!(sections[0].fields[0].label, "ospf-instance");
+    }
+
+    #[test]
+    fn modified_rest_api_only_lists_that_field() {
+        use crate::schema::RestApi;
+
+        let base = vec![table("rt1", None, None)];
+        let mut candidate_table = table("rt1", None, None);
+        candidate_table.rest_api = Some(RestApi {
+            address: "10.0.0.1".parse().unwrap(),
+            port: 8080,
+        });
+        let sections = diff_routing_tables(&base, &[candidate_table]);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].fields.len(), 1);
+        assert_eq!(sections[0].fields[0].label, REST_API_LABEL);
+        assert_eq!(sections[0].fields[0].old.as_deref(), Some("unset"));
+        assert_eq!(sections[0].fields[0].new.as_deref(), Some("10.0.0.1:8080"));
     }
 
     #[test]

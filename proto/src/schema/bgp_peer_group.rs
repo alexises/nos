@@ -9,6 +9,7 @@ use super::Config;
 /// encoding allows an IPv6-transport session to carry IPv4 unicast NLRI, so
 /// this must never be derived from, or cross-validated against, either
 /// address's IP version.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AddressFamily {
     Ipv4Unicast,
@@ -37,6 +38,7 @@ impl std::fmt::Display for AddressFamily {
 /// `nos-ribd`), never here. `label` disambiguates which of an interface's
 /// addresses to use when it carries more than one; `None` requires the
 /// interface to carry exactly one address.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceAddress {
     /// An explicitly named interface.
@@ -96,12 +98,14 @@ pub const CONNECT_RETRY_TIME_DEFAULT_SECS: u16 = 120;
 /// resolves to `SelfAddress` for an eBGP peer-group and `Unchanged` for an
 /// iBGP one — standard BGP practice, since an iBGP speaker must not silently
 /// mask a route's real eBGP-learned next-hop unless explicitly told to.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NextHopMode {
     SelfAddress,
     Unchanged,
 }
 
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct BgpPeerGroup {
@@ -209,6 +213,7 @@ fn policy_reference_valid(name: Option<&String>, ctx: &Config) -> garde::Result 
 /// exclusive mechanisms, matching the kernel (a socket can carry
 /// `TCP_MD5SIG` or TCP-AO keys, never both at once). Stored clear-text, like
 /// every field in this config.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BgpAuth {
     /// RFC 2385 TCP MD5 signature — a single shared password.
@@ -224,6 +229,7 @@ pub enum BgpAuth {
 /// segments (exactly one key must have this set); `is_rnext` optionally
 /// requests the peer switch to this key next, for rotation without a
 /// dropped session.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BgpAoKey {
     pub send_id: u8,
@@ -235,6 +241,7 @@ pub struct BgpAoKey {
 }
 
 /// RFC 5925's two mandatory-to-implement algorithms.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BgpAoAlgorithm {
     HmacSha1_96,

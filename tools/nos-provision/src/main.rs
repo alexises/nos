@@ -95,6 +95,21 @@ struct Args {
     #[arg(long, default_value = "rt1")]
     routing_table: String,
 
+    /// If set, pins `nos-restd` to `--routing-table`, listening on this
+    /// address inside its VRF (`RoutingTableOp::SetRestApi`). Mutually
+    /// exclusive with `--clear-rest-api`.
+    #[arg(long)]
+    rest_api_address: Option<IpAddr>,
+
+    /// TCP port for `--rest-api-address`.
+    #[arg(long, default_value_t = nos_proto::REST_API_PORT_DEFAULT)]
+    rest_api_port: u16,
+
+    /// If set, unpins `nos-restd` from `--routing-table`
+    /// (`RoutingTableOp::ClearRestApi`).
+    #[arg(long)]
+    clear_rest_api: bool,
+
     #[arg(long, default_value = "r1")]
     bgp_instance: String,
     #[arg(long)]
@@ -1029,6 +1044,21 @@ async fn main() -> anyhow::Result<()> {
         ops.push(ConfigOp::Interface(InterfaceOp::SetLldpDestination {
             name: name.to_string(),
             destination,
+        }));
+    }
+
+    if let Some(address) = args.rest_api_address {
+        if args.clear_rest_api {
+            bail!("--rest-api-address and --clear-rest-api are mutually exclusive");
+        }
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetRestApi {
+            name: args.routing_table.clone(),
+            address,
+            port: args.rest_api_port,
+        }));
+    } else if args.clear_rest_api {
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::ClearRestApi {
+            name: args.routing_table.clone(),
         }));
     }
 

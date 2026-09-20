@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use nos_log_client::ForwardingLayer;
+use nos_proto::diff::routing_table::REST_API_LABEL;
 use nos_proto::{DiffScope, DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use nos_watchdog::{
     broker, instances, supervise_one, BackoffPolicy, Endpoint, EndpointKind, EndpointRegistry,
@@ -61,6 +62,15 @@ struct Args {
     /// Extra arguments forwarded to every nos-ospfv3d instance.
     #[arg(long = "ospfv3d-arg", allow_hyphen_values = true)]
     ospfv3d_flags: Vec<String>,
+
+    /// Path to the nos-restd binary to supervise (one instance is spawned
+    /// per routing table that has `rest-api` pinned to it).
+    #[arg(long, default_value = "/usr/local/bin/nos-restd")]
+    restd_bin: PathBuf,
+
+    /// Extra arguments forwarded to every nos-restd instance.
+    #[arg(long = "restd-arg", allow_hyphen_values = true)]
+    restd_flags: Vec<String>,
 
     /// Path to the nos-interfaced binary to supervise. Unlike nos-bgpd/
     /// nos-ribd, exactly one instance is always supervised regardless of how
@@ -216,6 +226,7 @@ async fn main() -> anyhow::Result<()> {
                 kind: EndpointKind::BgpInstance,
                 socket_prefix: "bgp",
             }),
+            claim_label: None,
             config_socket: args.config_socket.clone(),
             log_socket: args.log_socket.clone(),
             watchdog_listen_socket: args.listen_socket.clone(),
@@ -234,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
                 kind: EndpointKind::RibTable,
                 socket_prefix: "rib",
             }),
+            claim_label: None,
             config_socket: args.config_socket.clone(),
             log_socket: args.log_socket.clone(),
             watchdog_listen_socket: args.listen_socket.clone(),
@@ -252,6 +264,7 @@ async fn main() -> anyhow::Result<()> {
                 kind: EndpointKind::OspfInstance,
                 socket_prefix: "ospf",
             }),
+            claim_label: None,
             config_socket: args.config_socket.clone(),
             log_socket: args.log_socket.clone(),
             watchdog_listen_socket: args.listen_socket.clone(),
@@ -270,6 +283,26 @@ async fn main() -> anyhow::Result<()> {
                 kind: EndpointKind::Ospfv3Instance,
                 socket_prefix: "ospfv3",
             }),
+            claim_label: None,
+            config_socket: args.config_socket.clone(),
+            log_socket: args.log_socket.clone(),
+            watchdog_listen_socket: args.listen_socket.clone(),
+            policy,
+            registry: registry.clone(),
+        },
+        // Opt-in per routing table (its `rest_api` field), not one per
+        // table — hence `claim_label`. No IPC query listener of its own, so
+        // no endpoint registration.
+        Managed {
+            scope: DiffScope::RoutingTables,
+            section: |d| &d.routing_tables,
+            bin: args.restd_bin,
+            flags: args.restd_flags,
+            name_flag: "--table",
+            daemon: "nos-restd",
+            noun: "REST API",
+            endpoint: None,
+            claim_label: Some(REST_API_LABEL),
             config_socket: args.config_socket.clone(),
             log_socket: args.log_socket.clone(),
             watchdog_listen_socket: args.listen_socket.clone(),

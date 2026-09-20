@@ -12,6 +12,7 @@ use super::{Config, OspfArea};
 /// shape, and `areas` (dotted-quad-keyed, see `OspfArea`). No interfaces
 /// beyond what a nested area's profiles can be attached to yet, and no wire
 /// protocol — this is a config-only skeleton, see `ospf/CLAUDE.md`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct OspfInstance {
@@ -23,6 +24,7 @@ pub struct OspfInstance {
 
     // Ipv4Addr is structurally valid by construction; no additional garde rule needed.
     #[garde(skip)]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub router_id: Ipv4Addr,
 
     /// This instance's OSPF areas, keyed by `area_id` — see `OspfArea`.

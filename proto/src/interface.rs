@@ -12,6 +12,7 @@ use crate::schema::InterfaceAddress;
 /// `addresses`/`routing_table` are populated only for a loopback interface
 /// (flat L3 config, unchanged); every other interface's L3 config lives in
 /// `subinterfaces` instead — see `schema::Subinterface`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InterfaceStatus {
     pub name: String,
@@ -36,11 +37,13 @@ pub struct InterfaceStatus {
     /// addresses" note) — it only surfaces what the kernel already assigned,
     /// purely so a consumer like `nos-ospfv3d` can source real RFC 5340
     /// Hello/Link-LSA traffic from it without its own kernel access.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub link_local_address: Option<Ipv6Addr>,
 }
 
 /// The wire twin of `schema::Subinterface` — one VLAN-scoped L3 attachment
 /// point on a physical interface, `tag == 0` for the untagged/native case.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubinterfaceStatus {
     pub tag: u16,
@@ -48,12 +51,14 @@ pub struct SubinterfaceStatus {
     pub routing_table: Option<String>,
     /// See `InterfaceStatus.link_local_address` — same observed-kernel-state
     /// semantics, scoped to this subinterface's own kernel device.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub link_local_address: Option<Ipv6Addr>,
 }
 
 /// The wire twin of `schema::BroadcastDomain` — a domain's own bridge
 /// device's flat L3 config (same shape as a loopback interface's, see
 /// `schema::BroadcastDomain`'s doc comment).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BroadcastDomainStatus {
     pub name: String,
@@ -61,6 +66,7 @@ pub struct BroadcastDomainStatus {
     pub routing_table: Option<String>,
     /// See `InterfaceStatus.link_local_address` — same observed-kernel-state
     /// semantics, scoped to this domain's own bridge device.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub link_local_address: Option<Ipv6Addr>,
     /// The real Linux bridge device name the `linux` driver allocated for
     /// this domain (e.g. `br1`) — `None` until the driver has actually
@@ -76,6 +82,7 @@ pub struct BroadcastDomainStatus {
 /// device's config, the same shape as `InterfaceStatus` minus the
 /// loopback-only flat `addresses`/`routing_table` fields (a bond is never a
 /// loopback — all its L3 config lives in `subinterfaces`).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortAggregateStatus {
     pub name: String,
@@ -85,6 +92,7 @@ pub struct PortAggregateStatus {
     pub subinterfaces: Vec<SubinterfaceStatus>,
     /// See `InterfaceStatus.link_local_address` — same observed-kernel-state
     /// semantics, scoped to this bond's own kernel device.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub link_local_address: Option<Ipv6Addr>,
     /// The real Linux bond device name the `linux` driver allocated for this
     /// aggregate (e.g. `bond1`) — `None` until the driver has actually
@@ -103,6 +111,7 @@ pub struct PortAggregateStatus {
 /// and "on reconnect" into the same one code path. Only meaningful for a
 /// `PortAggregateMode::Lacp` aggregate — `nos-lacpd` never pushes for a
 /// `Xor` one, whose members are enslaved unconditionally regardless.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LacpAggregateMembers {
     pub aggregate: String,

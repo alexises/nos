@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 /// least one row, even `Down`; a broadcast link reports one row per
 /// currently-known neighbor (zero if none yet — there's no single fixed peer
 /// to show a placeholder for on a multi-access segment).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OspfNeighborState {
     Down,
@@ -32,6 +33,7 @@ pub enum OspfNeighborState {
 /// election ever runs); a broadcast link starts `Waiting`, then becomes
 /// `Dr`/`Backup`/`DrOther` once RFC 2328 §9.4 election runs (see
 /// `ospf::election`).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LinkInterfaceState {
     PointToPoint,
@@ -44,15 +46,18 @@ pub enum LinkInterfaceState {
 /// One neighbor's summary row, for `show ospf neigh` — one row per
 /// currently-known neighbor on a link (see `OspfNeighborState`'s doc
 /// comment for point-to-point vs. broadcast row-count semantics).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NeighborSummary {
     /// The attach point's display name, matching
     /// `reconcile::attach_points_for`'s existing `"<interface>.<tag>"`/
     /// `"broadcast-domain:<name>"` convention.
     pub link: String,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub area_id: Ipv4Addr,
     pub interface_state: LinkInterfaceState,
     /// Known once at least one Hello has been received on this link.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub neighbor_router_id: Option<Ipv4Addr>,
     pub state: OspfNeighborState,
     /// Seconds since the last Hello was received from this neighbor. `None`
@@ -70,18 +75,24 @@ pub struct NeighborSummary {
     /// This link's currently elected DR/BDR — `None` on a point-to-point
     /// link (no election ever runs) or before a broadcast link's first
     /// election.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub dr: Option<Ipv4Addr>,
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub bdr: Option<Ipv4Addr>,
 }
 
 /// One installed LSA's header fields, for `show ospf database` — never the
 /// full LSA body, which this NOS has no operator-facing use for yet (no SPF
 /// consumer to explain a route's ancestry).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LsaSummary {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub area_id: Ipv4Addr,
     pub lsa_type: u8,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub link_state_id: Ipv4Addr,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub advertising_router: Ipv4Addr,
     pub sequence_number: i32,
     pub age: u16,

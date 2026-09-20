@@ -159,6 +159,18 @@ async fn dispatch_request(store: &ConfigStore, req: Request) -> Option<Event> {
                 Event::Error(e.to_string())
             }
         },
+        Request::SetTransactionPath { name, path, value } => {
+            match store
+                .set_transaction_path(&name, &path, value.as_deref())
+                .await
+            {
+                Ok(snap) => Event::Transaction(snap),
+                Err(e) => {
+                    debug!(transaction = %name, error = %e, "set transaction path failed");
+                    Event::Error(e.to_string())
+                }
+            }
+        }
         Request::Subscribe | Request::Unsubscribe | Request::SubscribeDiff { .. } => return None,
     })
 }

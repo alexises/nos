@@ -10,6 +10,10 @@ pub enum ConfigError {
     TransactionNotFound(String),
     #[error("edit failed: {0}")]
     Op(#[from] nos_proto::OpError),
+    #[error("config path: {0}")]
+    Path(#[from] nos_proto::config_path::PathError),
+    #[error("invalid JSON body for config path: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("config persistence is not configured on this daemon (no --config-file set)")]
     PersistenceNotConfigured,
     #[error("IPC I/O error: {0}")]

@@ -14,6 +14,7 @@ use super::{Config, Ospfv3Area};
 /// `nos-ospfv3d`) — see the `OSPFv3` Phase 1 plan. `router_id`/`area_id`
 /// (on `Ospfv3Area`) stay `Ipv4Addr`: RFC 5340 keeps these as opaque 32-bit
 /// identifiers, not real addresses, exactly like RFC 2328.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct Ospfv3Instance {
@@ -25,6 +26,7 @@ pub struct Ospfv3Instance {
 
     // Ipv4Addr is structurally valid by construction; no additional garde rule needed.
     #[garde(skip)]
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub router_id: Ipv4Addr,
 
     /// This instance's `OSPFv3` areas, keyed by `area_id` — see `Ospfv3Area`.

@@ -12,14 +12,17 @@ use super::Config;
 /// from the existing `this.prefix in <cidr>` operator, which stays
 /// containment/orlonger-based for a bare CIDR — see root `CLAUDE.md`'s RPL
 /// section.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrefixListEntry {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub cidr: IpNet,
     pub range: Option<(u8, u8)>,
 }
 
 /// A named set of prefix-match entries, referenced by bare name from an RPL
 /// script's `this.prefix in NAME`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct PrefixList {

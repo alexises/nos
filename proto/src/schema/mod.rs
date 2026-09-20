@@ -45,7 +45,10 @@ pub use ospfv3_profile::Ospfv3Profile;
 pub use policy_definition::PolicyDefinition;
 pub use port_aggregate::{LacpRate, PortAggregate, PortAggregateMode};
 pub use prefix_list::{PrefixList, PrefixListEntry};
-pub use routing_table::{Redistribute, RedistributeSource, RedistributeTarget, RoutingTable};
+pub use routing_table::{
+    Redistribute, RedistributeSource, RedistributeTarget, RestApi, RoutingTable,
+    REST_API_PORT_DEFAULT,
+};
 pub use static_route::StaticRoute;
 pub use static_routing_instance::StaticRoutingInstance;
 pub use switching_profile::{SwitchingProfile, SwitchingProfileMember, VlanTag};
@@ -55,6 +58,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::validators::hostname_charset;
 
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
 pub struct Config {

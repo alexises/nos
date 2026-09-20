@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 /// Wire twin of `nos-rib`'s internal `RouteSource` — kept separate so
 /// `nos-rib`'s own domain type doesn't need to derive wire traits it has no
 /// other use for.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RouteSourceKind {
     Static,
@@ -14,16 +15,20 @@ pub enum RouteSourceKind {
 }
 
 /// One candidate route for a prefix.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RouteEntry {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub gateway: IpAddr,
     pub source: RouteSourceKind,
 }
 
 /// One prefix's full candidate list, ordered best (winner) to worst by
 /// source preference.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrefixRoutes {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub prefix: IpNet,
     pub candidates: Vec<RouteEntry>,
 }
@@ -33,9 +38,12 @@ pub struct PrefixRoutes {
 /// (redistributed-from-static) loc-rib entry has no real next-hop and is
 /// never pushed at all, to avoid a pointless static→bgp→rib→kernel round
 /// trip on the same table it came from.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BgpRoute {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub prefix: IpNet,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub next_hop: IpAddr,
 }
 
@@ -54,9 +62,12 @@ pub enum BgpRouteUpdate {
 /// for kernel installation — the OSPF analogue of `BgpRoute`. Never a
 /// directly-connected destination (root's own subnet) — see
 /// `ospf::spf::compute`'s directly-connected filter.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OspfRoute {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub prefix: IpNet,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub next_hop: IpAddr,
     /// The local kernel interface (ifindex) `next_hop` is reachable over,
     /// when the pushing daemon knows it — always `Some` from `nos-ospfv3d`
