@@ -17,6 +17,7 @@ use nos_proto::{
     EsEntry, EvpnKey, EvpnRoute, EvpnUpdate, FdbTable, MacEntry, MacSource, NeighEntry,
 };
 use tokio::sync::{mpsc, watch, Mutex};
+use tokio::time::{sleep_until, Instant};
 use tracing::{debug, info, warn};
 
 use crate::df;
@@ -68,6 +69,9 @@ struct Segment {
     /// Every PE on the segment, ranked (see `df::candidates`).
     pes: Vec<IpAddr>,
     df: bool,
+    /// Inside the DF wait timer: treated as non-DF whatever the election says
+    /// (set by `sync_df`; `plan_df` itself stays pure).
+    waiting: bool,
 }
 
 /// What `bgp_client` keeps originated into the named BGP instance.
@@ -220,6 +224,7 @@ fn plan_df(r: &Ready, received: &HashMap<EvpnKey, EvpnRoute>) -> Vec<Segment> {
                 port: p.port.clone(),
                 pes: df::candidates(r.vtep, &peers),
                 df: df::elect(r.vtep, &peers, r.vni) == r.vtep,
+                waiting: false,
             }
         })
         .collect()
@@ -246,6 +251,9 @@ struct Inner {
     segments: Vec<Segment>,
     /// The flood setting last applied to each segment port.
     es_flood: BTreeMap<String, bool>,
+    /// When each attached segment port's DF wait timer ends (RFC 7432 §8.5
+    /// step 3). Set the first time the port is planned, dropped when it leaves.
+    df_wait_until: BTreeMap<String, Instant>,
     /// Local ARP/ND bindings and SVI addresses, as (MAC, IP).
     local_neigh: BTreeSet<(Mac, IpAddr)>,
 }
@@ -255,10 +263,13 @@ pub struct Fdb {
     driver: Arc<dyn FdbDriver>,
     inner: Mutex<Inner>,
     target: watch::Sender<EvpnTarget>,
+    df_wait: Duration,
+    /// The earliest running DF wait timer, for `run_local` to sleep until.
+    df_deadline: watch::Sender<Option<Instant>>,
 }
 
 impl Fdb {
-    pub fn new(domain: String, driver: Arc<dyn FdbDriver>) -> Arc<Self> {
+    pub fn new(domain: String, driver: Arc<dyn FdbDriver>, df_wait: Duration) -> Arc<Self> {
         let (target, _) = watch::channel(EvpnTarget {
             domain: domain.clone(),
             ..EvpnTarget::default()
@@ -268,6 +279,8 @@ impl Fdb {
             driver,
             inner: Mutex::default(),
             target,
+            df_wait,
+            df_deadline: watch::channel(None).0,
         })
     }
 
@@ -352,17 +365,43 @@ impl Fdb {
 
     /// Re-elects the Designated Forwarder of every attached segment and
     /// applies it: a non-DF stops flooding BUM to the segment's port, a DF
-    /// (and a port no longer on any segment) floods normally. The block is
-    /// re-asserted every call, so a port the kernel recreated is healed by
-    /// the tick.
+    /// (and a port no longer on any segment) floods normally. A port is held
+    /// blocked for `df_wait` after it first appears (RFC 7432 §8.5 step 3), so
+    /// a PE that has just come up doesn't deliver BUM the DF already does. The
+    /// block is re-asserted every call, so a port the kernel recreated is
+    /// healed by the tick.
     async fn sync_df(&self, g: &mut Inner) {
-        let plan = g
+        let mut plan = g
             .ready
             .as_ref()
             .map(|r| plan_df(r, &g.received))
             .unwrap_or_default();
+        let now = Instant::now();
+        for s in &mut plan {
+            let until = *g.df_wait_until.entry(s.port.clone()).or_insert_with(|| {
+                info!(
+                    domain = %self.domain, esi = %format_esi(&s.esi), port = %s.port,
+                    seconds = self.df_wait.as_secs(), "df wait started"
+                );
+                now + self.df_wait
+            });
+            s.waiting = now < until;
+        }
+        g.df_wait_until
+            .retain(|p, _| plan.iter().any(|s| &s.port == p));
+        let next = g
+            .df_wait_until
+            .values()
+            .filter(|u| **u > now)
+            .min()
+            .copied();
+        self.df_deadline.send_if_modified(|d| {
+            let changed = *d != next;
+            *d = next;
+            changed
+        });
         for s in &plan {
-            if g.segments.iter().find(|o| o.port == s.port) != Some(s) {
+            if !s.waiting && g.segments.iter().find(|o| o.port == s.port) != Some(s) {
                 // `%`, not a bare str: a plain str field renders quoted.
                 let role = if s.df { "df" } else { "non-df" };
                 info!(
@@ -372,16 +411,17 @@ impl Fdb {
                     "df elected"
                 );
             }
+            let flood = s.df && !s.waiting;
             let prev = g.es_flood.get(&s.port).copied();
-            if prev == Some(s.df) && s.df {
+            if prev == Some(flood) && flood {
                 continue;
             }
-            match self.driver.set_port_flood(&s.port, s.df).await {
+            match self.driver.set_port_flood(&s.port, flood).await {
                 Ok(()) => {
-                    if prev != Some(s.df) {
-                        info!(domain = %self.domain, port = %s.port, flood = s.df, "segment port flooding set");
+                    if prev != Some(flood) {
+                        info!(domain = %self.domain, port = %s.port, flood, "segment port flooding set");
                     }
-                    g.es_flood.insert(s.port.clone(), s.df);
+                    g.es_flood.insert(s.port.clone(), flood);
                 }
                 Err(e) => {
                     debug!(domain = %self.domain, port = %s.port, error = %e, "could not set port flooding yet, retrying");
@@ -578,7 +618,9 @@ impl Fdb {
         let mut wake = self.driver.watch_neigh();
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut df_deadline = self.df_deadline.subscribe();
         loop {
+            let df_at = *df_deadline.borrow_and_update();
             tokio::select! {
                 ev = recv_opt(&mut wake) => {
                     if ev.is_none() {
@@ -591,6 +633,13 @@ impl Fdb {
                     }
                 }
                 _ = tick.tick() => {}
+                // A DF wait timer ended: elect now rather than at the tick.
+                () = sleep_until_opt(df_at) => {
+                    let mut g = self.inner.lock().await;
+                    self.sync_df(&mut g).await;
+                    continue;
+                }
+                _ = df_deadline.changed() => continue,
                 _ = shutdown.changed() => break,
             }
             self.refresh_local().await;
@@ -667,11 +716,18 @@ impl Fdb {
                 .map(|s| EsEntry {
                     esi: format_esi(&s.esi),
                     port: s.port.clone(),
-                    designated_forwarder: s.df,
+                    designated_forwarder: s.df && !s.waiting,
                     pes: s.pes.clone(),
                 })
                 .collect(),
         }
+    }
+}
+
+async fn sleep_until_opt(at: Option<Instant>) {
+    match at {
+        Some(at) => sleep_until(at).await,
+        None => pending().await,
     }
 }
 
@@ -924,7 +980,7 @@ mod tests {
     #[tokio::test]
     async fn pushes_program_the_kernel_by_delta_and_survive_reconfiguration() {
         let driver = Arc::new(Recorder::default());
-        let fdb = Fdb::new("bd1".to_string(), driver.clone());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
         fdb.set_ready(Some(ready())).await;
         assert_eq!(calls(&driver), ["ensure 10100"]);
 
@@ -969,7 +1025,7 @@ mod tests {
     #[tokio::test]
     async fn a_mac_shared_by_two_routes_is_removed_only_with_the_last() {
         let driver = Arc::new(Recorder::default());
-        let fdb = Fdb::new("bd1".to_string(), driver.clone());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
         fdb.set_ready(Some(ready())).await;
         calls(&driver);
 
@@ -1015,7 +1071,11 @@ mod tests {
 
     #[tokio::test]
     async fn arp_and_connected_originate_type2_with_ip() {
-        let fdb = Fdb::new("bd1".to_string(), Arc::new(Recorder::default()));
+        let fdb = Fdb::new(
+            "bd1".to_string(),
+            Arc::new(Recorder::default()),
+            Duration::ZERO,
+        );
         let mut rx = fdb.subscribe();
         let mut r = ready();
         r.arp = true;
@@ -1037,7 +1097,11 @@ mod tests {
 
     #[tokio::test]
     async fn local_macs_are_published_for_bgp_with_the_type3() {
-        let fdb = Fdb::new("bd1".to_string(), Arc::new(Recorder::default()));
+        let fdb = Fdb::new(
+            "bd1".to_string(),
+            Arc::new(Recorder::default()),
+            Duration::ZERO,
+        );
         let mut rx = fdb.subscribe();
         fdb.set_ready(Some(ready())).await;
         assert_eq!(rx.borrow_and_update().routes.len(), 1, "just the Type-3");
@@ -1077,7 +1141,11 @@ mod tests {
 
     #[tokio::test]
     async fn macs_behind_a_segment_port_carry_its_esi_and_a_type4_is_originated() {
-        let fdb = Fdb::new("bd1".to_string(), Arc::new(Recorder::default()));
+        let fdb = Fdb::new(
+            "bd1".to_string(),
+            Arc::new(Recorder::default()),
+            Duration::ZERO,
+        );
         let mut rx = fdb.subscribe();
         fdb.set_ready(Some(ready_with_segment())).await;
         fdb.refresh_local().await;
@@ -1111,7 +1179,7 @@ mod tests {
     #[tokio::test]
     async fn the_non_df_stops_flooding_to_the_segment_and_gets_it_back() {
         let driver = Arc::new(Recorder::default());
-        let fdb = Fdb::new("bd1".to_string(), driver.clone());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
         fdb.set_ready(Some(ready_with_segment())).await;
         // Alone on the segment: the DF, flooding explicitly enabled.
         assert_eq!(calls(&driver), ["ensure 10100", "flood eth1 true"]);
@@ -1144,5 +1212,38 @@ mod tests {
         calls(&driver);
         fdb.set_ready(None).await;
         assert_eq!(calls(&driver), ["remove 10100", "flood eth1 true"]);
+    }
+
+    #[tokio::test]
+    async fn a_new_segment_port_stays_blocked_until_the_df_wait_ends() {
+        let driver = Arc::new(Recorder::default());
+        let wait = Duration::from_millis(150);
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), wait);
+        let (stop, shutdown) = watch::channel(false);
+        let local = tokio::spawn(fdb.clone().run_local(shutdown));
+
+        // Alone on the segment, so the DF — but not until the timer ends.
+        fdb.set_ready(Some(ready_with_segment())).await;
+        assert!(calls(&driver).ends_with(&["flood eth1 false".to_string()]));
+        assert!(!fdb.table().await.segments[0].designated_forwarder);
+
+        // `run_local` wakes at the deadline by itself (the tick is 10s).
+        tokio::time::sleep(wait * 3).await;
+        assert!(calls(&driver).contains(&"flood eth1 true".to_string()));
+        assert!(fdb.table().await.segments[0].designated_forwarder);
+
+        // A PE joining an already-elected port does not restart the wait.
+        fdb.apply_push(EvpnUpdate::Add(es_route(ESI, REMOTE))).await;
+        assert!(calls(&driver).is_empty(), "still the DF, still flooding");
+        assert!(fdb.table().await.segments[0].designated_forwarder);
+
+        // Leaving the segment clears the timer: coming back waits again.
+        fdb.set_ready(None).await;
+        calls(&driver);
+        fdb.set_ready(Some(ready_with_segment())).await;
+        assert!(calls(&driver).ends_with(&["flood eth1 false".to_string()]));
+
+        stop.send(true).unwrap();
+        local.await.unwrap();
     }
 }

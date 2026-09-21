@@ -68,6 +68,24 @@ pub const LACP_SYSTEM_ID_B: &str = "02:00:00:00:0b:01";
 /// the even `EVPN_VNI`), and a MAC pinned behind the bond.
 pub const ESI: &str = "00:11:22:33:44:55:66:77:88:99";
 pub const ESI_PEER_ORIGIN: &str = "10.50.0.1";
+/// `evpn-esi`: router-a's `--df-wait` — long enough to read the port's real
+/// flood flags while it is still blocked.
+pub const DF_WAIT_SECS: u32 = 12;
+pub const DF_WAIT_ARG: &str = "--fdbd-arg=--df-wait=12";
+/// `evpn-dataplane`: the two PEs share one Route Target both ways, each has
+/// its own RD; a dual-homed CE (`ce`, one link to each PE) and a host (`h`)
+/// behind router-b sit in the same L2 domain. Docker networks are the wires.
+pub const EVPN_DP_RT: &str = "65000:10100";
+pub const EVPN_DP_RD_A: &str = "65001:1";
+pub const EVPN_DP_RD_B: &str = "65002:1";
+pub const NET_CE_A: &str = "nos-verify-net-ce-a";
+pub const NET_CE_B: &str = "nos-verify-net-ce-b";
+pub const NET_H: &str = "nos-verify-net-h";
+pub const HOST_IMAGE: &str = "nos-verify-host:local";
+pub const CE_HOST: &str = "e2e-ce";
+pub const H_HOST: &str = "e2e-h";
+pub const CE_IP: &str = "192.168.10.10";
+pub const H_IP: &str = "192.168.10.20";
 pub const ESI_MAC: &str = "02:00:00:00:00:0e";
 pub const ASN_B: u32 = 65002;
 /// Only `route-server` (router-b and router-c must be in distinct ASes from

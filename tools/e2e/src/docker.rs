@@ -249,6 +249,33 @@ impl Dock {
         Ok(())
     }
 
+    /// Starts an end-host container: `image` on `network` with `NET_ADMIN`/
+    /// `NET_RAW` (its own bonds, addresses, `tcpdump`), idling. Further
+    /// networks are attached with `network_connect`.
+    pub async fn start_host(&self, name: &str, image: &str, network: &str) -> anyhow::Result<()> {
+        self.container_remove(name).await;
+        let body = ContainerCreateBody {
+            image: Some(image.to_string()),
+            cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            host_config: Some(HostConfig {
+                cap_add: Some(["NET_ADMIN", "NET_RAW"].map(String::from).to_vec()),
+                network_mode: Some(network.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let opts = CreateContainerOptionsBuilder::default().name(name).build();
+        self.docker
+            .create_container(Some(opts), body)
+            .await
+            .with_context(|| format!("creating container {name}"))?;
+        self.docker
+            .start_container(name, None)
+            .await
+            .with_context(|| format!("starting container {name}"))?;
+        Ok(())
+    }
+
     /// Runs `cmd` inside a running container; `(exit code, stdout+stderr)`.
     pub async fn exec(&self, container: &str, cmd: &[&str]) -> anyhow::Result<(i64, String)> {
         use bollard::exec::StartExecResults;

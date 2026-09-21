@@ -34,6 +34,11 @@ pub struct LinuxFdbDriver {
     /// `vni -> ifindex` of the vxlan devices `ensure_vxlan` last saw, so the
     /// per-MAC calls don't each pay a link lookup.
     ifindex: Mutex<HashMap<u32, u32>>,
+    /// `vni -> ifindex` of each device's underlay, which every remote entry
+    /// must name (`NDA_IFINDEX`, `bridge fdb ... via`): without it the kernel
+    /// resolves the remote VTEP in the *main* table, and with the underlay in a
+    /// VRF the route isn't there (`tx_carrier_errors`, nothing ever sent).
+    underlay: Mutex<HashMap<u32, u32>>,
 }
 
 impl LinuxFdbDriver {
@@ -44,6 +49,7 @@ impl LinuxFdbDriver {
         Ok(Self {
             handle,
             ifindex: Mutex::new(HashMap::new()),
+            underlay: Mutex::new(HashMap::new()),
         })
     }
 
@@ -83,6 +89,15 @@ impl LinuxFdbDriver {
             .ok_or_else(|| DriverError::Other(format!("bridge {bridge} does not exist yet")))?
             .header
             .index)
+    }
+
+    fn via(&self, vni: u32) -> u32 {
+        self.underlay
+            .lock()
+            .unwrap()
+            .get(&vni)
+            .copied()
+            .unwrap_or(0)
     }
 
     async fn vxlan_index(&self, vni: u32) -> Result<u32, DriverError> {
@@ -185,9 +200,11 @@ fn vxlan_matches(link: &LinkMessage, vni: u32, vtep: IpAddr, underlay: u32) -> b
 
 /// One FDB entry on the vxlan device `ifindex`. `master` also files it in the
 /// bridge's own table (with `extern_learn`, so the bridge neither ages nor
-/// relearns it); without it, it's a vxlan-only entry (the flood list).
+/// relearns it); without it, it's a vxlan-only entry (the flood list). `via`
+/// is the underlay's ifindex the remote VTEP is reached through.
 fn fdb_msg(
     ifindex: u32,
+    via: u32,
     mac: Mac,
     dst: IpAddr,
     vni: u32,
@@ -202,6 +219,7 @@ fn fdb_msg(
         NeighbourAttribute::LinkLayerAddress(mac.to_vec()),
         NeighbourAttribute::Destination(NeighbourAddress::from(dst)),
         NeighbourAttribute::Vni(vni),
+        NeighbourAttribute::IfIndex(via),
     ];
     m
 }
@@ -277,11 +295,13 @@ impl FdbDriver for LinuxFdbDriver {
             .execute()
             .await?;
         self.ifindex.lock().unwrap().insert(vni, idx);
+        self.underlay.lock().unwrap().insert(vni, underlay_idx);
         Ok(())
     }
 
     async fn remove_vxlan(&self, vni: u32) -> Result<(), DriverError> {
         self.ifindex.lock().unwrap().remove(&vni);
+        self.underlay.lock().unwrap().remove(&vni);
         if let Some(l) = self.find_link(&vxlan_name(vni)).await? {
             self.handle.link().del(l.header.index).execute().await?;
             info!(vxlan = %vxlan_name(vni), "deleted vxlan device");
@@ -291,20 +311,20 @@ impl FdbDriver for LinuxFdbDriver {
 
     async fn set_remote_mac(&self, vni: u32, mac: Mac, vtep: IpAddr) -> Result<(), DriverError> {
         let idx = self.vxlan_index(vni).await?;
-        let msg = fdb_msg(idx, mac, vtep, vni, REMOTE_MAC);
+        let msg = fdb_msg(idx, self.via(vni), mac, vtep, vni, REMOTE_MAC);
         self.neigh(msg, false, NLM_F_CREATE | NLM_F_REPLACE, 0)
             .await
     }
 
     async fn del_remote_mac(&self, vni: u32, mac: Mac, vtep: IpAddr) -> Result<(), DriverError> {
         let idx = self.vxlan_index(vni).await?;
-        let msg = fdb_msg(idx, mac, vtep, vni, REMOTE_MAC);
+        let msg = fdb_msg(idx, self.via(vni), mac, vtep, vni, REMOTE_MAC);
         self.neigh(msg, true, 0, ENOENT).await
     }
 
     async fn add_flood(&self, vni: u32, vtep: IpAddr) -> Result<(), DriverError> {
         let idx = self.vxlan_index(vni).await?;
-        let msg = fdb_msg(idx, [0; 6], vtep, vni, NeighbourFlags::Own);
+        let msg = fdb_msg(idx, self.via(vni), [0; 6], vtep, vni, NeighbourFlags::Own);
         // APPEND: the all-zero MAC carries one destination per remote VTEP,
         // and `NeighbourAddRequest` offers no way to set it. An identical
         // destination already present is left alone by the kernel.
@@ -313,7 +333,7 @@ impl FdbDriver for LinuxFdbDriver {
 
     async fn del_flood(&self, vni: u32, vtep: IpAddr) -> Result<(), DriverError> {
         let idx = self.vxlan_index(vni).await?;
-        let msg = fdb_msg(idx, [0; 6], vtep, vni, NeighbourFlags::Own);
+        let msg = fdb_msg(idx, self.via(vni), [0; 6], vtep, vni, NeighbourFlags::Own);
         self.neigh(msg, true, 0, ENOENT).await
     }
 

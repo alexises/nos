@@ -66,6 +66,12 @@ struct Args {
     #[arg(long, value_enum, default_value_t = default_driver_kind())]
     driver: DriverKind,
 
+    /// Seconds a newly attached Ethernet Segment port stays blocked before the
+    /// Designated Forwarder election is applied (RFC 7432 §8.5 step 3, whose
+    /// default is 3), so a PE that has just come up doesn't double-deliver BUM.
+    #[arg(long, default_value_t = 3)]
+    df_wait: u64,
+
     /// Unix socket to forward this process's log events to.
     #[arg(long, default_value = DEFAULT_LOG_SOCKET)]
     log_socket: PathBuf,
@@ -116,7 +122,11 @@ async fn main() -> anyhow::Result<()> {
         ),
     };
 
-    let fdb = Fdb::new(args.domain.clone(), driver);
+    let fdb = Fdb::new(
+        args.domain.clone(),
+        driver,
+        std::time::Duration::from_secs(args.df_wait),
+    );
     let bgp_task = bgp_client::spawn(
         args.watchdog_socket.clone(),
         fdb.subscribe(),

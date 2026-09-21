@@ -110,12 +110,14 @@ impl World {
 
     pub async fn down(&mut self) {
         self.routers.clear();
-        for name in ["router-a", "router-b", "router-c", "router-r", "router-g"] {
+        for name in [
+            "router-a", "router-b", "router-c", "router-r", "router-g", CE_HOST, H_HOST,
+        ] {
             self.dock.container_remove(name).await;
             self.dock.volume_remove(&format!("{name}-run")).await;
             self.dock.volume_remove(&format!("{name}-data")).await;
         }
-        for net in [NET, NET_BOND1, NET_BOND2] {
+        for net in [NET, NET_BOND1, NET_BOND2, NET_CE_A, NET_CE_B, NET_H] {
             self.dock.network_remove(net).await;
         }
     }

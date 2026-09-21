@@ -7,7 +7,7 @@ use anyhow::{bail, Context};
 use reqwest::Method;
 
 use crate::consts::*;
-use crate::router::{log, strings, Router, B, C};
+use crate::router::{log, strings, Id, Router, A, B, C};
 use crate::world::World;
 
 /// `--static-route` + `--redistribute` flags: router-a (or a client) redistributes
@@ -162,7 +162,7 @@ pub async fn reflector(w: &mut World) -> anyhow::Result<()> {
             IP_A,
         ])
     };
-    w.start(crate::router::A, Some(hub(IP_B)), &[]).await?;
+    w.start(A, Some(hub(IP_B)), &[]).await?;
     w.start(B, Some(client(RID_B, IP_B)), &[]).await?;
     w.start(C, Some(client(RID_C, IP_C)), &[]).await?;
     w.a()?.provision_flags(&hub(IP_C)).await?;
@@ -199,8 +199,7 @@ pub async fn route_server(w: &mut World) -> anyhow::Result<()> {
             "--route-server-client",
         ])
     };
-    w.start(crate::router::A, Some(hub("pg-b", ASN_B, IP_B)), &[])
-        .await?;
+    w.start(A, Some(hub("pg-b", ASN_B, IP_B)), &[]).await?;
     w.start(B, None, &[]).await?;
     w.start(C, None, &[]).await?;
     w.a()?.provision_flags(&hub("pg-c", ASN_C, IP_C)).await?;
@@ -396,11 +395,11 @@ fn evpn_flags() -> Vec<String> {
     ])
 }
 
-/// Starts router-a with `evpn_flags`, builds/starts the GoBGP speaker
+/// Starts router-a with `evpn_flags` (and `watchdog_args`), builds/starts the GoBGP speaker
 /// (router-g) peering it over l2vpn-evpn, and waits for the session and
 /// gobgpd's gRPC API.
-async fn evpn_speaker(w: &mut World) -> anyhow::Result<()> {
-    w.start(crate::router::A, Some(evpn_flags()), &[]).await?;
+async fn evpn_speaker(w: &mut World, watchdog_args: &[&str]) -> anyhow::Result<()> {
+    w.start(A, Some(evpn_flags()), watchdog_args).await?;
 
     log("building/starting the GoBGP speaker (router-g)");
     w.dock
@@ -446,7 +445,7 @@ async fn evpn_speaker(w: &mut World) -> anyhow::Result<()> {
 /// hold them per peer, serve them on `show bgp evpn`, and drop them on an
 /// explicit withdrawal and, for what is left, when the session goes away.
 pub async fn evpn(w: &mut World) -> anyhow::Result<()> {
-    evpn_speaker(w).await?;
+    evpn_speaker(w, &[]).await?;
     let a = w.a()?;
 
     let (mac, ip, rd, rt) = ("aa:bb:cc:00:00:01", "192.0.2.10", "65010:1", "65010:10000");
@@ -530,6 +529,29 @@ pub async fn evpn(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Reads the real bridge port `dev` back, in `container`'s netns, until its
+/// unicast and multicast flood flags are both `on`.
+async fn bridge_port_flood(w: &World, container: &str, dev: &str, on: bool) -> anyhow::Result<()> {
+    let want = if on { "on" } else { "off" };
+    let mut last = String::new();
+    for _ in 0..30 {
+        last = w
+            .dock
+            .in_netns(
+                NETNS_HELPER_IMAGE,
+                container,
+                &["bridge", "-d", "link", "show", "dev", dev],
+            )
+            .await?;
+        if last.contains(&format!(" flood {want}")) && last.contains(&format!("mcast_flood {want}"))
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("bridge port {dev} never read flood {want}: {last}")
+}
+
 async fn gobgp_owned(w: &World, args: Vec<String>) -> anyhow::Result<String> {
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     gobgp(w, &refs).await
@@ -571,7 +593,7 @@ async fn gobgp_evpn_rib(w: &World, what: &str, want: impl Fn(&str) -> bool) -> a
 /// `redistribute from arp` an ARP binding pinned on the bridge (`ip neigh add
 /// ... nud permanent`) for a MAC behind a local port — both seen by GoBGP.
 pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
-    evpn_speaker(w).await?;
+    evpn_speaker(w, &[]).await?;
     let a = w.a()?;
 
     let mut flags = evpn_flags();
@@ -864,7 +886,7 @@ const GOBGP_ESI_TEXT: &str = "ESI_ARBITRARY | 11:22:33:44:55:66:77:88:99";
 /// Type-4 and the Type-2's ESI. Control plane and kernel port state only, not
 /// forwarding.
 pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
-    evpn_speaker(w).await?;
+    evpn_speaker(w, &[DF_WAIT_ARG]).await?;
     w.connect_bond_networks().await?;
     let a = w.a()?;
 
@@ -902,31 +924,33 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
 
-    // The kernel names the bond from nos-interfaced's registry: ask for it.
-    let mut bond = String::new();
-    for _ in 0..30 {
-        let body = a
-            .rest_expect(Method::GET, "/v1/port-aggregates", None, 200)
-            .await?;
-        let aggregates: serde_json::Value = serde_json::from_str(&body)?;
-        if let Some(name) = aggregates
-            .as_array()
-            .and_then(|v| v.iter().find(|s| s["name"] == "bond1"))
-            .and_then(|s| s["bond_name"].as_str())
-        {
-            bond = name.to_string();
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    if bond.is_empty() {
-        bail!("nos-interfaced never created a bond for bond1");
-    }
+    let bond = bond_name(a, "bond1").await?;
     let role = |r: &str| format!("df elected domain={EVPN_DOMAIN} esi={ESI} port={bond} role={r}");
     let flooding =
         |on: bool| format!("segment port flooding set domain={EVPN_DOMAIN} port={bond} flood={on}");
 
-    log("alone on the segment: router-a is the DF and the bond floods");
+    // The DF wait timer, against the real kernel: the port is held blocked
+    // (whatever the election would say) until it ends, and only then elected.
+    // The wait is long enough (12s) for the helper container to read the port.
+    log("DF wait timer: the bond is blocked before any election is applied");
+    a.wait(&format!(
+        "df wait started domain={EVPN_DOMAIN} esi={ESI} port={bond} seconds={DF_WAIT_SECS}"
+    ))
+    .await?;
+    if a.count(&role("df")) != 0 {
+        bail!("router-a elected before its DF wait timer ended");
+    }
+    a.wait(&flooding(false)).await?;
+    bridge_port_flood(w, "router-a", &bond, false).await?;
+    let table = a
+        .rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
+        .await?;
+    let table: serde_json::Value = serde_json::from_str(&table)?;
+    if table["segments"][0]["designated_forwarder"] != false {
+        bail!("show fdb lists router-a as the DF during its wait timer: {table}");
+    }
+
+    log("alone on the segment: once the timer ends router-a is the DF and the bond floods");
     a.wait(&role("df")).await?;
     a.wait(&flooding(true)).await?;
 
@@ -998,44 +1022,26 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
         }
         v
     };
-    // Reads the real bridge port back until its flood flags are as wanted.
-    let port_flood = |on: bool| {
-        let (w, bond) = (&*w, bond.clone());
-        async move {
-            let want = if on { "on" } else { "off" };
-            let mut last = String::new();
-            for _ in 0..30 {
-                last = netns_a(w, &["bridge", "-d", "link", "show", "dev", &bond]).await?;
-                if last.contains(&format!(" flood {want}"))
-                    && last.contains(&format!("mcast_flood {want}"))
-                {
-                    return Ok(());
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-            bail!("bridge port {bond} never read flood {want}: {last}")
-        }
-    };
-    port_flood(true).await?;
+    bridge_port_flood(w, "router-a", &bond, true).await?;
 
     log("a second PE on the segment with a lower address wins the election");
     let base = a.count(&role("non-df"));
     gobgp_owned(w, peer_es("add")).await?;
     a.wait_new(&role("non-df"), base, 30).await?;
     a.wait(&flooding(false)).await?;
-    port_flood(false).await?;
+    bridge_port_flood(w, "router-a", &bond, false).await?;
 
     log("its Type-4 withdrawn: router-a is the DF again and the bond floods");
     let base = a.count(&role("df"));
     gobgp_owned(w, peer_es("del")).await?;
     a.wait_new(&role("df"), base, 30).await?;
-    port_flood(true).await?;
+    bridge_port_flood(w, "router-a", &bond, true).await?;
 
     log("back to non-DF, then clearing the ESI restores flooding and withdraws it");
     let base = a.count(&role("non-df"));
     gobgp_owned(w, peer_es("add")).await?;
     a.wait_new(&role("non-df"), base, 30).await?;
-    port_flood(false).await?;
+    bridge_port_flood(w, "router-a", &bond, false).await?;
     let mut clear = flags.clone();
     let at = clear
         .iter()
@@ -1044,7 +1050,7 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     clear.drain(at..=at + 1);
     clear.push("--delete-port-aggregate-esi".to_string());
     a.provision_flags(&clear).await?;
-    port_flood(true).await?;
+    bridge_port_flood(w, "router-a", &bond, true).await?;
     gobgp_evpn_rib(w, "dropped router-a's Type-4 and the Type-2's ESI", |rib| {
         !es_route(rib)
             && rib
@@ -1052,4 +1058,249 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
                 .any(|l| l.contains(ESI_MAC) && !l.contains(GOBGP_ESI_TEXT))
     })
     .await
+}
+
+/// The kernel name `router`'s `nos-interfaced` gave the port aggregate `name`.
+async fn bond_name(r: &Router, name: &str) -> anyhow::Result<String> {
+    for _ in 0..30 {
+        let body = r
+            .rest_expect(Method::GET, "/v1/port-aggregates", None, 200)
+            .await?;
+        let aggregates: serde_json::Value = serde_json::from_str(&body)?;
+        if let Some(bond) = aggregates
+            .as_array()
+            .and_then(|v| v.iter().find(|s| s["name"] == name))
+            .and_then(|s| s["bond_name"].as_str())
+        {
+            return Ok(bond.to_string());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!(
+        "{}: nos-interfaced never created a bond for {name}",
+        r.name()
+    )
+}
+
+/// `evpn-dataplane`: one PE's whole EVPN config — an eBGP session to the other
+/// PE with `address-family l2vpn-evpn` and the domain, sharing one Route Target.
+fn evpn_pe_flags(id: Id, rd: &str) -> Vec<String> {
+    let mut flags = id.base_flags();
+    flags.extend(strings(&[
+        "--peer-group",
+        "pg-evpn",
+        "--evpn",
+        "--broadcast-domain",
+        EVPN_DOMAIN,
+        "--evpn-vni",
+        &EVPN_VNI.to_string(),
+        "--evpn-rd",
+        rd,
+        "--evpn-rt-import",
+        EVPN_DP_RT,
+        "--evpn-rt-export",
+        EVPN_DP_RT,
+        "--evpn-vtep-source-interface",
+        "eth0",
+        "--evpn-redistribute-bgp",
+        "r1",
+    ]));
+    flags
+}
+
+/// A one-member static port aggregate, untagged in the EVPN domain, on the
+/// docker-network `member` link; `esi` makes it an Ethernet Segment.
+fn bond_flags(name: &str, esi: bool, member: &str) -> Vec<String> {
+    let mut flags = strings(&["--port-aggregate", name]);
+    if esi {
+        flags.extend(strings(&["--port-aggregate-esi", ESI]));
+    }
+    flags.extend(strings(&[
+        "--port-aggregate-untagged-domain",
+        EVPN_DOMAIN,
+        "--enslave-interface-into-port-aggregate",
+        member,
+    ]));
+    flags
+}
+
+/// Runs a shell script in an end-host container; errors on a non-zero exit.
+async fn host_sh(w: &World, host: &str, script: &str) -> anyhow::Result<String> {
+    let (code, out) = w.dock.exec(host, &["sh", "-c", script]).await?;
+    if code != 0 {
+        bail!("{host}: `{script}` exited {code}: {}", out.trim());
+    }
+    Ok(out)
+}
+
+/// How many ARP requests for the CE from the host a capture file holds.
+/// `arping` prints the target MAC (`who-has X (ff:ff:..) tell Y`), the kernel's
+/// own requests don't.
+async fn arp_requests(w: &World, file: &str) -> anyhow::Result<usize> {
+    let script = format!("grep -c -E 'who-has {CE_IP}( .*)? tell {H_IP}' {file} || true");
+    let out = host_sh(w, CE_HOST, &script).await?;
+    out.trim()
+        .parse()
+        .with_context(|| format!("counting ARP requests in {file}: {out:?}"))
+}
+
+/// The EVPN data plane, for real: two `nos` PEs over a VXLAN underlay in a
+/// VRF, a CE dual-homed to both through one Ethernet Segment (a bond of one
+/// docker-network link to each PE), and a host behind router-b. Unlike
+/// `evpn-fdb`/`evpn-esi` (control plane and kernel state, against GoBGP) this
+/// sends frames.
+///
+/// Router-a has the lower address, so for the even VNI it is the segment's DF
+/// and router-b is not. With the CE's link to router-b down, every frame the
+/// CE sends enters router-a and must cross the VXLAN to reach the host, and
+/// back; with both up, one broadcast from the host reaches the CE through the
+/// DF only — once — while the non-DF's link stays silent; with the link to
+/// router-a down instead, the CE is bridged locally on router-b.
+pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
+    w.start(A, Some(evpn_pe_flags(A, EVPN_DP_RD_A)), &[])
+        .await?;
+    w.start(B, Some(evpn_pe_flags(B, EVPN_DP_RD_B)), &[])
+        .await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.established().await?;
+    b.established().await?;
+
+    // The underlay is in a VRF (`rt1`): its VXLAN sockets only accept packets
+    // that came in through a VRF slave with this set. Nothing in nos sets it
+    // (the daemons are unprivileged and /proc/sys is read-only in the
+    // container), so it is an operator prerequisite the harness applies.
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    for router in ["router-a", "router-b"] {
+        w.dock
+            .in_netns(
+                NETNS_HELPER_IMAGE,
+                router,
+                &["sh", "-c", "echo 1 > /proc/sys/net/ipv4/udp_l3mdev_accept"],
+            )
+            .await?;
+    }
+
+    log("wiring the CE (to both PEs) and the host (to router-b) over docker networks");
+    for net in [NET_CE_A, NET_CE_B, NET_H] {
+        if !w.dock.network_exists(net).await {
+            w.dock.network_create(net, &[], false).await?;
+        }
+    }
+    w.dock.network_connect(NET_CE_A, "router-a").await;
+    w.dock.network_connect(NET_CE_B, "router-b").await;
+    w.dock.network_connect(NET_H, "router-b").await;
+    w.dock
+        .ensure_image(
+            HOST_IMAGE,
+            "FROM debian:bookworm-slim\n\
+             RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
+             iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    w.dock.start_host(CE_HOST, HOST_IMAGE, NET_CE_A).await?;
+    w.dock.network_connect(NET_CE_B, CE_HOST).await;
+    w.dock.start_host(H_HOST, HOST_IMAGE, NET_H).await?;
+
+    let mut on_a = evpn_pe_flags(A, EVPN_DP_RD_A);
+    on_a.extend(bond_flags("bond1", true, "eth1"));
+    a.provision_flags(&on_a).await?;
+    let mut on_b = evpn_pe_flags(B, EVPN_DP_RD_B);
+    on_b.extend(bond_flags("bond1", true, "eth1"));
+    b.provision_flags(&on_b).await?;
+    let mut host_port = evpn_pe_flags(B, EVPN_DP_RD_B);
+    host_port.extend(bond_flags("bond2", false, "eth2"));
+    b.provision_flags(&host_port).await?;
+
+    let vxlan = format!("vx{EVPN_VNI}");
+    for r in [a, b] {
+        r.wait(&format!(
+            "vxlan device ready domain={EVPN_DOMAIN} vni={EVPN_VNI} vxlan={vxlan}"
+        ))
+        .await?;
+    }
+    a.wait(&format!(
+        "flood entry installed domain={EVPN_DOMAIN} vtep={IP_B}"
+    ))
+    .await?;
+    b.wait(&format!(
+        "flood entry installed domain={EVPN_DOMAIN} vtep={IP_A}"
+    ))
+    .await?;
+
+    log("election: router-a (lower address) is the segment's DF, router-b is not");
+    let (bond_a, bond_b) = (bond_name(a, "bond1").await?, bond_name(b, "bond1").await?);
+    let role = |bond: &str, r: &str| {
+        format!("df elected domain={EVPN_DOMAIN} esi={ESI} port={bond} role={r}")
+    };
+    a.wait(&role(&bond_a, "df")).await?;
+    b.wait(&role(&bond_b, "non-df")).await?;
+    bridge_port_flood(w, "router-a", &bond_a, true).await?;
+    bridge_port_flood(w, "router-b", &bond_b, false).await?;
+
+    log("the CE bonds its two links; the host takes an address");
+    host_sh(
+        w,
+        CE_HOST,
+        &format!(
+            "set -e; for i in eth0 eth1; do ip addr flush dev $i; ip link set $i down; done; \
+             ip link add bond0 type bond mode balance-xor miimon 100 xmit_hash_policy layer2; \
+             ip link set eth0 master bond0; ip link set eth1 master bond0; \
+             ip link set bond0 up; ip addr add {CE_IP}/24 dev bond0"
+        ),
+    )
+    .await?;
+    host_sh(w, H_HOST, &format!("ip addr add {H_IP}/24 dev eth0")).await?;
+
+    log("unicast across the VXLAN: the CE's link to router-b is down, so every frame enters router-a");
+    host_sh(w, CE_HOST, "ip link set eth1 down; sleep 1").await?;
+    host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
+    host_sh(w, H_HOST, &format!("ping -c 3 -W 2 {CE_IP}")).await?;
+
+    log("BUM: one broadcast from the host reaches the CE once, through the DF only");
+    host_sh(w, CE_HOST, "ip link set eth1 up; sleep 1").await?;
+    host_sh(
+        w,
+        CE_HOST,
+        "rm -f /tmp/e0 /tmp/e1; \
+         timeout 8 tcpdump -l -n -Q in -i eth0 arp and ether broadcast >/tmp/e0 2>&1 & \
+         timeout 8 tcpdump -l -n -Q in -i eth1 arp and ether broadcast >/tmp/e1 2>&1 & \
+         sleep 2",
+    )
+    .await?;
+    let arping = host_sh(
+        w,
+        H_HOST,
+        &format!("arping -c 1 -w 3 -I eth0 -s {H_IP} {CE_IP}"),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let (via_df, via_non_df) = (
+        arp_requests(w, "/tmp/e0").await?,
+        arp_requests(w, "/tmp/e1").await?,
+    );
+    if (via_df, via_non_df) != (1, 0) {
+        bail!(
+            "the host's broadcast reached the CE {via_df}x through router-a (the DF) and \
+             {via_non_df}x through router-b (the non-DF); expected exactly 1 and 0\n\
+             arping: {arping}\ncaptures: {}",
+            host_sh(w, CE_HOST, "tail -n +1 /tmp/e0 /tmp/e1").await?
+        );
+    }
+
+    log("the CE's link to router-a goes down: it is bridged locally on router-b");
+    host_sh(w, CE_HOST, "ip link set eth0 down; sleep 1").await?;
+    host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
+
+    for host in [CE_HOST, H_HOST] {
+        w.dock.container_remove(host).await;
+    }
+    for (net, router) in [
+        (NET_CE_A, "router-a"),
+        (NET_CE_B, "router-b"),
+        (NET_H, "router-b"),
+    ] {
+        w.dock.network_disconnect(net, router).await;
+        w.dock.network_remove(net).await;
+    }
+    Ok(())
 }

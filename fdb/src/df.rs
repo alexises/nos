@@ -8,10 +8,11 @@
 //!
 //! Pure: `Fdb` feeds it the Type-4 origins it received and applies the answer.
 //!
-//! ponytail: no DF wait timer (§8.5 step 3) — a PE that has just come up
-//! elects with whatever Type-4s have arrived so far, so BUM can briefly be
-//! delivered twice; and every PE on the segment is assumed to serve every
-//! domain (no Type-1 per-EVI routes to say otherwise).
+//! The DF wait timer (§8.5 step 3) is `Fdb::sync_df`'s: this only answers
+//! "who would be the DF".
+//!
+//! ponytail: every PE on the segment is assumed to serve every domain (no
+//! Type-1 per-EVI routes to say otherwise).
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
