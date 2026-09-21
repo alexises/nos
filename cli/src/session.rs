@@ -1569,6 +1569,34 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             }),
             after: PathAfter::Stay,
         },
+        Command::Set(SetTarget::PortAggregateEsiRelative { esi }) => Resolved::ApplyOp {
+            op: ConfigOp::PortAggregate(PortAggregateOp::SetEsi {
+                name: path.port_aggregate()?.to_string(),
+                esi,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::PortAggregateLacpSystemIdRelative { system_id }) => {
+            Resolved::ApplyOp {
+                op: ConfigOp::PortAggregate(PortAggregateOp::SetLacpSystemId {
+                    name: path.port_aggregate()?.to_string(),
+                    system_id,
+                }),
+                after: PathAfter::Stay,
+            }
+        }
+        Command::Delete(DeleteTarget::PortAggregateEsiRelative) => Resolved::ApplyOp {
+            op: ConfigOp::PortAggregate(PortAggregateOp::ClearEsi {
+                name: path.port_aggregate()?.to_string(),
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::PortAggregateLacpSystemIdRelative) => Resolved::ApplyOp {
+            op: ConfigOp::PortAggregate(PortAggregateOp::ClearLacpSystemId {
+                name: path.port_aggregate()?.to_string(),
+            }),
+            after: PathAfter::Stay,
+        },
         Command::Set(SetTarget::InterfacePortAggregate {
             name,
             port_aggregate,
@@ -5912,6 +5940,50 @@ mod tests {
                 after: PathAfter::Stay,
             }
         );
+    }
+
+    #[test]
+    fn relative_esi_and_lacp_system_id_resolve_against_the_current_aggregate() {
+        let mode = config_mode("t1", Path::PortAggregate("bond1".to_string()), false);
+        let esi = "00:11:22:33:44:55:66:77:88:99".to_string();
+        for (cmd, op) in [
+            (
+                Command::Set(SetTarget::PortAggregateEsiRelative { esi: esi.clone() }),
+                PortAggregateOp::SetEsi {
+                    name: "bond1".to_string(),
+                    esi,
+                },
+            ),
+            (
+                Command::Delete(DeleteTarget::PortAggregateEsiRelative),
+                PortAggregateOp::ClearEsi {
+                    name: "bond1".to_string(),
+                },
+            ),
+            (
+                Command::Set(SetTarget::PortAggregateLacpSystemIdRelative {
+                    system_id: "02:00:00:00:00:01".to_string(),
+                }),
+                PortAggregateOp::SetLacpSystemId {
+                    name: "bond1".to_string(),
+                    system_id: "02:00:00:00:00:01".to_string(),
+                },
+            ),
+            (
+                Command::Delete(DeleteTarget::PortAggregateLacpSystemIdRelative),
+                PortAggregateOp::ClearLacpSystemId {
+                    name: "bond1".to_string(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                resolve(&mode, cmd),
+                Resolved::ApplyOp {
+                    op: ConfigOp::PortAggregate(op),
+                    after: PathAfter::Stay,
+                }
+            );
+        }
     }
 
     #[test]

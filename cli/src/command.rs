@@ -415,6 +415,10 @@ pub enum SetTarget {
     /// `set port-aggregate <name> {esi|lacp-system-id} <value>`: the parser
     /// builds the op itself, like `BroadcastDomainEvpn`.
     PortAggregateField(PortAggregateOp),
+    /// Context-relative — only valid while navigated into a port aggregate.
+    PortAggregateEsiRelative { esi: String },
+    /// Context-relative — only valid while navigated into a port aggregate.
+    PortAggregateLacpSystemIdRelative { system_id: String },
     /// Fully-qualified — works from anywhere in configuration mode. Upserts
     /// by `broadcast_domain` within the named switching profile.
     SwitchingProfileMember {
@@ -748,6 +752,10 @@ pub enum DeleteTarget {
     BroadcastDomainEvpn(BroadcastDomainOp),
     /// The `delete` counterpart of `SetTarget::PortAggregateField`.
     PortAggregateField(PortAggregateOp),
+    /// Context-relative — the aggregate comes from `path` at resolve time.
+    PortAggregateEsiRelative,
+    /// Context-relative — the aggregate comes from `path` at resolve time.
+    PortAggregateLacpSystemIdRelative,
     SwitchingProfile {
         name: String,
     },
@@ -1984,6 +1992,12 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 rate: parse_lacp_rate(rate),
             })
         }
+        ["esi", esi] => Command::Set(SetTarget::PortAggregateEsiRelative {
+            esi: (*esi).to_string(),
+        }),
+        ["lacp-system-id", id] => Command::Set(SetTarget::PortAggregateLacpSystemIdRelative {
+            system_id: (*id).to_string(),
+        }),
         ["lacp-rate", rate @ ("fast" | "slow")] => {
             Command::Set(SetTarget::PortAggregateLacpRateRelative {
                 rate: parse_lacp_rate(rate),
@@ -2202,6 +2216,8 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
             name: (*name).to_string(),
         }),
         ["mtu"] => Command::Delete(DeleteTarget::MtuRelative),
+        ["esi"] => Command::Delete(DeleteTarget::PortAggregateEsiRelative),
+        ["lacp-system-id"] => Command::Delete(DeleteTarget::PortAggregateLacpSystemIdRelative),
         ["interface", name, "switching-profile"] => {
             Command::Delete(DeleteTarget::InterfaceSwitchingProfile {
                 name: (*name).to_string(),
@@ -4595,6 +4611,27 @@ mod tests {
                     name: "bond1".to_string()
                 }
             ))
+        );
+        // Relative forms, valid while navigated into an aggregate.
+        assert_eq!(
+            Command::parse("set esi 00:11:22:33:44:55:66:77:88:99"),
+            Command::Set(SetTarget::PortAggregateEsiRelative {
+                esi: "00:11:22:33:44:55:66:77:88:99".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("set lacp-system-id 02:00:00:00:00:01"),
+            Command::Set(SetTarget::PortAggregateLacpSystemIdRelative {
+                system_id: "02:00:00:00:00:01".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete esi"),
+            Command::Delete(DeleteTarget::PortAggregateEsiRelative)
+        );
+        assert_eq!(
+            Command::parse("delete lacp-system-id"),
+            Command::Delete(DeleteTarget::PortAggregateLacpSystemIdRelative)
         );
         // The aggregate itself is still deletable.
         assert!(matches!(
