@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Incoming, PeerId};
-use nos_proto::{IpcCodec, Role, WatchdogEvent, WatchdogRequest};
+use nos_proto::{IpcCodec, Role, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS};
 use tokio::io::split;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -96,8 +96,12 @@ async fn handle_connection(incoming: Incoming, ctx: Arc<Ctx>) {
                 break;
             }
         };
+        // Only a direct `Login` is throttled here: `RestLogin` comes over
+        // `nos-restd`'s shared connection, which does its own per-user delay.
+        let is_login = matches!(request, WatchdogRequest::Login { .. });
         let event = dispatch(&ctx, peer.as_ref(), request).await;
-        let rejected_login = matches!(&event, WatchdogEvent::Denied(m) if m == INVALID_CREDENTIALS);
+        let rejected_login =
+            is_login && matches!(&event, WatchdogEvent::Denied(m) if m == INVALID_CREDENTIALS);
         if rejected_login {
             failed_logins += 1;
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
@@ -108,20 +112,38 @@ async fn handle_connection(incoming: Incoming, ctx: Arc<Ctx>) {
     }
 }
 
-const INVALID_CREDENTIALS: &str = "invalid credentials";
-
-async fn dispatch(ctx: &Ctx, peer: Option<&PeerId>, request: WatchdogRequest) -> WatchdogEvent {
+/// Who may send what. No wildcard arm: a new `WatchdogRequest` variant does
+/// not compile until it is classified here.
+fn allowed(peer: Option<&PeerId>, request: &WatchdogRequest) -> bool {
+    let role = peer.map(|p| p.role.as_str());
     match request {
         // The one thing an unauthenticated peer may do.
+        WatchdogRequest::Login { .. } => true,
+        WatchdogRequest::ResolveEndpoint { .. } => peer.is_some(),
+        WatchdogRequest::RenewCert { .. } => role == Some(Role::User.as_str()),
+        // `nos-restd` vouches for REST clients: it has verified their certificate
+        // (or, for a login, forwards the password it was given).
+        WatchdogRequest::IssueRestServerCert { .. }
+        | WatchdogRequest::RestLogin { .. }
+        | WatchdogRequest::RestRenew { .. } => role == Some(Role::Restd.as_str()),
+    }
+}
+
+async fn dispatch(ctx: &Ctx, peer: Option<&PeerId>, request: WatchdogRequest) -> WatchdogEvent {
+    if !allowed(peer, &request) {
+        warn!(peer = ?peer, ?request, "refusing a broker request the caller may not make");
+        return WatchdogEvent::Denied(if peer.is_none() {
+            "authentication required".to_string()
+        } else {
+            "not permitted".to_string()
+        });
+    }
+    match request {
         WatchdogRequest::Login {
             user,
             password,
             csr_der,
-        } => login(ctx, &user, password, &csr_der).await,
-        _ if peer.is_none() => {
-            debug!("refusing an unauthenticated broker request");
-            WatchdogEvent::Denied("authentication required".to_string())
-        }
+        } => login(ctx, &user, password, &csr_der, Realm::Ipc).await,
         WatchdogRequest::ResolveEndpoint { service } => {
             let s = &ctx.sockets;
             let resolved = ctx
@@ -136,17 +158,54 @@ async fn dispatch(ctx: &Ctx, peer: Option<&PeerId>, request: WatchdogRequest) ->
                 WatchdogEvent::NotAvailable
             }
         }
-        WatchdogRequest::RenewCert { csr_der } => match peer {
-            Some(p) if p.role == Role::User.as_str() => renew(ctx, &p.name, &csr_der).await,
-            _ => WatchdogEvent::Denied("only a logged-in user can renew".to_string()),
-        },
+        // `allowed` has already required a `user` peer.
+        WatchdogRequest::RenewCert { csr_der } => {
+            renew(ctx, peer.map_or("", |p| &p.name), &csr_der, Realm::Ipc).await
+        }
+        WatchdogRequest::RestLogin {
+            user,
+            password,
+            csr_der,
+        } => login(ctx, &user, password, &csr_der, Realm::Rest).await,
+        WatchdogRequest::RestRenew { user, csr_der } => {
+            renew(ctx, &user, &csr_der, Realm::Rest).await
+        }
+        WatchdogRequest::IssueRestServerCert { addresses, csr_der } => {
+            match ctx.pki.sign_rest_server(&csr_der, &addresses) {
+                Ok((cert_der, ca_der)) => {
+                    info!(?addresses, "issued a REST listener certificate");
+                    WatchdogEvent::RestServerCert {
+                        cert_der,
+                        ca_der,
+                        lifetime_secs: ctx.pki.leaf_lifetime.as_secs(),
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "rejected a malformed REST certificate request");
+                    WatchdogEvent::Denied("bad certificate request".to_string())
+                }
+            }
+        }
     }
+}
+
+/// Which CA a login/renewal is certified by.
+#[derive(Clone, Copy)]
+enum Realm {
+    Ipc,
+    Rest,
 }
 
 /// Checks `password` against the running config's users (argon2, run off the
 /// async threads — it is deliberately slow) and, on success, certifies the
 /// caller's own public key as that user.
-async fn login(ctx: &Ctx, user: &str, password: String, csr_der: &[u8]) -> WatchdogEvent {
+async fn login(
+    ctx: &Ctx,
+    user: &str,
+    password: String,
+    csr_der: &[u8],
+    realm: Realm,
+) -> WatchdogEvent {
     let users = match config_client::fetch_users(&ctx.pki.identity, &ctx.sockets.config).await {
         Ok(users) => users,
         Err(e) => {
@@ -169,21 +228,21 @@ async fn login(ctx: &Ctx, user: &str, password: String, csr_der: &[u8]) -> Watch
         info!(user = %user, "login rejected");
         return WatchdogEvent::Denied(INVALID_CREDENTIALS.to_string());
     }
-    let event = issue(ctx, user, csr_der);
+    let event = issue(ctx, user, csr_der, realm);
     if matches!(event, WatchdogEvent::Issued { .. }) {
-        info!(user = %user, "login accepted");
+        info!(user = %user, rest = matches!(realm, Realm::Rest), "login accepted");
     }
     event
 }
 
 /// A still-valid certificate is proof enough — but a user deleted since must
 /// not be able to keep renewing.
-async fn renew(ctx: &Ctx, user: &str, csr_der: &[u8]) -> WatchdogEvent {
+async fn renew(ctx: &Ctx, user: &str, csr_der: &[u8], realm: Realm) -> WatchdogEvent {
     match config_client::fetch_users(&ctx.pki.identity, &ctx.sockets.config).await {
         Ok(users) if users.iter().any(|u| u.name == user) => {
-            let event = issue(ctx, user, csr_der);
+            let event = issue(ctx, user, csr_der, realm);
             if matches!(event, WatchdogEvent::Issued { .. }) {
-                info!(user = %user, "user certificate renewed");
+                info!(user = %user, rest = matches!(realm, Realm::Rest), "user certificate renewed");
             }
             event
         }
@@ -198,8 +257,12 @@ async fn renew(ctx: &Ctx, user: &str, csr_der: &[u8]) -> WatchdogEvent {
     }
 }
 
-fn issue(ctx: &Ctx, user: &str, csr_der: &[u8]) -> WatchdogEvent {
-    match ctx.pki.sign_user(csr_der, user) {
+fn issue(ctx: &Ctx, user: &str, csr_der: &[u8], realm: Realm) -> WatchdogEvent {
+    let signed = match realm {
+        Realm::Ipc => ctx.pki.sign_user(csr_der, user),
+        Realm::Rest => ctx.pki.sign_rest_user(csr_der, user),
+    };
+    match signed {
         Ok(cert_der) => WatchdogEvent::Issued {
             cert_der,
             lifetime_secs: ctx.pki.user_lifetime.as_secs(),

@@ -10,11 +10,11 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::Json;
 use futures::{Stream, StreamExt};
 use nos_proto::{
-    BgpEvent, BgpRequest, Config, InterfaceEvent, InterfaceRequest, InterfaceStatus, LacpEvent,
-    LacpRequest, LldpEvent, LldpNeighbor, LldpRequest, LogEntry, LogEvent, LogRequest, LsaSummary,
-    NeighborSummary, OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary,
-    Ospfv3Request, PeerSummary, PortAggregateLacpSummary, PortAggregateStatus, PrefixRoutes,
-    RibEvent, RibRequest, ServiceRef,
+    BgpEvent, BgpRequest, Config, EvpnRouteSummary, InterfaceEvent, InterfaceRequest,
+    InterfaceStatus, LacpEvent, LacpRequest, LldpEvent, LldpNeighbor, LldpRequest, LogEntry,
+    LogEvent, LogRequest, LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Ospfv3Event,
+    Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request, PeerSummary, PortAggregateLacpSummary,
+    PortAggregateStatus, PrefixRoutes, RibEvent, RibRequest, ServiceRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -184,6 +184,7 @@ pub async fn logs(
 
 /// Named so `#[utoipa::path]` can take them as a `body` (it cannot parse nested generics).
 pub type BgpSummaryReport = Vec<InstanceReport<Vec<PeerSummary>>>;
+pub type BgpEvpnReport = Vec<InstanceReport<Vec<EvpnRouteSummary>>>;
 pub type OspfNeighborsReport = Vec<InstanceReport<Vec<NeighborSummary>>>;
 pub type OspfDatabaseReport = Vec<InstanceReport<Vec<LsaSummary>>>;
 pub type Ospfv3NeighborsReport = Vec<InstanceReport<Vec<Ospfv3NeighborSummary>>>;
@@ -310,6 +311,30 @@ pub async fn bgp_summary(State(d): State<Daemons>) -> ApiResult<Json<BgpSummaryR
             || BgpRequest::GetSummary,
             |e| match e {
                 BgpEvent::Summary(v) => Some(v),
+                _ => None,
+            },
+        )
+        .await,
+    ))
+}
+
+#[utoipa::path(get, path = "/v1/bgp/evpn", tag = "show", summary = "Received EVPN routes, per instance", responses((status = 200, body = BgpEvpnReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn bgp_evpn(State(d): State<Daemons>) -> ApiResult<Json<BgpEvpnReport>> {
+    let names = d
+        .running_config()
+        .await?
+        .bgp_instances
+        .into_iter()
+        .map(|i| i.name)
+        .collect();
+    Ok(Json(
+        per_instance(
+            &d,
+            names,
+            ServiceRef::BgpInstance,
+            || BgpRequest::GetEvpnRoutes,
+            |e| match e {
+                BgpEvent::EvpnRoutes(v) => Some(v),
                 _ => None,
             },
         )

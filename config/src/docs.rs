@@ -116,7 +116,8 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::AddBgpPeerGroupAddressFamily => (
             "Add an address family to a peer-group.",
-            "Adds one AFI/SAFI (ipv4 or ipv6 unicast) to the set exchanged over this \
+            "Adds one AFI/SAFI (ipv4 or ipv6 unicast, or l2vpn-evpn — RFC 7432 EVPN, which \
+             is received and shown only for now) to the set exchanged over this \
              peer-group's session. A no-op if it's already present. At least one address \
              family is required for the peer-group to be valid; checked at commit time.",
         ),

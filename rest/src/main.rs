@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
@@ -63,10 +62,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let daemons = Daemons {
-        watchdog_socket: Arc::new(args.watchdog_socket),
-        config_socket: Arc::new(config_socket),
-    };
+    let daemons = Daemons::new(args.watchdog_socket, config_socket);
     let listener = Listener {
         table: args.table,
         router: api::router(daemons.clone()),

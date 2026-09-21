@@ -19,9 +19,10 @@ pub mod schema;
 pub mod validators;
 
 pub use bgp::{
-    BgpEvent, BgpRequest, BgpSessionState, PeerSummary, RedistributeUpdate, RedistributedRoute,
+    BgpEvent, BgpRequest, BgpSessionState, EvpnRouteSummary, PeerSummary, RedistributeUpdate,
+    RedistributedRoute,
 };
-pub use broker::{Role, ServiceRef, WatchdogEvent, WatchdogRequest};
+pub use broker::{Role, ServiceRef, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS};
 pub use codec::IpcCodec;
 pub use derive::sync_routing_table_refs;
 pub use diff::{diff_configs, ConfigDiff, DiffScope, DiffStatus, FieldDiff, SectionDiff};

@@ -15,7 +15,7 @@ use nos_proto::LogEntry;
 use regex::Regex;
 use tokio::task::JoinHandle;
 
-use crate::consts::{E2E_PASSWORD, E2E_USER};
+use crate::rest::Rest;
 
 #[derive(Default)]
 struct Store {
@@ -72,10 +72,10 @@ pub fn bre(pattern: &str) -> Regex {
 }
 
 impl Logs {
-    /// Starts following `base`'s logs (`http://ip:port`).
-    pub fn follow(base: String) -> Self {
+    /// Starts following a router's logs over its REST API.
+    pub fn follow(rest: Rest) -> Self {
         let store = Arc::new(Mutex::new(Store::default()));
-        let task = tokio::spawn(follow_forever(base, store.clone()));
+        let task = tokio::spawn(follow_forever(rest, store.clone()));
         Self { store, task }
     }
 
@@ -133,15 +133,17 @@ impl Logs {
     }
 }
 
-async fn follow_forever(base: String, store: Arc<Mutex<Store>>) {
-    let client = reqwest::Client::new();
+async fn follow_forever(rest: Rest, store: Arc<Mutex<Store>>) {
     // `limit` trims the backlog to the most recent N; ask for "everything".
-    let url = format!("{base}/v1/logs/follow?limit=100000000");
+    let url = format!("{}/v1/logs/follow?limit=100000000", rest.base());
     loop {
-        let request = client.get(&url).basic_auth(E2E_USER, Some(E2E_PASSWORD));
-        if let Ok(resp) = request.send().await {
-            if resp.status().is_success() {
-                read_stream(resp, &store).await;
+        // Not yet up (or being restarted) is just "try again": `client` logs in
+        // for a certificate each time it needs one.
+        if let Ok(client) = rest.client().await {
+            if let Ok(resp) = client.get(&url).send().await {
+                if resp.status().is_success() {
+                    read_stream(resp, &store).await;
+                }
             }
         }
         tokio::time::sleep(Duration::from_secs(1)).await;

@@ -3,16 +3,23 @@
 //! public trust anchor published as `ca.crt`, and user certificates issued
 //! at login (`broker`).
 //!
-//! The CA key exists only in this process's memory. A watchdog restart
+//! There are two CAs, because the two transports have different audiences: the
+//! IPC CA (ML-DSA-65, quantum-safe authentication) for daemons and `nos`, and
+//! the REST CA (ECDSA P-256, so browsers and stock clients can present a
+//! certificate) for `nos-restd`'s TCP listener and its clients. A REST
+//! certificate never opens an IPC socket, and vice versa.
+//!
+//! The CA keys exist only in this process's memory. A watchdog restart
 //! re-keys everything, which costs nothing: every child is restarted with it.
 
 use std::io;
+use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nos_pki::{Bundle, Ca, Identity, PeerId};
+use nos_pki::{Bundle, Ca, Identity, KeyAlg, PeerId};
 use nos_proto::Role;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -20,6 +27,7 @@ use tracing::{info, warn};
 
 pub struct Pki {
     ca: Ca,
+    rest_ca: Ca,
     /// The watchdog's own identity, for its config subscriptions, log
     /// forwarding and the broker socket. Rotated by `spawn_self_rotation`.
     pub identity: Identity,
@@ -32,9 +40,9 @@ pub struct Pki {
 }
 
 impl Pki {
-    /// Creates the CA, writes its public certificate to `<dir>/ca.crt`
-    /// (world-readable: it only lets a client recognise the watchdog), and
-    /// issues the watchdog's own identity.
+    /// Creates both CAs, writes their public certificates to `<dir>/ca.crt`
+    /// and `<dir>/rest-ca.crt` (world-readable: they only let a client
+    /// recognise the watchdog), and issues the watchdog's own identity.
     pub fn start(
         dir: &Path,
         leaf_lifetime: Duration,
@@ -47,17 +55,16 @@ impl Pki {
                 "--pki-rotate-every must be shorter than --pki-leaf-lifetime, or certificates expire before their replacement arrives",
             ));
         }
-        let ca = Ca::new()?;
+        let ca = Ca::new(KeyAlg::MlDsa65)?;
+        let rest_ca = Ca::new(KeyAlg::EcdsaP256)?;
         std::fs::create_dir_all(dir)?;
-        // Write-then-rename so a client never reads half a certificate.
-        let (tmp, dest) = (dir.join(".ca.crt.tmp"), dir.join("ca.crt"));
-        std::fs::write(&tmp, ca.cert_pem())?;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
-        std::fs::rename(&tmp, &dest)?;
+        publish(dir, "ca.crt", &ca.cert_pem())?;
+        publish(dir, "rest-ca.crt", &rest_ca.cert_pem())?;
 
         let identity = Identity::from_bundle(&ca.issue(&peer(Role::Watchdog, ""), leaf_lifetime)?)?;
         Ok(Arc::new(Self {
             ca,
+            rest_ca,
             identity,
             leaf_lifetime,
             rotate_every,
@@ -76,6 +83,26 @@ impl Pki {
     pub fn sign_user(&self, csr_der: &[u8], user: &str) -> io::Result<Vec<u8>> {
         self.ca
             .sign_csr(csr_der, &peer(Role::User, user), self.user_lifetime)
+    }
+
+    /// `sign_user`, from the REST CA: the certificate a REST client presents
+    /// to `nos-restd` (a different trust domain from IPC).
+    pub fn sign_rest_user(&self, csr_der: &[u8], user: &str) -> io::Result<Vec<u8>> {
+        self.rest_ca
+            .sign_csr(csr_der, &peer(Role::User, user), self.user_lifetime)
+    }
+
+    /// The listener certificate for `nos-restd`, and the REST CA's own
+    /// certificate — the trust anchor it verifies client certificates against.
+    pub fn sign_rest_server(
+        &self,
+        csr_der: &[u8],
+        addresses: &[IpAddr],
+    ) -> io::Result<(Vec<u8>, Vec<u8>)> {
+        let cert = self
+            .rest_ca
+            .sign_server_csr(csr_der, addresses, self.leaf_lifetime)?;
+        Ok((cert, self.rest_ca.cert_der().to_vec()))
     }
 
     /// Keeps the watchdog's own identity from expiring, the way
@@ -101,6 +128,14 @@ impl Pki {
             }
         })
     }
+}
+
+/// Write-then-rename so a client never reads half a certificate.
+fn publish(dir: &Path, name: &str, pem: &str) -> io::Result<()> {
+    let (tmp, dest) = (dir.join(format!(".{name}.tmp")), dir.join(name));
+    std::fs::write(&tmp, pem)?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
+    std::fs::rename(&tmp, &dest)
 }
 
 fn peer(role: Role, name: &str) -> PeerId {

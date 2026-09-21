@@ -25,6 +25,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "communities" => bgp::communities(w).await,
         "reflector" => bgp::reflector(w).await,
         "route-server" => bgp::route_server(w).await,
+        "evpn" => bgp::evpn(w).await,
         "loopback" => drivers::loopback(w).await,
         "mtu" => drivers::mtu(w).await,
         "port-aggregate" => drivers::port_aggregate(w).await,
@@ -101,7 +102,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "ospfv3",
             "ospfv3-dr",
         ],
-        "multi" => &["reflector", "route-server"],
+        "multi" => &["evpn", "reflector", "route-server"],
         // Self-contained like `ospf-aging`: it needs its own short-lived
         // certificates, so it restarts the routers with them.
         "pki-suite" => &["up", "established", "pki", "pki-rotation"],
@@ -130,6 +131,7 @@ pub const ALL: &[&str] = &[
     "policy",
     "redistribute-policy",
     "communities",
+    "evpn",
     "reflector",
     "route-server",
     "ospf",

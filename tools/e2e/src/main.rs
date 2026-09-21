@@ -15,6 +15,7 @@ mod consts;
 mod docker;
 mod logs;
 mod phases;
+mod rest;
 mod router;
 mod world;
 

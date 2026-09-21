@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
 use rustls::client::{ClientConfig, ResolvesClientCert, Resumption};
-use rustls::crypto::ring as provider;
+use rustls::crypto::aws_lc_rs::sign::any_supported_type;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::server::{
@@ -33,6 +33,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 use tracing::{debug, info, warn};
 
 use crate::ca::{err, Bundle, SERVER_NAME};
+use crate::policy::{key_alg_name, Policy};
 use crate::PeerId;
 
 static GLOBAL: OnceLock<Identity> = OnceLock::new();
@@ -133,6 +134,49 @@ impl AsyncWrite for Stream {
     }
 }
 
+/// What a finished handshake settled on — the post-quantum policy made visible
+/// (tests assert on it, and every handshake logs it at debug level).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Negotiated {
+    /// The key-exchange group, e.g. `X25519MLKEM768`.
+    pub kx: String,
+    /// The peer certificate's key algorithm, e.g. `ML-DSA-65`; `none` when
+    /// the peer sent no certificate.
+    pub peer_key: &'static str,
+}
+
+impl Stream {
+    pub fn negotiated(&self) -> Negotiated {
+        let (kx, certs) = match &self.0 {
+            TlsStream::Client(c) => {
+                let (_, conn) = c.get_ref();
+                (
+                    conn.negotiated_key_exchange_group(),
+                    conn.peer_certificates(),
+                )
+            }
+            TlsStream::Server(c) => {
+                let (_, conn) = c.get_ref();
+                (
+                    conn.negotiated_key_exchange_group(),
+                    conn.peer_certificates(),
+                )
+            }
+        };
+        Negotiated {
+            kx: kx.map_or_else(|| "none".to_string(), |g| format!("{:?}", g.name())),
+            peer_key: certs
+                .and_then(|c| c.first())
+                .map_or("none", |c| key_alg_name(c)),
+        }
+    }
+
+    fn log_handshake(&self, side: &str) {
+        let n = self.negotiated();
+        debug!(side = %side, kx = %n.kx, peer_key = %n.peer_key, "ipc tls handshake ok");
+    }
+}
+
 /// A peer that can't finish a handshake this fast is dropped rather than left
 /// holding a connection slot.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -188,18 +232,24 @@ impl fmt::Debug for Identity {
 }
 
 fn certify(b: &Bundle) -> io::Result<Current> {
-    let key = provider::sign::any_supported_type(&PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-        b.key.clone(),
-    )))
-    .map_err(err)?;
     let peer = PeerId::from_cert_der(&b.cert)
         .ok_or_else(|| err("certificate carries no nos:// identity"))?;
-    let key = CertifiedKey::new(vec![CertificateDer::from(b.cert.clone())], key);
-    key.keys_match().map_err(err)?;
     Ok(Current {
-        key: Arc::new(key),
+        key: certified_key(&b.cert, &b.key)?,
         peer,
     })
+}
+
+/// A leaf certificate and its PKCS#8 key as rustls wants them, checked to
+/// belong together.
+pub(crate) fn certified_key(cert_der: &[u8], key_der: &[u8]) -> io::Result<Arc<CertifiedKey>> {
+    let key = any_supported_type(&PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        key_der.to_vec(),
+    )))
+    .map_err(err)?;
+    let key = CertifiedKey::new(vec![CertificateDer::from(cert_der.to_vec())], key);
+    key.keys_match().map_err(err)?;
+    Ok(Arc::new(key))
 }
 
 impl Identity {
@@ -207,7 +257,7 @@ impl Identity {
     /// it can verify servers and connect to a socket that allows unauthenticated
     /// clients (the login path), nothing else. `update` gives it a certificate.
     pub fn anonymous(ca_der: &[u8]) -> io::Result<Self> {
-        let provider = Arc::new(provider::default_provider());
+        let provider = crate::policy::provider(Policy::Ipc);
         let mut roots = RootCertStore::empty();
         roots
             .add(CertificateDer::from(ca_der.to_vec()))
@@ -367,6 +417,7 @@ impl Identity {
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tls handshake timed out"))??;
         let stream = Stream(TlsStream::Client(tls));
+        stream.log_handshake("client");
         match peer_of(&stream) {
             Some(got) if accept(&got) => Ok(stream),
             got => Err(io::Error::new(
@@ -465,6 +516,7 @@ impl Incoming {
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tls handshake timed out"))??;
         let stream = Stream(TlsStream::Server(tls));
+        stream.log_handshake("server");
         let peer = peer_of(&stream);
         Ok((stream, peer))
     }

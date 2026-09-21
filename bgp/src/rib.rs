@@ -72,6 +72,7 @@ use nos_rpl::CompiledPolicy;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::evpn::EvpnNlri;
 use crate::message::{self, UpdateMessage};
 
 /// Adapts a `RibRoute` into `nos_rpl`'s input shape — see root `CLAUDE.md`'s
@@ -133,6 +134,25 @@ fn apply_policy(
     }
 }
 
+/// Stores one `MP_REACH_NLRI` batch's EVPN routes in a peer's EVPN Adj-RIB-In,
+/// logging only routes that are new or changed.
+fn learn_evpn(
+    table: &mut HashMap<EvpnNlri, EvpnRoute>,
+    from: IpAddr,
+    mp: &message::MpReachNlri,
+    extended_communities: &[u64],
+) {
+    for nlri in &mp.evpn {
+        let route = EvpnRoute {
+            next_hop: mp.next_hop,
+            extended_communities: extended_communities.to_vec(),
+        };
+        if table.insert(nlri.clone(), route.clone()) != Some(route) {
+            info!(peer = %from, route_type = nlri.route_type(), route = %nlri, next_hop = %mp.next_hop, "evpn route learned");
+        }
+    }
+}
+
 /// Applies one learned NLRI to a peer's Adj-RIB-In, shared by an UPDATE's
 /// plain IPv4 NLRI and its RFC 4760 `MP_REACH_NLRI`, which differ only in
 /// where the next-hop comes from.
@@ -179,6 +199,15 @@ fn family_of(net: IpNet) -> AddressFamily {
 pub enum RouteOrigin {
     Local,
     Peer(IpAddr),
+}
+
+/// One received EVPN route's attributes — `Adj-RIB-In` content, nothing derived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvpnRoute {
+    pub next_hop: IpAddr,
+    /// Raw 8-byte extended communities (Route Targets, Encapsulation, MAC
+    /// Mobility, ...), exactly as received.
+    pub extended_communities: Vec<u64>,
 }
 
 /// One candidate route for a prefix, either locally redistributed or learned
@@ -346,6 +375,11 @@ pub struct BgpRib {
     /// reflection and checked for loop-prevention on receipt.
     cluster_id: Ipv4Addr,
     adj_rib_in: HashMap<IpAddr, HashMap<IpNet, RibRoute>>,
+    /// Received EVPN (RFC 7432) routes per peer, keyed by NLRI.
+    // ponytail: Adj-RIB-In only — no best-path, Route-Target import filtering,
+    // import policy (RPL's `Input` is prefix-shaped) or re-advertisement, since
+    // nothing consumes EVPN routes yet. Add a Loc-RIB when a MAC-VRF does.
+    evpn_adj_rib_in: HashMap<IpAddr, HashMap<EvpnNlri, EvpnRoute>>,
     /// The unfiltered prefix set as told by `nos-ribd`'s
     /// `RedistributeUpdate` — the raw truth `redistributed` below is
     /// filtered from (see `apply_redistribute_update`/`set_redistribute_policy`).
@@ -395,6 +429,7 @@ impl BgpRib {
             local_router_id: Ipv4Addr::UNSPECIFIED,
             cluster_id: Ipv4Addr::UNSPECIFIED,
             adj_rib_in: HashMap::new(),
+            evpn_adj_rib_in: HashMap::new(),
             redistribute_raw: HashSet::new(),
             redistributed: HashMap::new(),
             redistribute_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
@@ -550,11 +585,27 @@ impl BgpRib {
         self.peer_outboxes.contains_key(&peer)
     }
 
+    /// Every received EVPN route, ordered by peer then route for stable output.
+    pub fn evpn_routes(&self) -> Vec<(IpAddr, &EvpnNlri, &EvpnRoute)> {
+        let mut out: Vec<_> = self
+            .evpn_adj_rib_in
+            .iter()
+            .flat_map(|(peer, t)| t.iter().map(move |(n, r)| (*peer, n, r)))
+            .collect();
+        out.sort_by_cached_key(|(peer, n, _)| (*peer, n.to_string()));
+        out
+    }
+
     pub fn peer_disconnected(&mut self, peer: IpAddr) {
         self.peer_outboxes.remove(&peer);
         self.adj_rib_out.remove(&peer);
         self.rs_sent.retain(|(p, _), _| *p != peer);
         self.rs_next_id.retain(|(p, _), _| *p != peer);
+        if let Some(routes) = self.evpn_adj_rib_in.remove(&peer) {
+            for nlri in routes.keys() {
+                info!(peer = %peer, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
+            }
+        }
         let removed = self.adj_rib_in.remove(&peer);
         if let Some(routes) = removed {
             for prefix in routes.into_keys() {
@@ -610,6 +661,15 @@ impl BgpRib {
                     .flat_map(|u| u.withdrawn.iter().copied()),
             )
             .collect();
+        for nlri in update.mp_unreach.iter().flat_map(|u| &u.evpn) {
+            if self
+                .evpn_adj_rib_in
+                .get_mut(&from)
+                .is_some_and(|t| t.remove(nlri).is_some())
+            {
+                info!(peer = %from, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
+            }
+        }
         if !withdrawn.is_empty() {
             let table = self.adj_rib_in.entry(from).or_default();
             for prefix in &withdrawn {
@@ -690,6 +750,14 @@ impl BgpRib {
                             ..base_route.clone()
                         };
                         learn_prefix(table, &mut touched, from, *prefix, candidate, import_policy);
+                    }
+                    if !mp.evpn.is_empty() {
+                        learn_evpn(
+                            self.evpn_adj_rib_in.entry(from).or_default(),
+                            from,
+                            mp,
+                            &attrs.extended_communities,
+                        );
                     }
                 }
             }
@@ -1375,6 +1443,99 @@ mod tests {
             mp_reach: vec![],
             mp_unreach: vec![],
         }
+    }
+
+    fn evpn_nlri(mac_last: u8) -> EvpnNlri {
+        EvpnNlri::MacIp {
+            rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
+            esi: [0; 10],
+            tag: 0,
+            mac: [0xaa, 0, 0, 0, 0, mac_last],
+            ip: None,
+            labels: vec![10_000],
+        }
+    }
+
+    fn evpn_reach(nlris: Vec<EvpnNlri>, as_path: Vec<u32>) -> UpdateMessage {
+        let mut u = ebgp_update(vec![], as_path, "0.0.0.0");
+        u.attributes.as_mut().unwrap().extended_communities = vec![0x0002_fde8_0000_2710];
+        u.mp_reach = vec![message::MpReachNlri {
+            afi: message::AFI_L2VPN,
+            safi: message::SAFI_EVPN,
+            next_hop: addr("192.0.2.1"),
+            nlri: vec![],
+            nlri_path_ids: vec![],
+            evpn: nlris,
+        }];
+        u
+    }
+
+    #[test]
+    fn evpn_routes_are_stored_per_peer_withdrawn_and_cleared_on_disconnect() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let observer = addr("10.0.0.2");
+        let _peer_rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        let mut observer_rx = register_peer(&mut rib, observer, false, addr("10.0.0.253"));
+
+        rib.handle_update(
+            peer,
+            false,
+            v4("192.0.2.1"),
+            &evpn_reach(vec![evpn_nlri(1), evpn_nlri(2)], vec![65001]),
+            &deny_all_policy(), // import policy is prefix-shaped: not applied to EVPN
+        );
+        let routes = rib.evpn_routes();
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].0, peer);
+        assert_eq!(routes[0].2.next_hop, addr("192.0.2.1"));
+        assert_eq!(
+            routes[0].2.extended_communities,
+            vec![0x0002_fde8_0000_2710]
+        );
+        // Nothing is re-advertised: no consumer exists yet.
+        assert!(recv_all(&mut observer_rx).is_empty());
+
+        // Re-announcing an existing route replaces it rather than duplicating.
+        rib.handle_update(
+            peer,
+            false,
+            v4("192.0.2.1"),
+            &evpn_reach(vec![evpn_nlri(1)], vec![65001]),
+            &deny_all_policy(),
+        );
+        assert_eq!(rib.evpn_routes().len(), 2);
+
+        let mut withdraw = empty_update();
+        withdraw.mp_unreach = vec![message::MpUnreachNlri {
+            afi: message::AFI_L2VPN,
+            safi: message::SAFI_EVPN,
+            withdrawn: vec![],
+            withdrawn_path_ids: vec![],
+            evpn: vec![evpn_nlri(1)],
+        }];
+        rib.handle_update(peer, false, v4("192.0.2.1"), &withdraw, &deny_all_policy());
+        let routes = rib.evpn_routes();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].1, &evpn_nlri(2));
+
+        rib.peer_disconnected(peer);
+        assert!(rib.evpn_routes().is_empty());
+    }
+
+    #[test]
+    fn evpn_update_with_own_asn_in_as_path_is_dropped() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        rib.handle_update(
+            peer,
+            false,
+            v4("192.0.2.1"),
+            &evpn_reach(vec![evpn_nlri(1)], vec![65001, 65000]),
+            &deny_all_policy(),
+        );
+        assert!(rib.evpn_routes().is_empty());
     }
 
     #[test]

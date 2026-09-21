@@ -6,6 +6,8 @@ use axum::Json;
 #[derive(Debug)]
 pub enum ApiError {
     BadRequest(String),
+    /// No valid client certificate, or a login that failed.
+    Unauthorized(String),
     NotFound(String),
     /// Well-formed request the config rejected (commit-time validation).
     Unprocessable(String),
@@ -34,6 +36,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, msg) = match self {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+            ApiError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m),
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m),
             ApiError::Unprocessable(m) => (StatusCode::UNPROCESSABLE_ENTITY, m),
             ApiError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),

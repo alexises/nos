@@ -4,15 +4,15 @@ use std::net::Ipv4Addr;
 use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
-    BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus, FieldDiff,
-    Interface, InterfaceAddress, InterfaceStatus, LacpMuxState, LacpRate, LacpReceiveState,
-    LinkInterfaceState, LogEntry, LogLevel, LsaSummary, NeighborSummary, NextHopMode, OspfArea,
-    OspfAuth, OspfCryptoAlgorithm, OspfInstance, OspfNeighborState, OspfProfile, Ospfv3Area,
-    Ospfv3Instance, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Profile, PeerSummary,
-    PolicyDefinition, PortAggregate, PortAggregateLacpSummary, PortAggregateStatus, PrefixList,
-    PrefixListEntry, PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, SourceAddress,
-    StaticRoute, StaticRoutingInstance, Subinterface, SubinterfaceStatus, SwitchingProfile,
-    TransactionSnapshot, VlanTag,
+    BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus,
+    EvpnRouteSummary, FieldDiff, Interface, InterfaceAddress, InterfaceStatus, LacpMuxState,
+    LacpRate, LacpReceiveState, LinkInterfaceState, LogEntry, LogLevel, LsaSummary,
+    NeighborSummary, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm, OspfInstance,
+    OspfNeighborState, OspfProfile, Ospfv3Area, Ospfv3Instance, Ospfv3LsaSummary,
+    Ospfv3NeighborSummary, Ospfv3Profile, PeerSummary, PolicyDefinition, PortAggregate,
+    PortAggregateLacpSummary, PortAggregateStatus, PrefixList, PrefixListEntry, PrefixRoutes,
+    RouteSourceKind, RoutingTable, SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance,
+    Subinterface, SubinterfaceStatus, SwitchingProfile, TransactionSnapshot, VlanTag,
 };
 
 use crate::session::Path;
@@ -662,6 +662,25 @@ pub fn render_bgp_summary(instance: &str, peers: &[PeerSummary]) -> String {
             peer.remote_address,
             peer.peer_group,
             render_bgp_session_state(peer.state),
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Render one BGP instance's received EVPN routes, one line per route — used
+/// for `show bgp evpn`.
+pub fn render_bgp_evpn(instance: &str, routes: &[EvpnRouteSummary]) -> String {
+    if routes.is_empty() {
+        return format!("bgp instance {instance}: no evpn routes");
+    }
+    let mut lines = vec![format!("bgp instance {instance}:")];
+    for r in routes {
+        lines.push(format!(
+            "  from {} next-hop {} {} [{}]",
+            r.peer,
+            r.next_hop,
+            r.route,
+            r.extended_communities.join(" ")
         ));
     }
     lines.join("\n")
@@ -2025,6 +2044,25 @@ mod tests {
             negotiated_hold_time: None,
             negotiated_keepalive: None,
         }
+    }
+
+    #[test]
+    fn render_bgp_evpn_lists_one_route_per_line() {
+        assert_eq!(
+            render_bgp_evpn("r1", &[]),
+            "bgp instance r1: no evpn routes"
+        );
+        let route = EvpnRouteSummary {
+            peer: "10.0.0.2".parse().unwrap(),
+            route_type: 3,
+            route: "[3]:[65000:1]:[0]:[192.0.2.1]".to_string(),
+            next_hop: "192.0.2.1".parse().unwrap(),
+            extended_communities: vec!["RT:65000:10000".to_string(), "encap:8".to_string()],
+        };
+        assert_eq!(
+            render_bgp_evpn("r1", &[route]),
+            "bgp instance r1:\n  from 10.0.0.2 next-hop 192.0.2.1 [3]:[65000:1]:[0]:[192.0.2.1] [RT:65000:10000 encap:8]"
+        );
     }
 
     #[test]

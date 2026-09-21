@@ -348,6 +348,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Doc::FromConfig(Topic::AddBgpPeerGroupAddressFamily),
         Configuration),
     spec!(["set" "bgp" "instance" (BgpInstanceName) "peer-group" (BgpPeerGroupName)
+           "address-family" "l2vpn-evpn"],
+        "set bgp instance <name> peer-group <group> address-family l2vpn-evpn",
+        Doc::FromConfig(Topic::AddBgpPeerGroupAddressFamily),
+        Configuration),
+    spec!(["set" "bgp" "instance" (BgpInstanceName) "peer-group" (BgpPeerGroupName)
            "hold-time" (Plain)],
         "set bgp instance <name> peer-group <group> hold-time <n>",
         Doc::FromConfig(Topic::SetBgpPeerGroupHoldTime),
@@ -430,6 +435,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "set address-family ipv6",
         Doc::FromConfig(Topic::AddBgpPeerGroupAddressFamily),
         ConfigurationPeerGroup),
+    spec!(["set" "address-family" "l2vpn-evpn"],
+        "set address-family l2vpn-evpn",
+        Doc::FromConfig(Topic::AddBgpPeerGroupAddressFamily),
+        ConfigurationPeerGroup),
     spec!(["set" "next-hop" "self"],
         "set next-hop self",
         Doc::FromConfig(Topic::SetBgpPeerGroupNextHop),
@@ -509,6 +518,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         ConfigurationPeerGroup),
     spec!(["delete" "address-family" "ipv6"],
         "delete address-family ipv6",
+        Doc::FromConfig(Topic::RemoveBgpPeerGroupAddressFamily),
+        ConfigurationPeerGroup),
+    spec!(["delete" "address-family" "l2vpn-evpn"],
+        "delete address-family l2vpn-evpn",
         Doc::FromConfig(Topic::RemoveBgpPeerGroupAddressFamily),
         ConfigurationPeerGroup),
     spec!(["delete" "next-hop"],
@@ -1416,6 +1429,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             detail: "Queries every configured BGP instance's nos-bgpd (each resolved via \
                      nos-watchdogd) for its peers' current session state, remote AS, uptime, \
                      and negotiated hold-time. An instance whose nos-bgpd isn't running is \
+                     reported individually rather than aborting the whole command.",
+        },
+        Always),
+    spec!(["show" "bgp" "evpn"],
+        "show bgp evpn",
+        Doc::Local {
+            summary: "Show every EVPN route received from BGP peers, across every instance.",
+            detail: "Queries every configured BGP instance's nos-bgpd (each resolved via \
+                     nos-watchdogd) for the EVPN (AFI 25 / SAFI 70) routes its peers sent: \
+                     route type, NLRI, next-hop and extended communities (Route Targets, \
+                     Encapsulation). Only peers whose peer-group has `address-family \
+                     l2vpn-evpn` exchange them. An instance whose nos-bgpd isn't running is \
                      reported individually rather than aborting the whole command.",
         },
         Always),

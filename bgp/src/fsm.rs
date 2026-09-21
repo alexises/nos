@@ -43,6 +43,15 @@ fn afi_of(family: AddressFamily) -> u16 {
     match family {
         AddressFamily::Ipv4Unicast => AFI_IPV4,
         AddressFamily::Ipv6Unicast => AFI_IPV6,
+        AddressFamily::L2vpnEvpn => message::AFI_L2VPN,
+    }
+}
+
+/// The wire SAFI of `family`.
+fn safi_of(family: AddressFamily) -> u8 {
+    match family {
+        AddressFamily::Ipv4Unicast | AddressFamily::Ipv6Unicast => 1,
+        AddressFamily::L2vpnEvpn => message::SAFI_EVPN,
     }
 }
 
@@ -76,8 +85,13 @@ fn build_mp_capabilities(
     let mut caps = Vec::new();
     for &af in address_families {
         let afi = afi_of(af);
-        caps.push(message::Capability::MultiProtocol { afi, safi: 1 });
-        if afi != transport_afi {
+        caps.push(message::Capability::MultiProtocol {
+            afi,
+            safi: safi_of(af),
+        });
+        // RFC 8950 is about unicast NLRI carried with a cross-family
+        // next-hop; EVPN's next-hop family is independent of its NLRI.
+        if af != AddressFamily::L2vpnEvpn && afi != transport_afi {
             caps.push(message::Capability::ExtendedNextHop {
                 nlri_afi: afi,
                 nlri_safi: 1,
@@ -91,7 +105,7 @@ fn build_mp_capabilities(
 /// Negotiates which address families this session actually carries, from the
 /// peer's OPEN capabilities and this session's own configured
 /// `address_families`/transport AFI. Returns `(mp_bgp_negotiated,
-/// negotiated_ipv4_unicast, negotiated_ipv6_unicast)` — a bool pair rather
+/// negotiated_ipv4_unicast, negotiated_ipv6_unicast, negotiated_evpn)` — bools rather
 /// than a generic set, since exactly two `AddressFamily` variants exist
 /// today and this keeps `RemoteInfo`/`Action` cheaply `Copy`.
 ///
@@ -102,7 +116,10 @@ fn build_mp_capabilities(
 /// only if both sides advertised it, and — when its family doesn't match the
 /// transport family — only if the peer also advertised the matching
 /// Extended Next Hop tuple.
-fn negotiate_address_families(open: &OpenMessage, ctx: &NegotiationContext) -> (bool, bool, bool) {
+fn negotiate_address_families(
+    open: &OpenMessage,
+    ctx: &NegotiationContext,
+) -> (bool, bool, bool, bool) {
     let peer_mp: HashSet<(u16, u8)> = open
         .capabilities
         .iter()
@@ -136,10 +153,14 @@ fn negotiate_address_families(open: &OpenMessage, ctx: &NegotiationContext) -> (
         peer_mp.contains(&(afi, 1))
             && (afi == ctx.transport_afi || peer_ext_nh.contains(&(afi, 1, ctx.transport_afi)))
     };
+    // EVPN needs no Extended Next Hop tuple, and has no legacy (non-MP) form.
+    let evpn = ctx.address_families.contains(&AddressFamily::L2vpnEvpn)
+        && peer_mp.contains(&(message::AFI_L2VPN, message::SAFI_EVPN));
     (
         mp_bgp_negotiated,
         negotiated(AFI_IPV4),
         negotiated(AFI_IPV6),
+        evpn,
     )
 }
 
@@ -221,6 +242,7 @@ struct RemoteInfo {
     mp_bgp_negotiated: bool,
     negotiated_ipv4_unicast: bool,
     negotiated_ipv6_unicast: bool,
+    negotiated_evpn: bool,
     /// RFC 7911 ADD-PATH negotiated for this AFI — always `false` unless
     /// this session is `is_rs_client` (only such sessions ever advertise the
     /// capability, see `run`) and the peer echoed it back.
@@ -261,6 +283,7 @@ enum Action {
         mp_bgp_negotiated: bool,
         negotiated_ipv4_unicast: bool,
         negotiated_ipv6_unicast: bool,
+        negotiated_evpn: bool,
         add_path_ipv4: bool,
         add_path_ipv6: bool,
     },
@@ -292,6 +315,7 @@ fn step(state: State, event: Event, ctx: &NegotiationContext) -> (Option<State>,
                 mp_bgp_negotiated: remote.mp_bgp_negotiated,
                 negotiated_ipv4_unicast: remote.negotiated_ipv4_unicast,
                 negotiated_ipv6_unicast: remote.negotiated_ipv6_unicast,
+                negotiated_evpn: remote.negotiated_evpn,
                 add_path_ipv4: remote.add_path_ipv4,
                 add_path_ipv6: remote.add_path_ipv6,
             }],
@@ -374,7 +398,7 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
             _ => negotiated_hold / 3,
         }
     };
-    let (mp_bgp_negotiated, negotiated_ipv4_unicast, negotiated_ipv6_unicast) =
+    let (mp_bgp_negotiated, negotiated_ipv4_unicast, negotiated_ipv6_unicast, negotiated_evpn) =
         negotiate_address_families(open, ctx);
     let (add_path_ipv4, add_path_ipv6) = negotiate_add_path(open, ctx);
     let remote = RemoteInfo {
@@ -383,6 +407,7 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
         mp_bgp_negotiated,
         negotiated_ipv4_unicast,
         negotiated_ipv6_unicast,
+        negotiated_evpn,
         add_path_ipv4,
         add_path_ipv6,
     };
@@ -693,6 +718,7 @@ pub async fn run(
             let tuples = peer
                 .address_families
                 .iter()
+                .filter(|&&af| af != AddressFamily::L2vpnEvpn)
                 .map(|&af| message::AddPathTuple {
                     afi: afi_of(af),
                     safi: 1,
@@ -805,6 +831,7 @@ pub async fn run(
                         mp_bgp_negotiated,
                         negotiated_ipv4_unicast,
                         negotiated_ipv6_unicast,
+                        negotiated_evpn,
                         add_path_ipv4,
                         add_path_ipv6,
                     } => {
@@ -815,6 +842,9 @@ pub async fn run(
                         }
                         if *negotiated_ipv6_unicast {
                             negotiated_afs.insert(AddressFamily::Ipv6Unicast);
+                        }
+                        if *negotiated_evpn {
+                            negotiated_afs.insert(AddressFamily::L2vpnEvpn);
                         }
                         let mut add_path_afis = HashSet::new();
                         let mut add_path_afs = HashSet::new();
@@ -921,6 +951,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     next_hop: route.next_hop,
                     nlri: vec![route.prefix],
                     nlri_path_ids: path_ids,
+                    evpn: Vec::new(),
                 }],
                 mp_unreach: Vec::new(),
             })
@@ -962,6 +993,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     safi: 1,
                     withdrawn: vec![prefix],
                     withdrawn_path_ids: path_ids,
+                    evpn: Vec::new(),
                 }],
             })
         }
@@ -1068,6 +1100,70 @@ mod tests {
         message::build_open(remote_as, Ipv4Addr::new(2, 2, 2, 2), hold_time)
     }
 
+    fn open_with_mp(afis: &[(u16, u8)]) -> OpenMessage {
+        let mut open = valid_open(65002, 90);
+        for &(afi, safi) in afis {
+            open.capabilities
+                .push(message::Capability::MultiProtocol { afi, safi });
+        }
+        open
+    }
+
+    fn ctx_with_afs(
+        address_families: Vec<AddressFamily>,
+        transport_afi: u16,
+    ) -> NegotiationContext {
+        NegotiationContext {
+            address_families,
+            transport_afi,
+            ..ctx(65002)
+        }
+    }
+
+    #[test]
+    fn evpn_negotiated_only_when_both_sides_advertise_it() {
+        let both = ctx_with_afs(
+            vec![AddressFamily::Ipv4Unicast, AddressFamily::L2vpnEvpn],
+            AFI_IPV4,
+        );
+        let peer = open_with_mp(&[(AFI_IPV4, 1), (message::AFI_L2VPN, message::SAFI_EVPN)]);
+        assert_eq!(
+            negotiate_address_families(&peer, &both),
+            (true, true, false, true)
+        );
+        // Peer never offered it.
+        let no_evpn = open_with_mp(&[(AFI_IPV4, 1)]);
+        assert_eq!(
+            negotiate_address_families(&no_evpn, &both),
+            (true, true, false, false)
+        );
+        // We never configured it.
+        let ipv4_only = ctx_with_afs(vec![AddressFamily::Ipv4Unicast], AFI_IPV4);
+        assert_eq!(
+            negotiate_address_families(&peer, &ipv4_only),
+            (true, true, false, false)
+        );
+        // EVPN alone needs no Extended Next Hop, even over an IPv6 transport.
+        let v6_transport = ctx_with_afs(vec![AddressFamily::L2vpnEvpn], AFI_IPV6);
+        let evpn_only = open_with_mp(&[(message::AFI_L2VPN, message::SAFI_EVPN)]);
+        assert_eq!(
+            negotiate_address_families(&evpn_only, &v6_transport),
+            (true, false, false, true)
+        );
+    }
+
+    #[test]
+    fn evpn_capability_is_sent_as_afi25_safi70_without_extended_next_hop() {
+        let caps = build_mp_capabilities(&[AddressFamily::L2vpnEvpn], AFI_IPV6);
+        assert_eq!(
+            caps,
+            vec![message::Capability::MultiProtocol {
+                afi: message::AFI_L2VPN,
+                safi: message::SAFI_EVPN
+            }]
+        );
+    }
+
     #[test]
     fn valid_open_moves_to_open_confirm_and_arms_timers() {
         let (next, actions) = step(
@@ -1168,6 +1264,7 @@ mod tests {
             mp_bgp_negotiated: false,
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
+            negotiated_evpn: false,
             add_path_ipv4: false,
             add_path_ipv6: false,
         };
@@ -1190,6 +1287,7 @@ mod tests {
             mp_bgp_negotiated: false,
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
+            negotiated_evpn: false,
             add_path_ipv4: false,
             add_path_ipv6: false,
         };
@@ -1240,6 +1338,7 @@ mod tests {
             mp_bgp_negotiated: false,
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
+            negotiated_evpn: false,
             add_path_ipv4: false,
             add_path_ipv6: false,
         };
@@ -1260,6 +1359,7 @@ mod tests {
             mp_bgp_negotiated: false,
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
+            negotiated_evpn: false,
             add_path_ipv4: false,
             add_path_ipv6: false,
         };

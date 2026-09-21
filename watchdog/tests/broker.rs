@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
-use nos_pki::{generate_csr, Identity, PeerId};
+use nos_pki::{generate_csr, generate_csr_for, Identity, KeyAlg, PeerId};
 use nos_proto::{
     Config, Event, IpcCodec, Request, Role, ServiceRef, User, WatchdogEvent, WatchdogRequest,
 };
@@ -303,4 +303,146 @@ async fn a_user_can_renew_until_they_are_deleted_and_daemons_cannot_renew_at_all
     )
     .await;
     assert!(matches!(gone, WatchdogEvent::Denied(_)), "{gone:?}");
+}
+
+fn rest_login(user: &str, password: &str, csr: Vec<u8>) -> WatchdogRequest {
+    WatchdogRequest::RestLogin {
+        user: user.to_string(),
+        password: password.to_string(),
+        csr_der: csr,
+    }
+}
+
+#[tokio::test]
+async fn only_restd_may_use_the_rest_requests() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+    let requests = || {
+        [
+            rest_login("alice", "s3cret", csr.clone()),
+            WatchdogRequest::RestRenew {
+                user: "alice".into(),
+                csr_der: csr.clone(),
+            },
+            WatchdogRequest::IssueRestServerCert {
+                addresses: vec!["127.0.0.1".parse().unwrap()],
+                csr_der: csr.clone(),
+            },
+        ]
+    };
+    for role in [Role::Bgpd, Role::User, Role::Configd] {
+        let mut conn = dial(&e.daemon(role, "x"), &e.broker).await;
+        for request in requests() {
+            let event = ask(&mut conn, request).await;
+            assert!(
+                matches!(event, WatchdogEvent::Denied(_)),
+                "{role:?}: {event:?}"
+            );
+        }
+    }
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    for request in requests() {
+        let event = ask(&mut conn, request).await;
+        assert!(matches!(event, WatchdogEvent::Denied(_)), "{event:?}");
+    }
+    let mut conn = dial(&e.daemon(Role::Restd, "rt1"), &e.broker).await;
+    for request in requests() {
+        let event = ask(&mut conn, request).await;
+        assert!(!matches!(event, WatchdogEvent::Denied(_)), "{event:?}");
+    }
+}
+
+#[tokio::test]
+async fn restd_gets_rest_certificates_that_do_not_open_ipc_sockets() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let mut conn = dial(&e.daemon(Role::Restd, "rt1"), &e.broker).await;
+
+    let (csr, key) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+    let WatchdogEvent::Issued { cert_der, .. } =
+        ask(&mut conn, rest_login("alice", "s3cret", csr)).await
+    else {
+        panic!("rest login refused");
+    };
+
+    // The REST CA is published beside the IPC one, and is a different root.
+    let rest_ca = std::fs::read_to_string(e.tmp.path().join("rest-ca.crt")).unwrap();
+    assert_ne!(
+        rest_ca,
+        std::fs::read_to_string(e.tmp.path().join("ca.crt")).unwrap()
+    );
+    nos_pki::rest::client_config(rest_ca.as_bytes(), Some((&cert_der, &key))).unwrap();
+
+    // Presenting it to the IPC broker fails: wrong CA and wrong algorithm.
+    let id = e.anonymous();
+    id.set_certificate(cert_der, key).unwrap();
+    let stream = id
+        .connect(&e.broker, &PeerId::new(Role::Watchdog.as_str(), ""))
+        .await;
+    if let Ok(stream) = stream {
+        let (r, w) = split(stream);
+        let mut conn: Conn = (
+            FramedRead::new(r, IpcCodec::<WatchdogEvent>::default()),
+            FramedWrite::new(w, IpcCodec::<WatchdogRequest>::default()),
+        );
+        conn.1
+            .send(WatchdogRequest::ResolveEndpoint {
+                service: ServiceRef::Config,
+            })
+            .await
+            .ok();
+        assert!(
+            !matches!(conn.0.next().await, Some(Ok(WatchdogEvent::Endpoint(_)))),
+            "a REST certificate must not authenticate on the IPC broker"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rest_login_failures_are_not_throttled_by_the_broker_connection() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let mut conn = dial(&e.daemon(Role::Restd, "rt1"), &e.broker).await;
+    let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+    let started = Instant::now();
+    for _ in 0..4 {
+        let event = ask(&mut conn, rest_login("alice", "nope", csr.clone())).await;
+        assert!(matches!(event, WatchdogEvent::Denied(_)));
+    }
+    // …so the shared connection survives, and a correct login still works.
+    let event = ask(&mut conn, rest_login("alice", "s3cret", csr)).await;
+    assert!(matches!(event, WatchdogEvent::Issued { .. }), "{event:?}");
+    assert!(started.elapsed() < Duration::from_secs(4));
+}
+
+#[tokio::test]
+async fn rest_renewal_is_refused_for_a_deleted_user_and_server_certs_carry_the_rest_ca() {
+    let e = env(vec![user("alice", "s3cret")]).await;
+    let mut conn = dial(&e.daemon(Role::Restd, "rt1"), &e.broker).await;
+    let (csr, _) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+
+    let renew = |user: &str| WatchdogRequest::RestRenew {
+        user: user.into(),
+        csr_der: csr.clone(),
+    };
+    assert!(matches!(
+        ask(&mut conn, renew("alice")).await,
+        WatchdogEvent::Issued { .. }
+    ));
+    e.users.lock().unwrap().clear();
+    assert!(matches!(
+        ask(&mut conn, renew("alice")).await,
+        WatchdogEvent::Denied(_)
+    ));
+
+    let WatchdogEvent::RestServerCert { ca_der, .. } = ask(
+        &mut conn,
+        WatchdogRequest::IssueRestServerCert {
+            addresses: vec!["10.0.0.1".parse().unwrap()],
+            csr_der: csr,
+        },
+    )
+    .await
+    else {
+        panic!("server certificate refused");
+    };
+    assert!(!ca_der.is_empty());
 }

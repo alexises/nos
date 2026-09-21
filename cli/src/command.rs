@@ -467,7 +467,7 @@ pub enum DeleteTarget {
     /// `delete source-address` — only valid while navigated into a
     /// peer-group.
     SourceAddress,
-    /// `delete address-family ipv4|ipv6` — only valid while navigated into
+    /// `delete address-family ipv4|ipv6|l2vpn-evpn` — only valid while navigated into
     /// a peer-group.
     AddressFamily(AddressFamily),
     /// `delete hold-time` — only valid while navigated into a peer-group.
@@ -799,6 +799,9 @@ pub enum Command {
     /// `show bgp brief` — a one-line-per-peer session summary across every
     /// configured BGP instance.
     ShowBgpBrief,
+    /// `show bgp evpn` — every EVPN route received by every configured BGP
+    /// instance.
+    ShowBgpEvpn,
     /// `show ospf neigh` — a one-line-per-link neighbor summary across every
     /// configured OSPF instance.
     ShowOspfNeigh,
@@ -943,6 +946,7 @@ fn parse_show(t: &[&str]) -> Option<Command> {
             follow: true,
         },
         ["bgp", "brief"] => Command::ShowBgpBrief,
+        ["bgp", "evpn"] => Command::ShowBgpEvpn,
         ["ospf", "neigh"] => Command::ShowOspfNeigh,
         ["ospf", "database"] => Command::ShowOspfDatabase,
         ["ospfv3", "neigh"] => Command::ShowOspfv3Neigh,
@@ -1125,6 +1129,13 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv6Unicast),
             })
         }
+        ["bgp", "instance", instance, "peer-group", group, "address-family", "l2vpn-evpn"] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::AddressFamily(AddressFamily::L2vpnEvpn),
+            })
+        }
         ["bgp", "instance", instance, "peer-group", group, "hold-time", n] => {
             Command::Set(SetTarget::BgpPeerGroup {
                 instance: (*instance).to_string(),
@@ -1253,6 +1264,9 @@ fn parse_set(t: &[&str]) -> Option<Command> {
         }),
         ["address-family", "ipv6"] => Command::Set(SetTarget::PeerGroupRelative {
             field: BgpPeerGroupField::AddressFamily(AddressFamily::Ipv6Unicast),
+        }),
+        ["address-family", "l2vpn-evpn"] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::AddressFamily(AddressFamily::L2vpnEvpn),
         }),
         ["next-hop", "self"] => Command::Set(SetTarget::PeerGroupRelative {
             field: BgpPeerGroupField::NextHop(NextHopMode::SelfAddress),
@@ -1892,6 +1906,9 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
         }
         ["address-family", "ipv6"] => {
             Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv6Unicast))
+        }
+        ["address-family", "l2vpn-evpn"] => {
+            Command::Delete(DeleteTarget::AddressFamily(AddressFamily::L2vpnEvpn))
         }
         ["next-hop"] => Command::Delete(DeleteTarget::NextHop),
         ["route-reflector-client"] => Command::Delete(DeleteTarget::RouteReflectorClient),
@@ -3654,6 +3671,24 @@ mod tests {
             Command::parse("delete address-family ipv6"),
             Command::Delete(DeleteTarget::AddressFamily(AddressFamily::Ipv6Unicast))
         );
+        assert_eq!(
+            Command::parse("delete address-family l2vpn-evpn"),
+            Command::Delete(DeleteTarget::AddressFamily(AddressFamily::L2vpnEvpn))
+        );
+        assert_eq!(
+            Command::parse("set address-family l2vpn-evpn"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::AddressFamily(AddressFamily::L2vpnEvpn),
+            })
+        );
+        assert_eq!(
+            Command::parse("set bgp instance R1 peer-group PG1 address-family l2vpn-evpn"),
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: "R1".to_string(),
+                group: "PG1".to_string(),
+                field: BgpPeerGroupField::AddressFamily(AddressFamily::L2vpnEvpn),
+            })
+        );
     }
 
     #[test]
@@ -3691,6 +3726,11 @@ mod tests {
     #[test]
     fn show_bgp_brief() {
         assert_eq!(Command::parse("show bgp brief"), Command::ShowBgpBrief);
+    }
+
+    #[test]
+    fn show_bgp_evpn() {
+        assert_eq!(Command::parse("show bgp evpn"), Command::ShowBgpEvpn);
     }
 
     #[test]

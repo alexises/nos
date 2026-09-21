@@ -2,7 +2,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use futures::{SinkExt, StreamExt};
-use nos_proto::{BgpEvent, BgpRequest, IpcCodec, PeerSummary, Role};
+use nos_proto::{BgpEvent, BgpRequest, EvpnRouteSummary, IpcCodec, PeerSummary, Role};
 use thiserror::Error;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -50,6 +50,18 @@ pub async fn get_summary(bgp_socket: &Path) -> Result<Vec<PeerSummary>, BgpClien
     writer.send(BgpRequest::GetSummary).await?;
     match reader.next().await {
         Some(Ok(BgpEvent::Summary(peers))) => Ok(peers),
+        Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
+        Some(Err(e)) => Err(BgpClientError::Io(e)),
+        None => Err(BgpClientError::ConnectionClosed),
+    }
+}
+
+/// Fetches every EVPN route the instance has received from any peer.
+pub async fn get_evpn_routes(bgp_socket: &Path) -> Result<Vec<EvpnRouteSummary>, BgpClientError> {
+    let (mut reader, mut writer) = connect(bgp_socket).await?;
+    writer.send(BgpRequest::GetEvpnRoutes).await?;
+    match reader.next().await {
+        Some(Ok(BgpEvent::EvpnRoutes(routes))) => Ok(routes),
         Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
         Some(Err(e)) => Err(BgpClientError::Io(e)),
         None => Err(BgpClientError::ConnectionClosed),

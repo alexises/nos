@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::testing::TestPki;
-use crate::{generate_csr, Bundle, Ca, Identity, PeerId};
+use crate::{generate_csr, Bundle, Ca, Identity, KeyAlg, Negotiated, PeerId};
 
 fn sock(name: &str) -> (tempdir::Guard, PathBuf) {
     let g = tempdir::Guard::new();
@@ -110,7 +110,7 @@ async fn a_peer_certified_by_another_ca_is_rejected() {
 
 #[tokio::test]
 async fn an_expired_certificate_is_rejected() {
-    let ca = Ca::new().unwrap();
+    let ca = Ca::new(KeyAlg::MlDsa65).unwrap();
     let now = OffsetDateTime::now_utc();
     let expired = ca
         .issue_between(
@@ -173,9 +173,9 @@ fn an_anonymous_identity_cannot_serve() {
 
 #[test]
 fn csr_signing_takes_the_key_but_never_the_identity() {
-    let ca = Ca::new().unwrap();
+    let ca = Ca::new(KeyAlg::MlDsa65).unwrap();
     // A hostile client asks for someone else's identity in its CSR.
-    let key = KeyPair::generate().unwrap();
+    let key = KeyPair::generate_for(&rcgen::PKCS_ML_DSA_65).unwrap();
     let mut p = CertificateParams::new(Vec::<String>::new()).unwrap();
     p.subject_alt_names
         .push(SanType::URI("nos://configd/".try_into().unwrap()));
@@ -209,7 +209,7 @@ fn csr_signing_takes_the_key_but_never_the_identity() {
 
 #[test]
 fn a_garbage_csr_is_an_error_not_a_panic() {
-    let ca = Ca::new().unwrap();
+    let ca = Ca::new(KeyAlg::MlDsa65).unwrap();
     assert!(ca
         .sign_csr(
             b"not a csr",
@@ -267,7 +267,7 @@ fn update_refuses_a_bundle_from_another_ca() {
 
 #[test]
 fn bundle_frames_round_trip_and_reject_garbage() {
-    let ca = Ca::new().unwrap();
+    let ca = Ca::new(KeyAlg::MlDsa65).unwrap();
     let b = ca
         .issue(&PeerId::new("bgpd", "r1"), Duration::from_secs(60))
         .unwrap();
@@ -288,7 +288,7 @@ fn bundle_frames_round_trip_and_reject_garbage() {
 
 #[test]
 fn debug_output_never_shows_key_material() {
-    let ca = Ca::new().unwrap();
+    let ca = Ca::new(KeyAlg::MlDsa65).unwrap();
     let b = ca
         .issue(&PeerId::new("bgpd", "r1"), Duration::from_secs(60))
         .unwrap();
@@ -320,4 +320,224 @@ async fn a_peer_that_hangs_up_without_close_notify_reads_as_clean_eof() {
         .await
         .expect("a hang-up is EOF, not an error");
     assert_eq!(got, b"hi");
+}
+
+// ---- post-quantum policy ------------------------------------------------
+
+#[tokio::test]
+async fn handshake_is_hybrid_ml_kem_with_ml_dsa_certificates() {
+    let pki = TestPki::new();
+    let (_g, path) = sock("pq.sock");
+    let listener = pki.identity("ribd", "rt1").listen(&path).unwrap();
+    let server = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await?.handshake().await?;
+        let mut buf = [0u8; 5];
+        s.read_exact(&mut buf).await?;
+        io::Result::Ok(s.negotiated())
+    });
+    let mut s = pki
+        .identity("bgpd", "r1")
+        .connect(&path, &PeerId::new("ribd", "rt1"))
+        .await
+        .unwrap();
+    let want = Negotiated {
+        kx: "X25519MLKEM768".into(),
+        peer_key: "ML-DSA-65",
+    };
+    assert_eq!(s.negotiated(), want);
+    s.write_all(b"hello").await.unwrap();
+    assert_eq!(server.await.unwrap().unwrap(), want);
+}
+
+/// A classical client — right CA, but only X25519 key exchange — must fail the
+/// handshake rather than negotiate down.
+#[tokio::test]
+async fn classical_key_exchange_is_refused() {
+    use rustls::crypto::aws_lc_rs;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+
+    let pki = TestPki::new();
+    let (_g, path) = sock("classical.sock");
+    let listener = pki.identity("ribd", "rt1").listen(&path).unwrap();
+    let server =
+        tokio::spawn(async move { listener.accept().await?.handshake().await.map(|_| ()) });
+
+    let mut provider = aws_lc_rs::default_provider();
+    provider.kx_groups = vec![aws_lc_rs::kx_group::X25519];
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(pki.ca().cert_der().to_vec()))
+        .unwrap();
+    let b = pki
+        .ca()
+        .issue(&PeerId::new("bgpd", "r1"), Duration::from_secs(60))
+        .unwrap();
+    let cfg = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(
+            vec![CertificateDer::from(b.cert)],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(b.key)),
+        )
+        .unwrap();
+    let sock = tokio::net::UnixStream::connect(&path).await.unwrap();
+    let res = tokio_rustls::TlsConnector::from(std::sync::Arc::new(cfg))
+        .connect(ServerName::try_from("nos.internal").unwrap(), sock)
+        .await;
+    assert!(res.is_err(), "a classical-only client must not connect");
+    assert!(server.await.unwrap().is_err());
+}
+
+/// A classical (ECDSA) certificate is refused by the IPC policy even when it
+/// chains to a CA the server trusts.
+#[tokio::test]
+async fn ecdsa_certificates_are_refused_on_ipc() {
+    let pki = TestPki::new();
+    let (_g, path) = sock("ecdsa.sock");
+    let listener = pki.identity("ribd", "rt1").listen(&path).unwrap();
+    let server =
+        tokio::spawn(async move { listener.accept().await?.handshake().await.map(|_| ()) });
+
+    let ecdsa_ca = Ca::new(KeyAlg::EcdsaP256).unwrap();
+    let b = ecdsa_ca
+        .issue(&PeerId::new("bgpd", "r1"), Duration::from_secs(60))
+        .unwrap();
+    // Trusts the server's ML-DSA CA, presents an ECDSA leaf from another CA.
+    let id = Identity::anonymous(pki.ca().cert_der()).unwrap();
+    id.set_certificate(b.cert, b.key).unwrap();
+    let _ = id.connect(&path, &PeerId::new("ribd", "rt1")).await;
+    assert!(server.await.unwrap().is_err());
+}
+
+/// A CA only certifies keys of its own algorithm.
+#[test]
+fn a_ca_refuses_a_key_of_another_algorithm() {
+    let ca = Ca::new(KeyAlg::MlDsa65).unwrap();
+    let (csr, _) = crate::generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+    assert!(ca
+        .sign_csr(&csr, &PeerId::new("user", "eve"), Duration::from_secs(60))
+        .is_err());
+}
+
+// ---- REST listener TLS --------------------------------------------------
+
+mod rest {
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use rustls::pki_types::ServerName;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_rustls::TlsConnector;
+
+    use crate::rest::{client_config, RestServer};
+    use crate::{generate_csr_for, Ca, KeyAlg, PeerId};
+
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    struct Fixture {
+        ca: Ca,
+        server: Arc<RestServer>,
+        listener: TcpListener,
+    }
+
+    async fn fixture() -> Fixture {
+        let ca = Ca::new(KeyAlg::EcdsaP256).unwrap();
+        let server = RestServer::new(ca.cert_der()).unwrap();
+        let (csr, key) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+        let cert = ca
+            .sign_server_csr(&csr, &[Ipv4Addr::LOCALHOST.into()], HOUR)
+            .unwrap();
+        server.set_certificate(&cert, &key).unwrap();
+        Fixture {
+            ca,
+            server: Arc::new(server),
+            listener: TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        }
+    }
+
+    fn user_cert(ca: &Ca, name: &str) -> (Vec<u8>, Vec<u8>) {
+        let (csr, key) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+        let cert = ca.sign_csr(&csr, &PeerId::new("user", name), HOUR).unwrap();
+        (cert, key)
+    }
+
+    /// Connects with `cfg`; returns what the client saw (`h2`, kx group) or
+    /// the error, plus what the server saw (user, h2) or its error.
+    async fn handshake(
+        f: &Fixture,
+        cfg: rustls::ClientConfig,
+    ) -> (
+        std::io::Result<(bool, String)>,
+        std::io::Result<(Option<String>, bool)>,
+    ) {
+        let addr = f.listener.local_addr().unwrap();
+        let server = f.server.clone();
+        let tcp = TcpStream::connect(addr).await;
+        let client = async move {
+            let tls = TlsConnector::from(Arc::new(cfg))
+                .connect(ServerName::IpAddress(Ipv4Addr::LOCALHOST.into()), tcp?)
+                .await?;
+            let (_, conn) = tls.get_ref();
+            let kx = format!("{:?}", conn.negotiated_key_exchange_group().unwrap().name());
+            std::io::Result::Ok((conn.alpn_protocol() == Some(b"h2"), kx))
+        };
+        let accept = async {
+            let (tcp, _) = f.listener.accept().await?;
+            let a = server.accept(tcp).await?;
+            std::io::Result::Ok((a.user, a.h2))
+        };
+        tokio::join!(client, accept)
+    }
+
+    #[tokio::test]
+    async fn a_user_certificate_names_the_user_over_post_quantum_h2() {
+        let f = fixture().await;
+        let (cert, key) = user_cert(&f.ca, "alice");
+        let cfg = client_config(f.ca.cert_pem().as_bytes(), Some((&cert, &key))).unwrap();
+        let (c, s) = handshake(&f, cfg).await;
+        assert_eq!(c.unwrap(), (true, "X25519MLKEM768".to_string()));
+        assert_eq!(s.unwrap(), (Some("alice".to_string()), true));
+    }
+
+    #[tokio::test]
+    async fn a_client_without_a_certificate_is_let_through_anonymous() {
+        let f = fixture().await;
+        let cfg = client_config(f.ca.cert_pem().as_bytes(), None).unwrap();
+        let (c, s) = handshake(&f, cfg).await;
+        c.unwrap();
+        assert_eq!(s.unwrap().0, None);
+    }
+
+    #[tokio::test]
+    async fn a_certificate_from_another_ca_is_refused() {
+        let f = fixture().await;
+        let other = Ca::new(KeyAlg::EcdsaP256).unwrap();
+        let (cert, key) = user_cert(&other, "mallory");
+        let cfg = client_config(f.ca.cert_pem().as_bytes(), Some((&cert, &key))).unwrap();
+        let (_, s) = handshake(&f, cfg).await;
+        assert!(s.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_classical_key_exchange_is_refused() {
+        use rustls::crypto::aws_lc_rs;
+        let f = fixture().await;
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(rustls::pki_types::CertificateDer::from(
+                f.ca.cert_der().to_vec(),
+            ))
+            .unwrap();
+        let mut provider = aws_lc_rs::default_provider();
+        provider.kx_groups = vec![aws_lc_rs::kx_group::X25519];
+        let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let (c, s) = handshake(&f, cfg).await;
+        assert!(c.is_err() && s.is_err());
+    }
 }

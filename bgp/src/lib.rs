@@ -2,6 +2,7 @@
 
 pub mod collision;
 pub mod config_client;
+pub mod evpn;
 pub mod fsm;
 pub mod interface_client;
 pub mod message;

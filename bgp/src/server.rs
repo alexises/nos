@@ -30,7 +30,9 @@ pub fn start(
 /// behalf); the redistribution feed is `nos-ribd`'s alone. No wildcard arm.
 fn allowed(role: Role, req: &BgpRequest) -> bool {
     match req {
-        BgpRequest::GetSummary | BgpRequest::SendRouteRefresh { .. } => {
+        BgpRequest::GetSummary
+        | BgpRequest::GetEvpnRoutes
+        | BgpRequest::SendRouteRefresh { .. } => {
             matches!(role, Role::User | Role::Restd)
         }
         BgpRequest::RedistributeRoutes(_) => role == Role::Ribd,
@@ -97,6 +99,12 @@ async fn handle_connection(
                     break;
                 }
             }
+            BgpRequest::GetEvpnRoutes => {
+                let event = BgpEvent::EvpnRoutes(sessions.evpn_route_summaries().await);
+                if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
             BgpRequest::RedistributeRoutes(update) => {
                 sessions.apply_redistribute_update(update).await;
             }
@@ -136,6 +144,11 @@ mod authz_tests {
                 allowed(role, &BgpRequest::GetSummary),
                 matches!(role, Role::User | Role::Restd),
                 "{role:?} summary"
+            );
+            assert_eq!(
+                allowed(role, &BgpRequest::GetEvpnRoutes),
+                matches!(role, Role::User | Role::Restd),
+                "{role:?} evpn routes"
             );
         }
     }

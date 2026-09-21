@@ -1,5 +1,6 @@
 //! IPC transport security: every daemon connection is mutually authenticated
-//! TLS, `nos-watchdogd` is the certificate authority, and humans log in.
+//! post-quantum TLS (ML-KEM key exchange, ML-DSA certificates), `nos-watchdogd`
+//! is the certificate authority, and humans log in.
 //!
 //! Every other phase is already an implicit test of the happy path — none of
 //! them could pass if a daemon couldn't authenticate to another — so these
@@ -52,6 +53,17 @@ pub async fn pki(w: &mut World) -> anyhow::Result<()> {
     // Whatever the instance is called, its certificate must carry that name.
     a.wait(&identity("nos-bgpd starting", "instance=.* ", "bgpd", ".*"))
         .await?;
+
+    // Every IPC handshake is hybrid ML-KEM key exchange with ML-DSA-65
+    // certificates — and none, on any daemon, negotiated anything else.
+    a.wait("ipc tls handshake ok side=server kx=X25519MLKEM768 peer_key=ML-DSA-65")
+        .await?;
+    let classical = a.count("ipc tls handshake ok side=[a-z]* kx=[^X]");
+    if classical != 0 {
+        bail!("{classical} IPC handshakes negotiated a key exchange other than X25519MLKEM768");
+    }
+    // The REST listener is certified separately, by the REST CA.
+    a.wait("issued a REST listener certificate").await?;
 
     log("logging in with the wrong password (must be refused)");
     let rejected = a.count(&format!("login rejected user={E2E_USER}"));

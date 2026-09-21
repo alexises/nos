@@ -155,6 +155,14 @@ async fn paginated(a: &Router, b: &Router) -> anyhow::Result<()> {
     }
 }
 
+/// Pagination needs router-a's Router-LSA *and* its redistributed AS-external
+/// LSA already in its LSDB when the DBD exchange starts: a single-LSA summary
+/// fits in one chunk at any size. REST provisioning is fast enough now that
+/// router-b can be up before the static route has become an LSA, so wait for it.
+async fn router_a_holds_two_lsas(a: &Router) -> anyhow::Result<()> {
+    a.wait("ospf lsa originated.*lsa_type=5").await
+}
+
 // --- phases ---
 
 pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
@@ -461,6 +469,7 @@ pub async fn ospf_dbd_pagination(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     a.provision_flags(&with_base(A, asbr(ospf(OSPF_ROUTER_ID))))
         .await?;
+    router_a_holds_two_lsas(a).await?;
     b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
         .await?;
     paginated(a, b).await?;
@@ -474,6 +483,7 @@ pub async fn ospf_mtu_pagination(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     a.provision_flags(&with_base(A, asbr(with_mtu(ospf(OSPF_ROUTER_ID)))))
         .await?;
+    router_a_holds_two_lsas(a).await?;
     b.provision_flags(&with_base(B, with_mtu(ospf(OSPF_ROUTER_ID_B))))
         .await?;
     a.wait(&format!("ospf profile resolved instance={OSPF_INSTANCE}"))

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// `WatchdogRequest`) rather than assumed from a hardcoded default, since the
 /// watchdog is the one process that actually spawns every other daemon and
 /// knows where it currently lives.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ServiceRef {
     /// `nos-configd`'s own IPC socket. The watchdog always knows this — it's
     /// passed to the watchdog itself via its own `--config-socket` arg.
@@ -150,6 +151,10 @@ impl Role {
     }
 }
 
+/// The one `WatchdogEvent::Denied` message for a failed login, identical for an
+/// unknown user and a wrong password so it reveals nothing about which exist.
+pub const INVALID_CREDENTIALS: &str = "invalid credentials";
+
 /// Messages sent from a client to `nos-watchdogd`'s broker socket.
 ///
 /// New variants must always be appended, never inserted — `postcard` encodes
@@ -172,6 +177,23 @@ pub enum WatchdogRequest {
     /// Trade a still-valid `user` certificate for a fresh one on the key in
     /// `csr_der`, with no password. Refused if the user no longer exists.
     RenewCert { csr_der: Vec<u8> },
+    /// `nos-restd` only: a TLS *server* certificate for its listener, valid
+    /// for `addresses`, on the key in `csr_der`. Answered with `RestServerCert`.
+    IssueRestServerCert {
+        addresses: Vec<IpAddr>,
+        csr_der: Vec<u8>,
+    },
+    /// `nos-restd` only, on behalf of a REST client: `Login`, but the
+    /// certificate is issued by the REST CA (`Issued`). The failed-login
+    /// throttle is `nos-restd`'s, not the broker connection's.
+    RestLogin {
+        user: String,
+        password: String,
+        csr_der: Vec<u8>,
+    },
+    /// `nos-restd` only: `RenewCert` for a REST client whose still-valid
+    /// certificate `nos-restd` has just verified. Refused if the user is gone.
+    RestRenew { user: String, csr_der: Vec<u8> },
 }
 
 // Manual `Debug`: a `Login` is one log line away from leaking a password.
@@ -187,9 +209,22 @@ impl fmt::Debug for WatchdogRequest {
                 .field("user", user)
                 .field("password", &"<hidden>")
                 .finish_non_exhaustive(),
+            WatchdogRequest::RestLogin { user, .. } => f
+                .debug_struct("RestLogin")
+                .field("user", user)
+                .field("password", &"<hidden>")
+                .finish_non_exhaustive(),
             WatchdogRequest::RenewCert { .. } => {
                 f.debug_struct("RenewCert").finish_non_exhaustive()
             }
+            WatchdogRequest::IssueRestServerCert { addresses, .. } => f
+                .debug_struct("IssueRestServerCert")
+                .field("addresses", addresses)
+                .finish_non_exhaustive(),
+            WatchdogRequest::RestRenew { user, .. } => f
+                .debug_struct("RestRenew")
+                .field("user", user)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -211,6 +246,14 @@ pub enum WatchdogEvent {
     /// Reply to `Login`/`RenewCert`: refused. Deliberately one opaque
     /// message for unknown user and wrong password alike.
     Denied(String),
+    /// Reply to `IssueRestServerCert`: the listener's certificate, the REST CA
+    /// that signed it (the trust anchor for client certificates), and how long
+    /// the certificate is valid.
+    RestServerCert {
+        cert_der: Vec<u8>,
+        ca_der: Vec<u8>,
+        lifetime_secs: u64,
+    },
 }
 
 #[cfg(test)]

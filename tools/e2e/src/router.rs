@@ -11,6 +11,7 @@ use reqwest::Method;
 use crate::consts::*;
 use crate::docker::{ContainerSpec, Dock};
 use crate::logs::Logs;
+use crate::rest::Rest;
 
 pub fn log(msg: impl AsRef<str>) {
     eprintln!("[nos-e2e] {}", msg.as_ref());
@@ -104,7 +105,7 @@ fn parse(flags: &[String]) -> anyhow::Result<Args> {
 pub struct Router {
     pub id: Id,
     pub logs: Logs,
-    http: reqwest::Client,
+    pub rest: Rest,
 }
 
 impl Router {
@@ -112,20 +113,31 @@ impl Router {
         self.id.name
     }
 
-    fn base(&self) -> String {
-        format!("http://{}:{REST_PORT}", self.id.ip)
+    /// Attaches to a router that is already running (its REST API is pinned).
+    /// The REST CA is read out of the container — the one trusted channel to
+    /// it — since a client verifies the API against exactly that.
+    pub async fn attach(dock: &Dock, id: Id) -> anyhow::Result<Self> {
+        let ca = Self::fetch_rest_ca(dock, id.name).await?;
+        let rest = Rest::new(id.ip, REST_PORT, ca);
+        Ok(Self {
+            id,
+            logs: Logs::follow(rest.clone()),
+            rest,
+        })
     }
 
-    /// Attaches to a router that is already running (its REST API is pinned).
-    pub fn attach(id: Id) -> Self {
-        Self {
-            id,
-            logs: Logs::follow(format!("http://{}:{REST_PORT}", id.ip)),
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("http client"),
+    /// `nos-watchdogd` publishes `rest-ca.crt` as it starts; a container that
+    /// was only just started may not have it yet.
+    async fn fetch_rest_ca(dock: &Dock, container: &str) -> anyhow::Result<Vec<u8>> {
+        for _ in 0..60 {
+            if let Ok((0, pem)) = dock.exec(container, &["cat", REST_CA_PATH]).await {
+                if pem.contains("BEGIN CERTIFICATE") {
+                    return Ok(pem.into_bytes());
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
+        bail!("{container}: {REST_CA_PATH} never appeared")
     }
 
     /// Starts `id`'s container from a *seeded* config — `seed_flags` plus the
@@ -168,7 +180,7 @@ impl Router {
         })
         .await?;
 
-        let router = Self::attach(id);
+        let router = Self::attach(dock, id).await?;
         router.wait_ready().await?;
         router.logs.settle().await;
         Ok(router)
@@ -182,33 +194,35 @@ impl Router {
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        bail!("{}: REST API never came up on {}", self.name(), self.base())
+        bail!(
+            "{}: REST API never came up on {}",
+            self.name(),
+            self.rest.base()
+        )
     }
 
-    /// One HTTP call as the harness's own user; `(status, body)`. Only a
-    /// transport failure is an `Err`.
+    /// One HTTPS call presenting the harness's own client certificate;
+    /// `(status, body)`. Only a transport failure is an `Err`.
     pub async fn rest(
         &self,
         method: Method,
         path: &str,
         body: Option<&str>,
     ) -> anyhow::Result<(u16, String)> {
-        self.rest_as(method, path, body, Some((E2E_USER, E2E_PASSWORD)))
-            .await
+        let client = self.rest.client().await?;
+        self.rest_with(&client, method, path, body).await
     }
 
-    /// Like `rest`, with explicit HTTP Basic credentials (or none).
-    pub async fn rest_as(
+    /// Like `rest`, over `client` — one presenting another certificate, or none
+    /// (`Rest::anonymous`).
+    pub async fn rest_with(
         &self,
+        client: &reqwest::Client,
         method: Method,
         path: &str,
         body: Option<&str>,
-        credentials: Option<(&str, &str)>,
     ) -> anyhow::Result<(u16, String)> {
-        let mut req = self.http.request(method, format!("{}{path}", self.base()));
-        if let Some((user, password)) = credentials {
-            req = req.basic_auth(user, Some(password));
-        }
+        let mut req = client.request(method, format!("{}{path}", self.rest.base()));
         if let Some(b) = body {
             req = req
                 .header("content-type", "application/json")

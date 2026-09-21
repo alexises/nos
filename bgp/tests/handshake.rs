@@ -430,3 +430,185 @@ async fn collision_leaves_exactly_one_side_running() {
     fake_active.abort();
     fake_passive.abort();
 }
+
+/// A peer that offers the EVPN capability (AFI 25 / SAFI 70), reports whether
+/// the real side's OPEN offered it too, then — once the real side has had a
+/// moment to reach `Established` — announces one Type-2 and one Type-3 route.
+async fn fake_evpn_peer(
+    stream: TcpStream,
+    asn: u32,
+    router_id: Ipv4Addr,
+    saw_evpn_capability: tokio::sync::oneshot::Sender<bool>,
+) {
+    use nos_bgp::evpn::EvpnNlri;
+
+    let (r, w) = stream.into_split();
+    let mut reader = FramedRead::new(r, BgpCodec::default());
+    let mut writer = FramedWrite::new(w, BgpCodec::default());
+
+    let mut open = message::build_open(asn, router_id, 90);
+    for (afi, safi) in [(1, 1), (25, 70)] {
+        open.capabilities
+            .push(message::Capability::MultiProtocol { afi, safi });
+    }
+    let _ = writer.send(BgpMessage::Open(open)).await;
+
+    let mut saw_evpn_capability = Some(saw_evpn_capability);
+    loop {
+        match reader.next().await {
+            Some(Ok(BgpMessage::Open(theirs))) => {
+                let offered = theirs
+                    .capabilities
+                    .iter()
+                    .any(|c| matches!(c, message::Capability::MultiProtocol { afi: 25, safi: 70 }));
+                let _ = saw_evpn_capability.take().unwrap().send(offered);
+                let _ = writer.send(BgpMessage::Keepalive).await;
+                break;
+            }
+            Some(Ok(_)) => {}
+            _ => return,
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let rd = [0, 0, 0xfd, 0xe8, 0, 0, 0, 1];
+    let update = message::UpdateMessage {
+        withdrawn_routes: vec![],
+        withdrawn_path_ids: vec![],
+        nlri: vec![],
+        nlri_path_ids: vec![],
+        attributes: Some(message::PathAttributes {
+            origin: message::Origin::Igp,
+            as_path: vec![asn],
+            next_hop: Ipv4Addr::UNSPECIFIED,
+            local_pref: None,
+            med: None,
+            originator_id: None,
+            cluster_list: vec![],
+            communities: vec![],
+            extended_communities: vec![0x0002_fde8_0000_2710],
+            large_communities: vec![],
+        }),
+        mp_reach: vec![message::MpReachNlri {
+            afi: 25,
+            safi: 70,
+            next_hop: "192.0.2.2".parse().unwrap(),
+            nlri: vec![],
+            nlri_path_ids: vec![],
+            evpn: vec![
+                EvpnNlri::MacIp {
+                    rd,
+                    esi: [0; 10],
+                    tag: 0,
+                    mac: [0xaa, 0, 0, 0, 0, 1],
+                    ip: None,
+                    labels: vec![10_000],
+                },
+                EvpnNlri::InclusiveMulticast {
+                    rd,
+                    tag: 0,
+                    origin: "192.0.2.2".parse().unwrap(),
+                },
+            ],
+        }],
+        mp_unreach: vec![],
+    };
+    let _ = writer.send(BgpMessage::Update(update)).await;
+    while reader.next().await.is_some() {}
+}
+
+#[tokio::test]
+async fn evpn_routes_from_a_real_session_are_stored_and_cleared_on_close() {
+    let (a_stream, b_stream) = loopback_pair().await;
+    let (a_asn, b_asn) = (65001, 65002);
+    let a_router_id = Ipv4Addr::new(1, 1, 1, 1);
+    let peer_addr: std::net::IpAddr = "10.0.0.2".parse().unwrap();
+    let families = vec![
+        nos_proto::AddressFamily::Ipv4Unicast,
+        nos_proto::AddressFamily::L2vpnEvpn,
+    ];
+
+    let slot_a = PeerSlot::new(ResolvedPeer {
+        remote_address: peer_addr,
+        source_address: None,
+        remote_as: b_asn,
+        peer_group: "pg1".to_string(),
+        hold_time: 90,
+        keepalive_interval: None,
+        connect_retry_time: Duration::from_secs(120),
+        auth: None,
+        next_hop: None,
+        address_families: families.clone(),
+        route_reflector_client: false,
+        route_server_client: false,
+        import_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+        export_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+    });
+    let rib = new_bgp_rib();
+    rib.lock()
+        .await
+        .set_local_identity(a_asn, a_router_id, a_router_id);
+
+    let a = tokio::spawn(fsm::run(
+        a_stream,
+        Role::Active,
+        LocalIdentity {
+            asn: a_asn,
+            router_id: a_router_id,
+            cluster_id: a_router_id,
+        },
+        PeerContext {
+            remote_address: peer_addr,
+            expected_remote_as: b_asn,
+            local_hold_time: 90,
+            keepalive_override: None,
+            next_hop: None,
+            address_families: families,
+            is_rr_client: false,
+            is_rs_client: false,
+            import_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+            export_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+        },
+        slot_a,
+        rib.clone(),
+    ));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let fake_b = tokio::spawn(fake_evpn_peer(
+        b_stream,
+        b_asn,
+        Ipv4Addr::new(2, 2, 2, 2),
+        tx,
+    ));
+
+    assert!(
+        rx.await.unwrap(),
+        "our OPEN must offer MP capability 25/70 when the peer-group has l2vpn-evpn"
+    );
+
+    let mut learned = 0;
+    for _ in 0..100 {
+        learned = rib.lock().await.evpn_routes().len();
+        if learned == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(learned, 2, "both EVPN routes should reach the RIB");
+    let guard = rib.lock().await;
+    let routes = guard.evpn_routes();
+    assert_eq!(routes[0].0, peer_addr);
+    assert_eq!(
+        routes[0].2.next_hop,
+        "192.0.2.2".parse::<std::net::IpAddr>().unwrap()
+    );
+    assert_eq!(
+        routes[0].2.extended_communities,
+        vec![0x0002_fde8_0000_2710]
+    );
+    drop(guard);
+
+    // Peer goes away: the session ends and its EVPN routes go with it.
+    fake_b.abort();
+    let _ = tokio::time::timeout(Duration::from_secs(2), a).await;
+    assert!(rib.lock().await.evpn_routes().is_empty());
+}

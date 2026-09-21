@@ -4,20 +4,21 @@
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{header, Method, Request as HttpRequest, StatusCode};
 use axum::Router;
-use base64::Engine as _;
 use futures::{SinkExt, StreamExt};
 use nos_config::{Config, ConfigStore, ListenAddr};
 use nos_pki::testing::shared;
 use nos_proto::{
     BgpEvent, BgpInstance, BgpRequest, IpcCodec, LogEntry, LogEvent, LogLevel, LogRequest,
     PrefixRoutes, RibEvent, RibRequest, RouteEntry, RouteSourceKind, ServiceRef, User,
-    WatchdogEvent, WatchdogRequest,
+    WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS,
 };
+use nos_rest::auth::PeerUser;
 use nos_rest::{api, ipc::Daemons};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -25,45 +26,60 @@ use serde_json::{json, Value};
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tower::ServiceExt;
 
-/// Serves `handler` on `path`, one reply per request, forever.
+/// Serves `handler` on `path`, one reply per request, forever. Returns how
+/// many connections it has accepted.
 fn serve<Req, Ev>(
     path: &Path,
-    (role, name): (&str, &str),
+    who: (&str, &str),
     handler: impl Fn(Req) -> Ev + Send + Sync + 'static,
-) where
+) -> Arc<AtomicUsize>
+where
+    Req: DeserializeOwned + Send + 'static,
+    Ev: Serialize + Send + 'static,
+{
+    serve_with(path, who, false, handler)
+}
+
+/// `serve`, optionally hanging up after every reply — a daemon that restarted
+/// between two requests, as far as a pooled connection can tell.
+fn serve_with<Req, Ev>(
+    path: &Path,
+    (role, name): (&str, &str),
+    hang_up_after_reply: bool,
+    handler: impl Fn(Req) -> Ev + Send + Sync + 'static,
+) -> Arc<AtomicUsize>
+where
     Req: DeserializeOwned + Send + 'static,
     Ev: Serialize + Send + 'static,
 {
     let listener = shared().identity(role, name).listen(path).unwrap();
     let handler = Arc::new(handler);
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let count = accepted.clone();
     tokio::spawn(async move {
         loop {
             let (stream, _) = listener.accept().await.unwrap().handshake().await.unwrap();
+            count.fetch_add(1, Ordering::SeqCst);
             let handler = handler.clone();
             tokio::spawn(async move {
                 let (r, w) = tokio::io::split(stream);
                 let mut reader = FramedRead::new(r, IpcCodec::<Req>::default());
                 let mut writer = FramedWrite::new(w, IpcCodec::<Ev>::default());
                 while let Some(Ok(req)) = reader.next().await {
-                    if writer.send(handler(req)).await.is_err() {
+                    if writer.send(handler(req)).await.is_err() || hang_up_after_reply {
                         break;
                     }
                 }
             });
         }
     });
+    accepted
 }
 
 /// The one user every fixture's config starts with (clear text here —
 /// `ConfigStore::new` hashes it, like a seeded config file).
 const USER: &str = "tester";
 const PASSWORD: &str = "secret";
-
-/// `Authorization: Basic` value for `user:password`.
-fn basic(user: &str, password: &str) -> String {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
-    format!("Basic {encoded}")
-}
 
 struct Fixture {
     app: Router,
@@ -94,42 +110,54 @@ async fn fixture(services: Vec<(ServiceRef, PathBuf)>) -> Fixture {
     serve(
         &watchdog_socket,
         ("watchdog", ""),
-        move |req: WatchdogRequest| {
-            let WatchdogRequest::ResolveEndpoint { service } = req else {
-                panic!("the fake broker only resolves endpoints");
-            };
-            services
+        move |req: WatchdogRequest| match req {
+            WatchdogRequest::ResolveEndpoint { service } => services
                 .iter()
                 .find(|(s, _)| *s == service)
                 .map_or(WatchdogEvent::NotAvailable, |(_, p)| {
                     WatchdogEvent::Endpoint(p.clone())
-                })
+                }),
+            // A stand-in CA: one fixed certificate for the right password.
+            WatchdogRequest::RestLogin { password, .. } if password == PASSWORD => {
+                WatchdogEvent::Issued {
+                    cert_der: vec![1, 2, 3],
+                    lifetime_secs: 60,
+                }
+            }
+            WatchdogRequest::RestLogin { .. } => {
+                WatchdogEvent::Denied(INVALID_CREDENTIALS.to_string())
+            }
+            WatchdogRequest::RestRenew { user, .. } if user == USER => WatchdogEvent::Issued {
+                cert_der: vec![4, 5, 6],
+                lifetime_secs: 60,
+            },
+            WatchdogRequest::RestRenew { .. } => WatchdogEvent::Denied("no such user".to_string()),
+            other => panic!("the fake broker does not handle {other:?}"),
         },
     );
-    let app = api::router(Daemons {
-        watchdog_socket: Arc::new(watchdog_socket),
-        config_socket: Arc::new(config_socket),
-    });
+    let app = api::router(Daemons::new(watchdog_socket, config_socket));
     Fixture { app, _dir: dir }
 }
 
 async fn send(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
-    send_as(app, method, uri, body, Some(&basic(USER, PASSWORD))).await
+    send_as(app, method, uri, body, Some(USER)).await
 }
 
-/// Like `send`, with an explicit `Authorization` header (or none).
+/// Like `send`, as the user a verified client certificate would name (`None`
+/// = the connection presented no certificate). The listener sets that per
+/// connection; TLS itself is covered by `over_tls` below.
 async fn send_as(
     app: &Router,
     method: Method,
     uri: &str,
     body: Option<Value>,
-    authorization: Option<&str>,
+    user: Option<&str>,
 ) -> (StatusCode, Value) {
-    let mut builder = HttpRequest::builder().method(method).uri(uri);
-    if let Some(a) = authorization {
-        builder = builder.header(header::AUTHORIZATION, a);
-    }
-    let req = builder
+    let req = HttpRequest::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .extension(PeerUser(user.map(str::to_string)))
         .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -402,6 +430,9 @@ async fn router_wide_show_reports_each_instance_that_is_not_running() {
     let (s, v) = send(app, Method::GET, "/v1/bgp/summary", None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v, json!([{ "instance": "r1", "error": "not running" }]));
+    let (s, v) = send(app, Method::GET, "/v1/bgp/evpn", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v, json!([{ "instance": "r1", "error": "not running" }]));
     assert_eq!(
         send(app, Method::GET, "/v1/ospf/neighbors", None).await.1,
         json!([])
@@ -481,7 +512,7 @@ async fn follow_logs_streams_backlog_then_live_lines_as_sse() {
 
     let req = HttpRequest::builder()
         .uri("/v1/logs/follow?source=nos-x")
-        .header(header::AUTHORIZATION, basic(USER, PASSWORD))
+        .extension(PeerUser(Some(USER.to_string())))
         .body(Body::empty())
         .unwrap();
     let resp = f.app.clone().oneshot(req).await.unwrap();
@@ -503,7 +534,7 @@ async fn follow_logs_streams_backlog_then_live_lines_as_sse() {
     // `limit` trims the backlog only: the newest backlog entry and the live line remain.
     let req = HttpRequest::builder()
         .uri("/v1/logs/follow?limit=1")
-        .header(header::AUTHORIZATION, basic(USER, PASSWORD))
+        .extension(PeerUser(Some(USER.to_string())))
         .body(Body::empty())
         .unwrap();
     let resp = f.app.clone().oneshot(req).await.unwrap();
@@ -600,7 +631,7 @@ async fn clear_bgp_soft_in_maps_the_daemons_reply_to_a_status() {
 }
 
 #[tokio::test]
-async fn every_route_requires_valid_basic_credentials() {
+async fn every_route_requires_a_certificate_of_an_existing_user() {
     let f = fixture(vec![]).await;
     let app = &f.app;
 
@@ -609,49 +640,57 @@ async fn every_route_requires_valid_basic_credentials() {
         "/openapi.json",
         "/swagger-ui/",
         "/v1/logs/follow",
+        "/v1/transactions/t1",
     ] {
         let (s, _) = send_as(app, Method::GET, uri, None, None).await;
-        assert_eq!(s, StatusCode::UNAUTHORIZED, "{uri} without credentials");
-        let (s, _) = send_as(app, Method::GET, uri, None, Some(&basic(USER, "wrong"))).await;
-        assert_eq!(s, StatusCode::UNAUTHORIZED, "{uri} with a wrong password");
-        let (s, _) = send_as(
-            app,
-            Method::GET,
-            uri,
-            None,
-            Some(&basic("nobody", PASSWORD)),
-        )
-        .await;
-        assert_eq!(s, StatusCode::UNAUTHORIZED, "{uri} with an unknown user");
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{uri} without a certificate");
+        let (s, _) = send_as(app, Method::GET, uri, None, Some("nobody")).await;
+        assert_eq!(
+            s,
+            StatusCode::UNAUTHORIZED,
+            "{uri} for a user that does not exist"
+        );
     }
-
-    let req = HttpRequest::builder()
-        .uri("/v1/config")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
+    let (s, _) = send_as(
+        app,
+        Method::POST,
+        "/v1/renew",
+        Some(json!({"csr": ""})),
+        None,
+    )
+    .await;
     assert_eq!(
-        resp.headers()[header::WWW_AUTHENTICATE],
-        r#"Basic realm="nos""#
+        s,
+        StatusCode::UNAUTHORIZED,
+        "renewal needs the certificate to renew"
     );
 
     for uri in ["/v1/config", "/openapi.json"] {
         let (s, _) = send(app, Method::GET, uri, None).await;
-        assert_eq!(s, StatusCode::OK, "{uri} with valid credentials");
+        assert_eq!(s, StatusCode::OK, "{uri} with a valid certificate");
     }
-    // The OpenAPI document advertises the scheme.
+    // The OpenAPI document advertises the scheme, and login is the one exception.
     let (_, doc) = send(app, Method::GET, "/openapi.json", None).await;
     assert_eq!(
-        doc["components"]["securitySchemes"]["basic"]["scheme"],
-        "basic"
+        doc["components"]["securitySchemes"]["mtls"]["type"],
+        "mutualTLS"
     );
-    assert_eq!(doc["security"], json!([{"basic": []}]));
+    assert_eq!(doc["security"], json!([{"mtls": []}]));
+    assert_eq!(
+        doc["paths"]["/v1/login"]["post"]["security"],
+        json!([{}]),
+        "login must be documented as needing no certificate"
+    );
 }
 
 #[tokio::test]
-async fn a_password_set_over_the_config_tree_is_hashed_and_takes_effect_on_commit() {
+async fn a_user_deleted_from_the_config_is_locked_out_on_the_next_request() {
     let f = fixture(vec![]).await;
     let app = &f.app;
+
+    // A certificate for a user who is not in the running config yet is refused…
+    let (s, _) = send_as(app, Method::GET, "/v1/config", None, Some("bob")).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 
     send(app, Method::POST, "/v1/transactions/t1", None).await;
     let (s, _) = send(
@@ -667,35 +706,324 @@ async fn a_password_set_over_the_config_tree_is_hashed_and_takes_effect_on_commi
         snap["password"].as_str().unwrap().starts_with("$argon2id$"),
         "clear text must never be stored: {snap}"
     );
-    // Not usable until committed.
-    let (s, _) = send_as(
-        app,
-        Method::GET,
-        "/v1/config",
-        None,
-        Some(&basic("bob", "bobpw")),
-    )
-    .await;
+    // …still refused while the user only exists in an open transaction…
+    let (s, _) = send_as(app, Method::GET, "/v1/config", None, Some("bob")).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 
+    // …accepted once committed…
     let (s, _) = send(app, Method::POST, "/v1/transactions/t1/commit", None).await;
     assert_eq!(s, StatusCode::OK);
-    let (s, _) = send_as(
+    let (s, _) = send_as(app, Method::GET, "/v1/config", None, Some("bob")).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // …and locked out again as soon as they are deleted.
+    send(app, Method::POST, "/v1/transactions/t2?base=current", None).await;
+    let (s, _) = send(app, Method::DELETE, "/v1/transactions/t2/user/bob", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = send(app, Method::POST, "/v1/transactions/t2/commit", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send_as(app, Method::GET, "/v1/config", None, Some("bob")).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn login_needs_no_certificate_and_a_failed_one_costs_a_second() {
+    let f = fixture(vec![]).await;
+    let app = &f.app;
+    let login = |password: &str, csr: &str| json!({"user": USER, "password": password, "csr": csr});
+
+    let (s, body) = send_as(
         app,
-        Method::GET,
-        "/v1/config",
+        Method::POST,
+        "/v1/login",
+        Some(login(PASSWORD, "AQID")),
         None,
-        Some(&basic("bob", "bobpw")),
     )
     .await;
-    assert_eq!(s, StatusCode::OK);
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["certificate"], "AQID"); // base64 of the stand-in CA's [1, 2, 3]
+    assert_eq!(body["lifetime_secs"], 60);
+
+    let started = std::time::Instant::now();
     let (s, _) = send_as(
         app,
-        Method::GET,
-        "/v1/config",
+        Method::POST,
+        "/v1/login",
+        Some(login("nope", "AQID")),
         None,
-        Some(&basic("bob", "nope")),
     )
     .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+
+    let (s, _) = send_as(
+        app,
+        Method::POST,
+        "/v1/login",
+        Some(login(PASSWORD, "!!!")),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a csr that is not base64");
+}
+
+/// However many streams or connections the guesses arrive on, one account
+/// takes one guess per second.
+#[tokio::test]
+async fn guesses_at_one_account_are_serialised() {
+    let f = fixture(vec![]).await;
+    let started = std::time::Instant::now();
+    let guess = |i: u8| {
+        let app = f.app.clone();
+        async move {
+            let body = json!({"user": USER, "password": format!("wrong{i}"), "csr": "AQID"});
+            send_as(&app, Method::POST, "/v1/login", Some(body), None)
+                .await
+                .0
+        }
+    };
+    let statuses = futures::future::join_all((0..3).map(guess)).await;
+    assert!(statuses.iter().all(|s| *s == StatusCode::UNAUTHORIZED));
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(3),
+        "three guesses at one account must not run in parallel: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn renewal_is_for_the_user_the_certificate_names() {
+    let f = fixture(vec![]).await;
+    let app = &f.app;
+    let (s, body) = send_as(
+        app,
+        Method::POST,
+        "/v1/renew",
+        Some(json!({"csr": "AQID"})),
+        Some(USER),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["certificate"], "BAUG");
+}
+
+// By value: it is the `serve` handler shape.
+#[allow(clippy::needless_pass_by_value)]
+fn rib_with_one_route(req: RibRequest) -> RibEvent {
+    match req {
+        RibRequest::GetRoutes => RibEvent::Routes(vec![PrefixRoutes {
+            prefix: "10.0.0.0/8".parse().unwrap(),
+            candidates: vec![],
+        }]),
+        _ => RibEvent::Error("unsupported".into()),
+    }
+}
+
+/// Every IPC connection is a mutual-TLS handshake: repeated requests must ride
+/// one connection per daemon, not open a fresh one each time.
+#[tokio::test]
+async fn requests_reuse_one_ipc_connection_per_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let rib = dir.path().join("rib.sock");
+    let ribd = serve(&rib, ("ribd", "rt1"), rib_with_one_route);
+    let f = fixture(vec![(ServiceRef::RibTable("rt1".into()), rib)]).await;
+
+    for _ in 0..10 {
+        let (s, _) = send(&f.app, Method::GET, "/v1/routes/rt1", None).await;
+        assert_eq!(s, StatusCode::OK);
+    }
+    assert_eq!(
+        ribd.load(Ordering::SeqCst),
+        1,
+        "ten requests, one handshake to nos-ribd"
+    );
+}
+
+/// A parked connection whose daemon has gone away is retried on a fresh one,
+/// not surfaced as an error.
+#[tokio::test]
+async fn a_stale_pooled_connection_is_retried_on_a_fresh_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let rib = dir.path().join("rib.sock");
+    let ribd = serve_with(&rib, ("ribd", "rt1"), true, rib_with_one_route);
+    let f = fixture(vec![(ServiceRef::RibTable("rt1".into()), rib)]).await;
+
+    for _ in 0..3 {
+        let (s, _) = send(&f.app, Method::GET, "/v1/routes/rt1", None).await;
+        assert_eq!(s, StatusCode::OK);
+    }
+    assert_eq!(ribd.load(Ordering::SeqCst), 3);
+}
+
+mod over_tls {
+    //! The real listener loop: TLS 1.3 with post-quantum key exchange, HTTP/2,
+    //! and the user taken from the client's certificate.
+
+    use std::net::Ipv4Addr;
+    use std::time::Duration;
+
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use nos_pki::rest::{client_config, RestServer};
+    use nos_pki::{generate_csr_for, Ca, KeyAlg, PeerId};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::watch;
+    use tokio_rustls::rustls::pki_types::ServerName;
+    use tokio_rustls::TlsConnector;
+
+    use super::*;
+
+    type Sender = hyper::client::conn::http2::SendRequest<Body>;
+
+    struct Tls {
+        ca: Ca,
+        addr: std::net::SocketAddr,
+        _stop: watch::Sender<bool>,
+        _fixture: Fixture,
+    }
+
+    async fn start() -> Tls {
+        let f = fixture(vec![]).await;
+        let ca = Ca::new(KeyAlg::EcdsaP256).unwrap();
+        let server = Arc::new(RestServer::new(ca.cert_der()).unwrap());
+        let (csr, key) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+        let cert = ca
+            .sign_server_csr(
+                &csr,
+                &[Ipv4Addr::LOCALHOST.into()],
+                Duration::from_secs(3600),
+            )
+            .unwrap();
+        server.set_certificate(&cert, &key).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stop_rx) = watch::channel(false);
+        tokio::spawn(nos_rest::listen::serve(
+            listener,
+            f.app.clone(),
+            server,
+            stop_rx,
+        ));
+        Tls {
+            ca,
+            addr,
+            _stop: stop,
+            _fixture: f,
+        }
+    }
+
+    fn user_cert(ca: &Ca, name: &str) -> (Vec<u8>, Vec<u8>) {
+        let (csr, key) = generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+        let cert = ca
+            .sign_csr(&csr, &PeerId::new("user", name), Duration::from_secs(3600))
+            .unwrap();
+        (cert, key)
+    }
+
+    impl Tls {
+        /// An HTTP/2 connection presenting `identity`; asserts ALPN chose h2.
+        async fn connect(&self, identity: Option<(&[u8], &[u8])>) -> Sender {
+            let cfg = client_config(self.ca.cert_pem().as_bytes(), identity).unwrap();
+            let tcp = TcpStream::connect(self.addr).await.unwrap();
+            let tls = TlsConnector::from(Arc::new(cfg))
+                .connect(ServerName::IpAddress(Ipv4Addr::LOCALHOST.into()), tcp)
+                .await
+                .unwrap();
+            assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
+            let (sender, conn) =
+                hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tls))
+                    .await
+                    .unwrap();
+            tokio::spawn(conn);
+            sender
+        }
+    }
+
+    async fn get(mut sender: Sender, path: &str) -> StatusCode {
+        let req = HttpRequest::builder()
+            .uri(format!("https://127.0.0.1{path}"))
+            .body(Body::empty())
+            .unwrap();
+        sender.send_request(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn many_requests_multiplex_over_one_connection_and_the_certificate_names_the_user() {
+        let t = start().await;
+        let (cert, key) = user_cert(&t.ca, USER);
+        let sender = t.connect(Some((&cert, &key))).await;
+        let statuses =
+            futures::future::join_all((0..20).map(|_| get(sender.clone(), "/v1/config"))).await;
+        assert!(
+            statuses.iter().all(|s| *s == StatusCode::OK),
+            "{statuses:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_certificate_for_an_unknown_user_or_none_at_all_is_401() {
+        let t = start().await;
+        let (cert, key) = user_cert(&t.ca, "nobody");
+        assert_eq!(
+            get(t.connect(Some((&cert, &key))).await, "/v1/config").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get(t.connect(None).await, "/v1/config").await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn login_works_without_a_certificate_over_tls() {
+        let t = start().await;
+        let mut sender = t.connect(None).await;
+        let req = HttpRequest::builder()
+            .method(Method::POST)
+            .uri("https://127.0.0.1/v1/login")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"user": USER, "password": PASSWORD, "csr": "AQID"}).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            sender.send_request(req).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn a_certificate_from_another_ca_never_gets_a_request_through() {
+        let t = start().await;
+        let other = Ca::new(KeyAlg::EcdsaP256).unwrap();
+        let (cert, key) = user_cert(&other, USER);
+        let cfg = client_config(t.ca.cert_pem().as_bytes(), Some((&cert, &key))).unwrap();
+        let tcp = TcpStream::connect(t.addr).await.unwrap();
+        let tls = TlsConnector::from(Arc::new(cfg))
+            .connect(ServerName::IpAddress(Ipv4Addr::LOCALHOST.into()), tcp)
+            .await;
+        // TLS 1.3 completes the client side before the server rules on its
+        // certificate, so the rejection shows up on first use.
+        let refused = match tls {
+            Err(_) => true,
+            Ok(tls) => {
+                let handshake = hyper::client::conn::http2::handshake::<_, _, Body>(
+                    TokioExecutor::new(),
+                    TokioIo::new(tls),
+                )
+                .await;
+                match handshake {
+                    Err(_) => true,
+                    Ok((mut sender, conn)) => {
+                        tokio::spawn(conn);
+                        let req = HttpRequest::builder()
+                            .uri("https://127.0.0.1/v1/config")
+                            .body(Body::empty())
+                            .unwrap();
+                        sender.send_request(req).await.is_err()
+                    }
+                }
+            }
+        };
+        assert!(refused, "a certificate from another CA must not be served");
+    }
 }

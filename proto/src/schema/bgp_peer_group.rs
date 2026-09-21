@@ -14,6 +14,9 @@ use super::Config;
 pub enum AddressFamily {
     Ipv4Unicast,
     Ipv6Unicast,
+    /// RFC 7432 EVPN (AFI 25 / SAFI 70). Appended last: postcard indexes
+    /// enum variants by position.
+    L2vpnEvpn,
 }
 
 impl AddressFamily {
@@ -21,6 +24,7 @@ impl AddressFamily {
         match self {
             AddressFamily::Ipv4Unicast => "ipv4",
             AddressFamily::Ipv6Unicast => "ipv6",
+            AddressFamily::L2vpnEvpn => "l2vpn-evpn",
         }
     }
 }

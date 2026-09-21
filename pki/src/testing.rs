@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use crate::{Ca, Identity, PeerId};
+use crate::{Ca, Identity, KeyAlg, PeerId};
 
 /// One CA for the whole test process, so a fake server and the code under
 /// test (dialing as the fallback identity `global()` provides) always agree.
@@ -25,7 +25,7 @@ impl Default for TestPki {
 impl TestPki {
     pub fn new() -> Self {
         Self {
-            ca: Ca::new().expect("test CA"),
+            ca: Ca::new(KeyAlg::MlDsa65).expect("test CA"),
         }
     }
 

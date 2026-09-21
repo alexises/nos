@@ -48,7 +48,14 @@ that doc (worth fixing `bgp/CLAUDE.md` too, separately).
   COMMUNITIES, LARGE COMMUNITIES, AS4_PATH/AS4_AGGREGATOR (moot — always
   native 4-byte).
 - **Capabilities**: Graceful Restart, ORF, dynamic capability negotiation.
-- **AFI/SAFI**: VPNv4/VPNv6/MPLS L3VPN, multicast, FlowSpec, EVPN.
+- **AFI/SAFI**: VPNv4/VPNv6/MPLS L3VPN, multicast, FlowSpec.
+- **EVPN** (AFI 25 / SAFI 70): only the *receive* side exists (see
+  `bgp/CLAUDE.md`'s "EVPN"). Still missing: originating Type-2/3 routes
+  (MAC learning from the kernel FDB), a Loc-RIB with best-path selection and
+  re-advertisement / route reflection of EVPN routes, Route-Target import
+  filtering, import/export policy (RPL's `Input` is prefix-shaped), a
+  MAC-VRF/VNI config model, and the kernel side (VXLAN device + bridge FDB
+  programming in `nos-interfaced`), ROUTE_REFRESH for AFI 25.
 - **Policy**: AS confederations, route dampening, and **no policy engine at
   all** — no route-maps/prefix-lists/AS-path or community filters, no
   import/export filtering.

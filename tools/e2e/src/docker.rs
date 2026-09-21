@@ -199,6 +199,56 @@ impl Dock {
         Ok(())
     }
 
+    /// Starts a plain (non-nos) container: `image` on `network` at `ip`, with
+    /// one file `(dir, name, contents)` uploaded before it starts. No volumes,
+    /// no capabilities — for a third-party BGP speaker acting as a test peer.
+    pub async fn start_plain(
+        &self,
+        name: &str,
+        image: &str,
+        network: &str,
+        ip: &str,
+        cmd: &[&str],
+        seed: (&str, &str, &[u8]),
+    ) -> anyhow::Result<()> {
+        self.container_remove(name).await;
+        let endpoint = EndpointSettings {
+            ipam_config: Some(EndpointIpamConfig {
+                ipv4_address: Some(ip.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let body = ContainerCreateBody {
+            image: Some(image.to_string()),
+            cmd: Some(cmd.iter().map(|s| (*s).to_string()).collect()),
+            host_config: Some(HostConfig {
+                network_mode: Some(network.to_string()),
+                ..Default::default()
+            }),
+            networking_config: Some(NetworkingConfig {
+                endpoints_config: Some(HashMap::from([(network.to_string(), endpoint)])),
+            }),
+            ..Default::default()
+        };
+        let opts = CreateContainerOptionsBuilder::default().name(name).build();
+        self.docker
+            .create_container(Some(opts), body)
+            .await
+            .with_context(|| format!("creating container {name}"))?;
+        let (dir, file, contents) = seed;
+        let opts = UploadToContainerOptionsBuilder::default().path(dir).build();
+        self.docker
+            .upload_to_container(name, Some(opts), body_full(tar_one(file, contents)?.into()))
+            .await
+            .with_context(|| format!("seeding {dir}/{file} into {name}"))?;
+        self.docker
+            .start_container(name, None)
+            .await
+            .with_context(|| format!("starting container {name}"))?;
+        Ok(())
+    }
+
     /// Runs `cmd` inside a running container; `(exit code, stdout+stderr)`.
     pub async fn exec(&self, container: &str, cmd: &[&str]) -> anyhow::Result<(i64, String)> {
         use bollard::exec::StartExecResults;
@@ -263,12 +313,20 @@ impl Dock {
 
     /// Builds a tiny debian+iproute2 image once, from an in-memory tar.
     pub async fn ensure_helper_image(&self, tag: &str) -> anyhow::Result<()> {
+        self.ensure_image(
+            tag,
+            "FROM debian:bookworm-slim\n\
+            RUN apt-get update && apt-get install -y --no-install-recommends iproute2 \\\n \
+            && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await
+    }
+
+    /// Builds `tag` from an inline Dockerfile, once.
+    pub async fn ensure_image(&self, tag: &str, dockerfile: &str) -> anyhow::Result<()> {
         if self.docker.inspect_image(tag).await.is_ok() {
             return Ok(());
         }
-        let dockerfile = "FROM debian:bookworm-slim\n\
-            RUN apt-get update && apt-get install -y --no-install-recommends iproute2 \\\n \
-            && rm -rf /var/lib/apt/lists/*\n";
         let opts = BuildImageOptionsBuilder::default()
             .dockerfile("Dockerfile")
             .t(tag)
@@ -282,9 +340,9 @@ impl Dock {
             )),
         );
         while let Some(step) = stream.next().await {
-            let step = step.context("building the netns helper image")?;
+            let step = step.with_context(|| format!("building image {tag}"))?;
             if let Some(err) = step.error_detail.and_then(|e| e.message) {
-                bail!("building the netns helper image: {err}");
+                bail!("building image {tag}: {err}");
             }
         }
         Ok(())

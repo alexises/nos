@@ -43,6 +43,22 @@ pub struct PeerSummary {
     pub negotiated_keepalive: Option<u16>,
 }
 
+/// One received EVPN (RFC 7432) route, for `show bgp evpn`. `route` is the
+/// NLRI rendered by `nos-bgpd` (`[2]:[65000:1]:[<esi>]:[<tag>]:...`) — nothing
+/// downstream interprets it.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvpnRouteSummary {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub peer: IpAddr,
+    pub route_type: u8,
+    pub route: String,
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub next_hop: IpAddr,
+    /// Extended communities rendered as `RT:65000:10000`, `encap:8`, ...
+    pub extended_communities: Vec<String>,
+}
+
 /// A single already-resolved winning route pushed by `nos-ribd` for
 /// redistribution into BGP — not `PrefixRoutes`/`RouteEntry`'s
 /// multi-candidate shape. `gateway` is carried for completeness only: the
@@ -83,6 +99,8 @@ pub enum BgpRequest {
     /// Operator-triggered `clear bgp <instance> <peer> soft-in` — ask
     /// `peer`'s live session to send it an RFC 2918 `ROUTE_REFRESH`.
     SendRouteRefresh { peer: IpAddr },
+    /// One-shot: every EVPN route received from any peer.
+    GetEvpnRoutes,
 }
 
 /// Messages sent from `nos-bgpd` to a query client.
@@ -95,4 +113,6 @@ pub enum BgpEvent {
     /// Reply to `SendRouteRefresh`: no `Established` session with that peer
     /// exists right now.
     PeerNotFound,
+    /// Reply to `GetEvpnRoutes`.
+    EvpnRoutes(Vec<EvpnRouteSummary>),
 }

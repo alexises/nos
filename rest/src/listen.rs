@@ -11,9 +11,18 @@
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::Extension;
 use futures::{SinkExt, StreamExt};
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto;
+use hyper_util::server::graceful::GracefulShutdown;
+use hyper_util::service::TowerToHyperService;
+use nos_pki::rest::RestServer;
 use nos_proto::{
     DiffScope, Event, IpcCodec, Request, RestApi, RibEvent, RibRequest, Role, ServiceRef,
 };
@@ -22,12 +31,16 @@ use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
+use tower::ServiceExt as _;
 use tracing::{debug, info, warn};
 
-use crate::ipc::{call, Daemons};
-use crate::watchdog_client::resolve_once;
+use crate::auth::PeerUser;
+use crate::ipc::Daemons;
 
 const TICK: Duration = Duration::from_secs(1);
+
+/// HTTP/2 streams one client may have in flight on a connection.
+const MAX_STREAMS: u32 = 128;
 
 /// What one bound listener was bound *to*, so a later tick can tell whether
 /// it is still the right one.
@@ -41,6 +54,8 @@ struct Bound {
     ifindex: Option<u32>,
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
+    /// Keeps the listener's TLS certificate renewed.
+    renew: JoinHandle<()>,
 }
 
 pub struct Listener {
@@ -157,12 +172,14 @@ impl Listener {
     }
 
     async fn vrf_name(&self) -> Option<String> {
-        let socket = resolve_once(
-            &self.daemons.watchdog_socket,
-            &ServiceRef::RibTable(self.table.clone()),
-        )
-        .await?;
-        match call::<_, RibEvent>(&socket, Role::Ribd, &self.table, RibRequest::GetVrfName).await {
+        match self
+            .daemons
+            .service::<_, RibEvent>(
+                ServiceRef::RibTable(self.table.clone()),
+                RibRequest::GetVrfName,
+            )
+            .await
+        {
             Ok(RibEvent::VrfName(name)) => name,
             _ => None,
         }
@@ -175,26 +192,88 @@ impl Listener {
             .ok_or_else(|| format!("vrf of table '{}' does not exist yet", self.table))?;
         let listener = bind_listener(SocketAddr::new(want.address, want.port), &vrf)
             .map_err(|e| format!("bind in vrf {vrf} failed: {e}"))?;
-        let (stop_tx, mut stop_rx) = watch::channel(false);
-        let app = self.router.clone();
-        let task = tokio::spawn(async move {
-            let _ = axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    let _ = stop_rx.wait_for(|s| *s).await;
-                })
-                .await;
-        });
+        // After the bind, so an address that isn't on the VRF yet (retried
+        // every tick) doesn't cost a certificate request each time.
+        let (tls, renew) = crate::tls::start(&self.daemons, want.address)
+            .await
+            .map_err(|e| format!("cannot get a REST listener certificate: {e}"))?;
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let task = tokio::spawn(serve(listener, self.router.clone(), tls, stop_rx));
         Ok(Bound {
             want: want.clone(),
             ifindex: ifindex(&vrf),
             vrf,
             stop: stop_tx,
             task,
+            renew,
         })
     }
 }
 
+/// Accepts connections until told to stop: TLS handshake in each connection's
+/// own task (a slow peer never stalls accept), then HTTP/1.1 or HTTP/2 —
+/// whichever ALPN chose — with the user the client certificate names attached
+/// to every request on that connection.
+pub async fn serve(
+    listener: TcpListener,
+    app: axum::Router,
+    tls: Arc<RestServer>,
+    mut stop: watch::Receiver<bool>,
+) {
+    let mut http = auto::Builder::new(TokioExecutor::new());
+    http.http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(Duration::from_secs(10));
+    http.http2()
+        .timer(TokioTimer::new())
+        .max_concurrent_streams(MAX_STREAMS)
+        .keep_alive_interval(Duration::from_secs(30))
+        .keep_alive_timeout(Duration::from_secs(20));
+    let http = Arc::new(http);
+    let graceful = GracefulShutdown::new();
+
+    loop {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            () = async { let _ = stop.wait_for(|s| *s).await; } => break,
+        };
+        let (tcp, peer) = match accepted {
+            Ok(accepted) => accepted,
+            Err(e) => {
+                warn!(error = %e, "rest accept failed");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        let (tls, app, http, watcher) =
+            (tls.clone(), app.clone(), http.clone(), graceful.watcher());
+        tokio::spawn(async move {
+            let accepted = match tls.accept(tcp).await {
+                Ok(accepted) => accepted,
+                Err(e) => {
+                    debug!(%peer, error = %e, "rest tls handshake failed");
+                    return;
+                }
+            };
+            let service = TowerToHyperService::new(
+                app.layer(Extension(PeerUser(accepted.user)))
+                    .map_request(|req: axum::http::Request<Incoming>| req.map(Body::new)),
+            );
+            let conn = http
+                .serve_connection_with_upgrades(TokioIo::new(accepted.stream), service)
+                .into_owned();
+            if let Err(e) = watcher.watch(conn).await {
+                debug!(%peer, error = %e, "rest connection ended");
+            }
+        });
+    }
+    drop(listener);
+    // The caller (`stop`) gives this a couple of seconds, then gives up.
+    graceful.shutdown().await;
+}
+
 async fn stop(b: Bound, table: &str) {
+    b.renew.abort();
     let _ = b.stop.send(true);
     // Graceful shutdown waits for open connections; don't let a keep-alive
     // client hold a rebind hostage.

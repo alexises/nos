@@ -1,0 +1,171 @@
+//! Getting a client certificate. `POST /v1/login` trades a password for one —
+//! the only route reachable without a certificate — and `POST /v1/renew`
+//! trades a still-valid one for a fresh one. Both ask `nos-watchdogd` (the CA)
+//! over the shared IPC connection; the client's private key never leaves it.
+//!
+//! The certificate is issued by the REST CA on the public key in the CSR the
+//! client sends (an ECDSA P-256 key — `openssl req -new -newkey ec
+//! -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout key.pem -outform DER`, the
+//! DER base64-encoded). Later requests present it in the TLS handshake and
+//! carry no password.
+
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use axum::extract::State;
+use axum::{Extension, Json};
+use base64::Engine as _;
+use nos_proto::{WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS};
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+
+use crate::auth::PeerUser;
+use crate::error::{ApiError, ApiResult, ErrorBody};
+use crate::ipc::Daemons;
+
+/// A failed login costs the account this much before the next attempt on it.
+// ponytail: per-username only — many usernames in parallel are unthrottled
+// (each still costs an argon2 verify). Add a per-source limit if that matters.
+const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(1);
+
+/// One attempt at a time per username, so guessing one account's password is
+/// limited to one guess per `FAILED_LOGIN_DELAY` however many streams or
+/// connections the guesses arrive on.
+#[derive(Default)]
+pub struct LoginGate(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
+
+impl LoginGate {
+    fn lock_for(&self, user: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.0
+            .lock()
+            .expect("login gate lock")
+            .entry(user.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// Forgets `user` once nobody else is waiting on it.
+    fn release(&self, user: &str, mine: &Arc<tokio::sync::Mutex<()>>) {
+        let mut gates = self.0.lock().expect("login gate lock");
+        // The map's copy and ours: nobody else holds it.
+        if Arc::strong_count(mine) == 2 {
+            gates.remove(user);
+        }
+    }
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct LoginRequest {
+    pub user: String,
+    pub password: String,
+    /// Base64 of a DER PKCS#10 certificate request for an ECDSA P-256 key you generated.
+    pub csr: String,
+}
+
+// A `Debug` that hides the password: request bodies must never be one log line
+// from leaking it.
+impl fmt::Debug for LoginRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LoginRequest")
+            .field("user", &self.user)
+            .field("password", &"<hidden>")
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct RenewRequest {
+    /// As `LoginRequest::csr`, for a fresh key.
+    pub csr: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct Certificate {
+    /// Base64 of the DER client certificate, issued by the REST CA.
+    pub certificate: String,
+    /// Seconds it is valid for; renew at half of that.
+    pub lifetime_secs: u64,
+}
+
+fn decode_csr(csr: &str) -> ApiResult<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(csr.trim())
+        .map_err(|_| ApiError::BadRequest("csr is not valid base64".to_string()))
+}
+
+fn certificate(reply: WatchdogEvent) -> ApiResult<Json<Certificate>> {
+    match reply {
+        WatchdogEvent::Issued {
+            cert_der,
+            lifetime_secs,
+        } => Ok(Json(Certificate {
+            certificate: base64::engine::general_purpose::STANDARD.encode(cert_der),
+            lifetime_secs,
+        })),
+        WatchdogEvent::Denied(m) if m == INVALID_CREDENTIALS || m == "no such user" => {
+            Err(ApiError::Unauthorized(m))
+        }
+        WatchdogEvent::Denied(m) if m == "bad certificate request" => Err(ApiError::BadRequest(m)),
+        WatchdogEvent::Denied(m) => Err(ApiError::Unavailable(m)),
+        other => Err(crate::ipc::unexpected("nos-watchdogd", &other)),
+    }
+}
+
+/// Trade a password for a client certificate.
+#[utoipa::path(
+    post, path = "/v1/login", tag = "auth", summary = "Trade a password for a client certificate",
+    description = "The only route that needs no client certificate. Send a certificate request for a key you generated; the response is the certificate.",
+    security(()),
+    request_body = LoginRequest,
+    responses(
+        (status = 200, body = Certificate),
+        (status = 400, body = ErrorBody, description = "malformed certificate request"),
+        (status = 401, body = ErrorBody, description = "unknown user or wrong password")
+    )
+)]
+pub async fn login(
+    State(d): State<Daemons>,
+    Json(body): Json<LoginRequest>,
+) -> ApiResult<Json<Certificate>> {
+    let csr_der = decode_csr(&body.csr)?;
+    let gate = d.login_gate.lock_for(&body.user);
+    let held = gate.lock().await;
+    let reply = d
+        .broker(WatchdogRequest::RestLogin {
+            user: body.user.clone(),
+            password: body.password,
+            csr_der,
+        })
+        .await;
+    if matches!(&reply, Ok(WatchdogEvent::Denied(m)) if m == INVALID_CREDENTIALS) {
+        tokio::time::sleep(FAILED_LOGIN_DELAY).await;
+    }
+    drop(held);
+    d.login_gate.release(&body.user, &gate);
+    certificate(reply?)
+}
+
+/// Trade the certificate this connection presented for a fresh one.
+#[utoipa::path(
+    post, path = "/v1/renew", tag = "auth", summary = "Renew the client certificate",
+    request_body = RenewRequest,
+    responses(
+        (status = 200, body = Certificate),
+        (status = 401, body = ErrorBody, description = "no valid certificate, or the user no longer exists")
+    )
+)]
+pub async fn renew(
+    State(d): State<Daemons>,
+    Extension(PeerUser(user)): Extension<PeerUser>,
+    Json(body): Json<RenewRequest>,
+) -> ApiResult<Json<Certificate>> {
+    // The middleware only lets a request with a certificate this far.
+    let user = user.ok_or_else(|| ApiError::Unauthorized("authentication required".into()))?;
+    let csr_der = decode_csr(&body.csr)?;
+    certificate(
+        d.broker(WatchdogRequest::RestRenew { user, csr_der })
+            .await?,
+    )
+}

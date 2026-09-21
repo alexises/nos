@@ -242,6 +242,28 @@ impl SessionManager {
             .collect()
     }
 
+    /// Every received EVPN route, for `BgpRequest::GetEvpnRoutes` — backs
+    /// `nos-cli`'s `show bgp evpn`.
+    pub async fn evpn_route_summaries(&self) -> Vec<nos_proto::EvpnRouteSummary> {
+        self.bgp_rib
+            .lock()
+            .await
+            .evpn_routes()
+            .into_iter()
+            .map(|(peer, nlri, route)| nos_proto::EvpnRouteSummary {
+                peer,
+                route_type: nlri.route_type(),
+                route: nlri.to_string(),
+                next_hop: route.next_hop,
+                extended_communities: route
+                    .extended_communities
+                    .iter()
+                    .map(|&c| crate::evpn::format_ext_community(c))
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// Aborts every peer task and the listener, and clears all state.
     /// Called once when `crate::reconcile::run`'s loop exits on shutdown.
     pub async fn shutdown(&self) {

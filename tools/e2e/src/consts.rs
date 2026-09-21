@@ -3,12 +3,15 @@
 //! distinct sub-block per scenario so log lines from different phases are
 //! never confusable.
 
-/// The user every router's *seeded* config carries, and what the harness
-/// authenticates its REST calls as (HTTP Basic).
+/// The user every router's *seeded* config carries, and what the harness logs
+/// in as (`POST /v1/login`) to get the client certificate its REST calls use.
 pub const E2E_USER: &str = "e2e";
 pub const E2E_PASSWORD: &str = "e2e-password";
 /// The `rest` phase's throwaway user for password-change checks.
 pub const REST_USER: &str = "rest-user";
+/// Where `nos-watchdogd` publishes the CA REST client certificates chain to —
+/// read out of the container over the docker API, never fetched over the network.
+pub const REST_CA_PATH: &str = "/run/nos/pki/rest-ca.crt";
 
 pub const NET: &str = "nos-verify-net";
 /// Two extra single-purpose docker networks, connected only to router-a, for
@@ -28,6 +31,14 @@ pub const IP_B: &str = "10.50.0.3";
 pub const IP_C: &str = "10.50.0.4";
 /// The throwaway router of the `rest` phase's destructive checks.
 pub const IP_R: &str = "10.50.0.5";
+/// The `evpn` phase's third-party speaker (GoBGP), which originates the EVPN
+/// routes no NOS router can yet.
+pub const IP_G: &str = "10.50.0.6";
+pub const ASN_G: u32 = 65010;
+pub const RID_G: &str = "6.6.6.6";
+pub const GOBGP_IMAGE: &str = "nos-e2e-gobgp:local";
+/// Same release `tools/bench-bgp.sh` pins.
+pub const GOBGP_VERSION: &str = "4.9.0";
 pub const ASN_A: u32 = 65001;
 pub const ASN_B: u32 = 65002;
 /// Only `route-server` (router-b and router-c must be in distinct ASes from

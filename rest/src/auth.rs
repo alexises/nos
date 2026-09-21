@@ -1,120 +1,77 @@
-//! HTTP Basic authentication for every route (including `/openapi.json`,
-//! `/swagger-ui/` and the SSE log stream). Credentials are checked against
-//! `Config.users` (argon2id hashes) fetched from `nos-configd` per request, the
-//! same way every handler reads config — so a user added/removed/re-passworded
-//! by a commit takes effect on the very next request. Fails closed: if
-//! `nos-configd` can't be reached the request is refused (503), never let through.
+//! Client-certificate authentication for every route (including `/openapi.json`,
+//! `/swagger-ui/` and the SSE log stream). The TLS layer has already verified
+//! the certificate against the REST CA; `PeerUser` is the user its URI SAN
+//! names (`listen.rs` puts it on each connection's requests). Here the user
+//! must also *still exist* in `Config.users` — fetched from `nos-configd` per
+//! request like every handler's config read — so a deleted user is locked out
+//! on the very next request rather than when their certificate expires.
+//! Fails closed: a request with no verified user is 401, and if `nos-configd`
+//! can't be reached it is refused (503), never let through.
 //!
-//! ponytail: one config `Get` plus one argon2 verify per request. Add a short-TTL
-//! cache of verified credentials only if that is ever measured to matter.
+//! The one exception is `POST /v1/login`, which is how a client with no
+//! certificate yet gets one (`login.rs`).
+//!
+//! ponytail: one config `Get` per request (a pooled IPC round trip, no
+//! handshake). Add a short-TTL cache of the user list only if that is measured
+//! to matter.
 
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use base64::Engine as _;
-use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+use utoipa::openapi::security::SecurityScheme;
 
 use crate::error::ErrorBody;
 use crate::ipc::Daemons;
 
-/// Declares the HTTP Basic scheme in the `OpenAPI` document (so Swagger UI offers
-/// an "Authorize" button) — the global `security` requirement is on `ApiDoc`.
-pub struct BasicAuthScheme;
+pub const LOGIN_PATH: &str = "/v1/login";
 
-impl utoipa::Modify for BasicAuthScheme {
+/// The user named by the client certificate this request's connection
+/// presented; `None` if it presented none. Set per connection by the listener.
+#[derive(Clone, Debug)]
+pub struct PeerUser(pub Option<String>);
+
+/// Declares the mutual-TLS scheme in the `OpenAPI` document — the global
+/// `security` requirement is on `ApiDoc`.
+pub struct MutualTlsScheme;
+
+impl utoipa::Modify for MutualTlsScheme {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         openapi
             .components
             .get_or_insert_with(Default::default)
             .add_security_scheme(
-                "basic",
-                SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Basic).build()),
+                "mtls",
+                SecurityScheme::MutualTls {
+                    description: Some(
+                        "A client certificate issued by POST /v1/login (or /v1/renew)".to_string(),
+                    ),
+                    extensions: None,
+                },
             );
     }
 }
 
-pub async fn basic_auth(State(daemons): State<Daemons>, req: Request, next: Next) -> Response {
-    let Some((user, password)) = credentials(req.headers()) else {
+pub async fn client_auth(State(daemons): State<Daemons>, req: Request, next: Next) -> Response {
+    if req.method() == Method::POST && req.uri().path() == LOGIN_PATH {
+        return next.run(req).await;
+    }
+    let Some(user) = req.extensions().get::<PeerUser>().and_then(|p| p.0.clone()) else {
         return unauthorized();
     };
-    let config = match daemons.running_config().await {
-        Ok(config) => config,
-        Err(e) => return e.into_response(),
-    };
-    let hash = config
-        .users
-        .into_iter()
-        .find(|u| u.name == user)
-        .map(|u| u.password);
-    let ok = tokio::task::spawn_blocking(move || {
-        nos_password::verify_or_dummy(&password, hash.as_deref())
-    })
-    .await
-    .unwrap_or(false);
-    if ok {
-        next.run(req).await
-    } else {
-        unauthorized()
+    match daemons.running_config().await {
+        Ok(config) if config.users.iter().any(|u| u.name == user) => next.run(req).await,
+        Ok(_) => unauthorized(),
+        Err(e) => e.into_response(),
     }
-}
-
-/// `(user, password)` from an `Authorization: Basic <base64(user:password)>` header.
-fn credentials(headers: &HeaderMap) -> Option<(String, String)> {
-    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let (scheme, encoded) = value.split_once(' ')?;
-    if !scheme.eq_ignore_ascii_case("basic") {
-        return None;
-    }
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(encoded.trim())
-        .ok()?;
-    let (user, password) = String::from_utf8(decoded)
-        .ok()?
-        .split_once(':')
-        .map(|(u, p)| (u.to_string(), p.to_string()))?;
-    Some((user, password))
 }
 
 fn unauthorized() -> Response {
     (
-        StatusCode::UNAUTHORIZED,
-        [(
-            header::WWW_AUTHENTICATE,
-            HeaderValue::from_static(r#"Basic realm="nos""#),
-        )],
+        axum::http::StatusCode::UNAUTHORIZED,
         axum::Json(ErrorBody {
-            error: "authentication required".to_string(),
+            error: "a client certificate is required (POST /v1/login to get one)".to_string(),
         }),
     )
         .into_response()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn headers(v: &str) -> HeaderMap {
-        let mut h = HeaderMap::new();
-        h.insert(header::AUTHORIZATION, v.parse().unwrap());
-        h
-    }
-
-    #[test]
-    fn parses_basic_and_keeps_colons_in_the_password() {
-        // "alice:pa:ss"
-        let h = headers("Basic YWxpY2U6cGE6c3M=");
-        assert_eq!(credentials(&h), Some(("alice".into(), "pa:ss".into())));
-        assert_eq!(
-            credentials(&headers("basic YWxpY2U6cGE6c3M=")),
-            Some(("alice".into(), "pa:ss".into()))
-        );
-    }
-
-    #[test]
-    fn rejects_other_schemes_and_garbage() {
-        assert_eq!(credentials(&headers("Bearer abc")), None);
-        assert_eq!(credentials(&headers("Basic !!!")), None);
-        assert_eq!(credentials(&HeaderMap::new()), None);
-    }
 }

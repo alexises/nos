@@ -3,13 +3,17 @@
 
 use std::fmt::Display;
 use std::io::{self, Read};
+use std::net::IpAddr;
 use std::time::Duration;
 
 use rcgen::{
-    BasicConstraints, CertificateParams, CertificateSigningRequestParams, DistinguishedName,
-    DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose, PublicKeyData, SanType, SignatureAlgorithm,
 };
+use rustls::pki_types::SignatureVerificationAlgorithm;
 use time::OffsetDateTime;
+use x509_parser::certification_request::X509CertificationRequest;
+use x509_parser::prelude::FromDer;
 
 use crate::PeerId;
 
@@ -26,26 +30,61 @@ pub(crate) fn err(e: impl Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
 }
 
+/// The signature algorithm of a CA, and of every key it issues for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyAlg {
+    /// ML-DSA-65 (FIPS 204): the IPC CA — quantum-safe authentication.
+    MlDsa65,
+    /// ECDSA P-256: the REST CA, whose certificates browsers and stock TLS
+    /// clients can still present.
+    EcdsaP256,
+}
+
+impl KeyAlg {
+    fn rcgen(self) -> &'static SignatureAlgorithm {
+        match self {
+            Self::MlDsa65 => &rcgen::PKCS_ML_DSA_65,
+            Self::EcdsaP256 => &rcgen::PKCS_ECDSA_P256_SHA256,
+        }
+    }
+
+    pub(crate) fn generate(self) -> io::Result<KeyPair> {
+        KeyPair::generate_for(self.rcgen()).map_err(err)
+    }
+
+    fn verifier(self) -> &'static dyn SignatureVerificationAlgorithm {
+        match self {
+            Self::MlDsa65 => webpki::aws_lc_rs::ML_DSA_65,
+            Self::EcdsaP256 => webpki::aws_lc_rs::ECDSA_P256_SHA256,
+        }
+    }
+}
+
 pub struct Ca {
     cert: rcgen::Certificate,
-    key: KeyPair,
+    issuer: Issuer<'static, KeyPair>,
+    alg: KeyAlg,
 }
 
 impl Ca {
     /// A fresh CA with a fresh key. Ephemeral by design: nothing persists it,
     /// so a watchdog restart (which restarts every child anyway) re-keys all.
-    pub fn new() -> io::Result<Self> {
+    pub fn new(alg: KeyAlg) -> io::Result<Self> {
         let now = OffsetDateTime::now_utc();
         let mut p = CertificateParams::new(Vec::<String>::new()).map_err(err)?;
         p.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
         p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         p.distinguished_name = DistinguishedName::new();
-        p.distinguished_name.push(DnType::CommonName, "nos ipc ca");
+        p.distinguished_name.push(DnType::CommonName, "nos ca");
         p.not_before = now - SKEW;
         p.not_after = now + CA_LIFETIME;
-        let key = KeyPair::generate().map_err(err)?;
+        let key = alg.generate()?;
         let cert = p.self_signed(&key).map_err(err)?;
-        Ok(Self { cert, key })
+        Ok(Self {
+            cert,
+            issuer: Issuer::new(p, key),
+            alg,
+        })
     }
 
     pub fn cert_der(&self) -> &[u8] {
@@ -69,9 +108,9 @@ impl Ca {
         not_before: OffsetDateTime,
         not_after: OffsetDateTime,
     ) -> io::Result<Bundle> {
-        let key = KeyPair::generate().map_err(err)?;
+        let key = self.alg.generate()?;
         let cert = leaf_params(peer, not_before, not_after)?
-            .signed_by(&key, &self.cert, &self.key)
+            .signed_by(&key, &self.issuer)
             .map_err(err)?;
         Ok(Bundle {
             ca: self.cert_der().to_vec(),
@@ -82,9 +121,10 @@ impl Ca {
 
     /// Signs the public key of a client-made CSR as `peer`. **Only the key is
     /// taken from the CSR** — the subject/SANs it asks for are discarded, so a
-    /// client can never claim an identity the CA didn't authenticate. (rcgen
-    /// checks the CSR's own signature, i.e. proof of possession of the key.)
-    /// Returns the leaf certificate DER.
+    /// client can never claim an identity the CA didn't authenticate. The CSR's
+    /// own signature (proof of possession of the key) is checked here rather
+    /// than by rcgen, whose parser cannot verify ML-DSA, and the key must be of
+    /// this CA's algorithm. Returns the leaf certificate DER.
     pub fn sign_csr(
         &self,
         csr_der: &[u8],
@@ -92,10 +132,68 @@ impl Ca {
         lifetime: Duration,
     ) -> io::Result<Vec<u8>> {
         let now = OffsetDateTime::now_utc();
-        let mut csr = CertificateSigningRequestParams::from_der(&csr_der.into()).map_err(err)?;
-        csr.params = leaf_params(peer, now - SKEW, now + lifetime)?;
-        let cert = csr.signed_by(&self.cert, &self.key).map_err(err)?;
+        self.sign_csr_with(csr_der, &leaf_params(peer, now - SKEW, now + lifetime)?)
+    }
+
+    /// `sign_csr` for a TLS *server* certificate valid for `addresses` (plus the
+    /// fixed `nos.internal` name) — how `nos-restd` gets the certificate its
+    /// listener presents. The addresses come from the caller, never the CSR.
+    pub fn sign_server_csr(
+        &self,
+        csr_der: &[u8],
+        addresses: &[IpAddr],
+        lifetime: Duration,
+    ) -> io::Result<Vec<u8>> {
+        let now = OffsetDateTime::now_utc();
+        let mut names = vec![SERVER_NAME.to_string()];
+        names.extend(addresses.iter().map(ToString::to_string));
+        let mut p = CertificateParams::new(names).map_err(err)?;
+        p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        p.distinguished_name = DistinguishedName::new();
+        p.distinguished_name.push(DnType::CommonName, "nos rest");
+        p.not_before = now - SKEW;
+        p.not_after = now + lifetime;
+        self.sign_csr_with(csr_der, &p)
+    }
+
+    fn sign_csr_with(&self, csr_der: &[u8], params: &CertificateParams) -> io::Result<Vec<u8>> {
+        let (rest, csr) = X509CertificationRequest::from_der(csr_der).map_err(err)?;
+        if !rest.is_empty() {
+            return Err(err("trailing bytes after CSR"));
+        }
+        let info = &csr.certification_request_info;
+        self.alg
+            .verifier()
+            .verify_signature(
+                info.subject_pki.subject_public_key.data.as_ref(),
+                info.raw,
+                csr.signature_value.data.as_ref(),
+            )
+            .map_err(|_| err("invalid CSR signature"))?;
+        let public_key = CsrKey {
+            alg: self.alg.rcgen(),
+            raw: info.subject_pki.subject_public_key.data.to_vec(),
+        };
+        let cert = params.signed_by(&public_key, &self.issuer).map_err(err)?;
         Ok(cert.der().to_vec())
+    }
+}
+
+/// A CSR's public key, in the CA's algorithm (already proven by the CSR's own
+/// signature). rcgen's `SubjectPublicKeyInfo::from_der` cannot parse ML-DSA keys.
+struct CsrKey {
+    alg: &'static SignatureAlgorithm,
+    raw: Vec<u8>,
+}
+
+impl PublicKeyData for CsrKey {
+    fn der_bytes(&self) -> &[u8] {
+        &self.raw
+    }
+
+    fn algorithm(&self) -> &'static SignatureAlgorithm {
+        self.alg
     }
 }
 
@@ -124,7 +222,13 @@ fn leaf_params(
 /// (`Ca::sign_csr`). Returns `(csr_der, pkcs8_key_der)`; the key never leaves
 /// the caller.
 pub fn generate_csr() -> io::Result<(Vec<u8>, Vec<u8>)> {
-    let key = KeyPair::generate().map_err(err)?;
+    generate_csr_for(KeyAlg::MlDsa65)
+}
+
+/// `generate_csr` for a key of the given algorithm — a REST client's key must
+/// match its CA (`KeyAlg::EcdsaP256`).
+pub fn generate_csr_for(alg: KeyAlg) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    let key = alg.generate()?;
     let csr = CertificateParams::new(Vec::<String>::new())
         .map_err(err)?
         .serialize_request(&key)

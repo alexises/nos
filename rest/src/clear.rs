@@ -56,6 +56,8 @@ pub async fn bgp_soft_in(
         BgpEvent::PeerNotFound => Err(ApiError::NotFound(format!(
             "no Established session with {peer} in bgp instance '{instance}'"
         ))),
-        other @ BgpEvent::Summary(_) => Err(unexpected("nos-bgpd", &other)),
+        other @ (BgpEvent::Summary(_) | BgpEvent::EvpnRoutes(_)) => {
+            Err(unexpected("nos-bgpd", &other))
+        }
     }
 }

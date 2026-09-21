@@ -30,7 +30,7 @@ impl World {
                 .and_then(|s| s.running)
                 .unwrap_or(false);
             if running {
-                let router = Router::attach(id);
+                let router = Router::attach(&dock, id).await?;
                 router.logs.settle().await;
                 routers.insert(id.name, router);
             }
@@ -110,7 +110,7 @@ impl World {
 
     pub async fn down(&mut self) {
         self.routers.clear();
-        for name in ["router-a", "router-b", "router-c", "router-r"] {
+        for name in ["router-a", "router-b", "router-c", "router-r", "router-g"] {
             self.dock.container_remove(name).await;
             self.dock.volume_remove(&format!("{name}-run")).await;
             self.dock.volume_remove(&format!("{name}-data")).await;

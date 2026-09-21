@@ -352,3 +352,166 @@ pub async fn communities(w: &mut World) -> anyhow::Result<()> {
     .await?;
     Ok(())
 }
+
+/// GoBGP release image, built once — same recipe as `tools/bench-bgp.sh`.
+fn gobgp_dockerfile() -> String {
+    format!(
+        "FROM debian:bookworm-slim\n\
+         RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \\\n \
+         && curl -fsSL https://github.com/osrg/gobgp/releases/download/v{GOBGP_VERSION}/gobgp_{GOBGP_VERSION}_linux_amd64.tar.gz \\\n \
+         | tar -xz -C /usr/local/bin gobgp gobgpd \\\n \
+         && apt-get purge -y --auto-remove curl && rm -rf /var/lib/apt/lists/*\n"
+    )
+}
+
+/// Runs one `gobgp` CLI command inside the GoBGP container.
+async fn gobgp(w: &World, args: &[&str]) -> anyhow::Result<()> {
+    let mut cmd = vec!["gobgp"];
+    cmd.extend_from_slice(args);
+    let (code, out) = w.dock.exec("router-g", &cmd).await?;
+    if code != 0 {
+        bail!("gobgp {}: exit {code}: {}", args.join(" "), out.trim());
+    }
+    Ok(())
+}
+
+/// RFC 7432 EVPN, receive side. No NOS router originates EVPN yet, so an
+/// independent implementation does: GoBGP announces one MAC/IP (Type 2) and
+/// one Inclusive Multicast (Type 3) route, with a Route Target and the VXLAN
+/// Encapsulation community, to router-a. Router-a must negotiate AFI 25 /
+/// SAFI 70 (its peer-group's only family besides IPv4 unicast), decode both,
+/// hold them per peer, serve them on `show bgp evpn`, and drop them on an
+/// explicit withdrawal and, for what is left, when the session goes away.
+pub async fn evpn(w: &mut World) -> anyhow::Result<()> {
+    let flags = strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--peer-group",
+        "pg-evpn",
+        "--remote-as",
+        &ASN_G.to_string(),
+        "--peer",
+        IP_G,
+        "--evpn",
+    ]);
+    w.start(crate::router::A, Some(flags), &[]).await?;
+
+    log("building/starting the GoBGP speaker (router-g)");
+    w.dock
+        .ensure_image(GOBGP_IMAGE, &gobgp_dockerfile())
+        .await?;
+    let conf = format!(
+        "[global.config]\n  as = {ASN_G}\n  router-id = \"{RID_G}\"\n\n\
+         [[neighbors]]\n  [neighbors.config]\n    neighbor-address = \"{IP_A}\"\n    peer-as = {ASN_A}\n  \
+         [neighbors.transport.config]\n    local-address = \"{IP_G}\"\n  \
+         [neighbors.timers.config]\n    connect-retry = 5\n  \
+         [[neighbors.afi-safis]]\n    [neighbors.afi-safis.config]\n      afi-safi-name = \"l2vpn-evpn\"\n"
+    );
+    w.dock
+        .start_plain(
+            "router-g",
+            GOBGP_IMAGE,
+            NET,
+            IP_G,
+            &["gobgpd", "-f", "/etc/gobgpd.toml"],
+            ("/etc", "gobgpd.toml", conf.as_bytes()),
+        )
+        .await?;
+
+    let a = w.a()?;
+    a.established().await?;
+    // gobgpd's gRPC API can lag its BGP listener by a moment.
+    let mut ready = Err(anyhow::anyhow!("gobgpd never answered"));
+    for _ in 0..30 {
+        ready = gobgp(w, &["global"]).await;
+        if ready.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    ready?;
+
+    let (mac, ip, rd, rt) = ("aa:bb:cc:00:00:01", "192.0.2.10", "65010:1", "65010:10000");
+    gobgp(
+        w,
+        &[
+            "global", "rib", "add", "-a", "evpn", "macadv", mac, ip, "etag", "0", "label", "10000",
+            "rd", rd, "rt", rt, "encap", "vxlan",
+        ],
+    )
+    .await?;
+    gobgp(
+        w,
+        &[
+            "global",
+            "rib",
+            "add",
+            "-a",
+            "evpn",
+            "multicast",
+            IP_G,
+            "etag",
+            "0",
+            "rd",
+            rd,
+            "rt",
+            rt,
+            "encap",
+            "vxlan",
+        ],
+    )
+    .await?;
+
+    let learned = |t: u8| format!("evpn route learned peer={IP_G} route_type={t}");
+    let withdrawn = |t: u8| format!("evpn route withdrawn peer={IP_G} route_type={t}");
+    a.wait(&learned(2)).await?;
+    a.wait(&learned(3)).await?;
+
+    // `show bgp evpn`, over REST: NLRI fields, Route Target and VXLAN encap
+    // all decoded from another implementation's encoding.
+    let show = || a.rest_expect(reqwest::Method::GET, "/v1/bgp/evpn", None, 200);
+    let body = show().await?;
+    for want in [
+        "\"route_type\":2",
+        "\"route_type\":3",
+        mac,
+        ip,
+        rd,
+        "RT:65010:10000",
+        "encap:8",
+    ] {
+        if !body.contains(want) {
+            bail!("show bgp evpn is missing {want}: {body}");
+        }
+    }
+
+    log("withdrawing the Type-2 route explicitly");
+    let base = a.count(&withdrawn(2));
+    gobgp(
+        w,
+        &[
+            "global", "rib", "del", "-a", "evpn", "macadv", mac, ip, "etag", "0", "label", "10000",
+            "rd", rd,
+        ],
+    )
+    .await?;
+    a.wait_new(&withdrawn(2), base, 30).await?;
+    let body = show().await?;
+    if body.contains("\"route_type\":2") || !body.contains("\"route_type\":3") {
+        bail!("expected only the Type-3 route after the withdrawal: {body}");
+    }
+
+    log("removing the speaker: its remaining route must go with the session");
+    let base = a.count(&withdrawn(3));
+    w.dock.container_remove("router-g").await;
+    a.wait_new(&withdrawn(3), base, 60).await?;
+    let body = show().await?;
+    if body.contains("\"route_type\"") {
+        bail!("EVPN routes outlived their session: {body}");
+    }
+    Ok(())
+}

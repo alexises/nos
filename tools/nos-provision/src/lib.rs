@@ -184,6 +184,11 @@ pub struct Args {
     #[arg(long)]
     pub route_server_client: bool,
 
+    /// If set, adds `address-family l2vpn-evpn` (RFC 7432, AFI 25 / SAFI 70)
+    /// to `--peer-group`, alongside the default IPv4 unicast.
+    #[arg(long)]
+    pub evpn: bool,
+
     /// If set, overrides `--peer-group`'s connect-retry time in seconds
     /// (`BgpPeerGroupOp::SetConnectRetryTime`). The default is RFC 4271's
     /// 120s, which leaves both sides Idle that long after a collision.
@@ -681,6 +686,13 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }));
     }
 
+    if args.evpn {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::AddAddressFamily {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            af: AddressFamily::L2vpnEvpn,
+        }));
+    }
     if args.route_reflector_client {
         ops.push(ConfigOp::BgpPeerGroup(
             BgpPeerGroupOp::SetRouteReflectorClient {

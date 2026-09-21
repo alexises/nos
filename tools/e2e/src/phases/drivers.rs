@@ -503,21 +503,25 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
 
-    // Authentication: every route refuses missing or wrong credentials (HTTP
-    // Basic, checked against the hashed `users` in nos-configd's config).
-    for (path, credentials) in [
-        ("/v1/config", None),
-        ("/v1/config", Some((E2E_USER, "wrong-password"))),
-        ("/v1/config", Some(("nobody", E2E_PASSWORD))),
-        ("/openapi.json", None),
-        ("/swagger-ui/", None),
-    ] {
-        let (status, _) = a.rest_as(Method::GET, path, None, credentials).await?;
+    // Authentication is mutual TLS: every route refuses a client with no
+    // certificate, and the one way to get a certificate — `POST /v1/login` —
+    // refuses a wrong password and an unknown user alike.
+    let anonymous = a.rest.anonymous()?;
+    for path in ["/v1/config", "/openapi.json", "/swagger-ui/"] {
+        let (status, _) = a.rest_with(&anonymous, Method::GET, path, None).await?;
         if status != 401 {
-            bail!("router-a: GET {path} as {credentials:?} -> {status}, want 401");
+            bail!("router-a: GET {path} without a certificate -> {status}, want 401");
         }
     }
-    log("router-a: REST refuses missing/wrong credentials with 401");
+    for (user, password) in [(E2E_USER, "wrong-password"), ("nobody", E2E_PASSWORD)] {
+        match a.rest.login(user, password).await? {
+            Err(401) => {}
+            Err(status) => bail!("router-a: login as {user} -> {status}, want 401"),
+            Ok(_) => bail!("router-a: login as {user} with '{password}' was accepted"),
+        }
+    }
+    log("router-a: REST refuses no certificate, a wrong password and an unknown user with 401");
+    rest_transport(a).await?;
 
     // Show endpoints, answered by other daemons (config, rib, bgp, interface).
     let config = a.rest_expect(Method::GET, "/v1/config", None, 200).await?;
@@ -677,15 +681,14 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     // `show log --follow`: an SSE stream carrying a *live* entry, not just the
     // backlog. Follow nos-configd, then commit an empty transaction so it logs
     // "config committed" while the stream is open.
-    let url = format!("http://{IP_A}:{REST_PORT}/v1/logs/follow?source=nos-configd&limit=1");
+    let url = format!(
+        "{}/v1/logs/follow?source=nos-configd&limit=1",
+        a.rest.base()
+    );
+    let client = a.rest.client().await?;
     let stream = tokio::spawn(async move {
         let mut text = String::new();
-        let Ok(resp) = reqwest::Client::new()
-            .get(&url)
-            .basic_auth(E2E_USER, Some(E2E_PASSWORD))
-            .send()
-            .await
-        else {
+        let Ok(resp) = client.get(&url).send().await else {
             return text;
         };
         let mut chunks = futures::StreamExt::boxed(resp.bytes_stream());
@@ -712,6 +715,90 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     rest_destructive(w).await
 }
 
+/// The transport itself: post-quantum key exchange is mandatory, and requests
+/// share connections instead of paying a handshake each — HTTP/2 multiplexing
+/// on the client side, pooled IPC connections behind it.
+async fn rest_transport(a: &Router) -> anyhow::Result<()> {
+    // A client offering only classical X25519 is refused at the handshake.
+    let failed = a.count("rest tls handshake failed");
+    if classical_handshake(a).await.is_ok() {
+        bail!(
+            "router-a: the REST listener completed a handshake without post-quantum key exchange"
+        );
+    }
+    a.wait_new("rest tls handshake failed", failed, 15).await?;
+    log("router-a: REST refuses a classical-only key exchange");
+
+    // One connection carries every request of a client: a warm-up call learns
+    // that the server speaks h2, then 40 concurrent ones multiplex over it.
+    let Ok(identity) = a.rest.login(E2E_USER, E2E_PASSWORD).await? else {
+        bail!("router-a: login as {E2E_USER} failed");
+    };
+    let client = a.rest.with_identity(&identity)?;
+    let handshake = "rest tls handshake ok user=e2e alpn=h2 kx=Some(X25519MLKEM768)";
+    let before = a.count(handshake);
+    a.rest_with(&client, Method::GET, "/v1/interfaces", None)
+        .await?;
+    let calls = (0..40).map(|_| a.rest_with(&client, Method::GET, "/v1/interfaces", None));
+    for (status, _) in futures::future::try_join_all(calls).await? {
+        if status != 200 {
+            bail!("router-a: a multiplexed request -> {status}");
+        }
+    }
+    a.wait_new(handshake, before, 15).await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let opened = a.count(handshake) - before;
+    if opened != 1 {
+        bail!("router-a: 41 requests took {opened} TLS handshakes, want exactly 1 (h2 over post-quantum TLS 1.3)");
+    }
+    log("router-a: 41 requests shared one post-quantum h2 connection");
+
+    // Behind it, nos-restd reuses its IPC connections: a request that touches
+    // the config, the broker and nos-ribd used to cost three handshakes, so 40
+    // of them would show >=120 server-side handshakes across the daemons. The
+    // margin is wide because other daemons reconnect in the background too.
+    let ipc = "ipc tls handshake ok side=server";
+    a.rest_with(&client, Method::GET, "/v1/routes/rt1", None)
+        .await?;
+    let before = a.count(ipc);
+    for _ in 0..40 {
+        a.rest_with(&client, Method::GET, "/v1/routes/rt1", None)
+            .await?;
+    }
+    let opened = a.count(ipc) - before;
+    if opened >= 30 {
+        bail!("router-a: 40 sequential requests opened {opened} IPC handshakes — connections are not being reused");
+    }
+    log(format!(
+        "router-a: 40 requests opened {opened} IPC handshakes (pooled)"
+    ));
+    Ok(())
+}
+
+/// Dials the REST port offering only the classical X25519 key exchange.
+async fn classical_handshake(a: &Router) -> anyhow::Result<()> {
+    use rustls::crypto::aws_lc_rs;
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, ServerName};
+
+    let mut provider = aws_lc_rs::default_provider();
+    provider.kx_groups = vec![aws_lc_rs::kx_group::X25519];
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(CertificateDer::from_pem_slice(a.rest.ca_pem())?)?;
+    let cfg = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let tcp = tokio::net::TcpStream::connect((a.id.ip, REST_PORT)).await?;
+    tokio_rustls::TlsConnector::from(std::sync::Arc::new(cfg))
+        .connect(
+            ServerName::IpAddress(a.id.ip.parse::<std::net::IpAddr>()?.into()),
+            tcp,
+        )
+        .await?;
+    Ok(())
+}
+
 /// A clear password set through the config tree is stored as a hash; setting
 /// the same one again changes nothing (no diff, identical hash); a different
 /// one replaces it and the old one stops working.
@@ -719,10 +806,12 @@ async fn rest_users(a: &Router) -> anyhow::Result<()> {
     let tx = format!("/v1/transactions/{REST_TX}");
     let user = format!("{tx}/user/{REST_USER}");
     let set = |password: &str| format!(r#"{{"name":"{REST_USER}","password":"{password}"}}"#);
+    // `POST /v1/login` as the user: 200 with a certificate, or the refusal.
     let login = |password: &'static str| async move {
-        a.rest_as(Method::GET, "/v1/config", None, Some((REST_USER, password)))
+        a.rest
+            .login(REST_USER, password)
             .await
-            .map(|(status, _)| status)
+            .map(|r| r.map_or_else(|status| status, |_| 200))
     };
     let stored_hash = || async {
         let config = a.rest_expect(Method::GET, "/v1/config", None, 200).await?;
@@ -744,8 +833,16 @@ async fn rest_users(a: &Router) -> anyhow::Result<()> {
     if !hash.starts_with("$argon2id$") || hash.contains("first") {
         bail!("router-a: password is not stored as an argon2id hash: {hash}");
     }
-    if login("first").await? != 200 {
+    // The certificate that login issued is what the user's later calls carry.
+    let Ok(identity) = a.rest.login(REST_USER, "first").await? else {
         bail!("router-a: the new user cannot log in with its password");
+    };
+    let as_user = a.rest.with_identity(&identity)?;
+    let (status, _) = a
+        .rest_with(&as_user, Method::GET, "/v1/config", None)
+        .await?;
+    if status != 200 {
+        bail!("router-a: the new user's certificate is refused: {status}");
     }
 
     // Same clear password again: empty diff, identical hash after commit.
@@ -788,6 +885,14 @@ async fn rest_users(a: &Router) -> anyhow::Result<()> {
         .await?;
     if login("second").await? != 401 {
         bail!("router-a: a deleted user can still log in");
+    }
+    // Their certificate is still valid for hours, but the user is gone: it is
+    // refused on the very next request, even on the connection already open.
+    let (status, _) = a
+        .rest_with(&as_user, Method::GET, "/v1/config", None)
+        .await?;
+    if status != 401 {
+        bail!("router-a: a deleted user's certificate still works: {status}");
     }
     log("router-a: user password change and deletion verified over REST");
     Ok(())

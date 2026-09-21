@@ -31,6 +31,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use ipnet::{IpNet, Ipv4Net};
 use tokio_util::codec::{Decoder, Encoder};
 
+use crate::evpn::{self, EvpnNlri};
+
 pub const BGP_VERSION: u8 = 4;
 const MARKER: [u8; 16] = [0xFF; 16];
 const HEADER_LEN: usize = 19;
@@ -65,6 +67,9 @@ const CAP_ADD_PATH: u8 = 69;
 /// AFI values this crate understands (RFC 4760's registry has many more).
 pub(crate) const AFI_IPV4: u16 = 1;
 pub(crate) const AFI_IPV6: u16 = 2;
+/// RFC 7432 EVPN: AFI L2VPN (25) / SAFI EVPN (70).
+pub(crate) const AFI_L2VPN: u16 = 25;
+pub(crate) const SAFI_EVPN: u8 = 70;
 
 const ATTR_ORIGIN: u8 = 1;
 const ATTR_AS_PATH: u8 = 2;
@@ -298,6 +303,8 @@ pub struct MpReachNlri {
     /// unless this AFI negotiated ADD-PATH on this session — never
     /// partially filled.
     pub nlri_path_ids: Vec<u32>,
+    /// AFI 25 / SAFI 70 routes; `nlri` is empty for such a batch.
+    pub evpn: Vec<EvpnNlri>,
 }
 
 /// RFC 4760 `MP_UNREACH_NLRI`: one AFI/SAFI batch of withdrawn routes.
@@ -309,6 +316,8 @@ pub struct MpUnreachNlri {
     /// RFC 7911 ADD-PATH identifiers, aligned by index with `withdrawn`.
     /// Empty unless this AFI negotiated ADD-PATH on this session.
     pub withdrawn_path_ids: Vec<u32>,
+    /// AFI 25 / SAFI 70 routes; `withdrawn` is empty for such a batch.
+    pub evpn: Vec<EvpnNlri>,
 }
 
 /// An RFC 4271 UPDATE message. `withdrawn_routes`/`nlri`/`attributes.next_hop`
@@ -1014,6 +1023,16 @@ fn decode_mp_reach(data: &[u8], add_path_afis: &HashSet<u16>) -> Result<MpReachN
             return Err(WireError::MalformedUpdate);
         }
     }
+    if (afi, safi) == (AFI_L2VPN, SAFI_EVPN) {
+        return Ok(MpReachNlri {
+            afi,
+            safi,
+            next_hop,
+            nlri: Vec::new(),
+            nlri_path_ids: Vec::new(),
+            evpn: evpn::decode_nlris(&data[pos..])?,
+        });
+    }
     let (nlri, nlri_path_ids) = decode_prefixes(afi, &data[pos..], add_path_afis.contains(&afi))?;
     Ok(MpReachNlri {
         afi,
@@ -1021,6 +1040,7 @@ fn decode_mp_reach(data: &[u8], add_path_afis: &HashSet<u16>) -> Result<MpReachN
         next_hop,
         nlri,
         nlri_path_ids,
+        evpn: Vec::new(),
     })
 }
 
@@ -1036,6 +1056,15 @@ fn decode_mp_unreach(
     }
     let afi = u16::from_be_bytes([data[0], data[1]]);
     let safi = data[2];
+    if (afi, safi) == (AFI_L2VPN, SAFI_EVPN) {
+        return Ok(MpUnreachNlri {
+            afi,
+            safi,
+            withdrawn: Vec::new(),
+            withdrawn_path_ids: Vec::new(),
+            evpn: evpn::decode_nlris(&data[3..])?,
+        });
+    }
     let (withdrawn, withdrawn_path_ids) =
         decode_prefixes(afi, &data[3..], add_path_afis.contains(&afi))?;
     Ok(MpUnreachNlri {
@@ -1043,6 +1072,7 @@ fn decode_mp_unreach(
         safi,
         withdrawn,
         withdrawn_path_ids,
+        evpn: Vec::new(),
     })
 }
 
@@ -1062,6 +1092,7 @@ fn encode_mp_reach(mp: &MpReachNlri) -> Vec<u8> {
     }
     out.push(0); // SNPA count — this crate never advertises any.
     out.extend_from_slice(&encode_prefixes(&mp.nlri, &mp.nlri_path_ids));
+    mp.evpn.iter().for_each(|n| evpn::encode_nlri(n, &mut out));
     out
 }
 
@@ -1070,6 +1101,7 @@ fn encode_mp_unreach(mp: &MpUnreachNlri) -> Vec<u8> {
     out.extend_from_slice(&mp.afi.to_be_bytes());
     out.push(mp.safi);
     out.extend_from_slice(&encode_prefixes(&mp.withdrawn, &mp.withdrawn_path_ids));
+    mp.evpn.iter().for_each(|n| evpn::encode_nlri(n, &mut out));
     out
 }
 
@@ -1427,6 +1459,19 @@ mod tests {
     }
 
     #[test]
+    fn open_with_evpn_capability_roundtrips() {
+        let mut open = build_open(65001, Ipv4Addr::new(3, 3, 3, 3), 90);
+        open.capabilities.push(Capability::MultiProtocol {
+            afi: AFI_L2VPN,
+            safi: SAFI_EVPN,
+        });
+        assert_eq!(
+            roundtrip(BgpMessage::Open(open.clone())),
+            BgpMessage::Open(open)
+        );
+    }
+
+    #[test]
     fn build_open_uses_as_trans_boundary_correctly() {
         assert_eq!(build_open(65535, Ipv4Addr::LOCALHOST, 90).my_as, 65535);
         assert_eq!(build_open(65536, Ipv4Addr::LOCALHOST, 90).my_as, AS_TRANS);
@@ -1630,6 +1675,7 @@ mod tests {
                 next_hop: "2001:db8::1".parse().unwrap(),
                 nlri: vec!["2001:db8:1::/48".parse().unwrap(), "::/0".parse().unwrap()],
                 nlri_path_ids: vec![],
+                evpn: vec![],
             }],
             ..empty_update()
         };
@@ -1647,6 +1693,7 @@ mod tests {
                 safi: 1,
                 withdrawn: vec!["2001:db8:1::/48".parse().unwrap()],
                 withdrawn_path_ids: vec![],
+                evpn: vec![],
             }],
             ..empty_update()
         };
@@ -1654,6 +1701,87 @@ mod tests {
             roundtrip(BgpMessage::Update(update.clone())),
             BgpMessage::Update(update)
         );
+    }
+
+    fn evpn_routes() -> Vec<EvpnNlri> {
+        let rd = [0, 0, 0xfd, 0xe8, 0, 0, 0, 1];
+        vec![
+            EvpnNlri::MacIp {
+                rd,
+                esi: [0; 10],
+                tag: 0,
+                mac: [0xaa, 0xbb, 0xcc, 0, 0, 1],
+                ip: Some("10.0.0.5".parse().unwrap()),
+                labels: vec![10_000],
+            },
+            EvpnNlri::InclusiveMulticast {
+                rd,
+                tag: 0,
+                origin: "192.0.2.1".parse().unwrap(),
+            },
+        ]
+    }
+
+    #[test]
+    fn mp_reach_evpn_roundtrips_with_extended_communities() {
+        // RT 65000:10000 (0x0002 type/subtype, 2-byte AS, 4-byte value).
+        let rt = 0x0002_fde8_0000_2710_u64;
+        let update = UpdateMessage {
+            attributes: Some(PathAttributes {
+                next_hop: Ipv4Addr::UNSPECIFIED,
+                extended_communities: vec![rt],
+                ..attrs(vec![65001], Some(100))
+            }),
+            mp_reach: vec![MpReachNlri {
+                afi: AFI_L2VPN,
+                safi: SAFI_EVPN,
+                next_hop: "192.0.2.1".parse().unwrap(),
+                nlri: vec![],
+                nlri_path_ids: vec![],
+                evpn: evpn_routes(),
+            }],
+            ..empty_update()
+        };
+        assert_eq!(
+            roundtrip(BgpMessage::Update(update.clone())),
+            BgpMessage::Update(update)
+        );
+    }
+
+    #[test]
+    fn mp_unreach_evpn_roundtrips() {
+        let update = UpdateMessage {
+            mp_unreach: vec![MpUnreachNlri {
+                afi: AFI_L2VPN,
+                safi: SAFI_EVPN,
+                withdrawn: vec![],
+                withdrawn_path_ids: vec![],
+                evpn: evpn_routes(),
+            }],
+            ..empty_update()
+        };
+        assert_eq!(
+            roundtrip(BgpMessage::Update(update.clone())),
+            BgpMessage::Update(update)
+        );
+    }
+
+    #[test]
+    fn mp_reach_l2vpn_with_other_safi_is_malformed() {
+        // Only SAFI 70 is understood for AFI 25; anything else must not be
+        // misread as a prefix list.
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&AFI_L2VPN.to_be_bytes());
+        wire.extend_from_slice(&[128, 4, 192, 0, 2, 1, 0]);
+        assert!(decode_mp_reach(&wire, &HashSet::new()).is_err());
+    }
+
+    #[test]
+    fn mp_reach_evpn_with_truncated_nlri_is_malformed() {
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&AFI_L2VPN.to_be_bytes());
+        wire.extend_from_slice(&[SAFI_EVPN, 4, 192, 0, 2, 1, 0, 3, 200]);
+        assert!(decode_mp_reach(&wire, &HashSet::new()).is_err());
     }
 
     #[test]
@@ -1670,6 +1798,7 @@ mod tests {
                 next_hop: "2001:db8::1".parse().unwrap(),
                 nlri: vec!["10.0.0.0/24".parse().unwrap()],
                 nlri_path_ids: vec![],
+                evpn: vec![],
             }],
             ..empty_update()
         };
