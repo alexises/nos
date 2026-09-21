@@ -3,8 +3,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use ipnet::IpNet;
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BroadcastDomainOp, LacpRate, LldpDestination, NetworkType,
-    NextHopMode, OspfCryptoAlgorithm, PortAggregateMode, Redistribute, RedistributeSource,
-    RedistributeTarget, SourceAddress, TransactionBase, VlanTag, REST_API_PORT_DEFAULT,
+    NextHopMode, OspfCryptoAlgorithm, PortAggregateMode, PortAggregateOp, Redistribute,
+    RedistributeSource, RedistributeTarget, SourceAddress, TransactionBase, VlanTag,
+    REST_API_PORT_DEFAULT,
 };
 
 /// A single field edit targeting a BGP instance.
@@ -411,6 +412,9 @@ pub enum SetTarget {
     /// EVPN edit: the parser builds the op itself (one variant instead of
     /// five parallel target/field types).
     BroadcastDomainEvpn(BroadcastDomainOp),
+    /// `set port-aggregate <name> {esi|lacp-system-id} <value>`: the parser
+    /// builds the op itself, like `BroadcastDomainEvpn`.
+    PortAggregateField(PortAggregateOp),
     /// Fully-qualified — works from anywhere in configuration mode. Upserts
     /// by `broadcast_domain` within the named switching profile.
     SwitchingProfileMember {
@@ -742,6 +746,8 @@ pub enum DeleteTarget {
     },
     /// The `delete` counterpart of `SetTarget::BroadcastDomainEvpn`.
     BroadcastDomainEvpn(BroadcastDomainOp),
+    /// The `delete` counterpart of `SetTarget::PortAggregateField`.
+    PortAggregateField(PortAggregateOp),
     SwitchingProfile {
         name: String,
     },
@@ -1139,6 +1145,32 @@ fn broadcast_domain_evpn_delete(name: &str, rest: &[&str]) -> Option<BroadcastDo
         ["redistribute", "from", "connected"] => {
             BroadcastDomainOp::ClearConnectedRedistribute { name }
         }
+        _ => return None,
+    })
+}
+
+/// The tail of `set port-aggregate <name> ...` for the ESI / LACP system-id fields.
+fn port_aggregate_field_set(name: &str, rest: &[&str]) -> Option<PortAggregateOp> {
+    let name = name.to_string();
+    Some(match rest {
+        ["esi", esi] => PortAggregateOp::SetEsi {
+            name,
+            esi: (*esi).to_string(),
+        },
+        ["lacp-system-id", id] => PortAggregateOp::SetLacpSystemId {
+            name,
+            system_id: (*id).to_string(),
+        },
+        _ => return None,
+    })
+}
+
+/// The tail of `delete port-aggregate <name> ...`.
+fn port_aggregate_field_delete(name: &str, rest: &[&str]) -> Option<PortAggregateOp> {
+    let name = name.to_string();
+    Some(match rest {
+        ["esi"] => PortAggregateOp::ClearEsi { name },
+        ["lacp-system-id"] => PortAggregateOp::ClearLacpSystemId { name },
         _ => return None,
     })
 }
@@ -1871,6 +1903,11 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 name, rest,
             )?))
         }
+        ["port-aggregate", name, rest @ ..] if port_aggregate_field_set(name, rest).is_some() => {
+            Command::Set(SetTarget::PortAggregateField(port_aggregate_field_set(
+                name, rest,
+            )?))
+        }
         ["community-alias", name, "value", value] => Command::Set(SetTarget::CommunityAliasValue {
             name: (*name).to_string(),
             value: (*value).to_string(),
@@ -2238,6 +2275,13 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
         {
             Command::Delete(DeleteTarget::BroadcastDomainEvpn(
                 broadcast_domain_evpn_delete(name, rest)?,
+            ))
+        }
+        ["port-aggregate", name, rest @ ..]
+            if port_aggregate_field_delete(name, rest).is_some() =>
+        {
+            Command::Delete(DeleteTarget::PortAggregateField(
+                port_aggregate_field_delete(name, rest)?,
             ))
         }
         ["switching-profile", name] => Command::Delete(DeleteTarget::SwitchingProfile {
@@ -4533,6 +4577,30 @@ mod tests {
             Command::parse("delete rest-api"),
             Command::Delete(DeleteTarget::RoutingTableRestApiRelative)
         );
+    }
+
+    #[test]
+    fn port_aggregate_esi_and_lacp_system_id() {
+        assert_eq!(
+            Command::parse("set port-aggregate bond1 esi 00:11:22:33:44:55:66:77:88:99"),
+            Command::Set(SetTarget::PortAggregateField(PortAggregateOp::SetEsi {
+                name: "bond1".to_string(),
+                esi: "00:11:22:33:44:55:66:77:88:99".to_string(),
+            }))
+        );
+        assert_eq!(
+            Command::parse("delete port-aggregate bond1 lacp-system-id"),
+            Command::Delete(DeleteTarget::PortAggregateField(
+                PortAggregateOp::ClearLacpSystemId {
+                    name: "bond1".to_string()
+                }
+            ))
+        );
+        // The aggregate itself is still deletable.
+        assert!(matches!(
+            Command::parse("delete port-aggregate bond1"),
+            Command::Delete(DeleteTarget::PortAggregate { .. })
+        ));
     }
 
     #[test]

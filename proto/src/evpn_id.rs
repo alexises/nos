@@ -78,6 +78,55 @@ pub fn parse_rt(text: &str) -> Option<u64> {
 /// subtype 0x0c, tunnel type 8).
 pub const ENCAP_VXLAN: u64 = 0x030c_0000_0000_0008;
 
+/// An Ethernet Segment Identifier (RFC 7432 §5): a type byte + 9 value bytes.
+pub type Esi = [u8; 10];
+
+/// `N` colon-separated hex bytes (`00:11:22:...`), exactly two digits each.
+fn parse_colon_hex<const N: usize>(text: &str) -> Option<[u8; N]> {
+    let mut out = [0u8; N];
+    let mut parts = text.split(':');
+    for byte in &mut out {
+        let p = parts.next()?;
+        if p.len() != 2 {
+            return None;
+        }
+        *byte = u8::from_str_radix(p, 16).ok()?;
+    }
+    parts.next().is_none().then_some(out)
+}
+
+/// An ESI in its text form, ten colon-separated hex bytes. All-zero is the
+/// reserved "single-homed" ESI, so it is not a valid configured value.
+#[must_use]
+pub fn parse_esi(text: &str) -> Option<Esi> {
+    parse_colon_hex(text).filter(|e: &Esi| e.iter().any(|b| *b != 0))
+}
+
+/// A unicast MAC address in its `aa:bb:cc:dd:ee:ff` text form.
+#[must_use]
+pub fn parse_mac(text: &str) -> Option<[u8; 6]> {
+    parse_colon_hex(text).filter(|m: &[u8; 6]| m[0] & 1 == 0)
+}
+
+#[must_use]
+pub fn format_esi(esi: &Esi) -> String {
+    esi.iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// The ES-Import Route Target (RFC 7432 §7.6, type 0x06 subtype 0x02) an
+/// Ethernet Segment route carries: the first six value bytes of the ESI.
+#[must_use]
+pub fn es_import_rt(esi: &Esi) -> u64 {
+    let mut b = [0u8; 8];
+    b[0] = 0x06;
+    b[1] = 0x02;
+    b[2..].copy_from_slice(&esi[1..7]);
+    u64::from_be_bytes(b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +155,34 @@ mod tests {
             Some(u64::from_be_bytes([1, 2, 192, 0, 2, 1, 0, 7]))
         );
         assert_eq!(parse_rt("65000"), None);
+    }
+
+    #[test]
+    fn esi_text_round_trips_and_rejects_bad_input() {
+        let esi = parse_esi("00:11:22:33:44:55:66:77:88:99").unwrap();
+        assert_eq!(
+            esi,
+            [0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99]
+        );
+        assert_eq!(format_esi(&esi), "00:11:22:33:44:55:66:77:88:99");
+        assert_eq!(parse_esi("00:00:00:00:00:00:00:00:00:00"), None);
+        assert_eq!(parse_esi("00:11:22"), None);
+        assert_eq!(parse_esi("00:11:22:33:44:55:66:77:88:99:aa"), None);
+        assert_eq!(parse_esi("0:11:22:33:44:55:66:77:88:99"), None);
+    }
+
+    #[test]
+    fn mac_must_be_unicast() {
+        assert_eq!(parse_mac("02:00:00:00:00:01"), Some([2, 0, 0, 0, 0, 1]));
+        assert_eq!(parse_mac("01:80:c2:00:00:02"), None);
+    }
+
+    #[test]
+    fn es_import_rt_is_esi_bytes_one_to_six() {
+        let esi = parse_esi("00:11:22:33:44:55:66:77:88:99").unwrap();
+        assert_eq!(
+            es_import_rt(&esi),
+            u64::from_be_bytes([6, 2, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66])
+        );
     }
 }

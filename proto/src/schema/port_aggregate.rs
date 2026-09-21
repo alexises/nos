@@ -74,6 +74,22 @@ pub struct PortAggregate {
     #[garde(skip)]
     pub lacp_rate: LacpRate,
 
+    /// The Ethernet Segment this bond attaches to (EVPN multi-homing, RFC
+    /// 7432): ten colon-separated hex bytes. Set the same value on every PE
+    /// the customer device is dual-homed to. `nos-fdbd` puts it on the Type-2
+    /// routes for MACs learned on this bond and elects a Designated Forwarder
+    /// among the PEs that share it.
+    #[serde(default)]
+    #[garde(custom(|v: &Option<String>, _ctx: &Config| valid_esi(v.as_deref())))]
+    pub esi: Option<String>,
+
+    /// Overrides `nos-lacpd`'s derived LACP Actor System ID for this bond, so
+    /// two PEs sharing an ESI can present the same actor to the customer
+    /// device. Only meaningful for a `Lacp`-mode aggregate.
+    #[serde(default)]
+    #[garde(custom(|v: &Option<String>, _ctx: &Config| valid_lacp_system_id(v.as_deref())))]
+    pub lacp_system_id: Option<String>,
+
     /// Names a `SwitchingProfile` trunking this bond into one or more
     /// `BroadcastDomain`s — same field, same meaning, as
     /// `Interface.switching_profile`.
@@ -87,6 +103,24 @@ pub struct PortAggregate {
     /// tag-0-is-untagged/native convention as `Interface.subinterfaces`.
     #[garde(dive, custom(|subs, _ctx: &Config| valid_subinterface_list(subs)))]
     pub subinterfaces: Vec<Subinterface>,
+}
+
+fn valid_esi(esi: Option<&str>) -> garde::Result {
+    match esi {
+        Some(e) if crate::evpn_id::parse_esi(e).is_none() => Err(garde::Error::new(
+            "esi must be ten colon-separated hex bytes, not all zero (00:11:22:33:44:55:66:77:88:99)",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn valid_lacp_system_id(id: Option<&str>) -> garde::Result {
+    match id {
+        Some(m) if crate::evpn_id::parse_mac(m).is_none() => Err(garde::Error::new(
+            "lacp-system-id must be a unicast MAC address (02:00:00:00:00:01)",
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn port_aggregate_name_valid(name: &String, ctx: &Config) -> garde::Result {
@@ -108,6 +142,17 @@ fn port_aggregate_name_valid(name: &String, ctx: &Config) -> garde::Result {
 /// here — `PortAggregate` has no loopback-style flat L3 fields to keep
 /// disjoint from `subinterfaces` in the first place.)
 pub(crate) fn valid_port_aggregates(aggregates: &[PortAggregate], ctx: &Config) -> garde::Result {
+    // One aggregate per Ethernet Segment on a PE: two bonds claiming the same
+    // ESI would make `nos-fdbd` unable to tell which port a MAC was learned on.
+    for (i, agg) in aggregates.iter().enumerate() {
+        if let Some(esi) = &agg.esi {
+            if aggregates[..i].iter().any(|o| o.esi.as_ref() == Some(esi)) {
+                return Err(garde::Error::new(format!(
+                    "esi {esi} is used by more than one port aggregate"
+                )));
+            }
+        }
+    }
     for agg in aggregates {
         if agg.subinterfaces.is_empty() {
             continue;
@@ -148,6 +193,8 @@ mod tests {
             name: name.to_string(),
             mode: PortAggregateMode::Xor, // arbitrary — mode has no bearing on the validators tested here
             lacp_rate: LacpRate::default(),
+            esi: None,
+            lacp_system_id: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
@@ -176,6 +223,36 @@ mod tests {
     #[test]
     fn dotted_name_fails() {
         let cfg = config_with(vec![aggregate("bond1.100")]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn esi_must_parse_and_be_unique() {
+        let mut a = aggregate("bond1");
+        a.esi = Some("00:11:22:33:44:55:66:77:88:99".to_string());
+        config_with(vec![a.clone()])
+            .validate_with(&config_with(vec![a.clone()]))
+            .unwrap();
+
+        let mut bad = a.clone();
+        bad.esi = Some("00:11".to_string());
+        let cfg = config_with(vec![bad]);
+        assert!(cfg.validate_with(&cfg).is_err());
+
+        let mut b = aggregate("bond2");
+        b.esi = a.esi.clone();
+        let cfg = config_with(vec![a, b]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn lacp_system_id_must_be_a_unicast_mac() {
+        let mut a = aggregate("bond1");
+        a.lacp_system_id = Some("02:00:00:00:00:01".to_string());
+        let cfg = config_with(vec![a.clone()]);
+        cfg.validate_with(&cfg).unwrap();
+        a.lacp_system_id = Some("01:00:00:00:00:01".to_string());
+        let cfg = config_with(vec![a]);
         assert!(cfg.validate_with(&cfg).is_err());
     }
 

@@ -230,6 +230,8 @@ mod tests {
             name: name.to_string(),
             mode: PortAggregateMode::Xor,
             lacp_rate: crate::schema::LacpRate::default(),
+            esi: None,
+            lacp_system_id: None,
             switching_profile: None,
             mtu: None,
             subinterfaces,

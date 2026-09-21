@@ -401,6 +401,28 @@ pub struct Args {
     #[arg(long)]
     pub port_aggregate_mtu: Option<u32>,
 
+    /// If set (requires `--port-aggregate`), sets the aggregate's EVPN
+    /// Ethernet Segment Identifier (`PortAggregateOp::SetEsi`).
+    #[arg(long)]
+    pub port_aggregate_esi: Option<String>,
+
+    /// If set (requires `--port-aggregate`), removes the aggregate's ESI
+    /// (`PortAggregateOp::ClearEsi`).
+    #[arg(long)]
+    pub delete_port_aggregate_esi: bool,
+
+    /// If set (requires `--port-aggregate`), overrides the aggregate's LACP
+    /// Actor System ID (`PortAggregateOp::SetLacpSystemId`).
+    #[arg(long)]
+    pub lacp_system_id: Option<String>,
+
+    /// If set (requires `--port-aggregate`), makes the aggregate an untagged
+    /// member of this broadcast domain: ensures the domain, a switching
+    /// profile `<aggregate>-sp` holding it, and assigns that profile to the
+    /// aggregate.
+    #[arg(long)]
+    pub port_aggregate_untagged_domain: Option<String>,
+
     /// One interface name per repetition, ensured and enslaved into
     /// `--port-aggregate` (`InterfaceOp::Ensure` + `InterfaceOp::SetPortAggregate`).
     /// Only meaningful with `--port-aggregate` also set.
@@ -1128,6 +1150,43 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 mtu,
             }));
         }
+        if let Some(esi) = args.port_aggregate_esi.clone() {
+            ops.push(ConfigOp::PortAggregate(PortAggregateOp::SetEsi {
+                name: name.clone(),
+                esi,
+            }));
+        }
+        if args.delete_port_aggregate_esi {
+            ops.push(ConfigOp::PortAggregate(PortAggregateOp::ClearEsi {
+                name: name.clone(),
+            }));
+        }
+        if let Some(system_id) = args.lacp_system_id.clone() {
+            ops.push(ConfigOp::PortAggregate(PortAggregateOp::SetLacpSystemId {
+                name: name.clone(),
+                system_id,
+            }));
+        }
+        if let Some(domain) = args.port_aggregate_untagged_domain.clone() {
+            let profile = format!("{name}-sp");
+            ops.push(ConfigOp::BroadcastDomain(BroadcastDomainOp::Ensure {
+                name: domain.clone(),
+            }));
+            ops.push(ConfigOp::SwitchingProfile(SwitchingProfileOp::Ensure {
+                name: profile.clone(),
+            }));
+            ops.push(ConfigOp::SwitchingProfile(SwitchingProfileOp::AddMember {
+                name: profile.clone(),
+                broadcast_domain: domain,
+                tag: VlanTag::Untagged,
+            }));
+            ops.push(ConfigOp::PortAggregate(
+                PortAggregateOp::SetSwitchingProfile {
+                    name: name.clone(),
+                    switching_profile: profile,
+                },
+            ));
+        }
         for member in &args.port_aggregate_members {
             ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
                 name: member.clone(),
@@ -1138,11 +1197,15 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             }));
         }
     } else if args.port_aggregate_mtu.is_some()
+        || args.port_aggregate_esi.is_some()
+        || args.delete_port_aggregate_esi
+        || args.lacp_system_id.is_some()
+        || args.port_aggregate_untagged_domain.is_some()
         || args.lacp_rate.is_some()
         || !args.port_aggregate_members.is_empty()
     {
         bail!(
-            "--port-aggregate-mtu/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
+            "--port-aggregate-mtu/--port-aggregate-esi/--lacp-system-id/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
         );
     }
 

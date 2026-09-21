@@ -60,6 +60,15 @@ pub const EVPN_HOST_IP: &str = "198.51.100.7";
 pub const EVPN_SVI_ADDRESS: &str = "203.0.113.1/24";
 pub const EVPN_SVI_IP: &str = "203.0.113.1";
 pub const EVPN_REMOTE_IP: &str = "192.0.2.10";
+/// `lacp`: each router's configured LACP Actor System ID (`lacp-system-id`).
+pub const LACP_SYSTEM_ID_A: &str = "02:00:00:00:0a:01";
+pub const LACP_SYSTEM_ID_B: &str = "02:00:00:00:0b:01";
+/// `evpn-esi`: the Ethernet Segment on router-a's bond, the origin address of
+/// the peer PE GoBGP plays (below router-a's, so it wins the DF election for
+/// the even `EVPN_VNI`), and a MAC pinned behind the bond.
+pub const ESI: &str = "00:11:22:33:44:55:66:77:88:99";
+pub const ESI_PEER_ORIGIN: &str = "10.50.0.1";
+pub const ESI_MAC: &str = "02:00:00:00:00:0e";
 pub const ASN_B: u32 = 65002;
 /// Only `route-server` (router-b and router-c must be in distinct ASes from
 /// each other and from router-a) and `ospf-dr`'s router-c use this.

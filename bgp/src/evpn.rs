@@ -453,6 +453,8 @@ pub fn format_ext_community(c: u64) -> String {
             u16::from_be_bytes([b[6], b[7]])
         ),
         (0x03, _) if b[1] == 0x0c => format!("encap:{}", u16::from_be_bytes([b[6], b[7]])),
+        // RFC 7432 §7.6: the ESI's value bytes 1..7.
+        (0x06, _) if b[1] == 0x02 => format!("ES-Import:{}", hex(&b[2..])),
         _ => format!("0x{c:016x}"),
     }
 }

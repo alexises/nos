@@ -7,6 +7,9 @@
 //! `fdb_push_client`. Deltas only: one changed MAC touches one NLRI per peer,
 //! never the whole table (see `apply_evpn_local`).
 //!
+//! A Type-2's ESI rides in `WireRoute::esi`; Type-4 (Ethernet Segment) routes
+//! are originated and received like any other key.
+//!
 //! ponytail: EVPN bypasses export policy (RPL's `Input` is prefix-shaped) and
 //! the local routes are announced verbatim — no best-path between a local and
 //! a received route for the same NLRI, no MAC mobility.
@@ -42,7 +45,7 @@ fn nlri_of(r: &WireRoute) -> EvpnNlri {
     match &r.key {
         EvpnKey::Mac { rd, mac } => EvpnNlri::MacIp {
             rd: *rd,
-            esi: [0; 10],
+            esi: r.esi,
             tag: 0,
             mac: *mac,
             ip: None,
@@ -50,7 +53,7 @@ fn nlri_of(r: &WireRoute) -> EvpnNlri {
         },
         EvpnKey::MacIp { rd, mac, ip } => EvpnNlri::MacIp {
             rd: *rd,
-            esi: [0; 10],
+            esi: r.esi,
             tag: 0,
             mac: *mac,
             ip: Some(*ip),
@@ -59,6 +62,11 @@ fn nlri_of(r: &WireRoute) -> EvpnNlri {
         EvpnKey::Imet { rd, origin } => EvpnNlri::InclusiveMulticast {
             rd: *rd,
             tag: 0,
+            origin: *origin,
+        },
+        EvpnKey::EthernetSegment { rd, esi, origin } => EvpnNlri::EthernetSegment {
+            rd: *rd,
+            esi: *esi,
             origin: *origin,
         },
     }
@@ -83,7 +91,7 @@ fn advertise(outbox: &PeerOutbox, local_asn: u32, r: &WireRoute) -> Option<Adver
                 vni: r.vni,
                 tunnel_ip: *origin,
             }),
-            EvpnKey::Mac { .. } | EvpnKey::MacIp { .. } => None,
+            EvpnKey::Mac { .. } | EvpnKey::MacIp { .. } | EvpnKey::EthernetSegment { .. } => None,
         },
     })
 }
@@ -100,7 +108,9 @@ impl BgpRib {
                     .insert(domain.to_string(), new.clone())
                     .unwrap_or_default();
                 for (key, r) in &old {
-                    if !new.contains_key(key) {
+                    // The ESI is part of a Type-2's wire identity, so a route
+                    // that moved onto/off a segment withdraws its old NLRI.
+                    if new.get(key).map(nlri_of) != Some(nlri_of(r)) {
                         self.withdraw_evpn(&nlri_of(r));
                     }
                 }
@@ -109,10 +119,14 @@ impl BgpRib {
                 }
             }
             EvpnUpdate::Add(r) => {
-                self.evpn_local
+                let old = self
+                    .evpn_local
                     .entry(domain.to_string())
                     .or_default()
                     .insert(r.key.clone(), r.clone());
+                if let Some(old) = old.filter(|o| nlri_of(o) != nlri_of(&r)) {
+                    self.withdraw_evpn(&nlri_of(&old));
+                }
                 self.announce_evpn(&r);
             }
             EvpnUpdate::Remove(key) => {
@@ -165,15 +179,16 @@ impl BgpRib {
         }
     }
 
-    /// Every received Type-2/Type-3 route, across peers, as the wire shape
+    /// Every received Type-2/3/4 route, across peers, as the wire shape
     /// `nos-fdbd` consumes. A MAC (or MAC+IP) learned from two peers collapses
     /// to one entry (last one iterated wins) — see `EvpnKey`.
     pub fn evpn_push_snapshot(&self) -> HashMap<EvpnKey, WireRoute> {
         let mut out = HashMap::new();
         for (nlri, route) in self.evpn_adj_rib_in.values().flatten() {
-            let (key, vni) = match nlri {
+            let (key, vni, esi) = match nlri {
                 EvpnNlri::MacIp {
                     rd,
+                    esi,
                     mac,
                     ip,
                     labels,
@@ -188,6 +203,7 @@ impl BgpRib {
                         None => EvpnKey::Mac { rd: *rd, mac: *mac },
                     },
                     labels.first().copied().unwrap_or(0),
+                    *esi,
                 ),
                 EvpnNlri::InclusiveMulticast { rd, origin, .. } => (
                     EvpnKey::Imet {
@@ -195,6 +211,16 @@ impl BgpRib {
                         origin: *origin,
                     },
                     route.pmsi_vni.unwrap_or(0),
+                    [0; 10],
+                ),
+                EvpnNlri::EthernetSegment { rd, esi, origin } => (
+                    EvpnKey::EthernetSegment {
+                        rd: *rd,
+                        esi: *esi,
+                        origin: *origin,
+                    },
+                    0,
+                    *esi,
                 ),
                 _ => continue,
             };
@@ -205,6 +231,7 @@ impl BgpRib {
                     vni,
                     next_hop: route.next_hop,
                     ext_communities: route.extended_communities.clone(),
+                    esi,
                 },
             );
         }

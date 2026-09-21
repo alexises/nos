@@ -76,6 +76,22 @@ fn changed_fields(base: &PortAggregate, candidate: &PortAggregate) -> Vec<FieldD
             new: Some(format!("{:?}", candidate.lacp_rate)),
         });
     }
+    for (label, old, new) in [
+        ("esi", &base.esi, &candidate.esi),
+        (
+            "lacp-system-id",
+            &base.lacp_system_id,
+            &candidate.lacp_system_id,
+        ),
+    ] {
+        if old != new {
+            fields.push(FieldDiff {
+                label: label.to_string(),
+                old: Some(old.clone().unwrap_or_else(|| "unset".to_string())),
+                new: Some(new.clone().unwrap_or_else(|| "unset".to_string())),
+            });
+        }
+    }
     if base.switching_profile != candidate.switching_profile {
         fields.push(FieldDiff {
             label: "switching-profile".to_string(),
@@ -155,6 +171,8 @@ mod tests {
             name: name.to_string(),
             mode: PortAggregateMode::Xor,
             lacp_rate: crate::schema::LacpRate::default(),
+            esi: None,
+            lacp_system_id: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),

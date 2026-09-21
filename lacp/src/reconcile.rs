@@ -141,7 +141,13 @@ async fn resync(
             .filter(|i| i.port_aggregate.as_deref() == Some(name))
             .map(|i| i.name.clone())
             .collect();
-        manager.reconcile(members, agg_cfg.lacp_rate);
+        // Config validation guarantees it parses; a bad value can only mean a
+        // hand-edited file, which falls back to the derived id.
+        let system_id = agg_cfg
+            .lacp_system_id
+            .as_deref()
+            .and_then(nos_proto::evpn_id::parse_mac);
+        manager.reconcile(members, agg_cfg.lacp_rate, system_id);
     }
 
     debug!(count = lacp_names.len(), "reconciled lacp aggregates");

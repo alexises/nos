@@ -47,12 +47,16 @@ pub struct AggregateManager {
     /// its MAC to the bond, and every other slave takes it over), so a
     /// port-derived ID changed whenever enslavement order did, restarting
     /// every link in a loop.
-    system_id: [u8; 6],
+    system_id: Mutex<[u8; 6]>,
+    /// The id used when config gives no override — computed once (it reads
+    /// the hostname and machine-id).
+    derived_system_id: [u8; 6],
     selection_task: JoinHandle<()>,
 }
 
 impl AggregateManager {
     pub fn new(name: &str, key: u16, push_tx: mpsc::Sender<LacpAggregateMembers>) -> Arc<Self> {
+        let derived = local_system_id();
         let observations = Arc::new(Mutex::new(HashMap::new()));
         let changed = Arc::new(Notify::new());
         let selected_txs: SelectedTxs = Arc::new(Mutex::new(HashMap::new()));
@@ -71,7 +75,8 @@ impl AggregateManager {
             selected_txs,
             observations,
             changed,
-            system_id: local_system_id(),
+            system_id: Mutex::new(derived),
+            derived_system_id: derived,
             selection_task,
         })
     }
@@ -80,12 +85,26 @@ impl AggregateManager {
     /// currently-running set, spawning/stopping `link::run` tasks as needed.
     /// A changed `rate` restarts every member (each renegotiates from
     /// scratch, briefly dropping out of the active set).
-    pub fn reconcile(&self, mut desired_members: Vec<String>, rate: LacpRate) {
+    ///
+    /// `system_id` overrides the derived Actor System ID (config's
+    /// `lacp-system-id`, so two PEs sharing an Ethernet Segment can present
+    /// the same actor); `None` goes back to the derived one. A change
+    /// restarts every member, like a rate change: the id is fixed for a
+    /// link task's lifetime.
+    pub fn reconcile(
+        &self,
+        mut desired_members: Vec<String>,
+        rate: LacpRate,
+        system_id: Option<[u8; 6]>,
+    ) {
         desired_members.sort();
+        let system_id = system_id.unwrap_or(self.derived_system_id);
         let rate_changed = {
             let mut current = self.rate.lock().unwrap();
-            let changed = *current != rate;
+            let mut id = self.system_id.lock().unwrap();
+            let changed = *current != rate || *id != system_id;
             *current = rate;
+            *id = system_id;
             changed
         };
 
@@ -105,8 +124,6 @@ impl AggregateManager {
             selected_txs.remove(&interface);
             observations.remove(&interface);
         }
-
-        let system_id = self.system_id;
 
         for interface in &desired_members {
             // A task that ended on its own (its socket failed hard, e.g. the
@@ -160,7 +177,7 @@ impl AggregateManager {
         ports.sort_by(|a, b| a.interface.cmp(&b.interface));
         PortAggregateLacpSummary {
             aggregate: self.name.clone(),
-            actor_system_id: self.system_id,
+            actor_system_id: *self.system_id.lock().unwrap(),
             actor_key: self.key,
             rate: *self.rate.lock().unwrap(),
             ports,
@@ -311,6 +328,19 @@ mod tests {
         assert_ne!(a, derive_system_id("router-b", "m1"));
         assert_ne!(a, derive_system_id("router-a", "m2"));
         assert_eq!(a[0], 0x02);
+    }
+
+    #[tokio::test]
+    async fn configured_system_id_overrides_the_derived_one_and_reverts() {
+        let (tx, _rx) = mpsc::channel(1);
+        let agg = AggregateManager::new("bond1", 1, tx);
+        let derived = agg.summary().actor_system_id;
+        let mine = [0x02, 0, 0, 0, 0, 0x99];
+        agg.reconcile(Vec::new(), LacpRate::Slow, Some(mine));
+        assert_eq!(agg.summary().actor_system_id, mine);
+        agg.reconcile(Vec::new(), LacpRate::Slow, None);
+        assert_eq!(agg.summary().actor_system_id, derived);
+        agg.shutdown();
     }
 
     #[test]

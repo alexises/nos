@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use async_trait::async_trait;
@@ -63,10 +63,21 @@ pub trait FdbDriver: Send + Sync {
     async fn add_flood(&self, vni: u32, vtep: IpAddr) -> Result<(), DriverError>;
     async fn del_flood(&self, vni: u32, vtep: IpAddr) -> Result<(), DriverError>;
 
-    /// MACs the bridge learned (or an operator pinned) on its local ports:
-    /// not `extern_learn`, not on the VXLAN port, not the ports' own
-    /// (permanent/local) addresses, no group addresses.
-    async fn local_macs(&self, bridge: &str, vni: u32) -> Result<BTreeSet<Mac>, DriverError>;
+    /// MACs the bridge learned (or an operator pinned) on its local ports,
+    /// each with the name of the port it sits behind: not `extern_learn`, not
+    /// on the VXLAN port, not the ports' own (permanent/local) addresses, no
+    /// group addresses.
+    async fn local_macs(
+        &self,
+        bridge: &str,
+        vni: u32,
+    ) -> Result<BTreeMap<Mac, String>, DriverError>;
+
+    /// Turns flooding of unknown-unicast, multicast and broadcast frames to
+    /// the bridge port `port` on or off (`bridge link set ... flood`). How a
+    /// non-Designated-Forwarder PE stops delivering BUM traffic to an
+    /// Ethernet Segment. `Err` while the port doesn't exist (yet).
+    async fn set_port_flood(&self, port: &str, flood: bool) -> Result<(), DriverError>;
 
     /// IP-to-MAC bindings (ARP / IPv6 ND) on the bridge itself, i.e. the SVI's
     /// neighbour table: not `extern_learn` (our own `set_neigh` writes — the

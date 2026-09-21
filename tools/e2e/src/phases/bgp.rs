@@ -844,3 +844,212 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
     }
     bail!("nos-fdbd never logged deleting {vxlan}")
 }
+
+/// GoBGP's spelling of `ESI` (`arbitrary` + the nine value bytes).
+const GOBGP_ESI: [&str; 2] = ["arbitrary", "11:22:33:44:55:66:77:88:99"];
+/// How GoBGP prints that ESI in its RIB.
+const GOBGP_ESI_TEXT: &str = "ESI_ARBITRARY | 11:22:33:44:55:66:77:88:99";
+
+/// EVPN multi-homing (RFC 7432 §8): a port aggregate with an `esi` that is an
+/// untagged member of the EVPN broadcast domain.
+///
+/// A MAC pinned behind the bond is originated as a Type-2 carrying the ESI, a
+/// MAC behind an ordinary port keeps ESI 0, and the domain originates a
+/// Type-4 Ethernet Segment route — all seen by GoBGP. GoBGP then plays a
+/// second PE on the segment with a lower address, which wins the DF election
+/// for the (even) VNI: router-a must become the non-DF and turn flooding off on
+/// the bond in the real kernel (read back with the helper's `bridge -d link`);
+/// when that PE's Type-4 is withdrawn router-a is the DF again and floods.
+/// Clearing the ESI while non-DF must restore flooding and withdraw the
+/// Type-4 and the Type-2's ESI. Control plane and kernel port state only, not
+/// forwarding.
+pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
+    evpn_speaker(w).await?;
+    w.connect_bond_networks().await?;
+    let a = w.a()?;
+
+    let mut flags = evpn_flags();
+    flags.extend(strings(&[
+        "--broadcast-domain",
+        EVPN_DOMAIN,
+        "--evpn-vni",
+        &EVPN_VNI.to_string(),
+        "--evpn-rd",
+        EVPN_RD,
+        "--evpn-rt-import",
+        EVPN_RT_IMPORT,
+        "--evpn-rt-export",
+        EVPN_RT_EXPORT,
+        "--evpn-vtep-source-interface",
+        "eth0",
+        "--evpn-redistribute-bgp",
+        "r1",
+        "--port-aggregate",
+        "bond1",
+        "--port-aggregate-esi",
+        ESI,
+        "--port-aggregate-untagged-domain",
+        EVPN_DOMAIN,
+        "--enslave-interface-into-port-aggregate",
+        "eth1",
+        "--enslave-interface-into-port-aggregate",
+        "eth2",
+    ]));
+    a.provision_flags(&flags).await?;
+    let vxlan = format!("vx{EVPN_VNI}");
+    a.wait(&format!(
+        "vxlan device ready domain={EVPN_DOMAIN} vni={EVPN_VNI} vxlan={vxlan}"
+    ))
+    .await?;
+
+    // The kernel names the bond from nos-interfaced's registry: ask for it.
+    let mut bond = String::new();
+    for _ in 0..30 {
+        let body = a
+            .rest_expect(Method::GET, "/v1/port-aggregates", None, 200)
+            .await?;
+        let aggregates: serde_json::Value = serde_json::from_str(&body)?;
+        if let Some(name) = aggregates
+            .as_array()
+            .and_then(|v| v.iter().find(|s| s["name"] == "bond1"))
+            .and_then(|s| s["bond_name"].as_str())
+        {
+            bond = name.to_string();
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if bond.is_empty() {
+        bail!("nos-interfaced never created a bond for bond1");
+    }
+    let role = |r: &str| format!("df elected domain={EVPN_DOMAIN} esi={ESI} port={bond} role={r}");
+    let flooding =
+        |on: bool| format!("segment port flooding set domain={EVPN_DOMAIN} port={bond} flood={on}");
+
+    log("alone on the segment: router-a is the DF and the bond floods");
+    a.wait(&role("df")).await?;
+    a.wait(&flooding(true)).await?;
+
+    log("pinning a MAC behind the bond and another behind an ordinary port");
+    let body = a
+        .rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
+        .await?;
+    let fdb: serde_json::Value = serde_json::from_str(&body)?;
+    let bridge = fdb["bridge"]
+        .as_str()
+        .context("show fdb has no bridge name")?
+        .to_string();
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    netns_a(w, &["ip", "link", "add", EVPN_PORT, "type", "dummy"]).await?;
+    netns_a(w, &["ip", "link", "set", EVPN_PORT, "master", &bridge]).await?;
+    netns_a(w, &["ip", "link", "set", EVPN_PORT, "up"]).await?;
+    for (mac, dev) in [(ESI_MAC, bond.as_str()), (EVPN_LOCAL_MAC, EVPN_PORT)] {
+        netns_a(
+            w,
+            &["bridge", "fdb", "add", mac, "dev", dev, "master", "static"],
+        )
+        .await?;
+    }
+    a.wait(&format!(
+        "local mac learned domain={EVPN_DOMAIN} mac={ESI_MAC} port={bond}"
+    ))
+    .await?;
+    a.wait(&format!(
+        "local mac learned domain={EVPN_DOMAIN} mac={EVPN_LOCAL_MAC} port={EVPN_PORT}"
+    ))
+    .await?;
+
+    log("GoBGP sees the ESI on the Type-2 behind the bond, none on the other, and a Type-4");
+    gobgp_evpn_rib(w, "showed the segment's Type-2", |rib| {
+        rib.lines()
+            .any(|l| l.contains(ESI_MAC) && l.contains(GOBGP_ESI_TEXT))
+    })
+    .await?;
+    gobgp_evpn_rib(w, "showed the other MAC without an ESI", |rib| {
+        rib.lines()
+            .any(|l| l.contains(EVPN_LOCAL_MAC) && !l.contains(GOBGP_ESI_TEXT))
+    })
+    .await?;
+    let es_route = |rib: &str| {
+        rib.lines().any(|l| {
+            l.contains("[type:esi]")
+                && l.contains(&format!("rd:{EVPN_RD}"))
+                && l.contains(GOBGP_ESI_TEXT)
+                && l.contains(&format!("ip:{IP_A}"))
+        })
+    };
+    gobgp_evpn_rib(w, "showed router-a's Type-4", es_route).await?;
+    let body = a
+        .rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
+        .await?;
+    let table: serde_json::Value = serde_json::from_str(&body)?;
+    if table["segments"][0]["designated_forwarder"] != true || table["segments"][0]["port"] != bond
+    {
+        bail!("show fdb does not list the segment with router-a as DF: {body}");
+    }
+
+    let peer_es = |verb: &'static str| {
+        let mut v = strings(&["global", "rib", verb, "-a", "evpn", "esi", ESI_PEER_ORIGIN]);
+        v.push("esi".to_string());
+        v.extend(strings(&GOBGP_ESI));
+        v.extend(strings(&["rd", "65010:1"]));
+        if verb == "add" {
+            v.extend(strings(&["rt", "65010:1", "encap", "vxlan"]));
+        }
+        v
+    };
+    // Reads the real bridge port back until its flood flags are as wanted.
+    let port_flood = |on: bool| {
+        let (w, bond) = (&*w, bond.clone());
+        async move {
+            let want = if on { "on" } else { "off" };
+            let mut last = String::new();
+            for _ in 0..30 {
+                last = netns_a(w, &["bridge", "-d", "link", "show", "dev", &bond]).await?;
+                if last.contains(&format!(" flood {want}"))
+                    && last.contains(&format!("mcast_flood {want}"))
+                {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            bail!("bridge port {bond} never read flood {want}: {last}")
+        }
+    };
+    port_flood(true).await?;
+
+    log("a second PE on the segment with a lower address wins the election");
+    let base = a.count(&role("non-df"));
+    gobgp_owned(w, peer_es("add")).await?;
+    a.wait_new(&role("non-df"), base, 30).await?;
+    a.wait(&flooding(false)).await?;
+    port_flood(false).await?;
+
+    log("its Type-4 withdrawn: router-a is the DF again and the bond floods");
+    let base = a.count(&role("df"));
+    gobgp_owned(w, peer_es("del")).await?;
+    a.wait_new(&role("df"), base, 30).await?;
+    port_flood(true).await?;
+
+    log("back to non-DF, then clearing the ESI restores flooding and withdraws it");
+    let base = a.count(&role("non-df"));
+    gobgp_owned(w, peer_es("add")).await?;
+    a.wait_new(&role("non-df"), base, 30).await?;
+    port_flood(false).await?;
+    let mut clear = flags.clone();
+    let at = clear
+        .iter()
+        .position(|f| f == "--port-aggregate-esi")
+        .context("the ESI flag is in the base flags")?;
+    clear.drain(at..=at + 1);
+    clear.push("--delete-port-aggregate-esi".to_string());
+    a.provision_flags(&clear).await?;
+    port_flood(true).await?;
+    gobgp_evpn_rib(w, "dropped router-a's Type-4 and the Type-2's ESI", |rib| {
+        !es_route(rib)
+            && rib
+                .lines()
+                .any(|l| l.contains(ESI_MAC) && !l.contains(GOBGP_ESI_TEXT))
+    })
+    .await
+}

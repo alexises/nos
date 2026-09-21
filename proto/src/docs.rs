@@ -230,6 +230,10 @@ pub enum Topic {
     ClearInterfacePortAggregate,
     /// `ConfigOp::PortAggregate(PortAggregateOp::SetLacpRate)`
     SetPortAggregateLacpRate,
+    /// `ConfigOp::PortAggregate(PortAggregateOp::SetEsi)` / `ClearEsi`
+    SetPortAggregateEsi,
+    /// `ConfigOp::PortAggregate(PortAggregateOp::SetLacpSystemId)` / `ClearLacpSystemId`
+    SetPortAggregateLacpSystemId,
     /// `ConfigOp::Interface(InterfaceOp::SetLldpDestination)`
     SetInterfaceLldpDestination,
     /// `ConfigOp::Lldp(LldpOp::SetTxInterval)`

@@ -1,5 +1,6 @@
 pub mod bgp_client;
 pub mod config_client;
+pub mod df;
 pub mod driver;
 pub mod fdb;
 pub mod interface_client;

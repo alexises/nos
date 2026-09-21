@@ -44,6 +44,20 @@ pub enum PortAggregateOp {
     Delete {
         name: String,
     },
+    SetEsi {
+        name: String,
+        esi: String,
+    },
+    ClearEsi {
+        name: String,
+    },
+    SetLacpSystemId {
+        name: String,
+        system_id: String,
+    },
+    ClearLacpSystemId {
+        name: String,
+    },
 }
 
 impl PortAggregateOp {
@@ -55,6 +69,8 @@ impl PortAggregateOp {
                         name: name.clone(),
                         mode: *mode,
                         lacp_rate: LacpRate::default(),
+                        esi: None,
+                        lacp_system_id: None,
                         switching_profile: None,
                         mtu: None,
                         subinterfaces: Vec::new(),
@@ -90,6 +106,22 @@ impl PortAggregateOp {
                 find_aggregate_mut(config, name)?.lacp_rate = *rate;
                 Ok(())
             }
+            PortAggregateOp::SetEsi { name, esi } => {
+                find_aggregate_mut(config, name)?.esi = Some(esi.clone());
+                Ok(())
+            }
+            PortAggregateOp::ClearEsi { name } => {
+                find_aggregate_mut(config, name)?.esi = None;
+                Ok(())
+            }
+            PortAggregateOp::SetLacpSystemId { name, system_id } => {
+                find_aggregate_mut(config, name)?.lacp_system_id = Some(system_id.clone());
+                Ok(())
+            }
+            PortAggregateOp::ClearLacpSystemId { name } => {
+                find_aggregate_mut(config, name)?.lacp_system_id = None;
+                Ok(())
+            }
             PortAggregateOp::Delete { name } => {
                 let before = config.port_aggregates.len();
                 config.port_aggregates.retain(|a| &a.name != name);
@@ -122,6 +154,8 @@ mod tests {
             name: name.to_string(),
             mode: PortAggregateMode::Xor,
             lacp_rate: LacpRate::default(),
+            esi: None,
+            lacp_system_id: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
@@ -211,6 +245,37 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.port_aggregates[0].lacp_rate, LacpRate::Fast);
+    }
+
+    #[test]
+    fn set_and_clear_esi_and_lacp_system_id() {
+        let mut cfg = Config {
+            port_aggregates: vec![aggregate("bond1")],
+            ..Default::default()
+        };
+        let name = "bond1".to_string();
+        PortAggregateOp::SetEsi {
+            name: name.clone(),
+            esi: "00:11:22:33:44:55:66:77:88:99".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        PortAggregateOp::SetLacpSystemId {
+            name: name.clone(),
+            system_id: "02:00:00:00:00:01".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert!(cfg.port_aggregates[0].esi.is_some());
+        assert!(cfg.port_aggregates[0].lacp_system_id.is_some());
+        PortAggregateOp::ClearEsi { name: name.clone() }
+            .apply(&mut cfg)
+            .unwrap();
+        PortAggregateOp::ClearLacpSystemId { name }
+            .apply(&mut cfg)
+            .unwrap();
+        assert_eq!(cfg.port_aggregates[0].esi, None);
+        assert_eq!(cfg.port_aggregates[0].lacp_system_id, None);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! The real backend: a VXLAN device per domain plus its bridge FDB, over
 //! `rtnetlink`. Idempotent throughout — see `FdbDriver`.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
 use std::sync::Mutex;
 
@@ -11,7 +11,10 @@ use netlink_packet_core::{
     NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_APPEND, NLM_F_CREATE, NLM_F_REPLACE,
     NLM_F_REQUEST,
 };
-use rtnetlink::packet_route::link::{InfoData, InfoVxlan, LinkAttribute, LinkInfo, LinkMessage};
+use rtnetlink::packet_route::link::{
+    InfoBridgePort, InfoData, InfoPortData, InfoPortKind, InfoVxlan, LinkAttribute, LinkInfo,
+    LinkMessage,
+};
 use rtnetlink::packet_route::neighbour::{
     NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
 };
@@ -53,6 +56,21 @@ impl LinuxFdbDriver {
             .execute();
         match links.try_next().await {
             Ok(link) => Ok(link),
+            Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -ENODEV => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The name of the link with `index` (`None` if it vanished meanwhile).
+    async fn link_name(&self, index: u32) -> Result<Option<String>, DriverError> {
+        let mut links = self.handle.link().get().match_index(index).execute();
+        match links.try_next().await {
+            Ok(link) => Ok(link.and_then(|l| {
+                l.attributes.into_iter().find_map(|a| match a {
+                    LinkAttribute::IfName(n) => Some(n),
+                    _ => None,
+                })
+            })),
             Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -ENODEV => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -299,7 +317,44 @@ impl FdbDriver for LinuxFdbDriver {
         self.neigh(msg, true, 0, ENOENT).await
     }
 
-    async fn local_macs(&self, bridge: &str, vni: u32) -> Result<BTreeSet<Mac>, DriverError> {
+    async fn set_port_flood(&self, port: &str, flood: bool) -> Result<(), DriverError> {
+        let link = self
+            .find_link(port)
+            .await?
+            .ok_or_else(|| DriverError::Other(format!("port {port} does not exist yet")))?;
+        // `ip link set dev <port> type bridge_slave flood .. mcast_flood ..
+        // bcast_flood ..`: an RTM_NEWLINK (not SETLINK — only the newlink path
+        // reaches the master's `slave_changelink`) carrying the port data. Only the
+        // bridge's own ports accept it (EOPNOTSUPP otherwise), so a bond that
+        // isn't enslaved yet is an error the tick retries.
+        let mut msg = LinkMessage::default();
+        msg.header.index = link.header.index;
+        msg.attributes.push(LinkAttribute::LinkInfo(vec![
+            LinkInfo::PortKind(InfoPortKind::Bridge),
+            LinkInfo::PortData(InfoPortData::BridgePort(vec![
+                InfoBridgePort::UnicastFlood(flood),
+                InfoBridgePort::MulticastFlood(flood),
+                InfoBridgePort::BroadcastFlood(flood),
+            ])),
+        ]));
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+        let mut response = self.handle.clone().request(req)?;
+        while let Some(m) = response.next().await {
+            if let NetlinkPayload::Error(e) = m.payload {
+                if e.raw_code() != 0 {
+                    return Err(rtnetlink::Error::NetlinkError(e).into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn local_macs(
+        &self,
+        bridge: &str,
+        vni: u32,
+    ) -> Result<BTreeMap<Mac, String>, DriverError> {
         let bridge_idx = self
             .find_link(bridge)
             .await?
@@ -313,7 +368,8 @@ impl FdbDriver for LinuxFdbDriver {
             .get()
             .set_address_family(AddressFamily::Bridge)
             .execute();
-        let mut out = BTreeSet::new();
+        let mut out = BTreeMap::new();
+        let mut names: HashMap<u32, String> = HashMap::new();
         while let Some(m) = dump.try_next().await? {
             let mut mac = None;
             let mut master = None;
@@ -336,7 +392,13 @@ impl FdbDriver for LinuxFdbDriver {
                 bridge_idx,
                 vxlan_idx,
             ) {
-                out.insert(mac);
+                let port = m.header.ifindex;
+                if let std::collections::hash_map::Entry::Vacant(v) = names.entry(port) {
+                    if let Some(name) = self.link_name(port).await? {
+                        v.insert(name);
+                    }
+                }
+                out.insert(mac, names.get(&port).cloned().unwrap_or_default());
             }
         }
         Ok(out)

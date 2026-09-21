@@ -30,7 +30,8 @@ pub use derive::sync_routing_table_refs;
 pub use diff::{diff_configs, ConfigDiff, DiffScope, DiffStatus, FieldDiff, SectionDiff};
 pub use docs::{CommandDoc, Topic};
 pub use fdb::{
-    EvpnKey, EvpnRoute, EvpnUpdate, FdbEvent, FdbRequest, FdbTable, MacEntry, MacSource, NeighEntry,
+    EsEntry, EvpnKey, EvpnRoute, EvpnUpdate, FdbEvent, FdbRequest, FdbTable, MacEntry, MacSource,
+    NeighEntry,
 };
 pub use interface::{
     BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, LacpAggregateMembers,

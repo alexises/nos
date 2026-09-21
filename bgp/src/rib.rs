@@ -1512,6 +1512,7 @@ mod tests {
             vni: 10100,
             next_hop: addr("192.0.2.9"),
             ext_communities: vec![0x0002_fde8_0000_2774],
+            esi: [0; 10],
         }
     }
 
@@ -1576,6 +1577,90 @@ mod tests {
             recv_all(&mut evpn_rx).as_slice(),
             [OutboundUpdate::WithdrawEvpn(_)]
         ));
+    }
+
+    #[test]
+    fn type2_carries_its_esi_and_moving_onto_a_segment_withdraws_the_old_nlri() {
+        let mut rib = new_rib(65000);
+        let mut rx = register_mp_peer(
+            &mut rib,
+            addr("10.0.0.1"),
+            false,
+            addr("10.0.0.254"),
+            evpn_afs(),
+        );
+        let esi = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Add(mac_route(1)));
+        let _ = recv_all(&mut rx);
+
+        // Same key, now on a segment: the old (ESI 0) NLRI goes, the new one comes.
+        let mut on_es = mac_route(1);
+        on_es.esi = esi;
+        rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Add(on_es));
+        let updates = recv_all(&mut rx);
+        assert_eq!(updates.len(), 2, "{updates:?}");
+        assert!(matches!(
+            &updates[0],
+            OutboundUpdate::WithdrawEvpn(EvpnNlri::MacIp { esi, .. }) if *esi == [0; 10]
+        ));
+        assert!(matches!(
+            &updates[1],
+            OutboundUpdate::AnnounceEvpn(a) if matches!(a.nlri, EvpnNlri::MacIp { esi: e, .. } if e == esi)
+        ));
+    }
+
+    #[test]
+    fn local_ethernet_segment_route_is_originated_and_received_ones_reach_fdbd() {
+        let mut rib = new_rib(65000);
+        let mut rx = register_mp_peer(
+            &mut rib,
+            addr("10.0.0.1"),
+            false,
+            addr("10.0.0.254"),
+            evpn_afs(),
+        );
+        let esi = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let rd = [0, 0, 0xfd, 0xe8, 0, 0, 0, 1];
+        let route = nos_proto::EvpnRoute {
+            key: nos_proto::EvpnKey::EthernetSegment {
+                rd,
+                esi,
+                origin: addr("192.0.2.9"),
+            },
+            vni: 0,
+            next_hop: addr("192.0.2.9"),
+            ext_communities: vec![nos_proto::evpn_id::es_import_rt(&esi)],
+            esi,
+        };
+        rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Add(route));
+        let updates = recv_all(&mut rx);
+        assert!(matches!(
+            updates.as_slice(),
+            [OutboundUpdate::AnnounceEvpn(a)] if matches!(a.nlri, EvpnNlri::EthernetSegment { .. })
+        ));
+
+        // A received Type-4 is handed to fdbd (previously dropped).
+        let peer = addr("10.0.0.2");
+        let _peer_rx = register_peer(&mut rib, peer, false, addr("10.0.0.253"));
+        rib.handle_update(
+            peer,
+            false,
+            v4("192.0.2.2"),
+            &evpn_reach(
+                vec![EvpnNlri::EthernetSegment {
+                    rd,
+                    esi,
+                    origin: addr("192.0.2.2"),
+                }],
+                vec![65001],
+            ),
+            &deny_all_policy(),
+        );
+        let snap = rib.evpn_push_snapshot();
+        assert!(snap.keys().any(|k| matches!(
+            k,
+            nos_proto::EvpnKey::EthernetSegment { origin, .. } if *origin == addr("192.0.2.2")
+        )));
     }
 
     #[test]

@@ -1374,6 +1374,11 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             op: ConfigOp::BroadcastDomain(op),
             after: PathAfter::Stay,
         },
+        Command::Set(SetTarget::PortAggregateField(op))
+        | Command::Delete(DeleteTarget::PortAggregateField(op)) => Resolved::ApplyOp {
+            op: ConfigOp::PortAggregate(op),
+            after: PathAfter::Stay,
+        },
         Command::Set(SetTarget::InterfaceSwitchingProfile {
             name,
             switching_profile,

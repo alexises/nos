@@ -173,6 +173,7 @@ mod tests {
                 vni: 1,
                 next_hop: "192.0.2.1".parse().unwrap(),
                 ext_communities: vec![],
+                esi: [0; 10],
             },
         )
     }

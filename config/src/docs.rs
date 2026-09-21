@@ -628,6 +628,24 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              end transmits at the rate the *other* end asks for, so both ends need `fast` for \
              fast detection in both directions.",
         ),
+        Topic::SetPortAggregateEsi => (
+            "Set the EVPN Ethernet Segment Identifier of a port aggregate.",
+            "Sets the esi field on the named port aggregate: ten colon-separated hex bytes, not \
+             all zero. Give the same value to the aggregate on every PE the customer device is \
+             multi-homed to. nos-fdbd then advertises it in the Type-2 route of every MAC learned \
+             on the aggregate, originates an Ethernet Segment (Type-4) route for it, and elects \
+             one PE per broadcast domain as the Designated Forwarder for BUM traffic (the others \
+             stop flooding to the aggregate). `delete` removes it. Two aggregates on one router \
+             cannot share an ESI.",
+        ),
+        Topic::SetPortAggregateLacpSystemId => (
+            "Override a port aggregate's LACP Actor System ID.",
+            "Sets the MAC address nos-lacpd advertises as the Actor System ID for the named \
+             `lacp`-mode aggregate, instead of the one derived from this machine's identity. Use \
+             the same value on every PE of a multi-homed Ethernet Segment so the customer device \
+             sees one partner and bundles its links across them. Must be a unicast MAC. `delete` \
+             goes back to the derived id.",
+        ),
         Topic::SetInterfacePortAggregate => (
             "Associate an interface with a port aggregate as a bonded member.",
             "Points an interface at a port aggregate by name, making it a bonded member. The \
@@ -922,6 +940,8 @@ mod tests {
         Topic::DeletePortAggregate,
         Topic::SetPortAggregateMode,
         Topic::SetPortAggregateLacpRate,
+        Topic::SetPortAggregateEsi,
+        Topic::SetPortAggregateLacpSystemId,
         Topic::SetInterfacePortAggregate,
         Topic::ClearInterfacePortAggregate,
         Topic::EnsureOspfInstance,

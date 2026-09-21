@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use async_trait::async_trait;
@@ -38,8 +38,12 @@ impl FdbDriver for NoopFdbDriver {
     async fn del_flood(&self, _: u32, _: IpAddr) -> Result<(), DriverError> {
         Ok(())
     }
-    async fn local_macs(&self, _: &str, _: u32) -> Result<BTreeSet<Mac>, DriverError> {
-        Ok(BTreeSet::new())
+    async fn local_macs(&self, _: &str, _: u32) -> Result<BTreeMap<Mac, String>, DriverError> {
+        Ok(BTreeMap::new())
+    }
+    async fn set_port_flood(&self, port: &str, flood: bool) -> Result<(), DriverError> {
+        info!(port = %port, flood, "noop driver: set port flood");
+        Ok(())
     }
     async fn local_neighbours(&self, _: &str) -> Result<BTreeSet<(Mac, IpAddr)>, DriverError> {
         Ok(BTreeSet::new())

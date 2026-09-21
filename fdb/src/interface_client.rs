@@ -39,6 +39,22 @@ pub async fn bridge_name(watchdog_socket: &Path, domain: &str) -> Option<String>
     }
 }
 
+/// The kernel bond device `nos-interfaced` created for port aggregate
+/// `aggregate` (`bond<id>`, never its config name; `None` until created).
+pub async fn bond_name(watchdog_socket: &Path, aggregate: &str) -> Option<String> {
+    let sock = watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
+    let req = InterfaceRequest::GetPortAggregate {
+        name: aggregate.to_string(),
+    };
+    match ask(&sock, req).await? {
+        InterfaceEvent::PortAggregate(status) => status.bond_name,
+        other => {
+            trace!(?other, "unexpected reply to GetPortAggregate");
+            None
+        }
+    }
+}
+
 /// The kernel name of routing table `table`'s loopback device: `lo<table id>`,
 /// the id being `nos-ribd`'s (see `RibRequest::GetTableId`).
 async fn loopback_device(watchdog_socket: &Path, table: &str) -> Option<String> {

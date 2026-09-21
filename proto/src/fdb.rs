@@ -8,19 +8,29 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
+/// An Ethernet Segment Identifier; all-zero is "single-homed".
+pub use crate::evpn_id::Esi;
+
 /// Route identity: what a withdrawal names.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EvpnKey {
-    /// Type-2 MAC advertisement (no IP, ESI 0, Ethernet tag 0).
+    /// Type-2 MAC advertisement (no IP, Ethernet tag 0).
     Mac { rd: [u8; 8], mac: [u8; 6] },
     /// Type-3 inclusive multicast: `origin` is the advertising VTEP.
     Imet { rd: [u8; 8], origin: IpAddr },
-    /// Type-2 MAC/IP advertisement (ESI 0, Ethernet tag 0). Appended:
+    /// Type-2 MAC/IP advertisement (Ethernet tag 0). Appended:
     /// postcard indexes variants by position.
     MacIp {
         rd: [u8; 8],
         mac: [u8; 6],
         ip: IpAddr,
+    },
+    /// Type-4 Ethernet Segment route: `origin` is the advertising PE. Appended
+    /// (postcard indexes variants by position).
+    EthernetSegment {
+        rd: [u8; 8],
+        esi: Esi,
+        origin: IpAddr,
     },
 }
 
@@ -35,6 +45,11 @@ pub struct EvpnRoute {
     pub next_hop: IpAddr,
     /// Raw RFC 4360 extended communities (Route Targets, encapsulation).
     pub ext_communities: Vec<u64>,
+    /// The Ethernet Segment of a Type-2 (all-zero = single-homed). Deliberately
+    /// in the value, not the key: a MAC moving onto or off a segment is a
+    /// replacement of one route, not a second one. (`bgp` withdraws the old
+    /// NLRI itself, since the ESI is part of the wire identity.)
+    pub esi: Esi,
 }
 
 /// A persistent, long-lived push in either direction (`nos-fdbd` ->
@@ -76,6 +91,28 @@ pub struct FdbTable {
     /// Remote VTEPs BUM traffic is replicated to (one per received Type-3).
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
     pub flood: Vec<IpAddr>,
+    /// The Ethernet Segments this domain is attached to (an aggregate with an
+    /// `esi` that is a member of the domain) and this PE's Designated
+    /// Forwarder role on each.
+    pub segments: Vec<EsEntry>,
+}
+
+/// One locally attached Ethernet Segment, as seen from one broadcast domain.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EsEntry {
+    /// `00:11:22:33:44:55:66:77:88:99`.
+    pub esi: String,
+    /// The bridge port the segment attaches through (the bond or its VLAN
+    /// sub-link).
+    pub port: String,
+    /// Whether this PE is the segment's Designated Forwarder for the domain's
+    /// BUM traffic. A non-DF has flooding to `port` turned off.
+    pub designated_forwarder: bool,
+    /// Every PE attached to the segment (this one included), in the order the
+    /// DF election ranks them.
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
+    pub pes: Vec<IpAddr>,
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -87,6 +124,8 @@ pub struct MacEntry {
     /// The remote VTEP for a `Remote` entry.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub vtep: Option<IpAddr>,
+    /// The Ethernet Segment a `Local` MAC was learned on, when its port is one.
+    pub esi: Option<String>,
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

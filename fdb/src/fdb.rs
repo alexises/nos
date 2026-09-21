@@ -6,17 +6,20 @@
 //! ponytail: a MAC learned from two VTEPs (or under two RDs) is last write
 //! wins — no MAC-mobility sequence numbers, so it can flap between them.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::pending;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nos_proto::evpn_id::ENCAP_VXLAN;
-use nos_proto::{EvpnKey, EvpnRoute, EvpnUpdate, FdbTable, MacEntry, MacSource, NeighEntry};
+use nos_proto::evpn_id::{es_import_rt, format_esi, Esi, ENCAP_VXLAN};
+use nos_proto::{
+    EsEntry, EvpnKey, EvpnRoute, EvpnUpdate, FdbTable, MacEntry, MacSource, NeighEntry,
+};
 use tokio::sync::{mpsc, watch, Mutex};
 use tracing::{debug, info, warn};
 
+use crate::df;
 use crate::driver::{is_advertisable_ip, vxlan_name, FdbDriver, Mac};
 
 /// How often local MACs and kernel state are re-checked regardless of
@@ -43,6 +46,28 @@ pub struct Ready {
     /// `redistribute from connected`: these SVI addresses (already filtered
     /// to `is_advertisable_ip`) are originated with the bridge's MAC.
     pub connected: Vec<IpAddr>,
+    /// The bridge ports of this domain that attach an Ethernet Segment (a
+    /// port aggregate with an `esi`, member of this domain).
+    pub es_ports: Vec<EsPort>,
+}
+
+/// A bridge port attached to an Ethernet Segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EsPort {
+    /// The kernel bridge-port device: the bond, or its `<bond>.<tag>` VLAN
+    /// sub-link.
+    pub port: String,
+    pub esi: Esi,
+}
+
+/// One attached segment's election outcome for this domain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Segment {
+    esi: Esi,
+    port: String,
+    /// Every PE on the segment, ranked (see `df::candidates`).
+    pes: Vec<IpAddr>,
+    df: bool,
 }
 
 /// What `bgp_client` keeps originated into the named BGP instance.
@@ -81,7 +106,10 @@ fn desired(r: &Ready, route: &EvpnRoute) -> Vec<Installed> {
     {
         return Vec::new();
     }
-    let foreign_type2 = route.vni == r.vni && route.next_hop != r.vtep;
+    // A MAC on a segment we are attached to is reachable through our own
+    // bond; a VXLAN entry to the peer PE that also learned it would win.
+    let on_local_segment = route.esi != [0; 10] && r.es_ports.iter().any(|p| p.esi == route.esi);
+    let foreign_type2 = route.vni == r.vni && route.next_hop != r.vtep && !on_local_segment;
     let vtep = route.next_hop;
     match &route.key {
         EvpnKey::Mac { mac, .. } if foreign_type2 => vec![Installed::Mac { mac: *mac, vtep }],
@@ -106,33 +134,94 @@ fn desired(r: &Ready, route: &EvpnRoute) -> Vec<Installed> {
     }
 }
 
+/// The ESI a MAC learned behind `port` is advertised with (all-zero when the
+/// port isn't a segment's).
+fn esi_of(r: &Ready, port: Option<&String>) -> Esi {
+    port.and_then(|port| r.es_ports.iter().find(|p| &p.port == port))
+        .map_or([0; 10], |p| p.esi)
+}
+
 /// This domain's originated routes: one Type-3 for the domain, one Type-2
-/// per local MAC and one Type-2 (MAC+IP) per local neighbour / SVI address.
+/// per local MAC and one Type-2 (MAC+IP) per local neighbour / SVI address
+/// (carrying the ESI of the port the MAC sits behind), and one Type-4 per
+/// attached Ethernet Segment.
 fn local_routes(
     r: &Ready,
-    macs: &BTreeSet<Mac>,
+    macs: &BTreeMap<Mac, String>,
     neighbours: &BTreeSet<(Mac, IpAddr)>,
 ) -> HashMap<EvpnKey, EvpnRoute> {
     let mut ext = r.rt_export.clone();
     ext.push(ENCAP_VXLAN);
-    let route = |key: EvpnKey| EvpnRoute {
-        key: key.clone(),
+    let route = |key: EvpnKey, esi: Esi| EvpnRoute {
+        key,
         vni: r.vni,
         next_hop: r.vtep,
         ext_communities: ext.clone(),
+        esi,
     };
+    let mut out = HashMap::new();
     let imet = EvpnKey::Imet {
         rd: r.rd,
         origin: r.vtep,
     };
-    std::iter::once(imet)
-        .chain(macs.iter().map(|m| EvpnKey::Mac { rd: r.rd, mac: *m }))
-        .chain(neighbours.iter().map(|(m, ip)| EvpnKey::MacIp {
+    out.insert(imet.clone(), route(imet, [0; 10]));
+    for (m, port) in macs {
+        let key = EvpnKey::Mac { rd: r.rd, mac: *m };
+        out.insert(key.clone(), route(key, esi_of(r, Some(port))));
+    }
+    for (m, ip) in neighbours {
+        let key = EvpnKey::MacIp {
             rd: r.rd,
             mac: *m,
             ip: *ip,
-        }))
-        .map(|k| (k.clone(), route(k)))
+        };
+        out.insert(key.clone(), route(key, esi_of(r, macs.get(m))));
+    }
+    let esis: BTreeSet<Esi> = r.es_ports.iter().map(|p| p.esi).collect();
+    for esi in esis {
+        let key = EvpnKey::EthernetSegment {
+            rd: r.rd,
+            esi,
+            origin: r.vtep,
+        };
+        // A Type-4 carries only its ES-Import Route Target (RFC 7432 §7.6):
+        // it is for the PEs on the segment, not for a MAC-VRF's import.
+        out.insert(
+            key.clone(),
+            EvpnRoute {
+                key,
+                vni: 0,
+                next_hop: r.vtep,
+                ext_communities: vec![es_import_rt(&esi)],
+                esi,
+            },
+        );
+    }
+    out
+}
+
+/// Elects the Designated Forwarder of every segment this domain attaches to,
+/// from the Type-4 routes received so far. Other PEs are recognised by their
+/// Type-4's originating address; our own is `r.vtep`.
+fn plan_df(r: &Ready, received: &HashMap<EvpnKey, EvpnRoute>) -> Vec<Segment> {
+    r.es_ports
+        .iter()
+        .map(|p| {
+            let peers: BTreeSet<IpAddr> = received
+                .keys()
+                .filter_map(|k| match k {
+                    EvpnKey::EthernetSegment { esi, origin, .. } if *esi == p.esi => Some(*origin),
+                    _ => None,
+                })
+                .filter(|o| *o != r.vtep)
+                .collect();
+            Segment {
+                esi: p.esi,
+                port: p.port.clone(),
+                pes: df::candidates(r.vtep, &peers),
+                df: df::elect(r.vtep, &peers, r.vni) == r.vtep,
+            }
+        })
         .collect()
 }
 
@@ -151,7 +240,12 @@ struct Inner {
     /// same entry (a MAC-only and a MAC+IP Type-2 for one MAC), so an item is
     /// only removed when no other key still holds it.
     installed: HashMap<EvpnKey, Vec<Installed>>,
-    local: BTreeSet<Mac>,
+    /// Each MAC with the bridge port it sits behind.
+    local: BTreeMap<Mac, String>,
+    /// The last election result per attached segment.
+    segments: Vec<Segment>,
+    /// The flood setting last applied to each segment port.
+    es_flood: BTreeMap<String, bool>,
     /// Local ARP/ND bindings and SVI addresses, as (MAC, IP).
     local_neigh: BTreeSet<(Mac, IpAddr)>,
 }
@@ -224,7 +318,10 @@ impl Fdb {
             }
             self.publish(&g);
         }
-        let Some(want) = ready else { return };
+        let Some(want) = ready else {
+            self.sync_df(&mut g).await;
+            return;
+        };
         // Idempotent: also the tick's repair path for a deleted/changed link.
         if let Err(e) = self
             .driver
@@ -235,6 +332,7 @@ impl Fdb {
             g.ready = None;
             g.installed.clear();
             self.publish(&g);
+            self.sync_df(&mut g).await;
             return;
         }
         if g.ready.is_none() {
@@ -249,6 +347,62 @@ impl Fdb {
         for k in keys {
             self.sync_key(&mut g, &k).await;
         }
+        self.sync_df(&mut g).await;
+    }
+
+    /// Re-elects the Designated Forwarder of every attached segment and
+    /// applies it: a non-DF stops flooding BUM to the segment's port, a DF
+    /// (and a port no longer on any segment) floods normally. The block is
+    /// re-asserted every call, so a port the kernel recreated is healed by
+    /// the tick.
+    async fn sync_df(&self, g: &mut Inner) {
+        let plan = g
+            .ready
+            .as_ref()
+            .map(|r| plan_df(r, &g.received))
+            .unwrap_or_default();
+        for s in &plan {
+            if g.segments.iter().find(|o| o.port == s.port) != Some(s) {
+                // `%`, not a bare str: a plain str field renders quoted.
+                let role = if s.df { "df" } else { "non-df" };
+                info!(
+                    domain = %self.domain, esi = %format_esi(&s.esi), port = %s.port,
+                    role = %role,
+                    pes = %s.pes.iter().map(ToString::to_string).collect::<Vec<_>>().join(","),
+                    "df elected"
+                );
+            }
+            let prev = g.es_flood.get(&s.port).copied();
+            if prev == Some(s.df) && s.df {
+                continue;
+            }
+            match self.driver.set_port_flood(&s.port, s.df).await {
+                Ok(()) => {
+                    if prev != Some(s.df) {
+                        info!(domain = %self.domain, port = %s.port, flood = s.df, "segment port flooding set");
+                    }
+                    g.es_flood.insert(s.port.clone(), s.df);
+                }
+                Err(e) => {
+                    debug!(domain = %self.domain, port = %s.port, error = %e, "could not set port flooding yet, retrying");
+                    g.es_flood.remove(&s.port);
+                }
+            }
+        }
+        let gone: Vec<String> = g
+            .es_flood
+            .keys()
+            .filter(|p| !plan.iter().any(|s| &s.port == *p))
+            .cloned()
+            .collect();
+        for port in gone {
+            // Best effort: if the port is gone too there is nothing to restore.
+            if self.driver.set_port_flood(&port, true).await.is_ok() {
+                info!(domain = %self.domain, port = %port, flood = true, "segment port flooding set");
+            }
+            g.es_flood.remove(&port);
+        }
+        g.segments = plan;
     }
 
     /// One `PushEvpnRoutes` from `nos-bgpd`.
@@ -271,8 +425,14 @@ impl Fdb {
                 vec![k]
             }
         };
+        let segments_changed = keys
+            .iter()
+            .any(|k| matches!(k, EvpnKey::EthernetSegment { .. }));
         for k in keys {
             self.sync_key(&mut g, &k).await;
+        }
+        if segments_changed {
+            self.sync_df(&mut g).await;
         }
     }
 
@@ -374,7 +534,7 @@ impl Fdb {
                 // Only hosts behind a local port: a binding the SVI learned
                 // over the VXLAN port belongs to the remote VTEP that
                 // originated it, and re-originating it would be wrong.
-                Ok(n) => neighbours.extend(n.into_iter().filter(|(m, _)| macs.contains(m))),
+                Ok(n) => neighbours.extend(n.into_iter().filter(|(m, _)| macs.contains_key(m))),
                 Err(e) => {
                     debug!(domain = %self.domain, error = %e, "could not read the bridge neighbours");
                     return;
@@ -400,10 +560,12 @@ impl Fdb {
             info!(domain = %self.domain, mac = %format_mac(*m), ip = %ip, "local neighbour removed");
         }
         g.local_neigh = neighbours;
-        for m in macs.difference(&g.local) {
-            info!(domain = %self.domain, mac = %format_mac(*m), "local mac learned");
+        for (m, port) in &macs {
+            if g.local.get(m) != Some(port) {
+                info!(domain = %self.domain, mac = %format_mac(*m), port = %port, "local mac learned");
+            }
         }
-        for m in g.local.difference(&macs) {
+        for m in g.local.keys().filter(|m| !macs.contains_key(*m)) {
             info!(domain = %self.domain, mac = %format_mac(*m), "local mac removed");
         }
         g.local = macs;
@@ -441,10 +603,16 @@ impl Fdb {
         let mut macs: Vec<MacEntry> = g
             .local
             .iter()
-            .map(|m| MacEntry {
+            .map(|(m, port)| MacEntry {
                 mac: format_mac(*m),
                 source: MacSource::Local,
                 vtep: None,
+                esi: g
+                    .ready
+                    .as_ref()
+                    .map(|r| esi_of(r, Some(port)))
+                    .filter(|e| *e != [0; 10])
+                    .map(|e| format_esi(&e)),
             })
             .collect();
         let mut neighbours: Vec<NeighEntry> = g
@@ -471,6 +639,7 @@ impl Fdb {
                     mac: format_mac(*mac),
                     source: MacSource::Remote,
                     vtep: Some(*vtep),
+                    esi: None,
                 }),
                 Installed::Neigh { mac, ip, vtep } => neighbours.push(NeighEntry {
                     ip: *ip,
@@ -492,6 +661,16 @@ impl Fdb {
             macs,
             neighbours,
             flood,
+            segments: g
+                .segments
+                .iter()
+                .map(|s| EsEntry {
+                    esi: format_esi(&s.esi),
+                    port: s.port.clone(),
+                    designated_forwarder: s.df,
+                    pes: s.pes.clone(),
+                })
+                .collect(),
         }
     }
 }
@@ -529,6 +708,20 @@ mod tests {
             bgp_instance: "r1".to_string(),
             arp: false,
             connected: Vec::new(),
+            es_ports: Vec::new(),
+        }
+    }
+
+    const ESI: Esi = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+    fn ready_with_segment() -> Ready {
+        Ready {
+            es_ports: vec![EsPort {
+                // The `Recorder` driver puts every local MAC behind `eth1`.
+                port: "eth1".to_string(),
+                esi: ESI,
+            }],
+            ..ready()
         }
     }
 
@@ -542,6 +735,7 @@ mod tests {
             vni,
             next_hop: next_hop.parse().unwrap(),
             ext_communities: vec![rt],
+            esi: [0; 10],
         }
     }
 
@@ -554,6 +748,7 @@ mod tests {
             vni,
             next_hop: next_hop.parse().unwrap(),
             ext_communities: vec![rt],
+            esi: [0; 10],
         }
     }
 
@@ -566,6 +761,7 @@ mod tests {
             vni: 0,
             next_hop: origin.parse().unwrap(),
             ext_communities: vec![rt],
+            esi: [0; 10],
         }
     }
 
@@ -623,7 +819,10 @@ mod tests {
 
     #[test]
     fn local_routes_are_a_type3_plus_a_type2_per_mac_with_rt_and_encap() {
-        let macs = BTreeSet::from([[0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, 2]]);
+        let macs = BTreeMap::from([
+            ([0, 0, 0, 0, 0, 1], "eth1".to_string()),
+            ([0, 0, 0, 0, 0, 2], "eth1".to_string()),
+        ]);
         let routes = local_routes(&ready(), &macs, &BTreeSet::new());
         assert_eq!(routes.len(), 3);
         let r = routes.values().next().unwrap();
@@ -634,7 +833,7 @@ mod tests {
     #[test]
     fn neighbours_add_one_type2_with_the_ip_each() {
         let neighbours = BTreeSet::from([([0, 0, 0, 0, 0, 1], "198.51.100.7".parse().unwrap())]);
-        let routes = local_routes(&ready(), &BTreeSet::new(), &neighbours);
+        let routes = local_routes(&ready(), &BTreeMap::new(), &neighbours);
         assert_eq!(routes.len(), 2, "the Type-3 and the MAC+IP");
         assert!(routes
             .keys()
@@ -682,8 +881,12 @@ mod tests {
             self.0.lock().unwrap().push(format!("flood- {v}"));
             Ok(())
         }
-        async fn local_macs(&self, _: &str, _: u32) -> Result<BTreeSet<Mac>, DriverError> {
-            Ok(BTreeSet::from([[0, 0, 0, 0, 0, 7]]))
+        async fn local_macs(&self, _: &str, _: u32) -> Result<BTreeMap<Mac, String>, DriverError> {
+            Ok(BTreeMap::from([([0, 0, 0, 0, 0, 7], "eth1".to_string())]))
+        }
+        async fn set_port_flood(&self, port: &str, flood: bool) -> Result<(), DriverError> {
+            self.0.lock().unwrap().push(format!("flood {port} {flood}"));
+            Ok(())
         }
         async fn local_neighbours(&self, _: &str) -> Result<BTreeSet<(Mac, IpAddr)>, DriverError> {
             // One host behind a local port, one only reachable over VXLAN.
@@ -844,5 +1047,102 @@ mod tests {
         assert_eq!(t.routes.len(), 2);
         fdb.set_ready(None).await;
         assert!(rx.borrow().routes.is_empty() && rx.borrow().bgp_instance.is_none());
+    }
+
+    fn es_route(esi: Esi, origin: &str) -> EvpnRoute {
+        let origin: IpAddr = origin.parse().unwrap();
+        EvpnRoute {
+            key: EvpnKey::EthernetSegment {
+                rd: [0; 8],
+                esi,
+                origin,
+            },
+            vni: 0,
+            next_hop: origin,
+            ext_communities: vec![es_import_rt(&esi)],
+            esi,
+        }
+    }
+
+    #[test]
+    fn a_remote_mac_on_a_segment_we_are_attached_to_is_not_installed() {
+        let mut route = mac_route(1, 10100, RT, REMOTE);
+        route.esi = ESI;
+        assert!(!desired(&ready(), &route).is_empty());
+        assert!(desired(&ready_with_segment(), &route).is_empty());
+        // ... but a different segment's MAC still is.
+        route.esi = [9; 10];
+        assert!(!desired(&ready_with_segment(), &route).is_empty());
+    }
+
+    #[tokio::test]
+    async fn macs_behind_a_segment_port_carry_its_esi_and_a_type4_is_originated() {
+        let fdb = Fdb::new("bd1".to_string(), Arc::new(Recorder::default()));
+        let mut rx = fdb.subscribe();
+        fdb.set_ready(Some(ready_with_segment())).await;
+        fdb.refresh_local().await;
+        let t = rx.borrow_and_update().clone();
+        // Type-3, Type-2 for MAC 7, Type-4.
+        assert_eq!(t.routes.len(), 3);
+        let mac = t
+            .routes
+            .values()
+            .find(|r| matches!(r.key, EvpnKey::Mac { .. }))
+            .unwrap();
+        assert_eq!(mac.esi, ESI);
+        let imet = t
+            .routes
+            .values()
+            .find(|r| matches!(r.key, EvpnKey::Imet { .. }))
+            .unwrap();
+        assert_eq!(imet.esi, [0; 10]);
+        let es = t
+            .routes
+            .values()
+            .find(|r| matches!(r.key, EvpnKey::EthernetSegment { .. }))
+            .unwrap();
+        assert_eq!(es.ext_communities, vec![es_import_rt(&ESI)]);
+        assert_eq!(
+            fdb.table().await.macs[0].esi.as_deref(),
+            Some("00:01:02:03:04:05:06:07:08:09")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_non_df_stops_flooding_to_the_segment_and_gets_it_back() {
+        let driver = Arc::new(Recorder::default());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone());
+        fdb.set_ready(Some(ready_with_segment())).await;
+        // Alone on the segment: the DF, flooding explicitly enabled.
+        assert_eq!(calls(&driver), ["ensure 10100", "flood eth1 true"]);
+        assert!(fdb.table().await.segments[0].designated_forwarder);
+
+        // A PE with a lower address: [192.0.1.9, 192.0.2.1], 10100 % 2 == 0,
+        // so it is the DF and we are not.
+        fdb.apply_push(EvpnUpdate::Add(es_route(ESI, "192.0.1.9")))
+            .await;
+        assert_eq!(calls(&driver), ["flood eth1 false"]);
+        let t = fdb.table().await;
+        assert!(!t.segments[0].designated_forwarder);
+        assert_eq!(t.segments[0].pes.len(), 2);
+
+        // The block is re-asserted on every resync, then lifted when the peer goes.
+        fdb.set_ready(Some(ready_with_segment())).await;
+        assert!(calls(&driver).contains(&"flood eth1 false".to_string()));
+        fdb.apply_push(EvpnUpdate::Remove(es_route(ESI, "192.0.1.9").key))
+            .await;
+        assert_eq!(calls(&driver), ["flood eth1 true"]);
+
+        // A Type-4 for another segment is none of our business.
+        fdb.apply_push(EvpnUpdate::Add(es_route([7; 10], "192.0.1.9")))
+            .await;
+        assert!(calls(&driver).is_empty());
+
+        // Unconfiguring while blocked restores flooding.
+        fdb.apply_push(EvpnUpdate::Add(es_route(ESI, "192.0.1.9")))
+            .await;
+        calls(&driver);
+        fdb.set_ready(None).await;
+        assert_eq!(calls(&driver), ["remove 10100", "flood eth1 true"]);
     }
 }

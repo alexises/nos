@@ -9,14 +9,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use nos_proto::evpn_id::{parse_rd, parse_rt};
-use nos_proto::{BroadcastDomain, Config, DiffScope, Event};
+use nos_proto::evpn_id::{parse_esi, parse_rd, parse_rt};
+use nos_proto::{BroadcastDomain, Config, DiffScope, Event, VlanTag};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::config_client;
 use crate::driver::is_advertisable_ip;
-use crate::fdb::{Fdb, Ready, TICK};
+use crate::fdb::{EsPort, Fdb, Ready, TICK};
 use crate::interface_client;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -33,6 +33,8 @@ pub async fn run(
         DiffScope::Interfaces,
         DiffScope::BgpInstances,
         DiffScope::RoutingTables,
+        DiffScope::PortAggregates,
+        DiffScope::SwitchingProfiles,
     ];
     'outer: while !*shutdown.borrow() {
         let mut events = match config_client::subscribe_diff(&config_socket, scopes.clone()).await {
@@ -115,6 +117,7 @@ async fn resolve(cfg: &Config, d: &BroadcastDomain, watchdog_socket: &Path) -> O
         return None;
     };
     let rts = |v: &[String]| v.iter().filter_map(|r| parse_rt(r)).collect();
+    let es_ports = es_ports(cfg, &d.name, watchdog_socket).await;
     Some(Ready {
         vni,
         bridge,
@@ -134,5 +137,44 @@ async fn resolve(cfg: &Config, d: &BroadcastDomain, watchdog_socket: &Path) -> O
         } else {
             Vec::new()
         },
+        es_ports,
     })
+}
+
+/// The bridge ports of `domain` that attach an Ethernet Segment: each port
+/// aggregate with an `esi` whose switching profile has `domain` as a member,
+/// as the bond itself (untagged member) or its `<bond>.<tag>` VLAN sub-link
+/// (`Dot1q`). A bond `nos-interfaced` hasn't created yet is skipped and
+/// picked up by the tick.
+async fn es_ports(cfg: &Config, domain: &str, watchdog_socket: &Path) -> Vec<EsPort> {
+    let mut out = Vec::new();
+    for agg in &cfg.port_aggregates {
+        let Some(esi) = agg.esi.as_deref().and_then(parse_esi) else {
+            continue;
+        };
+        let Some(profile) = agg
+            .switching_profile
+            .as_ref()
+            .and_then(|n| cfg.switching_profiles.iter().find(|p| &p.name == n))
+        else {
+            continue;
+        };
+        let Some(member) = profile
+            .members
+            .iter()
+            .find(|m| m.broadcast_domain == domain)
+        else {
+            continue;
+        };
+        let Some(bond) = interface_client::bond_name(watchdog_socket, &agg.name).await else {
+            debug!(aggregate = %agg.name, "bond not created by nos-interfaced yet");
+            continue;
+        };
+        let port = match member.tag {
+            VlanTag::Untagged => bond,
+            VlanTag::Dot1q(tag) => format!("{bond}.{tag}"),
+        };
+        out.push(EsPort { port, esi });
+    }
+    out
 }

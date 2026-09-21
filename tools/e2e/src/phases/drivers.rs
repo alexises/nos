@@ -103,10 +103,16 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
         "--enslave-interface-into-port-aggregate",
         "eth2",
     ];
+    // A configured Actor System ID per router (`lacp-system-id`), proven on
+    // the wire below by each side seeing the other's as its partner.
     let mut on = lacp_flags(&["--lacp-rate", "fast"]);
     on.extend(strings(&both));
-    a.provision(&on).await?;
-    b.provision(&on).await?;
+    let mut on_a = on.clone();
+    on_a.extend(strings(&["--lacp-system-id", LACP_SYSTEM_ID_A]));
+    let mut on_b = on;
+    on_b.extend(strings(&["--lacp-system-id", LACP_SYSTEM_ID_B]));
+    a.provision(&on_a).await?;
+    b.provision(&on_b).await?;
 
     let reconciled =
         format!("lacp reconciled aggregate members aggregate={LACP_AGGREGATE} members=2");
@@ -121,6 +127,26 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
             ))
             .await?;
         }
+    }
+
+    log("the configured lacp-system-id is the actor id, and the partner sees it");
+    let body = a
+        .rest_expect(reqwest::Method::GET, "/v1/lacp", None, 200)
+        .await?;
+    let summary: serde_json::Value = serde_json::from_str(&body)?;
+    let agg = summary
+        .as_array()
+        .and_then(|v| v.iter().find(|s| s["aggregate"] == LACP_AGGREGATE))
+        .with_context(|| format!("no {LACP_AGGREGATE} in show lacp: {body}"))?;
+    let id = |mac: [u8; 6]| serde_json::json!(mac);
+    if agg["actor_system_id"] != id([2, 0, 0, 0, 0x0a, 1]) {
+        bail!("router-a's actor system id is not the configured one: {body}");
+    }
+    if !agg["ports"].as_array().is_some_and(|p| {
+        p.iter()
+            .all(|p| p["partner_system_id"] == id([2, 0, 0, 0, 0x0b, 1]))
+    }) {
+        bail!("router-a's partners are not router-b's configured system id: {body}");
     }
 
     log("waiting for both routers to actually enslave eth1/eth2 into the real kernel bond");
