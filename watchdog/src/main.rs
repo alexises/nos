@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::Parser;
 use nos_log_client::ForwardingLayer;
+use nos_proto::diff::broadcast_domain::VNI_LABEL;
 use nos_proto::diff::routing_table::REST_API_LABEL;
 use nos_proto::{
     DiffScope, Role, DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_PKI_DIR,
@@ -48,6 +49,15 @@ struct Args {
     /// Extra arguments forwarded to every nos-ribd instance.
     #[arg(long = "ribd-arg", allow_hyphen_values = true)]
     ribd_flags: Vec<String>,
+
+    /// Path to the nos-fdbd binary to supervise (one instance is spawned per
+    /// broadcast domain that has a `vni`).
+    #[arg(long, default_value = "/usr/local/bin/nos-fdbd")]
+    fdbd_bin: PathBuf,
+
+    /// Extra arguments forwarded to every nos-fdbd instance.
+    #[arg(long = "fdbd-arg", allow_hyphen_values = true)]
+    fdbd_flags: Vec<String>,
 
     /// Path to the nos-ospfd binary to supervise (one instance is spawned
     /// per OSPF instance in the running config).
@@ -340,6 +350,30 @@ async fn main() -> anyhow::Result<()> {
                 socket_prefix: "ospfv3",
             }),
             claim_label: None,
+            config_socket: args.config_socket.clone(),
+            log_socket: args.log_socket.clone(),
+            watchdog_listen_socket: args.listen_socket.clone(),
+            policy,
+            registry: registry.clone(),
+        },
+        // One `nos-fdbd` per broadcast domain, but only while the domain has a
+        // `vni` (`claim_label`, like `nos-restd` on `rest-api`) — a plain L2
+        // domain has no EVPN/VXLAN state for a daemon to own.
+        Managed {
+            scope: DiffScope::BroadcastDomains,
+            section: |d| &d.broadcast_domains,
+            bin: args.fdbd_bin,
+            flags: args.fdbd_flags,
+            name_flag: "--domain",
+            daemon: "nos-fdbd",
+            role: Role::Fdbd,
+            pki: pki.clone(),
+            noun: "broadcast domain",
+            endpoint: Some(Endpoint {
+                kind: EndpointKind::FdbDomain,
+                socket_prefix: "fdb",
+            }),
+            claim_label: Some(VNI_LABEL),
             config_socket: args.config_socket.clone(),
             log_socket: args.log_socket.clone(),
             watchdog_listen_socket: args.listen_socket.clone(),

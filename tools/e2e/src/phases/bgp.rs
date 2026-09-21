@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use anyhow::{bail, Context};
+use reqwest::Method;
 
 use crate::consts::*;
 use crate::router::{log, strings, Router, B, C};
@@ -364,26 +365,21 @@ fn gobgp_dockerfile() -> String {
     )
 }
 
-/// Runs one `gobgp` CLI command inside the GoBGP container.
-async fn gobgp(w: &World, args: &[&str]) -> anyhow::Result<()> {
+/// Runs one `gobgp` CLI command inside the GoBGP container; its output.
+async fn gobgp(w: &World, args: &[&str]) -> anyhow::Result<String> {
     let mut cmd = vec!["gobgp"];
     cmd.extend_from_slice(args);
     let (code, out) = w.dock.exec("router-g", &cmd).await?;
     if code != 0 {
         bail!("gobgp {}: exit {code}: {}", args.join(" "), out.trim());
     }
-    Ok(())
+    Ok(out)
 }
 
-/// RFC 7432 EVPN, receive side. No NOS router originates EVPN yet, so an
-/// independent implementation does: GoBGP announces one MAC/IP (Type 2) and
-/// one Inclusive Multicast (Type 3) route, with a Route Target and the VXLAN
-/// Encapsulation community, to router-a. Router-a must negotiate AFI 25 /
-/// SAFI 70 (its peer-group's only family besides IPv4 unicast), decode both,
-/// hold them per peer, serve them on `show bgp evpn`, and drop them on an
-/// explicit withdrawal and, for what is left, when the session goes away.
-pub async fn evpn(w: &mut World) -> anyhow::Result<()> {
-    let flags = strings(&[
+/// router-a's flags for both EVPN phases: one eBGP peer-group toward GoBGP
+/// with `address-family l2vpn-evpn`.
+fn evpn_flags() -> Vec<String> {
+    strings(&[
         "--address",
         &format!("{IP_A}/24"),
         "--asn",
@@ -397,8 +393,14 @@ pub async fn evpn(w: &mut World) -> anyhow::Result<()> {
         "--peer",
         IP_G,
         "--evpn",
-    ]);
-    w.start(crate::router::A, Some(flags), &[]).await?;
+    ])
+}
+
+/// Starts router-a with `evpn_flags`, builds/starts the GoBGP speaker
+/// (router-g) peering it over l2vpn-evpn, and waits for the session and
+/// gobgpd's gRPC API.
+async fn evpn_speaker(w: &mut World) -> anyhow::Result<()> {
+    w.start(crate::router::A, Some(evpn_flags()), &[]).await?;
 
     log("building/starting the GoBGP speaker (router-g)");
     w.dock
@@ -427,13 +429,25 @@ pub async fn evpn(w: &mut World) -> anyhow::Result<()> {
     // gobgpd's gRPC API can lag its BGP listener by a moment.
     let mut ready = Err(anyhow::anyhow!("gobgpd never answered"));
     for _ in 0..30 {
-        ready = gobgp(w, &["global"]).await;
+        ready = gobgp(w, &["global"]).await.map(drop);
         if ready.is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    ready?;
+    ready
+}
+
+/// RFC 7432 EVPN, receive side. No NOS router originates EVPN yet, so an
+/// independent implementation does: GoBGP announces one MAC/IP (Type 2) and
+/// one Inclusive Multicast (Type 3) route, with a Route Target and the VXLAN
+/// Encapsulation community, to router-a. Router-a must negotiate AFI 25 /
+/// SAFI 70 (its peer-group's only family besides IPv4 unicast), decode both,
+/// hold them per peer, serve them on `show bgp evpn`, and drop them on an
+/// explicit withdrawal and, for what is left, when the session goes away.
+pub async fn evpn(w: &mut World) -> anyhow::Result<()> {
+    evpn_speaker(w).await?;
+    let a = w.a()?;
 
     let (mac, ip, rd, rt) = ("aa:bb:cc:00:00:01", "192.0.2.10", "65010:1", "65010:10000");
     gobgp(
@@ -514,4 +528,244 @@ pub async fn evpn(w: &mut World) -> anyhow::Result<()> {
         bail!("EVPN routes outlived their session: {body}");
     }
     Ok(())
+}
+
+async fn gobgp_owned(w: &World, args: Vec<String>) -> anyhow::Result<String> {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    gobgp(w, &refs).await
+}
+
+/// Runs an iproute2 command inside router-a's network namespace.
+async fn netns_a(w: &World, cmd: &[&str]) -> anyhow::Result<String> {
+    w.dock.in_netns(NETNS_HELPER_IMAGE, "router-a", cmd).await
+}
+
+/// Polls GoBGP's EVPN RIB until `want(rib)` holds.
+async fn gobgp_evpn_rib(w: &World, what: &str, want: impl Fn(&str) -> bool) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..30 {
+        last = gobgp(w, &["global", "rib", "-a", "evpn"]).await?;
+        if want(&last) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("GoBGP's EVPN RIB never {what}: {last}")
+}
+
+/// `nos-fdbd`, both directions, against GoBGP as the remote VTEP. A broadcast
+/// domain with a VNI, RD, import/export Route Targets, a VTEP source and
+/// `redistribute from mac to bgp` gets a real VXLAN device on its bridge.
+///
+/// Remote -> kernel: GoBGP's Type-3 becomes a flood entry, its Type-2 (with a
+/// matching Route Target) a remote MAC; a Type-2 with another Route Target is
+/// ignored; a withdrawal removes the MAC. Local -> BGP: a MAC pinned on a
+/// port of the domain's bridge (by a helper container in router-a's netns —
+/// the runtime image has no iproute2) is originated as a Type-2, next to the
+/// domain's Type-3, and GoBGP sees both; removing it withdraws it. Finally
+/// unsetting the VNI must stop `nos-fdbd` and delete the VXLAN device.
+pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
+    evpn_speaker(w).await?;
+    let a = w.a()?;
+
+    let mut flags = evpn_flags();
+    flags.extend(strings(&[
+        "--broadcast-domain",
+        EVPN_DOMAIN,
+        "--evpn-vni",
+        &EVPN_VNI.to_string(),
+        "--evpn-rd",
+        EVPN_RD,
+        "--evpn-rt-import",
+        EVPN_RT_IMPORT,
+        "--evpn-rt-export",
+        EVPN_RT_EXPORT,
+        "--evpn-vtep-source-interface",
+        "eth0",
+        "--evpn-redistribute-bgp",
+        "r1",
+    ]));
+    a.provision_flags(&flags).await?;
+    let vxlan = format!("vx{EVPN_VNI}");
+    a.wait(&format!(
+        "vxlan device ready domain={EVPN_DOMAIN} vni={EVPN_VNI} vxlan={vxlan}"
+    ))
+    .await?;
+
+    log("remote -> kernel: GoBGP originates a Type-3 and Type-2 routes");
+    let (rd_g, rt_g) = ("65010:1", EVPN_RT_IMPORT);
+    gobgp(
+        w,
+        &[
+            "global",
+            "rib",
+            "add",
+            "-a",
+            "evpn",
+            "multicast",
+            IP_G,
+            "etag",
+            "0",
+            "rd",
+            rd_g,
+            "rt",
+            rt_g,
+            "encap",
+            "vxlan",
+        ],
+    )
+    .await?;
+    a.wait(&format!(
+        "flood entry installed domain={EVPN_DOMAIN} vtep={IP_G}"
+    ))
+    .await?;
+    let macadv = |verb: &'static str, mac: &'static str, rt: &'static str| {
+        let vni = EVPN_VNI.to_string();
+        let mut v = strings(&[
+            "global",
+            "rib",
+            verb,
+            "-a",
+            "evpn",
+            "macadv",
+            mac,
+            "192.0.2.10",
+            "etag",
+            "0",
+            "label",
+            &vni,
+            "rd",
+            rd_g,
+        ]);
+        if verb == "add" {
+            v.extend(strings(&["rt", rt, "encap", "vxlan"]));
+        }
+        v
+    };
+    let installed =
+        |mac: &str| format!("remote mac installed domain={EVPN_DOMAIN} mac={mac} vtep={IP_G}");
+    let removed =
+        |mac: &str| format!("remote mac removed domain={EVPN_DOMAIN} mac={mac} vtep={IP_G}");
+
+    let other_base = a.count(&installed(EVPN_OTHER_RT_MAC));
+    gobgp_owned(w, macadv("add", EVPN_OTHER_RT_MAC, "65010:99")).await?;
+    gobgp_owned(w, macadv("add", EVPN_REMOTE_MAC, rt_g)).await?;
+    a.wait(&installed(EVPN_REMOTE_MAC)).await?;
+    // Same UPDATE cadence as the accepted route, so a few seconds is proof.
+    a.assert_quiet(&installed(EVPN_OTHER_RT_MAC), other_base, 5)
+        .await?;
+
+    log("`show fdb` over REST reflects the kernel-facing table");
+    let body = a
+        .rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
+        .await?;
+    for want in [EVPN_REMOTE_MAC, IP_G, &vxlan] {
+        if !body.contains(want) {
+            bail!("show fdb is missing {want}: {body}");
+        }
+    }
+    if body.contains(EVPN_OTHER_RT_MAC) {
+        bail!("a route with a foreign Route Target reached the fdb: {body}");
+    }
+    let fdb: serde_json::Value = serde_json::from_str(&body)?;
+    let bridge = fdb["bridge"]
+        .as_str()
+        .context("show fdb has no bridge name")?
+        .to_string();
+
+    log("a withdrawal removes the MAC again");
+    let base = a.count(&removed(EVPN_REMOTE_MAC));
+    gobgp_owned(w, macadv("del", EVPN_REMOTE_MAC, rt_g)).await?;
+    a.wait_new(&removed(EVPN_REMOTE_MAC), base, 30).await?;
+
+    log("local -> BGP: pinning a MAC on a port of the domain's bridge");
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    netns_a(w, &["ip", "link", "add", EVPN_PORT, "type", "dummy"]).await?;
+    netns_a(w, &["ip", "link", "set", EVPN_PORT, "master", &bridge]).await?;
+    netns_a(w, &["ip", "link", "set", EVPN_PORT, "up"]).await?;
+    netns_a(
+        w,
+        &[
+            "bridge",
+            "fdb",
+            "add",
+            EVPN_LOCAL_MAC,
+            "dev",
+            EVPN_PORT,
+            "master",
+            "static",
+        ],
+    )
+    .await?;
+    a.wait(&format!(
+        "local mac learned domain={EVPN_DOMAIN} mac={EVPN_LOCAL_MAC}"
+    ))
+    .await?;
+    // GoBGP sees the Type-2 (with our RD) and the domain's own Type-3.
+    gobgp_evpn_rib(w, "showed the local MAC", |rib| {
+        rib.contains(EVPN_LOCAL_MAC) && rib.contains(&format!("rd:{EVPN_RD}"))
+    })
+    .await?;
+    gobgp_evpn_rib(w, "showed router-a's Type-3", |rib| {
+        rib.lines()
+            .any(|l| l.contains("multicast") && l.contains(&format!("rd:{EVPN_RD}")))
+    })
+    .await?;
+
+    log("removing the MAC withdraws it");
+    let base = a.count(&format!(
+        "local mac removed domain={EVPN_DOMAIN} mac={EVPN_LOCAL_MAC}"
+    ));
+    netns_a(
+        w,
+        &[
+            "bridge",
+            "fdb",
+            "del",
+            EVPN_LOCAL_MAC,
+            "dev",
+            EVPN_PORT,
+            "master",
+        ],
+    )
+    .await?;
+    a.wait_new(
+        &format!("local mac removed domain={EVPN_DOMAIN} mac={EVPN_LOCAL_MAC}"),
+        base,
+        30,
+    )
+    .await?;
+    gobgp_evpn_rib(w, "dropped the local MAC", |rib| {
+        !rib.contains(EVPN_LOCAL_MAC)
+    })
+    .await?;
+
+    log("unsetting the vni stops nos-fdbd and deletes the vxlan device");
+    netns_a(w, &["ip", "link", "del", EVPN_PORT]).await?;
+    let mut clear = evpn_flags();
+    clear.extend(strings(&[
+        "--broadcast-domain",
+        EVPN_DOMAIN,
+        "--evpn-clear",
+        "--evpn-rt-import",
+        EVPN_RT_IMPORT,
+        "--evpn-rt-export",
+        EVPN_RT_EXPORT,
+    ]));
+    a.provision_flags(&clear).await?;
+    a.wait(&format!(
+        "broadcast domain removed from config, stopping nos-fdbd name={EVPN_DOMAIN}"
+    ))
+    .await?;
+    // `nos-fdbd` deletes the device on SIGINT, after its own log forwarding has
+    // already shut down — so, like the `rest` phase's teardown checks, read the
+    // container's stdout (which carries ANSI colour, hence two separate checks).
+    for _ in 0..30 {
+        let logs = w.dock.logs("router-a").await?;
+        if logs.contains("deleted vxlan device") && logs.contains(&vxlan) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("nos-fdbd never logged deleting {vxlan}")
 }

@@ -14,7 +14,7 @@ use nos_cli::help_menu::HelpMenu;
 use nos_cli::session::{self, Mode, PathAfter, Resolved};
 use nos_cli::spec::{self, Doc};
 use nos_cli::{
-    bgp_client, client, format, interface_client, lacp_client, lldp_client, log_client,
+    bgp_client, client, fdb_client, format, interface_client, lacp_client, lldp_client, log_client,
     ospf_client, ospfv3_client, rib_client, watchdog_client,
 };
 use nos_pki::Identity;
@@ -860,6 +860,10 @@ async fn handle_action(
             show_route(watchdog_socket, &table, address).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowFdb { domain } => {
+            show_fdb(watchdog_socket, &domain).await;
+            Outcome::Continue(mode)
+        }
         Resolved::ShowInterface { name } => {
             show_interface(watchdog_socket, name.as_deref()).await;
             Outcome::Continue(mode)
@@ -1104,6 +1108,31 @@ async fn show_route(watchdog_socket: &Path, table: &str, address: Option<std::ne
             Ok(None) => println!("no route matches {addr}"),
             Err(e) => eprintln!("error: {e}"),
         },
+    }
+}
+
+/// Resolves the domain's `nos-fdbd` instance (one per domain that has a VNI)
+/// via the watchdog broker and prints its forwarding database.
+async fn show_fdb(watchdog_socket: &Path, domain: &str) {
+    let fdb_socket = match watchdog_client::resolve(
+        watchdog_socket,
+        nos_proto::ServiceRef::FdbDomain(domain.to_string()),
+    )
+    .await
+    {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            eprintln!("nos-fdbd is not running for broadcast domain '{domain}' (needs a vni)");
+            return;
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+    match fdb_client::get_table(&fdb_socket).await {
+        Ok(t) => println!("{}", format::render_fdb_table(&t)),
+        Err(e) => eprintln!("error: {e}"),
     }
 }
 

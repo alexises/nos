@@ -238,6 +238,16 @@ pub enum Topic {
     SetLldpTxHold,
     /// `ConfigOp::Lldp(LldpOp::SetManagementAddress)`
     SetLldpManagementAddress,
+    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetVni)` / `ClearVni`
+    SetBroadcastDomainVni,
+    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetRd)` / `ClearRd`
+    SetBroadcastDomainRd,
+    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::AddRouteTarget)` / `RemoveRouteTarget`
+    AddBroadcastDomainRouteTarget,
+    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetVtepSource)` / `ClearVtepSource`
+    SetBroadcastDomainVtepSource,
+    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetMacRedistribute)` / `ClearMacRedistribute`
+    SetBroadcastDomainMacRedistribute,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

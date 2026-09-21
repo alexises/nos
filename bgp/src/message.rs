@@ -87,6 +87,7 @@ const ATTR_COMMUNITY: u8 = 8;
 const ATTR_EXTENDED_COMMUNITIES: u8 = 16;
 /// RFC 8092 §3 large community — a list of 12-byte (3×u32) values.
 const ATTR_LARGE_COMMUNITY: u8 = 32;
+const ATTR_PMSI_TUNNEL: u8 = 22;
 /// RFC 4271 §4.3 attribute flag bit indicating a 2-byte (rather than 1-byte)
 /// attribute length field follows the type byte.
 const ATTR_FLAG_EXTENDED_LENGTH: u8 = 0x10;
@@ -287,6 +288,17 @@ pub struct PathAttributes {
     /// local data 2. Empty iff the wire message carried no `LARGE_COMMUNITY`
     /// attribute.
     pub large_communities: Vec<(u32, u32, u32)>,
+    /// RFC 6514 §5 PMSI Tunnel — carried on EVPN Type-3 routes (RFC 8365
+    /// §8.2.1), which is where the VNI of an inclusive multicast route lives.
+    pub pmsi: Option<Pmsi>,
+}
+
+/// An ingress-replication (tunnel type 6) PMSI Tunnel attribute, the only
+/// kind EVPN/VXLAN uses: `vni` fills the label field, `tunnel_ip` is the VTEP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pmsi {
+    pub vni: u32,
+    pub tunnel_ip: IpAddr,
 }
 
 /// RFC 4760 `MP_REACH_NLRI`: one AFI/SAFI batch of announced routes sharing
@@ -822,6 +834,7 @@ struct ParsedAttributes {
     communities: Vec<u32>,
     extended_communities: Vec<u64>,
     large_communities: Vec<(u32, u32, u32)>,
+    pmsi: Option<Pmsi>,
     mp_reach: Vec<MpReachNlri>,
     mp_unreach: Vec<MpUnreachNlri>,
 }
@@ -847,6 +860,7 @@ fn parse_path_attributes(
     let mut communities = Vec::new();
     let mut extended_communities = Vec::new();
     let mut large_communities = Vec::new();
+    let mut pmsi = None;
     let mut mp_reach = Vec::new();
     let mut mp_unreach = Vec::new();
 
@@ -959,6 +973,7 @@ fn parse_path_attributes(
                     })
                     .collect();
             }
+            ATTR_PMSI_TUNNEL => pmsi = decode_pmsi(value),
             ATTR_MP_REACH_NLRI => mp_reach.push(decode_mp_reach(value, add_path_afis)?),
             ATTR_MP_UNREACH_NLRI => mp_unreach.push(decode_mp_unreach(value, add_path_afis)?),
             _ => {
@@ -981,9 +996,36 @@ fn parse_path_attributes(
         communities,
         extended_communities,
         large_communities,
+        pmsi,
         mp_reach,
         mp_unreach,
     })
+}
+
+/// `flags(1) type(1) label(3) tunnel-id`; anything but ingress replication
+/// (type 6) with a 4/16-byte tunnel id is ignored, never an error — the
+/// attribute is optional and only EVPN Type-3 consumers look at it.
+fn decode_pmsi(value: &[u8]) -> Option<Pmsi> {
+    if value.len() < 5 || value[1] != 6 {
+        return None;
+    }
+    let vni = u32::from_be_bytes([0, value[2], value[3], value[4]]);
+    let tunnel_ip = match value.len() - 5 {
+        4 => IpAddr::from(<[u8; 4]>::try_from(&value[5..]).ok()?),
+        16 => IpAddr::from(<[u8; 16]>::try_from(&value[5..]).ok()?),
+        _ => return None,
+    };
+    Some(Pmsi { vni, tunnel_ip })
+}
+
+fn encode_pmsi(p: &Pmsi) -> Vec<u8> {
+    let mut v = vec![0, 6];
+    v.extend_from_slice(&p.vni.to_be_bytes()[1..]);
+    match p.tunnel_ip {
+        IpAddr::V4(a) => v.extend_from_slice(&a.octets()),
+        IpAddr::V6(a) => v.extend_from_slice(&a.octets()),
+    }
+    v
 }
 
 /// RFC 4760 `MP_REACH_NLRI` value: `AFI(2) SAFI(1) NextHopLen(1)
@@ -1192,6 +1234,7 @@ fn parse_update(body: &[u8], add_path_afis: &HashSet<u16>) -> Result<UpdateMessa
             communities: parsed.communities,
             extended_communities: parsed.extended_communities,
             large_communities: parsed.large_communities,
+            pmsi: parsed.pmsi,
         })
     } else {
         None
@@ -1350,6 +1393,14 @@ fn encode_attributes(update: &UpdateMessage) -> Vec<u8> {
                 &value,
             );
         }
+    }
+    if let Some(pmsi) = update.attributes.as_ref().and_then(|a| a.pmsi.as_ref()) {
+        encode_attribute(
+            &mut out,
+            ATTR_FLAG_OPTIONAL_TRANSITIVE,
+            ATTR_PMSI_TUNNEL,
+            &encode_pmsi(pmsi),
+        );
     }
     for mp in &update.mp_reach {
         encode_attribute(
@@ -1570,6 +1621,7 @@ mod tests {
             communities: vec![],
             extended_communities: vec![],
             large_communities: vec![],
+            pmsi: None,
         }
     }
 
@@ -1609,6 +1661,7 @@ mod tests {
                 communities: vec![(65000 << 16) | 100, 0xFFFF_FF01],
                 extended_communities: vec![(0u64 << 56) | (2u64 << 48) | 100],
                 large_communities: vec![(65000, 1, 1)],
+                pmsi: None,
                 ..attrs(vec![65001], Some(200))
             }),
             ..empty_update()
@@ -1846,6 +1899,7 @@ mod tests {
                 communities: vec![],
                 extended_communities: vec![],
                 large_communities: vec![],
+                pmsi: None,
             })
         );
     }
@@ -1936,5 +1990,15 @@ mod tests {
         assert!(!is_valid_bgp_identifier(Ipv4Addr::BROADCAST));
         assert!(!is_valid_bgp_identifier(Ipv4Addr::new(224, 0, 0, 1)));
         assert!(is_valid_bgp_identifier(Ipv4Addr::new(10, 0, 0, 1)));
+    }
+
+    #[test]
+    fn pmsi_tunnel_round_trips_and_other_tunnel_types_are_ignored() {
+        let p = Pmsi {
+            vni: 10100,
+            tunnel_ip: "192.0.2.1".parse().unwrap(),
+        };
+        assert_eq!(decode_pmsi(&encode_pmsi(&p)), Some(p));
+        assert_eq!(decode_pmsi(&[0, 2, 0, 0, 1, 1, 2, 3, 4]), None);
     }
 }

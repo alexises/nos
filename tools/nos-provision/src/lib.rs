@@ -281,6 +281,47 @@ pub struct Args {
     #[arg(long)]
     pub delete_broadcast_domain_svi: bool,
 
+    /// EVPN on `--broadcast-domain` (ensured if missing): its VNI. The rest
+    /// of the `--evpn-*` flags require it; see `BroadcastDomain::vni`.
+    #[arg(long)]
+    pub evpn_vni: Option<u32>,
+
+    /// EVPN Route Distinguisher of `--broadcast-domain` (`asn:nn`).
+    #[arg(long)]
+    pub evpn_rd: Option<String>,
+
+    /// Route Target added to `--broadcast-domain`'s import list (repeatable).
+    #[arg(long)]
+    pub evpn_rt_import: Vec<String>,
+
+    /// Route Target added to `--broadcast-domain`'s export list (repeatable).
+    #[arg(long)]
+    pub evpn_rt_export: Vec<String>,
+
+    /// `vtep-source interface <name>` on `--broadcast-domain`. Mutually
+    /// exclusive with `--evpn-vtep-source-loopback`.
+    #[arg(long)]
+    pub evpn_vtep_source_interface: Option<String>,
+
+    /// Label of the address to use, paired with either vtep-source flag.
+    #[arg(long)]
+    pub evpn_vtep_source_label: Option<String>,
+
+    /// `vtep-source loopback` on `--broadcast-domain`.
+    #[arg(long)]
+    pub evpn_vtep_source_loopback: bool,
+
+    /// `redistribute from mac to bgp <instance>` on `--broadcast-domain`.
+    #[arg(long)]
+    pub evpn_redistribute_bgp: Option<String>,
+
+    /// If set, undoes the EVPN config of `--broadcast-domain`: clears
+    /// redistribute, vtep-source, rd and vni (in that order, so validation
+    /// passes) and removes any route target named by `--evpn-rt-import`/
+    /// `--evpn-rt-export`. Mutually exclusive with the setting flags.
+    #[arg(long)]
+    pub evpn_clear: bool,
+
     /// If set, points `--peer-group`'s source-address at this named
     /// interface (`BgpPeerGroupOp::SetSourceAddress` with
     /// `SourceAddress::Interface`). Mutually exclusive with
@@ -532,6 +573,86 @@ fn parse_user(s: &str) -> Result<(String, String), String> {
     s.split_once('=')
         .map(|(n, p)| (n.to_string(), p.to_string()))
         .ok_or_else(|| "expected <name>=<password>".to_string())
+}
+
+/// The `--evpn-*` flags -> `BroadcastDomainOp`s on `--broadcast-domain`.
+fn evpn_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
+    let name = || args.broadcast_domain.clone();
+    let op = |o| ConfigOp::BroadcastDomain(o);
+    let setting = args.evpn_vni.is_some()
+        || args.evpn_rd.is_some()
+        || args.evpn_vtep_source_interface.is_some()
+        || args.evpn_vtep_source_loopback
+        || args.evpn_redistribute_bgp.is_some();
+    if args.evpn_clear && setting {
+        bail!("--evpn-clear is mutually exclusive with the other --evpn-* setting flags");
+    }
+    if args.evpn_vtep_source_interface.is_some() && args.evpn_vtep_source_loopback {
+        bail!(
+            "--evpn-vtep-source-interface and --evpn-vtep-source-loopback are mutually exclusive"
+        );
+    }
+    let mut ops = Vec::new();
+    if args.evpn_clear {
+        for (import, list) in [(true, &args.evpn_rt_import), (false, &args.evpn_rt_export)] {
+            for rt in list {
+                ops.push(op(BroadcastDomainOp::RemoveRouteTarget {
+                    name: name(),
+                    import,
+                    route_target: rt.clone(),
+                }));
+            }
+        }
+        ops.push(op(BroadcastDomainOp::ClearMacRedistribute { name: name() }));
+        ops.push(op(BroadcastDomainOp::ClearVtepSource { name: name() }));
+        ops.push(op(BroadcastDomainOp::ClearRd { name: name() }));
+        ops.push(op(BroadcastDomainOp::ClearVni { name: name() }));
+        return Ok(ops);
+    }
+    if !setting && args.evpn_rt_import.is_empty() && args.evpn_rt_export.is_empty() {
+        return Ok(ops);
+    }
+    ops.push(op(BroadcastDomainOp::Ensure { name: name() }));
+    if let Some(vni) = args.evpn_vni {
+        ops.push(op(BroadcastDomainOp::SetVni { name: name(), vni }));
+    }
+    if let Some(rd) = &args.evpn_rd {
+        ops.push(op(BroadcastDomainOp::SetRd {
+            name: name(),
+            rd: rd.clone(),
+        }));
+    }
+    for (import, list) in [(true, &args.evpn_rt_import), (false, &args.evpn_rt_export)] {
+        for rt in list {
+            ops.push(op(BroadcastDomainOp::AddRouteTarget {
+                name: name(),
+                import,
+                route_target: rt.clone(),
+            }));
+        }
+    }
+    let label = args.evpn_vtep_source_label.clone();
+    if let Some(interface) = &args.evpn_vtep_source_interface {
+        ops.push(op(BroadcastDomainOp::SetVtepSource {
+            name: name(),
+            vtep_source: SourceAddress::Interface {
+                interface: interface.clone(),
+                label,
+            },
+        }));
+    } else if args.evpn_vtep_source_loopback {
+        ops.push(op(BroadcastDomainOp::SetVtepSource {
+            name: name(),
+            vtep_source: SourceAddress::Loopback { label },
+        }));
+    }
+    if let Some(instance) = &args.evpn_redistribute_bgp {
+        ops.push(op(BroadcastDomainOp::SetMacRedistribute {
+            name: name(),
+            bgp_instance: instance.clone(),
+        }));
+    }
+    Ok(ops)
 }
 
 pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
@@ -856,6 +977,8 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             name: args.broadcast_domain.clone(),
         }));
     }
+
+    ops.extend(evpn_ops(args)?);
 
     // Adds a second (IPv6) address to `--broadcast-domain`'s SVI alongside
     // `--broadcast-domain-svi-address` — same dual-stack rationale as

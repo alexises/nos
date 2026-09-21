@@ -5,6 +5,8 @@ pub mod config_path;
 pub mod derive;
 pub mod diff;
 pub mod docs;
+pub mod evpn_id;
+pub mod fdb;
 pub mod interface;
 pub mod ipc;
 pub mod lacp;
@@ -27,6 +29,9 @@ pub use codec::IpcCodec;
 pub use derive::sync_routing_table_refs;
 pub use diff::{diff_configs, ConfigDiff, DiffScope, DiffStatus, FieldDiff, SectionDiff};
 pub use docs::{CommandDoc, Topic};
+pub use fdb::{
+    EvpnKey, EvpnRoute, EvpnUpdate, FdbEvent, FdbRequest, FdbTable, MacEntry, MacSource,
+};
 pub use interface::{
     BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, LacpAggregateMembers,
     PortAggregateStatus, SubinterfaceStatus,

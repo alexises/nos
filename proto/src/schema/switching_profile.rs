@@ -106,6 +106,12 @@ mod tests {
     fn domain(name: &str) -> BroadcastDomain {
         BroadcastDomain {
             ospfv3_profile: None,
+            vni: None,
+            rd: None,
+            route_targets_import: Vec::new(),
+            route_targets_export: Vec::new(),
+            vtep_source: None,
+            mac_redistribute: None,
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,

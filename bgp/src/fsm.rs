@@ -944,6 +944,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     communities: route.communities,
                     extended_communities: route.extended_communities,
                     large_communities: route.large_communities,
+                    pmsi: None,
                 }),
                 mp_reach: vec![message::MpReachNlri {
                     afi: afi_of_ipnet(route.prefix),
@@ -974,6 +975,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     communities: route.communities,
                     extended_communities: route.extended_communities,
                     large_communities: route.large_communities,
+                    pmsi: None,
                 }),
                 mp_reach: Vec::new(),
                 mp_unreach: Vec::new(),
@@ -997,6 +999,49 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 }],
             })
         }
+        OutboundUpdate::AnnounceEvpn(route) => BgpMessage::Update(message::UpdateMessage {
+            withdrawn_routes: Vec::new(),
+            withdrawn_path_ids: Vec::new(),
+            nlri: Vec::new(),
+            nlri_path_ids: Vec::new(),
+            attributes: Some(message::PathAttributes {
+                origin: message::Origin::Igp,
+                as_path: route.as_path,
+                next_hop: Ipv4Addr::UNSPECIFIED, // unused: the real next-hop lives in mp_reach
+                local_pref: route.local_pref,
+                med: None,
+                originator_id: None,
+                cluster_list: Vec::new(),
+                communities: Vec::new(),
+                extended_communities: route.extended_communities,
+                large_communities: Vec::new(),
+                pmsi: route.pmsi,
+            }),
+            mp_reach: vec![message::MpReachNlri {
+                afi: message::AFI_L2VPN,
+                safi: message::SAFI_EVPN,
+                next_hop: route.next_hop,
+                nlri: Vec::new(),
+                nlri_path_ids: Vec::new(),
+                evpn: vec![route.nlri],
+            }],
+            mp_unreach: Vec::new(),
+        }),
+        OutboundUpdate::WithdrawEvpn(nlri) => BgpMessage::Update(message::UpdateMessage {
+            withdrawn_routes: Vec::new(),
+            withdrawn_path_ids: Vec::new(),
+            nlri: Vec::new(),
+            nlri_path_ids: Vec::new(),
+            attributes: None,
+            mp_reach: Vec::new(),
+            mp_unreach: vec![message::MpUnreachNlri {
+                afi: message::AFI_L2VPN,
+                safi: message::SAFI_EVPN,
+                withdrawn: Vec::new(),
+                withdrawn_path_ids: Vec::new(),
+                evpn: vec![nlri],
+            }],
+        }),
         OutboundUpdate::Withdraw(prefix, _, path_id) => {
             let path_ids = path_id.map_or_else(Vec::new, |id| vec![id]);
             BgpMessage::Update(message::UpdateMessage {

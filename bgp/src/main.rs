@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use nos_bgp::session::SessionManager;
-use nos_bgp::{reconcile, rib_push_client, server, watchdog_client};
+use nos_bgp::{fdb_push_client, reconcile, rib_push_client, server, watchdog_client};
 use nos_log_client::ForwardingLayer;
 use nos_pki::Identity;
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
@@ -109,6 +109,11 @@ async fn main() -> anyhow::Result<()> {
         sessions.clone(),
         shutdown_rx.clone(),
     );
+    let fdb_push_task = fdb_push_client::spawn(
+        args.watchdog_socket.clone(),
+        sessions.clone(),
+        shutdown_rx.clone(),
+    );
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),
@@ -133,6 +138,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Err(e) = rib_push_task.await {
         warn!(instance = %args.instance, error = %e, "rib push task ended abnormally");
+    }
+    if let Err(e) = fdb_push_task.await {
+        warn!(instance = %args.instance, error = %e, "fdb push task ended abnormally");
     }
     server_task.abort();
 

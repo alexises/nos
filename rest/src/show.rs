@@ -10,11 +10,11 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::Json;
 use futures::{Stream, StreamExt};
 use nos_proto::{
-    BgpEvent, BgpRequest, Config, EvpnRouteSummary, InterfaceEvent, InterfaceRequest,
-    InterfaceStatus, LacpEvent, LacpRequest, LldpEvent, LldpNeighbor, LldpRequest, LogEntry,
-    LogEvent, LogRequest, LsaSummary, NeighborSummary, OspfEvent, OspfRequest, Ospfv3Event,
-    Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request, PeerSummary, PortAggregateLacpSummary,
-    PortAggregateStatus, PrefixRoutes, RibEvent, RibRequest, ServiceRef,
+    BgpEvent, BgpRequest, Config, EvpnRouteSummary, FdbEvent, FdbRequest, FdbTable, InterfaceEvent,
+    InterfaceRequest, InterfaceStatus, LacpEvent, LacpRequest, LldpEvent, LldpNeighbor,
+    LldpRequest, LogEntry, LogEvent, LogRequest, LsaSummary, NeighborSummary, OspfEvent,
+    OspfRequest, Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request, PeerSummary,
+    PortAggregateLacpSummary, PortAggregateStatus, PrefixRoutes, RibEvent, RibRequest, ServiceRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +40,19 @@ pub async fn routes(
         RibEvent::Routes(r) => Ok(Json(r)),
         RibEvent::Error(e) => Err(ApiError::BadGateway(e)),
         other => Err(unexpected("nos-ribd", &other)),
+    }
+}
+
+#[utoipa::path(get, path = "/v1/fdb/{domain}", tag = "show", summary = "A broadcast domain's forwarding database: local and EVPN-learned MACs, flood list", params(("domain" = String, Path, description = "broadcast domain name")), responses((status = 200, body = FdbTable), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn fdb(
+    State(d): State<Daemons>,
+    Path(domain): Path<String>,
+) -> ApiResult<Json<FdbTable>> {
+    match d
+        .service(ServiceRef::FdbDomain(domain), FdbRequest::GetMacs)
+        .await?
+    {
+        FdbEvent::Table(t) => Ok(Json(t)),
     }
 }
 

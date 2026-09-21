@@ -6,7 +6,7 @@ use crate::validators::{
     unique_addresses, unique_in,
 };
 
-use super::{Config, InterfaceAddress};
+use super::{Config, InterfaceAddress, SourceAddress};
 
 /// A named L2 broadcast domain. `SwitchingProfile` references it for L2
 /// membership; `addresses`/`routing_table` independently make the domain's
@@ -44,6 +44,76 @@ pub struct BroadcastDomain {
     /// separate field rather than a widened `ospf_profile`.
     #[garde(custom(|p: &Option<String>, ctx: &Config| ospfv3_profile_reference_valid(p.as_ref(), ctx)))]
     pub ospfv3_profile: Option<String>,
+
+    /// EVPN/VXLAN: the domain's VXLAN Network Identifier. Setting it makes
+    /// `nos-watchdogd` run a `nos-fdbd` for this domain. Everything below
+    /// requires it — see `valid_broadcast_domains`.
+    #[garde(custom(|v: &Option<u32>, _ctx: &Config| valid_vni(*v)))]
+    pub vni: Option<u32>,
+
+    /// EVPN Route Distinguisher, `asn:nn` or `a.b.c.d:nn`.
+    #[garde(custom(|v: &Option<String>, _ctx: &Config| valid_rd(v.as_deref())))]
+    pub rd: Option<String>,
+
+    /// Route Targets a received EVPN route must carry (any one) to be
+    /// installed into this domain's FDB.
+    #[serde(default)]
+    #[garde(custom(|v: &Vec<String>, _ctx: &Config| valid_rts(v)))]
+    pub route_targets_import: Vec<String>,
+
+    /// Route Targets attached to every EVPN route this domain originates.
+    #[serde(default)]
+    #[garde(custom(|v: &Vec<String>, _ctx: &Config| valid_rts(v)))]
+    pub route_targets_export: Vec<String>,
+
+    /// The VTEP address (VXLAN local endpoint), resolved at runtime by
+    /// `nos-fdbd` over IPC to `nos-interfaced` — never here, like
+    /// `BgpPeerGroup.source_address`. `Loopback` means the loopback of the
+    /// routing table owning `mac_redistribute`'s BGP instance.
+    #[garde(skip)]
+    pub vtep_source: Option<SourceAddress>,
+
+    /// `redistribute from mac to bgp <instance>`: the BGP instance this
+    /// domain's local MACs are originated into as EVPN Type-2 routes (and
+    /// whose received EVPN routes are installed into the domain's FDB).
+    #[garde(custom(|v: &Option<String>, ctx: &Config| bgp_instance_exists(v.as_ref(), ctx)))]
+    pub mac_redistribute: Option<String>,
+}
+
+fn valid_vni(vni: Option<u32>) -> garde::Result {
+    match vni {
+        Some(v) if !(1..=0x00ff_ffff).contains(&v) => {
+            Err(garde::Error::new("vni must be between 1 and 16777215"))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn valid_rd(rd: Option<&str>) -> garde::Result {
+    match rd {
+        Some(r) if crate::evpn_id::parse_rd(r).is_none() => Err(garde::Error::new(
+            "rd must be asn:nn or a.b.c.d:nn (nn fits 16 bits unless a 2-byte asn)",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn valid_rts(rts: &[String]) -> garde::Result {
+    match rts.iter().find(|r| crate::evpn_id::parse_rt(r).is_none()) {
+        Some(_) => Err(garde::Error::new(
+            "route-target must be asn:nn or a.b.c.d:nn",
+        )),
+        None => Ok(()),
+    }
+}
+
+fn bgp_instance_exists(name: Option<&String>, ctx: &Config) -> garde::Result {
+    match name {
+        Some(n) if !ctx.bgp_instances.iter().any(|i| &i.name == n) => {
+            Err(garde::Error::new("referenced bgp instance does not exist"))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// `ospf_profile`/`ospfv3_profile`, if set, require `routing_table` also set
@@ -62,6 +132,22 @@ pub(crate) fn valid_broadcast_domains(domains: &[BroadcastDomain]) -> garde::Res
                 "ospfv3 profile requires a routing-table on the same broadcast domain",
             ));
         }
+        if d.vni.is_none()
+            && (d.rd.is_some()
+                || !d.route_targets_import.is_empty()
+                || !d.route_targets_export.is_empty()
+                || d.vtep_source.is_some()
+                || d.mac_redistribute.is_some())
+        {
+            return Err(garde::Error::new(
+                "rd, route-targets, vtep-source and redistribute require a vni on the same broadcast domain",
+            ));
+        }
+        if d.mac_redistribute.is_some() && (d.rd.is_none() || d.vtep_source.is_none()) {
+            return Err(garde::Error::new(
+                "redistribute mac requires an rd and a vtep-source on the same broadcast domain",
+            ));
+        }
     }
     Ok(())
 }
@@ -78,6 +164,12 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
+            vni: None,
+            rd: None,
+            route_targets_import: Vec::new(),
+            route_targets_export: Vec::new(),
+            vtep_source: None,
+            mac_redistribute: None,
         }
     }
 
@@ -210,5 +302,70 @@ mod tests {
         d.ospf_profile = Some("p1".to_string());
         let cfg = config_with_ospf(vec![d], vec![]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    fn evpn_domain() -> BroadcastDomain {
+        let mut d = domain("bd1");
+        d.vni = Some(10100);
+        d.rd = Some("65000:1".to_string());
+        d.route_targets_import = vec!["65000:10100".to_string()];
+        d.route_targets_export = vec!["65000:10100".to_string()];
+        d.vtep_source = Some(SourceAddress::Loopback { label: None });
+        d.mac_redistribute = Some("r1".to_string());
+        d
+    }
+
+    fn config_with_instance(d: BroadcastDomain) -> Config {
+        use crate::schema::BgpInstance;
+        let mut cfg = config_with(vec![d], vec![]);
+        cfg.bgp_instances = vec![BgpInstance {
+            name: "r1".to_string(),
+            router_id: "1.1.1.1".parse().unwrap(),
+            asn: 65000,
+            peer_groups: Vec::new(),
+            peers: Vec::new(),
+            cluster_id: None,
+            routing_table: None,
+            redistribute_policy: None,
+        }];
+        cfg
+    }
+
+    #[test]
+    fn evpn_domain_passes() {
+        let cfg = config_with_instance(evpn_domain());
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn evpn_fields_without_vni_fail() {
+        let mut d = evpn_domain();
+        d.vni = None;
+        let cfg = config_with_instance(d);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn redistribute_without_rd_fails() {
+        let mut d = evpn_domain();
+        d.rd = None;
+        let cfg = config_with_instance(d);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn bad_vni_rd_rt_and_dangling_instance_fail() {
+        for mutate in [
+            (|d: &mut BroadcastDomain| d.vni = Some(0)) as fn(&mut BroadcastDomain),
+            |d| d.vni = Some(1 << 24),
+            |d| d.rd = Some("junk".to_string()),
+            |d| d.route_targets_import = vec!["65000".to_string()],
+            |d| d.mac_redistribute = Some("nope".to_string()),
+        ] {
+            let mut d = evpn_domain();
+            mutate(&mut d);
+            let cfg = config_with_instance(d);
+            assert!(cfg.validate_with(&cfg).is_err());
+        }
     }
 }

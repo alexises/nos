@@ -358,11 +358,33 @@ impl Dock {
         host_pid: bool,
         args: &[&str],
     ) -> anyhow::Result<String> {
-        let mut cmd = vec!["ip".to_string()];
-        cmd.extend(args.iter().map(|s| (*s).to_string()));
+        let mut cmd = vec!["ip"];
+        cmd.extend_from_slice(args);
+        self.helper(helper_image, netns_of, host_pid, &cmd).await
+    }
+
+    /// Runs any iproute2 command (`bridge fdb ...`) in `container`'s network
+    /// namespace — the runtime image has no iproute2, so the helper image
+    /// does it, exactly like `ip`.
+    pub async fn in_netns(
+        &self,
+        helper_image: &str,
+        container: &str,
+        cmd: &[&str],
+    ) -> anyhow::Result<String> {
+        self.helper(helper_image, Some(container), false, cmd).await
+    }
+
+    async fn helper(
+        &self,
+        helper_image: &str,
+        netns_of: Option<&str>,
+        host_pid: bool,
+        cmd: &[&str],
+    ) -> anyhow::Result<String> {
         let body = ContainerCreateBody {
             image: Some(helper_image.to_string()),
-            cmd: Some(cmd),
+            cmd: Some(cmd.iter().map(|s| (*s).to_string()).collect()),
             host_config: Some(HostConfig {
                 privileged: Some(true),
                 network_mode: netns_of.map(|c| format!("container:{c}")),
@@ -384,7 +406,7 @@ impl Dock {
         let out = self.logs(&id).await.unwrap_or_default();
         self.container_remove(&id).await;
         if code != 0 {
-            bail!("ip {}: exit {code}: {}", args.join(" "), out.trim());
+            bail!("{}: exit {code}: {}", cmd.join(" "), out.trim());
         }
         Ok(out)
     }

@@ -47,6 +47,7 @@ pub async fn run(
             vec![
                 DiffScope::BgpInstances,
                 DiffScope::RoutingTables,
+                DiffScope::BroadcastDomains,
                 DiffScope::PolicyDefinitions,
                 DiffScope::CommunityAliases,
                 DiffScope::CommunityGroups,
@@ -228,6 +229,15 @@ async fn resync(
         Some(name) => policy_cache.resolve(Some(name)),
     };
 
+    // The broadcast domains that `redistribute from mac to bgp` this instance
+    // — the ones whose `nos-fdbd` gets every received EVPN route.
+    let fdb_domains = cfg
+        .broadcast_domains
+        .iter()
+        .filter(|d| d.vni.is_some() && d.mac_redistribute.as_deref() == Some(instance))
+        .map(|d| d.name.clone())
+        .collect();
+
     sessions
         .reconcile(
             vrf,
@@ -235,6 +245,7 @@ async fn resync(
             local,
             peers,
             redistribute_policy,
+            fdb_domains,
         )
         .await;
 }

@@ -101,6 +101,14 @@ pub enum BgpRequest {
     SendRouteRefresh { peer: IpAddr },
     /// One-shot: every EVPN route received from any peer.
     GetEvpnRoutes,
+    /// Fire-and-forget, no reply: one `nos-fdbd`'s local MACs, originated as
+    /// EVPN Type-2 (and its flood-list Type-3) routes. `domain` scopes a
+    /// `Full`, since several domains feed one BGP instance (unlike
+    /// `nos-ribd`, where table and instance are 1:1).
+    RedistributeMacs {
+        domain: String,
+        update: crate::fdb::EvpnUpdate,
+    },
 }
 
 /// Messages sent from `nos-bgpd` to a query client.

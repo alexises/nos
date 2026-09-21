@@ -506,6 +506,42 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Unsets the routing-table field on a broadcast domain, reverting to no explicit \
              association.",
         ),
+        Topic::SetBroadcastDomainVni => (
+            "Give a broadcast domain a VXLAN Network Identifier (EVPN).",
+            "Setting a VNI (1-16777215) makes nos-watchdogd run a nos-fdbd for the domain, \
+             which creates a VXLAN device enslaved into the domain's bridge and programs its \
+             forwarding database. rd, route-target, vtep-source and redistribute all require \
+             it. `delete` clears it, which stops nos-fdbd and removes the VXLAN device.",
+        ),
+        Topic::SetBroadcastDomainRd => (
+            "Set a broadcast domain's EVPN Route Distinguisher.",
+            "Written asn:nn or a.b.c.d:nn (with a 4-byte asn or an address, nn must fit 16 \
+             bits). Carried on every EVPN route the domain originates. Requires a vni.",
+        ),
+        Topic::AddBroadcastDomainRouteTarget => (
+            "Add an EVPN Route Target to a broadcast domain's import or export list.",
+            "`import`: a received EVPN route is installed into the domain's forwarding \
+             database only if it carries at least one of these. `export`: attached to every \
+             EVPN route the domain originates. Written asn:nn or a.b.c.d:nn; adding one \
+             already present is a no-op, and `delete` removes one. Requires a vni.",
+        ),
+        Topic::SetBroadcastDomainVtepSource => (
+            "Set the address a broadcast domain's VXLAN tunnels are sourced from.",
+            "Names an interface (and, when it carries several addresses, the label of the one \
+             to use) or `loopback` — the loopback of the routing table owning the BGP \
+             instance named by `redistribute`. Resolved at runtime by nos-fdbd, so a missing \
+             address is retried rather than rejected at commit. It is also the next-hop of \
+             every EVPN route the domain originates. Requires a vni.",
+        ),
+        Topic::SetBroadcastDomainMacRedistribute => (
+            "Redistribute a broadcast domain's MAC addresses into a BGP instance (EVPN).",
+            "`redistribute from mac to bgp <instance>`: nos-fdbd originates an EVPN Type-2 \
+             (MAC advertisement) route per MAC learned locally on the domain's bridge and a \
+             Type-3 (inclusive multicast) route for the domain, into the named BGP instance; \
+             EVPN routes that instance receives with a matching import route-target are \
+             installed into the domain's forwarding database. Requires a vni, an rd and a \
+             vtep-source; the peer-group must have `address-family l2vpn-evpn`.",
+        ),
         Topic::EnsureSwitchingProfile => (
             "Create a switching profile in the transaction if it doesn't already exist.",
             "Adds a new switching profile with the given name to the transaction's \
@@ -849,6 +885,11 @@ mod tests {
         Topic::SetBgpInstanceClusterId,
         Topic::ClearBgpInstanceClusterId,
         Topic::EnsureBroadcastDomain,
+        Topic::SetBroadcastDomainVni,
+        Topic::SetBroadcastDomainRd,
+        Topic::AddBroadcastDomainRouteTarget,
+        Topic::SetBroadcastDomainVtepSource,
+        Topic::SetBroadcastDomainMacRedistribute,
         Topic::DeleteBroadcastDomain,
         Topic::AddBroadcastDomainAddress,
         Topic::RemoveBroadcastDomainAddress,

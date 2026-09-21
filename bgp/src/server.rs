@@ -36,6 +36,7 @@ fn allowed(role: Role, req: &BgpRequest) -> bool {
             matches!(role, Role::User | Role::Restd)
         }
         BgpRequest::RedistributeRoutes(_) => role == Role::Ribd,
+        BgpRequest::RedistributeMacs { .. } => role == Role::Fdbd,
     }
 }
 
@@ -108,6 +109,9 @@ async fn handle_connection(
             BgpRequest::RedistributeRoutes(update) => {
                 sessions.apply_redistribute_update(update).await;
             }
+            BgpRequest::RedistributeMacs { domain, update } => {
+                sessions.apply_evpn_local(&domain, update).await;
+            }
             BgpRequest::SendRouteRefresh { peer } => {
                 let event = if sessions
                     .send_command(peer, FsmCommand::SendRouteRefresh)
@@ -139,6 +143,17 @@ mod authz_tests {
                 ),
                 role == Role::Ribd,
                 "{role:?} redistribute"
+            );
+            assert_eq!(
+                allowed(
+                    role,
+                    &BgpRequest::RedistributeMacs {
+                        domain: "bd1".to_string(),
+                        update: nos_proto::EvpnUpdate::Full(vec![])
+                    }
+                ),
+                role == Role::Fdbd,
+                "{role:?} redistribute macs"
             );
             assert_eq!(
                 allowed(role, &BgpRequest::GetSummary),

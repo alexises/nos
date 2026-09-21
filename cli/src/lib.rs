@@ -2,6 +2,7 @@ pub mod bgp_client;
 pub mod client;
 pub mod command;
 pub mod completer;
+pub mod fdb_client;
 pub mod format;
 pub mod help_menu;
 pub mod interface_client;

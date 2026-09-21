@@ -488,6 +488,7 @@ async fn fake_evpn_peer(
             communities: vec![],
             extended_communities: vec![0x0002_fde8_0000_2710],
             large_communities: vec![],
+            pmsi: None,
         }),
         mp_reach: vec![message::MpReachNlri {
             afi: 25,

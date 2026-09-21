@@ -42,7 +42,7 @@ pub fn start(
 
 /// Status queries: people, the REST API on their behalf, and the routing
 /// daemons that resolve an interface's address (`nos-bgpd`'s `source-address`,
-/// the OSPF daemons' link addressing). The LACP member
+/// the OSPF daemons' link addressing, `nos-fdbd`'s VTEP address and bridge). The LACP member
 /// push rewrites kernel bond membership, so it is `nos-lacpd`'s alone. No
 /// wildcard arm: a new request must be classified.
 fn allowed(role: Role, req: &InterfaceRequest) -> bool {
@@ -54,7 +54,7 @@ fn allowed(role: Role, req: &InterfaceRequest) -> bool {
         | InterfaceRequest::GetPortAggregate { .. } => {
             matches!(
                 role,
-                Role::User | Role::Restd | Role::Bgpd | Role::Ospfd | Role::Ospfv3d
+                Role::User | Role::Restd | Role::Bgpd | Role::Ospfd | Role::Ospfv3d | Role::Fdbd
             )
         }
         InterfaceRequest::PushLacpMembers(_) => role == Role::Lacpd,
@@ -251,7 +251,12 @@ mod authz_tests {
                 allowed(role, &InterfaceRequest::GetInterfaces),
                 matches!(
                     role,
-                    Role::User | Role::Restd | Role::Bgpd | Role::Ospfd | Role::Ospfv3d
+                    Role::User
+                        | Role::Restd
+                        | Role::Bgpd
+                        | Role::Ospfd
+                        | Role::Ospfv3d
+                        | Role::Fdbd
                 ),
                 "{role:?} query"
             );

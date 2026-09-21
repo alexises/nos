@@ -185,6 +185,7 @@ impl SessionManager {
         local: LocalIdentity,
         desired: Vec<ResolvedPeer>,
         redistribute_policy: Arc<nos_rpl::CompiledPolicy>,
+        fdb_domains: Vec<String>,
     ) {
         if *self.local.borrow() != local {
             let _ = self.local.send(local);
@@ -194,6 +195,7 @@ impl SessionManager {
             bgp_rib.set_local_identity(local.asn, local.router_id, local.cluster_id);
             bgp_rib.set_routing_table(routing_table);
             bgp_rib.set_redistribute_policy(redistribute_policy);
+            bgp_rib.set_fdb_domains(fdb_domains);
         }
         if *self.vrf.borrow() != vrf {
             let _ = self.vrf.send(vrf.clone());
@@ -206,6 +208,23 @@ impl SessionManager {
     /// `server.rs`'s fire-and-forget `BgpRequest::RedistributeRoutes` handler.
     pub async fn apply_redistribute_update(&self, update: nos_proto::RedistributeUpdate) {
         self.bgp_rib.lock().await.apply_redistribute_update(update);
+    }
+
+    /// One `nos-fdbd`'s local MACs (`BgpRequest::RedistributeMacs`).
+    pub async fn apply_evpn_local(&self, domain: &str, update: nos_proto::EvpnUpdate) {
+        self.bgp_rib.lock().await.apply_evpn_local(domain, update);
+    }
+
+    /// The broadcast domains fed by `fdb_push_client`, and every received
+    /// EVPN route to feed them.
+    pub async fn fdb_push_snapshot(
+        &self,
+    ) -> (
+        Vec<String>,
+        HashMap<nos_proto::EvpnKey, nos_proto::EvpnRoute>,
+    ) {
+        let rib = self.bgp_rib.lock().await;
+        (rib.fdb_domains().to_vec(), rib.evpn_push_snapshot())
     }
 
     /// This instance's owning routing table name and current best-path

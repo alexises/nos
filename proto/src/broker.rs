@@ -45,6 +45,9 @@ pub enum ServiceRef {
     /// The single `nos-lldpd` instance, resolved directly like `Lacp` — one
     /// LLDP engine handles every LLDP-enabled interface.
     Lldp,
+    /// The `nos-fdbd` instance serving one EVPN `BroadcastDomain`, named by
+    /// the domain's config key — through the registry, like `RibTable`.
+    FdbDomain(String),
 }
 
 impl ServiceRef {
@@ -61,6 +64,7 @@ impl ServiceRef {
             ServiceRef::Ospfv3Instance(_) => Role::Ospfv3d,
             ServiceRef::Lacp => Role::Lacpd,
             ServiceRef::Lldp => Role::Lldpd,
+            ServiceRef::FdbDomain(_) => Role::Fdbd,
         }
     }
 
@@ -71,7 +75,8 @@ impl ServiceRef {
             ServiceRef::RibTable(n)
             | ServiceRef::BgpInstance(n)
             | ServiceRef::OspfInstance(n)
-            | ServiceRef::Ospfv3Instance(n) => n,
+            | ServiceRef::Ospfv3Instance(n)
+            | ServiceRef::FdbDomain(n) => n,
             ServiceRef::Config
             | ServiceRef::Interfaces
             | ServiceRef::Log
@@ -103,13 +108,14 @@ pub enum Role {
     Interfaced,
     Lacpd,
     Lldpd,
+    Fdbd,
     Restd,
     /// A person, authenticated by login; the certificate's name is the username.
     User,
 }
 
 impl Role {
-    pub const ALL: [Role; 12] = [
+    pub const ALL: [Role; 13] = [
         Role::Watchdog,
         Role::Configd,
         Role::Logd,
@@ -120,6 +126,7 @@ impl Role {
         Role::Interfaced,
         Role::Lacpd,
         Role::Lldpd,
+        Role::Fdbd,
         Role::Restd,
         Role::User,
     ];
@@ -136,6 +143,7 @@ impl Role {
             Role::Interfaced => "interfaced",
             Role::Lacpd => "lacpd",
             Role::Lldpd => "lldpd",
+            Role::Fdbd => "fdbd",
             Role::Restd => "restd",
             Role::User => "user",
         }

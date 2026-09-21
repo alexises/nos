@@ -1,7 +1,7 @@
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{BroadcastDomain, Config, InterfaceAddress};
+use crate::schema::{BroadcastDomain, Config, InterfaceAddress, SourceAddress};
 
 use super::OpError;
 
@@ -55,6 +55,47 @@ pub enum BroadcastDomainOp {
     Delete {
         name: String,
     },
+    /// EVPN/VXLAN (all appended after `Delete`: postcard indexes by position).
+    SetVni {
+        name: String,
+        vni: u32,
+    },
+    ClearVni {
+        name: String,
+    },
+    SetRd {
+        name: String,
+        rd: String,
+    },
+    ClearRd {
+        name: String,
+    },
+    /// Idempotent add of one Route Target to the import or export list.
+    AddRouteTarget {
+        name: String,
+        import: bool,
+        route_target: String,
+    },
+    RemoveRouteTarget {
+        name: String,
+        import: bool,
+        route_target: String,
+    },
+    SetVtepSource {
+        name: String,
+        vtep_source: SourceAddress,
+    },
+    ClearVtepSource {
+        name: String,
+    },
+    /// `redistribute from mac to bgp <bgp_instance>`.
+    SetMacRedistribute {
+        name: String,
+        bgp_instance: String,
+    },
+    ClearMacRedistribute {
+        name: String,
+    },
 }
 
 impl BroadcastDomainOp {
@@ -68,6 +109,12 @@ impl BroadcastDomainOp {
                         routing_table: None,
                         ospf_profile: None,
                         ospfv3_profile: None,
+                        vni: None,
+                        rd: None,
+                        route_targets_import: Vec::new(),
+                        route_targets_export: Vec::new(),
+                        vtep_source: None,
+                        mac_redistribute: None,
                     });
                 }
                 Ok(())
@@ -137,6 +184,75 @@ impl BroadcastDomainOp {
                 }
                 Ok(())
             }
+            BroadcastDomainOp::SetVni { name, vni } => {
+                find_domain_mut(config, name)?.vni = Some(*vni);
+                Ok(())
+            }
+            BroadcastDomainOp::ClearVni { name } => {
+                find_domain_mut(config, name)?.vni = None;
+                Ok(())
+            }
+            BroadcastDomainOp::SetRd { name, rd } => {
+                find_domain_mut(config, name)?.rd = Some(rd.clone());
+                Ok(())
+            }
+            BroadcastDomainOp::ClearRd { name } => {
+                find_domain_mut(config, name)?.rd = None;
+                Ok(())
+            }
+            BroadcastDomainOp::AddRouteTarget {
+                name,
+                import,
+                route_target,
+            } => {
+                let d = find_domain_mut(config, name)?;
+                let list = if *import {
+                    &mut d.route_targets_import
+                } else {
+                    &mut d.route_targets_export
+                };
+                if !list.contains(route_target) {
+                    list.push(route_target.clone());
+                }
+                Ok(())
+            }
+            BroadcastDomainOp::RemoveRouteTarget {
+                name,
+                import,
+                route_target,
+            } => {
+                let d = find_domain_mut(config, name)?;
+                let list = if *import {
+                    &mut d.route_targets_import
+                } else {
+                    &mut d.route_targets_export
+                };
+                let before = list.len();
+                list.retain(|r| r != route_target);
+                if list.len() == before {
+                    return Err(OpError::BroadcastDomainRouteTargetNotFound {
+                        name: name.clone(),
+                        route_target: route_target.clone(),
+                    });
+                }
+                Ok(())
+            }
+            BroadcastDomainOp::SetVtepSource { name, vtep_source } => {
+                find_domain_mut(config, name)?.vtep_source = Some(vtep_source.clone());
+                Ok(())
+            }
+            BroadcastDomainOp::ClearVtepSource { name } => {
+                find_domain_mut(config, name)?.vtep_source = None;
+                Ok(())
+            }
+            BroadcastDomainOp::SetMacRedistribute { name, bgp_instance } => {
+                find_domain_mut(config, name)?.mac_redistribute = Some(bgp_instance.clone());
+                Ok(())
+            }
+            BroadcastDomainOp::ClearMacRedistribute { name } => {
+                find_domain_mut(config, name)?.mac_redistribute = None;
+                Ok(())
+            }
         }
     }
 }
@@ -163,6 +279,12 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
+            vni: None,
+            rd: None,
+            route_targets_import: Vec::new(),
+            route_targets_export: Vec::new(),
+            vtep_source: None,
+            mac_redistribute: None,
         }
     }
 
@@ -349,5 +471,59 @@ mod tests {
         .apply(&mut cfg)
         .unwrap_err();
         assert!(matches!(err, OpError::BroadcastDomainNotFound(n) if n == "bd1"));
+    }
+
+    #[test]
+    fn evpn_setters_and_route_target_lists() {
+        let mut cfg = Config {
+            broadcast_domains: vec![domain("bd1")],
+            ..Default::default()
+        };
+        let n = || "bd1".to_string();
+        for op in [
+            BroadcastDomainOp::SetVni { name: n(), vni: 10 },
+            BroadcastDomainOp::SetRd {
+                name: n(),
+                rd: "65000:1".to_string(),
+            },
+            BroadcastDomainOp::AddRouteTarget {
+                name: n(),
+                import: true,
+                route_target: "65000:10".to_string(),
+            },
+            BroadcastDomainOp::AddRouteTarget {
+                name: n(),
+                import: true,
+                route_target: "65000:10".to_string(),
+            },
+            BroadcastDomainOp::AddRouteTarget {
+                name: n(),
+                import: false,
+                route_target: "65000:11".to_string(),
+            },
+            BroadcastDomainOp::SetMacRedistribute {
+                name: n(),
+                bgp_instance: "r1".to_string(),
+            },
+        ] {
+            op.apply(&mut cfg).unwrap();
+        }
+        let d = &cfg.broadcast_domains[0];
+        assert_eq!(d.vni, Some(10));
+        assert_eq!(d.route_targets_import, ["65000:10"]);
+        assert_eq!(d.route_targets_export, ["65000:11"]);
+        assert_eq!(d.mac_redistribute.as_deref(), Some("r1"));
+
+        let err = BroadcastDomainOp::RemoveRouteTarget {
+            name: n(),
+            import: false,
+            route_target: "65000:10".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::BroadcastDomainRouteTargetNotFound { .. }
+        ));
     }
 }

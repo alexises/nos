@@ -1873,6 +1873,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "nos-fdb"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "futures",
+ "netlink-packet-core",
+ "netlink-packet-route",
+ "nos-log-client",
+ "nos-pki",
+ "nos-proto",
+ "rtnetlink",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nos-interface"
 version = "0.1.0"
 dependencies = [

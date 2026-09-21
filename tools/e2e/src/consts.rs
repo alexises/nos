@@ -40,6 +40,19 @@ pub const GOBGP_IMAGE: &str = "nos-e2e-gobgp:local";
 /// Same release `tools/bench-bgp.sh` pins.
 pub const GOBGP_VERSION: &str = "4.9.0";
 pub const ASN_A: u32 = 65001;
+/// `evpn-fdb`: router-a's broadcast domain and its EVPN identity. The import
+/// Route Target is the one GoBGP tags its routes with (`65010:10000`); the
+/// export one is router-a's own. `EVPN_LOCAL_MAC` is what the helper pins on
+/// the bridge, `EVPN_REMOTE_MAC` what GoBGP announces.
+pub const EVPN_DOMAIN: &str = "bd-evpn";
+pub const EVPN_VNI: u32 = 10100;
+pub const EVPN_RD: &str = "65001:1";
+pub const EVPN_RT_IMPORT: &str = "65010:10000";
+pub const EVPN_RT_EXPORT: &str = "65001:10100";
+pub const EVPN_LOCAL_MAC: &str = "02:00:00:00:00:01";
+pub const EVPN_REMOTE_MAC: &str = "aa:bb:cc:00:00:01";
+pub const EVPN_OTHER_RT_MAC: &str = "aa:bb:cc:00:00:02";
+pub const EVPN_PORT: &str = "evpn0";
 pub const ASN_B: u32 = 65002;
 /// Only `route-server` (router-b and router-c must be in distinct ASes from
 /// each other and from router-a) and `ospf-dr`'s router-c use this.

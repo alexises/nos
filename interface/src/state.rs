@@ -691,6 +691,12 @@ mod tests {
                 routing_table: None,
                 ospf_profile: None,
                 ospfv3_profile: None,
+                vni: None,
+                rd: None,
+                route_targets_import: Vec::new(),
+                route_targets_export: Vec::new(),
+                vtep_source: None,
+                mac_redistribute: None,
             },
             nos_proto::BroadcastDomain {
                 name: "bd2".to_string(),
@@ -698,6 +704,12 @@ mod tests {
                 routing_table: None,
                 ospf_profile: None,
                 ospfv3_profile: None,
+                vni: None,
+                rd: None,
+                route_targets_import: Vec::new(),
+                route_targets_export: Vec::new(),
+                vtep_source: None,
+                mac_redistribute: None,
             },
         ];
         build_from_config(&config, &driver, &Interfaces::new()).await;
@@ -724,6 +736,12 @@ mod tests {
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
             ospfv3_profile: None,
+            vni: None,
+            rd: None,
+            route_targets_import: Vec::new(),
+            route_targets_export: Vec::new(),
+            vtep_source: None,
+            mac_redistribute: None,
         }];
         build_from_config(&config, &driver, &Interfaces::new()).await;
         let calls = driver.calls.lock().unwrap().clone();
@@ -749,6 +767,12 @@ mod tests {
             routing_table: Some("rt1".to_string()),
             ospf_profile: None,
             ospfv3_profile: None,
+            vni: None,
+            rd: None,
+            route_targets_import: Vec::new(),
+            route_targets_export: Vec::new(),
+            vtep_source: None,
+            mac_redistribute: None,
         }];
         let interfaces = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
         let domain = interfaces.get_domain("bd1").unwrap();
@@ -773,6 +797,12 @@ mod tests {
             routing_table: None,
             ospf_profile: None,
             ospfv3_profile: None,
+            vni: None,
+            rd: None,
+            route_targets_import: Vec::new(),
+            route_targets_export: Vec::new(),
+            vtep_source: None,
+            mac_redistribute: None,
         }];
         let previous = build_from_config(&config_with_domain, &driver, &Interfaces::new()).await;
 

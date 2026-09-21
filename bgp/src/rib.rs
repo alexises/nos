@@ -75,6 +75,9 @@ use tracing::{info, warn};
 use crate::evpn::EvpnNlri;
 use crate::message::{self, UpdateMessage};
 
+mod evpn_out;
+pub use evpn_out::AdvertisedEvpn;
+
 /// Adapts a `RibRoute` into `nos_rpl`'s input shape — see root `CLAUDE.md`'s
 /// "Execution model". A plain function, not an adapter trait: there is
 /// exactly one producer (`RibRoute`) today, so a trait would add indirection
@@ -141,10 +144,12 @@ fn learn_evpn(
     from: IpAddr,
     mp: &message::MpReachNlri,
     extended_communities: &[u64],
+    pmsi: Option<message::Pmsi>,
 ) {
     for nlri in &mp.evpn {
         let route = EvpnRoute {
             next_hop: mp.next_hop,
+            pmsi_vni: pmsi.map(|p| p.vni),
             extended_communities: extended_communities.to_vec(),
         };
         if table.insert(nlri.clone(), route.clone()) != Some(route) {
@@ -205,6 +210,8 @@ pub enum RouteOrigin {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvpnRoute {
     pub next_hop: IpAddr,
+    /// The VNI of a Type-3 route's PMSI Tunnel attribute, when it had one.
+    pub pmsi_vni: Option<u32>,
     /// Raw 8-byte extended communities (Route Targets, Encapsulation, MAC
     /// Mobility, ...), exactly as received.
     pub extended_communities: Vec<u64>,
@@ -276,6 +283,9 @@ pub struct RibRoute {
 pub enum OutboundUpdate {
     Announce(AdvertisedRoute),
     Withdraw(IpNet, bool, Option<u32>),
+    /// An EVPN route originated by `nos-fdbd` (see `evpn_out`).
+    AnnounceEvpn(AdvertisedEvpn),
+    WithdrawEvpn(EvpnNlri),
 }
 
 /// A route rewritten for advertisement toward one specific peer.
@@ -380,6 +390,13 @@ pub struct BgpRib {
     // import policy (RPL's `Input` is prefix-shaped) or re-advertisement, since
     // nothing consumes EVPN routes yet. Add a Loc-RIB when a MAC-VRF does.
     evpn_adj_rib_in: HashMap<IpAddr, HashMap<EvpnNlri, EvpnRoute>>,
+    /// EVPN routes originated by each `nos-fdbd` (keyed by broadcast domain),
+    /// and what was last announced to each peer — see `evpn_out`.
+    evpn_local: HashMap<String, HashMap<nos_proto::EvpnKey, nos_proto::EvpnRoute>>,
+    evpn_adj_rib_out: HashMap<IpAddr, HashMap<EvpnNlri, AdvertisedEvpn>>,
+    /// Broadcast domains whose `redistribute from mac to bgp` names this
+    /// instance — the ones `fdb_push_client` feeds received EVPN routes to.
+    fdb_domains: Vec<String>,
     /// The unfiltered prefix set as told by `nos-ribd`'s
     /// `RedistributeUpdate` — the raw truth `redistributed` below is
     /// filtered from (see `apply_redistribute_update`/`set_redistribute_policy`).
@@ -430,6 +447,9 @@ impl BgpRib {
             cluster_id: Ipv4Addr::UNSPECIFIED,
             adj_rib_in: HashMap::new(),
             evpn_adj_rib_in: HashMap::new(),
+            evpn_local: HashMap::new(),
+            evpn_adj_rib_out: HashMap::new(),
+            fdb_domains: Vec::new(),
             redistribute_raw: HashSet::new(),
             redistributed: HashMap::new(),
             redistribute_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
@@ -450,6 +470,15 @@ impl BgpRib {
         self.local_asn = asn;
         self.local_router_id = router_id;
         self.cluster_id = cluster_id;
+    }
+
+    /// Sets the broadcast domains fed by `fdb_push_client`.
+    pub fn set_fdb_domains(&mut self, domains: Vec<String>) {
+        self.fdb_domains = domains;
+    }
+
+    pub fn fdb_domains(&self) -> &[String] {
+        &self.fdb_domains
     }
 
     /// Sets this instance's owning `RoutingTable` name (`BgpInstance.routing_table`).
@@ -524,6 +553,7 @@ impl BgpRib {
             }
         }
         self.adj_rib_out.insert(peer, advertised);
+        self.announce_evpn_to(peer);
         if is_rs_client {
             let prefixes: Vec<IpNet> = self.loc_rib.keys().copied().collect();
             for prefix in prefixes {
@@ -599,6 +629,7 @@ impl BgpRib {
     pub fn peer_disconnected(&mut self, peer: IpAddr) {
         self.peer_outboxes.remove(&peer);
         self.adj_rib_out.remove(&peer);
+        self.evpn_adj_rib_out.remove(&peer);
         self.rs_sent.retain(|(p, _), _| *p != peer);
         self.rs_next_id.retain(|(p, _), _| *p != peer);
         if let Some(routes) = self.evpn_adj_rib_in.remove(&peer) {
@@ -757,6 +788,7 @@ impl BgpRib {
                             from,
                             mp,
                             &attrs.extended_communities,
+                            attrs.pmsi,
                         );
                     }
                 }
@@ -1427,6 +1459,7 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                pmsi: None,
             }),
             mp_reach: vec![],
             mp_unreach: vec![],
@@ -1468,6 +1501,100 @@ mod tests {
             evpn: nlris,
         }];
         u
+    }
+
+    fn mac_route(mac: u8) -> nos_proto::EvpnRoute {
+        nos_proto::EvpnRoute {
+            key: nos_proto::EvpnKey::Mac {
+                rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
+                mac: [0, 0, 0, 0, 0, mac],
+            },
+            vni: 10100,
+            next_hop: addr("192.0.2.9"),
+            ext_communities: vec![0x0002_fde8_0000_2774],
+        }
+    }
+
+    fn evpn_afs() -> HashSet<AddressFamily> {
+        HashSet::from([AddressFamily::Ipv4Unicast, AddressFamily::L2vpnEvpn])
+    }
+
+    #[test]
+    fn local_evpn_routes_are_announced_withdrawn_and_replayed_to_new_peers() {
+        let mut rib = new_rib(65000);
+        let mut evpn_rx = register_mp_peer(
+            &mut rib,
+            addr("10.0.0.1"),
+            false,
+            addr("10.0.0.254"),
+            evpn_afs(),
+        );
+        let mut plain_rx = register_mp_peer(
+            &mut rib,
+            addr("10.0.0.2"),
+            false,
+            addr("10.0.0.253"),
+            HashSet::from([AddressFamily::Ipv4Unicast]),
+        );
+
+        rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Add(mac_route(1)));
+        let updates = recv_all(&mut evpn_rx);
+        assert_eq!(updates.len(), 1);
+        let OutboundUpdate::AnnounceEvpn(adv) = &updates[0] else {
+            panic!("expected an EVPN announcement, got {updates:?}");
+        };
+        // eBGP: our ASN prepended; the VTEP next-hop is untouched.
+        assert_eq!(adv.as_path, vec![65000]);
+        assert_eq!(adv.next_hop, addr("192.0.2.9"));
+        assert_eq!(adv.extended_communities, vec![0x0002_fde8_0000_2774]);
+        assert!(recv_all(&mut plain_rx).is_empty(), "EVPN not negotiated");
+
+        // An identical re-push is not re-announced.
+        rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Add(mac_route(1)));
+        assert!(recv_all(&mut evpn_rx).is_empty());
+
+        // A peer that comes up later gets the current set.
+        let mut late_rx = register_mp_peer(
+            &mut rib,
+            addr("10.0.0.3"),
+            false,
+            addr("10.0.0.252"),
+            evpn_afs(),
+        );
+        assert_eq!(recv_all(&mut late_rx).len(), 1);
+
+        // Full replaces only that domain's routes: mac 1 is withdrawn, 2 announced.
+        rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Full(vec![mac_route(2)]));
+        let updates = recv_all(&mut evpn_rx);
+        assert_eq!(updates.len(), 2);
+        assert!(updates
+            .iter()
+            .any(|u| matches!(u, OutboundUpdate::WithdrawEvpn(_))));
+
+        rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Remove(mac_route(2).key));
+        assert!(matches!(
+            recv_all(&mut evpn_rx).as_slice(),
+            [OutboundUpdate::WithdrawEvpn(_)]
+        ));
+    }
+
+    #[test]
+    fn received_type2_and_type3_become_wire_routes_for_fdbd() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        rib.handle_update(
+            peer,
+            false,
+            v4("192.0.2.1"),
+            &evpn_reach(vec![evpn_nlri(1)], vec![65001]),
+            &deny_all_policy(),
+        );
+        let snap = rib.evpn_push_snapshot();
+        assert_eq!(snap.len(), 1);
+        let r = snap.values().next().unwrap();
+        assert_eq!(r.next_hop, addr("192.0.2.1"));
+        assert_eq!(r.ext_communities, vec![0x0002_fde8_0000_2710]);
     }
 
     #[test]
@@ -2199,6 +2326,7 @@ mod tests {
                     communities: Vec::new(),
                     extended_communities: Vec::new(),
                     large_communities: Vec::new(),
+                    pmsi: None,
                 }),
                 ..empty_update()
             },
@@ -2223,6 +2351,7 @@ mod tests {
                     communities: Vec::new(),
                     extended_communities: Vec::new(),
                     large_communities: Vec::new(),
+                    pmsi: None,
                 }),
                 ..empty_update()
             },
@@ -2351,6 +2480,7 @@ mod tests {
         updates.sort_by_key(|u| match u {
             OutboundUpdate::Withdraw(p, _, _) => p.to_string(),
             OutboundUpdate::Announce(a) => a.prefix.to_string(),
+            OutboundUpdate::AnnounceEvpn(_) | OutboundUpdate::WithdrawEvpn(_) => String::new(),
         });
         assert_eq!(
             updates,
@@ -2568,6 +2698,7 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                pmsi: None,
             }),
             ..empty_update()
         }
@@ -3264,6 +3395,7 @@ mod tests {
         assert!(updates.iter().all(|u| match u {
             OutboundUpdate::Announce(r) => r.path_id.is_none(),
             OutboundUpdate::Withdraw(_, _, id) => id.is_none(),
+            OutboundUpdate::AnnounceEvpn(_) | OutboundUpdate::WithdrawEvpn(_) => true,
         }));
         // Still transparent (no AS_PATH prepend) — that's governed by
         // is_rs_client alone, independent of ADD-PATH negotiation. Only

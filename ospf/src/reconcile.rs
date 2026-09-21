@@ -729,6 +729,12 @@ mod tests {
         let cfg = Config {
             broadcast_domains: vec![BroadcastDomain {
                 ospfv3_profile: None,
+                vni: None,
+                rd: None,
+                route_targets_import: Vec::new(),
+                route_targets_export: Vec::new(),
+                vtep_source: None,
+                mac_redistribute: None,
                 name: "bd1".to_string(),
                 addresses: Vec::new(),
                 routing_table: None,
@@ -774,6 +780,12 @@ mod tests {
             interfaces: vec![interface("loopback-rt1", Some("p1"))],
             broadcast_domains: vec![BroadcastDomain {
                 ospfv3_profile: None,
+                vni: None,
+                rd: None,
+                route_targets_import: Vec::new(),
+                route_targets_export: Vec::new(),
+                vtep_source: None,
+                mac_redistribute: None,
                 name: "bd1".to_string(),
                 addresses: Vec::new(),
                 routing_table: None,
@@ -789,6 +801,12 @@ mod tests {
         let cfg = Config {
             broadcast_domains: vec![BroadcastDomain {
                 ospfv3_profile: None,
+                vni: None,
+                rd: None,
+                route_targets_import: Vec::new(),
+                route_targets_export: Vec::new(),
+                vtep_source: None,
+                mac_redistribute: None,
                 name: "bd1".to_string(),
                 addresses: Vec::new(),
                 routing_table: Some("rt1".to_string()),
@@ -827,6 +845,12 @@ mod tests {
             interfaces: vec![iface],
             broadcast_domains: vec![BroadcastDomain {
                 ospfv3_profile: None,
+                vni: None,
+                rd: None,
+                route_targets_import: Vec::new(),
+                route_targets_export: Vec::new(),
+                vtep_source: None,
+                mac_redistribute: None,
                 name: "bd1".to_string(),
                 addresses: Vec::new(),
                 routing_table: None,

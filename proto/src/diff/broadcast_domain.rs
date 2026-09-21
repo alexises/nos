@@ -71,6 +71,40 @@ fn ospf_profile_str(domain: &BroadcastDomain) -> String {
         .unwrap_or_else(|| "unset".to_string())
 }
 
+/// The field label `nos-watchdogd` keys its `nos-fdbd` claim on (see
+/// `Managed::claim_label`): a domain runs one while its vni is set.
+pub const VNI_LABEL: &str = "vni";
+
+/// The EVPN fields as `(label, rendered value)`, so the three section
+/// builders below share one list. Labels are what watchdog's `claim_label`
+/// (`vni`) and every `DiffScope::BroadcastDomains` subscriber key on.
+fn evpn_fields(d: &BroadcastDomain) -> Vec<(&'static str, String)> {
+    let list = |v: &[String]| {
+        if v.is_empty() {
+            "none".to_string()
+        } else {
+            v.join(", ")
+        }
+    };
+    let opt = |v: &Option<String>| v.clone().unwrap_or_else(|| "unset".to_string());
+    vec![
+        (
+            "vni",
+            d.vni.map_or_else(|| "unset".to_string(), |v| v.to_string()),
+        ),
+        ("rd", opt(&d.rd)),
+        ("route-target-import", list(&d.route_targets_import)),
+        ("route-target-export", list(&d.route_targets_export)),
+        (
+            "vtep-source",
+            d.vtep_source
+                .as_ref()
+                .map_or_else(|| "unset".to_string(), ToString::to_string),
+        ),
+        ("redistribute-mac", opt(&d.mac_redistribute)),
+    ]
+}
+
 fn changed_fields(base: &BroadcastDomain, candidate: &BroadcastDomain) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     let mut base_addrs = base.addresses.clone();
@@ -98,6 +132,16 @@ fn changed_fields(base: &BroadcastDomain, candidate: &BroadcastDomain) -> Vec<Fi
             new: Some(ospf_profile_str(candidate)),
         });
     }
+    // `ospfv3_profile` is not diffed today (pre-existing gap, out of scope).
+    for ((label, old), (_, new)) in evpn_fields(base).into_iter().zip(evpn_fields(candidate)) {
+        if old != new {
+            fields.push(FieldDiff {
+                label: label.to_string(),
+                old: Some(old),
+                new: Some(new),
+            });
+        }
+    }
     fields
 }
 
@@ -122,7 +166,14 @@ fn removed_section(domain: &BroadcastDomain) -> SectionDiff {
                 old: Some(ospf_profile_str(domain)),
                 new: None,
             },
-        ],
+        ]
+        .into_iter()
+        .chain(evpn_fields(domain).into_iter().map(|(label, v)| FieldDiff {
+            label: label.to_string(),
+            old: Some(v),
+            new: None,
+        }))
+        .collect(),
         subsections: Vec::new(),
     }
 }
@@ -148,7 +199,14 @@ fn added_section(domain: &BroadcastDomain) -> SectionDiff {
                 old: None,
                 new: Some(ospf_profile_str(domain)),
             },
-        ],
+        ]
+        .into_iter()
+        .chain(evpn_fields(domain).into_iter().map(|(label, v)| FieldDiff {
+            label: label.to_string(),
+            old: None,
+            new: Some(v),
+        }))
+        .collect(),
         subsections: Vec::new(),
     }
 }
@@ -164,7 +222,24 @@ mod tests {
             addresses: Vec::new(),
             routing_table: None,
             ospf_profile: None,
+            vni: None,
+            rd: None,
+            route_targets_import: Vec::new(),
+            route_targets_export: Vec::new(),
+            vtep_source: None,
+            mac_redistribute: None,
         }
+    }
+
+    #[test]
+    fn vni_only_edit_is_a_change() {
+        let mut candidate_domain = domain("bd1");
+        candidate_domain.vni = Some(10100);
+        let sections = diff_broadcast_domains(&[domain("bd1")], &[candidate_domain]);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].fields.len(), 1);
+        assert_eq!(sections[0].fields[0].label, "vni");
+        assert_eq!(sections[0].fields[0].new.as_deref(), Some("10100"));
     }
 
     #[test]

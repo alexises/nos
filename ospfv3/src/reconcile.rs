@@ -551,6 +551,12 @@ mod tests {
                 routing_table: None,
                 ospf_profile: None,
                 ospfv3_profile: Some("p1".to_string()),
+                vni: None,
+                rd: None,
+                route_targets_import: Vec::new(),
+                route_targets_export: Vec::new(),
+                vtep_source: None,
+                mac_redistribute: None,
             }],
             ..Default::default()
         };
@@ -595,6 +601,12 @@ mod tests {
                 routing_table: Some("rt1".to_string()),
                 ospf_profile: None,
                 ospfv3_profile: Some("p1".to_string()),
+                vni: None,
+                rd: None,
+                route_targets_import: Vec::new(),
+                route_targets_export: Vec::new(),
+                vtep_source: None,
+                mac_redistribute: None,
             }],
             ..Default::default()
         };

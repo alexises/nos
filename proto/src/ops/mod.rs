@@ -179,6 +179,8 @@ pub enum OpError {
     BroadcastDomainNotFound(String),
     #[error("address '{address}' not found on broadcast domain '{name}'")]
     BroadcastDomainAddressNotFound { name: String, address: IpNet },
+    #[error("route target '{route_target}' not found on broadcast domain '{name}'")]
+    BroadcastDomainRouteTargetNotFound { name: String, route_target: String },
     #[error("switching profile '{0}' not found")]
     SwitchingProfileNotFound(String),
     #[error("broadcast domain '{broadcast_domain}' not found in switching profile '{name}'")]

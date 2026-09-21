@@ -2,9 +2,9 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
 use nos_proto::{
-    AddressFamily, BgpAoAlgorithm, LacpRate, LldpDestination, NetworkType, NextHopMode,
-    OspfCryptoAlgorithm, PortAggregateMode, Redistribute, RedistributeSource, RedistributeTarget,
-    SourceAddress, TransactionBase, VlanTag, REST_API_PORT_DEFAULT,
+    AddressFamily, BgpAoAlgorithm, BroadcastDomainOp, LacpRate, LldpDestination, NetworkType,
+    NextHopMode, OspfCryptoAlgorithm, PortAggregateMode, Redistribute, RedistributeSource,
+    RedistributeTarget, SourceAddress, TransactionBase, VlanTag, REST_API_PORT_DEFAULT,
 };
 
 /// A single field edit targeting a BGP instance.
@@ -407,6 +407,10 @@ pub enum SetTarget {
     },
     /// Fully-qualified — works from anywhere in configuration mode.
     BroadcastDomainRoutingTable { name: String, routing_table: String },
+    /// A `set broadcast domain <name> {vni|rd|route-target|vtep-source|redistribute}`
+    /// EVPN edit: the parser builds the op itself (one variant instead of
+    /// five parallel target/field types).
+    BroadcastDomainEvpn(BroadcastDomainOp),
     /// Fully-qualified — works from anywhere in configuration mode. Upserts
     /// by `broadcast_domain` within the named switching profile.
     SwitchingProfileMember {
@@ -736,6 +740,8 @@ pub enum DeleteTarget {
     BroadcastDomainRoutingTable {
         name: String,
     },
+    /// The `delete` counterpart of `SetTarget::BroadcastDomainEvpn`.
+    BroadcastDomainEvpn(BroadcastDomainOp),
     SwitchingProfile {
         name: String,
     },
@@ -774,6 +780,10 @@ pub enum Command {
     ShowRoute {
         table: String,
         address: Option<IpAddr>,
+    },
+    /// `show fdb <domain>` — one broadcast domain's forwarding database.
+    ShowFdb {
+        domain: String,
     },
     /// `show interface` (every interface) or `show interface <name>` (one).
     ShowInterface {
@@ -916,6 +926,9 @@ fn parse_show(t: &[&str]) -> Option<Command> {
             table: (*table).to_string(),
             address: Some(addr.parse::<IpAddr>().ok()?),
         },
+        ["fdb", domain] => Command::ShowFdb {
+            domain: (*domain).to_string(),
+        },
         ["interface"] => Command::ShowInterface { name: None },
         ["interface", name] => Command::ShowInterface {
             name: Some((*name).to_string()),
@@ -1044,6 +1057,74 @@ fn parse_edit(t: &[&str]) -> Option<Command> {
 
 /// `set` — every field assignment, in both its fully-qualified and its
 /// path-relative form.
+/// The tail of `set broadcast domain <name> ...` for the EVPN fields.
+fn broadcast_domain_evpn_set(name: &str, rest: &[&str]) -> Option<BroadcastDomainOp> {
+    let name = name.to_string();
+    Some(match rest {
+        ["vni", n] => BroadcastDomainOp::SetVni {
+            name,
+            vni: n.parse().ok()?,
+        },
+        ["rd", rd] => BroadcastDomainOp::SetRd {
+            name,
+            rd: (*rd).to_string(),
+        },
+        ["route-target", dir @ ("import" | "export"), rt] => BroadcastDomainOp::AddRouteTarget {
+            name,
+            import: *dir == "import",
+            route_target: (*rt).to_string(),
+        },
+        ["vtep-source", "interface", ifname] => BroadcastDomainOp::SetVtepSource {
+            name,
+            vtep_source: SourceAddress::Interface {
+                interface: (*ifname).to_string(),
+                label: None,
+            },
+        },
+        ["vtep-source", "interface", ifname, "label", label] => BroadcastDomainOp::SetVtepSource {
+            name,
+            vtep_source: SourceAddress::Interface {
+                interface: (*ifname).to_string(),
+                label: Some((*label).to_string()),
+            },
+        },
+        ["vtep-source", "loopback"] => BroadcastDomainOp::SetVtepSource {
+            name,
+            vtep_source: SourceAddress::Loopback { label: None },
+        },
+        ["vtep-source", "loopback", "label", label] => BroadcastDomainOp::SetVtepSource {
+            name,
+            vtep_source: SourceAddress::Loopback {
+                label: Some((*label).to_string()),
+            },
+        },
+        ["redistribute", "from", "mac", "to", "bgp", instance] => {
+            BroadcastDomainOp::SetMacRedistribute {
+                name,
+                bgp_instance: (*instance).to_string(),
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// The tail of `delete broadcast domain <name> ...` for the EVPN fields.
+fn broadcast_domain_evpn_delete(name: &str, rest: &[&str]) -> Option<BroadcastDomainOp> {
+    let name = name.to_string();
+    Some(match rest {
+        ["vni"] => BroadcastDomainOp::ClearVni { name },
+        ["rd"] => BroadcastDomainOp::ClearRd { name },
+        ["route-target", dir @ ("import" | "export"), rt] => BroadcastDomainOp::RemoveRouteTarget {
+            name,
+            import: *dir == "import",
+            route_target: (*rt).to_string(),
+        },
+        ["vtep-source"] => BroadcastDomainOp::ClearVtepSource { name },
+        ["redistribute"] => BroadcastDomainOp::ClearMacRedistribute { name },
+        _ => return None,
+    })
+}
+
 fn parse_set(t: &[&str]) -> Option<Command> {
     Some(match t {
         ["bgp", "instance", name, "asn", n] => Command::Set(SetTarget::BgpInstance {
@@ -1765,6 +1846,13 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 routing_table: (*table).to_string(),
             })
         }
+        ["broadcast", "domain", name, rest @ ..]
+            if broadcast_domain_evpn_set(name, rest).is_some() =>
+        {
+            Command::Set(SetTarget::BroadcastDomainEvpn(broadcast_domain_evpn_set(
+                name, rest,
+            )?))
+        }
         ["community-alias", name, "value", value] => Command::Set(SetTarget::CommunityAliasValue {
             name: (*name).to_string(),
             value: (*value).to_string(),
@@ -2126,6 +2214,13 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
             Command::Delete(DeleteTarget::BroadcastDomainRoutingTable {
                 name: (*name).to_string(),
             })
+        }
+        ["broadcast", "domain", name, rest @ ..]
+            if broadcast_domain_evpn_delete(name, rest).is_some() =>
+        {
+            Command::Delete(DeleteTarget::BroadcastDomainEvpn(
+                broadcast_domain_evpn_delete(name, rest)?,
+            ))
         }
         ["switching-profile", name] => Command::Delete(DeleteTarget::SwitchingProfile {
             name: (*name).to_string(),
@@ -4419,6 +4514,63 @@ mod tests {
         assert_eq!(
             Command::parse("delete rest-api"),
             Command::Delete(DeleteTarget::RoutingTableRestApiRelative)
+        );
+    }
+
+    #[test]
+    fn broadcast_domain_evpn_set_and_delete() {
+        assert_eq!(
+            Command::parse("set broadcast domain bd1 vni 10100"),
+            Command::Set(SetTarget::BroadcastDomainEvpn(BroadcastDomainOp::SetVni {
+                name: "bd1".to_string(),
+                vni: 10100
+            }))
+        );
+        assert_eq!(
+            Command::parse("set broadcast domain bd1 route-target import 65000:10100"),
+            Command::Set(SetTarget::BroadcastDomainEvpn(
+                BroadcastDomainOp::AddRouteTarget {
+                    name: "bd1".to_string(),
+                    import: true,
+                    route_target: "65000:10100".to_string()
+                }
+            ))
+        );
+        assert_eq!(
+            Command::parse("set broadcast domain bd1 redistribute from mac to bgp r1"),
+            Command::Set(SetTarget::BroadcastDomainEvpn(
+                BroadcastDomainOp::SetMacRedistribute {
+                    name: "bd1".to_string(),
+                    bgp_instance: "r1".to_string()
+                }
+            ))
+        );
+        assert_eq!(
+            Command::parse("delete broadcast domain bd1 redistribute"),
+            Command::Delete(DeleteTarget::BroadcastDomainEvpn(
+                BroadcastDomainOp::ClearMacRedistribute {
+                    name: "bd1".to_string()
+                }
+            ))
+        );
+        // Existing forms are untouched.
+        assert!(matches!(
+            Command::parse("set broadcast domain bd1 routing-table rt1"),
+            Command::Set(SetTarget::BroadcastDomainRoutingTable { .. })
+        ));
+    }
+
+    #[test]
+    fn show_fdb_takes_one_domain() {
+        assert_eq!(
+            Command::parse("show fdb bd1"),
+            Command::ShowFdb {
+                domain: "bd1".to_string()
+            }
+        );
+        assert_eq!(
+            Command::parse("show fdb"),
+            Command::Unknown("show fdb".to_string())
         );
     }
 }

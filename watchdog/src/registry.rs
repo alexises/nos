@@ -17,6 +17,7 @@ pub struct EndpointRegistry {
     bgp_instances: Arc<RwLock<HashMap<String, PathBuf>>>,
     ospf_instances: Arc<RwLock<HashMap<String, PathBuf>>>,
     ospfv3_instances: Arc<RwLock<HashMap<String, PathBuf>>>,
+    fdb_domains: Arc<RwLock<HashMap<String, PathBuf>>>,
 }
 
 /// Which of the registry's per-name maps an endpoint belongs to — one per
@@ -27,6 +28,7 @@ pub enum EndpointKind {
     BgpInstance,
     OspfInstance,
     Ospfv3Instance,
+    FdbDomain,
 }
 
 impl EndpointKind {
@@ -36,6 +38,7 @@ impl EndpointKind {
             EndpointKind::BgpInstance => "bgp instance",
             EndpointKind::OspfInstance => "ospf instance",
             EndpointKind::Ospfv3Instance => "ospfv3 instance",
+            EndpointKind::FdbDomain => "fdb domain",
         }
     }
 }
@@ -47,6 +50,7 @@ impl EndpointRegistry {
             EndpointKind::BgpInstance => &self.bgp_instances,
             EndpointKind::OspfInstance => &self.ospf_instances,
             EndpointKind::Ospfv3Instance => &self.ospfv3_instances,
+            EndpointKind::FdbDomain => &self.fdb_domains,
         }
     }
 
@@ -94,6 +98,7 @@ impl EndpointRegistry {
             ServiceRef::BgpInstance(name) => (EndpointKind::BgpInstance, name),
             ServiceRef::OspfInstance(name) => (EndpointKind::OspfInstance, name),
             ServiceRef::Ospfv3Instance(name) => (EndpointKind::Ospfv3Instance, name),
+            ServiceRef::FdbDomain(name) => (EndpointKind::FdbDomain, name),
         };
         self.map(kind).read().await.get(name).cloned()
     }

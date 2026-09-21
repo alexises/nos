@@ -1212,6 +1212,35 @@ pub fn render_prefix_list(list: &PrefixList) -> String {
     format!("prefix-list {}: entries [{entries}]", list.name)
 }
 
+/// Render one domain's forwarding database for `show fdb`.
+pub fn render_fdb_table(t: &nos_proto::FdbTable) -> String {
+    let dev = |d: &Option<String>| d.as_deref().unwrap_or("not created yet").to_string();
+    let mut lines = vec![format!(
+        "broadcast-domain {}: vni {}, bridge {}, vxlan {}",
+        t.domain,
+        t.vni,
+        dev(&t.bridge),
+        dev(&t.vxlan)
+    )];
+    if t.macs.is_empty() {
+        lines.push("  no MAC addresses".to_string());
+    }
+    for m in &t.macs {
+        lines.push(match (m.source, m.vtep) {
+            (nos_proto::MacSource::Remote, Some(vtep)) => format!("  {} remote via {vtep}", m.mac),
+            (nos_proto::MacSource::Remote, None) => format!("  {} remote", m.mac),
+            (nos_proto::MacSource::Local, _) => format!("  {} local", m.mac),
+        });
+    }
+    let flood: Vec<String> = t.flood.iter().map(ToString::to_string).collect();
+    lines.push(if flood.is_empty() {
+        "  flood list: none".to_string()
+    } else {
+        format!("  flood list: {}", flood.join(", "))
+    });
+    lines.join("\n")
+}
+
 /// Render one broadcast domain as human-readable text, including its own
 /// SVI (address/routing-table) config — mirrors `render_interface`'s flat
 /// loopback rendering, since a domain's bridge has the same flat L3 shape.
@@ -1228,10 +1257,26 @@ pub fn render_broadcast_domain(domain: &BroadcastDomain) -> String {
     };
     let routing_table = domain.routing_table.as_deref().unwrap_or("unset");
     let ospf_profile = domain.ospf_profile.as_deref().unwrap_or("unset");
-    format!(
+    let mut line = format!(
         "broadcast-domain {}: address [{addresses}], routing-table {routing_table}, ospf-profile {ospf_profile}",
         domain.name
-    )
+    );
+    if let Some(vni) = domain.vni {
+        let list = |v: &[String]| v.join(",");
+        let _ = write!(
+            line,
+            ", vni {vni}, rd {}, rt-import [{}], rt-export [{}], vtep-source {}, redistribute-mac {}",
+            domain.rd.as_deref().unwrap_or("unset"),
+            list(&domain.route_targets_import),
+            list(&domain.route_targets_export),
+            domain
+                .vtep_source
+                .as_ref()
+                .map_or_else(|| "unset".to_string(), ToString::to_string),
+            domain.mac_redistribute.as_deref().unwrap_or("unset"),
+        );
+    }
+    line
 }
 
 /// Render one `VlanTag` the same way for every caller.
@@ -2317,5 +2362,34 @@ mod tests {
         let text = render_config(&config);
         assert!(text.contains("user alice"));
         assert!(!text.contains("argon2id") && !text.contains("secret-hash"));
+    }
+
+    #[test]
+    fn fdb_table_lists_local_remote_and_flood() {
+        let t = nos_proto::FdbTable {
+            domain: "bd1".to_string(),
+            vni: 10100,
+            bridge: Some("br1".to_string()),
+            vxlan: Some("vx10100".to_string()),
+            macs: vec![
+                nos_proto::MacEntry {
+                    mac: "02:00:00:00:00:01".to_string(),
+                    source: nos_proto::MacSource::Local,
+                    vtep: None,
+                },
+                nos_proto::MacEntry {
+                    mac: "02:00:00:00:00:09".to_string(),
+                    source: nos_proto::MacSource::Remote,
+                    vtep: Some("192.0.2.9".parse().unwrap()),
+                },
+            ],
+            flood: vec!["192.0.2.9".parse().unwrap()],
+        };
+        assert_eq!(
+            render_fdb_table(&t),
+            "broadcast-domain bd1: vni 10100, bridge br1, vxlan vx10100\n  \
+             02:00:00:00:00:01 local\n  02:00:00:00:00:09 remote via 192.0.2.9\n  \
+             flood list: 192.0.2.9"
+        );
     }
 }

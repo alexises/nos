@@ -463,6 +463,10 @@ pub enum Resolved {
         table: String,
         address: Option<IpAddr>,
     },
+    /// `show fdb <domain>` — data-plane, valid in any mode.
+    ShowFdb {
+        domain: String,
+    },
     /// `show interface` (every interface) or `show interface <name>` (one)
     /// — data-plane, valid in any mode.
     ShowInterface {
@@ -556,6 +560,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::Help => Resolved::Help,
         Command::ShowConfig => Resolved::ShowRunningConfig,
         Command::ShowRoute { table, address } => Resolved::ShowRoute { table, address },
+        Command::ShowFdb { domain } => Resolved::ShowFdb { domain },
         Command::ShowInterface { name } => Resolved::ShowInterface { name },
         Command::ShowPortAggregate { name } => Resolved::ShowPortAggregate { name },
         Command::ShowLacp { name } => Resolved::ShowLacp { name },
@@ -1362,6 +1367,11 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 name,
                 routing_table,
             }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::BroadcastDomainEvpn(op))
+        | Command::Delete(DeleteTarget::BroadcastDomainEvpn(op)) => Resolved::ApplyOp {
+            op: ConfigOp::BroadcastDomain(op),
             after: PathAfter::Stay,
         },
         Command::Set(SetTarget::InterfaceSwitchingProfile {
@@ -2290,6 +2300,7 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
         | Command::Help
         | Command::ShowConfig
         | Command::ShowRoute { .. }
+        | Command::ShowFdb { .. }
         | Command::ShowInterface { .. }
         | Command::ShowPortAggregate { .. }
         | Command::ShowLacp { .. }
@@ -2662,6 +2673,17 @@ mod tests {
                 address: None,
             }
         );
+    }
+
+    #[test]
+    fn show_fdb_works_in_any_mode() {
+        let domain = || "bd1".to_string();
+        for mode in [Mode::Operational, config_mode("t1", Path::Root, false)] {
+            assert_eq!(
+                resolve(&mode, Command::ShowFdb { domain: domain() }),
+                Resolved::ShowFdb { domain: domain() }
+            );
+        }
     }
 
     #[test]
