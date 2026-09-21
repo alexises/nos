@@ -102,6 +102,8 @@ fn evpn_fields(d: &BroadcastDomain) -> Vec<(&'static str, String)> {
                 .map_or_else(|| "unset".to_string(), ToString::to_string),
         ),
         ("redistribute-mac", opt(&d.mac_redistribute)),
+        ("redistribute-arp", opt(&d.arp_redistribute)),
+        ("redistribute-connected", opt(&d.connected_redistribute)),
     ]
 }
 
@@ -228,6 +230,8 @@ mod tests {
             route_targets_export: Vec::new(),
             vtep_source: None,
             mac_redistribute: None,
+            arp_redistribute: None,
+            connected_redistribute: None,
         }
     }
 

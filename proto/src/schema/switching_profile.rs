@@ -112,6 +112,8 @@ mod tests {
             route_targets_export: Vec::new(),
             vtep_source: None,
             mac_redistribute: None,
+            arp_redistribute: None,
+            connected_redistribute: None,
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,

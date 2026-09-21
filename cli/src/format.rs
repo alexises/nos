@@ -1232,6 +1232,15 @@ pub fn render_fdb_table(t: &nos_proto::FdbTable) -> String {
             (nos_proto::MacSource::Local, _) => format!("  {} local", m.mac),
         });
     }
+    for n in &t.neighbours {
+        lines.push(match (n.source, n.vtep) {
+            (nos_proto::MacSource::Remote, Some(vtep)) => {
+                format!("  {} is at {} remote via {vtep}", n.ip, n.mac)
+            }
+            (nos_proto::MacSource::Remote, None) => format!("  {} is at {} remote", n.ip, n.mac),
+            (nos_proto::MacSource::Local, _) => format!("  {} is at {} local", n.ip, n.mac),
+        });
+    }
     let flood: Vec<String> = t.flood.iter().map(ToString::to_string).collect();
     lines.push(if flood.is_empty() {
         "  flood list: none".to_string()
@@ -1265,7 +1274,7 @@ pub fn render_broadcast_domain(domain: &BroadcastDomain) -> String {
         let list = |v: &[String]| v.join(",");
         let _ = write!(
             line,
-            ", vni {vni}, rd {}, rt-import [{}], rt-export [{}], vtep-source {}, redistribute-mac {}",
+            ", vni {vni}, rd {}, rt-import [{}], rt-export [{}], vtep-source {}, redistribute-mac {}, redistribute-arp {}, redistribute-connected {}",
             domain.rd.as_deref().unwrap_or("unset"),
             list(&domain.route_targets_import),
             list(&domain.route_targets_export),
@@ -1274,6 +1283,8 @@ pub fn render_broadcast_domain(domain: &BroadcastDomain) -> String {
                 .as_ref()
                 .map_or_else(|| "unset".to_string(), ToString::to_string),
             domain.mac_redistribute.as_deref().unwrap_or("unset"),
+            domain.arp_redistribute.as_deref().unwrap_or("unset"),
+            domain.connected_redistribute.as_deref().unwrap_or("unset"),
         );
     }
     line
@@ -2383,12 +2394,28 @@ mod tests {
                     vtep: Some("192.0.2.9".parse().unwrap()),
                 },
             ],
+            neighbours: vec![
+                nos_proto::NeighEntry {
+                    ip: "198.51.100.7".parse().unwrap(),
+                    mac: "02:00:00:00:00:01".to_string(),
+                    source: nos_proto::MacSource::Local,
+                    vtep: None,
+                },
+                nos_proto::NeighEntry {
+                    ip: "192.0.2.10".parse().unwrap(),
+                    mac: "02:00:00:00:00:09".to_string(),
+                    source: nos_proto::MacSource::Remote,
+                    vtep: Some("192.0.2.9".parse().unwrap()),
+                },
+            ],
             flood: vec!["192.0.2.9".parse().unwrap()],
         };
         assert_eq!(
             render_fdb_table(&t),
             "broadcast-domain bd1: vni 10100, bridge br1, vxlan vx10100\n  \
              02:00:00:00:00:01 local\n  02:00:00:00:00:09 remote via 192.0.2.9\n  \
+             198.51.100.7 is at 02:00:00:00:00:01 local\n  \
+             192.0.2.10 is at 02:00:00:00:00:09 remote via 192.0.2.9\n  \
              flood list: 192.0.2.9"
         );
     }

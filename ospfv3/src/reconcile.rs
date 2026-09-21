@@ -557,6 +557,8 @@ mod tests {
                 route_targets_export: Vec::new(),
                 vtep_source: None,
                 mac_redistribute: None,
+                arp_redistribute: None,
+                connected_redistribute: None,
             }],
             ..Default::default()
         };
@@ -607,6 +609,8 @@ mod tests {
                 route_targets_export: Vec::new(),
                 vtep_source: None,
                 mac_redistribute: None,
+                arp_redistribute: None,
+                connected_redistribute: None,
             }],
             ..Default::default()
         };

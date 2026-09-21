@@ -564,6 +564,12 @@ async fn gobgp_evpn_rib(w: &World, what: &str, want: impl Fn(&str) -> bool) -> a
 /// the runtime image has no iproute2) is originated as a Type-2, next to the
 /// domain's Type-3, and GoBGP sees both; removing it withdraws it. Finally
 /// unsetting the VNI must stop `nos-fdbd` and delete the VXLAN device.
+///
+/// Type-2 with an IP: GoBGP's `macadv <mac> <ip>` also becomes a kernel
+/// neighbour on the bridge (`remote neighbour installed`); `redistribute from
+/// connected` originates the domain's SVI address with the bridge's MAC, and
+/// `redistribute from arp` an ARP binding pinned on the bridge (`ip neigh add
+/// ... nud permanent`) for a MAC behind a local port — both seen by GoBGP.
 pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
     evpn_speaker(w).await?;
     let a = w.a()?;
@@ -584,6 +590,12 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
         "eth0",
         "--evpn-redistribute-bgp",
         "r1",
+        "--evpn-redistribute-arp-bgp",
+        "r1",
+        "--evpn-redistribute-connected-bgp",
+        "r1",
+        "--broadcast-domain-svi-address",
+        EVPN_SVI_ADDRESS,
     ]));
     a.provision_flags(&flags).await?;
     let vxlan = format!("vx{EVPN_VNI}");
@@ -629,7 +641,7 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
             "evpn",
             "macadv",
             mac,
-            "192.0.2.10",
+            EVPN_REMOTE_IP,
             "etag",
             "0",
             "label",
@@ -651,6 +663,11 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
     gobgp_owned(w, macadv("add", EVPN_OTHER_RT_MAC, "65010:99")).await?;
     gobgp_owned(w, macadv("add", EVPN_REMOTE_MAC, rt_g)).await?;
     a.wait(&installed(EVPN_REMOTE_MAC)).await?;
+    // Its IP is a kernel neighbour on the bridge too.
+    let neigh_installed = format!(
+        "remote neighbour installed domain={EVPN_DOMAIN} mac={EVPN_REMOTE_MAC} ip={EVPN_REMOTE_IP} vtep={IP_G}"
+    );
+    a.wait(&neigh_installed).await?;
     // Same UPDATE cadence as the accepted route, so a few seconds is proof.
     a.assert_quiet(&installed(EVPN_OTHER_RT_MAC), other_base, 5)
         .await?;
@@ -659,7 +676,7 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
     let body = a
         .rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
         .await?;
-    for want in [EVPN_REMOTE_MAC, IP_G, &vxlan] {
+    for want in [EVPN_REMOTE_MAC, EVPN_REMOTE_IP, IP_G, &vxlan] {
         if !body.contains(want) {
             bail!("show fdb is missing {want}: {body}");
         }
@@ -677,6 +694,10 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
     let base = a.count(&removed(EVPN_REMOTE_MAC));
     gobgp_owned(w, macadv("del", EVPN_REMOTE_MAC, rt_g)).await?;
     a.wait_new(&removed(EVPN_REMOTE_MAC), base, 30).await?;
+    a.wait(&format!(
+        "remote neighbour removed domain={EVPN_DOMAIN} mac={EVPN_REMOTE_MAC} ip={EVPN_REMOTE_IP} vtep={IP_G}"
+    ))
+    .await?;
 
     log("local -> BGP: pinning a MAC on a port of the domain's bridge");
     w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
@@ -709,6 +730,60 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
     gobgp_evpn_rib(w, "showed router-a's Type-3", |rib| {
         rib.lines()
             .any(|l| l.contains("multicast") && l.contains(&format!("rd:{EVPN_RD}")))
+    })
+    .await?;
+
+    log("redistribute from connected: the SVI address is a Type-2 with the bridge's MAC");
+    a.wait(&format!(
+        "local neighbour learned domain={EVPN_DOMAIN} mac=.* ip={EVPN_SVI_IP}"
+    ))
+    .await?;
+    gobgp_evpn_rib(w, "showed the SVI address", |rib| {
+        rib.lines()
+            .any(|l| l.contains("macadv") && l.contains(EVPN_SVI_IP))
+    })
+    .await?;
+
+    log("redistribute from arp: a neighbour behind a local port is a Type-2 with the IP");
+    netns_a(
+        w,
+        &[
+            "ip",
+            "neigh",
+            "add",
+            EVPN_HOST_IP,
+            "lladdr",
+            EVPN_LOCAL_MAC,
+            "dev",
+            &bridge,
+            "nud",
+            "permanent",
+        ],
+    )
+    .await?;
+    a.wait(&format!(
+        "local neighbour learned domain={EVPN_DOMAIN} mac={EVPN_LOCAL_MAC} ip={EVPN_HOST_IP}"
+    ))
+    .await?;
+    gobgp_evpn_rib(w, "showed the neighbour's MAC+IP", |rib| {
+        rib.lines()
+            .any(|l| l.contains(EVPN_LOCAL_MAC) && l.contains(EVPN_HOST_IP))
+    })
+    .await?;
+    let base = a.count(&format!(
+        "local neighbour removed domain={EVPN_DOMAIN} mac={EVPN_LOCAL_MAC} ip={EVPN_HOST_IP}"
+    ));
+    netns_a(w, &["ip", "neigh", "del", EVPN_HOST_IP, "dev", &bridge]).await?;
+    a.wait_new(
+        &format!(
+            "local neighbour removed domain={EVPN_DOMAIN} mac={EVPN_LOCAL_MAC} ip={EVPN_HOST_IP}"
+        ),
+        base,
+        30,
+    )
+    .await?;
+    gobgp_evpn_rib(w, "withdrew the neighbour's MAC+IP", |rib| {
+        !rib.contains(EVPN_HOST_IP)
     })
     .await?;
 

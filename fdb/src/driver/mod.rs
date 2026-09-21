@@ -68,10 +68,65 @@ pub trait FdbDriver: Send + Sync {
     /// (permanent/local) addresses, no group addresses.
     async fn local_macs(&self, bridge: &str, vni: u32) -> Result<BTreeSet<Mac>, DriverError>;
 
+    /// IP-to-MAC bindings (ARP / IPv6 ND) on the bridge itself, i.e. the SVI's
+    /// neighbour table: not `extern_learn` (our own `set_neigh` writes — the
+    /// loop guard), only usable states, and only `is_advertisable_ip`
+    /// addresses.
+    async fn local_neighbours(&self, bridge: &str) -> Result<BTreeSet<(Mac, IpAddr)>, DriverError>;
+
+    /// The bridge's own MAC — what an SVI address is originated with.
+    async fn bridge_mac(&self, bridge: &str) -> Result<Mac, DriverError>;
+
+    /// A remote host's IP-to-MAC binding on the bridge (the SVI's neighbour
+    /// table), marked `extern_learn` so the kernel neither ages nor probes it.
+    async fn set_neigh(&self, bridge: &str, mac: Mac, ip: IpAddr) -> Result<(), DriverError>;
+    async fn del_neigh(&self, bridge: &str, mac: Mac, ip: IpAddr) -> Result<(), DriverError>;
+
     /// A wake-up on every kernel neighbour/FDB change (the receiver only
     /// signals "look again" — `local_macs` is the source of truth). `None`
     /// when the backend has no such feed; the caller then relies on its tick.
     fn watch_neigh(&self) -> Option<mpsc::UnboundedReceiver<()>>;
+}
+
+/// Whether an address belongs in a Type-2 route: link-local, loopback,
+/// multicast and unspecified addresses only ever mean something on one link.
+#[must_use]
+pub fn is_advertisable_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(a) => {
+            !(a.is_unspecified()
+                || a.is_loopback()
+                || a.is_multicast()
+                || a.is_link_local()
+                || a.is_broadcast())
+        }
+        IpAddr::V6(a) => {
+            !(a.is_unspecified()
+                || a.is_loopback()
+                || a.is_multicast()
+                || (a.segments()[0] & 0xffc0) == 0xfe80)
+        }
+    }
+}
+
+/// Whether a neighbour dump entry is a binding this domain should originate.
+/// `usable` = the state carries a resolved MAC (reachable/stale/delay/probe/
+/// permanent, not incomplete/failed/none/noarp).
+#[must_use]
+pub fn is_local_neigh(
+    mac: Mac,
+    ip: IpAddr,
+    usable: bool,
+    ext_learned: bool,
+    ifindex: u32,
+    bridge_ifindex: u32,
+) -> bool {
+    ifindex == bridge_ifindex
+        && usable
+        && !ext_learned
+        && mac != [0; 6]
+        && mac[0] & 1 == 0
+        && is_advertisable_ip(ip)
 }
 
 /// Whether a bridge FDB dump entry is a MAC this domain should originate.
@@ -120,6 +175,36 @@ mod tests {
             2,
             None
         ));
+    }
+
+    #[test]
+    fn only_resolved_global_neighbours_on_the_bridge_count() {
+        let ip: IpAddr = "198.51.100.7".parse().unwrap();
+        assert!(is_local_neigh(M, ip, true, false, 2, 2));
+        // our own extern_learn write, an unresolved entry, another device
+        assert!(!is_local_neigh(M, ip, true, true, 2, 2));
+        assert!(!is_local_neigh(M, ip, false, false, 2, 2));
+        assert!(!is_local_neigh(M, ip, true, false, 3, 2));
+        assert!(!is_local_neigh([0; 6], ip, true, false, 2, 2));
+    }
+
+    #[test]
+    fn link_local_and_special_addresses_are_not_advertised() {
+        for ip in ["198.51.100.7", "2001:db8::7"] {
+            assert!(is_advertisable_ip(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in [
+            "169.254.1.1",
+            "fe80::1",
+            "127.0.0.1",
+            "::1",
+            "224.0.0.1",
+            "ff02::1",
+            "0.0.0.0",
+            "::",
+        ] {
+            assert!(!is_advertisable_ip(ip.parse().unwrap()), "{ip}");
+        }
     }
 
     #[test]

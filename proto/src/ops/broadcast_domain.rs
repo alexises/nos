@@ -96,6 +96,23 @@ pub enum BroadcastDomainOp {
     ClearMacRedistribute {
         name: String,
     },
+    /// `redistribute from arp to bgp <bgp_instance>` — appended: postcard
+    /// indexes variants by position.
+    SetArpRedistribute {
+        name: String,
+        bgp_instance: String,
+    },
+    ClearArpRedistribute {
+        name: String,
+    },
+    /// `redistribute from connected to bgp <bgp_instance>`.
+    SetConnectedRedistribute {
+        name: String,
+        bgp_instance: String,
+    },
+    ClearConnectedRedistribute {
+        name: String,
+    },
 }
 
 impl BroadcastDomainOp {
@@ -115,6 +132,8 @@ impl BroadcastDomainOp {
                         route_targets_export: Vec::new(),
                         vtep_source: None,
                         mac_redistribute: None,
+                        arp_redistribute: None,
+                        connected_redistribute: None,
                     });
                 }
                 Ok(())
@@ -253,6 +272,22 @@ impl BroadcastDomainOp {
                 find_domain_mut(config, name)?.mac_redistribute = None;
                 Ok(())
             }
+            BroadcastDomainOp::SetArpRedistribute { name, bgp_instance } => {
+                find_domain_mut(config, name)?.arp_redistribute = Some(bgp_instance.clone());
+                Ok(())
+            }
+            BroadcastDomainOp::ClearArpRedistribute { name } => {
+                find_domain_mut(config, name)?.arp_redistribute = None;
+                Ok(())
+            }
+            BroadcastDomainOp::SetConnectedRedistribute { name, bgp_instance } => {
+                find_domain_mut(config, name)?.connected_redistribute = Some(bgp_instance.clone());
+                Ok(())
+            }
+            BroadcastDomainOp::ClearConnectedRedistribute { name } => {
+                find_domain_mut(config, name)?.connected_redistribute = None;
+                Ok(())
+            }
         }
     }
 }
@@ -285,6 +320,8 @@ mod tests {
             route_targets_export: Vec::new(),
             vtep_source: None,
             mac_redistribute: None,
+            arp_redistribute: None,
+            connected_redistribute: None,
         }
     }
 
@@ -505,6 +542,14 @@ mod tests {
                 name: n(),
                 bgp_instance: "r1".to_string(),
             },
+            BroadcastDomainOp::SetArpRedistribute {
+                name: n(),
+                bgp_instance: "r1".to_string(),
+            },
+            BroadcastDomainOp::SetConnectedRedistribute {
+                name: n(),
+                bgp_instance: "r1".to_string(),
+            },
         ] {
             op.apply(&mut cfg).unwrap();
         }
@@ -513,6 +558,8 @@ mod tests {
         assert_eq!(d.route_targets_import, ["65000:10"]);
         assert_eq!(d.route_targets_export, ["65000:11"]);
         assert_eq!(d.mac_redistribute.as_deref(), Some("r1"));
+        assert_eq!(d.arp_redistribute.as_deref(), Some("r1"));
+        assert_eq!(d.connected_redistribute.as_deref(), Some("r1"));
 
         let err = BroadcastDomainOp::RemoveRouteTarget {
             name: n(),

@@ -78,6 +78,18 @@ pub struct BroadcastDomain {
     /// whose received EVPN routes are installed into the domain's FDB).
     #[garde(custom(|v: &Option<String>, ctx: &Config| bgp_instance_exists(v.as_ref(), ctx)))]
     pub mac_redistribute: Option<String>,
+
+    /// `redistribute from arp to bgp <instance>`: local ARP/ND neighbours on
+    /// the domain's bridge are also originated as Type-2 routes carrying the
+    /// IP. Must name the same instance as `mac_redistribute`.
+    #[garde(custom(|v: &Option<String>, ctx: &Config| bgp_instance_exists(v.as_ref(), ctx)))]
+    pub arp_redistribute: Option<String>,
+
+    /// `redistribute from connected to bgp <instance>`: the domain's own
+    /// (SVI) `addresses` are originated as Type-2 routes carrying the
+    /// bridge's MAC. Must name the same instance as `mac_redistribute`.
+    #[garde(custom(|v: &Option<String>, ctx: &Config| bgp_instance_exists(v.as_ref(), ctx)))]
+    pub connected_redistribute: Option<String>,
 }
 
 fn valid_vni(vni: Option<u32>) -> garde::Result {
@@ -137,7 +149,9 @@ pub(crate) fn valid_broadcast_domains(domains: &[BroadcastDomain]) -> garde::Res
                 || !d.route_targets_import.is_empty()
                 || !d.route_targets_export.is_empty()
                 || d.vtep_source.is_some()
-                || d.mac_redistribute.is_some())
+                || d.mac_redistribute.is_some()
+                || d.arp_redistribute.is_some()
+                || d.connected_redistribute.is_some())
         {
             return Err(garde::Error::new(
                 "rd, route-targets, vtep-source and redistribute require a vni on the same broadcast domain",
@@ -147,6 +161,14 @@ pub(crate) fn valid_broadcast_domains(domains: &[BroadcastDomain]) -> garde::Res
             return Err(garde::Error::new(
                 "redistribute mac requires an rd and a vtep-source on the same broadcast domain",
             ));
+        }
+        // One EVPN target per domain: fdbd originates everything into it.
+        for extra in [&d.arp_redistribute, &d.connected_redistribute] {
+            if extra.is_some() && extra != &d.mac_redistribute {
+                return Err(garde::Error::new(
+                    "redistribute arp/connected must name the same bgp instance as redistribute mac",
+                ));
+            }
         }
     }
     Ok(())
@@ -170,6 +192,8 @@ mod tests {
             route_targets_export: Vec::new(),
             vtep_source: None,
             mac_redistribute: None,
+            arp_redistribute: None,
+            connected_redistribute: None,
         }
     }
 
@@ -338,6 +362,29 @@ mod tests {
     }
 
     #[test]
+    fn arp_and_connected_must_follow_mac_redistribute() {
+        let mut d = evpn_domain();
+        d.arp_redistribute = Some("r1".to_string());
+        d.connected_redistribute = Some("r1".to_string());
+        let cfg = config_with_instance(d.clone());
+        cfg.validate_with(&cfg).unwrap();
+
+        // Without `redistribute from mac` (or naming another instance) they are refused.
+        for mutate in [
+            (|d: &mut BroadcastDomain| d.mac_redistribute = None) as fn(&mut BroadcastDomain),
+            |d| d.mac_redistribute = Some("r2".to_string()),
+        ] {
+            let mut bad = d.clone();
+            mutate(&mut bad);
+            let mut cfg = config_with_instance(bad);
+            let mut second = cfg.bgp_instances[0].clone();
+            second.name = "r2".to_string();
+            cfg.bgp_instances.push(second);
+            assert!(cfg.validate_with(&cfg).is_err());
+        }
+    }
+
+    #[test]
     fn evpn_fields_without_vni_fail() {
         let mut d = evpn_domain();
         d.vni = None;
@@ -361,6 +408,8 @@ mod tests {
             |d| d.rd = Some("junk".to_string()),
             |d| d.route_targets_import = vec!["65000".to_string()],
             |d| d.mac_redistribute = Some("nope".to_string()),
+            |d| d.arp_redistribute = Some("nope".to_string()),
+            |d| d.connected_redistribute = Some("nope".to_string()),
         ] {
             let mut d = evpn_domain();
             mutate(&mut d);

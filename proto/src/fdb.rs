@@ -15,6 +15,13 @@ pub enum EvpnKey {
     Mac { rd: [u8; 8], mac: [u8; 6] },
     /// Type-3 inclusive multicast: `origin` is the advertising VTEP.
     Imet { rd: [u8; 8], origin: IpAddr },
+    /// Type-2 MAC/IP advertisement (ESI 0, Ethernet tag 0). Appended:
+    /// postcard indexes variants by position.
+    MacIp {
+        rd: [u8; 8],
+        mac: [u8; 6],
+        ip: IpAddr,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +70,9 @@ pub struct FdbTable {
     pub bridge: Option<String>,
     pub vxlan: Option<String>,
     pub macs: Vec<MacEntry>,
+    /// IP-to-MAC bindings: local ARP/ND and SVI addresses, and remote Type-2
+    /// routes carrying an IP.
+    pub neighbours: Vec<NeighEntry>,
     /// Remote VTEPs BUM traffic is replicated to (one per received Type-3).
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
     pub flood: Vec<IpAddr>,
@@ -71,6 +81,19 @@ pub struct FdbTable {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MacEntry {
+    /// `aa:bb:cc:dd:ee:ff`.
+    pub mac: String,
+    pub source: MacSource,
+    /// The remote VTEP for a `Remote` entry.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub vtep: Option<IpAddr>,
+}
+
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NeighEntry {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub ip: IpAddr,
     /// `aa:bb:cc:dd:ee:ff`.
     pub mac: String,
     pub source: MacSource,

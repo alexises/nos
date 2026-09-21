@@ -53,6 +53,13 @@ pub const EVPN_LOCAL_MAC: &str = "02:00:00:00:00:01";
 pub const EVPN_REMOTE_MAC: &str = "aa:bb:cc:00:00:01";
 pub const EVPN_OTHER_RT_MAC: &str = "aa:bb:cc:00:00:02";
 pub const EVPN_PORT: &str = "evpn0";
+/// `evpn-fdb`'s Type-2-with-IP checks: an ARP binding pinned on the bridge for
+/// `EVPN_LOCAL_MAC`, the domain's SVI address (`redistribute from connected`),
+/// and the address GoBGP's `macadv` carries (`macadv` in `evpn_fdb`).
+pub const EVPN_HOST_IP: &str = "198.51.100.7";
+pub const EVPN_SVI_ADDRESS: &str = "203.0.113.1/24";
+pub const EVPN_SVI_IP: &str = "203.0.113.1";
+pub const EVPN_REMOTE_IP: &str = "192.0.2.10";
 pub const ASN_B: u32 = 65002;
 /// Only `route-server` (router-b and router-c must be in distinct ASes from
 /// each other and from router-a) and `ospf-dr`'s router-c use this.

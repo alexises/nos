@@ -248,6 +248,10 @@ pub enum Topic {
     SetBroadcastDomainVtepSource,
     /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetMacRedistribute)` / `ClearMacRedistribute`
     SetBroadcastDomainMacRedistribute,
+    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetArpRedistribute)` / `ClearArpRedistribute`
+    SetBroadcastDomainArpRedistribute,
+    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetConnectedRedistribute)` / `ClearConnectedRedistribute`
+    SetBroadcastDomainConnectedRedistribute,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

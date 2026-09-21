@@ -315,6 +315,16 @@ pub struct Args {
     #[arg(long)]
     pub evpn_redistribute_bgp: Option<String>,
 
+    /// `redistribute from arp to bgp <instance>` on `--broadcast-domain`
+    /// (must be the same instance as `--evpn-redistribute-bgp`).
+    #[arg(long)]
+    pub evpn_redistribute_arp_bgp: Option<String>,
+
+    /// `redistribute from connected to bgp <instance>` on `--broadcast-domain`
+    /// (must be the same instance as `--evpn-redistribute-bgp`).
+    #[arg(long)]
+    pub evpn_redistribute_connected_bgp: Option<String>,
+
     /// If set, undoes the EVPN config of `--broadcast-domain`: clears
     /// redistribute, vtep-source, rd and vni (in that order, so validation
     /// passes) and removes any route target named by `--evpn-rt-import`/
@@ -583,7 +593,9 @@ fn evpn_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || args.evpn_rd.is_some()
         || args.evpn_vtep_source_interface.is_some()
         || args.evpn_vtep_source_loopback
-        || args.evpn_redistribute_bgp.is_some();
+        || args.evpn_redistribute_bgp.is_some()
+        || args.evpn_redistribute_arp_bgp.is_some()
+        || args.evpn_redistribute_connected_bgp.is_some();
     if args.evpn_clear && setting {
         bail!("--evpn-clear is mutually exclusive with the other --evpn-* setting flags");
     }
@@ -603,6 +615,10 @@ fn evpn_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 }));
             }
         }
+        ops.push(op(BroadcastDomainOp::ClearArpRedistribute { name: name() }));
+        ops.push(op(BroadcastDomainOp::ClearConnectedRedistribute {
+            name: name(),
+        }));
         ops.push(op(BroadcastDomainOp::ClearMacRedistribute { name: name() }));
         ops.push(op(BroadcastDomainOp::ClearVtepSource { name: name() }));
         ops.push(op(BroadcastDomainOp::ClearRd { name: name() }));
@@ -648,6 +664,18 @@ fn evpn_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     }
     if let Some(instance) = &args.evpn_redistribute_bgp {
         ops.push(op(BroadcastDomainOp::SetMacRedistribute {
+            name: name(),
+            bgp_instance: instance.clone(),
+        }));
+    }
+    if let Some(instance) = &args.evpn_redistribute_arp_bgp {
+        ops.push(op(BroadcastDomainOp::SetArpRedistribute {
+            name: name(),
+            bgp_instance: instance.clone(),
+        }));
+    }
+    if let Some(instance) = &args.evpn_redistribute_connected_bgp {
+        ops.push(op(BroadcastDomainOp::SetConnectedRedistribute {
             name: name(),
             bgp_instance: instance.clone(),
         }));

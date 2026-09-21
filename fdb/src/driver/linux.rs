@@ -20,7 +20,7 @@ use rtnetlink::{Handle, LinkUnspec, LinkVxlan, MulticastGroup};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-use super::{is_local_mac, vxlan_name, DriverError, FdbDriver, Mac, VXLAN_PORT};
+use super::{is_local_mac, is_local_neigh, vxlan_name, DriverError, FdbDriver, Mac, VXLAN_PORT};
 
 /// errno(3) values the kernel answers a missing object with.
 const ENODEV: i32 = 19;
@@ -56,6 +56,15 @@ impl LinuxFdbDriver {
             Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -ENODEV => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    async fn bridge_index(&self, bridge: &str) -> Result<u32, DriverError> {
+        Ok(self
+            .find_link(bridge)
+            .await?
+            .ok_or_else(|| DriverError::Other(format!("bridge {bridge} does not exist yet")))?
+            .header
+            .index)
     }
 
     async fn vxlan_index(&self, vni: u32) -> Result<u32, DriverError> {
@@ -104,6 +113,38 @@ fn master_of(link: &LinkMessage) -> Option<u32> {
         LinkAttribute::Controller(i) => Some(*i),
         _ => None,
     })
+}
+
+fn link_mac(link: &LinkMessage) -> Option<Mac> {
+    link.attributes.iter().find_map(|a| match a {
+        LinkAttribute::Address(b) => Mac::try_from(b.as_slice()).ok(),
+        _ => None,
+    })
+}
+
+fn neigh_address(a: &NeighbourAddress) -> Option<IpAddr> {
+    match a {
+        NeighbourAddress::Inet(a) => Some(IpAddr::V4(*a)),
+        NeighbourAddress::Inet6(a) => Some(IpAddr::V6(*a)),
+        _ => None,
+    }
+}
+
+/// One IP neighbour on the bridge `ifindex` (its SVI's ARP/ND table).
+fn ip_neigh_msg(ifindex: u32, mac: Mac, ip: IpAddr) -> NeighbourMessage {
+    let mut m = NeighbourMessage::default();
+    m.header.family = match ip {
+        IpAddr::V4(_) => AddressFamily::Inet,
+        IpAddr::V6(_) => AddressFamily::Inet6,
+    };
+    m.header.ifindex = ifindex;
+    m.header.state = NeighbourState::Permanent;
+    m.header.flags = NeighbourFlags::ExtLearned;
+    m.attributes = vec![
+        NeighbourAttribute::LinkLayerAddress(mac.to_vec()),
+        NeighbourAttribute::Destination(NeighbourAddress::from(ip)),
+    ];
+    m
 }
 
 fn vxlan_matches(link: &LinkMessage, vni: u32, vtep: IpAddr, underlay: u32) -> bool {
@@ -301,6 +342,73 @@ impl FdbDriver for LinuxFdbDriver {
         Ok(out)
     }
 
+    async fn local_neighbours(&self, bridge: &str) -> Result<BTreeSet<(Mac, IpAddr)>, DriverError> {
+        let bridge_idx = self.bridge_index(bridge).await?;
+        let mut out = BTreeSet::new();
+        for family in [AddressFamily::Inet, AddressFamily::Inet6] {
+            let mut dump = self
+                .handle
+                .neighbours()
+                .get()
+                .set_address_family(family)
+                .execute();
+            while let Some(m) = dump.try_next().await? {
+                let mut mac = None;
+                let mut ip = None;
+                for a in &m.attributes {
+                    match a {
+                        NeighbourAttribute::LinkLayerAddress(b) => {
+                            mac = Mac::try_from(b.as_slice()).ok();
+                        }
+                        NeighbourAttribute::Destination(d) => ip = neigh_address(d),
+                        _ => {}
+                    }
+                }
+                let (Some(mac), Some(ip)) = (mac, ip) else {
+                    continue;
+                };
+                let usable = matches!(
+                    m.header.state,
+                    NeighbourState::Reachable
+                        | NeighbourState::Stale
+                        | NeighbourState::Delay
+                        | NeighbourState::Probe
+                        | NeighbourState::Permanent
+                );
+                if is_local_neigh(
+                    mac,
+                    ip,
+                    usable,
+                    m.header.flags.contains(NeighbourFlags::ExtLearned),
+                    m.header.ifindex,
+                    bridge_idx,
+                ) {
+                    out.insert((mac, ip));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn bridge_mac(&self, bridge: &str) -> Result<Mac, DriverError> {
+        self.find_link(bridge)
+            .await?
+            .as_ref()
+            .and_then(link_mac)
+            .ok_or_else(|| DriverError::Other(format!("bridge {bridge} has no MAC yet")))
+    }
+
+    async fn set_neigh(&self, bridge: &str, mac: Mac, ip: IpAddr) -> Result<(), DriverError> {
+        let msg = ip_neigh_msg(self.bridge_index(bridge).await?, mac, ip);
+        self.neigh(msg, false, NLM_F_CREATE | NLM_F_REPLACE, 0)
+            .await
+    }
+
+    async fn del_neigh(&self, bridge: &str, mac: Mac, ip: IpAddr) -> Result<(), DriverError> {
+        let msg = ip_neigh_msg(self.bridge_index(bridge).await?, mac, ip);
+        self.neigh(msg, true, 0, ENOENT).await
+    }
+
     fn watch_neigh(&self) -> Option<mpsc::UnboundedReceiver<()>> {
         let (conn, _handle, mut messages) =
             rtnetlink::new_multicast_connection(&[MulticastGroup::Neigh]).ok()?;
@@ -308,13 +416,17 @@ impl FdbDriver for LinuxFdbDriver {
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             while let Some((msg, _)) = messages.next().await {
-                let bridge_fdb = matches!(
+                // Bridge FDB (MACs) and ARP/ND (IP neighbours) alike.
+                let relevant = matches!(
                     &msg.payload,
                     NetlinkPayload::InnerMessage(
                         RouteNetlinkMessage::NewNeighbour(n) | RouteNetlinkMessage::DelNeighbour(n)
-                    ) if n.header.family == AddressFamily::Bridge
+                    ) if matches!(
+                        n.header.family,
+                        AddressFamily::Bridge | AddressFamily::Inet | AddressFamily::Inet6
+                    )
                 );
-                if bridge_fdb && tx.send(()).is_err() {
+                if relevant && tx.send(()).is_err() {
                     break;
                 }
             }

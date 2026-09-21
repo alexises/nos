@@ -15,6 +15,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::config_client;
+use crate::driver::is_advertisable_ip;
 use crate::fdb::{Fdb, Ready, TICK};
 use crate::interface_client;
 
@@ -122,6 +123,16 @@ async fn resolve(cfg: &Config, d: &BroadcastDomain, watchdog_socket: &Path) -> O
         rd,
         rt_import: rts(&d.route_targets_import),
         rt_export: rts(&d.route_targets_export),
-        bgp_instance: instance,
+        bgp_instance: instance.clone(),
+        arp: d.arp_redistribute.as_deref() == Some(instance.as_str()),
+        connected: if d.connected_redistribute.as_deref() == Some(instance.as_str()) {
+            d.addresses
+                .iter()
+                .map(|a| a.address.addr())
+                .filter(|ip| is_advertisable_ip(*ip))
+                .collect()
+        } else {
+            Vec::new()
+        },
     })
 }

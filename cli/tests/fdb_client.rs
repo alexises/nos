@@ -15,6 +15,7 @@ fn sample() -> FdbTable {
             source: MacSource::Remote,
             vtep: Some("192.0.2.9".parse().unwrap()),
         }],
+        neighbours: Vec::new(),
         flood: vec!["192.0.2.9".parse().unwrap()],
     }
 }

@@ -542,6 +542,21 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              installed into the domain's forwarding database. Requires a vni, an rd and a \
              vtep-source; the peer-group must have `address-family l2vpn-evpn`.",
         ),
+        Topic::SetBroadcastDomainArpRedistribute => (
+            "Also originate a broadcast domain's ARP/ND neighbours as EVPN MAC+IP routes.",
+            "`redistribute from arp to bgp <instance>`: every IPv4 ARP / IPv6 ND neighbour \
+             (link-local addresses excluded) on the domain's bridge is originated as an EVPN \
+             Type-2 route carrying both its MAC and IP. The instance must be the one named by \
+             `redistribute from mac`. Received Type-2 routes with an IP are programmed as \
+             kernel neighbours on the bridge.",
+        ),
+        Topic::SetBroadcastDomainConnectedRedistribute => (
+            "Originate a broadcast domain's own (SVI) addresses as EVPN MAC+IP routes.",
+            "`redistribute from connected to bgp <instance>`: each of the domain's own \
+             `address`es (its SVI, link-local excluded) is originated as an EVPN Type-2 route \
+             carrying the bridge's MAC and that IP. The instance must be the one named by \
+             `redistribute from mac`.",
+        ),
         Topic::EnsureSwitchingProfile => (
             "Create a switching profile in the transaction if it doesn't already exist.",
             "Adds a new switching profile with the given name to the transaction's \
@@ -890,6 +905,8 @@ mod tests {
         Topic::AddBroadcastDomainRouteTarget,
         Topic::SetBroadcastDomainVtepSource,
         Topic::SetBroadcastDomainMacRedistribute,
+        Topic::SetBroadcastDomainArpRedistribute,
+        Topic::SetBroadcastDomainConnectedRedistribute,
         Topic::DeleteBroadcastDomain,
         Topic::AddBroadcastDomainAddress,
         Topic::RemoveBroadcastDomainAddress,

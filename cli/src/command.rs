@@ -1104,6 +1104,18 @@ fn broadcast_domain_evpn_set(name: &str, rest: &[&str]) -> Option<BroadcastDomai
                 bgp_instance: (*instance).to_string(),
             }
         }
+        ["redistribute", "from", "arp", "to", "bgp", instance] => {
+            BroadcastDomainOp::SetArpRedistribute {
+                name,
+                bgp_instance: (*instance).to_string(),
+            }
+        }
+        ["redistribute", "from", "connected", "to", "bgp", instance] => {
+            BroadcastDomainOp::SetConnectedRedistribute {
+                name,
+                bgp_instance: (*instance).to_string(),
+            }
+        }
         _ => return None,
     })
 }
@@ -1120,7 +1132,13 @@ fn broadcast_domain_evpn_delete(name: &str, rest: &[&str]) -> Option<BroadcastDo
             route_target: (*rt).to_string(),
         },
         ["vtep-source"] => BroadcastDomainOp::ClearVtepSource { name },
-        ["redistribute"] => BroadcastDomainOp::ClearMacRedistribute { name },
+        ["redistribute"] | ["redistribute", "from", "mac"] => {
+            BroadcastDomainOp::ClearMacRedistribute { name }
+        }
+        ["redistribute", "from", "arp"] => BroadcastDomainOp::ClearArpRedistribute { name },
+        ["redistribute", "from", "connected"] => {
+            BroadcastDomainOp::ClearConnectedRedistribute { name }
+        }
         _ => return None,
     })
 }
@@ -4553,6 +4571,51 @@ mod tests {
                 }
             ))
         );
+        assert_eq!(
+            Command::parse("set broadcast domain bd1 redistribute from arp to bgp r1"),
+            Command::Set(SetTarget::BroadcastDomainEvpn(
+                BroadcastDomainOp::SetArpRedistribute {
+                    name: "bd1".to_string(),
+                    bgp_instance: "r1".to_string()
+                }
+            ))
+        );
+        assert_eq!(
+            Command::parse("set broadcast domain bd1 redistribute from connected to bgp r1"),
+            Command::Set(SetTarget::BroadcastDomainEvpn(
+                BroadcastDomainOp::SetConnectedRedistribute {
+                    name: "bd1".to_string(),
+                    bgp_instance: "r1".to_string()
+                }
+            ))
+        );
+        for (cmd, op) in [
+            (
+                "mac",
+                BroadcastDomainOp::ClearMacRedistribute {
+                    name: "bd1".to_string(),
+                },
+            ),
+            (
+                "arp",
+                BroadcastDomainOp::ClearArpRedistribute {
+                    name: "bd1".to_string(),
+                },
+            ),
+            (
+                "connected",
+                BroadcastDomainOp::ClearConnectedRedistribute {
+                    name: "bd1".to_string(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                Command::parse(&format!(
+                    "delete broadcast domain bd1 redistribute from {cmd}"
+                )),
+                Command::Delete(DeleteTarget::BroadcastDomainEvpn(op))
+            );
+        }
         // Existing forms are untouched.
         assert!(matches!(
             Command::parse("set broadcast domain bd1 routing-table rt1"),

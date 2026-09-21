@@ -48,6 +48,14 @@ fn nlri_of(r: &WireRoute) -> EvpnNlri {
             ip: None,
             labels: vec![r.vni],
         },
+        EvpnKey::MacIp { rd, mac, ip } => EvpnNlri::MacIp {
+            rd: *rd,
+            esi: [0; 10],
+            tag: 0,
+            mac: *mac,
+            ip: Some(*ip),
+            labels: vec![r.vni],
+        },
         EvpnKey::Imet { rd, origin } => EvpnNlri::InclusiveMulticast {
             rd: *rd,
             tag: 0,
@@ -75,7 +83,7 @@ fn advertise(outbox: &PeerOutbox, local_asn: u32, r: &WireRoute) -> Option<Adver
                 vni: r.vni,
                 tunnel_ip: *origin,
             }),
-            EvpnKey::Mac { .. } => None,
+            EvpnKey::Mac { .. } | EvpnKey::MacIp { .. } => None,
         },
     })
 }
@@ -158,16 +166,27 @@ impl BgpRib {
     }
 
     /// Every received Type-2/Type-3 route, across peers, as the wire shape
-    /// `nos-fdbd` consumes. A MAC learned from two peers collapses to one
-    /// entry (last one iterated wins) — see `EvpnKey`.
+    /// `nos-fdbd` consumes. A MAC (or MAC+IP) learned from two peers collapses
+    /// to one entry (last one iterated wins) — see `EvpnKey`.
     pub fn evpn_push_snapshot(&self) -> HashMap<EvpnKey, WireRoute> {
         let mut out = HashMap::new();
         for (nlri, route) in self.evpn_adj_rib_in.values().flatten() {
             let (key, vni) = match nlri {
                 EvpnNlri::MacIp {
-                    rd, mac, labels, ..
+                    rd,
+                    mac,
+                    ip,
+                    labels,
+                    ..
                 } => (
-                    EvpnKey::Mac { rd: *rd, mac: *mac },
+                    match ip {
+                        Some(ip) => EvpnKey::MacIp {
+                            rd: *rd,
+                            mac: *mac,
+                            ip: *ip,
+                        },
+                        None => EvpnKey::Mac { rd: *rd, mac: *mac },
+                    },
                     labels.first().copied().unwrap_or(0),
                 ),
                 EvpnNlri::InclusiveMulticast { rd, origin, .. } => (

@@ -41,6 +41,18 @@ impl FdbDriver for NoopFdbDriver {
     async fn local_macs(&self, _: &str, _: u32) -> Result<BTreeSet<Mac>, DriverError> {
         Ok(BTreeSet::new())
     }
+    async fn local_neighbours(&self, _: &str) -> Result<BTreeSet<(Mac, IpAddr)>, DriverError> {
+        Ok(BTreeSet::new())
+    }
+    async fn bridge_mac(&self, _: &str) -> Result<Mac, DriverError> {
+        Ok([0x02, 0, 0, 0, 0, 0xfe])
+    }
+    async fn set_neigh(&self, _: &str, _: Mac, _: IpAddr) -> Result<(), DriverError> {
+        Ok(())
+    }
+    async fn del_neigh(&self, _: &str, _: Mac, _: IpAddr) -> Result<(), DriverError> {
+        Ok(())
+    }
     fn watch_neigh(&self) -> Option<mpsc::UnboundedReceiver<()>> {
         None
     }
