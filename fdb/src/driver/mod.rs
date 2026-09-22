@@ -6,6 +6,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 
 pub mod linux;
+mod nexthop;
 pub mod noop;
 
 pub use linux::LinuxFdbDriver;
@@ -59,6 +60,21 @@ pub trait FdbDriver: Send + Sync {
     async fn set_remote_mac(&self, vni: u32, mac: Mac, vtep: IpAddr) -> Result<(), DriverError>;
     async fn del_remote_mac(&self, vni: u32, mac: Mac, vtep: IpAddr) -> Result<(), DriverError>;
 
+    /// A remote MAC reachable through *several* VTEPs, which the kernel
+    /// balances by flow hash (an FDB nexthop group): how a MAC on an
+    /// all-active Ethernet Segment is aliased over the segment's PEs. The
+    /// same `extern_learn` marking as `set_remote_mac`; replaces whatever
+    /// entry the MAC had. IPv4 VTEPs only. Groups and their nexthops are
+    /// created as needed and kept until `remove_vxlan`.
+    async fn set_remote_mac_group(
+        &self,
+        vni: u32,
+        mac: Mac,
+        vteps: &[IpAddr],
+    ) -> Result<(), DriverError>;
+    /// Removes the entry `set_remote_mac_group` wrote.
+    async fn del_remote_mac_group(&self, vni: u32, mac: Mac) -> Result<(), DriverError>;
+
     /// One head-end-replication flood destination (the all-zero MAC entry).
     async fn add_flood(&self, vni: u32, vtep: IpAddr) -> Result<(), DriverError>;
     async fn del_flood(&self, vni: u32, vtep: IpAddr) -> Result<(), DriverError>;
@@ -79,6 +95,19 @@ pub trait FdbDriver: Send + Sync {
     /// Ethernet Segment. `Err` while the port doesn't exist (yet).
     async fn set_port_flood(&self, port: &str, flood: bool) -> Result<(), DriverError>;
 
+    /// Puts the bridge port `port` in the `forwarding` or `disabled` STP state
+    /// (`bridge link set ... state 3|0`): a disabled port drops every frame in
+    /// both directions, unicast included — how a single-active non-DF is kept
+    /// off its Ethernet Segment. (Not `blocking`: with the bridge's STP off the
+    /// kernel undoes that at once, but leaves a disabled port alone.) `Err`
+    /// while the port doesn't exist (yet), or when kernel STP owns the state.
+    async fn set_port_forwarding(&self, port: &str, forwarding: bool) -> Result<(), DriverError>;
+
+    /// Whether `port` has carrier (`IFF_LOWER_UP`); `false` while it doesn't
+    /// exist. A bond with no live member has none, which is how an Ethernet
+    /// Segment is noticed to be down.
+    async fn port_up(&self, port: &str) -> Result<bool, DriverError>;
+
     /// IP-to-MAC bindings (ARP / IPv6 ND) on the bridge itself, i.e. the SVI's
     /// neighbour table: not `extern_learn` (our own `set_neigh` writes — the
     /// loop guard), only usable states, and only `is_advertisable_ip`
@@ -93,8 +122,9 @@ pub trait FdbDriver: Send + Sync {
     async fn set_neigh(&self, bridge: &str, mac: Mac, ip: IpAddr) -> Result<(), DriverError>;
     async fn del_neigh(&self, bridge: &str, mac: Mac, ip: IpAddr) -> Result<(), DriverError>;
 
-    /// A wake-up on every kernel neighbour/FDB change (the receiver only
-    /// signals "look again" — `local_macs` is the source of truth). `None`
+    /// A wake-up on every kernel neighbour/FDB or link change (the receiver
+    /// only signals "look again" — `local_macs`/`port_up` are the source of
+    /// truth). `None`
     /// when the backend has no such feed; the caller then relies on its tick.
     fn watch_neigh(&self) -> Option<mpsc::UnboundedReceiver<()>>;
 }

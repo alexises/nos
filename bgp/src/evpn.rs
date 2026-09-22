@@ -427,7 +427,8 @@ pub fn encode_nlri(nlri: &EvpnNlri, out: &mut Vec<u8>) {
 
 /// Renders an RFC 4360 / RFC 5668 / RFC 7432 extended community for `show`:
 /// Route Target / Route Origin as `RT:65000:10000`, VXLAN-style Encapsulation
-/// as `encap:8`; anything else as raw hex.
+/// as `encap:8`, ES-Import as `ES-Import:…`, an ESI Label as
+/// `esi-label:single-active|all-active`; anything else as raw hex.
 #[must_use]
 pub fn format_ext_community(c: u64) -> String {
     let b = c.to_be_bytes();
@@ -455,6 +456,15 @@ pub fn format_ext_community(c: u64) -> String {
         (0x03, _) if b[1] == 0x0c => format!("encap:{}", u16::from_be_bytes([b[6], b[7]])),
         // RFC 7432 §7.6: the ESI's value bytes 1..7.
         (0x06, _) if b[1] == 0x02 => format!("ES-Import:{}", hex(&b[2..])),
+        // RFC 7432 §7.5: the flags octet's bit 0 is Single-Active.
+        (0x06, _) if b[1] == 0x01 => format!(
+            "esi-label:{}",
+            if b[2] & 1 == 1 {
+                "single-active"
+            } else {
+                "all-active"
+            }
+        ),
         _ => format!("0x{c:016x}"),
     }
 }
@@ -616,6 +626,14 @@ mod tests {
         assert_eq!(
             format_ext_community(0x0600_0000_0000_0001),
             "0x0600000000000001"
+        );
+        assert_eq!(
+            format_ext_community(0x0601_0100_0000_0000),
+            "esi-label:single-active"
+        );
+        assert_eq!(
+            format_ext_community(0x0601_0000_0000_0000),
+            "esi-label:all-active"
         );
         assert_eq!(samples()[4].to_string(), "[3]:[65000:1]:[0]:[192.0.2.1]");
     }

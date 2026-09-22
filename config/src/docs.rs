@@ -646,6 +646,16 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              sees one partner and bundles its links across them. Must be a unicast MAC. `delete` \
              goes back to the derived id.",
         ),
+        Topic::SetPortAggregateRedundancyMode => (
+            "Set how the PEs sharing a port aggregate's Ethernet Segment divide the traffic.",
+            "Sets the redundancy-mode of the named port aggregate: `all-active` (the default) lets \
+             every PE forward unicast to the segment and only the Designated Forwarder flood BUM; \
+             `single-active` lets only the Designated Forwarder forward anything, the other PEs \
+             blocking the aggregate's bridge port outright. The mode is announced to the other PEs \
+             in the per-ES Ethernet A-D route, and needs an `esi` (checked at commit time). The \
+             blocked port keeps its carrier, so a single-active customer device needs end-to-end \
+             failure detection (for example an ARP-monitored active-backup bond) to move over.",
+        ),
         Topic::SetInterfacePortAggregate => (
             "Associate an interface with a port aggregate as a bonded member.",
             "Points an interface at a port aggregate by name, making it a bonded member. The \
@@ -942,6 +952,7 @@ mod tests {
         Topic::SetPortAggregateLacpRate,
         Topic::SetPortAggregateEsi,
         Topic::SetPortAggregateLacpSystemId,
+        Topic::SetPortAggregateRedundancyMode,
         Topic::SetInterfacePortAggregate,
         Topic::ClearInterfacePortAggregate,
         Topic::EnsureOspfInstance,

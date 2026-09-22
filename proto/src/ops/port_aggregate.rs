@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Config, LacpRate, PortAggregate, PortAggregateMode};
+use crate::schema::{Config, EsRedundancy, LacpRate, PortAggregate, PortAggregateMode};
 
 use super::OpError;
 
@@ -58,6 +58,11 @@ pub enum PortAggregateOp {
     ClearLacpSystemId {
         name: String,
     },
+    /// Appended (postcard indexes variants by position).
+    SetRedundancyMode {
+        name: String,
+        mode: EsRedundancy,
+    },
 }
 
 impl PortAggregateOp {
@@ -70,6 +75,7 @@ impl PortAggregateOp {
                         mode: *mode,
                         lacp_rate: LacpRate::default(),
                         esi: None,
+                        redundancy_mode: EsRedundancy::default(),
                         lacp_system_id: None,
                         switching_profile: None,
                         mtu: None,
@@ -122,6 +128,10 @@ impl PortAggregateOp {
                 find_aggregate_mut(config, name)?.lacp_system_id = None;
                 Ok(())
             }
+            PortAggregateOp::SetRedundancyMode { name, mode } => {
+                find_aggregate_mut(config, name)?.redundancy_mode = *mode;
+                Ok(())
+            }
             PortAggregateOp::Delete { name } => {
                 let before = config.port_aggregates.len();
                 config.port_aggregates.retain(|a| &a.name != name);
@@ -155,6 +165,7 @@ mod tests {
             mode: PortAggregateMode::Xor,
             lacp_rate: LacpRate::default(),
             esi: None,
+            redundancy_mode: EsRedundancy::default(),
             lacp_system_id: None,
             switching_profile: None,
             mtu: None,
@@ -245,6 +256,28 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.port_aggregates[0].lacp_rate, LacpRate::Fast);
+    }
+
+    #[test]
+    fn set_redundancy_mode() {
+        let mut cfg = Config {
+            port_aggregates: vec![aggregate("bond1")],
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.port_aggregates[0].redundancy_mode,
+            EsRedundancy::AllActive
+        );
+        PortAggregateOp::SetRedundancyMode {
+            name: "bond1".to_string(),
+            mode: EsRedundancy::SingleActive,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.port_aggregates[0].redundancy_mode,
+            EsRedundancy::SingleActive
+        );
     }
 
     #[test]

@@ -1664,6 +1664,77 @@ mod tests {
     }
 
     #[test]
+    fn ethernet_ad_routes_are_originated_per_es_and_per_evi_and_received_ones_keep_their_origin() {
+        use nos_proto::fdb::AD_TAG_ES;
+        let mut rib = new_rib(65000);
+        let mut rx = register_mp_peer(
+            &mut rib,
+            addr("10.0.0.1"),
+            false,
+            addr("10.0.0.254"),
+            evpn_afs(),
+        );
+        let esi = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let rd = [0, 0, 0xfd, 0xe8, 0, 0, 0, 1];
+        let ad = |tag: u32, vni: u32| nos_proto::EvpnRoute {
+            key: nos_proto::EvpnKey::EthernetAd {
+                rd,
+                esi,
+                tag,
+                origin: addr("192.0.2.9"),
+            },
+            vni,
+            next_hop: addr("192.0.2.9"),
+            ext_communities: vec![nos_proto::evpn_id::esi_label_ext(false)],
+            esi,
+        };
+        rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Add(ad(AD_TAG_ES, 0)));
+        rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Add(ad(0, 10_100)));
+        let updates = recv_all(&mut rx);
+        // Per-ES: MAX-ET and no label; per-EVI: tag 0, the VNI in the label.
+        assert!(matches!(
+            &updates[0],
+            OutboundUpdate::AnnounceEvpn(a)
+                if matches!(a.nlri, EvpnNlri::EthernetAd { tag: AD_TAG_ES, label: 0, .. })
+        ));
+        assert!(matches!(
+            &updates[1],
+            OutboundUpdate::AnnounceEvpn(a)
+                if matches!(a.nlri, EvpnNlri::EthernetAd { tag: 0, label: 10_100, .. })
+        ));
+
+        // Two PEs sending the same NLRI stay two entries, told apart by origin.
+        for (peer, nh) in [
+            (addr("10.0.0.2"), "192.0.2.2"),
+            (addr("10.0.0.3"), "192.0.2.3"),
+        ] {
+            let _peer_rx = register_peer(&mut rib, peer, false, addr("10.0.0.253"));
+            let mut u = evpn_reach(
+                vec![EvpnNlri::EthernetAd {
+                    rd,
+                    esi,
+                    tag: AD_TAG_ES,
+                    label: 0,
+                }],
+                vec![65001],
+            );
+            u.mp_reach[0].next_hop = addr(nh);
+            rib.handle_update(peer, false, v4(nh), &u, &deny_all_policy());
+        }
+        let snap = rib.evpn_push_snapshot();
+        let origins: std::collections::BTreeSet<_> = snap
+            .keys()
+            .filter_map(|k| match k {
+                nos_proto::EvpnKey::EthernetAd { origin, tag, .. } if *tag == AD_TAG_ES => {
+                    Some(*origin)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(origins.len(), 2, "{snap:?}");
+    }
+
+    #[test]
     fn received_type2_and_type3_become_wire_routes_for_fdbd() {
         let mut rib = new_rib(65000);
         let peer = addr("10.0.0.1");

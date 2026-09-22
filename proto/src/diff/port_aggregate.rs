@@ -76,6 +76,13 @@ fn changed_fields(base: &PortAggregate, candidate: &PortAggregate) -> Vec<FieldD
             new: Some(format!("{:?}", candidate.lacp_rate)),
         });
     }
+    if base.redundancy_mode != candidate.redundancy_mode {
+        fields.push(FieldDiff {
+            label: "redundancy-mode".to_string(),
+            old: Some(format!("{:?}", base.redundancy_mode)),
+            new: Some(format!("{:?}", candidate.redundancy_mode)),
+        });
+    }
     for (label, old, new) in [
         ("esi", &base.esi, &candidate.esi),
         (
@@ -172,6 +179,7 @@ mod tests {
             mode: PortAggregateMode::Xor,
             lacp_rate: crate::schema::LacpRate::default(),
             esi: None,
+            redundancy_mode: crate::schema::EsRedundancy::default(),
             lacp_system_id: None,
             switching_profile: None,
             mtu: None,

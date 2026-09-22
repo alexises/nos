@@ -32,6 +32,12 @@ impl FdbDriver for NoopFdbDriver {
     async fn del_remote_mac(&self, _: u32, _: Mac, _: IpAddr) -> Result<(), DriverError> {
         Ok(())
     }
+    async fn set_remote_mac_group(&self, _: u32, _: Mac, _: &[IpAddr]) -> Result<(), DriverError> {
+        Ok(())
+    }
+    async fn del_remote_mac_group(&self, _: u32, _: Mac) -> Result<(), DriverError> {
+        Ok(())
+    }
     async fn add_flood(&self, _: u32, _: IpAddr) -> Result<(), DriverError> {
         Ok(())
     }
@@ -44,6 +50,13 @@ impl FdbDriver for NoopFdbDriver {
     async fn set_port_flood(&self, port: &str, flood: bool) -> Result<(), DriverError> {
         info!(port = %port, flood, "noop driver: set port flood");
         Ok(())
+    }
+    async fn set_port_forwarding(&self, port: &str, forwarding: bool) -> Result<(), DriverError> {
+        info!(port = %port, forwarding, "noop driver: set port forwarding");
+        Ok(())
+    }
+    async fn port_up(&self, _: &str) -> Result<bool, DriverError> {
+        Ok(true)
     }
     async fn local_neighbours(&self, _: &str) -> Result<BTreeSet<(Mac, IpAddr)>, DriverError> {
         Ok(BTreeSet::new())

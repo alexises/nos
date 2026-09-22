@@ -1003,13 +1003,40 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
         })
     };
     gobgp_evpn_rib(w, "showed router-a's Type-4", es_route).await?;
+
+    // Type-1 (RFC 7432 §8.2/§8.4): per-ES is MAX-ET with an ESI Label community
+    // (all-active here), per-EVI is tag 0 with the VNI in the label.
+    log("Type-1: GoBGP sees router-a's per-ES A-D (MAX-ET, ESI Label) and per-EVI A-D (VNI)");
+    let ad_route = |rib: &str, per_es: bool| {
+        rib.lines().any(|l| {
+            l.contains("[type:A-D]")
+                && l.contains(&format!("rd:{EVPN_RD}"))
+                && l.contains(GOBGP_ESI_TEXT)
+                && l.contains(EVPN_RT_EXPORT)
+                && if per_es {
+                    l.contains("[etag:4294967295]") && l.contains("[esi-label: 0]")
+                } else {
+                    l.contains("[etag:0]")
+                        && l.contains(&format!("[{EVPN_VNI}]"))
+                        && !l.contains("esi-label")
+                }
+        })
+    };
+    gobgp_evpn_rib(w, "showed router-a's per-ES A-D", |rib| ad_route(rib, true)).await?;
+    gobgp_evpn_rib(w, "showed router-a's per-EVI A-D", |rib| {
+        ad_route(rib, false)
+    })
+    .await?;
+
     let body = a
         .rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
         .await?;
     let table: serde_json::Value = serde_json::from_str(&body)?;
-    if table["segments"][0]["designated_forwarder"] != true || table["segments"][0]["port"] != bond
+    if table["segments"][0]["designated_forwarder"] != true
+        || table["segments"][0]["port"] != bond
+        || table["segments"][0]["up"] != true
     {
-        bail!("show fdb does not list the segment with router-a as DF: {body}");
+        bail!("show fdb does not list the segment up with router-a as DF: {body}");
     }
 
     let peer_es = |verb: &'static str| {
@@ -1037,6 +1064,172 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&role("df"), base, 30).await?;
     bridge_port_flood(w, "router-a", &bond, true).await?;
 
+    log("mass withdrawal: MACs of a segment router-a is not on wait for their PE's per-ES A-D");
+    let vni = EVPN_VNI.to_string();
+    let macadv2 = |verb: &'static str, mac: &'static str, ip: &'static str| {
+        let mut v = strings(&[
+            "global", "rib", verb, "-a", "evpn", "macadv", mac, ip, "esi",
+        ]);
+        v.extend(strings(&ESI2));
+        v.extend(strings(&["etag", "0", "label", &vni, "rd", ESI2_RD]));
+        if verb == "add" {
+            v.extend(strings(&["rt", EVPN_RT_IMPORT, "encap", "vxlan"]));
+        }
+        v
+    };
+    let ad2 = |verb: &'static str| {
+        let mut v = strings(&["global", "rib", verb, "-a", "evpn", "a-d", "esi"]);
+        v.extend(strings(&ESI2));
+        v.extend(strings(&[
+            "etag",
+            "4294967295",
+            "label",
+            "0",
+            "rd",
+            ESI2_RD,
+        ]));
+        if verb == "add" {
+            v.extend(strings(&[
+                "rt",
+                EVPN_RT_IMPORT,
+                "encap",
+                "vxlan",
+                "esi-label",
+                "0",
+                "all-active",
+            ]));
+        }
+        v
+    };
+    let installed =
+        |mac: &str| format!("remote mac installed domain={EVPN_DOMAIN} mac={mac} vtep={IP_G}");
+    let removed =
+        |mac: &str| format!("remote mac removed domain={EVPN_DOMAIN} mac={mac} vtep={IP_G}");
+    let installed_base: Vec<usize> = ESI2_MACS
+        .iter()
+        .map(|(m, _)| a.count(&installed(m)))
+        .collect();
+    for (m, ip) in ESI2_MACS {
+        gobgp_owned(w, macadv2("add", m, ip)).await?;
+    }
+    // Their PE has not advertised the segment yet: the MACs are not usable.
+    a.assert_quiet(&installed(ESI2_MACS[0].0), installed_base[0], 5)
+        .await?;
+    gobgp_owned(w, ad2("add")).await?;
+    for (i, (m, _)) in ESI2_MACS.iter().enumerate() {
+        a.wait_new(&installed(m), installed_base[i], 30).await?;
+    }
+    let body = a
+        .rest_expect(Method::GET, "/v1/bgp/evpn", None, 200)
+        .await?;
+    if !body.contains("esi-label:all-active") {
+        bail!("show bgp evpn does not decode the ESI Label community: {body}");
+    }
+    log("withdrawing that one route takes every MAC of the segment away at once");
+    let removed_base: Vec<usize> = ESI2_MACS
+        .iter()
+        .map(|(m, _)| a.count(&removed(m)))
+        .collect();
+    gobgp_owned(w, ad2("del")).await?;
+    for (i, (m, _)) in ESI2_MACS.iter().enumerate() {
+        a.wait_new(&removed(m), removed_base[i], 30).await?;
+    }
+    log("advertising it again brings them back");
+    let installed_base: Vec<usize> = ESI2_MACS
+        .iter()
+        .map(|(m, _)| a.count(&installed(m)))
+        .collect();
+    gobgp_owned(w, ad2("add")).await?;
+    for (i, (m, _)) in ESI2_MACS.iter().enumerate() {
+        a.wait_new(&installed(m), installed_base[i], 30).await?;
+    }
+    gobgp_owned(w, ad2("del")).await?;
+    for (m, ip) in ESI2_MACS {
+        gobgp_owned(w, macadv2("del", m, ip)).await?;
+    }
+
+    log("aliasing: a MAC on a segment two PEs serve is balanced over both, in the real kernel");
+    let alias_mac = ESI3_MAC.0;
+    let [pe1, pe2] = ESI3_PES;
+    let group_installed = format!(
+        "remote mac group installed domain={EVPN_DOMAIN} mac={alias_mac} vteps={},{}",
+        pe1.0, pe2.0
+    );
+    let group_base = a.count(&group_installed);
+    gobgp_owned(w, gobgp_macadv("add", &ESI3, ESI3_MAC, pe1)).await?;
+    for pe in [pe1, pe2] {
+        gobgp_owned(w, gobgp_ad("add", &ESI3, true, pe)).await?;
+        gobgp_owned(w, gobgp_ad("add", &ESI3, false, pe)).await?;
+    }
+    a.wait_new(&group_installed, group_base, 30).await?;
+    let (nexthops, entry) = kernel_aliasing(w, alias_mac).await?;
+    if !entry.contains("nhid") {
+        bail!("the aliased MAC's FDB entry does not use a nexthop group: {entry:?}");
+    }
+    let groups = nexthops.lines().filter(|l| l.contains("group ")).count();
+    if groups != 1
+        || !nexthops.contains(&format!("via {}", pe1.0))
+        || !nexthops.contains(&format!("via {}", pe2.0))
+    {
+        bail!("expected one FDB group over both PEs: {nexthops}");
+    }
+    let body = a
+        .rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
+        .await?;
+    let table: serde_json::Value = serde_json::from_str(&body)?;
+    let aliased = table["macs"]
+        .as_array()
+        .and_then(|m| m.iter().find(|e| e["mac"] == alias_mac))
+        .context("show fdb lacks the aliased MAC")?;
+    if aliased["vteps"].as_array().map(Vec::len) != Some(2) {
+        bail!("show fdb does not list both VTEPs of the aliased MAC: {aliased}");
+    }
+
+    log("the second PE stops serving the EVI: the MAC is back on the one PE that does");
+    let removed = format!(
+        "remote mac group removed domain={EVPN_DOMAIN} mac={alias_mac} vteps={},{}",
+        pe1.0, pe2.0
+    );
+    let removed_base = a.count(&removed);
+    gobgp_owned(w, gobgp_ad("del", &ESI3, false, pe2)).await?;
+    a.wait_new(&removed, removed_base, 30).await?;
+    a.wait(&format!(
+        "remote mac installed domain={EVPN_DOMAIN} mac={alias_mac} vtep={}",
+        pe1.0
+    ))
+    .await?;
+    let (_, entry) = kernel_aliasing(w, alias_mac).await?;
+    if entry.contains("nhid") || !entry.contains(&format!("dst {}", pe1.0)) {
+        bail!("the MAC did not fall back to its one PE: {entry:?}");
+    }
+
+    log("cleaning up the aliasing routes");
+    gobgp_owned(w, gobgp_macadv("del", &ESI3, ESI3_MAC, pe1)).await?;
+    for pe in [pe1, pe2] {
+        gobgp_owned(w, gobgp_ad("del", &ESI3, true, pe)).await?;
+    }
+    gobgp_owned(w, gobgp_ad("del", &ESI3, false, pe1)).await?;
+
+    log("ES down: the bond losing carrier withdraws Type-4 and both Type-1, carrier back restores them");
+    netns_a(w, &["ip", "link", "set", &bond, "down"]).await?;
+    a.wait(&format!(
+        "segment port carrier changed domain={EVPN_DOMAIN} port={bond} up=false"
+    ))
+    .await?;
+    gobgp_evpn_rib(w, "dropped router-a's segment routes", |rib| {
+        !es_route(rib) && !ad_route(rib, true) && !ad_route(rib, false)
+    })
+    .await?;
+    let carrier_up =
+        format!("segment port carrier changed domain={EVPN_DOMAIN} port={bond} up=true");
+    let base = a.count(&carrier_up);
+    netns_a(w, &["ip", "link", "set", &bond, "up"]).await?;
+    a.wait_new(&carrier_up, base, 30).await?;
+    gobgp_evpn_rib(w, "re-advertised router-a's segment routes", |rib| {
+        es_route(rib) && ad_route(rib, true) && ad_route(rib, false)
+    })
+    .await?;
+
     log("back to non-DF, then clearing the ESI restores flooding and withdraws it");
     let base = a.count(&role("non-df"));
     gobgp_owned(w, peer_es("add")).await?;
@@ -1051,13 +1244,96 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     clear.push("--delete-port-aggregate-esi".to_string());
     a.provision_flags(&clear).await?;
     bridge_port_flood(w, "router-a", &bond, true).await?;
-    gobgp_evpn_rib(w, "dropped router-a's Type-4 and the Type-2's ESI", |rib| {
-        !es_route(rib)
-            && rib
-                .lines()
-                .any(|l| l.contains(ESI_MAC) && !l.contains(GOBGP_ESI_TEXT))
-    })
+    gobgp_evpn_rib(
+        w,
+        "dropped router-a's Type-4, Type-1s and the Type-2's ESI",
+        |rib| {
+            !es_route(rib)
+                && !ad_route(rib, true)
+                && !ad_route(rib, false)
+                && rib
+                    .lines()
+                    .any(|l| l.contains(ESI_MAC) && !l.contains(GOBGP_ESI_TEXT))
+        },
+    )
     .await
+}
+
+/// GoBGP arguments to add/delete one PE's A-D route for `esi`: per-ES (MAX-ET,
+/// all-active ESI Label) or per-EVI (tag 0, the VNI in the label), advertised
+/// with `nexthop` as its VTEP.
+fn gobgp_ad(
+    verb: &'static str,
+    esi: &[&str; 2],
+    per_es: bool,
+    (nexthop, rd): (&str, &str),
+) -> Vec<String> {
+    let (etag, label) = if per_es {
+        ("4294967295".to_string(), "0".to_string())
+    } else {
+        ("0".to_string(), EVPN_VNI.to_string())
+    };
+    let mut v = strings(&["global", "rib", verb, "-a", "evpn", "a-d", "esi"]);
+    v.extend(strings(esi));
+    v.extend(strings(&["etag", &etag, "label", &label, "rd", rd]));
+    if verb == "add" {
+        v.extend(strings(&["rt", EVPN_RT_IMPORT, "encap", "vxlan"]));
+        if per_es {
+            v.extend(strings(&["esi-label", "0", "all-active"]));
+        }
+        v.extend(strings(&["nexthop", nexthop]));
+    }
+    v
+}
+
+/// GoBGP arguments to add/delete a MAC (with an IP, which GoBGP requires) on
+/// `esi`, advertised by the PE `nexthop`.
+fn gobgp_macadv(
+    verb: &'static str,
+    esi: &[&str; 2],
+    (mac, ip): (&str, &str),
+    (nexthop, rd): (&str, &str),
+) -> Vec<String> {
+    let mut v = strings(&[
+        "global", "rib", verb, "-a", "evpn", "macadv", mac, ip, "esi",
+    ]);
+    v.extend(strings(esi));
+    v.extend(strings(&[
+        "etag",
+        "0",
+        "label",
+        &EVPN_VNI.to_string(),
+        "rd",
+        rd,
+    ]));
+    if verb == "add" {
+        v.extend(strings(&[
+            "rt",
+            EVPN_RT_IMPORT,
+            "encap",
+            "vxlan",
+            "nexthop",
+            nexthop,
+        ]));
+    }
+    v
+}
+
+/// `evpn-esi`'s kernel read-back: router-a's FDB nexthop groups, and the
+/// `vx<vni>` FDB entry for `mac` (empty when there is none).
+async fn kernel_aliasing(w: &World, mac: &str) -> anyhow::Result<(String, String)> {
+    let nexthops = netns_a(w, &["ip", "nexthop", "show"]).await?;
+    let fdb = netns_a(
+        w,
+        &["bridge", "fdb", "show", "dev", &format!("vx{EVPN_VNI}")],
+    )
+    .await?;
+    let entry = fdb
+        .lines()
+        .filter(|l| l.contains(mac) && l.contains(" self"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((nexthops, entry))
 }
 
 /// The kernel name `router`'s `nos-interfaced` gave the port aggregate `name`.
@@ -1144,19 +1420,7 @@ async fn arp_requests(w: &World, file: &str) -> anyhow::Result<usize> {
         .with_context(|| format!("counting ARP requests in {file}: {out:?}"))
 }
 
-/// The EVPN data plane, for real: two `nos` PEs over a VXLAN underlay in a
-/// VRF, a CE dual-homed to both through one Ethernet Segment (a bond of one
-/// docker-network link to each PE), and a host behind router-b. Unlike
-/// `evpn-fdb`/`evpn-esi` (control plane and kernel state, against GoBGP) this
-/// sends frames.
-///
-/// Router-a has the lower address, so for the even VNI it is the segment's DF
-/// and router-b is not. With the CE's link to router-b down, every frame the
-/// CE sends enters router-a and must cross the VXLAN to reach the host, and
-/// back; with both up, one broadcast from the host reaches the CE through the
-/// DF only — once — while the non-DF's link stays silent; with the link to
-/// router-a down instead, the CE is bridged locally on router-b.
-pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
+async fn dataplane_setup(w: &mut World, single_active: bool) -> anyhow::Result<(String, String)> {
     w.start(A, Some(evpn_pe_flags(A, EVPN_DP_RD_A)), &[])
         .await?;
     w.start(B, Some(evpn_pe_flags(B, EVPN_DP_RD_B)), &[])
@@ -1203,9 +1467,21 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
 
     let mut on_a = evpn_pe_flags(A, EVPN_DP_RD_A);
     on_a.extend(bond_flags("bond1", true, "eth1"));
+    if single_active {
+        on_a.extend(strings(&[
+            "--port-aggregate-redundancy-mode",
+            "single-active",
+        ]));
+    }
     a.provision_flags(&on_a).await?;
     let mut on_b = evpn_pe_flags(B, EVPN_DP_RD_B);
     on_b.extend(bond_flags("bond1", true, "eth1"));
+    if single_active {
+        on_b.extend(strings(&[
+            "--port-aggregate-redundancy-mode",
+            "single-active",
+        ]));
+    }
     b.provision_flags(&on_b).await?;
     let mut host_port = evpn_pe_flags(B, EVPN_DP_RD_B);
     host_port.extend(bond_flags("bond2", false, "eth2"));
@@ -1234,22 +1510,62 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     };
     a.wait(&role(&bond_a, "df")).await?;
     b.wait(&role(&bond_b, "non-df")).await?;
-    bridge_port_flood(w, "router-a", &bond_a, true).await?;
-    bridge_port_flood(w, "router-b", &bond_b, false).await?;
+    Ok((bond_a, bond_b))
+}
 
-    log("the CE bonds its two links; the host takes an address");
+/// The dual-homed CE's bond (`bond_opts` picks its mode) and the host's address.
+async fn dataplane_ce(w: &World, bond_opts: &str) -> anyhow::Result<()> {
     host_sh(
         w,
         CE_HOST,
         &format!(
             "set -e; for i in eth0 eth1; do ip addr flush dev $i; ip link set $i down; done; \
-             ip link add bond0 type bond mode balance-xor miimon 100 xmit_hash_policy layer2; \
+             ip link add bond0 type bond {bond_opts}; \
              ip link set eth0 master bond0; ip link set eth1 master bond0; \
              ip link set bond0 up; ip addr add {CE_IP}/24 dev bond0"
         ),
     )
     .await?;
     host_sh(w, H_HOST, &format!("ip addr add {H_IP}/24 dev eth0")).await?;
+
+    Ok(())
+}
+
+/// Removes the CE, the host and their networks.
+async fn dataplane_teardown(w: &World) -> anyhow::Result<()> {
+    for host in [CE_HOST, H_HOST] {
+        w.dock.container_remove(host).await;
+    }
+    for (net, router) in [
+        (NET_CE_A, "router-a"),
+        (NET_CE_B, "router-b"),
+        (NET_H, "router-b"),
+    ] {
+        w.dock.network_disconnect(net, router).await;
+        w.dock.network_remove(net).await;
+    }
+    Ok(())
+}
+
+/// The EVPN data plane, for real: two `nos` PEs over a VXLAN underlay in a
+/// VRF, a CE dual-homed to both through one Ethernet Segment (a bond of one
+/// docker-network link to each PE), and a host behind router-b. Unlike
+/// `evpn-fdb`/`evpn-esi` (control plane and kernel state, against GoBGP) this
+/// sends frames.
+///
+/// Router-a has the lower address, so for the even VNI it is the segment's DF
+/// and router-b is not. With the CE's link to router-b down, every frame the
+/// CE sends enters router-a and must cross the VXLAN to reach the host, and
+/// back; with both up, one broadcast from the host reaches the CE through the
+/// DF only — once — while the non-DF's link stays silent; with the link to
+/// router-a down instead, the CE is bridged locally on router-b.
+pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
+    let (bond_a, bond_b) = dataplane_setup(w, false).await?;
+    bridge_port_flood(w, "router-a", &bond_a, true).await?;
+    bridge_port_flood(w, "router-b", &bond_b, false).await?;
+
+    log("the CE bonds its two links; the host takes an address");
+    dataplane_ce(w, "mode balance-xor miimon 100 xmit_hash_policy layer2").await?;
 
     log("unicast across the VXLAN: the CE's link to router-b is down, so every frame enters router-a");
     host_sh(w, CE_HOST, "ip link set eth1 down; sleep 1").await?;
@@ -1291,16 +1607,142 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     host_sh(w, CE_HOST, "ip link set eth0 down; sleep 1").await?;
     host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
 
-    for host in [CE_HOST, H_HOST] {
-        w.dock.container_remove(host).await;
+    dataplane_teardown(w).await
+}
+
+/// Reads the real bridge port `dev` back, in `container`'s netns, until its STP
+/// state is `want` (`disabled` / `forwarding`).
+async fn bridge_port_state(
+    w: &World,
+    container: &str,
+    dev: &str,
+    want: &str,
+) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..30 {
+        last = w
+            .dock
+            .in_netns(
+                NETNS_HELPER_IMAGE,
+                container,
+                &["bridge", "-d", "link", "show", "dev", dev],
+            )
+            .await?;
+        if last.contains(&format!(" state {want}")) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    for (net, router) in [
-        (NET_CE_A, "router-a"),
-        (NET_CE_B, "router-b"),
-        (NET_H, "router-b"),
-    ] {
-        w.dock.network_disconnect(net, router).await;
-        w.dock.network_remove(net).await;
+    bail!("bridge port {dev} never read state {want}: {last}")
+}
+
+/// Pings `ip` from `host` until one reply comes back, for at most `secs`.
+async fn ping_until(w: &World, host: &str, ip: &str, secs: u32) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..secs {
+        let (code, out) = w
+            .dock
+            .exec(host, &["ping", "-c", "1", "-W", "1", ip])
+            .await?;
+        if code == 0 {
+            return Ok(());
+        }
+        last = out;
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    Ok(())
+    bail!("{host} never reached {ip} within {secs}s: {}", last.trim())
+}
+
+/// `evpn-single-active`: EVPN single-active multi-homing (RFC 7432 §8.5), for
+/// real. The same topology as `evpn-dataplane` — two `nos` PEs, a CE dual-homed
+/// to both through one Ethernet Segment, a host behind router-b — with
+/// `redundancy-mode single-active` on both PEs' bonds and the CE running an
+/// ARP-monitored active-backup bond instead of an all-active one.
+///
+/// Router-a (the lower address) is the DF, so its port forwards and router-b's
+/// is *disabled* in the kernel (STP state, read back with `bridge -d link`) —
+/// unicast included, not just BUM — while its flooding flags stay on. Router-a
+/// sees router-b's per-ES A-D carrying the Single-Active ESI Label. The CE talks
+/// to the host through the DF. Router-a's bond then goes down: it
+/// withdraws the segment, router-b becomes the DF and unblocks, and the CE (its
+/// ARP probes unanswered on router-a's dead link) moves over; when the carrier
+/// returns router-a is elected again and router-b is blocked again.
+pub async fn evpn_single_active(w: &mut World) -> anyhow::Result<()> {
+    let (bond_a, bond_b) = dataplane_setup(w, true).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    let role = |bond: &str, r: &str| {
+        format!("df elected domain={EVPN_DOMAIN} esi={ESI} port={bond} role={r}")
+    };
+    let carrier = |bond: &str, up: bool| {
+        format!("segment port carrier changed domain={EVPN_DOMAIN} port={bond} up={up}")
+    };
+
+    log("single-active: the non-DF's port is blocked outright, the DF's forwards");
+    bridge_port_state(w, "router-b", &bond_b, "disabled").await?;
+    bridge_port_state(w, "router-a", &bond_a, "forwarding").await?;
+    // It is the state that blocks, not the flood flags.
+    bridge_port_flood(w, "router-b", &bond_b, true).await?;
+    for (r, want_df) in [(a, true), (b, false)] {
+        let body = r
+            .rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
+            .await?;
+        let table: serde_json::Value = serde_json::from_str(&body)?;
+        if table["segments"][0]["single_active"] != true
+            || table["segments"][0]["designated_forwarder"] != want_df
+        {
+            bail!(
+                "{}: show fdb does not list a single-active segment (DF={want_df}): {body}",
+                r.name()
+            );
+        }
+    }
+
+    log("router-a decodes router-b's per-ES A-D and its Single-Active ESI Label");
+    let body = a
+        .rest_expect(Method::GET, "/v1/bgp/evpn", None, 200)
+        .await?;
+    if !body.contains("esi-label:single-active") {
+        bail!("router-a does not show router-b's Single-Active ESI Label: {body}");
+    }
+
+    log("the CE: an ARP-monitored active-backup bond preferring router-a's link");
+    dataplane_ce(
+        w,
+        &format!("mode active-backup arp_interval 200 arp_ip_target {H_IP} primary eth0"),
+    )
+    .await?;
+    ping_until(w, CE_HOST, H_IP, 30).await?;
+    ping_until(w, H_HOST, CE_IP, 30).await?;
+    let active = host_sh(w, CE_HOST, "cat /sys/class/net/bond0/bonding/active_slave").await?;
+    if active.trim() != "eth0" {
+        bail!(
+            "the CE is active on {:?}, expected eth0 (router-a, the DF)",
+            active.trim()
+        );
+    }
+
+    log("router-a's bond goes down: router-b takes over and unblocks, the CE follows");
+    let df_base = b.count(&role(&bond_b, "df"));
+    // The bond itself, not its member: the bond has no link monitoring, so a
+    // member going down would leave its carrier up.
+    netns_a(w, &["ip", "link", "set", &bond_a, "down"]).await?;
+    a.wait(&carrier(&bond_a, false)).await?;
+    b.wait_new(&role(&bond_b, "df"), df_base, 60).await?;
+    bridge_port_state(w, "router-b", &bond_b, "forwarding").await?;
+    ping_until(w, CE_HOST, H_IP, 30).await?;
+    ping_until(w, H_HOST, CE_IP, 30).await?;
+
+    log("carrier back: router-a is elected again and router-b is blocked again");
+    let a_df = a.count(&role(&bond_a, "df"));
+    let b_non_df = b.count(&role(&bond_b, "non-df"));
+    let up_base = a.count(&carrier(&bond_a, true));
+    netns_a(w, &["ip", "link", "set", &bond_a, "up"]).await?;
+    a.wait_new(&carrier(&bond_a, true), up_base, 30).await?;
+    a.wait_new(&role(&bond_a, "df"), a_df, 60).await?;
+    b.wait_new(&role(&bond_b, "non-df"), b_non_df, 60).await?;
+    bridge_port_state(w, "router-b", &bond_b, "disabled").await?;
+    bridge_port_state(w, "router-a", &bond_a, "forwarding").await?;
+    ping_until(w, CE_HOST, H_IP, 30).await?;
+
+    dataplane_teardown(w).await
 }

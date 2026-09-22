@@ -41,6 +41,20 @@ pub enum LacpRate {
     Fast,
 }
 
+/// How the PEs sharing an Ethernet Segment (`PortAggregate.esi`) divide the
+/// traffic (RFC 7432 §8.5): `AllActive` lets every PE forward unicast to the
+/// segment and only the Designated Forwarder flood BUM; `SingleActive` lets
+/// only the Designated Forwarder forward anything, the others' ports being
+/// blocked outright. Announced to the other PEs in the per-ES Ethernet A-D
+/// route's ESI Label community. Only meaningful with an `esi`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum EsRedundancy {
+    #[default]
+    AllActive,
+    SingleActive,
+}
+
 /// A named Linux bonding device, statically (`Xor`) or LACP-negotiated
 /// (`Lacp`). Same
 /// config surface as a *physical* `Interface` (never a loopback — bonding a
@@ -82,6 +96,12 @@ pub struct PortAggregate {
     #[serde(default)]
     #[garde(custom(|v: &Option<String>, _ctx: &Config| valid_esi(v.as_deref())))]
     pub esi: Option<String>,
+
+    /// See [`EsRedundancy`]. `#[serde(default)]` so a config persisted before
+    /// this field existed still loads (as all-active, what it always was).
+    #[serde(default)]
+    #[garde(skip)]
+    pub redundancy_mode: EsRedundancy,
 
     /// Overrides `nos-lacpd`'s derived LACP Actor System ID for this bond, so
     /// two PEs sharing an ESI can present the same actor to the customer
@@ -142,6 +162,15 @@ fn port_aggregate_name_valid(name: &String, ctx: &Config) -> garde::Result {
 /// here — `PortAggregate` has no loopback-style flat L3 fields to keep
 /// disjoint from `subinterfaces` in the first place.)
 pub(crate) fn valid_port_aggregates(aggregates: &[PortAggregate], ctx: &Config) -> garde::Result {
+    // A redundancy mode is a property of the Ethernet Segment.
+    for agg in aggregates {
+        if agg.redundancy_mode == EsRedundancy::SingleActive && agg.esi.is_none() {
+            return Err(garde::Error::new(format!(
+                "port aggregate {} is single-active but has no esi",
+                agg.name
+            )));
+        }
+    }
     // One aggregate per Ethernet Segment on a PE: two bonds claiming the same
     // ESI would make `nos-fdbd` unable to tell which port a MAC was learned on.
     for (i, agg) in aggregates.iter().enumerate() {
@@ -194,6 +223,7 @@ mod tests {
             mode: PortAggregateMode::Xor, // arbitrary — mode has no bearing on the validators tested here
             lacp_rate: LacpRate::default(),
             esi: None,
+            redundancy_mode: EsRedundancy::default(),
             lacp_system_id: None,
             switching_profile: None,
             mtu: None,
@@ -243,6 +273,17 @@ mod tests {
         b.esi = a.esi.clone();
         let cfg = config_with(vec![a, b]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn single_active_needs_an_esi() {
+        let mut a = aggregate("bond1");
+        a.redundancy_mode = EsRedundancy::SingleActive;
+        let cfg = config_with(vec![a.clone()]);
+        assert!(cfg.validate_with(&cfg).is_err());
+        a.esi = Some("00:11:22:33:44:55:66:77:88:99".to_string());
+        let cfg = config_with(vec![a]);
+        cfg.validate_with(&cfg).unwrap();
     }
 
     #[test]

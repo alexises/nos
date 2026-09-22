@@ -12,7 +12,10 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nos_proto::evpn_id::{es_import_rt, format_esi, Esi, ENCAP_VXLAN};
+use nos_proto::evpn_id::{
+    es_import_rt, esi_label_ext, format_esi, parse_esi_label, Esi, ENCAP_VXLAN,
+};
+use nos_proto::fdb::AD_TAG_ES;
 use nos_proto::{
     EsEntry, EvpnKey, EvpnRoute, EvpnUpdate, FdbTable, MacEntry, MacSource, NeighEntry,
 };
@@ -59,10 +62,14 @@ pub struct EsPort {
     /// sub-link.
     pub port: String,
     pub esi: Esi,
+    /// `redundancy-mode single-active` on the aggregate.
+    pub single_active: bool,
 }
 
-/// One attached segment's election outcome for this domain.
+/// One attached segment's election outcome for this domain. The four bools
+/// are independent facts (elected, still waiting, carrier, mode).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 struct Segment {
     esi: Esi,
     port: String,
@@ -72,7 +79,54 @@ struct Segment {
     /// Inside the DF wait timer: treated as non-DF whatever the election says
     /// (set by `sync_df`; `plan_df` itself stays pure).
     waiting: bool,
+    /// The port has carrier. A down segment is neither DF nor advertised.
+    up: bool,
+    /// The other PEs whose per-ES Ethernet A-D route for this segment we hold.
+    ad_pes: Vec<IpAddr>,
+    /// Single-active: a non-DF is blocked outright, not just refused BUM.
+    single_active: bool,
 }
+
+impl Segment {
+    /// Whether two plans elect the same way — `ad_pes` changing alone is not
+    /// a new election (it would only repeat the `df elected` log).
+    fn same_election(&self, o: &Self) -> bool {
+        (
+            &self.esi,
+            &self.port,
+            &self.pes,
+            self.df,
+            self.waiting,
+            self.up,
+            self.single_active,
+        ) == (
+            &o.esi,
+            &o.port,
+            &o.pes,
+            o.df,
+            o.waiting,
+            o.up,
+            o.single_active,
+        )
+    }
+}
+
+/// What the Ethernet A-D routes we hold say about one segment.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SegmentAds {
+    /// The PEs whose per-ES Ethernet A-D route we hold (RFC 7432 §8.2): a
+    /// remote MAC on the segment is only usable while its PE is in here, and
+    /// withdrawing the route is the mass withdrawal that takes every such MAC
+    /// away at once.
+    pes: BTreeSet<IpAddr>,
+    /// The PEs whose per-EVI A-D route for this domain's VNI we hold: the
+    /// backup paths of a single-active segment (§8.4.1.2).
+    evi: BTreeSet<IpAddr>,
+    /// A per-ES route carried the Single-Active flag in its ESI Label.
+    single_active: bool,
+}
+
+type Ads = HashMap<Esi, SegmentAds>;
 
 /// What `bgp_client` keeps originated into the named BGP instance.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -88,6 +142,11 @@ enum Installed {
         mac: Mac,
         vtep: IpAddr,
     },
+    /// A MAC on an all-active segment, balanced over these PEs (sorted).
+    MacGroup {
+        mac: Mac,
+        vteps: Vec<IpAddr>,
+    },
     /// An IP-to-MAC binding on the bridge; `vtep` is only for `show fdb`.
     Neigh {
         mac: Mac,
@@ -99,10 +158,59 @@ enum Installed {
     },
 }
 
+/// The A-D index of `received`: only routes carrying one of our import Route
+/// Targets count (a per-ES route carries the RTs of the EVIs on the segment),
+/// and never our own. A per-EVI route also has to name this domain's VNI.
+fn ad_index(r: &Ready, received: &HashMap<EvpnKey, EvpnRoute>) -> Ads {
+    let mut out = Ads::new();
+    for route in received.values() {
+        let EvpnKey::EthernetAd {
+            esi, tag, origin, ..
+        } = &route.key
+        else {
+            continue;
+        };
+        if *origin == r.vtep
+            || !route
+                .ext_communities
+                .iter()
+                .any(|c| r.rt_import.contains(c))
+        {
+            continue;
+        }
+        let ads = out.entry(*esi).or_default();
+        if *tag == AD_TAG_ES {
+            ads.pes.insert(*origin);
+            ads.single_active |= route
+                .ext_communities
+                .iter()
+                .any(|c| parse_esi_label(*c) == Some(true));
+        } else if route.vni == r.vni {
+            ads.evi.insert(*origin);
+        }
+    }
+    out
+}
+
+/// The PEs a MAC on an all-active segment is load-balanced over (aliasing,
+/// RFC 7432 §8.4.1.1): those that advertise both the segment (per-ES A-D) and
+/// the EVI (per-EVI A-D). Only when there are several, the MAC's own PE is one
+/// of them, and they are all IPv4 (an FDB nexthop's gateway).
+fn alias_group(a: &SegmentAds, owner: IpAddr) -> Option<Vec<IpAddr>> {
+    if a.single_active {
+        return None;
+    }
+    let members: Vec<IpAddr> = a.pes.intersection(&a.evi).copied().collect();
+    (members.len() > 1 && members.contains(&owner) && members.iter().all(IpAddr::is_ipv4))
+        .then_some(members)
+}
+
 /// What a received route should become in the kernel, if anything: it must
 /// carry one of our import Route Targets, name this VNI, and not be our own.
 /// A Type-2 with an IP is both an FDB entry (its MAC) and a neighbour (its IP).
-fn desired(r: &Ready, route: &EvpnRoute) -> Vec<Installed> {
+/// A Type-2 on a segment is only usable while its PE's per-ES A-D route for
+/// that segment is held (`ads`).
+fn desired(r: &Ready, route: &EvpnRoute, ads: &Ads) -> Vec<Installed> {
     if !route
         .ext_communities
         .iter()
@@ -113,12 +221,43 @@ fn desired(r: &Ready, route: &EvpnRoute) -> Vec<Installed> {
     // A MAC on a segment we are attached to is reachable through our own
     // bond; a VXLAN entry to the peer PE that also learned it would win.
     let on_local_segment = route.esi != [0; 10] && r.es_ports.iter().any(|p| p.esi == route.esi);
-    let foreign_type2 = route.vni == r.vni && route.next_hop != r.vtep && !on_local_segment;
-    let vtep = route.next_hop;
+    // The PE a MAC on a segment is reached through: the one that advertised it
+    // while its per-ES A-D is held; on a single-active segment whose PE lost it,
+    // a backup (a PE that advertised a per-EVI A-D for this VNI).
+    let via = if route.esi == [0; 10] {
+        Some(route.next_hop)
+    } else {
+        ads.get(&route.esi).and_then(|a| {
+            if a.pes.contains(&route.next_hop) {
+                Some(route.next_hop)
+            } else if a.single_active {
+                a.pes.intersection(&a.evi).next().copied()
+            } else {
+                None
+            }
+        })
+    };
+    let foreign_type2 =
+        route.vni == r.vni && route.next_hop != r.vtep && !on_local_segment && via.is_some();
+    let vtep = via.unwrap_or(route.next_hop);
+    // A MAC whose own PE's per-ES A-D is held is aliased over the segment's PEs.
+    let group = (via == Some(route.next_hop))
+        .then(|| {
+            ads.get(&route.esi)
+                .and_then(|a| alias_group(a, route.next_hop))
+        })
+        .flatten();
+    let mac_item = |mac: Mac| match &group {
+        Some(vteps) => Installed::MacGroup {
+            mac,
+            vteps: vteps.clone(),
+        },
+        None => Installed::Mac { mac, vtep },
+    };
     match &route.key {
-        EvpnKey::Mac { mac, .. } if foreign_type2 => vec![Installed::Mac { mac: *mac, vtep }],
+        EvpnKey::Mac { mac, .. } if foreign_type2 => vec![mac_item(*mac)],
         EvpnKey::MacIp { mac, ip, .. } if foreign_type2 => {
-            let mut v = vec![Installed::Mac { mac: *mac, vtep }];
+            let mut v = vec![mac_item(*mac)];
             if is_advertisable_ip(*ip) {
                 v.push(Installed::Neigh {
                     mac: *mac,
@@ -147,12 +286,16 @@ fn esi_of(r: &Ready, port: Option<&String>) -> Esi {
 
 /// This domain's originated routes: one Type-3 for the domain, one Type-2
 /// per local MAC and one Type-2 (MAC+IP) per local neighbour / SVI address
-/// (carrying the ESI of the port the MAC sits behind), and one Type-4 per
-/// attached Ethernet Segment.
+/// (carrying the ESI of the port the MAC sits behind), and, per attached
+/// Ethernet Segment whose port has carrier (not in `down`), one Type-4 and
+/// the two Type-1 Ethernet A-D routes (per-ES and per-EVI). A segment going
+/// down withdraws all three — that is what tells the other PEs to stop
+/// sending its MACs here.
 fn local_routes(
     r: &Ready,
     macs: &BTreeMap<Mac, String>,
     neighbours: &BTreeSet<(Mac, IpAddr)>,
+    down: &BTreeSet<String>,
 ) -> HashMap<EvpnKey, EvpnRoute> {
     let mut ext = r.rt_export.clone();
     ext.push(ENCAP_VXLAN);
@@ -181,8 +324,11 @@ fn local_routes(
         };
         out.insert(key.clone(), route(key, esi_of(r, macs.get(m))));
     }
-    let esis: BTreeSet<Esi> = r.es_ports.iter().map(|p| p.esi).collect();
-    for esi in esis {
+    let mut esis: BTreeMap<Esi, bool> = BTreeMap::new();
+    for p in r.es_ports.iter().filter(|p| !down.contains(&p.port)) {
+        *esis.entry(p.esi).or_default() |= p.single_active;
+    }
+    for (esi, single_active) in esis {
         let key = EvpnKey::EthernetSegment {
             rd: r.rd,
             esi,
@@ -200,14 +346,49 @@ fn local_routes(
                 esi,
             },
         );
+        // Per-ES A-D (RFC 7432 §8.2.1): MAX-ET, the export RTs of the EVIs on
+        // the segment, and the ESI Label community (RFC 8365 §8.3.1: no label
+        // with VXLAN, only its flags octet).
+        let key = EvpnKey::EthernetAd {
+            rd: r.rd,
+            esi,
+            tag: AD_TAG_ES,
+            origin: r.vtep,
+        };
+        let mut es_ext = ext.clone();
+        es_ext.push(esi_label_ext(single_active));
+        out.insert(
+            key.clone(),
+            EvpnRoute {
+                key,
+                vni: 0,
+                next_hop: r.vtep,
+                ext_communities: es_ext,
+                esi,
+            },
+        );
+        // Per-EVI A-D (§8.4): tag 0, the VNI in the label, this domain's RTs.
+        let key = EvpnKey::EthernetAd {
+            rd: r.rd,
+            esi,
+            tag: 0,
+            origin: r.vtep,
+        };
+        out.insert(key.clone(), route(key, esi));
     }
     out
 }
 
 /// Elects the Designated Forwarder of every segment this domain attaches to,
 /// from the Type-4 routes received so far. Other PEs are recognised by their
-/// Type-4's originating address; our own is `r.vtep`.
-fn plan_df(r: &Ready, received: &HashMap<EvpnKey, EvpnRoute>) -> Vec<Segment> {
+/// Type-4's originating address; our own is `r.vtep`. A segment whose port is
+/// in `down` is never the DF.
+fn plan_df(
+    r: &Ready,
+    received: &HashMap<EvpnKey, EvpnRoute>,
+    ads: &Ads,
+    down: &BTreeSet<String>,
+) -> Vec<Segment> {
     r.es_ports
         .iter()
         .map(|p| {
@@ -219,15 +400,29 @@ fn plan_df(r: &Ready, received: &HashMap<EvpnKey, EvpnRoute>) -> Vec<Segment> {
                 })
                 .filter(|o| *o != r.vtep)
                 .collect();
+            let up = !down.contains(&p.port);
             Segment {
                 esi: p.esi,
                 port: p.port.clone(),
                 pes: df::candidates(r.vtep, &peers),
-                df: df::elect(r.vtep, &peers, r.vni) == r.vtep,
+                df: up && df::elect(r.vtep, &peers, r.vni) == r.vtep,
                 waiting: false,
+                up,
+                ad_pes: ads
+                    .get(&p.esi)
+                    .map(|a| a.pes.iter().copied().collect())
+                    .unwrap_or_default(),
+                single_active: p.single_active,
             }
         })
         .collect()
+}
+
+fn join_ips(ips: &[IpAddr]) -> String {
+    ips.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 pub fn format_mac(mac: Mac) -> String {
@@ -251,11 +446,37 @@ struct Inner {
     segments: Vec<Segment>,
     /// The flood setting last applied to each segment port.
     es_flood: BTreeMap<String, bool>,
+    /// The forwarding state last applied to each segment port (only recorded
+    /// once it left the kernel default, forwarding).
+    es_fwd: BTreeMap<String, bool>,
     /// When each attached segment port's DF wait timer ends (RFC 7432 §8.5
     /// step 3). Set the first time the port is planned, dropped when it leaves.
     df_wait_until: BTreeMap<String, Instant>,
     /// Local ARP/ND bindings and SVI addresses, as (MAC, IP).
     local_neigh: BTreeSet<(Mac, IpAddr)>,
+    /// The per-ES A-D routes held, see `Ads`. Kept current by `refresh_ads`.
+    ads: Ads,
+    /// Attached segment ports with no carrier (unknown counts as up).
+    es_down: BTreeSet<String>,
+}
+
+/// Recomputes `g.ads` and returns the segments whose PE set changed.
+fn refresh_ads(g: &mut Inner) -> Vec<Esi> {
+    let new = g
+        .ready
+        .as_ref()
+        .map(|r| ad_index(r, &g.received))
+        .unwrap_or_default();
+    let stale = new
+        .keys()
+        .chain(g.ads.keys())
+        .filter(|e| new.get(*e) != g.ads.get(*e))
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    g.ads = new;
+    stale
 }
 
 pub struct Fdb {
@@ -295,7 +516,7 @@ impl Fdb {
             routes: g
                 .ready
                 .as_ref()
-                .map(|r| local_routes(r, &g.local, &g.local_neigh))
+                .map(|r| local_routes(r, &g.local, &g.local_neigh, &g.es_down))
                 .unwrap_or_default(),
         };
         self.target.send_if_modified(|t| {
@@ -356,6 +577,7 @@ impl Fdb {
             g.ready = Some(want);
             self.publish(&g);
         }
+        refresh_ads(&mut g);
         let keys: Vec<EvpnKey> = g.received.keys().cloned().collect();
         for k in keys {
             self.sync_key(&mut g, &k).await;
@@ -374,10 +596,16 @@ impl Fdb {
         let mut plan = g
             .ready
             .as_ref()
-            .map(|r| plan_df(r, &g.received))
+            .map(|r| plan_df(r, &g.received, &g.ads, &g.es_down))
             .unwrap_or_default();
         let now = Instant::now();
         for s in &mut plan {
+            if !s.up {
+                // No carrier: the wait starts over when it comes back.
+                g.df_wait_until.remove(&s.port);
+                s.waiting = true;
+                continue;
+            }
             let until = *g.df_wait_until.entry(s.port.clone()).or_insert_with(|| {
                 info!(
                     domain = %self.domain, esi = %format_esi(&s.esi), port = %s.port,
@@ -401,7 +629,13 @@ impl Fdb {
             changed
         });
         for s in &plan {
-            if !s.waiting && g.segments.iter().find(|o| o.port == s.port) != Some(s) {
+            if !s.waiting
+                && !g
+                    .segments
+                    .iter()
+                    .find(|o| o.port == s.port)
+                    .is_some_and(|o| o.same_election(s))
+            {
                 // `%`, not a bare str: a plain str field renders quoted.
                 let role = if s.df { "df" } else { "non-df" };
                 info!(
@@ -411,38 +645,83 @@ impl Fdb {
                     "df elected"
                 );
             }
-            let flood = s.df && !s.waiting;
-            let prev = g.es_flood.get(&s.port).copied();
-            if prev == Some(flood) && flood {
-                continue;
-            }
-            match self.driver.set_port_flood(&s.port, flood).await {
-                Ok(()) => {
-                    if prev != Some(flood) {
-                        info!(domain = %self.domain, port = %s.port, flood, "segment port flooding set");
-                    }
-                    g.es_flood.insert(s.port.clone(), flood);
-                }
-                Err(e) => {
-                    debug!(domain = %self.domain, port = %s.port, error = %e, "could not set port flooding yet, retrying");
-                    g.es_flood.remove(&s.port);
-                }
-            }
+            // All-active: only the DF floods BUM to the port. Single-active: the
+            // port floods normally but only the DF's forwards anything.
+            let active = s.df && !s.waiting;
+            let (flood, forwarding) = if s.single_active {
+                (true, active)
+            } else {
+                (active, true)
+            };
+            self.apply_port_flood(g, &s.port, flood).await;
+            self.apply_port_forwarding(g, &s.port, forwarding).await;
         }
         let gone: Vec<String> = g
             .es_flood
             .keys()
+            .chain(g.es_fwd.keys())
             .filter(|p| !plan.iter().any(|s| &s.port == *p))
             .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect();
         for port in gone {
             // Best effort: if the port is gone too there is nothing to restore.
-            if self.driver.set_port_flood(&port, true).await.is_ok() {
+            if g.es_flood.remove(&port).is_some()
+                && self.driver.set_port_flood(&port, true).await.is_ok()
+            {
                 info!(domain = %self.domain, port = %port, flood = true, "segment port flooding set");
             }
-            g.es_flood.remove(&port);
+            if g.es_fwd.remove(&port) == Some(false)
+                && self.driver.set_port_forwarding(&port, true).await.is_ok()
+            {
+                info!(domain = %self.domain, port = %port, forwarding = true, "segment port forwarding set");
+            }
         }
         g.segments = plan;
+    }
+
+    /// Applies the BUM-flood setting of one segment port; a block is
+    /// re-asserted on every call (a recreated port is healed by the tick).
+    async fn apply_port_flood(&self, g: &mut Inner, port: &str, flood: bool) {
+        let prev = g.es_flood.get(port).copied();
+        if prev == Some(flood) && flood {
+            return;
+        }
+        match self.driver.set_port_flood(port, flood).await {
+            Ok(()) => {
+                if prev != Some(flood) {
+                    info!(domain = %self.domain, port = %port, flood, "segment port flooding set");
+                }
+                g.es_flood.insert(port.to_string(), flood);
+            }
+            Err(e) => {
+                debug!(domain = %self.domain, port = %port, error = %e, "could not set port flooding yet, retrying");
+                g.es_flood.remove(port);
+            }
+        }
+    }
+
+    /// Applies the forwarding state of one segment port (single-active blocks
+    /// a non-DF outright). Forwarding is the kernel default, so it is only
+    /// asserted when the port was blocked before.
+    async fn apply_port_forwarding(&self, g: &mut Inner, port: &str, forwarding: bool) {
+        let prev = g.es_fwd.get(port).copied();
+        if forwarding && prev != Some(false) {
+            return;
+        }
+        match self.driver.set_port_forwarding(port, forwarding).await {
+            Ok(()) => {
+                if prev != Some(forwarding) {
+                    info!(domain = %self.domain, port = %port, forwarding, "segment port forwarding set");
+                }
+                g.es_fwd.insert(port.to_string(), forwarding);
+            }
+            Err(e) => {
+                debug!(domain = %self.domain, port = %port, error = %e, "could not set port forwarding yet, retrying");
+                g.es_fwd.remove(port);
+            }
+        }
     }
 
     /// One `PushEvpnRoutes` from `nos-bgpd`.
@@ -465,9 +744,34 @@ impl Fdb {
                 vec![k]
             }
         };
-        let segments_changed = keys
-            .iter()
-            .any(|k| matches!(k, EvpnKey::EthernetSegment { .. }));
+        let segments_changed = keys.iter().any(|k| {
+            matches!(
+                k,
+                EvpnKey::EthernetSegment { .. } | EvpnKey::EthernetAd { .. }
+            )
+        });
+        let mut keys = keys;
+        if keys.iter().any(|k| matches!(k, EvpnKey::EthernetAd { .. })) {
+            // A PE's per-ES A-D coming or going re-decides every MAC on that
+            // segment at once (mass withdrawal, RFC 7432 §8.2.1).
+            let stale = refresh_ads(&mut g);
+            for esi in &stale {
+                info!(
+                    domain = %self.domain, esi = %format_esi(esi),
+                    pes = %g.ads.get(esi).map(|a| a.pes.iter().map(ToString::to_string).collect::<Vec<_>>().join(",")).unwrap_or_default(),
+                    "segment per-es a-d changed"
+                );
+            }
+            keys.extend(
+                g.received
+                    .iter()
+                    .filter(|(_, r)| {
+                        stale.contains(&r.esi)
+                            && matches!(r.key, EvpnKey::Mac { .. } | EvpnKey::MacIp { .. })
+                    })
+                    .map(|(k, _)| k.clone()),
+            );
+        }
         for k in keys {
             self.sync_key(&mut g, &k).await;
         }
@@ -482,7 +786,7 @@ impl Fdb {
         let want = g
             .received
             .get(key)
-            .map(|r| desired(&ready, r))
+            .map(|r| desired(&ready, r, &g.ads))
             .unwrap_or_default();
         let have = g.installed.get(key).cloned().unwrap_or_default();
         if want == have {
@@ -511,12 +815,19 @@ impl Fdb {
     async fn install(&self, r: &Ready, i: &Installed) -> bool {
         let res = match i {
             Installed::Mac { mac, vtep } => self.driver.set_remote_mac(r.vni, *mac, *vtep).await,
+            Installed::MacGroup { mac, vteps } => {
+                self.driver.set_remote_mac_group(r.vni, *mac, vteps).await
+            }
             Installed::Neigh { mac, ip, .. } => self.driver.set_neigh(&r.bridge, *mac, *ip).await,
             Installed::Flood { vtep } => self.driver.add_flood(r.vni, *vtep).await,
         };
         match (res, i) {
             (Ok(()), Installed::Mac { mac, vtep }) => {
                 info!(domain = %self.domain, mac = %format_mac(*mac), vtep = %vtep, "remote mac installed");
+                true
+            }
+            (Ok(()), Installed::MacGroup { mac, vteps }) => {
+                info!(domain = %self.domain, mac = %format_mac(*mac), vteps = %join_ips(vteps), "remote mac group installed");
                 true
             }
             (Ok(()), Installed::Neigh { mac, ip, vtep }) => {
@@ -537,12 +848,16 @@ impl Fdb {
     async fn uninstall(&self, r: &Ready, i: &Installed) {
         let res = match i {
             Installed::Mac { mac, vtep } => self.driver.del_remote_mac(r.vni, *mac, *vtep).await,
+            Installed::MacGroup { mac, .. } => self.driver.del_remote_mac_group(r.vni, *mac).await,
             Installed::Neigh { mac, ip, .. } => self.driver.del_neigh(&r.bridge, *mac, *ip).await,
             Installed::Flood { vtep } => self.driver.del_flood(r.vni, *vtep).await,
         };
         match (res, i) {
             (Ok(()), Installed::Mac { mac, vtep }) => {
                 info!(domain = %self.domain, mac = %format_mac(*mac), vtep = %vtep, "remote mac removed");
+            }
+            (Ok(()), Installed::MacGroup { mac, vteps }) => {
+                info!(domain = %self.domain, mac = %format_mac(*mac), vteps = %join_ips(vteps), "remote mac group removed");
             }
             (Ok(()), Installed::Neigh { mac, ip, vtep }) => {
                 info!(domain = %self.domain, mac = %format_mac(*mac), ip = %ip, vtep = %vtep, "remote neighbour removed");
@@ -561,6 +876,22 @@ impl Fdb {
     pub async fn refresh_local(&self) {
         let mut g = self.inner.lock().await;
         let Some(r) = g.ready.clone() else { return };
+        // Segment carrier first: a down segment withdraws its routes. A failed
+        // read counts as up, so a transient netlink error withdraws nothing.
+        let mut down = BTreeSet::new();
+        for p in &r.es_ports {
+            if !self.driver.port_up(&p.port).await.unwrap_or(true) {
+                down.insert(p.port.clone());
+            }
+        }
+        if down != g.es_down {
+            for p in down.symmetric_difference(&g.es_down) {
+                info!(domain = %self.domain, port = %p, up = !down.contains(p), "segment port carrier changed");
+            }
+            g.es_down = down;
+            self.sync_df(&mut g).await;
+            self.publish(&g);
+        }
         let macs = match self.driver.local_macs(&r.bridge, r.vni).await {
             Ok(m) => m,
             Err(e) => {
@@ -656,6 +987,7 @@ impl Fdb {
                 mac: format_mac(*m),
                 source: MacSource::Local,
                 vtep: None,
+                vteps: Vec::new(),
                 esi: g
                     .ready
                     .as_ref()
@@ -688,6 +1020,14 @@ impl Fdb {
                     mac: format_mac(*mac),
                     source: MacSource::Remote,
                     vtep: Some(*vtep),
+                    vteps: vec![*vtep],
+                    esi: None,
+                }),
+                Installed::MacGroup { mac, vteps } => macs.push(MacEntry {
+                    mac: format_mac(*mac),
+                    source: MacSource::Remote,
+                    vtep: vteps.first().copied(),
+                    vteps: vteps.clone(),
                     esi: None,
                 }),
                 Installed::Neigh { mac, ip, vtep } => neighbours.push(NeighEntry {
@@ -718,6 +1058,9 @@ impl Fdb {
                     port: s.port.clone(),
                     designated_forwarder: s.df && !s.waiting,
                     pes: s.pes.clone(),
+                    ad_pes: s.ad_pes.clone(),
+                    up: s.up,
+                    single_active: s.single_active,
                 })
                 .collect(),
         }
@@ -776,9 +1119,32 @@ mod tests {
                 // The `Recorder` driver puts every local MAC behind `eth1`.
                 port: "eth1".to_string(),
                 esi: ESI,
+                single_active: false,
             }],
             ..ready()
         }
+    }
+
+    fn ready_single_active() -> Ready {
+        let mut r = ready_with_segment();
+        r.es_ports[0].single_active = true;
+        r
+    }
+
+    /// The A-D index entry for a segment whose PEs' per-ES routes are held.
+    fn ads_of(esi: Esi, pes: &[&str]) -> Ads {
+        Ads::from([(
+            esi,
+            SegmentAds {
+                pes: pes.iter().map(|p| p.parse().unwrap()).collect(),
+                ..SegmentAds::default()
+            },
+        )])
+    }
+
+    /// `desired` with no per-ES A-D held.
+    fn want(r: &Ready, route: &EvpnRoute) -> Vec<Installed> {
+        desired(r, route, &Ads::new())
     }
 
     fn macip_route(mac: u8, ip: &str, vni: u32, rt: u64, next_hop: &str) -> EvpnRoute {
@@ -824,26 +1190,26 @@ mod tests {
     #[test]
     fn only_matching_foreign_routes_are_wanted() {
         let r = ready();
-        assert!(!desired(&r, &mac_route(1, 10100, RT, REMOTE)).is_empty());
+        assert!(!want(&r, &mac_route(1, 10100, RT, REMOTE)).is_empty());
         assert!(
-            desired(&r, &mac_route(1, 10100, 1, REMOTE)).is_empty(),
+            want(&r, &mac_route(1, 10100, 1, REMOTE)).is_empty(),
             "wrong RT"
         );
         assert!(
-            desired(&r, &mac_route(1, 999, RT, REMOTE)).is_empty(),
+            want(&r, &mac_route(1, 999, RT, REMOTE)).is_empty(),
             "wrong VNI"
         );
         assert!(
-            desired(&r, &mac_route(1, 10100, RT, VTEP)).is_empty(),
+            want(&r, &mac_route(1, 10100, RT, VTEP)).is_empty(),
             "our own"
         );
         assert_eq!(
-            desired(&r, &imet_route(REMOTE, RT)),
+            want(&r, &imet_route(REMOTE, RT)),
             vec![Installed::Flood {
                 vtep: REMOTE.parse().unwrap()
             }]
         );
-        assert!(desired(&r, &imet_route(VTEP, RT)).is_empty());
+        assert!(want(&r, &imet_route(VTEP, RT)).is_empty());
     }
 
     #[test]
@@ -851,7 +1217,7 @@ mod tests {
         let r = ready();
         let vtep: IpAddr = REMOTE.parse().unwrap();
         assert_eq!(
-            desired(&r, &macip_route(1, "198.51.100.7", 10100, RT, REMOTE)),
+            want(&r, &macip_route(1, "198.51.100.7", 10100, RT, REMOTE)),
             vec![
                 Installed::Mac {
                     mac: [0, 0, 0, 0, 0, 1],
@@ -865,10 +1231,10 @@ mod tests {
             ]
         );
         // The same filters as a MAC-only route, and no link-local neighbour.
-        assert!(desired(&r, &macip_route(1, "198.51.100.7", 10100, 1, REMOTE)).is_empty());
-        assert!(desired(&r, &macip_route(1, "198.51.100.7", 10100, RT, VTEP)).is_empty());
+        assert!(want(&r, &macip_route(1, "198.51.100.7", 10100, 1, REMOTE)).is_empty());
+        assert!(want(&r, &macip_route(1, "198.51.100.7", 10100, RT, VTEP)).is_empty());
         assert_eq!(
-            desired(&r, &macip_route(1, "fe80::1", 10100, RT, REMOTE)).len(),
+            want(&r, &macip_route(1, "fe80::1", 10100, RT, REMOTE)).len(),
             1
         );
     }
@@ -879,7 +1245,7 @@ mod tests {
             ([0, 0, 0, 0, 0, 1], "eth1".to_string()),
             ([0, 0, 0, 0, 0, 2], "eth1".to_string()),
         ]);
-        let routes = local_routes(&ready(), &macs, &BTreeSet::new());
+        let routes = local_routes(&ready(), &macs, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(routes.len(), 3);
         let r = routes.values().next().unwrap();
         assert_eq!(r.next_hop, VTEP.parse::<IpAddr>().unwrap());
@@ -889,15 +1255,16 @@ mod tests {
     #[test]
     fn neighbours_add_one_type2_with_the_ip_each() {
         let neighbours = BTreeSet::from([([0, 0, 0, 0, 0, 1], "198.51.100.7".parse().unwrap())]);
-        let routes = local_routes(&ready(), &BTreeMap::new(), &neighbours);
+        let routes = local_routes(&ready(), &BTreeMap::new(), &neighbours, &BTreeSet::new());
         assert_eq!(routes.len(), 2, "the Type-3 and the MAC+IP");
         assert!(routes
             .keys()
             .any(|k| matches!(k, EvpnKey::MacIp { ip, .. } if ip.to_string() == "198.51.100.7")));
     }
 
+    /// Records every driver call; the second field is the ports with no carrier.
     #[derive(Default)]
-    struct Recorder(StdMutex<Vec<String>>);
+    struct Recorder(StdMutex<Vec<String>>, StdMutex<BTreeSet<String>>);
 
     #[async_trait]
     impl FdbDriver for Recorder {
@@ -929,6 +1296,25 @@ mod tests {
                 .push(format!("del {} {v}", format_mac(m)));
             Ok(())
         }
+        async fn set_remote_mac_group(
+            &self,
+            _: u32,
+            m: Mac,
+            v: &[IpAddr],
+        ) -> Result<(), DriverError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("group {} {}", format_mac(m), join_ips(v)));
+            Ok(())
+        }
+        async fn del_remote_mac_group(&self, _: u32, m: Mac) -> Result<(), DriverError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("group- {}", format_mac(m)));
+            Ok(())
+        }
         async fn add_flood(&self, _: u32, v: IpAddr) -> Result<(), DriverError> {
             self.0.lock().unwrap().push(format!("flood+ {v}"));
             Ok(())
@@ -943,6 +1329,13 @@ mod tests {
         async fn set_port_flood(&self, port: &str, flood: bool) -> Result<(), DriverError> {
             self.0.lock().unwrap().push(format!("flood {port} {flood}"));
             Ok(())
+        }
+        async fn set_port_forwarding(&self, port: &str, fwd: bool) -> Result<(), DriverError> {
+            self.0.lock().unwrap().push(format!("fwd {port} {fwd}"));
+            Ok(())
+        }
+        async fn port_up(&self, port: &str) -> Result<bool, DriverError> {
+            Ok(!self.1.lock().unwrap().contains(port))
         }
         async fn local_neighbours(&self, _: &str) -> Result<BTreeSet<(Mac, IpAddr)>, DriverError> {
             // One host behind a local port, one only reachable over VXLAN.
@@ -1128,15 +1521,125 @@ mod tests {
         }
     }
 
+    fn ad_route(esi: Esi, tag: u32, vni: u32, origin: &str) -> EvpnRoute {
+        let origin: IpAddr = origin.parse().unwrap();
+        EvpnRoute {
+            key: EvpnKey::EthernetAd {
+                rd: [0; 8],
+                esi,
+                tag,
+                origin,
+            },
+            vni,
+            next_hop: origin,
+            ext_communities: vec![RT, esi_label_ext(false)],
+            esi,
+        }
+    }
+
+    fn es_ad(esi: Esi, origin: &str) -> EvpnRoute {
+        ad_route(esi, AD_TAG_ES, 0, origin)
+    }
+
     #[test]
-    fn a_remote_mac_on_a_segment_we_are_attached_to_is_not_installed() {
+    fn a_remote_mac_on_a_segment_needs_its_pes_per_es_ad_and_never_on_our_own() {
         let mut route = mac_route(1, 10100, RT, REMOTE);
         route.esi = ESI;
-        assert!(!desired(&ready(), &route).is_empty());
-        assert!(desired(&ready_with_segment(), &route).is_empty());
-        // ... but a different segment's MAC still is.
+        let ads = ads_of(ESI, &[REMOTE]);
+        // Not usable until the PE that advertised it has advertised the segment.
+        assert!(want(&ready(), &route).is_empty(), "no per-es a-d yet");
+        assert!(!desired(&ready(), &route, &ads).is_empty());
+        // A different PE's A-D for the segment doesn't count.
+        let other = ads_of(ESI, &["192.0.2.77"]);
+        assert!(desired(&ready(), &route, &other).is_empty());
+        // ... and on a segment we are attached to it is reachable via our own bond.
+        assert!(desired(&ready_with_segment(), &route, &ads).is_empty());
+        // A different segment's MAC is just as gated.
         route.esi = [9; 10];
-        assert!(!desired(&ready_with_segment(), &route).is_empty());
+        assert!(desired(&ready_with_segment(), &route, &ads).is_empty());
+        let ads9 = ads_of([9; 10], &[REMOTE]);
+        assert!(!desired(&ready_with_segment(), &route, &ads9).is_empty());
+    }
+
+    #[test]
+    fn the_per_es_ad_index_counts_only_our_route_targets_and_never_our_own_pe() {
+        let r = ready();
+        let mut received = HashMap::new();
+        for route in [
+            es_ad(ESI, REMOTE),
+            es_ad(ESI, VTEP),
+            // A per-EVI route, and one for another domain (other RT).
+            ad_route(ESI, 0, 10100, "192.0.2.10"),
+            EvpnRoute {
+                ext_communities: vec![1],
+                ..es_ad(ESI, "192.0.2.11")
+            },
+        ] {
+            received.insert(route.key.clone(), route);
+        }
+        // The per-EVI route counts as a backup path only for this domain's VNI.
+        let mut expected = ads_of(ESI, &[REMOTE]);
+        expected
+            .get_mut(&ESI)
+            .unwrap()
+            .evi
+            .insert("192.0.2.10".parse().unwrap());
+        assert_eq!(ad_index(&r, &received), expected);
+    }
+
+    #[tokio::test]
+    async fn withdrawing_a_pes_per_es_ad_takes_all_its_macs_at_once_and_readvertising_restores_them(
+    ) {
+        let driver = Arc::new(Recorder::default());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
+        fdb.set_ready(Some(ready())).await;
+        calls(&driver);
+        let mut m1 = mac_route(1, 10100, RT, REMOTE);
+        m1.esi = ESI;
+        let mut m2 = mac_route(2, 10100, RT, REMOTE);
+        m2.esi = ESI;
+        // A MAC with no ESI is not affected by any of this.
+        let plain = mac_route(3, 10100, RT, REMOTE);
+        for r in [&m1, &m2, &plain] {
+            fdb.apply_push(EvpnUpdate::Add(r.clone())).await;
+        }
+        assert_eq!(calls(&driver), ["set 00:00:00:00:00:03 192.0.2.9"]);
+
+        fdb.apply_push(EvpnUpdate::Add(es_ad(ESI, REMOTE))).await;
+        let mut c = calls(&driver);
+        c.sort();
+        assert_eq!(
+            c,
+            [
+                "set 00:00:00:00:00:01 192.0.2.9",
+                "set 00:00:00:00:00:02 192.0.2.9"
+            ]
+        );
+        assert_eq!(fdb.table().await.macs.len(), 3);
+
+        // Mass withdrawal: one route goes, both MACs go, the plain one stays.
+        fdb.apply_push(EvpnUpdate::Remove(es_ad(ESI, REMOTE).key))
+            .await;
+        let mut c = calls(&driver);
+        c.sort();
+        assert_eq!(
+            c,
+            [
+                "del 00:00:00:00:00:01 192.0.2.9",
+                "del 00:00:00:00:00:02 192.0.2.9"
+            ]
+        );
+        assert_eq!(fdb.table().await.macs.len(), 1);
+
+        // A `Full` that brings it back reinstalls them.
+        fdb.apply_push(EvpnUpdate::Full(vec![
+            m1.clone(),
+            m2.clone(),
+            plain,
+            es_ad(ESI, REMOTE),
+        ]))
+        .await;
+        assert_eq!(fdb.table().await.macs.len(), 3);
     }
 
     #[tokio::test]
@@ -1150,8 +1653,8 @@ mod tests {
         fdb.set_ready(Some(ready_with_segment())).await;
         fdb.refresh_local().await;
         let t = rx.borrow_and_update().clone();
-        // Type-3, Type-2 for MAC 7, Type-4.
-        assert_eq!(t.routes.len(), 3);
+        // Type-3, Type-2 for MAC 7, Type-4, and the two Type-1.
+        assert_eq!(t.routes.len(), 5);
         let mac = t
             .routes
             .values()
@@ -1170,6 +1673,24 @@ mod tests {
             .find(|r| matches!(r.key, EvpnKey::EthernetSegment { .. }))
             .unwrap();
         assert_eq!(es.ext_communities, vec![es_import_rt(&ESI)]);
+        // Per-ES A-D: MAX-ET, the RTs, encapsulation and an all-active ESI Label.
+        let per_es = t
+            .routes
+            .values()
+            .find(|r| matches!(r.key, EvpnKey::EthernetAd { tag, .. } if tag == AD_TAG_ES))
+            .unwrap();
+        assert_eq!(
+            per_es.ext_communities,
+            vec![RT, ENCAP_VXLAN, esi_label_ext(false)]
+        );
+        // Per-EVI A-D: tag 0, the VNI, the domain's RTs.
+        let per_evi = t
+            .routes
+            .values()
+            .find(|r| matches!(r.key, EvpnKey::EthernetAd { tag: 0, .. }))
+            .unwrap();
+        assert_eq!(per_evi.vni, 10100);
+        assert_eq!(per_evi.ext_communities, vec![RT, ENCAP_VXLAN]);
         assert_eq!(
             fdb.table().await.macs[0].esi.as_deref(),
             Some("00:01:02:03:04:05:06:07:08:09")
@@ -1245,5 +1766,260 @@ mod tests {
 
         stop.send(true).unwrap();
         local.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_segment_without_carrier_withdraws_its_routes_and_is_never_the_df() {
+        let driver = Arc::new(Recorder::default());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
+        let mut rx = fdb.subscribe();
+        fdb.set_ready(Some(ready_with_segment())).await;
+        fdb.refresh_local().await;
+        assert_eq!(rx.borrow_and_update().routes.len(), 5);
+        assert!(fdb.table().await.segments[0].up);
+
+        // The bond loses its last member: Type-4 and both Type-1 go.
+        driver.1.lock().unwrap().insert("eth1".to_string());
+        fdb.refresh_local().await;
+        let routes = rx.borrow_and_update().routes.clone();
+        assert_eq!(routes.len(), 2, "the Type-3 and the MAC: {routes:?}");
+        assert!(!routes.keys().any(|k| matches!(
+            k,
+            EvpnKey::EthernetSegment { .. } | EvpnKey::EthernetAd { .. }
+        )));
+        let t = fdb.table().await;
+        assert!(!t.segments[0].up);
+        assert!(!t.segments[0].designated_forwarder);
+
+        // Carrier back: everything is advertised again.
+        driver.1.lock().unwrap().clear();
+        fdb.refresh_local().await;
+        assert_eq!(rx.borrow_and_update().routes.len(), 5);
+        assert!(fdb.table().await.segments[0].up);
+    }
+
+    #[tokio::test]
+    async fn a_single_active_non_df_is_blocked_outright_and_the_df_forwards() {
+        let driver = Arc::new(Recorder::default());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
+        fdb.set_ready(Some(ready_single_active())).await;
+        // Alone: the DF. It floods, and forwarding is the kernel default, so
+        // it is never asserted.
+        assert_eq!(calls(&driver), ["ensure 10100", "flood eth1 true"]);
+        assert!(fdb.table().await.segments[0].single_active);
+
+        // A PE with a lower address is the DF: the port is blocked, but it
+        // still floods (only forwarding decides).
+        fdb.apply_push(EvpnUpdate::Add(es_route(ESI, "192.0.1.9")))
+            .await;
+        assert_eq!(calls(&driver), ["fwd eth1 false"]);
+        assert!(!fdb.table().await.segments[0].designated_forwarder);
+
+        // The block is re-asserted on every resync, then lifted when it goes.
+        fdb.set_ready(Some(ready_single_active())).await;
+        assert!(calls(&driver).contains(&"fwd eth1 false".to_string()));
+        fdb.apply_push(EvpnUpdate::Remove(es_route(ESI, "192.0.1.9").key))
+            .await;
+        assert_eq!(calls(&driver), ["fwd eth1 true"]);
+
+        // Unconfiguring while blocked restores both.
+        fdb.apply_push(EvpnUpdate::Add(es_route(ESI, "192.0.1.9")))
+            .await;
+        calls(&driver);
+        fdb.set_ready(None).await;
+        assert_eq!(
+            calls(&driver),
+            ["remove 10100", "flood eth1 true", "fwd eth1 true"]
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_the_mode_swaps_the_mechanism_and_undoes_the_old_one() {
+        let driver = Arc::new(Recorder::default());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
+        fdb.set_ready(Some(ready_with_segment())).await;
+        fdb.apply_push(EvpnUpdate::Add(es_route(ESI, "192.0.1.9")))
+            .await;
+        calls(&driver);
+        // All-active non-DF: BUM flooding off, forwarding untouched.
+        fdb.set_ready(Some(ready_with_segment())).await;
+        let c = calls(&driver);
+        assert!(c.contains(&"flood eth1 false".to_string()), "{c:?}");
+        assert!(!c.iter().any(|x| x.starts_with("fwd")), "{c:?}");
+
+        fdb.set_ready(Some(ready_single_active())).await;
+        let c = calls(&driver);
+        assert!(c.contains(&"flood eth1 true".to_string()), "{c:?}");
+        assert!(c.contains(&"fwd eth1 false".to_string()), "{c:?}");
+
+        fdb.set_ready(Some(ready_with_segment())).await;
+        let c = calls(&driver);
+        assert!(c.contains(&"flood eth1 false".to_string()), "{c:?}");
+        assert!(c.contains(&"fwd eth1 true".to_string()), "{c:?}");
+    }
+
+    #[test]
+    fn the_per_es_ad_announces_the_redundancy_mode_in_its_esi_label() {
+        let label = |r: &Ready| {
+            local_routes(r, &BTreeMap::new(), &BTreeSet::new(), &BTreeSet::new())
+                .values()
+                .find(|x| matches!(x.key, EvpnKey::EthernetAd { tag, .. } if tag == AD_TAG_ES))
+                .unwrap()
+                .ext_communities
+                .iter()
+                .find_map(|c| parse_esi_label(*c))
+        };
+        assert_eq!(label(&ready_with_segment()), Some(false));
+        assert_eq!(label(&ready_single_active()), Some(true));
+    }
+
+    #[test]
+    fn a_single_active_segments_macs_fall_back_to_a_pe_with_a_per_evi_ad() {
+        let backup = "192.0.2.77";
+        let mut route = mac_route(1, 10100, RT, REMOTE);
+        route.esi = [9; 10];
+        let ads = |single_active: bool, evi: &[&str]| {
+            Ads::from([(
+                [9; 10],
+                SegmentAds {
+                    pes: BTreeSet::from([backup.parse().unwrap()]),
+                    evi: evi.iter().map(|p| p.parse().unwrap()).collect(),
+                    single_active,
+                },
+            )])
+        };
+        let mac = |vtep: &str| {
+            vec![Installed::Mac {
+                mac: [0, 0, 0, 0, 0, 1],
+                vtep: vtep.parse().unwrap(),
+            }]
+        };
+        // REMOTE's per-ES A-D is gone: the MAC moves to the backup PE...
+        assert_eq!(
+            desired(&ready(), &route, &ads(true, &[backup])),
+            mac(backup)
+        );
+        // ... unless the segment is all-active (mass withdrawal), or the
+        // backup never advertised the EVI.
+        assert!(desired(&ready(), &route, &ads(false, &[backup])).is_empty());
+        assert!(desired(&ready(), &route, &ads(true, &[])).is_empty());
+        // While REMOTE's own per-ES A-D is held the MAC stays where it is.
+        let mut held = ads(true, &[backup]);
+        held.get_mut(&[9; 10])
+            .unwrap()
+            .pes
+            .insert(REMOTE.parse().unwrap());
+        assert_eq!(desired(&ready(), &route, &held), mac(REMOTE));
+    }
+
+    fn evi_ad(esi: Esi, origin: &str) -> EvpnRoute {
+        ad_route(esi, 0, 10100, origin)
+    }
+
+    #[test]
+    fn a_mac_is_aliased_only_over_pes_with_both_a_per_es_and_a_per_evi_ad() {
+        let ip = |s: &str| -> IpAddr { s.parse().unwrap() };
+        let ads = |pes: &[&str], evi: &[&str], single_active: bool| SegmentAds {
+            pes: pes.iter().map(|p| ip(p)).collect(),
+            evi: evi.iter().map(|p| ip(p)).collect(),
+            single_active,
+        };
+        let (a, b) = ("192.0.2.9", "192.0.2.20");
+        // Both PEs serve the segment and the EVI: balanced over both, sorted.
+        assert_eq!(
+            alias_group(&ads(&[b, a], &[a, b], false), ip(a)),
+            Some(vec![ip(a), ip(b)])
+        );
+        // One PE is no group; a PE without the EVI's A-D is left out.
+        assert_eq!(alias_group(&ads(&[a], &[a], false), ip(a)), None);
+        assert_eq!(alias_group(&ads(&[a, b], &[a], false), ip(a)), None);
+        // The MAC's own PE has to be one of them.
+        assert_eq!(
+            alias_group(&ads(&[a, b], &[b, "192.0.2.30"], false), ip(a)),
+            None
+        );
+        // Single-active has a backup path, not aliasing.
+        assert_eq!(alias_group(&ads(&[a, b], &[a, b], true), ip(a)), None);
+        // An FDB nexthop's gateway is IPv4.
+        assert_eq!(
+            alias_group(&ads(&[a, "2001:db8::1"], &[a, "2001:db8::1"], false), ip(a)),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_segments_macs_move_between_one_pe_and_a_group_as_the_a_d_routes_come_and_go() {
+        let driver = Arc::new(Recorder::default());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
+        fdb.set_ready(Some(ready())).await;
+        let (a, b, esi) = (REMOTE, "192.0.2.20", [9; 10]);
+        let mut mac = mac_route(1, 10100, RT, a);
+        mac.esi = esi;
+        fdb.apply_push(EvpnUpdate::Add(mac)).await;
+        calls(&driver);
+
+        // One PE serving the segment: the plain entry.
+        fdb.apply_push(EvpnUpdate::Add(es_ad(esi, a))).await;
+        fdb.apply_push(EvpnUpdate::Add(evi_ad(esi, a))).await;
+        assert_eq!(calls(&driver), ["set 00:00:00:00:00:01 192.0.2.9"]);
+
+        // A second PE that serves the segment and the EVI: aliased.
+        fdb.apply_push(EvpnUpdate::Add(es_ad(esi, b))).await;
+        assert!(calls(&driver).is_empty(), "no per-EVI A-D from it yet");
+        fdb.apply_push(EvpnUpdate::Add(evi_ad(esi, b))).await;
+        assert_eq!(
+            calls(&driver),
+            [
+                "del 00:00:00:00:00:01 192.0.2.9",
+                "group 00:00:00:00:00:01 192.0.2.9,192.0.2.20"
+            ]
+        );
+        let table = fdb.table().await;
+        assert_eq!(table.macs.len(), 1);
+        assert_eq!(table.macs[0].vteps.len(), 2);
+
+        // It stops serving the EVI: back to the plain entry.
+        fdb.apply_push(EvpnUpdate::Remove(evi_ad(esi, b).key)).await;
+        assert_eq!(
+            calls(&driver),
+            [
+                "group- 00:00:00:00:00:01",
+                "set 00:00:00:00:00:01 192.0.2.9"
+            ]
+        );
+        assert_eq!(fdb.table().await.macs[0].vteps.len(), 1);
+
+        // Its own per-ES A-D going is still a mass withdrawal.
+        fdb.apply_push(EvpnUpdate::Remove(es_ad(esi, a).key)).await;
+        assert_eq!(calls(&driver), ["del 00:00:00:00:00:01 192.0.2.9"]);
+        assert!(fdb.table().await.macs.is_empty());
+    }
+
+    #[test]
+    fn two_routes_for_one_aliased_mac_want_one_and_the_same_group() {
+        let (a, b) = (REMOTE, "192.0.2.20");
+        let esi = [9; 10];
+        let ads = Ads::from([(
+            esi,
+            SegmentAds {
+                pes: [a, b].iter().map(|p| p.parse().unwrap()).collect(),
+                evi: [a, b].iter().map(|p| p.parse().unwrap()).collect(),
+                single_active: false,
+            },
+        )]);
+        // The MAC advertised by each PE (each under its own RD): the same item,
+        // so the second route neither reinstalls nor flaps the first.
+        let mut from_a = mac_route(1, 10100, RT, a);
+        from_a.esi = esi;
+        let mut from_b = mac_route(1, 10100, RT, b);
+        from_b.esi = esi;
+        assert_eq!(
+            desired(&ready(), &from_a, &ads),
+            desired(&ready(), &from_b, &ads)
+        );
+        assert!(matches!(
+            desired(&ready(), &from_a, &ads)[..],
+            [Installed::MacGroup { .. }]
+        ));
     }
 }

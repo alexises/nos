@@ -234,6 +234,8 @@ pub enum Topic {
     SetPortAggregateEsi,
     /// `ConfigOp::PortAggregate(PortAggregateOp::SetLacpSystemId)` / `ClearLacpSystemId`
     SetPortAggregateLacpSystemId,
+    /// `ConfigOp::PortAggregate(PortAggregateOp::SetRedundancyMode)`
+    SetPortAggregateRedundancyMode,
     /// `ConfigOp::Interface(InterfaceOp::SetLldpDestination)`
     SetInterfaceLldpDestination,
     /// `ConfigOp::Lldp(LldpOp::SetTxInterval)`

@@ -22,6 +22,7 @@ async-trait          = { workspace = true }
 rtnetlink            = { workspace = true }
 netlink-packet-core  = { workspace = true }
 netlink-packet-route = { workspace = true }
+netlink-sys          = { workspace = true }
 
 [[bin]]
 name = "nos-fdbd"

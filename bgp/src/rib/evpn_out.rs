@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
+use nos_proto::fdb::AD_TAG_ES;
 use nos_proto::{AddressFamily, EvpnKey, EvpnRoute as WireRoute, EvpnUpdate};
 
 use super::{BgpRib, OutboundUpdate, PeerOutbox};
@@ -69,6 +70,14 @@ fn nlri_of(r: &WireRoute) -> EvpnNlri {
             esi: *esi,
             origin: *origin,
         },
+        // `origin` is not on the wire: the NLRI has no originator.
+        EvpnKey::EthernetAd { rd, esi, tag, .. } => EvpnNlri::EthernetAd {
+            rd: *rd,
+            esi: *esi,
+            tag: *tag,
+            // RFC 8365 §5.1.3: a per-EVI route's label field carries the VNI.
+            label: if *tag == AD_TAG_ES { 0 } else { r.vni },
+        },
     }
 }
 
@@ -91,7 +100,10 @@ fn advertise(outbox: &PeerOutbox, local_asn: u32, r: &WireRoute) -> Option<Adver
                 vni: r.vni,
                 tunnel_ip: *origin,
             }),
-            EvpnKey::Mac { .. } | EvpnKey::MacIp { .. } | EvpnKey::EthernetSegment { .. } => None,
+            EvpnKey::Mac { .. }
+            | EvpnKey::MacIp { .. }
+            | EvpnKey::EthernetSegment { .. }
+            | EvpnKey::EthernetAd { .. } => None,
         },
     })
 }
@@ -220,6 +232,21 @@ impl BgpRib {
                         origin: *origin,
                     },
                     0,
+                    *esi,
+                ),
+                EvpnNlri::EthernetAd {
+                    rd,
+                    esi,
+                    tag,
+                    label,
+                } => (
+                    EvpnKey::EthernetAd {
+                        rd: *rd,
+                        esi: *esi,
+                        tag: *tag,
+                        origin: route.next_hop,
+                    },
+                    if *tag == AD_TAG_ES { 0 } else { *label },
                     *esi,
                 ),
                 _ => continue,

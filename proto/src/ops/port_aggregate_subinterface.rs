@@ -231,6 +231,7 @@ mod tests {
             mode: PortAggregateMode::Xor,
             lacp_rate: crate::schema::LacpRate::default(),
             esi: None,
+            redundancy_mode: crate::schema::EsRedundancy::default(),
             lacp_system_id: None,
             switching_profile: None,
             mtu: None,

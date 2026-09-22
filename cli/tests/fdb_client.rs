@@ -14,6 +14,7 @@ fn sample() -> FdbTable {
             mac: "02:00:00:00:00:01".to_string(),
             source: MacSource::Remote,
             vtep: Some("192.0.2.9".parse().unwrap()),
+            vteps: vec!["192.0.2.9".parse().unwrap()],
             esi: None,
         }],
         neighbours: Vec::new(),

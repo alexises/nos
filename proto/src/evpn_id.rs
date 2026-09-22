@@ -127,9 +127,35 @@ pub fn es_import_rt(esi: &Esi) -> u64 {
     u64::from_be_bytes(b)
 }
 
+/// The ESI Label extended community (RFC 7432 §7.5, type 0x06 subtype 0x01) a
+/// per-ES Ethernet A-D route carries. With VXLAN there is no ESI label
+/// (RFC 8365 §8.3.1: local bias instead), so the label is zero and only the
+/// flags octet matters: bit 0 is the Single-Active bit.
+#[must_use]
+pub fn esi_label_ext(single_active: bool) -> u64 {
+    u64::from_be_bytes([0x06, 0x01, u8::from(single_active), 0, 0, 0, 0, 0])
+}
+
+/// The redundancy mode an ESI Label community announces: `Some(true)` for
+/// single-active, `Some(false)` for all-active, `None` for any other community.
+#[must_use]
+pub fn parse_esi_label(c: u64) -> Option<bool> {
+    let b = c.to_be_bytes();
+    (b[0] == 0x06 && b[1] == 0x01).then_some(b[2] & 1 == 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn esi_label_carries_the_single_active_bit() {
+        assert_eq!(esi_label_ext(false), 0x0601_0000_0000_0000);
+        assert_eq!(esi_label_ext(true), 0x0601_0100_0000_0000);
+        assert_eq!(parse_esi_label(esi_label_ext(true)), Some(true));
+        assert_eq!(parse_esi_label(esi_label_ext(false)), Some(false));
+        assert_eq!(parse_esi_label(ENCAP_VXLAN), None);
+    }
 
     #[test]
     fn rd_types() {

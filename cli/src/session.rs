@@ -1569,6 +1569,19 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             }),
             after: PathAfter::Stay,
         },
+        Command::Set(SetTarget::PortAggregateRedundancyMode { name, mode }) => Resolved::ApplyOp {
+            op: ConfigOp::PortAggregate(PortAggregateOp::SetRedundancyMode { name, mode }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::PortAggregateRedundancyModeRelative { mode }) => {
+            Resolved::ApplyOp {
+                op: ConfigOp::PortAggregate(PortAggregateOp::SetRedundancyMode {
+                    name: path.port_aggregate()?.to_string(),
+                    mode,
+                }),
+                after: PathAfter::Stay,
+            }
+        }
         Command::Set(SetTarget::PortAggregateEsiRelative { esi }) => Resolved::ApplyOp {
             op: ConfigOp::PortAggregate(PortAggregateOp::SetEsi {
                 name: path.port_aggregate()?.to_string(),
@@ -5940,6 +5953,32 @@ mod tests {
                 after: PathAfter::Stay,
             }
         );
+    }
+
+    #[test]
+    fn redundancy_mode_resolves_relative_and_qualified() {
+        let mode = config_mode("t1", Path::PortAggregate("bond1".to_string()), false);
+        let op = ConfigOp::PortAggregate(PortAggregateOp::SetRedundancyMode {
+            name: "bond1".to_string(),
+            mode: nos_proto::EsRedundancy::SingleActive,
+        });
+        for cmd in [
+            SetTarget::PortAggregateRedundancyModeRelative {
+                mode: nos_proto::EsRedundancy::SingleActive,
+            },
+            SetTarget::PortAggregateRedundancyMode {
+                name: "bond1".to_string(),
+                mode: nos_proto::EsRedundancy::SingleActive,
+            },
+        ] {
+            assert_eq!(
+                resolve(&mode, Command::Set(cmd)),
+                Resolved::ApplyOp {
+                    op: op.clone(),
+                    after: PathAfter::Stay,
+                }
+            );
+        }
     }
 
     #[test]

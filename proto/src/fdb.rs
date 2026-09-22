@@ -32,7 +32,22 @@ pub enum EvpnKey {
         esi: Esi,
         origin: IpAddr,
     },
+    /// Type-1 Ethernet Auto-Discovery: per-ES when `tag == AD_TAG_ES`, per-EVI
+    /// otherwise (its VNI is `EvpnRoute::vni`). `origin` is the advertising PE
+    /// — the BGP next hop on a received route, our VTEP on a local one. It is
+    /// *not* on the wire (the NLRI has no originator), so it is only here to
+    /// keep two PEs' routes apart. Appended (postcard indexes by position).
+    EthernetAd {
+        rd: [u8; 8],
+        esi: Esi,
+        tag: u32,
+        origin: IpAddr,
+    },
 }
+
+/// The Ethernet Tag ID of a per-ES Ethernet A-D route (RFC 7432 §8.2.1,
+/// "MAX-ET").
+pub const AD_TAG_ES: u32 = 0xFFFF_FFFF;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvpnRoute {
@@ -113,6 +128,17 @@ pub struct EsEntry {
     /// DF election ranks them.
     #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
     pub pes: Vec<IpAddr>,
+    /// The PEs whose per-ES Ethernet A-D route for this segment is currently
+    /// held (this one excluded): a remote MAC on the segment is only installed
+    /// while its PE is listed here.
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
+    pub ad_pes: Vec<IpAddr>,
+    /// Whether the segment's port is up (carrier). A down segment withdraws its
+    /// Type-4 and Type-1 routes and stops being a DF candidate.
+    pub up: bool,
+    /// Single-active redundancy: a non-DF blocks the port outright (unicast
+    /// too), instead of only refusing BUM.
+    pub single_active: bool,
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -121,9 +147,14 @@ pub struct MacEntry {
     /// `aa:bb:cc:dd:ee:ff`.
     pub mac: String,
     pub source: MacSource,
-    /// The remote VTEP for a `Remote` entry.
+    /// The remote VTEP for a `Remote` entry (the first of `vteps`).
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub vtep: Option<IpAddr>,
+    /// Every VTEP a `Remote` entry is reached through: one, or several when
+    /// the MAC sits on an all-active Ethernet Segment and traffic is balanced
+    /// over its PEs (aliasing, RFC 7432 §8.4.1.1). Empty for a `Local` MAC.
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
+    pub vteps: Vec<IpAddr>,
     /// The Ethernet Segment a `Local` MAC was learned on, when its port is one.
     pub esi: Option<String>,
 }

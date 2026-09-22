@@ -174,7 +174,11 @@ async fn es_ports(cfg: &Config, domain: &str, watchdog_socket: &Path) -> Vec<EsP
             VlanTag::Untagged => bond,
             VlanTag::Dot1q(tag) => format!("{bond}.{tag}"),
         };
-        out.push(EsPort { port, esi });
+        out.push(EsPort {
+            port,
+            esi,
+            single_active: agg.redundancy_mode == nos_proto::EsRedundancy::SingleActive,
+        });
     }
     out
 }

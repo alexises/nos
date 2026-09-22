@@ -72,6 +72,21 @@ pub const ESI_PEER_ORIGIN: &str = "10.50.0.1";
 /// flood flags while it is still blocked.
 pub const DF_WAIT_SECS: u32 = 12;
 pub const DF_WAIT_ARG: &str = "--fdbd-arg=--df-wait=12";
+/// `evpn-esi`: a second segment router-a is *not* attached to, on which GoBGP
+/// plays the PE that advertises two MACs (with an IP each, GoBGP requires one)
+/// and, later, its per-ES A-D route. GoBGP's spelling, and how its RIB prints it.
+pub const ESI2: [&str; 2] = ["arbitrary", "11:22:33:44:55:66:77:88:aa"];
+pub const ESI2_MACS: [(&str, &str); 2] = [
+    ("aa:bb:cc:00:00:03", "192.0.2.31"),
+    ("aa:bb:cc:00:00:04", "192.0.2.32"),
+];
+pub const ESI2_RD: &str = "65010:9";
+/// `evpn-esi`, aliasing: a third segment router-a is not on, served by two PEs
+/// GoBGP plays with distinct next hops (fake VTEPs — only the kernel state
+/// router-a builds for them is read back) and one MAC advertised by the first.
+pub const ESI3: [&str; 2] = ["arbitrary", "11:22:33:44:55:66:77:88:bb"];
+pub const ESI3_PES: [(&str, &str); 2] = [("10.50.0.11", "65010:11"), ("10.50.0.12", "65010:12")];
+pub const ESI3_MAC: (&str, &str) = ("aa:bb:cc:00:00:05", "192.0.2.35");
 /// `evpn-dataplane`: the two PEs share one Route Target both ways, each has
 /// its own RD; a dual-homed CE (`ce`, one link to each PE) and a host (`h`)
 /// behind router-b sit in the same L2 domain. Docker networks are the wires.

@@ -2,9 +2,9 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
 use nos_proto::{
-    AddressFamily, BgpAoAlgorithm, BroadcastDomainOp, LacpRate, LldpDestination, NetworkType,
-    NextHopMode, OspfCryptoAlgorithm, PortAggregateMode, PortAggregateOp, Redistribute,
-    RedistributeSource, RedistributeTarget, SourceAddress, TransactionBase, VlanTag,
+    AddressFamily, BgpAoAlgorithm, BroadcastDomainOp, EsRedundancy, LacpRate, LldpDestination,
+    NetworkType, NextHopMode, OspfCryptoAlgorithm, PortAggregateMode, PortAggregateOp,
+    Redistribute, RedistributeSource, RedistributeTarget, SourceAddress, TransactionBase, VlanTag,
     REST_API_PORT_DEFAULT,
 };
 
@@ -443,6 +443,10 @@ pub enum SetTarget {
     PortAggregateLacpRate { name: String, rate: LacpRate },
     /// Context-relative — only valid while navigated into a port aggregate.
     PortAggregateLacpRateRelative { rate: LacpRate },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    PortAggregateRedundancyMode { name: String, mode: EsRedundancy },
+    /// Context-relative — only valid while navigated into a port aggregate.
+    PortAggregateRedundancyModeRelative { mode: EsRedundancy },
     /// Fully-qualified — works from anywhere in configuration mode.
     InterfacePortAggregate {
         name: String,
@@ -885,6 +889,14 @@ pub enum Command {
     Diff,
     Empty,
     Unknown(String),
+}
+
+fn parse_redundancy_mode(token: &str) -> EsRedundancy {
+    if token == "single-active" {
+        EsRedundancy::SingleActive
+    } else {
+        EsRedundancy::AllActive
+    }
 }
 
 fn parse_lacp_rate(token: &str) -> LacpRate {
@@ -1992,6 +2004,17 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 rate: parse_lacp_rate(rate),
             })
         }
+        ["port-aggregate", name, "redundancy-mode", mode @ ("all-active" | "single-active")] => {
+            Command::Set(SetTarget::PortAggregateRedundancyMode {
+                name: (*name).to_string(),
+                mode: parse_redundancy_mode(mode),
+            })
+        }
+        ["redundancy-mode", mode @ ("all-active" | "single-active")] => {
+            Command::Set(SetTarget::PortAggregateRedundancyModeRelative {
+                mode: parse_redundancy_mode(mode),
+            })
+        }
         ["esi", esi] => Command::Set(SetTarget::PortAggregateEsiRelative {
             esi: (*esi).to_string(),
         }),
@@ -2575,6 +2598,27 @@ mod tests {
         assert_eq!(
             Command::parse("set lacp-rate medium"),
             Command::Unknown("set lacp-rate medium".to_string())
+        );
+    }
+
+    #[test]
+    fn set_redundancy_mode() {
+        assert_eq!(
+            Command::parse("set port-aggregate bond1 redundancy-mode single-active"),
+            Command::Set(SetTarget::PortAggregateRedundancyMode {
+                name: "bond1".to_string(),
+                mode: EsRedundancy::SingleActive,
+            })
+        );
+        assert_eq!(
+            Command::parse("set redundancy-mode all-active"),
+            Command::Set(SetTarget::PortAggregateRedundancyModeRelative {
+                mode: EsRedundancy::AllActive,
+            })
+        );
+        assert_eq!(
+            Command::parse("set redundancy-mode both"),
+            Command::Unknown("set redundancy-mode both".to_string())
         );
     }
 

@@ -393,8 +393,12 @@ pub fn render_port_aggregate(agg: &PortAggregate) -> String {
         .lacp_system_id
         .as_ref()
         .map_or_else(String::new, |i| format!(", lacp-system-id {i}"));
+    let redundancy = match agg.redundancy_mode {
+        nos_proto::EsRedundancy::AllActive => "",
+        nos_proto::EsRedundancy::SingleActive => ", redundancy-mode single-active",
+    };
     let mut lines = vec![format!(
-        "port-aggregate {}: mode {:?}, switching-profile {switching_profile}, mtu {mtu}{esi}{system_id}",
+        "port-aggregate {}: mode {:?}, switching-profile {switching_profile}, mtu {mtu}{esi}{redundancy}{system_id}",
         agg.name, agg.mode
     )];
     for sub in &agg.subinterfaces {
@@ -1235,6 +1239,16 @@ pub fn render_fdb_table(t: &nos_proto::FdbTable) -> String {
     }
     for m in &t.macs {
         lines.push(match (m.source, m.vtep) {
+            // An aliased MAC (RFC 7432 §8.4.1.1) is balanced over several PEs.
+            (nos_proto::MacSource::Remote, Some(_)) if m.vteps.len() > 1 => format!(
+                "  {} remote via {} (aliased)",
+                m.mac,
+                m.vteps
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             (nos_proto::MacSource::Remote, Some(vtep)) => format!("  {} remote via {vtep}", m.mac),
             (nos_proto::MacSource::Remote, None) => format!("  {} remote", m.mac),
             (nos_proto::MacSource::Local, _) => match &m.esi {
@@ -1260,16 +1274,31 @@ pub fn render_fdb_table(t: &nos_proto::FdbTable) -> String {
     });
     for e in &t.segments {
         let pes: Vec<String> = e.pes.iter().map(ToString::to_string).collect();
+        let ads: Vec<String> = e.ad_pes.iter().map(ToString::to_string).collect();
         lines.push(format!(
-            "  ethernet-segment {} on {}: {} (PEs {})",
+            "  ethernet-segment {} on {}: {} (PEs {}){}{}",
             e.esi,
             e.port,
-            if e.designated_forwarder {
+            if !e.up {
+                "down, no carrier"
+            } else if e.designated_forwarder {
                 "designated forwarder"
+            } else if e.single_active {
+                "non-designated forwarder, port blocked"
             } else {
                 "non-designated forwarder, BUM blocked"
             },
-            pes.join(", ")
+            pes.join(", "),
+            if ads.is_empty() {
+                String::new()
+            } else {
+                format!(", per-ES A-D from {}", ads.join(", "))
+            },
+            if e.single_active {
+                ", single-active"
+            } else {
+                ""
+            }
         ));
     }
     lines.join("\n")
@@ -2412,12 +2441,21 @@ mod tests {
                     mac: "02:00:00:00:00:01".to_string(),
                     source: nos_proto::MacSource::Local,
                     vtep: None,
+                    vteps: Vec::new(),
                     esi: Some("00:11:22:33:44:55:66:77:88:99".to_string()),
                 },
                 nos_proto::MacEntry {
                     mac: "02:00:00:00:00:09".to_string(),
                     source: nos_proto::MacSource::Remote,
                     vtep: Some("192.0.2.9".parse().unwrap()),
+                    vteps: vec!["192.0.2.9".parse().unwrap()],
+                    esi: None,
+                },
+                nos_proto::MacEntry {
+                    mac: "02:00:00:00:00:0a".to_string(),
+                    source: nos_proto::MacSource::Remote,
+                    vtep: Some("192.0.2.9".parse().unwrap()),
+                    vteps: vec!["192.0.2.9".parse().unwrap(), "192.0.2.10".parse().unwrap()],
                     esi: None,
                 },
             ],
@@ -2441,6 +2479,9 @@ mod tests {
                 port: "bond1".to_string(),
                 designated_forwarder: false,
                 pes: vec!["192.0.2.1".parse().unwrap(), "192.0.2.9".parse().unwrap()],
+                ad_pes: vec!["192.0.2.9".parse().unwrap()],
+                up: true,
+                single_active: false,
             }],
         };
         assert_eq!(
@@ -2448,11 +2489,27 @@ mod tests {
             "broadcast-domain bd1: vni 10100, bridge br1, vxlan vx10100\n  \
              02:00:00:00:00:01 local, esi 00:11:22:33:44:55:66:77:88:99\n  \
              02:00:00:00:00:09 remote via 192.0.2.9\n  \
+             02:00:00:00:00:0a remote via 192.0.2.9, 192.0.2.10 (aliased)\n  \
              198.51.100.7 is at 02:00:00:00:00:01 local\n  \
              192.0.2.10 is at 02:00:00:00:00:09 remote via 192.0.2.9\n  \
              flood list: 192.0.2.9\n  \
              ethernet-segment 00:11:22:33:44:55:66:77:88:99 on bond1: non-designated \
-             forwarder, BUM blocked (PEs 192.0.2.1, 192.0.2.9)"
+             forwarder, BUM blocked (PEs 192.0.2.1, 192.0.2.9), per-ES A-D from 192.0.2.9"
         );
+        // Single-active says so, and a blocked non-DF is a blocked port.
+        let mut sa = t.clone();
+        sa.segments[0].single_active = true;
+        assert!(render_fdb_table(&sa).ends_with(
+            "non-designated forwarder, port blocked (PEs 192.0.2.1, 192.0.2.9), \
+             per-ES A-D from 192.0.2.9, single-active"
+        ));
+        // A segment without carrier says so instead of naming a role.
+        let mut down = t.clone();
+        down.segments[0].up = false;
+        down.segments[0].ad_pes.clear();
+        assert!(render_fdb_table(&down).ends_with(
+            "ethernet-segment 00:11:22:33:44:55:66:77:88:99 on bond1: down, no carrier \
+             (PEs 192.0.2.1, 192.0.2.9)"
+        ));
     }
 }

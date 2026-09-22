@@ -1882,6 +1882,7 @@ dependencies = [
  "futures",
  "netlink-packet-core",
  "netlink-packet-route",
+ "netlink-sys",
  "nos-log-client",
  "nos-pki",
  "nos-proto",

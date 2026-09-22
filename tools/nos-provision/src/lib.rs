@@ -19,8 +19,8 @@ use clap::Parser;
 use ipnet::IpNet;
 use nos_proto::{
     AddressFamily, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, ConfigOp,
-    InterfaceOp, LacpRate, LldpDestination, LldpOp, OspfAreaOp, OspfCryptoAlgorithm, OspfCryptoKey,
-    OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
+    EsRedundancy, InterfaceOp, LacpRate, LldpDestination, LldpOp, OspfAreaOp, OspfCryptoAlgorithm,
+    OspfCryptoKey, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
     PolicyDefinitionOp, PortAggregateMode, PortAggregateOp, Redistribute, RedistributeSource,
     RedistributeTarget, RoutingTableOp, SourceAddress, StaticRouteOp, StaticRoutingInstanceOp,
     SubinterfaceOp, SwitchingProfileOp, UserOp, VlanTag,
@@ -40,6 +40,23 @@ impl From<PortAggregateModeArg> for PortAggregateMode {
         match mode {
             PortAggregateModeArg::Xor => PortAggregateMode::Xor,
             PortAggregateModeArg::Lacp => PortAggregateMode::Lacp,
+        }
+    }
+}
+
+/// Clap-facing mirror of `nos_proto::EsRedundancy` (`all-active` /
+/// `single-active`), for the same reason as `PortAggregateModeArg`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum EsRedundancyArg {
+    AllActive,
+    SingleActive,
+}
+
+impl From<EsRedundancyArg> for EsRedundancy {
+    fn from(mode: EsRedundancyArg) -> Self {
+        match mode {
+            EsRedundancyArg::AllActive => EsRedundancy::AllActive,
+            EsRedundancyArg::SingleActive => EsRedundancy::SingleActive,
         }
     }
 }
@@ -410,6 +427,12 @@ pub struct Args {
     /// (`PortAggregateOp::ClearEsi`).
     #[arg(long)]
     pub delete_port_aggregate_esi: bool,
+
+    /// If set (requires `--port-aggregate`), sets how the PEs sharing the
+    /// aggregate's Ethernet Segment divide the traffic
+    /// (`PortAggregateOp::SetRedundancyMode`); needs an ESI at commit time.
+    #[arg(long, value_enum)]
+    pub port_aggregate_redundancy_mode: Option<EsRedundancyArg>,
 
     /// If set (requires `--port-aggregate`), overrides the aggregate's LACP
     /// Actor System ID (`PortAggregateOp::SetLacpSystemId`).
@@ -1161,6 +1184,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 name: name.clone(),
             }));
         }
+        if let Some(mode) = args.port_aggregate_redundancy_mode {
+            ops.push(ConfigOp::PortAggregate(
+                PortAggregateOp::SetRedundancyMode {
+                    name: name.clone(),
+                    mode: mode.into(),
+                },
+            ));
+        }
         if let Some(system_id) = args.lacp_system_id.clone() {
             ops.push(ConfigOp::PortAggregate(PortAggregateOp::SetLacpSystemId {
                 name: name.clone(),
@@ -1199,13 +1230,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     } else if args.port_aggregate_mtu.is_some()
         || args.port_aggregate_esi.is_some()
         || args.delete_port_aggregate_esi
+        || args.port_aggregate_redundancy_mode.is_some()
         || args.lacp_system_id.is_some()
         || args.port_aggregate_untagged_domain.is_some()
         || args.lacp_rate.is_some()
         || !args.port_aggregate_members.is_empty()
     {
         bail!(
-            "--port-aggregate-mtu/--port-aggregate-esi/--lacp-system-id/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
+            "--port-aggregate-mtu/--port-aggregate-esi/--port-aggregate-redundancy-mode/--lacp-system-id/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
         );
     }
 
