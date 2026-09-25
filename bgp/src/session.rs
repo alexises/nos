@@ -229,7 +229,7 @@ impl SessionManager {
 
     /// This instance's owning routing table name and current best-path
     /// snapshot, for `rib_push_client`'s poll loop.
-    pub async fn bgp_push_snapshot(&self) -> (Option<String>, HashMap<IpNet, IpAddr>) {
+    pub async fn bgp_push_snapshot(&self) -> (Option<String>, HashMap<IpNet, crate::rib::Hops>) {
         self.bgp_rib.lock().await.push_snapshot()
     }
 

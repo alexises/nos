@@ -410,6 +410,9 @@ pub struct BgpRib {
     /// deny-all default — see `proto`'s `Redistribute.policy` doc comment).
     redistribute_policy: Arc<CompiledPolicy>,
     loc_rib: HashMap<IpNet, RibRoute>,
+    /// Per prefix, the runner-up path's next hop (a different next hop from
+    /// the winner's), pushed to `nos-ribd` as the kernel backup route.
+    backups: HashMap<IpNet, IpAddr>,
     /// What we've last told each peer, for correct withdrawals.
     adj_rib_out: HashMap<IpAddr, HashSet<IpNet>>,
     peer_outboxes: HashMap<IpAddr, PeerOutbox>,
@@ -454,6 +457,7 @@ impl BgpRib {
             redistributed: HashMap::new(),
             redistribute_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             loc_rib: HashMap::new(),
+            backups: HashMap::new(),
             adj_rib_out: HashMap::new(),
             peer_outboxes: HashMap::new(),
             rs_sent: HashMap::new(),
@@ -492,11 +496,15 @@ impl BgpRib {
     /// `next_hop: None` (see `redistributed_route`) and is excluded — there's
     /// no real gateway to install, and pushing it would round-trip
     /// static→bgp→rib→kernel pointlessly on the same table it came from.
-    pub fn push_snapshot(&self) -> (Option<String>, HashMap<IpNet, IpAddr>) {
+    pub fn push_snapshot(&self) -> (Option<String>, HashMap<IpNet, Hops>) {
         let routes = self
             .loc_rib
             .iter()
-            .filter_map(|(prefix, route)| route.next_hop.map(|next_hop| (*prefix, next_hop)))
+            .filter_map(|(prefix, route)| {
+                route
+                    .next_hop
+                    .map(|next_hop| (*prefix, (next_hop, self.backups.get(prefix).copied())))
+            })
             .collect();
         (self.owning_routing_table.clone(), routes)
     }
@@ -906,6 +914,17 @@ impl BgpRib {
         }
 
         let best = best_path(&candidates);
+        match best
+            .as_ref()
+            .and_then(|b| runner_up_next_hop(&candidates, b))
+        {
+            Some(nh) => {
+                self.backups.insert(prefix, nh);
+            }
+            None => {
+                self.backups.remove(&prefix);
+            }
+        }
 
         let unchanged = match (&best, self.loc_rib.get(&prefix)) {
             (Some(new), Some(old)) => new == old,
@@ -1113,6 +1132,29 @@ fn compare_med(a: &RibRoute, b: &RibRoute) -> std::cmp::Ordering {
         (Some(x), Some(y)) if x == y => b.med.unwrap_or(0).cmp(&a.med.unwrap_or(0)),
         _ => std::cmp::Ordering::Equal,
     }
+}
+
+/// A route's next hop plus its backup (runner-up path's next hop), as pushed
+/// to `nos-ribd`.
+pub type Hops = (IpAddr, Option<IpAddr>);
+
+/// The next hop of the best candidate other than `best` that has a real
+/// next hop different from `best`'s — the backup path. `None` when there is
+/// no such candidate (a single path, or every other path shares the winner's
+/// next hop, which a backup route couldn't protect against anyway).
+fn runner_up_next_hop(
+    candidates: &[(RibRoute, Option<IpAddr>)],
+    best: &RibRoute,
+) -> Option<IpAddr> {
+    if candidates.len() < 2 {
+        return None;
+    }
+    let others: Vec<(RibRoute, Option<IpAddr>)> = candidates
+        .iter()
+        .filter(|(r, _)| r.next_hop.is_some() && r.next_hop != best.next_hop)
+        .cloned()
+        .collect();
+    best_path(&others)?.next_hop
 }
 
 /// The full RFC 4271 §9.1.2.2 decision process — see the module doc
@@ -3576,7 +3618,52 @@ mod tests {
         );
 
         let (_, routes) = rib.push_snapshot();
-        assert_eq!(routes.get(&prefix("1.2.3.0/24")), Some(&addr("10.0.0.9")));
+        assert_eq!(
+            routes.get(&prefix("1.2.3.0/24")),
+            Some(&(addr("10.0.0.9"), None))
+        );
+    }
+
+    #[test]
+    fn push_snapshot_carries_runner_up_as_backup() {
+        let mut rib = new_rib(65000);
+        rib.handle_update(
+            addr("10.0.0.1"),
+            false,
+            v4("192.0.2.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.9"),
+            &nos_rpl::ACCEPT_ALL,
+        );
+        // Longer AS_PATH → loses, but its distinct next hop is the backup.
+        rib.handle_update(
+            addr("10.0.0.2"),
+            false,
+            v4("192.0.2.2"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65002, 65003], "10.0.0.8"),
+            &nos_rpl::ACCEPT_ALL,
+        );
+        // A third path sharing the winner's next hop can't be a backup.
+        rib.handle_update(
+            addr("10.0.0.3"),
+            false,
+            v4("192.0.2.3"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![65004, 65005, 65006], "10.0.0.9"),
+            &nos_rpl::ACCEPT_ALL,
+        );
+
+        let (_, routes) = rib.push_snapshot();
+        assert_eq!(
+            routes.get(&prefix("1.2.3.0/24")),
+            Some(&(addr("10.0.0.9"), Some(addr("10.0.0.8"))))
+        );
+
+        // Losing the runner-up drops the backup.
+        rib.peer_disconnected(addr("10.0.0.2"));
+        let (_, routes) = rib.push_snapshot();
+        assert_eq!(
+            routes.get(&prefix("1.2.3.0/24")),
+            Some(&(addr("10.0.0.9"), None))
+        );
     }
 
     #[test]

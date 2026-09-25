@@ -387,6 +387,7 @@ async fn show_routes_via_the_broker_and_missing_daemons_are_503() {
             candidates: vec![RouteEntry {
                 gateway: "192.0.2.1".parse().unwrap(),
                 source: RouteSourceKind::Static,
+                backup: None,
             }],
         }]),
         RibRequest::Lookup { .. } => RibEvent::NoMatch,

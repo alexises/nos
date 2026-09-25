@@ -10,6 +10,7 @@ fn sample_prefix_routes() -> PrefixRoutes {
         candidates: vec![RouteEntry {
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSourceKind::Static,
+            backup: None,
         }],
     }
 }

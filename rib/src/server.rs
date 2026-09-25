@@ -174,6 +174,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
                         gateway: r.next_hop,
                         source: RouteSource::Bgp,
                         interface_id: None,
+                        backup: r.backup_next_hop,
                     }),
                 );
                 full_replace = true;
@@ -184,6 +185,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
                     gateway: r.next_hop,
                     source: RouteSource::Bgp,
                     interface_id: None,
+                    backup: r.backup_next_hop,
                 };
                 match guard.upsert_and_diff(entry) {
                     BestPathChange::Unchanged => {}
@@ -247,6 +249,7 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
                         gateway: r.next_hop,
                         source: RouteSource::Ospf,
                         interface_id: r.interface_id,
+                        backup: r.backup_next_hop,
                     }),
                 );
                 full_replace = true;
@@ -257,6 +260,7 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
                     gateway: r.next_hop,
                     source: RouteSource::Ospf,
                     interface_id: r.interface_id,
+                    backup: r.backup_next_hop,
                 };
                 match guard.upsert_and_diff(entry) {
                     BestPathChange::Unchanged => {}
@@ -308,6 +312,7 @@ fn to_prefix_routes(prefix: nos_proto::IpNet, candidates: &[RibEntry]) -> Prefix
             .map(|e| RouteEntry {
                 gateway: e.gateway,
                 source: to_source_kind(e.source),
+                backup: e.backup,
             })
             .collect(),
     }

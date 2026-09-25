@@ -349,6 +349,33 @@ pub async fn ospf_spf(w: &mut World) -> anyhow::Result<()> {
         .await
 }
 
+/// RFC 5286 loop-free alternate: with router-c also on the broadcast segment,
+/// router-a can reach router-b's loopback via b itself (primary) or via c (c's
+/// own shortest path to b doesn't run back through a). `nos-ospfd` must push
+/// both and `nos-ribd` install the backup as a second kernel route (higher
+/// metric), and remove both again when the loopback leaves OSPF.
+pub async fn ospf_lfa(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let prefix = OSPF_SPF_LOOPBACK_ADDRESS;
+    let primary = format!("added route prefix={prefix}.*source=Some(Ospf) backup=false");
+    let backup = format!("added route prefix={prefix}.*source=Some(Ospf) backup=true");
+    let (p0, b0) = (a.count(&primary), a.count(&backup));
+    b.provision(&[
+        "--loopback-address",
+        prefix,
+        "--ospf-loopback-profile",
+        OSPF_PROFILE,
+    ])
+    .await?;
+    a.wait_new(&primary, p0, 60).await?;
+    a.wait_new(&backup, b0, 60).await?;
+
+    let removed = format!("removed route prefix={prefix}.*backup=true");
+    let r0 = a.count(&removed);
+    b.provision(&["--clear-ospf-loopback-profile"]).await?;
+    a.wait_new(&removed, r0, 60).await
+}
+
 /// Router-b's loopback moves into a second area, making it a real ABR: it must
 /// originate a Type-3 summary-LSA, and router-a (backbone only) must install a
 /// kernel route to a prefix that is not in its own area.

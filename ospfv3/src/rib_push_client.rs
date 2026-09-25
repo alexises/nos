@@ -161,6 +161,7 @@ fn to_routes(routes: &HashMap<IpNet, (IpAddr, Option<u32>)>) -> Vec<OspfRoute> {
             prefix,
             next_hop,
             interface_id,
+            backup_next_hop: None,
         })
         .collect()
 }
@@ -177,6 +178,7 @@ fn diff_routes(
                 prefix,
                 next_hop,
                 interface_id,
+                backup_next_hop: None,
             }));
         }
     }
@@ -220,6 +222,7 @@ mod tests {
                 prefix: "2001:db8::/64".parse().unwrap(),
                 next_hop: "fe80::2".parse().unwrap(),
                 interface_id: Some(1),
+                backup_next_hop: None,
             })]
         );
     }
@@ -250,6 +253,7 @@ mod tests {
                 prefix: "2001:db8:3::/64".parse().unwrap(),
                 next_hop: "fe80::1".parse().unwrap(),
                 interface_id: Some(1),
+                backup_next_hop: None,
             }),
             OspfRouteUpdate::Remove("2001:db8:2::/64".parse().unwrap()),
         ];

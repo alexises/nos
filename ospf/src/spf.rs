@@ -72,6 +72,14 @@ pub struct RouteEntry {
     pub prefix: Ipv4Net,
     pub next_hop: Ipv4Addr,
     pub metric: u32,
+    /// RFC 5286 loop-free alternate next hop (a different first hop than
+    /// `next_hop` that provably won't loop the packet back through us), if
+    /// one exists. Filled in by `compute` after every collector has run.
+    pub backup_next_hop: Option<Ipv4Addr>,
+    /// The vertex this destination hangs off (the router/network whose
+    /// distance the metric was built from) — what the loop-free test is
+    /// evaluated against, since the leaf metric cancels out of it.
+    egress: Vertex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,7 +180,106 @@ pub fn compute(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<RouteEntry> {
         &mut out,
     );
 
+    let alternates = alternates(root, &routers, &networks);
+    for route in out.values_mut() {
+        route.backup_next_hop = pick_backup(route, &alternates, &dist);
+    }
+
     out.into_values().collect()
+}
+
+/// One candidate first hop for a loop-free alternate: a router adjacent to
+/// root (over a p2p link, or sharing a transit network), reached at `addr`,
+/// with the shortest-path distances *from that router* to every vertex.
+struct Alternate {
+    /// The neighbor's own address on the shared link — the next hop.
+    addr: Ipv4Addr,
+    /// Root's cost of the link to it.
+    link_cost: u32,
+    /// Its shortest distance back to root.
+    to_root: u32,
+    dist_from: HashMap<Vertex, u32>,
+}
+
+/// RFC 5286 basic loop-free alternates: every root-adjacent router other
+/// than root itself, each with its own Dijkstra (over the same LSDB), so
+/// `pick_backup` can evaluate the loop-free inequality per destination.
+///
+/// `ponytail:` one full Dijkstra per neighbor per area on every SPF run —
+/// fine for the handful of neighbors this NOS has; an incremental/reverse-SPF
+/// would be the upgrade if a router ever had hundreds. Link protection only
+/// (RFC 5286 §3.1's inequality), no node-protecting or downstream-path
+/// criteria, no remote LFA.
+fn alternates(
+    root: Ipv4Addr,
+    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
+) -> Vec<Alternate> {
+    let Some(root_lsa) = routers.get(&root) else {
+        return Vec::new();
+    };
+    // (neighbor router-id, its address toward us, our cost to it)
+    let mut candidates: Vec<(Ipv4Addr, Ipv4Addr, u32)> = Vec::new();
+    for l in &root_lsa.links {
+        match l.link_type {
+            LINK_TYPE_POINT_TO_POINT => {
+                if let Some(addr) =
+                    own_link_data(routers, l.link_id, LINK_TYPE_POINT_TO_POINT, root)
+                {
+                    candidates.push((l.link_id, addr, u32::from(l.metric)));
+                }
+            }
+            LINK_TYPE_TRANSIT_NETWORK => {
+                let Some(net) = networks.get(&l.link_id) else {
+                    continue;
+                };
+                for &r in net.attached_routers.iter().filter(|&&r| r != root) {
+                    if let Some(addr) =
+                        own_link_data(routers, r, LINK_TYPE_TRANSIT_NETWORK, l.link_id)
+                    {
+                        candidates.push((r, addr, u32::from(l.metric)));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    candidates
+        .into_iter()
+        .filter_map(|(id, addr, link_cost)| {
+            let dist_from = run_dijkstra(id, routers, networks).0;
+            let to_root = *dist_from.get(&Vertex::Router(root))?;
+            Some(Alternate {
+                addr,
+                link_cost,
+                to_root,
+                dist_from,
+            })
+        })
+        .collect()
+}
+
+/// The best alternate for `route`: among candidates whose address differs
+/// from the primary next hop and that satisfy RFC 5286 §3.1's loop-free
+/// inequality `dist(N, E) < dist(N, root) + dist(root, E)` for the route's
+/// egress vertex `E`, the one with the lowest total cost (ties: lowest
+/// address, for determinism).
+fn pick_backup(
+    route: &RouteEntry,
+    alternates: &[Alternate],
+    dist: &HashMap<Vertex, u32>,
+) -> Option<Ipv4Addr> {
+    let root_to_egress = *dist.get(&route.egress)?;
+    alternates
+        .iter()
+        .filter(|a| a.addr != route.next_hop)
+        .filter_map(|a| {
+            let n_to_egress = *a.dist_from.get(&route.egress)?;
+            (n_to_egress < a.to_root.saturating_add(root_to_egress))
+                .then_some((a.link_cost.saturating_add(n_to_egress), a.addr))
+        })
+        .min()
+        .map(|(_, addr)| addr)
 }
 
 /// One area's intra-area-only view — the subset of RFC 2328 §16.1 SPF fit
@@ -397,6 +504,8 @@ fn collect_network_routes(
                 prefix: net_from(network_id, network.network_mask),
                 next_hop: nh,
                 metric: d,
+                backup_next_hop: None,
+                egress: vertex,
             },
         );
     }
@@ -441,6 +550,8 @@ fn collect_stub_routes(
                     prefix: net_from(link.link_id, link.link_data),
                     next_hop: nh,
                     metric: d.saturating_add(u32::from(link.metric)),
+                    backup_next_hop: None,
+                    egress: vertex,
                 },
             );
         }
@@ -495,6 +606,8 @@ fn collect_intra_area_stub_routes(
                     prefix: net_from(link.link_id, link.link_data),
                     next_hop: nh,
                     metric: d.saturating_add(u32::from(link.metric)),
+                    backup_next_hop: None,
+                    egress: vertex,
                 },
             );
         }
@@ -535,6 +648,8 @@ fn collect_summary_routes(
                 prefix: net_from(link_state_id, s.network_mask),
                 next_hop: nh,
                 metric: d.saturating_add(s.metric),
+                backup_next_hop: None,
+                egress: vertex,
             },
         );
     }
@@ -552,10 +667,10 @@ fn asbr_distance(
     asbr_summaries: &[(Ipv4Addr, Ipv4Addr, &SummaryLsaBody)],
     dist: &HashMap<Vertex, u32>,
     next_hop: &HashMap<Vertex, NextHop>,
-) -> Option<(u32, Ipv4Addr)> {
+) -> Option<(u32, Ipv4Addr, Vertex)> {
     if let Some(&d) = dist.get(&Vertex::Router(asbr)) {
         if let Some(NextHop::Router(nh)) = next_hop.get(&Vertex::Router(asbr)).copied() {
-            return Some((d, nh));
+            return Some((d, nh, Vertex::Router(asbr)));
         }
     }
     asbr_summaries
@@ -566,9 +681,9 @@ fn asbr_distance(
             let NextHop::Router(nh) = next_hop.get(&Vertex::Router(abr)).copied()? else {
                 return None;
             };
-            Some((d.saturating_add(s.metric), nh))
+            Some((d.saturating_add(s.metric), nh, Vertex::Router(abr)))
         })
-        .min_by_key(|&(d, _)| d)
+        .min_by_key(|&(d, _, _)| d)
 }
 
 /// RFC 2328 §16.4 AS-external routes, restricted to this NOS's Type-1-only
@@ -598,7 +713,7 @@ fn collect_external_routes(
         if asbr == root {
             continue;
         }
-        let Some((d, nh)) = asbr_distance(asbr, asbr_summaries, dist, next_hop) else {
+        let Some((d, nh, egress)) = asbr_distance(asbr, asbr_summaries, dist, next_hop) else {
             continue;
         };
         // Same `(Ipv4Addr, Ipv4Addr)` key shape `collect_stub_routes` uses,
@@ -612,6 +727,8 @@ fn collect_external_routes(
                 prefix: net_from(link_state_id, ext.network_mask),
                 next_hop: nh,
                 metric: d.saturating_add(ext.metric),
+                backup_next_hop: None,
+                egress,
             },
         );
     }
@@ -1206,5 +1323,79 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].next_hop, addr(10, 0, 1, 2));
         assert_eq!(routes[0].metric, 2 + EXTERNAL_METRIC_CONSTANT);
+    }
+
+    /// root(1) — 2, root — 3, 2 — 3 with the given 2–3 cost; 2 owns a stub.
+    fn triangle(cost_23: u16) -> Vec<Arc<Lsa>> {
+        let (r1, r2, r3) = (router_id(1), router_id(2), router_id(3));
+        vec![
+            router_lsa(
+                r1,
+                vec![
+                    p2p(r2, addr(10, 0, 12, 1), 1),
+                    p2p(r3, addr(10, 0, 13, 1), 1),
+                ],
+            ),
+            router_lsa(
+                r2,
+                vec![
+                    p2p(r1, addr(10, 0, 12, 2), 1),
+                    p2p(r3, addr(10, 0, 23, 2), cost_23),
+                    stub(addr(192, 168, 2, 0), addr(255, 255, 255, 0), 1),
+                ],
+            ),
+            router_lsa(
+                r3,
+                vec![
+                    p2p(r1, addr(10, 0, 13, 3), 1),
+                    p2p(r2, addr(10, 0, 23, 3), cost_23),
+                ],
+            ),
+        ]
+    }
+
+    fn route_to(routes: &[RouteEntry], prefix: &str) -> RouteEntry {
+        routes
+            .iter()
+            .find(|r| r.prefix == prefix.parse().unwrap())
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn triangle_gets_loop_free_alternate_via_the_other_neighbor() {
+        let routes = compute(router_id(1), &triangle(1));
+        let r = route_to(&routes, "192.168.2.0/24");
+        assert_eq!(r.next_hop, addr(10, 0, 12, 2));
+        // 3 reaches 2 directly (1) < 3→root (1) + root→2 (1).
+        assert_eq!(r.backup_next_hop, Some(addr(10, 0, 13, 3)));
+    }
+
+    #[test]
+    fn neighbor_whose_best_path_loops_through_root_is_not_an_alternate() {
+        // 3's shortest way to 2 is back through root (1+1=2 < 10), so
+        // 2 < 1 + 1 fails: it would loop.
+        let routes = compute(router_id(1), &triangle(10));
+        let r = route_to(&routes, "192.168.2.0/24");
+        assert_eq!(r.next_hop, addr(10, 0, 12, 2));
+        assert_eq!(r.backup_next_hop, None);
+    }
+
+    #[test]
+    fn single_neighbor_has_no_alternate() {
+        let root = router_id(1);
+        let w = router_id(2);
+        let lsas = [
+            router_lsa(root, vec![p2p(w, addr(10, 0, 0, 1), 1)]),
+            router_lsa(
+                w,
+                vec![
+                    p2p(root, addr(10, 0, 0, 2), 1),
+                    stub(addr(192, 168, 1, 0), addr(255, 255, 255, 0), 1),
+                ],
+            ),
+        ];
+        let routes = compute(root, &lsas);
+        assert_eq!(routes[0].backup_next_hop, None);
     }
 }

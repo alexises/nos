@@ -21,6 +21,10 @@ pub struct RouteEntry {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub gateway: IpAddr,
     pub source: RouteSourceKind,
+    /// Pre-computed backup next hop, installed in the kernel at a higher
+    /// metric so it takes over the instant the primary is withdrawn.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub backup: Option<IpAddr>,
 }
 
 /// One prefix's full candidate list, ordered best (winner) to worst by
@@ -45,6 +49,9 @@ pub struct BgpRoute {
     pub prefix: IpNet,
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub next_hop: IpAddr,
+    /// Runner-up path's next hop (a different one from `next_hop`), if any.
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub backup_next_hop: Option<IpAddr>,
 }
 
 /// Sent by the owning `nos-bgpd` instance to `nos-ribd` over a persistent,
@@ -80,6 +87,10 @@ pub struct OspfRoute {
     /// (RFC 2328 next-hops are ordinary routable IPv4 addresses, which the
     /// kernel resolves via its own routing table without needing one).
     pub interface_id: Option<u32>,
+    /// RFC 5286 loop-free alternate next hop, if one exists. Always `None`
+    /// from `nos-ospfv3d` (no LFA there yet).
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    pub backup_next_hop: Option<IpAddr>,
 }
 
 /// Sent by the owning `nos-ospfd` instance to `nos-ribd` over a persistent,

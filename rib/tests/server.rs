@@ -18,6 +18,7 @@ fn sample_rib() -> Rib {
         prefix: broad,
         gateway: "10.0.0.1".parse().unwrap(),
         source: RouteSource::Static,
+        backup: None,
     });
     // Two competing candidates for the same prefix, to prove ordering.
     rib.insert(RibEntry {
@@ -25,12 +26,14 @@ fn sample_rib() -> Rib {
         prefix: narrow,
         gateway: "10.0.1.9".parse().unwrap(),
         source: RouteSource::Bgp,
+        backup: None,
     });
     rib.insert(RibEntry {
         interface_id: None,
         prefix: narrow,
         gateway: "10.0.1.1".parse().unwrap(),
         source: RouteSource::Static,
+        backup: None,
     });
     rib
 }
@@ -360,7 +363,11 @@ async fn push_bgp_routes_full_inserts_into_shared_rib_and_applies_to_driver() {
     let next_hop: IpAddr = "203.0.113.1".parse().unwrap();
     writer
         .send(RibRequest::PushBgpRoutes(vec![
-            nos_proto::BgpRouteUpdate::Full(vec![nos_proto::BgpRoute { prefix, next_hop }]),
+            nos_proto::BgpRouteUpdate::Full(vec![nos_proto::BgpRoute {
+                prefix,
+                next_hop,
+                backup_next_hop: None,
+            }]),
         ]))
         .await
         .unwrap();
@@ -393,7 +400,11 @@ async fn push_bgp_routes_add_only_calls_apply_delta_when_the_winner_changes() {
     let (_reader, mut writer) = connect_as(&path, "bgpd", "r1").await;
     let prefix: nos_proto::IpNet = "203.0.113.0/24".parse().unwrap();
     let next_hop: IpAddr = "203.0.113.1".parse().unwrap();
-    let route = nos_proto::BgpRoute { prefix, next_hop };
+    let route = nos_proto::BgpRoute {
+        prefix,
+        next_hop,
+        backup_next_hop: None,
+    };
 
     // A genuinely new prefix triggers apply_delta.
     writer
@@ -426,6 +437,7 @@ async fn push_bgp_routes_add_only_calls_apply_delta_when_the_winner_changes() {
             nos_proto::BgpRouteUpdate::Add(nos_proto::BgpRoute {
                 prefix: other_prefix,
                 next_hop,
+                backup_next_hop: None,
             }),
         ]))
         .await
@@ -466,6 +478,7 @@ async fn route_pushes_from_the_wrong_role_are_refused() {
                 nos_proto::BgpRouteUpdate::Add(nos_proto::BgpRoute {
                     prefix: "10.9.0.0/24".parse().unwrap(),
                     next_hop: "10.0.0.1".parse().unwrap(),
+                    backup_next_hop: None,
                 }),
             ]))
             .await

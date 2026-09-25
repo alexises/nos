@@ -286,6 +286,7 @@ mod tests {
             prefix: prefix.parse().unwrap(),
             gateway: gateway.parse().unwrap(),
             source: RouteSource::Static,
+            backup: None,
         }
     }
 
@@ -372,6 +373,7 @@ mod tests {
                 prefix,
                 gateway: "10.0.0.9".parse().unwrap(),
                 source: RouteSource::Bgp,
+                backup: None,
             },
         );
 
@@ -401,6 +403,7 @@ mod tests {
             prefix: "2001:db8::/32".parse().unwrap(),
             gateway: "2001:db8::1".parse().unwrap(),
             source: RouteSource::Static,
+            backup: None,
         };
         routes.insert(entry.prefix, entry);
 
@@ -493,6 +496,7 @@ mod tests {
                 prefix,
                 gateway: "10.0.0.9".parse().unwrap(),
                 source: RouteSource::Bgp,
+                backup: None,
             },
         );
 

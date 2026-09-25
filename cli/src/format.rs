@@ -624,8 +624,11 @@ pub fn render_prefix_routes(entries: &[PrefixRoutes]) -> String {
         lines.push(format!("{}", entry.prefix));
         for (i, candidate) in entry.candidates.iter().enumerate() {
             let marker = if i == 0 { "*" } else { " " };
+            let backup = candidate
+                .backup
+                .map_or_else(String::new, |b| format!(" backup {b}"));
             lines.push(format!(
-                "  {marker} via {} [{}]",
+                "  {marker} via {} [{}]{backup}",
                 candidate.gateway,
                 render_route_source(candidate.source)
             ));

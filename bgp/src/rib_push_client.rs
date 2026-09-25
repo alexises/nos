@@ -14,7 +14,6 @@
 //! latency.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -149,10 +148,14 @@ async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>)
     }
 }
 
-fn to_routes(routes: &HashMap<IpNet, IpAddr>) -> Vec<BgpRoute> {
+fn to_routes(routes: &HashMap<IpNet, crate::rib::Hops>) -> Vec<BgpRoute> {
     routes
         .iter()
-        .map(|(&prefix, &next_hop)| BgpRoute { prefix, next_hop })
+        .map(|(&prefix, &(next_hop, backup_next_hop))| BgpRoute {
+            prefix,
+            next_hop,
+            backup_next_hop,
+        })
         .collect()
 }
 
@@ -162,13 +165,17 @@ fn to_routes(routes: &HashMap<IpNet, IpAddr>) -> Vec<BgpRoute> {
 /// `last_sent` had that `new_routes` no longer does. Pure and unit-tested
 /// directly — the surrounding connection/reconnect machinery isn't.
 fn diff_routes(
-    last_sent: &HashMap<IpNet, IpAddr>,
-    new_routes: &HashMap<IpNet, IpAddr>,
+    last_sent: &HashMap<IpNet, crate::rib::Hops>,
+    new_routes: &HashMap<IpNet, crate::rib::Hops>,
 ) -> Vec<BgpRouteUpdate> {
     let mut updates = Vec::new();
-    for (&prefix, &next_hop) in new_routes {
-        if last_sent.get(&prefix) != Some(&next_hop) {
-            updates.push(BgpRouteUpdate::Add(BgpRoute { prefix, next_hop }));
+    for (&prefix, &hops) in new_routes {
+        if last_sent.get(&prefix) != Some(&hops) {
+            updates.push(BgpRouteUpdate::Add(BgpRoute {
+                prefix,
+                next_hop: hops.0,
+                backup_next_hop: hops.1,
+            }));
         }
     }
     for prefix in last_sent.keys() {
@@ -181,12 +188,14 @@ fn diff_routes(
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
     use super::*;
 
-    fn routes(pairs: &[(&str, &str)]) -> HashMap<IpNet, IpAddr> {
+    fn routes(pairs: &[(&str, &str)]) -> HashMap<IpNet, crate::rib::Hops> {
         pairs
             .iter()
-            .map(|(p, gw)| (p.parse().unwrap(), gw.parse().unwrap()))
+            .map(|(p, gw)| (p.parse().unwrap(), (gw.parse().unwrap(), None)))
             .collect()
     }
 
@@ -210,6 +219,7 @@ mod tests {
             vec![BgpRouteUpdate::Add(BgpRoute {
                 prefix: "10.0.0.0/24".parse().unwrap(),
                 next_hop: "10.0.0.2".parse().unwrap(),
+                backup_next_hop: None,
             })]
         );
     }
@@ -233,10 +243,28 @@ mod tests {
             BgpRouteUpdate::Add(BgpRoute {
                 prefix: "10.0.2.0/24".parse().unwrap(),
                 next_hop: "10.0.2.1".parse().unwrap(),
+                backup_next_hop: None,
             }),
             BgpRouteUpdate::Remove("10.0.1.0/24".parse().unwrap()),
         ];
         expected.sort_by_key(|u| format!("{u:?}"));
         assert_eq!(updates, expected);
+    }
+
+    #[test]
+    fn diff_backup_only_change_is_add() {
+        let gw: IpAddr = "10.0.0.1".parse().unwrap();
+        let bk: IpAddr = "10.0.9.9".parse().unwrap();
+        let p: IpNet = "10.0.0.0/24".parse().unwrap();
+        let last_sent = HashMap::from([(p, (gw, None))]);
+        let new_routes = HashMap::from([(p, (gw, Some(bk)))]);
+        assert_eq!(
+            diff_routes(&last_sent, &new_routes),
+            vec![BgpRouteUpdate::Add(BgpRoute {
+                prefix: p,
+                next_hop: gw,
+                backup_next_hop: Some(bk),
+            })]
+        );
     }
 }
