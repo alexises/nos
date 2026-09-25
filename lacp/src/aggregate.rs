@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, watch, Notify};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use crate::churn_machine::{ChurnState, CHURN_DETECTION_TIME};
 use crate::link::{self, LinkConfig, PortObservation};
 use crate::mux_machine::MuxState;
 use crate::packet::state_bit;
@@ -24,6 +25,15 @@ use crate::selection::{self, PortCandidate};
 /// 802.1AX defaults — no CLI-exposed knobs in v1 (see `lacp/CLAUDE.md`).
 const ACTOR_SYSTEM_PRIORITY: u16 = 32768;
 const ACTOR_PORT_PRIORITY: u16 = 32768;
+
+/// `NOS_LACP_CHURN_SECS` shortens 802.1AX's 60s `Churn_Detection_Time` so the
+/// e2e harness doesn't wait a minute; unset in production.
+fn churn_time() -> std::time::Duration {
+    std::env::var("NOS_LACP_CHURN_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map_or(CHURN_DETECTION_TIME, std::time::Duration::from_secs)
+}
 
 type SelectedTxs = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 
@@ -141,6 +151,7 @@ impl AggregateManager {
                 actor_port_priority: ACTOR_PORT_PRIORITY,
                 rate,
                 selected_rx,
+                churn_time: churn_time(),
             };
             let task = tokio::spawn(link::run(
                 config,
@@ -172,6 +183,8 @@ impl AggregateManager {
                 synchronized: obs
                     .partner
                     .is_some_and(|p| p.has_state(state_bit::SYNCHRONIZATION)),
+                actor_churn: obs.actor_churn == ChurnState::Churn,
+                partner_churn: obs.partner_churn == ChurnState::Churn,
             })
             .collect();
         ports.sort_by(|a, b| a.interface.cmp(&b.interface));
@@ -230,7 +243,9 @@ async fn selection_loop(
         let mut active_members: Vec<String> = snapshot
             .iter()
             .filter(|(interface, obs)| {
-                selected.contains(*interface) && obs.mux_state == MuxState::Distributing
+                selected.contains(*interface)
+                    && obs.mux_state == MuxState::Distributing
+                    && !obs.is_churned()
             })
             .map(|(interface, _)| interface.clone())
             .collect();

@@ -170,6 +170,8 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     // Expired baseline is taken here since a port also passes through Expired
     // while first starting up.
     let expired_base = a.count("interface=eth2 receive_state=Expired");
+    let churn = "lacp partner churn machine transitioned interface=eth2 churn=Churn";
+    let churn_base = a.count(churn);
     let mut withdraw = lacp_flags(&["--lacp-rate", "fast"]);
     withdraw.extend(strings(&[
         "--enslave-interface-into-port-aggregate",
@@ -186,6 +188,53 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
         30,
     )
     .await?;
+
+    // 802.1AX churn detection: eth2 stays out of sync past the (shortened)
+    // churn-detection time, so it is flagged churned — and, being kept out of
+    // the active set, stays out of the bond — while eth1 is untouched.
+    log("the silent partner port is flagged as churned in show lacp");
+    a.wait_new(churn, churn_base, 30).await?;
+    let body = a
+        .rest_expect(reqwest::Method::GET, "/v1/lacp", None, 200)
+        .await?;
+    let summary: serde_json::Value = serde_json::from_str(&body)?;
+    let port = |name: &str| {
+        summary
+            .as_array()
+            .and_then(|v| v.iter().find(|s| s["aggregate"] == LACP_AGGREGATE))
+            .and_then(|s| s["ports"].as_array())
+            .and_then(|p| p.iter().find(|p| p["interface"] == name))
+            .cloned()
+    };
+    let (eth1, eth2) = (port("eth1"), port("eth2"));
+    if eth2.is_none_or(|p| p["partner_churn"] != true)
+        || eth1.is_none_or(|p| p["partner_churn"] != false)
+    {
+        bail!("expected eth2 partner_churn=true and eth1 partner_churn=false: {body}");
+    }
+
+    // Recovery: router-b takes eth2 back, the partner syncs again, so the
+    // churn flag clears and nos-interfaced enslaves eth2 into the bond anew.
+    log("the partner port comes back: churn clears and eth2 rejoins the bond");
+    let cleared = "lacp partner churn machine transitioned interface=eth2 churn=NoChurn";
+    let cleared_base = a.count(cleared);
+    let rejoin_base = a.count("enslaved interface to bond interface=eth2 bond=bond");
+    let mut restore = lacp_flags(&["--lacp-rate", "fast"]);
+    restore.extend(strings(&both));
+    b.provision(&restore).await?;
+    a.wait_new(cleared, cleared_base, 60).await?;
+    a.wait_new(
+        "enslaved interface to bond interface=eth2 bond=bond",
+        rejoin_base,
+        60,
+    )
+    .await?;
+    let body = a
+        .rest_expect(reqwest::Method::GET, "/v1/lacp", None, 200)
+        .await?;
+    if body.contains("\"partner_churn\":true") {
+        bail!("a partner is still flagged churned after recovery: {body}");
+    }
 
     let mut off = lacp_flags(&[]);
     off.extend(strings(&both));

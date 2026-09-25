@@ -57,7 +57,6 @@ Every one of these was a real hot loop or stall found by running `nos-e2e lacp` 
 
 ## Explicitly deferred (documented, not silently missing)
 
-- **Churn Detection machines** (§6.4.17) — diagnostic-only, no functional effect on aggregation.
 - **Marker Protocol** (§6.5) — only matters for guaranteed frame ordering during a live port move between aggregators; irrelevant with config-fixed membership.
 - **Full dynamic cross-aggregate Selection Logic** — see the Selection Logic section above; permanent, not temporary.
 - **Per-port priority/system-priority knobs** — fixed at the 802.1AX default (32768).
@@ -71,6 +70,7 @@ Every one of these was a real hot loop or stall found by running `nos-e2e lacp` 
 | `socket.rs` | A thin wrapper over the shared `nos-l2-socket` crate (`L2Socket`, also used by `nos-lldp`) fixing its ethertype/group/buffer; `LacpSocket` — a raw `AF_PACKET`/`SOCK_RAW` socket bound to **one physical member interface** (never the bond, never a VRF — same reasoning as `ospf::socket`'s own interface-scoped bind: no demux, so binding wider leaks other links' traffic), restricted to ethertype `0x8809` and joined to the slow-protocols multicast MAC `01:80:C2:00:00:02` via `PACKET_ADD_MEMBERSHIP` (most NIC drivers otherwise never pass an arbitrary multicast destination up to userspace at all). The raw `libc`/`unsafe` (`sockaddr_ll` construction, `PACKET_ADD_MEMBERSHIP`'s `packet_mreq`) now lives in `l2-socket/`, not here. The shared `recv` also drops frames not addressed to the joined group — LACPDUs only ever go to `01:80:C2:00:00:02` |
 | `receive_machine.rs` | §6.4.12 Receive Machine — pure `step`, see above |
 | `periodic_tx_machine.rs` | §6.4.13 Periodic Transmission Machine timing (`interval_for`) — see above |
+| `churn_machine.rs` | §6.4.17 Actor/Partner Churn Detection — pure `step`; `link.rs` runs one per side per port (60s, `NOS_LACP_CHURN_SECS` shortens it for e2e). Beyond the standard's diagnostic-only role, a port with either side `Churn` is left out of the active-member set (no traffic on it); reported as `actor_churn`/`partner_churn` in `show lacp` / `GET /v1/lacp` |
 | `mux_machine.rs` | §6.4.15 Mux Machine — pure `step`, see above |
 | `selection.rs` | Config-scoped Selection Logic — pure `select`, see above |
 | `link.rs` | Per-port owning struct + `run()` — mirrors `ospf::link.rs`'s per-link shape: owns the socket and all three state machines, drives them off real timer deadlines (`tokio::select!` over the periodic-send ticker, the `Current_While_Timer`, the Mux `Wait_While_Timer`, a `selected` watch-channel, and packet receive), reports every change into the shared observation map |

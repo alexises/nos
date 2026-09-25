@@ -9,6 +9,7 @@ use nos_proto::LacpRate;
 use tokio::sync::{watch, Notify};
 use tracing::{debug, info, warn};
 
+use crate::churn_machine::{self, ChurnState};
 use crate::mux_machine::{self, MuxState};
 use crate::packet::{self, state_bit, Lacpdu, PortInfo};
 use crate::periodic_tx_machine::interval_for;
@@ -33,6 +34,9 @@ pub struct LinkConfig {
     /// whenever it re-runs `selection::select` (on any port's observation
     /// change).
     pub selected_rx: watch::Receiver<bool>,
+    /// 802.1AX `Churn_Detection_Time` (60s; shortened only by tests/e2e via
+    /// `NOS_LACP_CHURN_SECS`, see `aggregate.rs`).
+    pub churn_time: Duration,
 }
 
 /// One member port's currently-observed state, as reported up to
@@ -46,9 +50,18 @@ pub struct PortObservation {
     /// The partner's last recorded Actor information — `None` until a
     /// LACPDU has been heard, and again once the Receive Machine gives up.
     pub partner: Option<PortInfo>,
+    pub actor_churn: ChurnState,
+    pub partner_churn: ChurnState,
 }
 
 impl PortObservation {
+    /// A churned port (either side stuck out of sync for a whole
+    /// `Churn_Detection_Time`) carries no traffic: `aggregate.rs` leaves it
+    /// out of the active-member set.
+    pub fn is_churned(&self) -> bool {
+        self.actor_churn == ChurnState::Churn || self.partner_churn == ChurnState::Churn
+    }
+
     pub fn current(&self) -> bool {
         self.receive_state == ReceiveState::Current
     }
@@ -101,6 +114,8 @@ pub async fn run(
     // the time of the previous send (see `periodic_tx_machine::interval_for`).
     let mut tx = TxState::new();
 
+    let mut churn = Churn::new(&config.interface, config.churn_time);
+    churn.eval(mux_state, partner);
     report(
         &observations,
         &changed,
@@ -109,6 +124,7 @@ pub async fn run(
         receive_state,
         mux_state,
         partner,
+        &churn,
     );
 
     loop {
@@ -139,15 +155,25 @@ pub async fn run(
                     apply_mux_action(mux_action, &mut wait_while_deadline);
                 }
                 info!(interface = %config.interface, receive_state = ?receive_state, "lacp receive machine transitioned");
-                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner);
+                churn.eval(mux_state, partner);
+                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner, &churn);
                 tx.send_if_changed(&socket, &config.interface, build_pdu(&config, port_number, receive_state, mux_state, partner));
+            }
+            () = tokio::time::sleep_until(churn.actor_deadline.into()) => {
+                churn.expire_actor();
+                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner, &churn);
+            }
+            () = tokio::time::sleep_until(churn.partner_deadline.into()) => {
+                churn.expire_partner();
+                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner, &churn);
             }
             () = tokio::time::sleep_until(wait_while_deadline.into()) => {
                 let (ms, action) = mux_machine::step(mux_state, mux_machine::Event::WaitWhileTimerExpired);
                 mux_state = ms;
                 apply_mux_action(action, &mut wait_while_deadline);
                 info!(interface = %config.interface, mux_state = ?mux_state, "lacp mux machine transitioned");
-                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner);
+                churn.eval(mux_state, partner);
+                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner, &churn);
                 tx.send_if_changed(&socket, &config.interface, build_pdu(&config, port_number, receive_state, mux_state, partner));
             }
             result = selected_rx.changed() => {
@@ -160,7 +186,8 @@ pub async fn run(
                 mux_state = ms;
                 apply_mux_action(action, &mut wait_while_deadline);
                 info!(interface = %config.interface, mux_state = ?mux_state, selected, "lacp mux machine transitioned");
-                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner);
+                churn.eval(mux_state, partner);
+                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner, &churn);
                 tx.send_if_changed(&socket, &config.interface, build_pdu(&config, port_number, receive_state, mux_state, partner));
             }
             recv = socket.recv() => {
@@ -196,7 +223,8 @@ pub async fn run(
                     partner_system = ?pdu.actor.system,
                     "lacp lacpdu received"
                 );
-                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner);
+                churn.eval(mux_state, partner);
+                report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner, &churn);
                 tx.send_if_changed(&socket, &config.interface, build_pdu(&config, port_number, receive_state, mux_state, partner));
             }
         }
@@ -241,7 +269,7 @@ fn apply_mux_action(action: mux_machine::Action, wait_while_deadline: &mut Insta
     }
 }
 
-#[allow(clippy::implicit_hasher)] // always the default hasher; never needs to be generic here
+#[allow(clippy::implicit_hasher, clippy::too_many_arguments)] // default hasher only; one call-site shape
 fn report(
     observations: &Arc<Mutex<HashMap<String, PortObservation>>>,
     changed: &Arc<Notify>,
@@ -250,12 +278,15 @@ fn report(
     receive_state: ReceiveState,
     mux_state: MuxState,
     partner: Option<PortInfo>,
+    churn: &Churn,
 ) {
     let observation = PortObservation {
         receive_state,
         mux_state,
         actor_port,
         partner,
+        actor_churn: churn.actor,
+        partner_churn: churn.partner,
     };
     let mut observations = observations.lock().unwrap();
     // Only signal on a real change: `aggregate.rs` reacts to every
@@ -268,6 +299,93 @@ fn report(
     observations.insert(interface.to_string(), observation);
     drop(observations);
     changed.notify_one();
+}
+
+/// Both Churn Detection machines (§6.4.17) with their timer deadlines.
+struct Churn {
+    interface: String,
+    actor: ChurnState,
+    partner: ChurnState,
+    actor_deadline: Instant,
+    partner_deadline: Instant,
+    time: Duration,
+}
+
+impl Churn {
+    fn new(interface: &str, time: Duration) -> Self {
+        Self {
+            interface: interface.to_string(),
+            actor: ChurnState::NoChurn,
+            partner: ChurnState::NoChurn,
+            actor_deadline: far_future(),
+            partner_deadline: far_future(),
+            time,
+        }
+    }
+
+    /// Re-evaluates both sides' Synchronization bit after any state change.
+    fn eval(&mut self, mux_state: MuxState, partner: Option<PortInfo>) {
+        let actor_sync = matches!(
+            mux_state,
+            MuxState::Attached | MuxState::Collecting | MuxState::Distributing
+        );
+        let partner_sync = partner.is_some_and(|p| p.has_state(state_bit::SYNCHRONIZATION));
+        let sync = |in_sync| churn_machine::Event::Sync { in_sync };
+        self.feed_actor(sync(actor_sync));
+        self.feed_partner(sync(partner_sync));
+    }
+
+    fn expire_actor(&mut self) {
+        self.feed_actor(churn_machine::Event::TimerExpired);
+    }
+
+    fn expire_partner(&mut self) {
+        self.feed_partner(churn_machine::Event::TimerExpired);
+    }
+
+    fn feed_actor(&mut self, event: churn_machine::Event) {
+        let before = self.actor;
+        Self::feed(&mut self.actor, &mut self.actor_deadline, event, self.time);
+        self.log("actor", before, self.actor);
+    }
+
+    fn feed_partner(&mut self, event: churn_machine::Event) {
+        let before = self.partner;
+        Self::feed(
+            &mut self.partner,
+            &mut self.partner_deadline,
+            event,
+            self.time,
+        );
+        self.log("partner", before, self.partner);
+    }
+
+    fn log(&self, side: &str, before: ChurnState, after: ChurnState) {
+        if before != after {
+            info!(interface = %self.interface, churn = ?after, "lacp {side} churn machine transitioned");
+        }
+    }
+
+    fn feed(
+        state: &mut ChurnState,
+        deadline: &mut Instant,
+        event: churn_machine::Event,
+        time: Duration,
+    ) {
+        let (next, action) = churn_machine::step(*state, event);
+        *state = next;
+        match action {
+            churn_machine::Action::StartTimer => *deadline = Instant::now() + time,
+            // Only `None` after an expiry leaves an elapsed deadline armed
+            // (a hot loop) — disarm on anything but a still-running timer.
+            churn_machine::Action::StopTimer => *deadline = far_future(),
+            churn_machine::Action::None => {
+                if next != ChurnState::Monitor {
+                    *deadline = far_future();
+                }
+            }
+        }
+    }
 }
 
 /// This port's own advertised `Actor_State` byte — see 802.1AX Table 6-4.
@@ -446,6 +564,7 @@ mod tests {
                 ReceiveState::Expired,
                 MuxState::Detached,
                 None,
+                &Churn::new("eth1", Duration::from_secs(60)),
             );
         };
 
@@ -602,5 +721,27 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod churn_tests {
+    use super::*;
+
+    #[test]
+    fn expiry_never_leaves_an_elapsed_deadline_and_sync_recovers() {
+        let mut c = Churn::new("eth1", Duration::from_millis(1));
+        c.eval(MuxState::Detached, None);
+        assert_eq!(
+            (c.actor, c.partner),
+            (ChurnState::Monitor, ChurnState::Monitor)
+        );
+        c.expire_actor();
+        c.expire_partner();
+        assert_eq!((c.actor, c.partner), (ChurnState::Churn, ChurnState::Churn));
+        assert!(c.actor_deadline > Instant::now() && c.partner_deadline > Instant::now());
+        c.eval(MuxState::Attached, None);
+        assert_eq!(c.actor, ChurnState::NoChurn);
+        assert_eq!(c.partner, ChurnState::Churn, "no partner sync yet");
     }
 }

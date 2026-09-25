@@ -5,9 +5,8 @@
 //! see `aggregate.rs` — so there is no separate "port administratively
 //! disabled but task still alive" state to model): `Initialize`/
 //! `PortDisabled`/`LacpDisabled` collapse into the task's own startup,
-//! entered once via `Event::Started`, never revisited. `Churn Detection`
-//! (802.1AX §6.4.17, diagnostic-only) is out of scope — see `lacp/
-//! CLAUDE.md`.
+//! entered once via `Event::Started`, never revisited. Churn Detection
+//! (802.1AX §6.4.17) lives in `churn_machine.rs`.
 
 /// Local, internal state — deliberately not `nos_proto::LacpReceiveState`
 /// (this crate's own state isn't necessarily wire-serializable forever),

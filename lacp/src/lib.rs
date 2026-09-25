@@ -5,6 +5,7 @@
 // pushes its negotiated active-member set over IPC.
 
 pub mod aggregate;
+pub mod churn_machine;
 pub mod config_client;
 pub mod interface_client;
 pub mod link;

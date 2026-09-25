@@ -154,7 +154,11 @@ impl Dock {
         let body = ContainerCreateBody {
             image: Some(IMAGE.to_string()),
             cmd: Some(spec.cmd.clone()),
-            env: Some(vec![format!("RUST_LOG={RUST_LOG}")]),
+            // Short 802.1AX churn-detection time so the `lacp` phase needn't wait 60s.
+            env: Some(vec![
+                format!("RUST_LOG={RUST_LOG}"),
+                "NOS_LACP_CHURN_SECS=8".to_string(),
+            ]),
             host_config: Some(HostConfig {
                 binds: Some(vec![
                     format!("{run_vol}:/run/nos"),

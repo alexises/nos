@@ -35,6 +35,7 @@ pub enum LacpMuxState {
 /// One member port's current LACP state, for `show lacp`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // wire status flags, one per fact
 pub struct LacpPortStatus {
     pub interface: String,
     pub actor_port_number: u16,
@@ -52,6 +53,11 @@ pub struct LacpPortStatus {
     /// The partner's advertised Synchronization bit on its most recent
     /// LACPDU.
     pub synchronized: bool,
+    /// 802.1AX §6.4.17: this port's own side has been out of sync for a whole
+    /// churn-detection time. A churned port is kept out of the bond.
+    pub actor_churn: bool,
+    /// Same, for the partner's advertised state.
+    pub partner_churn: bool,
 }
 
 /// One `PortAggregate`'s LACP engine state, for `show lacp [<name>]`.
