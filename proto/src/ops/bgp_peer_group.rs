@@ -77,6 +77,15 @@ pub enum BgpPeerGroupOp {
         instance: String,
         name: String,
     },
+    SetMrai {
+        instance: String,
+        name: String,
+        mrai: u16,
+    },
+    ClearMrai {
+        instance: String,
+        name: String,
+    },
     /// Sets `auth` to a single MD5 password, replacing any TCP-AO keys
     /// (the two mechanisms are mutually exclusive — the kernel accepts only
     /// one per socket).
@@ -179,6 +188,7 @@ impl BgpPeerGroupOp {
                         hold_time: None,
                         keepalive_interval: None,
                         connect_retry_time: None,
+                        mrai: None,
                         auth: None,
                         next_hop: None,
                         route_reflector_client: false,
@@ -270,6 +280,18 @@ impl BgpPeerGroupOp {
             }
             BgpPeerGroupOp::ClearConnectRetryTime { instance, name } => {
                 find_group_mut(config, instance, name)?.connect_retry_time = None;
+                Ok(())
+            }
+            BgpPeerGroupOp::SetMrai {
+                instance,
+                name,
+                mrai,
+            } => {
+                find_group_mut(config, instance, name)?.mrai = Some(*mrai);
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearMrai { instance, name } => {
+                find_group_mut(config, instance, name)?.mrai = None;
                 Ok(())
             }
             BgpPeerGroupOp::SetMd5Auth {
@@ -467,6 +489,7 @@ mod tests {
             hold_time: None,
             keepalive_interval: None,
             connect_retry_time: None,
+            mrai: None,
             auth: None,
             next_hop: None,
             route_reflector_client: false,
@@ -738,6 +761,26 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].peer_groups[0].keepalive_interval, None);
+    }
+
+    #[test]
+    fn set_and_clear_mrai() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetMrai {
+            instance: "r1".into(),
+            name: "pg1".into(),
+            mrai: 30,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].mrai, Some(30));
+        BgpPeerGroupOp::ClearMrai {
+            instance: "r1".into(),
+            name: "pg1".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].mrai, None);
     }
 
     #[test]

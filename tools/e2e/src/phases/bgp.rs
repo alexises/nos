@@ -297,6 +297,47 @@ pub async fn redistribute_policy(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&learned(), after_b, 60).await
 }
 
+/// RFC 4271 §9.2.1.1 pacing: with `mrai 30` on router-a's peer-group, the first
+/// advertisement of the prefix goes out at once, a withdrawal is never held,
+/// and a re-advertisement seconds later is held until 30s after the first.
+/// Flapped through router-a's redistribute policy, like `redistribute-policy`.
+pub async fn mrai(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let withdrawn = format!("loc-rib route for {REDISTRIBUTE_PREFIX} withdrawn");
+    let file = policy_file(
+        "reject-for-mrai",
+        &format!("if this.prefix in {REDISTRIBUTE_PREFIX}:\n    reject\nelse:\n    accept\n"),
+    )?;
+    let mut accept = redistribute();
+    accept.extend(["--mrai", "30"]);
+    let mut reject = accept.clone();
+    reject.extend([
+        "--policy-name",
+        "reject-for-mrai",
+        "--policy-source-file",
+        &file,
+        "--redistribute-policy",
+        "reject-for-mrai",
+    ]);
+
+    // A new mrai restarts the session, so the first advertisement is a fresh one.
+    let (est, learned_before) = (a.count("bgp session established"), b.count(&learned()));
+    a.provision(&accept).await?;
+    reestablished(a, est).await?;
+    b.wait_new(&learned(), learned_before, 60).await?;
+
+    log("withdrawing the prefix: must reach router-b at once, not after the mrai");
+    let withdrawn_before = b.count(&withdrawn);
+    a.provision(&reject).await?;
+    b.wait_new(&withdrawn, withdrawn_before, 10).await?;
+
+    log("re-advertising the prefix: must be held back until the mrai elapses");
+    let learned_before = b.count(&learned());
+    a.provision(&accept).await?;
+    b.assert_quiet(&learned(), learned_before, 8).await?;
+    b.wait_new(&learned(), learned_before, 40).await
+}
+
 /// An export policy tagging the prefix with an RFC 1997 community that must
 /// survive encoding, the real session, and decoding into router-b's loc-rib.
 pub async fn communities(w: &mut World) -> anyhow::Result<()> {

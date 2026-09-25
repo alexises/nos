@@ -36,6 +36,7 @@ pub enum BgpPeerGroupField {
     HoldTime(u16),
     KeepaliveInterval(u16),
     ConnectRetryTime(u16),
+    Mrai(u16),
     Md5Password(String),
     /// A new (or replacement) TCP-AO key — `current`/`rnext` are set via the
     /// separate `AoCurrentKey`/`AoRnextKey` variants, not here.
@@ -496,6 +497,8 @@ pub enum DeleteTarget {
     /// `delete connect-retry-time` — only valid while navigated into a
     /// peer-group.
     ConnectRetryTime,
+    /// `delete mrai` — only valid while navigated into a peer-group.
+    Mrai,
     /// `delete auth` — shared with an `OspfProfile`'s crypto/simple auth
     /// (its schema has no field enum of its own to carry a separate
     /// variant, mirroring `BgpInstanceField::RouterId`'s exact precedent) —
@@ -1314,6 +1317,13 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 field: BgpPeerGroupField::ConnectRetryTime(n.parse::<u16>().ok()?),
             })
         }
+        ["bgp", "instance", instance, "peer-group", group, "mrai", n] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::Mrai(n.parse::<u16>().ok()?),
+            })
+        }
         ["bgp", "instance", instance, "peer-group", group, "next-hop", "self"] => {
             Command::Set(SetTarget::BgpPeerGroup {
                 instance: (*instance).to_string(),
@@ -1451,6 +1461,9 @@ fn parse_set(t: &[&str]) -> Option<Command> {
         }),
         ["connect-retry-time", n] => Command::Set(SetTarget::PeerGroupRelative {
             field: BgpPeerGroupField::ConnectRetryTime(n.parse::<u16>().ok()?),
+        }),
+        ["mrai", n] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::Mrai(n.parse::<u16>().ok()?),
         }),
         ["md5-password", password] => Command::Set(SetTarget::PeerGroupRelative {
             field: BgpPeerGroupField::Md5Password((*password).to_string()),
@@ -2109,6 +2122,7 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
         ["hold-time"] => Command::Delete(DeleteTarget::HoldTime),
         ["keepalive-interval"] => Command::Delete(DeleteTarget::KeepaliveInterval),
         ["connect-retry-time"] => Command::Delete(DeleteTarget::ConnectRetryTime),
+        ["mrai"] => Command::Delete(DeleteTarget::Mrai),
         ["auth"] => Command::Delete(DeleteTarget::Auth),
         ["ao-key", send_id] => Command::Delete(DeleteTarget::AoKey(send_id.parse::<u8>().ok()?)),
         ["routing-table", name] => Command::Delete(DeleteTarget::RoutingTable {
@@ -2421,6 +2435,20 @@ fn parse_ospf_crypto_algorithm(token: &str) -> Option<OspfCryptoAlgorithm> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_mrai() {
+        assert_eq!(
+            Command::parse("set mrai 30"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::Mrai(30),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete mrai"),
+            Command::Delete(DeleteTarget::Mrai)
+        );
+    }
 
     #[test]
     fn show_config() {

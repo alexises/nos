@@ -202,6 +202,7 @@ async fn resync(
                 .map_or(fsm::CONNECT_RETRY_TIME, |s| {
                     Duration::from_secs(u64::from(s))
                 }),
+            mrai: Duration::from_secs(u64::from(group.mrai.unwrap_or(0))),
             auth: group.auth.as_ref().map(ResolvedAuth::from),
             next_hop: group.next_hop,
             address_families: group.address_families.clone(),

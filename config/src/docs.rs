@@ -367,6 +367,17 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Unsets the connect-retry-time field on a peer-group, reverting to the default of \
              120 seconds.",
         ),
+        Topic::SetBgpPeerGroupMrai => (
+            "Set a peer-group's BGP MinRouteAdvertisementInterval.",
+            "Sets the mrai field on a peer-group (RFC 4271 §9.2.1.1) — advertisements to a peer \
+             in this group are batched and sent at most once per this many seconds, and repeated \
+             changes to one prefix within the interval collapse into the latest. Withdrawals are \
+             never delayed. Unset or 0 sends every change immediately.",
+        ),
+        Topic::ClearBgpPeerGroupMrai => (
+            "Clear a peer-group's BGP MinRouteAdvertisementInterval.",
+            "Unsets the mrai field on a peer-group, reverting to unpaced advertisements.",
+        ),
         Topic::SetBgpPeerGroupMd5Auth => (
             "Set a peer-group's BGP MD5 password.",
             "Sets a single RFC 2385 TCP MD5 signature password on a peer-group's sessions, \
@@ -913,6 +924,8 @@ mod tests {
         Topic::ClearBgpPeerGroupKeepaliveInterval,
         Topic::SetBgpPeerGroupConnectRetryTime,
         Topic::ClearBgpPeerGroupConnectRetryTime,
+        Topic::SetBgpPeerGroupMrai,
+        Topic::ClearBgpPeerGroupMrai,
         Topic::SetBgpPeerGroupMd5Auth,
         Topic::SetBgpPeerGroupAoKey,
         Topic::RemoveBgpPeerGroupAoKey,
