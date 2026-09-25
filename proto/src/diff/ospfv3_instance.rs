@@ -52,6 +52,13 @@ fn changed_fields(base: &Ospfv3Instance, candidate: &Ospfv3Instance) -> Vec<Fiel
             new: Some(candidate.router_id.to_string()),
         });
     }
+    if base.extended_lsa != candidate.extended_lsa {
+        fields.push(FieldDiff {
+            label: "extended-lsa".to_string(),
+            old: Some(base.extended_lsa.to_string()),
+            new: Some(candidate.extended_lsa.to_string()),
+        });
+    }
     fields
 }
 
@@ -95,6 +102,7 @@ mod tests {
             router_id,
             areas: Vec::new(),
             routing_table: None,
+            extended_lsa: false,
         }
     }
 

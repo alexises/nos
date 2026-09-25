@@ -1144,6 +1144,13 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             },
             _ => return Err(NO_CURRENT_OSPF_OR_OSPFV3_PROFILE),
         },
+        Command::Set(SetTarget::Ospfv3InstanceExtendedLsa { name }) => Resolved::ApplyOp {
+            op: ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetExtendedLsa {
+                name,
+                enabled: true,
+            }),
+            after: PathAfter::Stay,
+        },
         Command::Set(SetTarget::Ospfv3Instance { name, router_id }) => Resolved::ApplyOp {
             op: ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetRouterId { name, router_id }),
             after: PathAfter::Stay,
@@ -1691,6 +1698,13 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 after: PathAfter::Stay,
             },
             _ => return Err(NO_CURRENT_OSPF_OR_OSPFV3_AREA),
+        },
+        Command::Delete(DeleteTarget::Ospfv3InstanceExtendedLsa { name }) => Resolved::ApplyOp {
+            op: ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetExtendedLsa {
+                name,
+                enabled: false,
+            }),
+            after: PathAfter::Stay,
         },
         Command::Delete(DeleteTarget::Ospfv3Instance { name }) => Resolved::ApplyOp {
             op: ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::Delete { name }),

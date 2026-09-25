@@ -119,8 +119,10 @@ async fn resync(
         router_id = %own.router_id,
         routing_table = ?own.routing_table,
         area_count = own.areas.len(),
+        extended_lsa = own.extended_lsa,
         "ospfv3 instance config resolved"
     );
+    links.set_extended_lsa(own.extended_lsa);
 
     let mut desired_links = Vec::new();
     let mut desired_loopback_prefixes: std::collections::HashMap<

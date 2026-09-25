@@ -794,6 +794,23 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             detail: "Mirrors 'set ospf instance <name> router-id <router-id>' for OSPFv3.",
         },
         Configuration),
+    spec!(["set" "ospfv3" "instance" (Ospfv3InstanceName) "extended-lsa"],
+        "set ospfv3 instance <name> extended-lsa",
+        Doc::Local {
+            summary: "Originate RFC 8362 extended (TLV) LSAs instead of the legacy set.",
+            detail: "Full mode: E-Router, E-Network, E-Link and E-Intra-Area-Prefix LSAs replace \
+                     the RFC 5340 Router/Network/Link/Intra-Area-Prefix LSAs; extended LSAs \
+                     from neighbors are always understood. Undo with 'delete ospfv3 instance \
+                     <name> extended-lsa'.",
+        },
+        Configuration),
+    spec!(["delete" "ospfv3" "instance" (Ospfv3InstanceName) "extended-lsa"],
+        "delete ospfv3 instance <name> extended-lsa",
+        Doc::Local {
+            summary: "Go back to originating the legacy RFC 5340 LSAs.",
+            detail: "Turns off RFC 8362 extended-LSA origination for the instance.",
+        },
+        Configuration),
     spec!(["set" "router-id" (Plain)],
         "set router-id <router-id>",
         Doc::Local {

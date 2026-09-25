@@ -583,6 +583,9 @@ pub struct Args {
     pub ospfv3_instance: Option<String>,
     #[arg(long)]
     pub ospfv3_router_id: Option<Ipv4Addr>,
+    /// RFC 8362 Full mode for that instance (requires `--ospfv3-instance`).
+    #[arg(long)]
+    pub ospfv3_extended_lsa: bool,
 
     /// Same shape as `--ospf-area` (requires `--ospfv3-instance`).
     #[arg(long)]
@@ -1441,6 +1444,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             name: name.clone(),
             router_id,
         }));
+        if args.ospfv3_extended_lsa {
+            ops.push(ConfigOp::Ospfv3Instance(Ospfv3InstanceOp::SetExtendedLsa {
+                name: name.clone(),
+                enabled: true,
+            }));
+        }
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetOspfv3Instance {
             name: args.routing_table.clone(),
             ospfv3_instance: name,

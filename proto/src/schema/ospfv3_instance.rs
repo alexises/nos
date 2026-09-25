@@ -41,6 +41,14 @@ pub struct Ospfv3Instance {
     /// redistribute into an `OSPFv3` instance yet.
     #[garde(skip)]
     pub routing_table: Option<String>,
+
+    /// RFC 8362 Full mode: originate/consume the TLV-based extended LSAs
+    /// (E-Router, E-Network, E-Link, E-Intra-Area-Prefix) instead of the
+    /// RFC 5340 legacy set. Off by default; `#[serde(default)]` so configs
+    /// saved before this field existed still load.
+    #[serde(default)]
+    #[garde(skip)]
+    pub extended_lsa: bool,
 }
 
 /// No two areas within the same instance may share an `area_id` — mirrors
@@ -74,6 +82,7 @@ mod tests {
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             areas: Vec::new(),
             routing_table: None,
+            extended_lsa: false,
         }
     }
 

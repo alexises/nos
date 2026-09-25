@@ -296,6 +296,8 @@ pub enum SetTarget {
     /// has no `auth`, so `SimplePassword`/`CryptoKey`/`CryptoCurrentKey`
     /// resolve to an error there).
     Ospfv3Instance { name: String, router_id: Ipv4Addr },
+    /// `set ospfv3 instance <name> extended-lsa` — RFC 8362 Full mode on.
+    Ospfv3InstanceExtendedLsa { name: String },
     /// Fully-qualified `Ospfv3Profile` field edit — works from anywhere in
     /// configuration mode.
     Ospfv3Profile {
@@ -595,6 +597,10 @@ pub enum DeleteTarget {
     },
     /// `delete ospfv3 instance <name>` — qualified.
     Ospfv3Instance {
+        name: String,
+    },
+    /// `delete ospfv3 instance <name> extended-lsa` — RFC 8362 Full mode off.
+    Ospfv3InstanceExtendedLsa {
         name: String,
     },
     /// `delete ospfv3 instance <name> area <area-id>` — qualified.
@@ -1544,6 +1550,11 @@ fn parse_set(t: &[&str]) -> Option<Command> {
             name: (*name).to_string(),
             router_id: ip.parse::<Ipv4Addr>().ok()?,
         }),
+        ["ospfv3", "instance", name, "extended-lsa"] => {
+            Command::Set(SetTarget::Ospfv3InstanceExtendedLsa {
+                name: (*name).to_string(),
+            })
+        }
         ["ospfv3", "instance", name, "router-id", ip] => Command::Set(SetTarget::Ospfv3Instance {
             name: (*name).to_string(),
             router_id: ip.parse::<Ipv4Addr>().ok()?,
@@ -2155,6 +2166,11 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
         ["profile", name] => Command::Delete(DeleteTarget::OspfProfileRelative {
             name: (*name).to_string(),
         }),
+        ["ospfv3", "instance", name, "extended-lsa"] => {
+            Command::Delete(DeleteTarget::Ospfv3InstanceExtendedLsa {
+                name: (*name).to_string(),
+            })
+        }
         ["ospfv3", "instance", name] => Command::Delete(DeleteTarget::Ospfv3Instance {
             name: (*name).to_string(),
         }),
@@ -4483,6 +4499,22 @@ mod tests {
             Command::parse("edit profile p1"),
             Command::Edit(EditTarget::OspfProfileRelative {
                 name: "p1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn set_and_delete_ospfv3_instance_extended_lsa() {
+        assert_eq!(
+            Command::parse("set ospfv3 instance o1 extended-lsa"),
+            Command::Set(SetTarget::Ospfv3InstanceExtendedLsa {
+                name: "o1".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("delete ospfv3 instance o1 extended-lsa"),
+            Command::Delete(DeleteTarget::Ospfv3InstanceExtendedLsa {
+                name: "o1".to_string()
             })
         );
     }

@@ -42,7 +42,8 @@ use ipnet::Ipv6Net;
 
 use crate::lsa::{
     self, IntraAreaPrefixLsaBody, Lsa, LsaBody, NetworkLsaBody, RouterLsaBody,
-    LINK_TYPE_POINT_TO_POINT, LINK_TYPE_TRANSIT_NETWORK, LSA_TYPE_NETWORK, LSA_TYPE_ROUTER,
+    LINK_TYPE_POINT_TO_POINT, LINK_TYPE_TRANSIT_NETWORK, LSA_TYPE_E_NETWORK, LSA_TYPE_E_ROUTER,
+    LSA_TYPE_NETWORK, LSA_TYPE_ROUTER,
 };
 
 /// One SPF vertex — a router (keyed by its router-id) or a transit network
@@ -360,7 +361,8 @@ fn collect_prefix_routes(
     let root_prefixes: HashSet<(Ipv6Addr, u8)> = prefix_lsas
         .iter()
         .filter(|p| {
-            p.referenced_ls_type == LSA_TYPE_ROUTER && p.referenced_advertising_router == root
+            matches!(p.referenced_ls_type, LSA_TYPE_ROUTER | LSA_TYPE_E_ROUTER)
+                && p.referenced_advertising_router == root
         })
         .flat_map(|p| p.prefixes.iter())
         .map(|entry| prefix_key(entry.prefix))
@@ -368,8 +370,10 @@ fn collect_prefix_routes(
 
     for body in prefix_lsas {
         let vertex = match body.referenced_ls_type {
-            LSA_TYPE_ROUTER => Vertex::Router(body.referenced_advertising_router),
-            LSA_TYPE_NETWORK => Vertex::Network(body.referenced_link_state_id),
+            LSA_TYPE_ROUTER | LSA_TYPE_E_ROUTER => {
+                Vertex::Router(body.referenced_advertising_router)
+            }
+            LSA_TYPE_NETWORK | LSA_TYPE_E_NETWORK => Vertex::Network(body.referenced_link_state_id),
             _ => continue,
         };
         if vertex == Vertex::Router(root) {
@@ -572,6 +576,38 @@ mod tests {
         // next-hop (see `RouteEntry::interface_id`'s doc comment).
         assert_eq!(routes[0].interface_id, 1);
         assert_eq!(routes[0].metric, 15);
+    }
+
+    #[test]
+    fn extended_lsas_give_the_same_routes_as_legacy_ones() {
+        let root = router_id(1);
+        let w = router_id(2);
+        let stub: Ipv6Net = "2001:db8:1::/64".parse().unwrap();
+        let as_extended = |l: Arc<Lsa>| {
+            let mut l = (*l).clone();
+            l.header.lsa_type = match l.header.lsa_type {
+                LSA_TYPE_ROUTER => lsa::LSA_TYPE_E_ROUTER,
+                LSA_TYPE_LINK => lsa::LSA_TYPE_E_LINK,
+                _ => lsa::LSA_TYPE_E_INTRA_AREA_PREFIX,
+            };
+            if let LsaBody::IntraAreaPrefix(p) = &mut l.body {
+                p.referenced_ls_type = lsa::LSA_TYPE_E_ROUTER;
+            }
+            Arc::new(l)
+        };
+        let legacy = [
+            router_lsa(root, vec![p2p(w, 1, 2, 5)]),
+            router_lsa(w, vec![p2p(root, 2, 1, 5)]),
+            link_lsa(w, 2, "fe80::2".parse().unwrap()),
+            router_prefix_lsa(w, vec![(stub, 10)]),
+        ];
+        let extended: Vec<_> = legacy.iter().cloned().map(as_extended).collect();
+
+        let routes = compute(root, &extended);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].prefix, stub);
+        assert_eq!(routes[0].metric, 15);
+        assert_eq!(routes[0].next_hop, compute(root, &legacy)[0].next_hop);
     }
 
     #[test]
