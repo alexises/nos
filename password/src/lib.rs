@@ -3,7 +3,7 @@
 
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::Argon2;
+use argon2::{Algorithm, Argon2, Params, Version};
 use std::sync::LazyLock;
 
 /// Prefix every stored hash carries; anything else in a `User.password` is a
@@ -14,12 +14,15 @@ pub fn is_hash(s: &str) -> bool {
     s.starts_with(HASH_PREFIX)
 }
 
-/// Hashes `password` with a fresh random salt.
+/// Hashes `password` with a fresh random salt, using RFC 9106 §4's
+/// memory-constrained profile (m=64 MiB, t=3, p=4). Verification reads the
+/// parameters from the stored PHC string, so older hashes keep working.
 pub fn hash(password: &str) -> String {
     let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
+    let params = Params::new(65536, 3, 4, None).expect("valid argon2 params");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
         .hash_password(password.as_bytes(), &salt)
-        .expect("argon2 with default params and a generated salt cannot fail")
+        .expect("argon2 with valid params and a generated salt cannot fail")
         .to_string()
 }
 
@@ -56,6 +59,17 @@ mod tests {
         assert!(is_hash(&h));
         assert!(verify("hunter2", &h));
         assert!(!verify("hunter3", &h));
+    }
+
+    #[test]
+    fn rfc9106_params_and_legacy_hashes_still_verify() {
+        assert!(hash("pw").contains("m=65536,t=3,p=4"));
+        let salt = SaltString::generate(&mut OsRng);
+        let old = Argon2::default()
+            .hash_password(b"pw", &salt)
+            .unwrap()
+            .to_string();
+        assert!(verify("pw", &old));
     }
 
     #[test]
