@@ -98,6 +98,10 @@ pub enum Topic {
     SetBgpPeerGroupConnectRetryTime,
     /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearConnectRetryTime)`
     ClearBgpPeerGroupConnectRetryTime,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetMrai)`
+    SetBgpPeerGroupMrai,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearMrai)`
+    ClearBgpPeerGroupMrai,
     /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetMd5Auth)`
     SetBgpPeerGroupMd5Auth,
     /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoKey)`

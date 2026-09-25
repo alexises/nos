@@ -68,6 +68,8 @@ pub struct ResolvedPeer {
     pub hold_time: u16,
     pub keepalive_interval: Option<u16>,
     pub connect_retry_time: Duration,
+    /// RFC 4271 §9.2.1.1; zero disables pacing (see `crate::mrai`).
+    pub mrai: Duration,
     pub auth: Option<ResolvedAuth>,
     /// The owning peer-group's configured next-hop override, if any —
     /// threaded straight through to `fsm::PeerContext`.
@@ -408,6 +410,7 @@ impl SessionManager {
         let instance = self.instance.clone();
         let local = *self.local.borrow();
         let remote_as = slot.peer.remote_as;
+        let mrai = slot.peer.mrai;
         let local_hold_time = slot.peer.hold_time;
         let keepalive_override = slot.peer.keepalive_interval;
         let next_hop = slot.peer.next_hop;
@@ -428,6 +431,7 @@ impl SessionManager {
                     expected_remote_as: remote_as,
                     local_hold_time,
                     keepalive_override,
+                    mrai,
                     next_hop,
                     address_families,
                     is_rr_client,
@@ -667,6 +671,7 @@ async fn active_connect_loop(
                                 expected_remote_as: slot.peer.remote_as,
                                 local_hold_time: slot.peer.hold_time,
                                 keepalive_override: slot.peer.keepalive_interval,
+                                mrai: slot.peer.mrai,
                                 next_hop: slot.peer.next_hop,
                                 address_families: slot.peer.address_families.clone(),
                                 is_rr_client: slot.peer.route_reflector_client,
@@ -712,6 +717,7 @@ mod tests {
             hold_time: 90,
             keepalive_interval: None,
             connect_retry_time: fsm::CONNECT_RETRY_TIME,
+            mrai: Duration::ZERO,
             auth: None,
             next_hop: None,
             address_families: vec![AddressFamily::Ipv4Unicast],

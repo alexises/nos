@@ -23,6 +23,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "policy" => bgp::policy(w).await,
         "redistribute-policy" => bgp::redistribute_policy(w).await,
         "communities" => bgp::communities(w).await,
+        "mrai" => bgp::mrai(w).await,
         "reflector" => bgp::reflector(w).await,
         "route-server" => bgp::route_server(w).await,
         "as4" => bgp::as4(w).await,
@@ -93,6 +94,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "policy",
             "redistribute-policy",
             "communities",
+            "mrai",
         ],
         "ospf-suite" => &[
             "up",
@@ -149,6 +151,7 @@ pub const ALL: &[&str] = &[
     "policy",
     "redistribute-policy",
     "communities",
+    "mrai",
     "evpn",
     "evpn-fdb",
     "evpn-esi",

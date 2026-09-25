@@ -7,6 +7,7 @@ pub mod fdb_push_client;
 pub mod fsm;
 pub mod interface_client;
 pub mod message;
+pub mod mrai;
 pub mod policy;
 pub mod reconcile;
 pub mod rib;

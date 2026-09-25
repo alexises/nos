@@ -57,6 +57,11 @@ pub fn render_bgp_peer_group(group: &BgpPeerGroup, local_asn: u32) -> String {
          auth {auth}, next-hop {next_hop}",
         group.name, group.remote_as
     );
+    line.push_str(
+        &group
+            .mrai
+            .map_or_else(String::new, |m| format!(", mrai {m}")),
+    );
     if group.route_reflector_client {
         line.push_str(", route-reflector-client");
     }
@@ -1899,6 +1904,7 @@ mod tests {
             hold_time: None,
             keepalive_interval: None,
             connect_retry_time: None,
+            mrai: None,
             auth: None,
             next_hop: None,
             route_reflector_client: false,

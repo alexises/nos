@@ -152,6 +152,12 @@ pub struct BgpPeerGroup {
     #[garde(custom(|c: &Option<u16>, _ctx: &Config| valid_connect_retry_time(*c)))]
     pub connect_retry_time: Option<u16>,
 
+    /// RFC 4271 §9.2.1.1 `MinRouteAdvertisementInterval`, in seconds: at most
+    /// one batch of advertisements per this interval to each peer (withdrawals
+    /// are exempt). `None` (or 0) disables pacing — every change is sent at once.
+    #[garde(skip)]
+    pub mrai: Option<u16>,
+
     /// `None` opens sessions with no transport authentication at all.
     /// Secrets are stored clear-text, like every other field in this config
     /// — see `BgpAuth`.
@@ -412,6 +418,7 @@ mod tests {
             hold_time: None,
             keepalive_interval: None,
             connect_retry_time: None,
+            mrai: None,
             auth: None,
             next_hop: None,
             route_reflector_client: false,

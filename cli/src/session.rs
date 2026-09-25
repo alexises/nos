@@ -2263,6 +2263,9 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 }
             })?,
         },
+        Command::Delete(DeleteTarget::Mrai) => peer_group_clear(path, |instance, name| {
+            BgpPeerGroupOp::ClearMrai { instance, name }
+        })?,
         Command::Delete(DeleteTarget::ConnectRetryTime) => {
             peer_group_clear(path, |instance, name| {
                 BgpPeerGroupOp::ClearConnectRetryTime { instance, name }
@@ -2440,6 +2443,11 @@ fn peer_group_set_op(instance: String, group: String, field: BgpPeerGroupField) 
                 connect_retry_time,
             }
         }
+        BgpPeerGroupField::Mrai(mrai) => BgpPeerGroupOp::SetMrai {
+            instance,
+            name: group,
+            mrai,
+        },
         BgpPeerGroupField::Md5Password(password) => BgpPeerGroupOp::SetMd5Auth {
             instance,
             name: group,

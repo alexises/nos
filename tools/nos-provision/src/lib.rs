@@ -212,6 +212,11 @@ pub struct Args {
     #[arg(long)]
     pub connect_retry_time: Option<u16>,
 
+    /// If set, sets `--peer-group`'s `MinRouteAdvertisementInterval` in seconds
+    /// (`BgpPeerGroupOp::SetMrai`).
+    #[arg(long)]
+    pub mrai: Option<u16>,
+
     /// If set, configures `--bgp-instance`'s RFC 4456 cluster-id
     /// (`BgpInstanceOp::SetClusterId`) — only meaningful alongside
     /// `--route-reflector-client`.
@@ -921,6 +926,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 connect_retry_time,
             },
         ));
+    }
+
+    if let Some(mrai) = args.mrai {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetMrai {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            mrai,
+        }));
     }
 
     if let Some(name) = args.policy_name.clone() {

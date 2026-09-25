@@ -210,6 +210,8 @@ pub struct PeerContext {
     pub expected_remote_as: u32,
     pub local_hold_time: u16,
     pub keepalive_override: Option<u16>,
+    /// The peer-group's MRAI; zero means unpaced (see `crate::mrai`).
+    pub mrai: Duration,
     /// The peer-group's configured next-hop override, if any — `None` lets
     /// `crate::rib::build_advertisement` fall back to the eBGP/iBGP-dependent
     /// default.
@@ -658,6 +660,7 @@ pub async fn run(
     let local_addr = stream.local_addr().ok().map(|addr| addr.ip());
     let remote_is_ibgp = local.asn == peer.expected_remote_as;
     let (outbox_tx, mut outbox_rx) = mpsc::unbounded_channel::<OutboundUpdate>();
+    let mut mrai = crate::mrai::Mrai::new(peer.mrai);
 
     let (read_half, write_half) = stream.into_split();
     let mut reader = FramedRead::new(read_half, BgpCodec::default());
@@ -773,7 +776,15 @@ pub async fn run(
                 }
                 () = cease.notified() => Event::CollisionLost,
                 Some(update) = outbox_rx.recv() => {
-                    let _ = writer.send(outbound_update_to_message(update)).await;
+                    if let Some(update) = mrai.push(update, Instant::now()) {
+                        let _ = writer.send(outbound_update_to_message(update)).await;
+                    }
+                    continue;
+                }
+                () = sleep_until_opt(mrai.deadline()) => {
+                    for update in mrai.flush(Instant::now()) {
+                        let _ = writer.send(outbound_update_to_message(update)).await;
+                    }
                     continue;
                 }
                 // Guarded on `Established`: collision resolution always

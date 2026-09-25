@@ -202,6 +202,7 @@ mod tests {
             hold_time: None,
             keepalive_interval: None,
             connect_retry_time: None,
+            mrai: None,
             auth: None,
             next_hop: None,
             route_reflector_client: false,
