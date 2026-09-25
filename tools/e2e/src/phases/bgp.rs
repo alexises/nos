@@ -402,7 +402,10 @@ pub async fn communities(w: &mut World) -> anyhow::Result<()> {
 /// Send: router-a redistributes a static route; its path is `[ASN_A4]`, which
 /// ExaBGP must receive as AS_PATH `[23456]` plus AS4_PATH `[ASN_A4]`. Receive:
 /// ExaBGP announces a route with AS_PATH `[65010 23456]` and an AS4_PATH
-/// carrying `AS4_HIDDEN_ASN`; router-a's Loc-RIB must hold the merged path.
+/// carrying `AS4_HIDDEN_ASN`; router-a's Loc-RIB must hold the merged path. The
+/// same route carries ATOMIC_AGGREGATE and an AGGREGATOR/AS4_AGGREGATOR pair
+/// (`AS4_AGGREGATOR_ASN`), which router-a must store merged (RFC 4271 §5.1.6,
+/// RFC 6793 §4.2.3; re-advertisement is covered by unit tests).
 pub async fn as4(w: &mut World) -> anyhow::Result<()> {
     let mut flags = strings(&[
         "--address",
@@ -432,6 +435,10 @@ pub async fn as4(w: &mut World) -> anyhow::Result<()> {
         .await?;
     // AS4_PATH (type 17, optional transitive): one AS_SEQUENCE of one ASN.
     let as4_value = format!("0201{AS4_HIDDEN_ASN:08X}");
+    // AGGREGATOR (type 7, 2-byte AS = AS_TRANS) + AS4_AGGREGATOR (type 18), and
+    // ATOMIC_AGGREGATE (type 6, empty): router-a must merge the real ASN.
+    let agg_value = format!("{AS_TRANS:04X}C0000209");
+    let as4_agg_value = format!("{AS4_AGGREGATOR_ASN:08X}C0000209");
     let conf = format!(
         "process rx {{\n    run /bin/sh -c \"cat > /tmp/rx.json\";\n    encoder json;\n}}\n\
          neighbor {IP_A} {{\n    router-id {RID_G};\n    local-address {IP_G};\n    \
@@ -439,7 +446,9 @@ pub async fn as4(w: &mut World) -> anyhow::Result<()> {
          family {{ ipv4 unicast; }}\n    \
          api {{ processes [ rx ]; receive {{ parsed; update; }} }}\n    \
          static {{\n        route {AS4_LEARNED_PREFIX} next-hop {IP_G} \
-         as-path [ {ASN_G} {AS_TRANS} ] attribute [ 0x11 0xc0 0x{as4_value} ];\n    }}\n}}\n"
+         as-path [ {ASN_G} {AS_TRANS} ] atomic-aggregate \
+         attribute [ 0x11 0xc0 0x{as4_value} ] \
+         attribute [ 0x07 0xc0 0x{agg_value} ] attribute [ 0x12 0xc0 0x{as4_agg_value} ];\n    }}\n}}\n"
     );
     w.dock
         .start_plain(
@@ -458,6 +467,12 @@ pub async fn as4(w: &mut World) -> anyhow::Result<()> {
     log("receive: ExaBGP's 2-byte AS_PATH + AS4_PATH must merge into the real path");
     a.wait(&format!(
         "loc-rib best path for {AS4_LEARNED_PREFIX} updated .*as_path=\\[{ASN_G}, {AS4_HIDDEN_ASN}\\]"
+    ))
+    .await?;
+
+    log("receive: ATOMIC_AGGREGATE kept, AGGREGATOR merged with AS4_AGGREGATOR");
+    a.wait(&format!(
+        "learned route for {AS4_LEARNED_PREFIX} into adj-rib-in .*atomic_aggregate=true aggregator=Some(({AS4_AGGREGATOR_ASN}, {AS4_AGGREGATOR_ID}))"
     ))
     .await?;
 

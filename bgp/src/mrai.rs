@@ -107,6 +107,8 @@ mod tests {
             origin: Origin::Igp,
             use_mp: false,
             originator_id: None,
+            atomic_aggregate: false,
+            aggregator: None,
             cluster_list: vec![],
             communities: vec![],
             extended_communities: vec![],

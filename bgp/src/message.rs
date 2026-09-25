@@ -79,6 +79,8 @@ const ATTR_AS_PATH: u8 = 2;
 const ATTR_NEXT_HOP: u8 = 3;
 const ATTR_MULTI_EXIT_DISC: u8 = 4;
 const ATTR_LOCAL_PREF: u8 = 5;
+const ATTR_ATOMIC_AGGREGATE: u8 = 6;
+const ATTR_AGGREGATOR: u8 = 7;
 const ATTR_ORIGINATOR_ID: u8 = 9;
 const ATTR_CLUSTER_LIST: u8 = 10;
 const ATTR_MP_REACH_NLRI: u8 = 14;
@@ -94,6 +96,8 @@ const ATTR_PMSI_TUNNEL: u8 = 22;
 /// RFC 6793 §3: the real 4-byte path, carried beside a 2-byte `AS_PATH` to/from
 /// a peer that never negotiated the four-octet AS capability.
 const ATTR_AS4_PATH: u8 = 17;
+/// RFC 6793 §3: the real 4-byte `AGGREGATOR`, beside a 2-byte one holding `AS_TRANS`.
+const ATTR_AS4_AGGREGATOR: u8 = 18;
 /// RFC 4271 §4.3 attribute flag bit indicating a 2-byte (rather than 1-byte)
 /// attribute length field follows the type byte.
 const ATTR_FLAG_EXTENDED_LENGTH: u8 = 0x10;
@@ -305,6 +309,17 @@ pub struct PathAttributes {
     /// RFC 6514 §5 PMSI Tunnel — carried on EVPN Type-3 routes (RFC 8365
     /// §8.2.1), which is where the VNI of an inclusive multicast route lives.
     pub pmsi: Option<Pmsi>,
+    /// RFC 4271 §5.1.6 `ATOMIC_AGGREGATE` — only ever preserved in transit.
+    pub atomic_aggregate: bool,
+    /// RFC 4271 §5.1.7 `AGGREGATOR` (`AS4_AGGREGATOR` merged in, RFC 6793).
+    pub aggregator: Option<Aggregator>,
+}
+
+/// The AS and router-id of the speaker that formed an aggregate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Aggregator {
+    pub asn: u32,
+    pub router_id: Ipv4Addr,
 }
 
 /// An ingress-replication (tunnel type 6) PMSI Tunnel attribute, the only
@@ -855,6 +870,8 @@ struct ParsedAttributes {
     extended_communities: Vec<u64>,
     large_communities: Vec<(u32, u32, u32)>,
     pmsi: Option<Pmsi>,
+    atomic_aggregate: bool,
+    aggregator: Option<Aggregator>,
     mp_reach: Vec<MpReachNlri>,
     mp_unreach: Vec<MpUnreachNlri>,
     /// RFC 7606 treat-as-withdraw: an attribute's content was malformed.
@@ -887,6 +904,9 @@ fn parse_path_attributes(
     let mut extended_communities = Vec::new();
     let mut large_communities = Vec::new();
     let mut pmsi = None;
+    let mut atomic_aggregate = false;
+    let mut aggregator: Option<Aggregator> = None;
+    let mut as4_aggregator = None;
     let mut mp_reach = Vec::new();
     let mut mp_unreach = Vec::new();
     // RFC 7606 treat-as-withdraw: set by any attribute whose *content* is
@@ -1019,6 +1039,27 @@ fn parse_path_attributes(
                         })
                         .collect();
                 }
+                // RFC 7606 §7.7/§7.8: a malformed one is discarded, not a withdraw.
+                ATTR_ATOMIC_AGGREGATE => atomic_aggregate = value.is_empty(),
+                ATTR_AGGREGATOR => {
+                    aggregator = match (value.len(), two_octet_as) {
+                        (6, true) => Some(Aggregator {
+                            asn: u32::from(u16::from_be_bytes([value[0], value[1]])),
+                            router_id: Ipv4Addr::new(value[2], value[3], value[4], value[5]),
+                        }),
+                        (8, false) => Some(Aggregator {
+                            asn: u32::from_be_bytes(value[0..4].try_into().unwrap()),
+                            router_id: Ipv4Addr::new(value[4], value[5], value[6], value[7]),
+                        }),
+                        _ => None,
+                    }
+                }
+                ATTR_AS4_AGGREGATOR if two_octet_as && value.len() == 8 => {
+                    as4_aggregator = Some(Aggregator {
+                        asn: u32::from_be_bytes(value[0..4].try_into().unwrap()),
+                        router_id: Ipv4Addr::new(value[4], value[5], value[6], value[7]),
+                    });
+                }
                 ATTR_PMSI_TUNNEL => pmsi = decode_pmsi(value),
                 ATTR_MP_REACH_NLRI => mp_reach.push(decode_mp_reach(value, add_path_afis)?),
                 ATTR_MP_UNREACH_NLRI => mp_unreach.push(decode_mp_unreach(value, add_path_afis)?),
@@ -1041,6 +1082,13 @@ fn parse_path_attributes(
         }
     }
 
+    // RFC 6793 §4.2.3: AS4_AGGREGATOR replaces an AGGREGATOR holding AS_TRANS.
+    if let (Some(agg), Some(as4)) = (aggregator.as_mut(), as4_aggregator) {
+        if agg.asn == u32::from(AS_TRANS) {
+            *agg = as4;
+        }
+    }
+
     Ok(ParsedAttributes {
         origin,
         as_path,
@@ -1053,6 +1101,8 @@ fn parse_path_attributes(
         extended_communities,
         large_communities,
         pmsi,
+        atomic_aggregate,
+        aggregator,
         mp_reach,
         mp_unreach,
         withdraw,
@@ -1300,6 +1350,8 @@ fn parse_update(
                     extended_communities: parsed.extended_communities,
                     large_communities: parsed.large_communities,
                     pmsi: parsed.pmsi,
+                    atomic_aggregate: parsed.atomic_aggregate,
+                    aggregator: parsed.aggregator,
                 })
             }
             _ => None,
@@ -1416,6 +1468,40 @@ fn encode_attributes(update: &UpdateMessage, two_octet_as: bool) -> Vec<u8> {
                 ATTR_NEXT_HOP,
                 &attrs.next_hop.octets(),
             );
+        }
+        if attrs.atomic_aggregate {
+            encode_attribute(
+                &mut out,
+                ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
+                ATTR_ATOMIC_AGGREGATE,
+                &[],
+            );
+        }
+        if let Some(agg) = attrs.aggregator {
+            let mut value = Vec::with_capacity(8);
+            if two_octet_as {
+                value.extend_from_slice(&u16::try_from(agg.asn).unwrap_or(AS_TRANS).to_be_bytes());
+            } else {
+                value.extend_from_slice(&agg.asn.to_be_bytes());
+            }
+            value.extend_from_slice(&agg.router_id.octets());
+            encode_attribute(
+                &mut out,
+                ATTR_FLAG_OPTIONAL_TRANSITIVE,
+                ATTR_AGGREGATOR,
+                &value,
+            );
+            // RFC 6793 §4.2.2: the real AS rides along only when it was squashed.
+            if two_octet_as && agg.asn > u32::from(u16::MAX) {
+                let mut v = agg.asn.to_be_bytes().to_vec();
+                v.extend_from_slice(&agg.router_id.octets());
+                encode_attribute(
+                    &mut out,
+                    ATTR_FLAG_OPTIONAL_TRANSITIVE,
+                    ATTR_AS4_AGGREGATOR,
+                    &v,
+                );
+            }
         }
         if let Some(local_pref) = attrs.local_pref {
             encode_attribute(
@@ -1578,6 +1664,8 @@ mod tests {
                 local_pref: None,
                 med: None,
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: vec![],
                 extended_communities: vec![],
@@ -1646,6 +1734,50 @@ mod tests {
         // A 4-octet peer never gets one either.
         let big = as_path_update(vec![65001, 4_200_000_000]);
         assert!(!attr_types(&big, false).contains(&ATTR_AS4_PATH));
+    }
+
+    #[test]
+    fn atomic_aggregate_and_aggregator_roundtrip_and_use_as4_aggregator_for_two_octet() {
+        let mut update = as_path_update(vec![65001]);
+        let agg = Aggregator {
+            asn: 4_200_000_001,
+            router_id: Ipv4Addr::new(192, 0, 2, 9),
+        };
+        {
+            let a = update.attributes.as_mut().unwrap();
+            a.atomic_aggregate = true;
+            a.aggregator = Some(agg);
+        }
+        // Four-octet session: 8-byte AGGREGATOR, no AS4_AGGREGATOR.
+        assert_eq!(
+            roundtrip(BgpMessage::Update(update.clone())),
+            BgpMessage::Update(update.clone())
+        );
+        let types = attr_types(&update, false);
+        assert!(types.contains(&ATTR_ATOMIC_AGGREGATE) && !types.contains(&ATTR_AS4_AGGREGATOR));
+        // Two-octet session: AS_TRANS + AS4_AGGREGATOR, merged back on receipt.
+        assert!(attr_types(&update, true).contains(&ATTR_AS4_AGGREGATOR));
+        let mut codec = two_octet_codec();
+        let mut buf = BytesMut::new();
+        codec
+            .encode(BgpMessage::Update(update.clone()), &mut buf)
+            .unwrap();
+        assert_eq!(
+            codec.decode(&mut buf).unwrap().unwrap(),
+            BgpMessage::Update(update)
+        );
+    }
+
+    #[test]
+    fn malformed_aggregate_attributes_are_discarded_not_withdrawn() {
+        let mut attrs = Vec::new();
+        encode_attribute(&mut attrs, 0x40, ATTR_ORIGIN, &[0]);
+        encode_attribute(&mut attrs, 0x40, ATTR_AS_PATH, &[]);
+        encode_attribute(&mut attrs, 0x40, ATTR_NEXT_HOP, &[192, 0, 2, 1]);
+        encode_attribute(&mut attrs, 0x40, ATTR_ATOMIC_AGGREGATE, &[1]);
+        encode_attribute(&mut attrs, 0xC0, ATTR_AGGREGATOR, &[0, 1, 2]);
+        let p = parse_path_attributes(&attrs, &HashSet::new(), false).unwrap();
+        assert!(!p.withdraw && !p.atomic_aggregate && p.aggregator.is_none());
     }
 
     #[test]
@@ -1840,6 +1972,8 @@ mod tests {
             local_pref,
             med: None,
             originator_id: None,
+            atomic_aggregate: false,
+            aggregator: None,
             cluster_list: vec![],
             communities: vec![],
             extended_communities: vec![],
@@ -2130,6 +2264,8 @@ mod tests {
                 local_pref: None,
                 med: None,
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: vec![],
                 extended_communities: vec![],

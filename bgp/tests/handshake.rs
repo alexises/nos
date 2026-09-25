@@ -494,6 +494,8 @@ async fn fake_evpn_peer(
             local_pref: None,
             med: None,
             originator_id: None,
+            atomic_aggregate: false,
+            aggregator: None,
             cluster_list: vec![],
             communities: vec![],
             extended_communities: vec![0x0002_fde8_0000_2710],

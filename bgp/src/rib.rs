@@ -175,7 +175,12 @@ fn learn_prefix(
 ) {
     match apply_policy(prefix, candidate, import_policy) {
         Some(route) => {
-            info!(peer = %from, "bgp: learned route for {prefix} into adj-rib-in");
+            info!(
+                peer = %from,
+                atomic_aggregate = route.atomic_aggregate,
+                aggregator = ?route.aggregator.map(|a| (a.asn, a.router_id)),
+                "bgp: learned route for {prefix} into adj-rib-in"
+            );
             table.insert(prefix, route);
         }
         None => {
@@ -268,6 +273,9 @@ pub struct RibRoute {
     /// RFC 8092 `LARGE_COMMUNITY` values, possibly rewritten by import
     /// policy. Empty for a fresh `Local` route.
     pub large_communities: Vec<(u32, u32, u32)>,
+    /// RFC 4271 §5.1.6/§5.1.7, preserved in transit (never set locally).
+    pub atomic_aggregate: bool,
+    pub aggregator: Option<message::Aggregator>,
 }
 
 /// One update this instance needs to send out over a specific peer's
@@ -326,6 +334,9 @@ pub struct AdvertisedRoute {
     pub communities: Vec<u32>,
     pub extended_communities: Vec<u64>,
     pub large_communities: Vec<(u32, u32, u32)>,
+    /// Transitive: forwarded unchanged to every eligible peer.
+    pub atomic_aggregate: bool,
+    pub aggregator: Option<message::Aggregator>,
     /// RFC 7911 ADD-PATH identifier — `Some` only when
     /// `BgpRib::propagate_rs_view` is sending one of several concurrent
     /// paths for the same prefix to a `route_server_client` peer that
@@ -767,6 +778,8 @@ impl BgpRib {
                     communities: attrs.communities.clone(),
                     extended_communities: attrs.extended_communities.clone(),
                     large_communities: attrs.large_communities.clone(),
+                    atomic_aggregate: attrs.atomic_aggregate,
+                    aggregator: attrs.aggregator,
                 };
                 for prefix in &update.nlri {
                     let candidate = RibRoute {
@@ -1102,6 +1115,8 @@ fn redistributed_route() -> RibRoute {
         next_hop: None,
         received_at: Instant::now(),
         originator_id: None,
+        atomic_aggregate: false,
+        aggregator: None,
         cluster_list: Vec::new().into(),
         communities: Vec::new(),
         extended_communities: Vec::new(),
@@ -1322,6 +1337,8 @@ fn build_advertisement(
         communities: best.communities.clone(),
         extended_communities: best.extended_communities.clone(),
         large_communities: best.large_communities.clone(),
+        atomic_aggregate: best.atomic_aggregate,
+        aggregator: best.aggregator,
         path_id: None,
     })
 }
@@ -1497,6 +1514,8 @@ mod tests {
                 local_pref: None,
                 med: None,
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -1952,6 +1971,41 @@ mod tests {
     }
 
     #[test]
+    fn atomic_aggregate_and_aggregator_survive_transit() {
+        let mut rib = new_rib(65000);
+        let source = addr("10.0.0.1");
+        let observer = addr("10.0.0.2");
+        let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
+        let mut observer_rx = register_peer(&mut rib, observer, false, addr("10.0.0.253"));
+
+        let agg = message::Aggregator {
+            asn: 4_200_000_001,
+            router_id: v4("192.0.2.9"),
+        };
+        let mut update = ebgp_update(vec!["1.2.3.0/24"], vec![], "10.0.0.1");
+        let attrs = update.attributes.as_mut().unwrap();
+        attrs.atomic_aggregate = true;
+        attrs.aggregator = Some(agg);
+        rib.handle_update(
+            source,
+            false,
+            v4("192.0.2.1"),
+            &update,
+            &nos_rpl::ACCEPT_ALL,
+        );
+
+        let adv = recv_all(&mut observer_rx)
+            .into_iter()
+            .find_map(|u| match u {
+                OutboundUpdate::Announce(a) if a.prefix == prefix("1.2.3.0/24") => Some(a),
+                _ => None,
+            })
+            .expect("expected an announcement for 1.2.3.0/24");
+        assert!(adv.atomic_aggregate);
+        assert_eq!(adv.aggregator, Some(agg));
+    }
+
+    #[test]
     fn export_policy_can_remove_community_for_one_peer() {
         let mut rib = new_rib(65000);
         let source = addr("10.0.0.1");
@@ -2102,6 +2156,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -2131,6 +2187,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -2277,6 +2335,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -2333,6 +2393,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -2379,6 +2441,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -2422,6 +2486,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -2457,6 +2523,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -2520,6 +2588,8 @@ mod tests {
                     local_pref: Some(50),
                     med: None,
                     originator_id: None,
+                    atomic_aggregate: false,
+                    aggregator: None,
                     cluster_list: vec![],
                     communities: Vec::new(),
                     extended_communities: Vec::new(),
@@ -2545,6 +2615,8 @@ mod tests {
                     local_pref: Some(200),
                     med: None,
                     originator_id: None,
+                    atomic_aggregate: false,
+                    aggregator: None,
                     cluster_list: vec![],
                     communities: Vec::new(),
                     extended_communities: Vec::new(),
@@ -2561,6 +2633,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -2604,6 +2678,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -2756,6 +2832,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -2785,6 +2863,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -2839,6 +2919,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -2892,6 +2974,8 @@ mod tests {
                 local_pref: None,
                 med,
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -2946,6 +3030,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -3008,6 +3094,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -3058,6 +3146,8 @@ mod tests {
             initial,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -3140,6 +3230,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -3207,6 +3299,8 @@ mod tests {
             updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -3258,6 +3352,8 @@ mod tests {
             initial,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -3330,6 +3426,8 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                atomic_aggregate: false,
+                aggregator: None,
                 path_id: None,
                 prefix: prefix("1.2.3.0/24"),
                 as_path: vec![],
@@ -3377,6 +3475,8 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                atomic_aggregate: false,
+                aggregator: None,
                 path_id: None,
                 prefix: prefix("4.5.6.0/24"),
                 as_path: vec![],
@@ -3448,6 +3548,8 @@ mod tests {
             plain_updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -3468,6 +3570,8 @@ mod tests {
             rs_updates,
             vec![OutboundUpdate::Announce(AdvertisedRoute {
                 originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
