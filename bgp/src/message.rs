@@ -1045,7 +1045,9 @@ fn decode_mp_reach(data: &[u8], add_path_afis: &HashSet<u16>) -> Result<MpReachN
     }
     let next_hop: IpAddr = match nh_len {
         4 => Ipv4Addr::new(data[4], data[5], data[6], data[7]).into(),
-        16 => {
+        // RFC 2545 §3: 32 = global address followed by link-local.
+        // ponytail: the link-local is dropped, `next_hop` is a single address.
+        16 | 32 => {
             let mut octets = [0u8; 16];
             octets.copy_from_slice(&data[4..20]);
             Ipv6Addr::from(octets).into()
@@ -1736,6 +1738,18 @@ mod tests {
             roundtrip(BgpMessage::Update(update.clone())),
             BgpMessage::Update(update)
         );
+    }
+
+    #[test]
+    fn mp_reach_accepts_global_plus_link_local_next_hop() {
+        // RFC 2545 §3: next-hop length 32 = global then link-local.
+        let mut v = vec![0, 2, 1, 32];
+        v.extend("2001:db8::1".parse::<Ipv6Addr>().unwrap().octets());
+        v.extend("fe80::1".parse::<Ipv6Addr>().unwrap().octets());
+        v.extend([0, 48, 0x20, 0x01, 0x0d, 0xb8, 0, 1]); // 0 SNPAs, 2001:db8:1::/48
+        let mp = decode_mp_reach(&v, &HashSet::new()).unwrap();
+        assert_eq!(mp.next_hop, "2001:db8::1".parse::<IpAddr>().unwrap());
+        assert_eq!(mp.nlri, vec!["2001:db8:1::/48".parse().unwrap()]);
     }
 
     #[test]
