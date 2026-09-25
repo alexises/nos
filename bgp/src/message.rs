@@ -176,6 +176,14 @@ pub enum UpdateMessageSubcode {
     MalformedAttributeList = 1,
 }
 
+/// RFC 6608 Finite State Machine Error subcodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsmSubcode {
+    UnexpectedInOpenSent = 1,
+    UnexpectedInOpenConfirm = 2,
+    UnexpectedInEstablished = 3,
+}
+
 /// RFC 4486 Cease subcodes actually used by this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CeaseSubcode {

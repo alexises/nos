@@ -28,8 +28,9 @@ use nos_proto::{AddressFamily, NextHopMode, HOLD_TIME_FLOOR};
 
 use crate::collision::{self, FsmCommand, PeerSlot};
 use crate::message::{
-    self, BgpCodec, BgpMessage, CeaseSubcode, ErrorCode, MessageHeaderSubcode, NotificationMessage,
-    OpenMessage, OpenMessageSubcode, RouteRefreshMessage, UpdateMessageSubcode, WireError,
+    self, BgpCodec, BgpMessage, CeaseSubcode, ErrorCode, FsmSubcode, MessageHeaderSubcode,
+    NotificationMessage, OpenMessage, OpenMessageSubcode, RouteRefreshMessage,
+    UpdateMessageSubcode, WireError,
 };
 use crate::rib::{BgpRib, OutboundUpdate};
 use crate::session::LocalIdentity;
@@ -359,13 +360,20 @@ fn step(state: State, event: Event, ctx: &NegotiationContext) -> (Option<State>,
         }
         // Anything else (an OPEN arriving twice, a KeepaliveTimerExpires
         // while not yet Established, ...) is a protocol sequencing error.
-        (_, _) => (
-            None,
-            vec![
-                Action::SendNotification(ErrorCode::FiniteStateMachine as u8, 0),
-                Action::Close,
-            ],
-        ),
+        (state, _) => {
+            let subcode = match state {
+                State::OpenSent => FsmSubcode::UnexpectedInOpenSent,
+                State::OpenConfirm(_) => FsmSubcode::UnexpectedInOpenConfirm,
+                State::Established(_) => FsmSubcode::UnexpectedInEstablished,
+            };
+            (
+                None,
+                vec![
+                    Action::SendNotification(ErrorCode::FiniteStateMachine as u8, subcode as u8),
+                    Action::Close,
+                ],
+            )
+        }
     }
 }
 
@@ -1387,6 +1395,41 @@ mod tests {
             assert!(actions.contains(&Action::SendNotification(
                 ErrorCode::HoldTimerExpired as u8,
                 0
+            )));
+        }
+    }
+
+    #[test]
+    fn unexpected_message_uses_rfc6608_subcode_of_current_state() {
+        let remote = RemoteInfo {
+            asn: 65002,
+            bgp_id: Ipv4Addr::new(2, 2, 2, 2),
+            mp_bgp_negotiated: false,
+            negotiated_ipv4_unicast: true,
+            negotiated_ipv6_unicast: false,
+            negotiated_evpn: false,
+            add_path_ipv4: false,
+            add_path_ipv6: false,
+            four_octet_as: true,
+        };
+        for (state, event, subcode) in [
+            (State::OpenSent, Event::KeepaliveReceived, 1),
+            (
+                State::OpenConfirm(remote),
+                Event::OpenReceived(valid_open(65002, 90)),
+                2,
+            ),
+            (
+                State::Established(remote),
+                Event::OpenReceived(valid_open(65002, 90)),
+                3,
+            ),
+        ] {
+            let (next, actions) = step(state, event, &ctx(65002));
+            assert_eq!(next, None);
+            assert!(actions.contains(&Action::SendNotification(
+                ErrorCode::FiniteStateMachine as u8,
+                subcode
             )));
         }
     }
