@@ -591,7 +591,43 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
         route_before,
         60,
     )
-    .await
+    .await?;
+
+    // RFC 8362 Full mode on both routers: adjacency survives (mixed or not,
+    // E-LSAs are known types), each originates E-LSAs, and the peer decodes
+    // and installs them (E-Router 0xA021, E-Link 0x8028, E-Intra-Area-Prefix
+    // 0xA029). The SPF side is covered by a unit test: the loopback route is
+    // already installed from the legacy LSAs, and the daemon only advertises
+    // an interface's first IPv6 address, so no new route can prove it here.
+    let e_pat = format!("ospfv3 lsa originated lsa_type={LSA_TYPE_E_ROUTER}");
+    let (a_before, b_before) = (a.count(&e_pat), b.count(&e_pat));
+    a.provision_flags(&with_base(
+        A,
+        [
+            ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+            strings(&["--ospfv3-extended-lsa"]),
+        ]
+        .concat(),
+    ))
+    .await?;
+    b.provision_flags(&with_base(
+        B,
+        [
+            ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B),
+            strings(&["--ospfv3-extended-lsa"]),
+        ]
+        .concat(),
+    ))
+    .await?;
+    a.wait_new(&e_pat, a_before, 60).await?;
+    b.wait_new(&e_pat, b_before, 60).await?;
+    for lsa_type in [0xA021u16, 0x8028, 0xA029] {
+        b.wait(&format!(
+            "ospfv3 lsa installed.*lsa_type={lsa_type}.*advertising_router={OSPFV3_ROUTER_ID}"
+        ))
+        .await?;
+    }
+    Ok(())
 }
 
 /// Reuses `ospf-dr`'s router-c and the same bd-ospf bridge (a BroadcastDomain

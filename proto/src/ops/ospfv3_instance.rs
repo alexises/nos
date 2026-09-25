@@ -20,6 +20,11 @@ pub enum Ospfv3InstanceOp {
         name: String,
         router_id: Ipv4Addr,
     },
+    /// Turns RFC 8362 extended-LSA (Full mode) origination on or off.
+    SetExtendedLsa {
+        name: String,
+        enabled: bool,
+    },
     Delete {
         name: String,
     },
@@ -35,12 +40,17 @@ impl Ospfv3InstanceOp {
                         router_id: Ipv4Addr::UNSPECIFIED,
                         areas: Vec::new(),
                         routing_table: None,
+                        extended_lsa: false,
                     });
                 }
                 Ok(())
             }
             Ospfv3InstanceOp::SetRouterId { name, router_id } => {
                 find_instance_mut(config, name)?.router_id = *router_id;
+                Ok(())
+            }
+            Ospfv3InstanceOp::SetExtendedLsa { name, enabled } => {
+                find_instance_mut(config, name)?.extended_lsa = *enabled;
                 Ok(())
             }
             Ospfv3InstanceOp::Delete { name } => {
@@ -76,6 +86,7 @@ mod tests {
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             areas: Vec::new(),
             routing_table: None,
+            extended_lsa: false,
         }
     }
 
@@ -123,6 +134,22 @@ mod tests {
             cfg.ospfv3_instances[0].router_id,
             Ipv4Addr::new(10, 0, 0, 1)
         );
+    }
+
+    #[test]
+    fn set_extended_lsa_toggles() {
+        let mut cfg = Config {
+            ospfv3_instances: vec![instance("o1")],
+            ..Default::default()
+        };
+        let op = |enabled| Ospfv3InstanceOp::SetExtendedLsa {
+            name: "o1".to_string(),
+            enabled,
+        };
+        op(true).apply(&mut cfg).unwrap();
+        assert!(cfg.ospfv3_instances[0].extended_lsa);
+        op(false).apply(&mut cfg).unwrap();
+        assert!(!cfg.ospfv3_instances[0].extended_lsa);
     }
 
     #[test]

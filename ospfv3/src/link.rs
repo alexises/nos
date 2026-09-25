@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -935,9 +936,51 @@ pub struct LinkManager {
     loopback_prefixes: Mutex<HashMap<Ipv4Addr, Vec<(Ipv6Net, u16)>>>,
     age_multiplier: u16,
     dbd_max_headers: usize,
+    /// RFC 8362 Full mode: originate the extended (TLV) LSA set instead of
+    /// the legacy one. ponytail: no Sparse mode, and legacy LSAs from before
+    /// a toggle are simply left to age out rather than flushed early.
+    extended_lsa: AtomicBool,
+}
+
+/// The four LS types this router originates, per RFC 8362 mode.
+struct LsaTypes {
+    router: u16,
+    network: u16,
+    link: u16,
+    intra_area_prefix: u16,
+}
+
+impl LsaTypes {
+    fn new(extended: bool) -> Self {
+        if extended {
+            Self {
+                router: lsa::LSA_TYPE_E_ROUTER,
+                network: lsa::LSA_TYPE_E_NETWORK,
+                link: lsa::LSA_TYPE_E_LINK,
+                intra_area_prefix: lsa::LSA_TYPE_E_INTRA_AREA_PREFIX,
+            }
+        } else {
+            Self {
+                router: lsa::LSA_TYPE_ROUTER,
+                network: lsa::LSA_TYPE_NETWORK,
+                link: lsa::LSA_TYPE_LINK,
+                intra_area_prefix: lsa::LSA_TYPE_INTRA_AREA_PREFIX,
+            }
+        }
+    }
 }
 
 impl LinkManager {
+    /// Switches between legacy and RFC 8362 extended LSA origination; takes
+    /// effect at the next origination tick.
+    pub fn set_extended_lsa(&self, extended: bool) {
+        self.extended_lsa.store(extended, Ordering::Relaxed);
+    }
+
+    fn lsa_types(&self) -> LsaTypes {
+        LsaTypes::new(self.extended_lsa.load(Ordering::Relaxed))
+    }
+
     pub fn new(age_multiplier: u16, dbd_max_headers: usize) -> Arc<Self> {
         let manager = Arc::new(Self {
             links: Mutex::new(HashMap::new()),
@@ -946,6 +989,7 @@ impl LinkManager {
             loopback_prefixes: Mutex::new(HashMap::new()),
             age_multiplier,
             dbd_max_headers,
+            extended_lsa: AtomicBool::new(false),
         });
         let background = Arc::clone(&manager);
         tokio::spawn(async move {
@@ -1025,6 +1069,7 @@ impl LinkManager {
             .collect();
         let area_ids: HashSet<Ipv4Addr> = by_area.keys().copied().chain(loopback_areas).collect();
 
+        let types = self.lsa_types();
         for area_id in area_ids {
             let links = by_area.get(&area_id).cloned().unwrap_or_default();
             let lsdb = self.lsdb_for(area_id).await;
@@ -1034,7 +1079,7 @@ impl LinkManager {
             install_self_originated(
                 &mut lsdb,
                 local_router_id,
-                lsa::LSA_TYPE_ROUTER,
+                types.router,
                 local_router_id,
                 LsaBody::Router(RouterLsaBody {
                     flags: 0,
@@ -1064,7 +1109,7 @@ impl LinkManager {
                 install_self_originated(
                     &mut lsdb,
                     local_router_id,
-                    lsa::LSA_TYPE_NETWORK,
+                    types.network,
                     lsa::interface_id_key(cfg.interface_id),
                     LsaBody::Network(NetworkLsaBody {
                         options: lsa::OPTION_V6 | lsa::OPTION_R,
@@ -1088,13 +1133,14 @@ impl LinkManager {
             .values()
             .map(|e| e.config.clone())
             .collect();
+        let types = self.lsa_types();
         for cfg in snapshot {
             let lsdb = self.lsdb_for(cfg.area_id).await;
             let mut lsdb = lsdb.lock().await;
             install_self_originated(
                 &mut lsdb,
                 local_router_id,
-                lsa::LSA_TYPE_LINK,
+                types.link,
                 lsa::interface_id_key(cfg.interface_id),
                 LsaBody::Link(LinkLsaBody {
                     priority: cfg.priority,
@@ -1133,6 +1179,7 @@ impl LinkManager {
             .chain(loopback_prefixes.keys().copied())
             .collect();
 
+        let types = self.lsa_types();
         for area_id in area_ids {
             let links = by_area.get(&area_id).cloned().unwrap_or_default();
             let lsdb = self.lsdb_for(area_id).await;
@@ -1158,10 +1205,10 @@ impl LinkManager {
                 install_self_originated(
                     &mut lsdb,
                     local_router_id,
-                    lsa::LSA_TYPE_INTRA_AREA_PREFIX,
+                    types.intra_area_prefix,
                     Ipv4Addr::UNSPECIFIED,
                     LsaBody::IntraAreaPrefix(IntraAreaPrefixLsaBody {
-                        referenced_ls_type: lsa::LSA_TYPE_ROUTER,
+                        referenced_ls_type: types.router,
                         referenced_link_state_id: local_router_id,
                         referenced_advertising_router: local_router_id,
                         prefixes: router_prefixes,
@@ -1186,10 +1233,10 @@ impl LinkManager {
                 install_self_originated(
                     &mut lsdb,
                     local_router_id,
-                    lsa::LSA_TYPE_INTRA_AREA_PREFIX,
+                    types.intra_area_prefix,
                     network_key,
                     LsaBody::IntraAreaPrefix(IntraAreaPrefixLsaBody {
-                        referenced_ls_type: lsa::LSA_TYPE_NETWORK,
+                        referenced_ls_type: types.network,
                         referenced_link_state_id: network_key,
                         referenced_advertising_router: local_router_id,
                         prefixes: vec![IntraAreaPrefixEntry {
@@ -1725,6 +1772,34 @@ mod tests {
         assert_eq!(body.link_local_address, cfg.link_local_address);
         assert_eq!(body.prefixes.len(), 1);
         assert_eq!(body.prefixes[0].prefix, cfg.prefix);
+    }
+
+    #[tokio::test]
+    async fn extended_mode_originates_only_extended_lsas() {
+        let manager = LinkManager::new(1, exchange::DEFAULT_DBD_MAX_HEADERS);
+        manager.set_extended_lsa(true);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let cfg = link("eth0.0", 10);
+        manager
+            .reconcile(vec![cfg.clone()], HashMap::new(), router_id)
+            .await;
+        manager.originate_router_lsas(router_id).await;
+        manager.originate_link_lsas(router_id).await;
+        manager.originate_intra_area_prefix_lsas(router_id).await;
+
+        let lsdb = manager.lsdb_for(cfg.area_id).await;
+        let types: HashSet<u16> = lsdb
+            .lock()
+            .await
+            .headers()
+            .iter()
+            .map(|h| h.lsa_type)
+            .collect();
+        assert!(types.contains(&lsa::LSA_TYPE_E_ROUTER));
+        assert!(types.contains(&lsa::LSA_TYPE_E_LINK));
+        assert!(!types.contains(&lsa::LSA_TYPE_ROUTER));
+        assert!(!types.contains(&lsa::LSA_TYPE_LINK));
+        assert!(!types.contains(&lsa::LSA_TYPE_INTRA_AREA_PREFIX));
     }
 
     #[tokio::test]

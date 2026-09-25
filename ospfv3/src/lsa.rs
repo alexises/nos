@@ -38,9 +38,10 @@ pub const OPTION_E: u32 = 0x02;
 pub const OPTION_R: u32 = 0x10;
 
 /// S2/S1 scope bits (bits 14-13): `01` = area scope. The U-bit (bit 15,
-/// "flood even if unrecognized") is left clear on every `LSA_TYPE_*`
-/// constant below — every type this crate ever originates or requests is
-/// known, so it never needs setting.
+/// "flood even if unrecognized") is left clear on the RFC 5340 `LSA_TYPE_*`
+/// constants below — every type this crate ever originates or requests is
+/// known, so it never needs setting — and set on the RFC 8362 ones, per
+/// that RFC.
 const SCOPE_AREA: u16 = 0x2000;
 /// S2/S1 scope bits: `00` = link-local scope.
 const SCOPE_LINK_LOCAL: u16 = 0x0000;
@@ -54,6 +55,22 @@ pub const LSA_TYPE_NETWORK: u16 = SCOPE_AREA | 2;
 pub const LSA_TYPE_LINK: u16 = SCOPE_LINK_LOCAL | 8;
 /// RFC 5340 §A.4.10 Intra-Area-Prefix-LSA — area-scoped, function code 9.
 pub const LSA_TYPE_INTRA_AREA_PREFIX: u16 = SCOPE_AREA | 9;
+
+/// RFC 8362 §3.1's extended LSAs (TLV bodies) — same information as the four
+/// legacy types above, so they decode into the very same `LsaBody` variants
+/// and only the wire encoding (chosen by the header's LS type) differs. The
+/// U-bit is set on all four (§3.1) so a router that doesn't know them still
+/// floods them; E-Link stays link-local scoped.
+pub const LSA_TYPE_E_ROUTER: u16 = 0x8000 | SCOPE_AREA | 0x21;
+pub const LSA_TYPE_E_NETWORK: u16 = 0x8000 | SCOPE_AREA | 0x22;
+pub const LSA_TYPE_E_LINK: u16 = 0x8000 | SCOPE_LINK_LOCAL | 0x28;
+pub const LSA_TYPE_E_INTRA_AREA_PREFIX: u16 = 0x8000 | SCOPE_AREA | 0x29;
+
+/// RFC 8362 §3.2's top-level TLV types (the only ones this crate uses).
+const TLV_ROUTER_LINK: u16 = 1;
+const TLV_ATTACHED_ROUTERS: u16 = 2;
+const TLV_INTRA_AREA_PREFIX: u16 = 6;
+const TLV_IPV6_LINK_LOCAL: u16 = 7;
 
 /// RFC 5340 §4.4.3.2's Router-LSA link types — identical values to
 /// `OSPFv2`'s (RFC 5340 §A.4.3: "Values as in [OSPFV2]"). No stub-network
@@ -286,7 +303,221 @@ fn decode_prefix(data: &[u8], prefix_len: u8) -> Result<(Ipv6Net, usize), Packet
     Ok((net, wire_len))
 }
 
-fn encode_body(body: &LsaBody) -> Vec<u8> {
+fn put_tlv(buf: &mut Vec<u8>, tlv_type: u16, value: &[u8]) {
+    buf.extend_from_slice(&tlv_type.to_be_bytes());
+    buf.extend_from_slice(&u16::try_from(value.len()).unwrap_or(u16::MAX).to_be_bytes());
+    buf.extend_from_slice(value);
+    buf.resize(buf.len().next_multiple_of(4), 0); // pad, not counted in Length
+}
+
+/// Splits `data` into RFC 8362 §3 `(type, value)` TLVs; padding is skipped
+/// and unknown types are left for the caller to ignore.
+fn split_tlvs(mut data: &[u8]) -> Result<Vec<(u16, &[u8])>, PacketError> {
+    let mut out = Vec::new();
+    while !data.is_empty() {
+        if data.len() < 4 {
+            return Err(PacketError::TruncatedBody);
+        }
+        let len = usize::from(u16::from_be_bytes([data[2], data[3]]));
+        if data.len() < 4 + len {
+            return Err(PacketError::TruncatedBody);
+        }
+        out.push((u16::from_be_bytes([data[0], data[1]]), &data[4..4 + len]));
+        data = &data[(4 + len.next_multiple_of(4)).min(data.len())..];
+    }
+    Ok(out)
+}
+
+/// Options word shared by every extended LSA's fixed part: one leading flag
+/// byte (E-Router flags / E-Link priority / reserved) + 24-bit options.
+fn fixed_word(first: u8, options: u32) -> [u8; 4] {
+    let o = (options & 0x00FF_FFFF).to_be_bytes();
+    [first, o[1], o[2], o[3]]
+}
+
+fn prefix_tlv_value(metric: u16, options: u8, prefix: &Ipv6Net) -> Vec<u8> {
+    let mut v = vec![0, 0, 0, 0];
+    v[2..4].copy_from_slice(&metric.to_be_bytes());
+    v.extend_from_slice(&[prefix.trunc().prefix_len(), options, 0, 0]);
+    encode_prefix(&mut v, prefix);
+    v
+}
+
+/// Reads an Intra-Area-Prefix TLV value: `(metric, options, prefix)`.
+fn parse_prefix_tlv(v: &[u8]) -> Result<(u16, u8, Ipv6Net), PacketError> {
+    if v.len() < 8 {
+        return Err(PacketError::TruncatedBody);
+    }
+    let metric = u32::from_be_bytes([0, v[1], v[2], v[3]]);
+    let (prefix, _) = decode_prefix(&v[8..], v[4])?;
+    Ok((u16::try_from(metric).unwrap_or(u16::MAX), v[5], prefix))
+}
+
+fn is_extended(lsa_type: u16) -> bool {
+    matches!(
+        lsa_type,
+        LSA_TYPE_E_ROUTER | LSA_TYPE_E_NETWORK | LSA_TYPE_E_LINK | LSA_TYPE_E_INTRA_AREA_PREFIX
+    )
+}
+
+fn encode_ext_body(body: &LsaBody) -> Vec<u8> {
+    let mut buf = Vec::new();
+    match body {
+        LsaBody::Router(r) => {
+            buf.extend_from_slice(&fixed_word(r.flags, r.options));
+            for l in &r.links {
+                let mut v = vec![l.link_type, 0];
+                v.extend_from_slice(&l.metric.to_be_bytes());
+                v.extend_from_slice(&l.interface_id.to_be_bytes());
+                v.extend_from_slice(&l.neighbor_interface_id.to_be_bytes());
+                v.extend_from_slice(&l.neighbor_router_id.octets());
+                put_tlv(&mut buf, TLV_ROUTER_LINK, &v);
+            }
+        }
+        LsaBody::Network(n) => {
+            buf.extend_from_slice(&fixed_word(0, n.options));
+            if !n.attached_routers.is_empty() {
+                let v: Vec<u8> = n
+                    .attached_routers
+                    .iter()
+                    .flat_map(Ipv4Addr::octets)
+                    .collect();
+                put_tlv(&mut buf, TLV_ATTACHED_ROUTERS, &v);
+            }
+        }
+        LsaBody::Link(l) => {
+            buf.extend_from_slice(&fixed_word(l.priority, l.options));
+            put_tlv(
+                &mut buf,
+                TLV_IPV6_LINK_LOCAL,
+                &l.link_local_address.octets(),
+            );
+            for p in &l.prefixes {
+                put_tlv(
+                    &mut buf,
+                    TLV_INTRA_AREA_PREFIX,
+                    &prefix_tlv_value(0, p.options, &p.prefix),
+                );
+            }
+        }
+        LsaBody::IntraAreaPrefix(i) => {
+            buf.extend_from_slice(&[0, 0]);
+            buf.extend_from_slice(&i.referenced_ls_type.to_be_bytes());
+            buf.extend_from_slice(&i.referenced_link_state_id.octets());
+            buf.extend_from_slice(&i.referenced_advertising_router.octets());
+            for p in &i.prefixes {
+                put_tlv(
+                    &mut buf,
+                    TLV_INTRA_AREA_PREFIX,
+                    &prefix_tlv_value(p.metric, p.options, &p.prefix),
+                );
+            }
+        }
+    }
+    buf
+}
+
+fn decode_ext_body(lsa_type: u16, data: &[u8]) -> Result<LsaBody, PacketError> {
+    let fixed_len = if lsa_type == LSA_TYPE_E_INTRA_AREA_PREFIX {
+        12
+    } else {
+        4
+    };
+    if data.len() < fixed_len {
+        return Err(PacketError::TruncatedBody);
+    }
+    let options = u32::from(data[1]) << 16 | u32::from(data[2]) << 8 | u32::from(data[3]);
+    let tlvs = split_tlvs(&data[fixed_len..])?;
+    match lsa_type {
+        LSA_TYPE_E_ROUTER => {
+            let mut links = Vec::new();
+            for (t, v) in tlvs {
+                if t != TLV_ROUTER_LINK {
+                    continue;
+                }
+                if v.len() < ROUTER_LINK_LEN {
+                    return Err(PacketError::TruncatedBody);
+                }
+                links.push(RouterLsaLink {
+                    link_type: v[0],
+                    metric: u16::from_be_bytes([v[2], v[3]]),
+                    interface_id: u32::from_be_bytes([v[4], v[5], v[6], v[7]]),
+                    neighbor_interface_id: u32::from_be_bytes([v[8], v[9], v[10], v[11]]),
+                    neighbor_router_id: read_ipv4(v, 12),
+                });
+            }
+            Ok(LsaBody::Router(RouterLsaBody {
+                flags: data[0],
+                options,
+                links,
+            }))
+        }
+        LSA_TYPE_E_NETWORK => {
+            let mut attached_routers = Vec::new();
+            for (t, v) in tlvs {
+                if t == TLV_ATTACHED_ROUTERS {
+                    if !v.len().is_multiple_of(4) {
+                        return Err(PacketError::TruncatedBody);
+                    }
+                    attached_routers.extend(v.as_chunks::<4>().0.iter().map(|c| read_ipv4(c, 0)));
+                }
+            }
+            Ok(LsaBody::Network(NetworkLsaBody {
+                options,
+                attached_routers,
+            }))
+        }
+        LSA_TYPE_E_LINK => {
+            let mut link_local_address = None;
+            let mut prefixes = Vec::new();
+            for (t, v) in tlvs {
+                match t {
+                    TLV_IPV6_LINK_LOCAL if v.len() >= 16 => {
+                        let mut o = [0u8; 16];
+                        o.copy_from_slice(&v[..16]);
+                        link_local_address = Some(Ipv6Addr::from(o));
+                    }
+                    TLV_IPV6_LINK_LOCAL => return Err(PacketError::TruncatedBody),
+                    TLV_INTRA_AREA_PREFIX => {
+                        let (_, options, prefix) = parse_prefix_tlv(v)?;
+                        prefixes.push(LinkPrefixEntry { options, prefix });
+                    }
+                    _ => {}
+                }
+            }
+            Ok(LsaBody::Link(LinkLsaBody {
+                priority: data[0],
+                options,
+                link_local_address: link_local_address.ok_or(PacketError::TruncatedBody)?,
+                prefixes,
+            }))
+        }
+        _ => {
+            let mut prefixes = Vec::new();
+            for (t, v) in tlvs {
+                if t == TLV_INTRA_AREA_PREFIX {
+                    let (metric, options, prefix) = parse_prefix_tlv(v)?;
+                    prefixes.push(IntraAreaPrefixEntry {
+                        options,
+                        metric,
+                        prefix,
+                    });
+                }
+            }
+            Ok(LsaBody::IntraAreaPrefix(IntraAreaPrefixLsaBody {
+                referenced_ls_type: u16::from_be_bytes([data[2], data[3]]),
+                referenced_link_state_id: read_ipv4(data, 4),
+                referenced_advertising_router: read_ipv4(data, 8),
+                prefixes,
+            }))
+        }
+    }
+}
+
+fn encode_body(lsa_type: u16, body: &LsaBody) -> Vec<u8> {
+    if is_extended(lsa_type) {
+        return encode_ext_body(body);
+    }
     match body {
         LsaBody::Router(r) => {
             let mut buf = Vec::with_capacity(4 + r.links.len() * ROUTER_LINK_LEN);
@@ -354,6 +585,7 @@ fn encode_body(body: &LsaBody) -> Vec<u8> {
 
 fn decode_body(lsa_type: u16, data: &[u8]) -> Result<LsaBody, PacketError> {
     match lsa_type {
+        t if is_extended(t) => decode_ext_body(t, data),
         LSA_TYPE_ROUTER => {
             if data.len() < 4 {
                 return Err(PacketError::TruncatedBody);
@@ -468,7 +700,7 @@ fn decode_body(lsa_type: u16, data: &[u8]) -> Result<LsaBody, PacketError> {
 /// Encodes `lsa`, overwriting `length`/`checksum` with freshly-computed
 /// values.
 pub fn encode_lsa(lsa: &Lsa) -> Vec<u8> {
-    let body = encode_body(&lsa.body);
+    let body = encode_body(lsa.header.lsa_type, &lsa.body);
     let total_len = LSA_HEADER_LEN + body.len();
     let mut header = lsa.header;
     header.length = u16::try_from(total_len).unwrap_or(u16::MAX);
@@ -663,6 +895,39 @@ mod tests {
                 }],
             }),
         }
+    }
+
+    #[test]
+    fn extended_lsas_round_trip_and_differ_from_legacy_wire_form() {
+        for (mut lsa, e_type) in [
+            (router_lsa(), LSA_TYPE_E_ROUTER),
+            (network_lsa(), LSA_TYPE_E_NETWORK),
+            (link_lsa(), LSA_TYPE_E_LINK),
+            (intra_area_prefix_lsa(), LSA_TYPE_E_INTRA_AREA_PREFIX),
+        ] {
+            let legacy = encode_lsa(&lsa);
+            lsa.header.lsa_type = e_type;
+            let wire = encode_lsa(&lsa);
+            assert_ne!(wire[20..], legacy[20..]);
+            assert_eq!(wire.len() % 4, 0);
+            let decoded = decode_lsa(&wire).unwrap();
+            assert_eq!(decoded.header.lsa_type, e_type);
+            assert_eq!(decoded.body, lsa.body);
+        }
+    }
+
+    #[test]
+    fn extended_lsa_skips_unknown_tlvs() {
+        let mut lsa = network_lsa();
+        lsa.header.lsa_type = LSA_TYPE_E_NETWORK;
+        let mut wire = encode_lsa(&lsa);
+        // Append an unknown TLV (type 99, 3 bytes + 1 pad) and re-checksum.
+        wire.extend_from_slice(&[0, 99, 0, 3, 1, 2, 3, 0]);
+        let len = u16::try_from(wire.len()).unwrap().to_be_bytes();
+        wire[18..20].copy_from_slice(&len);
+        let checksum = lsa_checksum(&wire[2..]);
+        wire[16..18].copy_from_slice(&checksum.to_be_bytes());
+        assert_eq!(decode_lsa(&wire).unwrap().body, lsa.body);
     }
 
     #[test]
