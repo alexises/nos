@@ -99,8 +99,7 @@ pub async fn run(
 
     // First send is immediate; each later one is scheduled from the state at
     // the time of the previous send (see `periodic_tx_machine::interval_for`).
-    let mut next_periodic_send = Instant::now();
-    let mut last_sent: Option<Lacpdu> = None;
+    let mut tx = TxState::new();
 
     report(
         &observations,
@@ -114,16 +113,17 @@ pub async fn run(
 
     loop {
         tokio::select! {
-            () = tokio::time::sleep_until(next_periodic_send.into()) => {
+            () = tokio::time::sleep_until(tx.next_periodic_send.into()) => {
                 let pdu = build_pdu(&config, port_number, receive_state, mux_state, partner);
-                send_lacpdu(&socket, &config.interface, &pdu);
-                last_sent = Some(pdu);
                 // Must move the deadline forward every time it fires, or the
-                // elapsed deadline re-fires immediately: a hot loop.
-                next_periodic_send = Instant::now() + interval_for(
+                // elapsed deadline re-fires immediately: a hot loop. A send
+                // denied by the limiter retries at the next refill instead
+                // (`transmit` sets that).
+                tx.next_periodic_send = Instant::now() + interval_for(
                     receive_state,
                     partner.is_some_and(|p| p.has_state(state_bit::TIMEOUT)),
                 );
+                tx.transmit(&socket, &config.interface, pdu);
             }
             () = tokio::time::sleep_until(current_while_deadline.into()) => {
                 let (rs, action) = receive_machine::step(receive_state, receive_machine::Event::CurrentWhileTimerExpired);
@@ -140,7 +140,7 @@ pub async fn run(
                 }
                 info!(interface = %config.interface, receive_state = ?receive_state, "lacp receive machine transitioned");
                 report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner);
-                send_if_changed(&socket, &config.interface, &mut last_sent, build_pdu(&config, port_number, receive_state, mux_state, partner));
+                tx.send_if_changed(&socket, &config.interface, build_pdu(&config, port_number, receive_state, mux_state, partner));
             }
             () = tokio::time::sleep_until(wait_while_deadline.into()) => {
                 let (ms, action) = mux_machine::step(mux_state, mux_machine::Event::WaitWhileTimerExpired);
@@ -148,7 +148,7 @@ pub async fn run(
                 apply_mux_action(action, &mut wait_while_deadline);
                 info!(interface = %config.interface, mux_state = ?mux_state, "lacp mux machine transitioned");
                 report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner);
-                send_if_changed(&socket, &config.interface, &mut last_sent, build_pdu(&config, port_number, receive_state, mux_state, partner));
+                tx.send_if_changed(&socket, &config.interface, build_pdu(&config, port_number, receive_state, mux_state, partner));
             }
             result = selected_rx.changed() => {
                 if result.is_err() {
@@ -161,7 +161,7 @@ pub async fn run(
                 apply_mux_action(action, &mut wait_while_deadline);
                 info!(interface = %config.interface, mux_state = ?mux_state, selected, "lacp mux machine transitioned");
                 report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner);
-                send_if_changed(&socket, &config.interface, &mut last_sent, build_pdu(&config, port_number, receive_state, mux_state, partner));
+                tx.send_if_changed(&socket, &config.interface, build_pdu(&config, port_number, receive_state, mux_state, partner));
             }
             recv = socket.recv() => {
                 let Ok(bytes) = recv else {
@@ -197,7 +197,7 @@ pub async fn run(
                     "lacp lacpdu received"
                 );
                 report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner);
-                send_if_changed(&socket, &config.interface, &mut last_sent, build_pdu(&config, port_number, receive_state, mux_state, partner));
+                tx.send_if_changed(&socket, &config.interface, build_pdu(&config, port_number, receive_state, mux_state, partner));
             }
         }
     }
@@ -343,27 +343,87 @@ fn send_lacpdu(socket: &LacpSocket, interface: &str, pdu: &Lacpdu) {
     }
 }
 
-/// 802.1AX's NTT ("need to transmit"): an event-driven send happens only if
-/// what we'd advertise differs from what we last sent. Replying to every
-/// received LACPDU unconditionally made two peers ping-pong at wire speed;
-/// with this they settle as soon as their states agree, and the periodic
-/// timer alone keeps the partner's `Current_While_Timer` alive.
-fn needs_transmit(last_sent: &mut Option<Lacpdu>, pdu: &Lacpdu) -> bool {
-    if last_sent.as_ref() == Some(pdu) {
-        return false;
-    }
-    *last_sent = Some(*pdu);
-    true
+/// 802.1AX §6.4.16: at most 3 LACPDUs per `Fast_Periodic_Time`, whatever the
+/// NTT events. A fixed window refilled once per second.
+const MAX_TX_PER_WINDOW: u8 = 3;
+const TX_WINDOW: Duration = Duration::from_secs(1);
+
+struct TxLimiter {
+    tokens: u8,
+    window_start: Instant,
 }
 
-fn send_if_changed(
-    socket: &LacpSocket,
-    interface: &str,
-    last_sent: &mut Option<Lacpdu>,
-    pdu: Lacpdu,
-) {
-    if needs_transmit(last_sent, &pdu) {
-        send_lacpdu(socket, interface, &pdu);
+impl TxLimiter {
+    fn new(now: Instant) -> Self {
+        Self {
+            tokens: MAX_TX_PER_WINDOW,
+            window_start: now,
+        }
+    }
+
+    fn try_take(&mut self, now: Instant) -> bool {
+        if now.duration_since(self.window_start) >= TX_WINDOW {
+            self.tokens = MAX_TX_PER_WINDOW;
+            self.window_start = now;
+        }
+        if self.tokens == 0 {
+            return false;
+        }
+        self.tokens -= 1;
+        true
+    }
+
+    fn next_refill(&self) -> Instant {
+        self.window_start + TX_WINDOW
+    }
+}
+
+/// The Transmit machine's state: what we last sent (NTT), the rate limiter,
+/// and when the periodic timer next fires.
+struct TxState {
+    last_sent: Option<Lacpdu>,
+    limiter: TxLimiter,
+    next_periodic_send: Instant,
+}
+
+fn needs_transmit(last_sent: Option<&Lacpdu>, pdu: &Lacpdu) -> bool {
+    last_sent != Some(pdu)
+}
+
+impl TxState {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            last_sent: None,
+            limiter: TxLimiter::new(now),
+            // First send is immediate.
+            next_periodic_send: now,
+        }
+    }
+
+    /// Sends `pdu` if the limiter allows. A denied send leaves `last_sent`
+    /// untouched (so the change still counts as unsent) and pulls the
+    /// periodic timer forward to the next refill, which rebuilds the PDU from
+    /// live state — so a suppressed change is delayed, never lost.
+    fn transmit(&mut self, socket: &LacpSocket, interface: &str, pdu: Lacpdu) {
+        if self.limiter.try_take(Instant::now()) {
+            send_lacpdu(socket, interface, &pdu);
+            self.last_sent = Some(pdu);
+        } else {
+            debug!(interface = %interface, "lacpdu rate limit hit, deferring");
+            self.next_periodic_send = self.limiter.next_refill();
+        }
+    }
+
+    /// 802.1AX's NTT ("need to transmit"): an event-driven send happens only
+    /// if what we'd advertise differs from what we last sent. Replying to
+    /// every received LACPDU unconditionally made two peers ping-pong at wire
+    /// speed; with this they settle as soon as their states agree, and the
+    /// periodic timer alone keeps the partner's `Current_While_Timer` alive.
+    fn send_if_changed(&mut self, socket: &LacpSocket, interface: &str, pdu: Lacpdu) {
+        if needs_transmit(self.last_sent.as_ref(), &pdu) {
+            self.transmit(socket, interface, pdu);
+        }
     }
 }
 
@@ -400,6 +460,16 @@ mod tests {
             changed.notified().now_or_never().is_none(),
             "an identical report must not notify"
         );
+    }
+
+    #[test]
+    fn limiter_allows_three_per_window() {
+        let t0 = Instant::now();
+        let mut l = TxLimiter::new(t0);
+        assert!((0..3).all(|_| l.try_take(t0)));
+        assert!(!l.try_take(t0 + Duration::from_millis(999)));
+        assert_eq!(l.next_refill(), t0 + TX_WINDOW);
+        assert!(l.try_take(t0 + TX_WINDOW));
     }
 
     /// Regression: a LACPDU arriving while `Waiting` yields `Action::None`;
@@ -448,20 +518,16 @@ mod tests {
             },
             collector_max_delay: 0,
         };
-        let mut last = None;
+        let sent = config_pdu(1);
+        assert!(needs_transmit(None, &sent), "first send goes out");
         assert!(
-            needs_transmit(&mut last, &config_pdu(1)),
-            "first send goes out"
-        );
-        assert!(
-            !needs_transmit(&mut last, &config_pdu(1)),
+            !needs_transmit(Some(&sent), &config_pdu(1)),
             "unchanged: no reply"
         );
         assert!(
-            needs_transmit(&mut last, &config_pdu(9)),
+            needs_transmit(Some(&sent), &config_pdu(9)),
             "changed state goes out"
         );
-        assert!(!needs_transmit(&mut last, &config_pdu(9)));
     }
 
     fn elapsed() -> Instant {
