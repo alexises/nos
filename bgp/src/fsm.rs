@@ -378,7 +378,8 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
         return reject(OpenMessageSubcode::BadPeerAs);
     }
     let remote_asn = message::effective_remote_asn(open);
-    if remote_asn != ctx.expected_remote_as {
+    // RFC 7607: AS 0 is never valid, whatever the peer is expected to be.
+    if remote_asn == 0 || remote_asn != ctx.expected_remote_as {
         return reject(OpenMessageSubcode::BadPeerAs);
     }
     if !message::is_valid_bgp_identifier(open.bgp_identifier) {
@@ -1303,6 +1304,20 @@ mod tests {
         open.my_as = message::AS_TRANS;
         open.capabilities.clear();
         let (next, actions) = step(State::OpenSent, Event::OpenReceived(open), &ctx(65002));
+        assert_eq!(next, None);
+        assert!(actions.contains(&Action::SendNotification(
+            ErrorCode::OpenMessage as u8,
+            OpenMessageSubcode::BadPeerAs as u8
+        )));
+    }
+
+    #[test]
+    fn as_zero_is_bad_peer_as_even_when_expected() {
+        let (next, actions) = step(
+            State::OpenSent,
+            Event::OpenReceived(valid_open(0, 90)),
+            &ctx(0),
+        );
         assert_eq!(next, None);
         assert!(actions.contains(&Action::SendNotification(
             ErrorCode::OpenMessage as u8,

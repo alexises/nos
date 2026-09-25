@@ -1194,6 +1194,10 @@ fn parse_as_path(mut data: &[u8], width: usize) -> Result<Vec<u32>, WireError> {
                 .chunks_exact(width)
                 .map(|c| c.iter().fold(0u32, |acc, &b| (acc << 8) | u32::from(b))),
         );
+        // RFC 7607: AS 0 must not appear in AS_PATH / AS4_PATH.
+        if asns.contains(&0) {
+            return Err(WireError::MalformedUpdate);
+        }
         data = &data[segment_len..];
     }
     Ok(asns)
@@ -1573,6 +1577,13 @@ mod tests {
             codec.decode(&mut buf).unwrap().unwrap(),
             BgpMessage::Update(update)
         );
+    }
+
+    #[test]
+    fn as_zero_in_as_path_is_malformed() {
+        assert!(parse_as_path(&[2, 2, 0xFD, 0xE9, 0, 0], 2).is_err());
+        assert!(parse_as_path(&[2, 1, 0, 0, 0, 0], 4).is_err());
+        assert!(parse_as_path(&[2, 1, 0, 0, 0xFD, 0xE9], 4).is_ok());
     }
 
     #[test]
