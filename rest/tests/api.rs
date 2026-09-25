@@ -351,7 +351,7 @@ async fn errors_map_to_statuses_and_leave_the_transaction_intact() {
     )
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
-    assert!(e["error"].as_str().unwrap().contains("does not match"));
+    assert!(e["detail"].as_str().unwrap().contains("does not match"));
     assert_eq!(
         send(app, Method::POST, "/v1/transactions/t3?base=bogus", None)
             .await
@@ -440,12 +440,112 @@ async fn router_wide_show_reports_each_instance_that_is_not_running() {
     );
 }
 
+/// Every error is an RFC 9457 problem document whose `status` repeats the
+/// HTTP status, with the right code for each kind of failure.
+#[tokio::test]
+async fn errors_are_problem_json_with_the_right_status() {
+    let f = fixture(vec![]).await;
+    send(&f.app, Method::POST, "/v1/transactions/p1?base=blank", None).await;
+    send(
+        &f.app,
+        Method::PUT,
+        "/v1/transactions/p1/hostname",
+        Some(json!("bad host name!")),
+    )
+    .await;
+    let cases: [(Method, &str, Option<&str>, StatusCode); 9] = [
+        (
+            Method::POST,
+            "/v1/transactions/p2?base=bogus",
+            Some(USER),
+            StatusCode::BAD_REQUEST,
+        ),
+        (Method::GET, "/v1/config", None, StatusCode::UNAUTHORIZED),
+        (
+            Method::GET,
+            "/v1/transactions/nope",
+            Some(USER),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            Method::POST,
+            "/v1/transactions/p1/commit",
+            Some(USER),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            Method::GET,
+            "/v1/interfaces",
+            Some(USER),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            Method::GET,
+            "/v1/interfaces/eth9",
+            Some(USER),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        // The framework's own errors, not a handler's: an extractor rejection
+        // (`limit` is a `usize`), an unknown route, a wrong method.
+        (
+            Method::GET,
+            "/v1/logs?limit=abc",
+            Some(USER),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            Method::GET,
+            "/v1/no-such-route",
+            Some(USER),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            Method::DELETE,
+            "/v1/config",
+            Some(USER),
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+    ];
+    for (method, uri, user, want) in cases {
+        let req = HttpRequest::builder()
+            .method(method)
+            .uri(uri)
+            .extension(PeerUser(user.map(str::to_string)))
+            .body(Body::empty())
+            .unwrap();
+        let resp = f.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), want, "{uri}");
+        assert_eq!(
+            resp.headers()[header::CONTENT_TYPE],
+            "application/problem+json",
+            "{uri}"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let p: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(p["type"], "about:blank", "{uri}");
+        assert_eq!(p["status"], want.as_u16(), "{uri}");
+        assert_eq!(p["title"], want.canonical_reason().unwrap(), "{uri}");
+        assert!(!p["detail"].as_str().unwrap().is_empty(), "{uri}");
+    }
+}
+
 #[tokio::test]
 async fn serves_its_openapi_document() {
     let f = fixture(vec![]).await;
     let (s, doc) = send(&f.app, Method::GET, "/openapi.json", None).await;
     assert_eq!(s, StatusCode::OK);
     assert!(doc["openapi"].as_str().unwrap().starts_with("3."));
+    // Error responses are documented as problem documents, never plain JSON.
+    let text = doc["paths"].to_string();
+    assert!(text.contains("application/problem+json"));
+    assert!(!text
+        .contains(r##""application/json":{"schema":{"$ref":"#/components/schemas/ErrorBody"}}"##));
+    assert_eq!(
+        doc["components"]["schemas"]["ErrorBody"]["required"],
+        json!(["type", "title", "status", "detail"])
+    );
     let paths = doc["paths"].as_object().unwrap();
     assert!(!paths.contains_key("/v1/transactions/{tx}/bgp-instance/{bgp_instance}/name"));
     assert!(paths

@@ -23,7 +23,30 @@ pub fn document(base: &OpenApi) -> Value {
     for (path, item) in paths {
         target.entry(path).or_insert(item);
     }
+    problem_media_type(&mut doc["paths"]);
     doc
+}
+
+/// Errors are `application/problem+json`, but the annotations (and `emit`)
+/// only name the `ErrorBody` schema, which utoipa files under
+/// `application/json`: re-key those content entries.
+fn problem_media_type(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            if m.get("application/json")
+                .and_then(|c| c.get("schema"))
+                .and_then(ref_name)
+                == Some("ErrorBody")
+            {
+                if let Some(c) = m.remove("application/json") {
+                    m.insert(crate::error::PROBLEM_JSON.to_string(), c);
+                }
+            }
+            m.values_mut().for_each(problem_media_type);
+        }
+        Value::Array(a) => a.iter_mut().for_each(problem_media_type),
+        _ => {}
+    }
 }
 
 /// The schema a property actually describes: unwraps `Option<T>`'s

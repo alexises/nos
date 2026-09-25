@@ -534,10 +534,28 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     // refuses a wrong password and an unknown user alike.
     let anonymous = a.rest.anonymous()?;
     for path in ["/v1/config", "/openapi.json", "/swagger-ui/"] {
-        let (status, _) = a.rest_with(&anonymous, Method::GET, path, None).await?;
+        let (status, body) = a.rest_with(&anonymous, Method::GET, path, None).await?;
         if status != 401 {
             bail!("router-a: GET {path} without a certificate -> {status}, want 401");
         }
+        // Errors are RFC 9457 problem documents, whose status repeats the HTTP one.
+        let problem: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+            anyhow::anyhow!("router-a: GET {path} 401 body is not JSON ({e}): {body}")
+        })?;
+        if problem["status"] != 401
+            || problem["type"] != "about:blank"
+            || problem["title"] != "Unauthorized"
+        {
+            bail!("router-a: GET {path} 401 body is not a problem document: {body}");
+        }
+    }
+    // The same over an authenticated request: an unknown transaction is a 404
+    // problem document, not a bare status.
+    let (status, body) = a
+        .rest(Method::GET, "/v1/transactions/no-such-tx", None)
+        .await?;
+    if status != 404 || !body.contains(r#""status":404"#) {
+        bail!("router-a: GET of an unknown transaction -> {status} {body}, want a 404 problem");
     }
     for (user, password) in [(E2E_USER, "wrong-password"), ("nobody", E2E_PASSWORD)] {
         match a.rest.login(user, password).await? {

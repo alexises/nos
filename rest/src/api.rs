@@ -103,4 +103,8 @@ pub fn router(daemons: Daemons) -> Router {
         // Last, so it wraps every route above — the merged Swagger UI, the
         // OpenAPI document and the SSE log stream included.
         .layer(axum::middleware::from_fn_with_state(daemons, client_auth))
+        // Outermost: also covers the framework's own 404/405/rejections.
+        .layer(axum::middleware::map_response(
+            crate::error::problem_for_framework_errors,
+        ))
 }

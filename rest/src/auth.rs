@@ -21,7 +21,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use utoipa::openapi::security::SecurityScheme;
 
-use crate::error::ErrorBody;
+use crate::error::ApiError;
 use crate::ipc::Daemons;
 
 pub const LOGIN_PATH: &str = "/v1/login";
@@ -67,11 +67,6 @@ pub async fn client_auth(State(daemons): State<Daemons>, req: Request, next: Nex
 }
 
 fn unauthorized() -> Response {
-    (
-        axum::http::StatusCode::UNAUTHORIZED,
-        axum::Json(ErrorBody {
-            error: "a client certificate is required (POST /v1/login to get one)".to_string(),
-        }),
-    )
+    ApiError::Unauthorized("a client certificate is required (POST /v1/login to get one)".into())
         .into_response()
 }
