@@ -28,6 +28,7 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use tracing::warn;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use ipnet::{IpNet, Ipv4Net};
@@ -856,6 +857,8 @@ struct ParsedAttributes {
     pmsi: Option<Pmsi>,
     mp_reach: Vec<MpReachNlri>,
     mp_unreach: Vec<MpUnreachNlri>,
+    /// RFC 7606 treat-as-withdraw: an attribute's content was malformed.
+    withdraw: bool,
 }
 
 /// Walks the TLV path-attribute list, decoding `ORIGIN`/`AS_PATH`/`NEXT_HOP`/
@@ -886,6 +889,9 @@ fn parse_path_attributes(
     let mut pmsi = None;
     let mut mp_reach = Vec::new();
     let mut mp_unreach = Vec::new();
+    // RFC 7606 treat-as-withdraw: set by any attribute whose *content* is
+    // malformed. Framing errors (below, outside `'attr`) still reset.
+    let mut withdraw = false;
 
     while !data.is_empty() {
         if data.len() < 2 {
@@ -909,100 +915,117 @@ fn parse_path_attributes(
         }
         let value = &data[header_len..header_len + len];
 
-        match attr_type {
-            ATTR_ORIGIN => {
-                if value.len() != 1 {
-                    return Err(WireError::MalformedUpdate);
+        'attr: {
+            match attr_type {
+                ATTR_ORIGIN => {
+                    if value.len() != 1 {
+                        withdraw = true;
+                        break 'attr;
+                    }
+                    match value[0] {
+                        0 => origin = Some(Origin::Igp),
+                        1 => origin = Some(Origin::Egp),
+                        2 => origin = Some(Origin::Incomplete),
+                        _ => withdraw = true,
+                    }
                 }
-                origin = Some(match value[0] {
-                    0 => Origin::Igp,
-                    1 => Origin::Egp,
-                    2 => Origin::Incomplete,
-                    _ => return Err(WireError::MalformedUpdate),
-                });
-            }
-            ATTR_AS_PATH => as_path = Some(parse_as_path(value, if two_octet_as { 2 } else { 4 })?),
-            ATTR_AS4_PATH if two_octet_as => as4_path = Some(parse_as_path(value, 4)?),
-            ATTR_NEXT_HOP => {
-                if value.len() != 4 {
-                    return Err(WireError::MalformedUpdate);
+                ATTR_AS_PATH => match parse_as_path(value, if two_octet_as { 2 } else { 4 }) {
+                    Ok(p) => as_path = Some(p),
+                    Err(_) => withdraw = true,
+                },
+                ATTR_AS4_PATH if two_octet_as => match parse_as_path(value, 4) {
+                    Ok(p) => as4_path = Some(p),
+                    Err(_) => withdraw = true,
+                },
+                ATTR_NEXT_HOP => {
+                    if value.len() != 4 {
+                        withdraw = true;
+                        break 'attr;
+                    }
+                    next_hop = Some(Ipv4Addr::new(value[0], value[1], value[2], value[3]));
                 }
-                next_hop = Some(Ipv4Addr::new(value[0], value[1], value[2], value[3]));
-            }
-            ATTR_LOCAL_PREF => {
-                if value.len() != 4 {
-                    return Err(WireError::MalformedUpdate);
+                ATTR_LOCAL_PREF => {
+                    if value.len() != 4 {
+                        withdraw = true;
+                        break 'attr;
+                    }
+                    local_pref = Some(u32::from_be_bytes(value.try_into().unwrap()));
                 }
-                local_pref = Some(u32::from_be_bytes(value.try_into().unwrap()));
-            }
-            ATTR_MULTI_EXIT_DISC => {
-                if value.len() != 4 {
-                    return Err(WireError::MalformedUpdate);
+                ATTR_MULTI_EXIT_DISC => {
+                    if value.len() != 4 {
+                        withdraw = true;
+                        break 'attr;
+                    }
+                    med = Some(u32::from_be_bytes(value.try_into().unwrap()));
                 }
-                med = Some(u32::from_be_bytes(value.try_into().unwrap()));
-            }
-            ATTR_ORIGINATOR_ID => {
-                if value.len() != 4 {
-                    return Err(WireError::MalformedUpdate);
+                ATTR_ORIGINATOR_ID => {
+                    if value.len() != 4 {
+                        withdraw = true;
+                        break 'attr;
+                    }
+                    originator_id = Some(Ipv4Addr::new(value[0], value[1], value[2], value[3]));
                 }
-                originator_id = Some(Ipv4Addr::new(value[0], value[1], value[2], value[3]));
-            }
-            ATTR_CLUSTER_LIST => {
-                if !value.len().is_multiple_of(4) {
-                    return Err(WireError::MalformedUpdate);
+                ATTR_CLUSTER_LIST => {
+                    if !value.len().is_multiple_of(4) {
+                        withdraw = true;
+                        break 'attr;
+                    }
+                    cluster_list = value
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| Ipv4Addr::new(c[0], c[1], c[2], c[3]))
+                        .collect();
                 }
-                cluster_list = value
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|c| Ipv4Addr::new(c[0], c[1], c[2], c[3]))
-                    .collect();
-            }
-            ATTR_COMMUNITY => {
-                if !value.len().is_multiple_of(4) {
-                    return Err(WireError::MalformedUpdate);
+                ATTR_COMMUNITY => {
+                    if !value.len().is_multiple_of(4) {
+                        withdraw = true;
+                        break 'attr;
+                    }
+                    communities = value
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| u32::from_be_bytes(*c))
+                        .collect();
                 }
-                communities = value
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|c| u32::from_be_bytes(*c))
-                    .collect();
-            }
-            ATTR_EXTENDED_COMMUNITIES => {
-                if !value.len().is_multiple_of(8) {
-                    return Err(WireError::MalformedUpdate);
+                ATTR_EXTENDED_COMMUNITIES => {
+                    if !value.len().is_multiple_of(8) {
+                        withdraw = true;
+                        break 'attr;
+                    }
+                    extended_communities = value
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|c| u64::from_be_bytes(*c))
+                        .collect();
                 }
-                extended_communities = value
-                    .as_chunks::<8>()
-                    .0
-                    .iter()
-                    .map(|c| u64::from_be_bytes(*c))
-                    .collect();
-            }
-            ATTR_LARGE_COMMUNITY => {
-                if !value.len().is_multiple_of(12) {
-                    return Err(WireError::MalformedUpdate);
+                ATTR_LARGE_COMMUNITY => {
+                    if !value.len().is_multiple_of(12) {
+                        withdraw = true;
+                        break 'attr;
+                    }
+                    large_communities = value
+                        .as_chunks::<12>()
+                        .0
+                        .iter()
+                        .map(|c| {
+                            (
+                                u32::from_be_bytes(c[0..4].try_into().unwrap()),
+                                u32::from_be_bytes(c[4..8].try_into().unwrap()),
+                                u32::from_be_bytes(c[8..12].try_into().unwrap()),
+                            )
+                        })
+                        .collect();
                 }
-                large_communities = value
-                    .as_chunks::<12>()
-                    .0
-                    .iter()
-                    .map(|c| {
-                        (
-                            u32::from_be_bytes(c[0..4].try_into().unwrap()),
-                            u32::from_be_bytes(c[4..8].try_into().unwrap()),
-                            u32::from_be_bytes(c[8..12].try_into().unwrap()),
-                        )
-                    })
-                    .collect();
-            }
-            ATTR_PMSI_TUNNEL => pmsi = decode_pmsi(value),
-            ATTR_MP_REACH_NLRI => mp_reach.push(decode_mp_reach(value, add_path_afis)?),
-            ATTR_MP_UNREACH_NLRI => mp_unreach.push(decode_mp_unreach(value, add_path_afis)?),
-            _ => {
-                // Unknown attribute type: skip by declared length, never an
-                // error — same philosophy as unrecognized OPEN capabilities.
+                ATTR_PMSI_TUNNEL => pmsi = decode_pmsi(value),
+                ATTR_MP_REACH_NLRI => mp_reach.push(decode_mp_reach(value, add_path_afis)?),
+                ATTR_MP_UNREACH_NLRI => mp_unreach.push(decode_mp_unreach(value, add_path_afis)?),
+                _ => {
+                    // Unknown attribute type: skip by declared length, never an
+                    // error — same philosophy as unrecognized OPEN capabilities.
+                }
             }
         }
 
@@ -1032,6 +1055,7 @@ fn parse_path_attributes(
         pmsi,
         mp_reach,
         mp_unreach,
+        withdraw,
     })
 }
 
@@ -1258,33 +1282,33 @@ fn parse_update(
     let (nlri, nlri_path_ids) = decode_prefixes_v4(&body[pos..], with_ids_v4)?;
 
     let announcing = !nlri.is_empty() || !parsed.mp_reach.is_empty();
-    let attributes = if announcing {
-        let next_hop = if nlri.is_empty() {
-            // MP-only announcement: the legacy NEXT_HOP attribute is never
-            // required (each mp_reach batch carries its own), and this value
-            // is never read when nlri is empty.
-            parsed.next_hop.unwrap_or(Ipv4Addr::UNSPECIFIED)
-        } else {
-            parsed.next_hop.ok_or(WireError::MalformedUpdate)?
-        };
-        Some(PathAttributes {
-            origin: parsed.origin.ok_or(WireError::MalformedUpdate)?,
-            as_path: parsed.as_path.ok_or(WireError::MalformedUpdate)?,
-            next_hop,
-            local_pref: parsed.local_pref,
-            med: parsed.med,
-            originator_id: parsed.originator_id,
-            cluster_list: parsed.cluster_list,
-            communities: parsed.communities,
-            extended_communities: parsed.extended_communities,
-            large_communities: parsed.large_communities,
-            pmsi: parsed.pmsi,
-        })
+    let attributes = if announcing && !parsed.withdraw {
+        // A missing mandatory attribute is treat-as-withdraw too (RFC 7606
+        // §3(d)). NEXT_HOP is only mandatory with legacy NLRI: an MP-only
+        // announcement carries its next-hop inside `MP_REACH_NLRI`.
+        match (parsed.origin, parsed.as_path, parsed.next_hop) {
+            (Some(origin), Some(as_path), next_hop) if next_hop.is_some() || nlri.is_empty() => {
+                Some(PathAttributes {
+                    origin,
+                    as_path,
+                    next_hop: next_hop.unwrap_or(Ipv4Addr::UNSPECIFIED),
+                    local_pref: parsed.local_pref,
+                    med: parsed.med,
+                    originator_id: parsed.originator_id,
+                    cluster_list: parsed.cluster_list,
+                    communities: parsed.communities,
+                    extended_communities: parsed.extended_communities,
+                    large_communities: parsed.large_communities,
+                    pmsi: parsed.pmsi,
+                })
+            }
+            _ => None,
+        }
     } else {
         None
     };
 
-    Ok(UpdateMessage {
+    let mut update = UpdateMessage {
         withdrawn_routes,
         withdrawn_path_ids,
         nlri,
@@ -1292,7 +1316,28 @@ fn parse_update(
         attributes,
         mp_reach: parsed.mp_reach,
         mp_unreach: parsed.mp_unreach,
-    })
+    };
+    // RFC 7606 §2 treat-as-withdraw: the announced routes are handled as if
+    // listed as withdrawn (legacy NLRI -> Withdrawn Routes, each MP_REACH
+    // batch -> an MP_UNREACH batch), and the attributes are dropped.
+    if announcing && update.attributes.is_none() {
+        warn!(
+            "malformed UPDATE path attributes: treating announced routes as withdrawn (RFC 7606)"
+        );
+        update.withdrawn_routes.append(&mut update.nlri);
+        update.withdrawn_path_ids.append(&mut update.nlri_path_ids);
+        let reach = std::mem::take(&mut update.mp_reach);
+        update
+            .mp_unreach
+            .extend(reach.into_iter().map(|m| MpUnreachNlri {
+                afi: m.afi,
+                safi: m.safi,
+                withdrawn: m.nlri,
+                withdrawn_path_ids: m.nlri_path_ids,
+                evpn: m.evpn,
+            }));
+    }
+    Ok(update)
 }
 
 fn encode_attribute(out: &mut Vec<u8>, flags: u8, attr_type: u8, value: &[u8]) {
@@ -2095,15 +2140,122 @@ mod tests {
     }
 
     #[test]
-    fn update_with_nlri_but_missing_mandatory_attribute_is_malformed() {
+    fn update_with_nlri_but_missing_mandatory_attribute_is_treated_as_withdraw() {
         // withdrawn_routes length = 0, path attributes length = 0 (no
         // ORIGIN/AS_PATH/NEXT_HOP at all), nlri = 10.0.0.0/8.
         let mut body = vec![0u8, 0u8, 0u8, 0u8];
         body.extend_from_slice(&[8, 10]);
+        let u = parse_update(&body, &HashSet::new(), false).unwrap();
+        assert!(u.nlri.is_empty() && u.attributes.is_none());
+        assert_eq!(u.withdrawn_routes, vec!["10.0.0.0/8".parse().unwrap()]);
+    }
+
+    /// Body: no withdrawn routes, `attrs`, then legacy NLRI 10.0.0.0/8.
+    fn body_with(attrs: &[u8]) -> Vec<u8> {
+        let mut body = vec![0u8, 0u8];
+        body.extend_from_slice(&u16::try_from(attrs.len()).unwrap().to_be_bytes());
+        body.extend_from_slice(attrs);
+        body.extend_from_slice(&[8, 10]);
+        body
+    }
+
+    fn valid_attrs() -> Vec<u8> {
+        let mut a = vec![0x40, ATTR_ORIGIN, 1, 0, 0x40, ATTR_AS_PATH, 0];
+        a.extend_from_slice(&[0x40, ATTR_NEXT_HOP, 4, 10, 0, 0, 1]);
+        a
+    }
+
+    #[test]
+    fn malformed_attribute_content_is_treated_as_withdraw_not_reset() {
+        let mp_reach = {
+            // AFI 2, SAFI 1, nh len 16 (2001:db8::1), reserved, 2001:db8:1::/48
+            let mut v = vec![0, 2, 1, 16];
+            v.extend_from_slice(&"2001:db8::1".parse::<Ipv6Addr>().unwrap().octets());
+            v.extend_from_slice(&[0, 48, 0x20, 0x01, 0x0d, 0xb8, 0, 1]);
+            v
+        };
+        for bad in [
+            &[0x40, ATTR_ORIGIN, 1, 9][..],             // bad ORIGIN value
+            &[0x80, ATTR_COMMUNITY, 3, 1, 2, 3][..],    // COMMUNITY length % 4
+            &[0x80, ATTR_MULTI_EXIT_DISC, 2, 0, 0][..], // MED length
+            &[0x40, ATTR_AS_PATH, 4, 2, 1, 0, 0][..],   // AS_PATH truncated segment
+        ] {
+            let mut attrs = valid_attrs();
+            attrs.extend_from_slice(bad);
+            attrs.extend_from_slice(&[
+                0x80,
+                ATTR_MP_REACH_NLRI,
+                u8::try_from(mp_reach.len()).unwrap(),
+            ]);
+            attrs.extend_from_slice(&mp_reach);
+            let u = parse_update(&body_with(&attrs), &HashSet::new(), false).unwrap();
+            assert_eq!(u.withdrawn_routes, vec!["10.0.0.0/8".parse().unwrap()]);
+            assert!(u.nlri.is_empty() && u.mp_reach.is_empty() && u.attributes.is_none());
+            assert_eq!(u.mp_unreach.len(), 1);
+            assert_eq!(
+                u.mp_unreach[0].withdrawn,
+                vec!["2001:db8:1::/48".parse().unwrap()]
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_attribute_framing_still_resets() {
+        // Attribute claims 5 value bytes but only 1 remains.
+        let attrs = [0x40, ATTR_ORIGIN, 5, 0];
         assert!(matches!(
-            parse_update(&body, &HashSet::new(), false),
+            parse_update(&body_with(&attrs), &HashSet::new(), false),
             Err(WireError::MalformedUpdate)
         ));
+    }
+
+    #[test]
+    fn as_zero_update_is_treated_as_withdraw() {
+        let mut attrs = vec![
+            0x40,
+            ATTR_ORIGIN,
+            1,
+            0,
+            0x40,
+            ATTR_AS_PATH,
+            6,
+            2,
+            1,
+            0,
+            0,
+            0,
+            0,
+        ];
+        attrs.extend_from_slice(&[0x40, ATTR_NEXT_HOP, 4, 10, 0, 0, 1]);
+        let u = parse_update(&body_with(&attrs), &HashSet::new(), false).unwrap();
+        assert!(u.nlri.is_empty() && u.attributes.is_none());
+        assert_eq!(u.withdrawn_routes.len(), 1);
+    }
+
+    #[test]
+    fn withdraw_carries_add_path_ids() {
+        let add_path = HashSet::from([AFI_IPV4]);
+        let mut attrs = valid_attrs();
+        attrs.extend_from_slice(&[0x80, ATTR_COMMUNITY, 1, 0]);
+        // ADD-PATH NLRI: path id 7, 10.0.0.0/8
+        let mut body = vec![0u8, 0u8];
+        body.extend_from_slice(&u16::try_from(attrs.len()).unwrap().to_be_bytes());
+        body.extend_from_slice(&attrs);
+        body.extend_from_slice(&[0, 0, 0, 7, 8, 10]);
+        let u = parse_update(&body, &add_path, false).unwrap();
+        assert_eq!(u.withdrawn_path_ids, vec![7]);
+        assert_eq!(u.withdrawn_routes.len(), 1);
+    }
+
+    #[test]
+    fn pure_withdrawal_with_bad_attribute_is_unchanged() {
+        let mut body = vec![0u8, 2, 8, 10];
+        let attrs = [0x80, ATTR_COMMUNITY, 1, 0];
+        body.extend_from_slice(&[0, 4]);
+        body.extend_from_slice(&attrs);
+        let u = parse_update(&body, &HashSet::new(), false).unwrap();
+        assert_eq!(u.withdrawn_routes, vec!["10.0.0.0/8".parse().unwrap()]);
+        assert!(u.attributes.is_none() && u.mp_unreach.is_empty());
     }
 
     #[test]

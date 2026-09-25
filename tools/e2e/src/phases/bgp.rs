@@ -444,6 +444,70 @@ pub async fn as4(w: &mut World) -> anyhow::Result<()> {
     bail!("ExaBGP never parsed AS_PATH [{AS_TRANS}] + AS4_PATH [{ASN_A4}]: {last}")
 }
 
+/// RFC 7606: an UPDATE whose COMMUNITY has a 3-byte value (malformed) must be
+/// treated as a withdraw, not reset the session. ExaBGP announces such a route
+/// beside a good one; router-a (no redistribution, so nothing that crashes
+/// ExaBGP's AS4 merge, see `as4`) must learn only the good one and stay up.
+pub async fn malformed_update(w: &mut World) -> anyhow::Result<()> {
+    let flags = strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--remote-as",
+        &ASN_G.to_string(),
+        "--peer",
+        IP_G,
+    ]);
+    w.start(A, Some(flags), &[]).await?;
+    w.dock
+        .ensure_image(
+            EXABGP_IMAGE,
+            &format!(
+                "FROM ghcr.io/exa-networks/exabgp:{EXABGP_VERSION}\n\
+                 ENV exabgp_daemon_daemonize=false exabgp_log_destination=stdout \\\n    \
+                 exabgp_log_level=DEBUG exabgp_log_all=true\n"
+            ),
+        )
+        .await?;
+    let conf = format!(
+        "neighbor {IP_A} {{\n    router-id {RID_G};\n    local-address {IP_G};\n    \
+         local-as {ASN_G};\n    peer-as {ASN_A};\n    family {{ ipv4 unicast; }}\n    \
+         static {{\n        route {AS4_LEARNED_PREFIX} next-hop {IP_G} as-path [ {ASN_G} ];\n        \
+         route {AS4_BAD_PREFIX} next-hop {IP_G} as-path [ {ASN_G} ] \
+         attribute [ 0x08 0xc0 0x010203 ];\n    }}\n}}\n"
+    );
+    w.dock
+        .start_plain(
+            "router-g",
+            EXABGP_IMAGE,
+            NET,
+            IP_G,
+            &["/etc/exabgp.conf"],
+            ("/etc", "exabgp.conf", conf.as_bytes()),
+        )
+        .await?;
+    let a = w.a()?;
+    a.established().await?;
+    let established = a.count("bgp session established");
+    a.wait(&format!(
+        "loc-rib best path for {AS4_LEARNED_PREFIX} updated"
+    ))
+    .await?;
+    a.wait("treating announced routes as withdrawn").await?;
+    anyhow::ensure!(
+        a.count(&format!("loc-rib best path for {AS4_BAD_PREFIX}")) == 0,
+        "router-a learned {AS4_BAD_PREFIX} despite its malformed COMMUNITY"
+    );
+    anyhow::ensure!(
+        a.count("bgp session established") == established,
+        "the malformed UPDATE reset the session"
+    );
+    Ok(())
+}
+
 /// GoBGP release image, built once — same recipe as `tools/bench-bgp.sh`.
 fn gobgp_dockerfile() -> String {
     format!(
