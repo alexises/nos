@@ -7,6 +7,7 @@ use anyhow::{bail, Context};
 use reqwest::Method;
 
 use crate::consts::*;
+use crate::logs::bre;
 use crate::router::{log, strings, Id, Router, A, B, C};
 use crate::world::World;
 
@@ -351,6 +352,96 @@ pub async fn communities(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     Ok(())
+}
+
+/// RFC 6793 against a real old speaker: ExaBGP with `asn4 disable` never sends
+/// the four-octet AS capability, so router-a (ASN > 65535) must talk 2-byte
+/// AS_PATH with AS_TRANS + AS4_PATH both ways.
+///
+/// Send: router-a redistributes a static route; its path is `[ASN_A4]`, which
+/// ExaBGP must receive as AS_PATH `[23456]` plus AS4_PATH `[ASN_A4]`. Receive:
+/// ExaBGP announces a route with AS_PATH `[65010 23456]` and an AS4_PATH
+/// carrying `AS4_HIDDEN_ASN`; router-a's Loc-RIB must hold the merged path.
+pub async fn as4(w: &mut World) -> anyhow::Result<()> {
+    let mut flags = strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--asn",
+        &ASN_A4.to_string(),
+        "--router-id",
+        RID_A,
+        "--remote-as",
+        &ASN_G.to_string(),
+        "--peer",
+        IP_G,
+    ]);
+    flags.extend(redistribute().into_iter().map(str::to_string));
+    w.start(A, Some(flags), &[]).await?;
+
+    log("building/starting the 2-byte-AS ExaBGP speaker (router-g)");
+    w.dock
+        .ensure_image(
+            EXABGP_IMAGE,
+            &format!(
+                "FROM ghcr.io/exa-networks/exabgp:{EXABGP_VERSION}\n\
+                 ENV exabgp_daemon_daemonize=false exabgp_log_destination=stdout \\\n    \
+                 exabgp_log_level=DEBUG exabgp_log_all=true\n"
+            ),
+        )
+        .await?;
+    // AS4_PATH (type 17, optional transitive): one AS_SEQUENCE of one ASN.
+    let as4_value = format!("0201{AS4_HIDDEN_ASN:08X}");
+    let conf = format!(
+        "process rx {{\n    run /bin/sh -c \"cat > /tmp/rx.json\";\n    encoder json;\n}}\n\
+         neighbor {IP_A} {{\n    router-id {RID_G};\n    local-address {IP_G};\n    \
+         local-as {ASN_G};\n    peer-as {AS_TRANS};\n    capability {{ asn4 disable; }}\n    \
+         family {{ ipv4 unicast; }}\n    \
+         api {{ processes [ rx ]; receive {{ parsed; update; }} }}\n    \
+         static {{\n        route {AS4_LEARNED_PREFIX} next-hop {IP_G} \
+         as-path [ {ASN_G} {AS_TRANS} ] attribute [ 0x11 0xc0 0x{as4_value} ];\n    }}\n}}\n"
+    );
+    w.dock
+        .start_plain(
+            "router-g",
+            EXABGP_IMAGE,
+            NET,
+            IP_G,
+            &["/etc/exabgp.conf"],
+            ("/etc", "exabgp.conf", conf.as_bytes()),
+        )
+        .await?;
+
+    let a = w.a()?;
+    a.established().await?;
+
+    log("receive: ExaBGP's 2-byte AS_PATH + AS4_PATH must merge into the real path");
+    a.wait(&format!(
+        "loc-rib best path for {AS4_LEARNED_PREFIX} updated .*as_path=\\[{ASN_G}, {AS4_HIDDEN_ASN}\\]"
+    ))
+    .await?;
+
+    // ExaBGP 5.0.13 parses both attributes (its debug log shows them) and then
+    // crashes in its own AS4_PATH merge (`'ASPath' object has no attribute
+    // 'as_seq'`), answering with a NOTIFICATION — so the session flaps and the
+    // wire bytes, as decoded by an independent implementation's parser, are
+    // what we assert on instead of an API dump.
+    log("send: router-a's redistributed route must reach ExaBGP as AS_TRANS + AS4_PATH");
+    let as_path_wire = format!("as-path .* payload 0201 {AS_TRANS:04X}");
+    let as4_path_wire = format!(
+        "as4-path .* payload 0201 {:04X} {:04X}",
+        ASN_A4 >> 16,
+        ASN_A4 & 0xFFFF
+    );
+    let mut last = String::new();
+    for _ in 0..30 {
+        last = w.dock.logs("router-g").await?;
+        let seen = |pat: &str| last.lines().any(|l| bre(pat).is_match(l));
+        if seen(&as_path_wire) && seen(&as4_path_wire) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("ExaBGP never parsed AS_PATH [{AS_TRANS}] + AS4_PATH [{ASN_A4}]: {last}")
 }
 
 /// GoBGP release image, built once — same recipe as `tools/bench-bgp.sh`.

@@ -248,6 +248,9 @@ struct RemoteInfo {
     /// capability, see `run`) and the peer echoed it back.
     add_path_ipv4: bool,
     add_path_ipv6: bool,
+    /// The peer sent the four-octet AS capability (RFC 6793); `false` means
+    /// 2-byte `AS_PATH` + `AS4_PATH` in both directions.
+    four_octet_as: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +289,7 @@ enum Action {
         negotiated_evpn: bool,
         add_path_ipv4: bool,
         add_path_ipv6: bool,
+        four_octet_as: bool,
     },
     Close,
 }
@@ -318,6 +322,7 @@ fn step(state: State, event: Event, ctx: &NegotiationContext) -> (Option<State>,
                 negotiated_evpn: remote.negotiated_evpn,
                 add_path_ipv4: remote.add_path_ipv4,
                 add_path_ipv6: remote.add_path_ipv6,
+                four_octet_as: remote.four_octet_as,
             }],
         ),
         (State::Established(remote), Event::KeepaliveReceived) => {
@@ -410,6 +415,7 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
         negotiated_evpn,
         add_path_ipv4,
         add_path_ipv6,
+        four_octet_as: message::four_octet_asn(open).is_some(),
     };
     (
         Some(State::OpenConfirm(remote)),
@@ -834,6 +840,7 @@ pub async fn run(
                         negotiated_evpn,
                         add_path_ipv4,
                         add_path_ipv6,
+                        four_octet_as,
                     } => {
                         slot.mark_established(role).await;
                         let mut negotiated_afs = HashSet::new();
@@ -865,6 +872,8 @@ pub async fn run(
                             .add_path_afis
                             .clone_from(&add_path_afis);
                         writer.encoder_mut().add_path_afis = add_path_afis;
+                        reader.decoder_mut().two_octet_as = !*four_octet_as;
+                        writer.encoder_mut().two_octet_as = !*four_octet_as;
                         bgp_rib.lock().await.peer_established(
                             peer.remote_address,
                             remote_is_ibgp,
@@ -1302,6 +1311,21 @@ mod tests {
     }
 
     #[test]
+    fn four_octet_as_follows_the_peers_capability() {
+        let with_cap = valid_open(65002, 90);
+        let (Some(State::OpenConfirm(r)), _) = handle_open(&with_cap, &ctx(65002)) else {
+            panic!("expected OpenConfirm");
+        };
+        assert!(r.four_octet_as);
+        let mut without = with_cap;
+        without.capabilities.clear();
+        let (Some(State::OpenConfirm(r)), _) = handle_open(&without, &ctx(65002)) else {
+            panic!("expected OpenConfirm");
+        };
+        assert!(!r.four_octet_as);
+    }
+
+    #[test]
     fn keepalive_in_open_confirm_reaches_established() {
         let remote = RemoteInfo {
             asn: 65002,
@@ -1312,6 +1336,7 @@ mod tests {
             negotiated_evpn: false,
             add_path_ipv4: false,
             add_path_ipv6: false,
+            four_octet_as: true,
         };
         let (next, actions) = step(
             State::OpenConfirm(remote),
@@ -1335,6 +1360,7 @@ mod tests {
             negotiated_evpn: false,
             add_path_ipv4: false,
             add_path_ipv6: false,
+            four_octet_as: true,
         };
         for state in [
             State::OpenSent,
@@ -1386,6 +1412,7 @@ mod tests {
             negotiated_evpn: false,
             add_path_ipv4: false,
             add_path_ipv6: false,
+            four_octet_as: true,
         };
         let (next, actions) = step(
             State::Established(remote),
@@ -1407,6 +1434,7 @@ mod tests {
             negotiated_evpn: false,
             add_path_ipv4: false,
             add_path_ipv6: false,
+            four_octet_as: true,
         };
         let (next, actions) = step(
             State::Established(remote),
