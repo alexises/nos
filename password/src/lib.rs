@@ -14,13 +14,28 @@ pub fn is_hash(s: &str) -> bool {
     s.starts_with(HASH_PREFIX)
 }
 
+fn params() -> Params {
+    Params::new(65536, 3, 4, None).expect("valid argon2 params")
+}
+
+/// `true` iff `hash` is a well-formed hash made with weaker parameters than
+/// [`hash`] uses today — the caller re-hashes it after a successful login.
+pub fn needs_rehash(hash: &str) -> bool {
+    let cur = params();
+    PasswordHash::new(hash)
+        .ok()
+        .and_then(|h| Params::try_from(&h).ok())
+        .is_some_and(|p| {
+            p.m_cost() < cur.m_cost() || p.t_cost() < cur.t_cost() || p.p_cost() < cur.p_cost()
+        })
+}
+
 /// Hashes `password` with a fresh random salt, using RFC 9106 §4's
 /// memory-constrained profile (m=64 MiB, t=3, p=4). Verification reads the
 /// parameters from the stored PHC string, so older hashes keep working.
 pub fn hash(password: &str) -> String {
     let salt = SaltString::generate(&mut OsRng);
-    let params = Params::new(65536, 3, 4, None).expect("valid argon2 params");
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params())
         .hash_password(password.as_bytes(), &salt)
         .expect("argon2 with valid params and a generated salt cannot fail")
         .to_string()
@@ -64,12 +79,15 @@ mod tests {
     #[test]
     fn rfc9106_params_and_legacy_hashes_still_verify() {
         assert!(hash("pw").contains("m=65536,t=3,p=4"));
+        assert!(!needs_rehash(&hash("pw")));
+        assert!(!needs_rehash("garbage"));
         let salt = SaltString::generate(&mut OsRng);
         let old = Argon2::default()
             .hash_password(b"pw", &salt)
             .unwrap()
             .to_string();
         assert!(verify("pw", &old));
+        assert!(needs_rehash(&old));
     }
 
     #[test]

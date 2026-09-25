@@ -218,15 +218,37 @@ async fn login(
         .find(|u| u.name == user)
         .map(|u| u.password);
     // `verify_or_dummy` burns the same time for an unknown user as for a wrong
-    // password, so response time doesn't reveal which usernames exist.
-    let ok = tokio::task::spawn_blocking(move || {
-        nos_password::verify_or_dummy(&password, stored.as_deref())
+    // password, so response time doesn't reveal which usernames exist. A
+    // correct password against a hash made with weaker parameters than today's
+    // is re-hashed here, while the clear text is at hand.
+    let old = stored.clone();
+    let (ok, upgraded) = tokio::task::spawn_blocking(move || {
+        let ok = nos_password::verify_or_dummy(&password, stored.as_deref());
+        let upgraded = stored
+            .filter(|h| ok && nos_password::needs_rehash(h))
+            .map(|_| nos_password::hash(&password));
+        (ok, upgraded)
     })
     .await
-    .unwrap_or(false);
+    .unwrap_or((false, None));
     if !ok {
         info!(user = %user, "login rejected");
         return WatchdogEvent::Denied(INVALID_CREDENTIALS.to_string());
+    }
+    if let (Some(old), Some(new)) = (old, upgraded) {
+        // Best effort: never fail a correct login over an upgrade.
+        match config_client::upgrade_password_hash(
+            &ctx.pki.identity,
+            &ctx.sockets.config,
+            user,
+            &old,
+            new,
+        )
+        .await
+        {
+            Ok(()) => info!(user = %user, "upgraded password hash to current parameters"),
+            Err(e) => warn!(user = %user, error = %e, "could not upgrade password hash"),
+        }
     }
     let event = issue(ctx, user, csr_der, realm);
     if matches!(event, WatchdogEvent::Issued { .. }) {

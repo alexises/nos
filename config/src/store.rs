@@ -222,6 +222,35 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// Swaps `user`'s password hash `old` for `new` in the running config
+    /// (see `Request::UpgradePasswordHash`), broadcasting it like a commit.
+    pub async fn upgrade_password_hash(
+        &self,
+        user: &str,
+        old: &str,
+        new: String,
+    ) -> Result<(), ConfigError> {
+        if !nos_password::is_hash(&new) {
+            return Err(ConfigError::HashUpgradeRefused);
+        }
+        let mut running = self.0.running.write().await;
+        let mut config = running.clone();
+        match config
+            .users
+            .iter_mut()
+            .find(|u| u.name == user && u.password == old)
+        {
+            Some(u) => u.password = new,
+            None => return Err(ConfigError::HashUpgradeRefused),
+        }
+        let diff = diff_configs(&running, &config);
+        *running = config.clone();
+        drop(running);
+        info!(user = %user, "password hash upgraded");
+        let _ = self.0.tx.send(Arc::new(CommitUpdate { config, diff }));
+        Ok(())
+    }
+
     /// The diff a fresh `SubscribeDiff` connection should see as its initial
     /// event: everything currently in the running config, reported as
     /// `Added` (diffing against an empty config can never produce
@@ -792,6 +821,34 @@ mod tests {
             store.get_transaction("t3").await.unwrap().config.users[0].password,
             hash
         );
+    }
+
+    #[tokio::test]
+    async fn password_hash_upgrade_is_a_compare_and_swap_of_hashes() {
+        let store = ConfigStore::new(Config::default(), None);
+        commit_password(&store, "t1", "alice", "one").await;
+        let old = store.running_snapshot().await.users[0].password.clone();
+        let new = nos_password::hash("one");
+        let mut rx = store.subscribe();
+
+        assert!(store
+            .upgrade_password_hash("alice", "stale", new.clone())
+            .await
+            .is_err());
+        assert!(store
+            .upgrade_password_hash("alice", &old, "clear".into())
+            .await
+            .is_err());
+        assert!(store
+            .upgrade_password_hash("bob", &old, new.clone())
+            .await
+            .is_err());
+        store
+            .upgrade_password_hash("alice", &old, new.clone())
+            .await
+            .unwrap();
+        assert_eq!(store.running_snapshot().await.users[0].password, new);
+        assert_eq!(rx.recv().await.unwrap().config.users[0].password, new);
     }
 
     #[tokio::test]

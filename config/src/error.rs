@@ -8,6 +8,8 @@ pub enum ConfigError {
     Validation(#[from] garde::Report),
     #[error("refusing to commit: it would remove every user and lock everyone out")]
     NoUsersLeft,
+    #[error("password hash upgrade refused: no such user, stale hash, or not a hash")]
+    HashUpgradeRefused,
     #[error("no transaction named '{0}'")]
     TransactionNotFound(String),
     #[error("edit failed: {0}")]

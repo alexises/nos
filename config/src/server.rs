@@ -164,6 +164,15 @@ async fn dispatch_request(store: &ConfigStore, req: Request) -> Option<Event> {
                 }
             }
         }
+        Request::UpgradePasswordHash { user, old, new } => {
+            match store.upgrade_password_hash(&user, &old, new).await {
+                Ok(()) => Event::Committed,
+                Err(e) => {
+                    debug!(user = %user, error = %e, "password hash upgrade refused");
+                    Event::Error(e.to_string())
+                }
+            }
+        }
         Request::Subscribe | Request::Unsubscribe | Request::SubscribeDiff { .. } => return None,
     })
 }
