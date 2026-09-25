@@ -18,9 +18,11 @@
 //! `MP_REACH_NLRI`/`MP_UNREACH_NLRI` path attributes and skips any other attribute type by
 //! its declared length (never an error — the same philosophy
 //! `parse_optional_parameters` already applies to unknown OPEN capabilities),
-//! and never emits RFC 6793's `AS4_PATH` transition attribute (`AS_PATH` is
-//! always encoded with 4-byte ASNs, since this NOS always advertises the
-//! four-octet AS number capability itself). Any other/unknown message type
+//! and, for a peer that never sent the four-octet AS capability
+//! (`BgpCodec::two_octet_as`), speaks RFC 6793's transition encoding: 2-byte
+//! `AS_PATH` with `AS_TRANS` plus `AS4_PATH` on send, `AS4_PATH` merged back
+//! in on receipt (no `AGGREGATOR` attribute exists here, so no
+//! `AS4_AGGREGATOR`). Any other/unknown message type
 //! still decodes as `BgpMessage::Unhandled` so the codec never chokes on one
 //! arriving.
 
@@ -88,6 +90,9 @@ const ATTR_EXTENDED_COMMUNITIES: u8 = 16;
 /// RFC 8092 §3 large community — a list of 12-byte (3×u32) values.
 const ATTR_LARGE_COMMUNITY: u8 = 32;
 const ATTR_PMSI_TUNNEL: u8 = 22;
+/// RFC 6793 §3: the real 4-byte path, carried beside a 2-byte `AS_PATH` to/from
+/// a peer that never negotiated the four-octet AS capability.
+const ATTR_AS4_PATH: u8 = 17;
 /// RFC 4271 §4.3 attribute flag bit indicating a 2-byte (rather than 1-byte)
 /// attribute length field follows the type byte.
 const ATTR_FLAG_EXTENDED_LENGTH: u8 = 0x10;
@@ -425,6 +430,10 @@ pub fn is_valid_bgp_identifier(id: Ipv4Addr) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct BgpCodec {
     pub add_path_afis: HashSet<u16>,
+    /// True once the peer's OPEN lacked the four-octet AS capability (RFC 6793
+    /// §4.2): `AS_PATH` is then 2-byte in both directions, with `AS4_PATH`
+    /// carrying the real path. Set at the same point as `add_path_afis`.
+    pub two_octet_as: bool,
 }
 
 impl Decoder for BgpCodec {
@@ -454,7 +463,9 @@ impl Decoder for BgpCodec {
 
         let message = match message_type {
             TYPE_OPEN => BgpMessage::Open(parse_open(&body)?),
-            TYPE_UPDATE => BgpMessage::Update(parse_update(&body, &self.add_path_afis)?),
+            TYPE_UPDATE => {
+                BgpMessage::Update(parse_update(&body, &self.add_path_afis, self.two_octet_as)?)
+            }
             TYPE_KEEPALIVE => {
                 if !body.is_empty() {
                     return Err(WireError::BadLength(length));
@@ -478,7 +489,7 @@ impl Encoder<BgpMessage> for BgpCodec {
     fn encode(&mut self, item: BgpMessage, dst: &mut BytesMut) -> Result<(), WireError> {
         let (message_type, body) = match item {
             BgpMessage::Open(open) => (TYPE_OPEN, encode_open(&open)),
-            BgpMessage::Update(update) => (TYPE_UPDATE, encode_update(&update)),
+            BgpMessage::Update(update) => (TYPE_UPDATE, encode_update(&update, self.two_octet_as)),
             BgpMessage::Keepalive => (TYPE_KEEPALIVE, Vec::new()),
             BgpMessage::Notification(n) => (TYPE_NOTIFICATION, encode_notification(&n)),
             BgpMessage::RouteRefresh(rr) => (TYPE_ROUTE_REFRESH, encode_route_refresh(rr)),
@@ -845,13 +856,17 @@ struct ParsedAttributes {
 /// `MP_UNREACH_NLRI` and skipping anything else by its own declared length
 /// (mirrors `parse_optional_parameters`'s handling of unknown OPEN
 /// capabilities). `add_path_afis` is threaded down into
-/// `MP_REACH_NLRI`/`MP_UNREACH_NLRI` decoding.
+/// `MP_REACH_NLRI`/`MP_UNREACH_NLRI` decoding. With `two_octet_as`, `AS_PATH`
+/// is read as 2-byte and merged with `AS4_PATH` per RFC 6793 §4.2.3; without
+/// it a stray `AS4_PATH` is ignored.
 fn parse_path_attributes(
     mut data: &[u8],
     add_path_afis: &HashSet<u16>,
+    two_octet_as: bool,
 ) -> Result<ParsedAttributes, WireError> {
     let mut origin = None;
-    let mut as_path = None;
+    let mut as_path: Option<Vec<u32>> = None;
+    let mut as4_path = None;
     let mut next_hop = None;
     let mut local_pref = None;
     let mut med = None;
@@ -898,7 +913,8 @@ fn parse_path_attributes(
                     _ => return Err(WireError::MalformedUpdate),
                 });
             }
-            ATTR_AS_PATH => as_path = Some(parse_as_path(value)?),
+            ATTR_AS_PATH => as_path = Some(parse_as_path(value, if two_octet_as { 2 } else { 4 })?),
+            ATTR_AS4_PATH if two_octet_as => as4_path = Some(parse_as_path(value, 4)?),
             ATTR_NEXT_HOP => {
                 if value.len() != 4 {
                     return Err(WireError::MalformedUpdate);
@@ -983,6 +999,15 @@ fn parse_path_attributes(
         }
 
         data = &data[header_len + len..];
+    }
+
+    // RFC 6793 §4.2.3: the trailing `as4.len()` entries of the 2-byte path are
+    // replaced by AS4_PATH; a longer AS4_PATH is malformed and ignored.
+    if let (Some(path), Some(as4)) = (as_path.as_mut(), as4_path) {
+        if as4.len() <= path.len() {
+            path.truncate(path.len() - as4.len());
+            path.extend(as4);
+        }
     }
 
     Ok(ParsedAttributes {
@@ -1150,24 +1175,25 @@ fn encode_mp_unreach(mp: &MpUnreachNlri) -> Vec<u8> {
 }
 
 /// Flattens one or more `AS_PATH` segments (`segment_type(1) count(1)
-/// count*4 bytes`) into a single `Vec<u32>`, regardless of `AS_SEQUENCE` vs.
-/// `AS_SET` (documented simplification — this crate never distinguishes them).
-fn parse_as_path(mut data: &[u8]) -> Result<Vec<u32>, WireError> {
+/// count*width bytes`, `width` 2 or 4) into a single `Vec<u32>`, regardless of
+/// `AS_SEQUENCE` vs. `AS_SET` (documented simplification — this crate never
+/// distinguishes them).
+fn parse_as_path(mut data: &[u8], width: usize) -> Result<Vec<u32>, WireError> {
     let mut asns = Vec::new();
     while !data.is_empty() {
         if data.len() < 2 {
             return Err(WireError::MalformedUpdate);
         }
         let count = usize::from(data[1]);
-        let segment_len = 2 + count * 4;
+        let segment_len = 2 + count * width;
         if data.len() < segment_len {
             return Err(WireError::MalformedUpdate);
         }
-        let mut asn_data = &data[2..segment_len];
-        for _ in 0..count {
-            asns.push(u32::from_be_bytes(asn_data[..4].try_into().unwrap()));
-            asn_data = &asn_data[4..];
-        }
+        asns.extend(
+            data[2..segment_len]
+                .chunks_exact(width)
+                .map(|c| c.iter().fold(0u32, |acc, &b| (acc << 8) | u32::from(b))),
+        );
         data = &data[segment_len..];
     }
     Ok(asns)
@@ -1188,7 +1214,11 @@ fn parse_as_path(mut data: &[u8]) -> Result<Vec<u32>, WireError> {
 /// `BgpCodec`) decides whether IPv4 unicast (legacy `withdrawn_routes`/
 /// `nlri`) — and, per-batch, each `mp_reach`/`mp_unreach` entry's own AFI —
 /// carries a leading RFC 7911 Path Identifier.
-fn parse_update(body: &[u8], add_path_afis: &HashSet<u16>) -> Result<UpdateMessage, WireError> {
+fn parse_update(
+    body: &[u8],
+    add_path_afis: &HashSet<u16>,
+    two_octet_as: bool,
+) -> Result<UpdateMessage, WireError> {
     if body.len() < 2 {
         return Err(WireError::MalformedUpdate);
     }
@@ -1210,7 +1240,7 @@ fn parse_update(body: &[u8], add_path_afis: &HashSet<u16>) -> Result<UpdateMessa
     if body.len() < pos + attr_len {
         return Err(WireError::MalformedUpdate);
     }
-    let parsed = parse_path_attributes(&body[pos..pos + attr_len], add_path_afis)?;
+    let parsed = parse_path_attributes(&body[pos..pos + attr_len], add_path_afis, two_octet_as)?;
     pos += attr_len;
 
     let (nlri, nlri_path_ids) = decode_prefixes_v4(&body[pos..], with_ids_v4)?;
@@ -1272,8 +1302,9 @@ fn encode_attribute(out: &mut Vec<u8>, flags: u8, attr_type: u8, value: &[u8]) {
 /// `MAX_AS_PATH_SEGMENT_LEN` ASNs each (the segment's own count field is a
 /// single byte). An empty path encodes as an empty attribute value (no
 /// segments at all) — valid for, e.g., a route redistributed straight to an
-/// iBGP peer, which never gets a local ASN prepended.
-fn encode_as_path(asns: &[u32]) -> Vec<u8> {
+/// iBGP peer, which never gets a local ASN prepended. With `two_octet`, each
+/// ASN is 2 bytes and one that doesn't fit becomes `AS_TRANS` (RFC 6793 §4.2.2).
+fn encode_as_path(asns: &[u32], two_octet: bool) -> Vec<u8> {
     let mut out = Vec::new();
     for chunk in asns.chunks(MAX_AS_PATH_SEGMENT_LEN) {
         out.push(AS_PATH_SEGMENT_SEQUENCE);
@@ -1281,7 +1312,12 @@ fn encode_as_path(asns: &[u32]) -> Vec<u8> {
         // elements per chunk, so this always fits in a u8.
         out.push(u8::try_from(chunk.len()).unwrap_or(u8::MAX));
         for asn in chunk {
-            out.extend_from_slice(&asn.to_be_bytes());
+            if two_octet {
+                let asn = u16::try_from(*asn).unwrap_or(AS_TRANS);
+                out.extend_from_slice(&asn.to_be_bytes());
+            } else {
+                out.extend_from_slice(&asn.to_be_bytes());
+            }
         }
     }
     out
@@ -1291,7 +1327,7 @@ fn encode_as_path(asns: &[u32]) -> Vec<u8> {
 /// `ORIGIN`/`AS_PATH`/(`NEXT_HOP`)/`LOCAL_PREF` attributes (`NEXT_HOP` only
 /// when the legacy `nlri` field is non-empty), then one `MP_REACH_NLRI`/
 /// `MP_UNREACH_NLRI` attribute per batch.
-fn encode_attributes(update: &UpdateMessage) -> Vec<u8> {
+fn encode_attributes(update: &UpdateMessage, two_octet_as: bool) -> Vec<u8> {
     let mut out = Vec::new();
     if let Some(attrs) = &update.attributes {
         encode_attribute(
@@ -1304,8 +1340,18 @@ fn encode_attributes(update: &UpdateMessage) -> Vec<u8> {
             &mut out,
             ATTR_FLAG_WELL_KNOWN_TRANSITIVE,
             ATTR_AS_PATH,
-            &encode_as_path(&attrs.as_path),
+            &encode_as_path(&attrs.as_path, two_octet_as),
         );
+        // RFC 6793 §4.2.2: the real path rides along only when some ASN was
+        // squashed to AS_TRANS.
+        if two_octet_as && attrs.as_path.iter().any(|&a| a > u32::from(u16::MAX)) {
+            encode_attribute(
+                &mut out,
+                ATTR_FLAG_OPTIONAL_TRANSITIVE,
+                ATTR_AS4_PATH,
+                &encode_as_path(&attrs.as_path, false),
+            );
+        }
         if !update.nlri.is_empty() {
             encode_attribute(
                 &mut out,
@@ -1428,7 +1474,7 @@ fn encode_attributes(update: &UpdateMessage) -> Vec<u8> {
 /// the whole message is capped at `MAX_MESSAGE_LEN` (4096) bytes by
 /// `BgpCodec::encode`, which will itself reject the overall frame if
 /// something pathological ever made it larger.
-fn encode_update(update: &UpdateMessage) -> Vec<u8> {
+fn encode_update(update: &UpdateMessage, two_octet_as: bool) -> Vec<u8> {
     let mut body = Vec::new();
 
     let withdrawn = encode_prefixes_v4(&update.withdrawn_routes, &update.withdrawn_path_ids);
@@ -1439,7 +1485,7 @@ fn encode_update(update: &UpdateMessage) -> Vec<u8> {
     );
     body.extend_from_slice(&withdrawn);
 
-    let attrs = encode_attributes(update);
+    let attrs = encode_attributes(update, two_octet_as);
     body.extend_from_slice(&u16::try_from(attrs.len()).unwrap_or(u16::MAX).to_be_bytes());
     body.extend_from_slice(&attrs);
 
@@ -1460,6 +1506,117 @@ mod tests {
         let mut buf = BytesMut::new();
         codec.encode(msg, &mut buf).unwrap();
         codec.decode(&mut buf).unwrap().unwrap()
+    }
+
+    fn as_path_update(as_path: Vec<u32>) -> UpdateMessage {
+        UpdateMessage {
+            withdrawn_routes: vec![],
+            withdrawn_path_ids: vec![],
+            nlri: vec!["10.0.0.0/8".parse().unwrap()],
+            nlri_path_ids: vec![],
+            attributes: Some(PathAttributes {
+                origin: Origin::Igp,
+                as_path,
+                next_hop: Ipv4Addr::new(192, 0, 2, 1),
+                local_pref: None,
+                med: None,
+                originator_id: None,
+                cluster_list: vec![],
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                pmsi: None,
+            }),
+            mp_reach: vec![],
+            mp_unreach: vec![],
+        }
+    }
+
+    fn two_octet_codec() -> BgpCodec {
+        BgpCodec {
+            two_octet_as: true,
+            ..BgpCodec::default()
+        }
+    }
+
+    /// Path attribute type codes in `update`'s wire encoding.
+    fn attr_types(update: &UpdateMessage, two_octet_as: bool) -> Vec<u8> {
+        let mut data = &encode_attributes(update, two_octet_as)[..];
+        let mut types = vec![];
+        while !data.is_empty() {
+            types.push(data[1]);
+            let (len, hdr) = if data[0] & ATTR_FLAG_EXTENDED_LENGTH != 0 {
+                (usize::from(u16::from_be_bytes([data[2], data[3]])), 4)
+            } else {
+                (usize::from(data[2]), 3)
+            };
+            data = &data[hdr + len..];
+        }
+        types
+    }
+
+    #[test]
+    fn two_octet_peer_gets_as_trans_and_as4_path_and_roundtrips() {
+        let update = as_path_update(vec![65001, 4_200_000_000, 65002]);
+        assert_eq!(
+            encode_as_path(&update.attributes.as_ref().unwrap().as_path, true),
+            [2, 3, 0xFD, 0xE9, 0x5B, 0xA0, 0xFD, 0xEA]
+        );
+        assert!(attr_types(&update, true).contains(&ATTR_AS4_PATH));
+
+        let mut codec = two_octet_codec();
+        let mut buf = BytesMut::new();
+        codec
+            .encode(BgpMessage::Update(update.clone()), &mut buf)
+            .unwrap();
+        assert_eq!(
+            codec.decode(&mut buf).unwrap().unwrap(),
+            BgpMessage::Update(update)
+        );
+    }
+
+    #[test]
+    fn two_octet_peer_with_only_small_asns_gets_no_as4_path() {
+        let update = as_path_update(vec![65001, 65002]);
+        assert!(!attr_types(&update, true).contains(&ATTR_AS4_PATH));
+        // A 4-octet peer never gets one either.
+        let big = as_path_update(vec![65001, 4_200_000_000]);
+        assert!(!attr_types(&big, false).contains(&ATTR_AS4_PATH));
+    }
+
+    #[test]
+    fn as4_path_merges_per_rfc6793_only_when_two_octet() {
+        // AS_PATH 65001 23456 65003 + AS4_PATH (real) 4200000000 65003:
+        // the trailing 2 entries are replaced, the leading one kept.
+        let mut attrs = Vec::new();
+        encode_attribute(&mut attrs, 0x40, ATTR_ORIGIN, &[0]);
+        encode_attribute(
+            &mut attrs,
+            0x40,
+            ATTR_AS_PATH,
+            &[2, 3, 0xFD, 0xE9, 0x5B, 0xA0, 0xFD, 0xEB],
+        );
+        encode_attribute(&mut attrs, 0x40, ATTR_NEXT_HOP, &[192, 0, 2, 1]);
+        encode_attribute(
+            &mut attrs,
+            0xC0,
+            ATTR_AS4_PATH,
+            &encode_as_path(&[4_200_000_000, 65003], false),
+        );
+        let merged = parse_path_attributes(&attrs, &HashSet::new(), true).unwrap();
+        assert_eq!(merged.as_path, Some(vec![65001, 4_200_000_000, 65003]));
+
+        // A longer AS4_PATH is ignored, leaving the 2-byte path as sent.
+        let mut long = Vec::new();
+        encode_attribute(&mut long, 0x40, ATTR_AS_PATH, &[2, 1, 0xFD, 0xE9]);
+        encode_attribute(
+            &mut long,
+            0xC0,
+            ATTR_AS4_PATH,
+            &encode_as_path(&[1, 2], false),
+        );
+        let ignored = parse_path_attributes(&long, &HashSet::new(), true).unwrap();
+        assert_eq!(ignored.as_path, Some(vec![65001]));
     }
 
     #[test]
@@ -1898,7 +2055,7 @@ mod tests {
         // nlri: 10.0.0.0/8
         body.extend_from_slice(&[8, 10]);
 
-        let parsed = parse_update(&body, &HashSet::new()).unwrap();
+        let parsed = parse_update(&body, &HashSet::new(), false).unwrap();
         assert_eq!(parsed.nlri, vec!["10.0.0.0/8".parse().unwrap()]);
         assert_eq!(
             parsed.attributes,
@@ -1925,7 +2082,7 @@ mod tests {
         let mut body = vec![0u8, 0u8, 0u8, 0u8];
         body.extend_from_slice(&[8, 10]);
         assert!(matches!(
-            parse_update(&body, &HashSet::new()),
+            parse_update(&body, &HashSet::new(), false),
             Err(WireError::MalformedUpdate)
         ));
     }
@@ -1935,7 +2092,7 @@ mod tests {
         // withdrawn_routes: one entry with an invalid prefix length (33).
         let body = vec![0u8, 2u8, 33u8, 10u8];
         assert!(matches!(
-            parse_update(&body, &HashSet::new()),
+            parse_update(&body, &HashSet::new(), false),
             Err(WireError::MalformedUpdate)
         ));
     }
@@ -1946,7 +2103,7 @@ mod tests {
         // of address data follows before the section's declared length ends.
         let body = vec![0u8, 2u8, 24u8, 10u8];
         assert!(matches!(
-            parse_update(&body, &HashSet::new()),
+            parse_update(&body, &HashSet::new(), false),
             Err(WireError::MalformedUpdate)
         ));
     }

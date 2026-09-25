@@ -40,6 +40,17 @@ pub const GOBGP_IMAGE: &str = "nos-e2e-gobgp:local";
 /// Same release `tools/bench-bgp.sh` pins.
 pub const GOBGP_VERSION: &str = "4.9.0";
 pub const ASN_A: u32 = 65001;
+/// `as4`: router-a's four-octet ASN, and the 2-byte-only ExaBGP speaker
+/// (`router-g`) it peers, which an RFC 6793 "old" speaker sees as AS_TRANS.
+pub const AS_TRANS: u32 = 23456;
+pub const ASN_A4: u32 = 4_200_000_001;
+/// ExaBGP's route for router-a to learn, and the four-octet ASN hidden in its
+/// AS4_PATH (0xFA56EA02) behind an AS_TRANS in the 2-byte AS_PATH.
+pub const AS4_LEARNED_PREFIX: &str = "203.0.113.0/24";
+pub const AS4_HIDDEN_ASN: u32 = 4_200_000_002;
+pub const EXABGP_IMAGE: &str = "nos-e2e-exabgp:local";
+/// Same release `tools/bench-bgp.sh` pins.
+pub const EXABGP_VERSION: &str = "5.0.13";
 /// `evpn-fdb`: router-a's broadcast domain and its EVPN identity. The import
 /// Route Target is the one GoBGP tags its routes with (`65010:10000`); the
 /// export one is router-a's own. `EVPN_LOCAL_MAC` is what the helper pins on
