@@ -26,6 +26,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "reflector" => bgp::reflector(w).await,
         "route-server" => bgp::route_server(w).await,
         "as4" => bgp::as4(w).await,
+        "malformed-update" => bgp::malformed_update(w).await,
         "evpn" => bgp::evpn(w).await,
         "evpn-fdb" => bgp::evpn_fdb(w).await,
         "evpn-esi" => bgp::evpn_esi(w).await,
@@ -111,6 +112,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
         ],
         "multi" => &[
             "as4",
+            "malformed-update",
             "evpn",
             "evpn-fdb",
             "evpn-esi",
@@ -155,6 +157,7 @@ pub const ALL: &[&str] = &[
     "reflector",
     "route-server",
     "as4",
+    "malformed-update",
     "ospf",
     "asbr",
     "ospf-dr",
