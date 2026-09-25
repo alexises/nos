@@ -1,0 +1,10 @@
+[package]
+name    = "nos-password"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+argon2 = { version = "0.5", features = ["std", "password-hash", "rand"] }

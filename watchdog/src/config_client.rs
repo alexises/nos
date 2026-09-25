@@ -1,0 +1,64 @@
+use std::io;
+use std::path::Path;
+use std::time::Duration;
+
+use futures::{SinkExt, StreamExt};
+use nos_pki::{Identity, PeerId, Stream};
+use nos_proto::{DiffScope, Event, IpcCodec, Request, Role, User};
+use tokio::io::{split, ReadHalf};
+use tokio_util::codec::{FramedRead, FramedWrite};
+
+type Reader = FramedRead<ReadHalf<Stream>, IpcCodec<Event>>;
+
+/// A dead `nos-configd` must fail a login, not hang it.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn configd() -> PeerId {
+    PeerId::new(Role::Configd.as_str(), "")
+}
+
+/// Dials `nos-configd`, sends `Request::SubscribeDiff { scopes }`, and
+/// returns the reader half for the caller to loop on indefinitely: an
+/// initial diff (synthesized against an empty config, so every
+/// currently-configured item in `scopes` shows up as `Added`), then one more
+/// `Event::Diff` per future commit that touches a requested scope.
+///
+/// Mirrors `nos-cli`'s `client::subscribe`, but deliberately not shared with
+/// it — `nos-watchdog` must not depend on `nos-cli`, a consumer binary, not
+/// a shared library.
+pub async fn subscribe_diff(
+    identity: &Identity,
+    socket_path: &Path,
+    scopes: Vec<DiffScope>,
+) -> io::Result<Reader> {
+    let stream = identity.connect(socket_path, &configd()).await?;
+    let (r, w) = split(stream);
+    let reader = FramedRead::new(r, IpcCodec::<Event>::default());
+    let mut writer = FramedWrite::new(w, IpcCodec::<Request>::default());
+    writer.send(Request::SubscribeDiff { scopes }).await?;
+    Ok(reader)
+}
+
+/// The locally configured users, hashes included — what a login is checked
+/// against. The hashes never leave the watchdog: a client only ever sends a
+/// password and gets back a certificate.
+pub async fn fetch_users(identity: &Identity, socket_path: &Path) -> io::Result<Vec<User>> {
+    let fetch = async {
+        let stream = identity.connect(socket_path, &configd()).await?;
+        let (r, w) = split(stream);
+        let mut writer = FramedWrite::new(w, IpcCodec::<Request>::default());
+        let mut reader = FramedRead::new(r, IpcCodec::<Event>::default());
+        writer.send(Request::Get).await?;
+        match reader.next().await {
+            Some(Ok(Event::Config(config))) => Ok(config.users),
+            Some(Ok(other)) => Err(io::Error::other(format!(
+                "unexpected reply to Get: {other:?}"
+            ))),
+            Some(Err(e)) => Err(e),
+            None => Err(io::ErrorKind::UnexpectedEof.into()),
+        }
+    };
+    tokio::time::timeout(FETCH_TIMEOUT, fetch)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "nos-configd did not answer"))?
+}

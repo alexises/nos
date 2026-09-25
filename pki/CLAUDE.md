@@ -1,0 +1,36 @@
+# nos-pki — IPC transport security
+
+Post-quantum mutual TLS over Unix sockets for every NOS daemon connection, with `nos-watchdogd` as the certificate authority — and the TLS for `nos-restd`'s TCP listener and its clients (`rest.rs`). A leaf crate with **no NOS dependencies**, like `nos-password`/`nos-tcp-auth`: it deals in `PeerId { role, name }` strings; `nos_proto::Role`/`ServiceRef::role()`/`instance()` say who is expected.
+
+## Post-quantum policy (`policy.rs`)
+
+**Nothing classical is spoken.** One `CryptoProvider` per policy, built on rustls's aws-lc-rs provider (ring has neither ML-KEM nor ML-DSA), TLS 1.3 only:
+
+- **Key exchange**: hybrid `X25519MLKEM768` and nothing else, on both policies. A peer that can't do it fails the handshake instead of negotiating down (`classical_key_exchange_is_refused`, and `nos-e2e rest` from a real X25519-only client). Hybrid, not pure ML-KEM, so a flaw in either half alone doesn't expose a session; pure `MLKEM768` is one line (`kx_group::MLKEM768`) if that is ever wanted.
+- **Cipher**: `TLS13_AES_256_GCM_SHA384` only (256-bit keys keep their margin against Grover).
+- **Certificates, `Policy::Ipc`**: ML-DSA-65 only. The verifier's `WebPkiSupportedAlgorithms` contains nothing else, so an ECDSA leaf fails even when it chains to a CA the server trusts (`ecdsa_certificates_are_refused_on_ipc`) — chain validation *and* CertificateVerify both.
+- **Certificates, `Policy::Rest`**: ECDSA P-256 only, from a **second CA** — deliberately classical so browsers and stock clients can still hold and present a REST certificate; the key exchange is still post-quantum. The cost: authenticity on the network-facing side is classical.
+- `Identity`/`Ca` take a `KeyAlg` (`MlDsa65`, `EcdsaP256`); a CA issues and certifies keys of its own algorithm only (`a_ca_refuses_a_key_of_another_algorithm`). `Stream::negotiated()` reports what a handshake settled on, and every handshake logs it (`ipc tls handshake ok side=… kx=… peer_key=…`, `rest tls handshake ok user=… alpn=… kx=…`) — `nos-e2e pki` asserts all IPC handshakes were `X25519MLKEM768` + `ML-DSA-65`.
+
+**Two gotchas of the versions in use** (rcgen 0.14, x509-parser 0.18, rustls 0.23): rcgen can *generate* and *sign with* ML-DSA, but its CSR parser can't verify an ML-DSA request (x509-parser has no ML-DSA verification) and its public-key-info parser doesn't know the algorithm. So `Ca::sign_csr` parses the CSR with x509-parser, verifies the proof-of-possession itself with webpki's algorithm for the CA's `KeyAlg`, and hands rcgen a small `PublicKeyData` (`CsrKey`) in that algorithm. If rcgen grows ML-DSA parsing, that whole detour can go. aws-lc-sys also needs a C toolchain at build time (the `rust:slim` builder image has one; no cmake needed).
+
+## Model
+
+- **Identity = a URI SAN**, `nos://<role>/<name>` (`PeerId`; `name` is percent-escaped, empty for singleton daemons). Every leaf also carries the fixed DNS SAN `nos.internal`, purely so rustls's stock WebPKI verifiers have a `ServerName` to check. Chain, expiry and key usage are the stock verifiers' job; *who the peer is* is checked by us right after the handshake, before any application byte moves (`Identity::connect` against an expected `PeerId`/role; servers get the peer from `Incoming::handshake`/`handshake_as`).
+- **TLS 1.3 only, no session resumption or tickets** (on the REST listener too — there it would also let a deleted user's session live on). A resumed session skips certificate verification, which would let an expired or rotated-out identity straight back in.
+- **Two `Ca`s** (`ca.rs`), both ephemeral, in `nos-watchdogd`'s memory only: the IPC CA (ML-DSA-65, `ca.crt`) and the REST CA (ECDSA P-256, `rest-ca.crt`). A REST certificate never opens an IPC socket and vice versa (`restd_gets_rest_certificates_that_do_not_open_ipc_sockets`). `issue` mints a fresh keypair + leaf; `sign_csr` certifies a client-made CSR taking **only the public key from it** — the SAN is set by the CA from the identity it authenticated, never from the CSR (`csr_signing_takes_the_key_but_never_the_identity`).
+- **`Identity`** (`identity.rs`) is a swappable handle (`arc-swap`) that rustls's client/server resolvers read at *handshake* time, so `update` rotates a certificate with no reconnect logic: new connections use it, established ones are untouched. An identity can be `anonymous` (trusts a CA, holds no certificate) — for the login socket — and get its certificate later with `set_certificate`.
+- **Delivery**: `Bundle` (`ca`, `cert`, `key`, DER) has a length-prefixed frame encoding. The watchdog writes one to each child's **piped stdin** at spawn and another every `--pki-rotate-every`; `Identity::from_stdin` reads the first and rotates on the rest from a plain `std::thread` (a blocked tokio stdin read would stall runtime shutdown). The key never touches argv, the environment or disk. There is **no plaintext fallback** — no identity, no daemon.
+- **REST (`rest.rs`)** — the only place other crates get rustls from. `RestServer` holds the REST-CA client verifier (client certificate *optional* at the TLS layer, because `POST /v1/login` must be reachable without one; the caller refuses everything else to an anonymous peer), a hot-swappable server certificate (`set_certificate`, from `Ca::sign_server_csr`: IP SANs from the caller, never the CSR), ALPN `h2`/`http/1.1`, and `accept(tcp)`, which handshakes and returns the user the client certificate names. `client_config(rest_ca_pem, identity)` is the matching client config for `reqwest::ClientBuilder::tls_backend_preconfigured`, the e2e harness and tests.
+- **Process-wide identity**: `Identity::from_stdin` (daemons) or `install` (`nos`, `nos-provision`, after login) sets the identity every outbound `nos_pki::connect(path, role, name)` / `connect_role(path, role)` uses, so call sites don't thread a handle through session managers and drivers. Servers take an explicit `&Identity` (`identity.listen(path)`); `listen_optional_client_auth` is only for the broker's login path. `connect_role` checks the role but not the name — for a client that has only a socket path from the broker.
+- **`Listener::accept`** returns an `Incoming` *without* handshaking; callers run `handshake`/`handshake_as` inside their per-connection task (5s timeout), so a slow or hostile peer never stalls the accept loop.
+
+## Testing
+
+`testing` feature (a dev-dependency feature of every crate that tests IPC): `testing::shared()` is one CA for the whole test process, and under this feature `global()` falls back to a `user/test` identity from it, so a fake server is `shared().identity("ribd", "rt1").listen(path)` and the client under test needs no setup. Production builds never enable it.
+
+## Known ceilings
+
+- Role-level authorization only (each server's `allowed(role, &request)`); `bgpd/r2` could still push into `rt1`'s RIB. Binding an instance to its table needs a config lookup.
+- The CA is regenerated on every watchdog start (which restarts every child anyway); nothing persists it, so there is no CRL and no CA rotation.
+- The user certificate `nos` holds is renewed at half its lifetime; if renewal keeps failing until it expires, commands fail and the shell must be restarted.

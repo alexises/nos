@@ -1,0 +1,138 @@
+use garde::Validate;
+use ipnet::IpNet;
+use serde::{Deserialize, Serialize};
+
+use crate::validators::unique_in;
+
+use super::Config;
+
+/// One `prefix-list` entry. `range: None` means exact match — this exact
+/// prefix+length only; `Some((min, max))` means "contained within `cidr`,
+/// with the candidate's own length in `[min, max]`". Deliberately different
+/// from the existing `this.prefix in <cidr>` operator, which stays
+/// containment/orlonger-based for a bare CIDR — see root `CLAUDE.md`'s RPL
+/// section.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefixListEntry {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub cidr: IpNet,
+    pub range: Option<(u8, u8)>,
+}
+
+/// A named set of prefix-match entries, referenced by bare name from an RPL
+/// script's `this.prefix in NAME`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[garde(context(Config as ctx))]
+pub struct PrefixList {
+    #[garde(
+        length(min = 1, max = 64),
+        custom(|n, ctx: &Config| unique_in(n, &ctx.prefix_lists, |p| &p.name))
+    )]
+    pub name: String,
+
+    #[garde(custom(|e: &Vec<PrefixListEntry>, _ctx: &Config| valid_entries(e)))]
+    pub entries: Vec<PrefixListEntry>,
+}
+
+/// A `range`, if set, may only narrow its own `cidr` — `min`/`max` must fall
+/// within `[cidr.prefix_len(), cidr.max_prefix_len()]` and `min <= max`.
+fn valid_entries(entries: &[PrefixListEntry]) -> garde::Result {
+    if entries.is_empty() {
+        return Err(garde::Error::new("must have at least one entry"));
+    }
+    for entry in entries {
+        if let Some((min, max)) = entry.range {
+            if min < entry.cidr.prefix_len() || min > max || max > entry.cidr.max_prefix_len() {
+                return Err(garde::Error::new(
+                    "range must narrow the entry's cidr: cidr length <= min <= max <= address family's max length",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(cidr: &str, range: Option<(u8, u8)>) -> PrefixListEntry {
+        PrefixListEntry {
+            cidr: cidr.parse().unwrap(),
+            range,
+        }
+    }
+
+    fn list(name: &str, entries: Vec<PrefixListEntry>) -> PrefixList {
+        PrefixList {
+            name: name.to_string(),
+            entries,
+        }
+    }
+
+    fn config_with(lists: Vec<PrefixList>) -> Config {
+        Config {
+            prefix_lists: lists,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn exact_entry_passes() {
+        let cfg = config_with(vec![list("BLOCKS", vec![entry("10.0.0.0/8", None)])]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn valid_range_entry_passes() {
+        let cfg = config_with(vec![list(
+            "BLOCKS",
+            vec![entry("10.0.0.0/8", Some((24, 32)))],
+        )]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn range_narrower_than_cidr_fails() {
+        let cfg = config_with(vec![list(
+            "BLOCKS",
+            vec![entry("10.0.0.0/8", Some((4, 32)))],
+        )]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn range_min_greater_than_max_fails() {
+        let cfg = config_with(vec![list(
+            "BLOCKS",
+            vec![entry("10.0.0.0/8", Some((32, 24)))],
+        )]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn range_exceeding_address_family_max_fails() {
+        let cfg = config_with(vec![list(
+            "BLOCKS",
+            vec![entry("10.0.0.0/8", Some((24, 40)))],
+        )]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn empty_entries_fails() {
+        let cfg = config_with(vec![list("EMPTY", vec![])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn duplicate_list_name_fails() {
+        let cfg = config_with(vec![
+            list("BLOCKS", vec![entry("10.0.0.0/8", None)]),
+            list("BLOCKS", vec![entry("172.16.0.0/12", None)]),
+        ]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+}

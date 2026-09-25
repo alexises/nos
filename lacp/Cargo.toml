@@ -1,0 +1,29 @@
+[package]
+name    = "nos-lacp"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+nos-pki            = { workspace = true }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+clap               = { workspace = true }
+anyhow             = { workspace = true }
+tracing-subscriber = { workspace = true }
+nos-proto          = { workspace = true }
+nos-log-client     = { workspace = true }
+nos-l2-socket      = { workspace = true }
+tokio-util         = { workspace = true }
+futures            = { workspace = true }
+thiserror          = { workspace = true }
+
+[[bin]]
+name = "nos-lacpd"
+path = "src/main.rs"
+
+[dev-dependencies]
+nos-pki  = { workspace = true, features = ["testing"] }
+tempfile = { workspace = true }

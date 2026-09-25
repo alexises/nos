@@ -1,0 +1,39 @@
+[package]
+name    = "nos-bgp"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+nos-pki            = { workspace = true }
+tokio              = { workspace = true }
+serde              = { workspace = true }
+tracing            = { workspace = true }
+thiserror          = { workspace = true }
+bytes              = { workspace = true }
+clap               = { workspace = true }
+anyhow             = { workspace = true }
+tracing-subscriber = { workspace = true }
+nos-proto          = { workspace = true }
+nos-log-client     = { workspace = true }
+nos-tcp-auth       = { workspace = true }
+tokio-util         = { workspace = true }
+futures            = { workspace = true }
+socket2            = { workspace = true }
+ipnet              = { workspace = true }
+nos-rpl            = { workspace = true }
+dhat               = { version = "0.3", optional = true }
+
+[features]
+dhat-heap = ["dep:dhat"]
+
+[[bin]]
+name = "nos-bgpd"
+path = "src/main.rs"
+
+[dev-dependencies]
+nos-pki  = { workspace = true, features = ["testing"] }
+proptest = { workspace = true }
+tempfile = { workspace = true }

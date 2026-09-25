@@ -1,0 +1,85 @@
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+
+use futures::{SinkExt, StreamExt};
+use nos_proto::{BgpEvent, BgpRequest, EvpnRouteSummary, IpcCodec, PeerSummary, Role};
+use thiserror::Error;
+use tokio_util::codec::{FramedRead, FramedWrite};
+
+#[derive(Debug, Error)]
+pub enum BgpClientError {
+    #[error("could not connect to nos-bgpd at {path}: {source}")]
+    Connect {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("connection to nos-bgpd closed unexpectedly")]
+    ConnectionClosed,
+    #[error("i/o error talking to nos-bgpd: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("unexpected reply from nos-bgpd: {0:?}")]
+    UnexpectedReply(BgpEvent),
+}
+
+async fn connect(
+    bgp_socket: &Path,
+) -> Result<
+    (
+        FramedRead<tokio::io::ReadHalf<nos_pki::Stream>, IpcCodec<BgpEvent>>,
+        FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<BgpRequest>>,
+    ),
+    BgpClientError,
+> {
+    let stream = nos_pki::connect_role(bgp_socket, Role::Bgpd)
+        .await
+        .map_err(|source| BgpClientError::Connect {
+            path: bgp_socket.to_path_buf(),
+            source,
+        })?;
+    let (r, w) = tokio::io::split(stream);
+    Ok((
+        FramedRead::new(r, IpcCodec::<BgpEvent>::default()),
+        FramedWrite::new(w, IpcCodec::<BgpRequest>::default()),
+    ))
+}
+
+/// Fetches every configured peer's current session summary.
+pub async fn get_summary(bgp_socket: &Path) -> Result<Vec<PeerSummary>, BgpClientError> {
+    let (mut reader, mut writer) = connect(bgp_socket).await?;
+    writer.send(BgpRequest::GetSummary).await?;
+    match reader.next().await {
+        Some(Ok(BgpEvent::Summary(peers))) => Ok(peers),
+        Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
+        Some(Err(e)) => Err(BgpClientError::Io(e)),
+        None => Err(BgpClientError::ConnectionClosed),
+    }
+}
+
+/// Fetches every EVPN route the instance has received from any peer.
+pub async fn get_evpn_routes(bgp_socket: &Path) -> Result<Vec<EvpnRouteSummary>, BgpClientError> {
+    let (mut reader, mut writer) = connect(bgp_socket).await?;
+    writer.send(BgpRequest::GetEvpnRoutes).await?;
+    match reader.next().await {
+        Some(Ok(BgpEvent::EvpnRoutes(routes))) => Ok(routes),
+        Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
+        Some(Err(e)) => Err(BgpClientError::Io(e)),
+        None => Err(BgpClientError::ConnectionClosed),
+    }
+}
+
+/// Asks `peer`'s live session to send it an RFC 2918 `ROUTE_REFRESH`.
+/// `Ok(true)` if a live `Established` session for `peer` was found and the
+/// command was delivered; `Ok(false)` if there's nothing to refresh right
+/// now (peer not configured, or no `Established` session).
+pub async fn send_route_refresh(bgp_socket: &Path, peer: IpAddr) -> Result<bool, BgpClientError> {
+    let (mut reader, mut writer) = connect(bgp_socket).await?;
+    writer.send(BgpRequest::SendRouteRefresh { peer }).await?;
+    match reader.next().await {
+        Some(Ok(BgpEvent::RouteRefreshSent)) => Ok(true),
+        Some(Ok(BgpEvent::PeerNotFound)) => Ok(false),
+        Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
+        Some(Err(e)) => Err(BgpClientError::Io(e)),
+        None => Err(BgpClientError::ConnectionClosed),
+    }
+}

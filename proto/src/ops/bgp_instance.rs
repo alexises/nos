@@ -1,0 +1,235 @@
+use std::net::Ipv4Addr;
+
+use serde::{Deserialize, Serialize};
+
+use crate::schema::{BgpInstance, Config};
+
+use super::OpError;
+
+/// An edit to a single named `BgpInstance` within a transaction's in-progress
+/// config. Applied without validation — `garde` validation only runs at
+/// commit time, matching the daemon's existing edit/commit split.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BgpInstanceOp {
+    /// Creates the instance with placeholder field values if it doesn't
+    /// already exist by name; no-op if it does. Backs `edit bgp instance
+    /// <name>`'s "create if missing, else navigate to it" semantics.
+    Ensure {
+        name: String,
+    },
+    SetAsn {
+        name: String,
+        asn: u32,
+    },
+    SetRouterId {
+        name: String,
+        router_id: Ipv4Addr,
+    },
+    SetClusterId {
+        name: String,
+        cluster_id: Ipv4Addr,
+    },
+    ClearClusterId {
+        name: String,
+    },
+    Delete {
+        name: String,
+    },
+}
+
+impl BgpInstanceOp {
+    pub fn apply(&self, config: &mut Config) -> Result<(), OpError> {
+        match self {
+            BgpInstanceOp::Ensure { name } => {
+                if !config.bgp_instances.iter().any(|i| &i.name == name) {
+                    config.bgp_instances.push(BgpInstance {
+                        name: name.clone(),
+                        router_id: Ipv4Addr::UNSPECIFIED,
+                        asn: 0,
+                        peer_groups: Vec::new(),
+                        peers: Vec::new(),
+                        cluster_id: None,
+                        routing_table: None,
+                        redistribute_policy: None,
+                    });
+                }
+                Ok(())
+            }
+            BgpInstanceOp::SetAsn { name, asn } => {
+                find_instance_mut(config, name)?.asn = *asn;
+                Ok(())
+            }
+            BgpInstanceOp::SetRouterId { name, router_id } => {
+                find_instance_mut(config, name)?.router_id = *router_id;
+                Ok(())
+            }
+            BgpInstanceOp::SetClusterId { name, cluster_id } => {
+                find_instance_mut(config, name)?.cluster_id = Some(*cluster_id);
+                Ok(())
+            }
+            BgpInstanceOp::ClearClusterId { name } => {
+                find_instance_mut(config, name)?.cluster_id = None;
+                Ok(())
+            }
+            BgpInstanceOp::Delete { name } => {
+                let before = config.bgp_instances.len();
+                config.bgp_instances.retain(|i| &i.name != name);
+                if config.bgp_instances.len() == before {
+                    return Err(OpError::BgpInstanceNotFound(name.clone()));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+pub(crate) fn find_instance_mut<'a>(
+    config: &'a mut Config,
+    name: &str,
+) -> Result<&'a mut BgpInstance, OpError> {
+    config
+        .bgp_instances
+        .iter_mut()
+        .find(|i| i.name == name)
+        .ok_or_else(|| OpError::BgpInstanceNotFound(name.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn instance(name: &str, asn: u32) -> BgpInstance {
+        BgpInstance {
+            name: name.to_string(),
+            router_id: Ipv4Addr::new(1, 1, 1, 1),
+            asn,
+            peer_groups: Vec::new(),
+            peers: Vec::new(),
+            cluster_id: None,
+            routing_table: None,
+            redistribute_policy: None,
+        }
+    }
+
+    #[test]
+    fn ensure_creates_placeholder_when_missing() {
+        let mut cfg = Config::default();
+        BgpInstanceOp::Ensure {
+            name: "r1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances.len(), 1);
+        assert_eq!(cfg.bgp_instances[0].name, "r1");
+        assert_eq!(cfg.bgp_instances[0].router_id, Ipv4Addr::UNSPECIFIED);
+        assert_eq!(cfg.bgp_instances[0].asn, 0);
+    }
+
+    #[test]
+    fn ensure_is_noop_when_present() {
+        let mut cfg = Config {
+            bgp_instances: vec![instance("r1", 65000)],
+            ..Default::default()
+        };
+        BgpInstanceOp::Ensure {
+            name: "r1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances.len(), 1);
+        assert_eq!(cfg.bgp_instances[0].asn, 65000);
+    }
+
+    #[test]
+    fn set_asn_updates_existing() {
+        let mut cfg = Config {
+            bgp_instances: vec![instance("r1", 65000)],
+            ..Default::default()
+        };
+        BgpInstanceOp::SetAsn {
+            name: "r1".to_string(),
+            asn: 65001,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].asn, 65001);
+    }
+
+    #[test]
+    fn set_asn_missing_instance_errors() {
+        let mut cfg = Config::default();
+        let err = BgpInstanceOp::SetAsn {
+            name: "r1".to_string(),
+            asn: 65001,
+        }
+        .apply(&mut cfg)
+        .unwrap_err();
+        assert!(matches!(err, OpError::BgpInstanceNotFound(n) if n == "r1"));
+    }
+
+    #[test]
+    fn set_router_id_updates_existing() {
+        let mut cfg = Config {
+            bgp_instances: vec![instance("r1", 65000)],
+            ..Default::default()
+        };
+        BgpInstanceOp::SetRouterId {
+            name: "r1".to_string(),
+            router_id: Ipv4Addr::new(10, 0, 0, 1),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].router_id, Ipv4Addr::new(10, 0, 0, 1));
+    }
+
+    #[test]
+    fn set_and_clear_cluster_id() {
+        let mut cfg = Config {
+            bgp_instances: vec![instance("r1", 65000)],
+            ..Default::default()
+        };
+        BgpInstanceOp::SetClusterId {
+            name: "r1".to_string(),
+            cluster_id: Ipv4Addr::new(1, 2, 3, 4),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].cluster_id,
+            Some(Ipv4Addr::new(1, 2, 3, 4))
+        );
+
+        BgpInstanceOp::ClearClusterId {
+            name: "r1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].cluster_id, None);
+    }
+
+    #[test]
+    fn delete_removes_existing() {
+        let mut cfg = Config {
+            bgp_instances: vec![instance("r1", 65000), instance("r2", 65001)],
+            ..Default::default()
+        };
+        BgpInstanceOp::Delete {
+            name: "r1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances.len(), 1);
+        assert_eq!(cfg.bgp_instances[0].name, "r2");
+    }
+
+    #[test]
+    fn delete_missing_instance_errors() {
+        let mut cfg = Config::default();
+        let err = BgpInstanceOp::Delete {
+            name: "r1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap_err();
+        assert!(matches!(err, OpError::BgpInstanceNotFound(n) if n == "r1"));
+    }
+}

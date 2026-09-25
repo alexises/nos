@@ -1,0 +1,38 @@
+[package]
+name    = "nos-ospf"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+nos-pki            = { workspace = true }
+tokio              = { workspace = true }
+serde              = { workspace = true }
+tracing            = { workspace = true }
+thiserror          = { workspace = true }
+clap               = { workspace = true }
+anyhow             = { workspace = true }
+tracing-subscriber = { workspace = true }
+nos-proto          = { workspace = true }
+nos-log-client     = { workspace = true }
+nos-rpl            = { workspace = true }
+nos-ospf-common    = { workspace = true }
+tokio-util         = { workspace = true }
+futures            = { workspace = true }
+socket2            = { workspace = true }
+libc               = { workspace = true }
+ipnet              = { workspace = true }
+md-5               = { workspace = true }
+sha1               = { workspace = true }
+sha2               = { workspace = true }
+hmac               = { workspace = true }
+
+[[bin]]
+name = "nos-ospfd"
+path = "src/main.rs"
+
+[dev-dependencies]
+nos-pki  = { workspace = true, features = ["testing"] }
+tempfile = { workspace = true }

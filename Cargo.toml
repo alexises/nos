@@ -1,0 +1,94 @@
+[workspace]
+members = ["proto", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tools/e2e", "tcp-auth", "rpl", "log-client", "l2-socket", "lacp", "lldp", "fdb", "rest", "password", "pki"]
+resolver = "2"
+
+[workspace.dependencies]
+tokio       = { version = "1", features = ["full"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+serde_yaml  = "0.9"
+tracing     = "0.1"
+thiserror   = "1"
+bytes       = "1"
+garde       = { version = "0.22", features = ["derive", "full"] }
+ipnet       = { version = "2", features = ["serde"] }
+postcard    = { version = "1", features = ["alloc"] }
+chrono      = { version = "0.4", default-features = false, features = ["std"] }
+tokio-util  = { version = "0.7", features = ["codec"] }
+futures     = "0.3"
+reqwest     = { version = "0.13", default-features = false, features = ["json", "stream"] }
+regex       = "1"
+bollard     = "0.21"
+tar         = "0.4"
+nos-proto          = { path = "proto" }
+nos-tcp-auth       = { path = "tcp-auth" }
+nos-password       = { path = "password" }
+nos-pki            = { path = "pki" }
+nos-l2-socket      = { path = "l2-socket" }
+nos-rpl            = { path = "rpl" }
+nos-log-client     = { path = "log-client" }
+nos-ospf-common    = { path = "ospf-common" }
+clap               = { version = "4", features = ["derive"] }
+anyhow             = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reedline            = "0.51.0"
+nix                 = { version = "0.29", default-features = false, features = ["signal", "process"] }
+async-trait         = "0.1"
+rtnetlink           = "0.23"
+netlink-packet-core  = "0.9"
+netlink-packet-route = "0.33"
+netlink-sys          = { version = "0.9", features = ["tokio_socket"] }
+fs2                 = "0.4"
+socket2             = { version = "0.5", features = ["all"] }
+libc                = "0.2"
+md-5                = "0.10"
+sha1                = "0.10"
+sha2                = "0.10"
+hmac                = "0.12"
+axum                = "0.8"
+utoipa              = { version = "5", features = ["axum_extras"] }
+utoipa-axum         = "0.2"
+# `vendored`: the UI assets ship inside the crate — no CDN at runtime (the API
+# lives in a management VRF) and no GitHub download at build time.
+utoipa-swagger-ui   = { version = "9", features = ["axum", "vendored"] }
+percent-encoding    = "2"
+rpassword           = "7"
+base64              = "0.22"
+# aws-lc-rs, not ring: it is the only rustls provider with ML-KEM key exchange
+# and ML-DSA signatures. TLS 1.3 only (no `tls12`) — see pki/CLAUDE.md.
+rustls              = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+tokio-rustls        = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
+rustls-webpki       = { version = "0.103", default-features = false, features = ["aws-lc-rs", "std"] }
+rcgen               = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser"] }
+x509-parser         = "0.18"
+arc-swap            = "1"
+time                = "0.3"
+
+# test dependencies
+tempfile    = "3"
+proptest    = "1"
+insta       = "1"
+
+# argon2 is deliberately slow; unoptimized it makes every password test take seconds.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+pedantic              = { level = "warn", priority = -1 }
+# allow noisy pedantic lints that produce more churn than value at this stage
+must_use_candidate        = "allow"
+module_name_repetitions   = "allow"
+missing_errors_doc        = "allow"
+missing_panics_doc        = "allow"
+# Length is fine here; depth is not. The flat one-arm-per-command/topic tables
+# (Command::parse, resolve_table, command_doc) are meant to read as a table and
+# must not be split up to dodge a line count — but an arm that nests deeply has
+# stopped being a table row, so excessive_nesting stays on. Threshold lives in
+# clippy.toml.
+too_many_lines             = "allow"
+excessive_nesting          = "warn"

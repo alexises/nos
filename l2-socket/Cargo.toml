@@ -1,0 +1,12 @@
+[package]
+name    = "nos-l2-socket"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio   = { workspace = true }
+socket2 = { workspace = true }
+libc    = { workspace = true }

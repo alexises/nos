@@ -1,0 +1,30 @@
+[package]
+name    = "nos-cli"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+nos-pki            = { workspace = true }
+tokio      = { workspace = true }
+nos-proto  = { workspace = true }
+ipnet      = { workspace = true }
+tokio-util = { workspace = true }
+futures    = { workspace = true }
+clap       = { workspace = true }
+anyhow     = { workspace = true }
+thiserror  = { workspace = true }
+reedline   = { workspace = true }
+chrono     = { workspace = true }
+nos-rpl    = { workspace = true }
+rpassword  = { workspace = true }
+
+[[bin]]
+name = "nos"
+path = "src/main.rs"
+
+[dev-dependencies]
+nos-pki  = { workspace = true, features = ["testing"] }
+tempfile = { workspace = true }

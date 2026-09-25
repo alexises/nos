@@ -1,0 +1,333 @@
+use garde::Validate;
+use serde::{Deserialize, Serialize};
+
+use crate::validators::unique_in;
+
+use super::interface::{switching_profile_reference_valid, valid_mtu, valid_subinterface_list};
+use super::{Config, Subinterface, VlanTag};
+
+/// How a `PortAggregate`'s member set is decided. Both variants create the
+/// *same* underlying kernel bond device (`BondMode::BalanceXor` — see
+/// `interface::driver::linux::bond_mode_of`'s doc comment for why `Lacp`
+/// does **not** map to the kernel's own `Ieee8023Ad` bonding mode); the
+/// difference is only which control plane decides which members are
+/// actually enslaved into it.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PortAggregateMode {
+    /// Static: every member named by an `Interface.port_aggregate`
+    /// reference is enslaved unconditionally, no negotiation.
+    Xor,
+    /// Dynamic: membership is negotiated by `nos-lacpd` (real IEEE 802.1AX
+    /// LACPDU exchange and Actor/Partner state machines, see `lacp/
+    /// CLAUDE.md`), which pushes its currently-negotiated active-member set
+    /// to `nos-interfaced` — a member interface is only enslaved once
+    /// `nos-lacpd` confirms it, and is released again if negotiation lapses
+    /// (partner LACPDUs stop, link goes down, etc).
+    Lacp,
+}
+
+/// How often this end asks its LACP partner to send LACPDUs (802.1AX's
+/// `LACP_Timeout`), and therefore how long it waits before declaring the
+/// partner gone: `Slow` is every 30s (90s to detect loss), `Fast` every 1s
+/// (3s to detect loss). Only meaningful for a `Lacp`-mode aggregate. Like
+/// Linux bonding's `lacp_rate`, it's a request to the partner — each end
+/// transmits at the rate the *other* end asks for.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LacpRate {
+    #[default]
+    Slow,
+    Fast,
+}
+
+/// How the PEs sharing an Ethernet Segment (`PortAggregate.esi`) divide the
+/// traffic (RFC 7432 §8.5): `AllActive` lets every PE forward unicast to the
+/// segment and only the Designated Forwarder flood BUM; `SingleActive` lets
+/// only the Designated Forwarder forward anything, the others' ports being
+/// blocked outright. Announced to the other PEs in the per-ES Ethernet A-D
+/// route's ESI Label community. Only meaningful with an `esi`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum EsRedundancy {
+    #[default]
+    AllActive,
+    SingleActive,
+}
+
+/// A named Linux bonding device, statically (`Xor`) or LACP-negotiated
+/// (`Lacp`). Same
+/// config surface as a *physical* `Interface` (never a loopback — bonding a
+/// loopback makes no sense): `switching_profile`/`mtu`/`subinterfaces`, all
+/// validated by the exact same helpers `Interface` uses, plus `mode`/
+/// `lacp_rate`. All L3
+/// config (addresses/routing-table/OSPF) lives under `subinterfaces` (tag 0
+/// for the untagged/native case), exactly like a physical `Interface` — a
+/// `PortAggregate` never gets the loopback-style flat `addresses`/
+/// `routing_table` fields, since there's no "loopback bond" concept. An
+/// `Interface` becomes a bonded member by setting its own `port_aggregate`
+/// field to this aggregate's name — the same reference-by-name shape
+/// `Interface.switching_profile` already uses for L2 trunk membership —
+/// rather than this type holding a member list itself.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[garde(context(Config as ctx))]
+pub struct PortAggregate {
+    #[garde(
+        length(min = 1, max = 64),
+        custom(|n, ctx: &Config| port_aggregate_name_valid(n, ctx))
+    )]
+    pub name: String,
+
+    #[garde(skip)]
+    pub mode: PortAggregateMode,
+
+    /// See [`LacpRate`]. `#[serde(default)]` so a config persisted before
+    /// this field existed still loads.
+    #[serde(default)]
+    #[garde(skip)]
+    pub lacp_rate: LacpRate,
+
+    /// The Ethernet Segment this bond attaches to (EVPN multi-homing, RFC
+    /// 7432): ten colon-separated hex bytes. Set the same value on every PE
+    /// the customer device is dual-homed to. `nos-fdbd` puts it on the Type-2
+    /// routes for MACs learned on this bond and elects a Designated Forwarder
+    /// among the PEs that share it.
+    #[serde(default)]
+    #[garde(custom(|v: &Option<String>, _ctx: &Config| valid_esi(v.as_deref())))]
+    pub esi: Option<String>,
+
+    /// See [`EsRedundancy`]. `#[serde(default)]` so a config persisted before
+    /// this field existed still loads (as all-active, what it always was).
+    #[serde(default)]
+    #[garde(skip)]
+    pub redundancy_mode: EsRedundancy,
+
+    /// Overrides `nos-lacpd`'s derived LACP Actor System ID for this bond, so
+    /// two PEs sharing an ESI can present the same actor to the customer
+    /// device. Only meaningful for a `Lacp`-mode aggregate.
+    #[serde(default)]
+    #[garde(custom(|v: &Option<String>, _ctx: &Config| valid_lacp_system_id(v.as_deref())))]
+    pub lacp_system_id: Option<String>,
+
+    /// Names a `SwitchingProfile` trunking this bond into one or more
+    /// `BroadcastDomain`s — same field, same meaning, as
+    /// `Interface.switching_profile`.
+    #[garde(custom(|sp: &Option<String>, ctx: &Config| switching_profile_reference_valid(sp.as_ref(), ctx)))]
+    pub switching_profile: Option<String>,
+
+    #[garde(custom(|m: &Option<u32>, _ctx: &Config| valid_mtu(*m)))]
+    pub mtu: Option<u32>,
+
+    /// This bond's own per-tag L3 attachment points — same type and same
+    /// tag-0-is-untagged/native convention as `Interface.subinterfaces`.
+    #[garde(dive, custom(|subs, _ctx: &Config| valid_subinterface_list(subs)))]
+    pub subinterfaces: Vec<Subinterface>,
+}
+
+fn valid_esi(esi: Option<&str>) -> garde::Result {
+    match esi {
+        Some(e) if crate::evpn_id::parse_esi(e).is_none() => Err(garde::Error::new(
+            "esi must be ten colon-separated hex bytes, not all zero (00:11:22:33:44:55:66:77:88:99)",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn valid_lacp_system_id(id: Option<&str>) -> garde::Result {
+    match id {
+        Some(m) if crate::evpn_id::parse_mac(m).is_none() => Err(garde::Error::new(
+            "lacp-system-id must be a unicast MAC address (02:00:00:00:00:01)",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn port_aggregate_name_valid(name: &String, ctx: &Config) -> garde::Result {
+    unique_in(name, &ctx.port_aggregates, |a| &a.name)?;
+    if name.contains('.') {
+        return Err(garde::Error::new(
+            "port aggregate name must not contain '.' (reserved for subinterface addressing, e.g. bond1.100)",
+        ));
+    }
+    Ok(())
+}
+
+/// `Config.port_aggregates`-level validator: the same subinterface/
+/// switching-profile tag-collision rule
+/// `interface::valid_subinterface_and_switching_profile_tags` enforces on an
+/// `Interface` — Linux only allows one master device per link, whether that
+/// link is a physical interface or a bond. (The other half of that
+/// interface-level validator, `valid_addressing_split`, has no counterpart
+/// here — `PortAggregate` has no loopback-style flat L3 fields to keep
+/// disjoint from `subinterfaces` in the first place.)
+pub(crate) fn valid_port_aggregates(aggregates: &[PortAggregate], ctx: &Config) -> garde::Result {
+    // A redundancy mode is a property of the Ethernet Segment.
+    for agg in aggregates {
+        if agg.redundancy_mode == EsRedundancy::SingleActive && agg.esi.is_none() {
+            return Err(garde::Error::new(format!(
+                "port aggregate {} is single-active but has no esi",
+                agg.name
+            )));
+        }
+    }
+    // One aggregate per Ethernet Segment on a PE: two bonds claiming the same
+    // ESI would make `nos-fdbd` unable to tell which port a MAC was learned on.
+    for (i, agg) in aggregates.iter().enumerate() {
+        if let Some(esi) = &agg.esi {
+            if aggregates[..i].iter().any(|o| o.esi.as_ref() == Some(esi)) {
+                return Err(garde::Error::new(format!(
+                    "esi {esi} is used by more than one port aggregate"
+                )));
+            }
+        }
+    }
+    for agg in aggregates {
+        if agg.subinterfaces.is_empty() {
+            continue;
+        }
+        let Some(profile_name) = &agg.switching_profile else {
+            continue;
+        };
+        let Some(profile) = ctx
+            .switching_profiles
+            .iter()
+            .find(|p| &p.name == profile_name)
+        else {
+            continue;
+        };
+        for sub in &agg.subinterfaces {
+            let collides = profile.members.iter().any(|m| match m.tag {
+                VlanTag::Untagged => sub.tag == 0,
+                VlanTag::Dot1q(n) => sub.tag == n,
+            });
+            if collides {
+                return Err(garde::Error::new(format!(
+                    "subinterface tag {} conflicts with a switching-profile member using the same tag",
+                    sub.tag
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::InterfaceAddress;
+
+    fn aggregate(name: &str) -> PortAggregate {
+        PortAggregate {
+            name: name.to_string(),
+            mode: PortAggregateMode::Xor, // arbitrary — mode has no bearing on the validators tested here
+            lacp_rate: LacpRate::default(),
+            esi: None,
+            redundancy_mode: EsRedundancy::default(),
+            lacp_system_id: None,
+            switching_profile: None,
+            mtu: None,
+            subinterfaces: Vec::new(),
+        }
+    }
+
+    fn config_with(aggregates: Vec<PortAggregate>) -> Config {
+        Config {
+            port_aggregates: aggregates,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn valid_aggregate_passes() {
+        let cfg = config_with(vec![aggregate("bond1")]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn duplicate_name_fails() {
+        let cfg = config_with(vec![aggregate("bond1"), aggregate("bond1")]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn dotted_name_fails() {
+        let cfg = config_with(vec![aggregate("bond1.100")]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn esi_must_parse_and_be_unique() {
+        let mut a = aggregate("bond1");
+        a.esi = Some("00:11:22:33:44:55:66:77:88:99".to_string());
+        config_with(vec![a.clone()])
+            .validate_with(&config_with(vec![a.clone()]))
+            .unwrap();
+
+        let mut bad = a.clone();
+        bad.esi = Some("00:11".to_string());
+        let cfg = config_with(vec![bad]);
+        assert!(cfg.validate_with(&cfg).is_err());
+
+        let mut b = aggregate("bond2");
+        b.esi = a.esi.clone();
+        let cfg = config_with(vec![a, b]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn single_active_needs_an_esi() {
+        let mut a = aggregate("bond1");
+        a.redundancy_mode = EsRedundancy::SingleActive;
+        let cfg = config_with(vec![a.clone()]);
+        assert!(cfg.validate_with(&cfg).is_err());
+        a.esi = Some("00:11:22:33:44:55:66:77:88:99".to_string());
+        let cfg = config_with(vec![a]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn lacp_system_id_must_be_a_unicast_mac() {
+        let mut a = aggregate("bond1");
+        a.lacp_system_id = Some("02:00:00:00:00:01".to_string());
+        let cfg = config_with(vec![a.clone()]);
+        cfg.validate_with(&cfg).unwrap();
+        a.lacp_system_id = Some("01:00:00:00:00:01".to_string());
+        let cfg = config_with(vec![a]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn invalid_mtu_fails() {
+        let mut agg = aggregate("bond1");
+        agg.mtu = Some(10);
+        let cfg = config_with(vec![agg]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn valid_subinterface_with_routing_table_passes() {
+        let mut agg = aggregate("bond1");
+        agg.subinterfaces = vec![crate::schema::Subinterface {
+            tag: 0,
+            addresses: vec![InterfaceAddress {
+                address: "10.0.0.1/24".parse().unwrap(),
+                label: None,
+            }],
+            routing_table: Some("rt1".to_string()),
+            ospf_profile: None,
+            ospfv3_profile: None,
+        }];
+        let mut cfg = config_with(vec![agg]);
+        cfg.routing_tables = vec![crate::schema::RoutingTable {
+            rest_api: None,
+            ospfv3_instance: None,
+            name: "rt1".to_string(),
+            bgp_instance: None,
+            ospf_instance: None,
+            static_routing_instance: None,
+            redistribute: None,
+        }];
+        cfg.validate_with(&cfg).unwrap();
+    }
+}

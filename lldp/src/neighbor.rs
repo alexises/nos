@@ -1,0 +1,195 @@
+//! Per-interface neighbor table (IEEE 802.1AB §9.2.7 remote systems MIB, cut
+//! down to what `show lldp neighbors` needs). Pure — the caller passes `now`
+//! in, so aging is unit-tested without sleeping.
+
+use std::collections::{hash_map, HashMap};
+use std::time::{Duration, Instant};
+
+use nos_proto::LldpNeighbor;
+
+use crate::packet::{Id, Lldpdu};
+
+/// Bounds memory against a hostile or misbehaving segment flooding distinct
+/// chassis IDs. 802.1AB models the same limit as "too many neighbors".
+pub const MAX_NEIGHBORS_PER_LINK: usize = 32;
+
+/// What `apply` did with a received LLDPDU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Update {
+    /// First time this neighbor (chassis + port) was heard.
+    New,
+    /// Already known; TTL and content refreshed.
+    Refreshed,
+    /// TTL 0 — the neighbor announced it is going away.
+    Removed,
+    /// Table full, or a shutdown for a neighbor we never had.
+    Ignored,
+}
+
+struct Entry {
+    pdu: Lldpdu,
+    expires_at: Instant,
+}
+
+#[derive(Default)]
+pub struct NeighborTable {
+    entries: HashMap<(Id, Id), Entry>,
+}
+
+impl NeighborTable {
+    pub fn apply(&mut self, pdu: Lldpdu, now: Instant) -> Update {
+        let key = (pdu.chassis_id.clone(), pdu.port_id.clone());
+        if pdu.ttl == 0 {
+            return if self.entries.remove(&key).is_some() {
+                Update::Removed
+            } else {
+                Update::Ignored
+            };
+        }
+        let expires_at = now + Duration::from_secs(u64::from(pdu.ttl));
+        let full = self.entries.len() >= MAX_NEIGHBORS_PER_LINK;
+        match self.entries.entry(key) {
+            hash_map::Entry::Occupied(mut slot) => {
+                slot.insert(Entry { pdu, expires_at });
+                Update::Refreshed
+            }
+            hash_map::Entry::Vacant(_) if full => Update::Ignored,
+            hash_map::Entry::Vacant(slot) => {
+                slot.insert(Entry { pdu, expires_at });
+                Update::New
+            }
+        }
+    }
+
+    /// Drops every entry whose TTL has lapsed and returns them.
+    pub fn expire(&mut self, now: Instant) -> Vec<Lldpdu> {
+        let expired: Vec<(Id, Id)> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| e.expires_at <= now)
+            .map(|(k, _)| k.clone())
+            .collect();
+        expired
+            .into_iter()
+            .filter_map(|k| self.entries.remove(&k))
+            .map(|e| e.pdu)
+            .collect()
+    }
+
+    /// When the soonest entry ages out, if any.
+    pub fn next_expiry(&self) -> Option<Instant> {
+        self.entries.values().map(|e| e.expires_at).min()
+    }
+
+    pub fn snapshot(&self, local_interface: &str, now: Instant) -> Vec<LldpNeighbor> {
+        self.entries
+            .values()
+            .map(|e| LldpNeighbor {
+                local_interface: local_interface.to_string(),
+                chassis_id: e.pdu.chassis_display(),
+                port_id: e.pdu.port_display(),
+                port_description: e.pdu.port_description.clone(),
+                system_name: e.pdu.system_name.clone(),
+                system_description: e.pdu.system_description.clone(),
+                capabilities: e.pdu.enabled_capability_names(),
+                management_addresses: e
+                    .pdu
+                    .management_addresses
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                ttl_remaining_secs: u32::try_from(
+                    e.expires_at.saturating_duration_since(now).as_secs(),
+                )
+                .unwrap_or(u32::MAX),
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::packet::{CHASSIS_SUBTYPE_MAC, PORT_SUBTYPE_IF_NAME};
+
+    fn pdu(chassis: u8, port: &str, ttl: u16) -> Lldpdu {
+        Lldpdu {
+            chassis_id: Id {
+                subtype: CHASSIS_SUBTYPE_MAC,
+                value: vec![2, 0, 0, 0, 0, chassis],
+            },
+            port_id: Id {
+                subtype: PORT_SUBTYPE_IF_NAME,
+                value: port.as_bytes().to_vec(),
+            },
+            ttl,
+            port_description: None,
+            system_name: Some(format!("r{chassis}")),
+            system_description: None,
+            capabilities: None,
+            management_addresses: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn new_then_refresh_then_shutdown() {
+        let now = Instant::now();
+        let mut t = NeighborTable::default();
+        assert_eq!(t.apply(pdu(1, "eth1", 120), now), Update::New);
+        assert_eq!(t.apply(pdu(1, "eth1", 120), now), Update::Refreshed);
+        assert_eq!(t.apply(pdu(1, "eth1", 0), now), Update::Removed);
+        assert_eq!(t.apply(pdu(1, "eth1", 0), now), Update::Ignored);
+        assert!(t.snapshot("eth0", now).is_empty());
+    }
+
+    #[test]
+    fn same_chassis_different_port_is_a_distinct_neighbor() {
+        let now = Instant::now();
+        let mut t = NeighborTable::default();
+        assert_eq!(t.apply(pdu(1, "eth1", 120), now), Update::New);
+        assert_eq!(t.apply(pdu(1, "eth2", 120), now), Update::New);
+        assert_eq!(t.snapshot("eth0", now).len(), 2);
+    }
+
+    #[test]
+    fn entries_age_out_at_their_ttl_and_refresh_extends_it() {
+        let now = Instant::now();
+        let mut t = NeighborTable::default();
+        t.apply(pdu(1, "eth1", 10), now);
+        t.apply(pdu(2, "eth1", 100), now);
+        assert_eq!(t.next_expiry(), Some(now + Duration::from_secs(10)));
+
+        assert!(t.expire(now + Duration::from_secs(9)).is_empty());
+        // Refresh neighbor 1 just before it lapses.
+        t.apply(pdu(1, "eth1", 10), now + Duration::from_secs(9));
+        assert!(t.expire(now + Duration::from_secs(10)).is_empty());
+
+        let gone = t.expire(now + Duration::from_secs(19));
+        assert_eq!(gone.len(), 1);
+        assert_eq!(gone[0].system_name.as_deref(), Some("r1"));
+        assert_eq!(t.snapshot("eth0", now).len(), 1);
+    }
+
+    #[test]
+    fn snapshot_reports_remaining_ttl() {
+        let now = Instant::now();
+        let mut t = NeighborTable::default();
+        t.apply(pdu(1, "eth1", 120), now);
+        let n = &t.snapshot("eth0", now + Duration::from_secs(20))[0];
+        assert_eq!(n.local_interface, "eth0");
+        assert_eq!(n.ttl_remaining_secs, 100);
+        assert_eq!(n.chassis_id, "02:00:00:00:00:01");
+    }
+
+    #[test]
+    fn table_is_bounded_against_a_flood_of_distinct_neighbors() {
+        let now = Instant::now();
+        let mut t = NeighborTable::default();
+        for i in 0..=u8::try_from(MAX_NEIGHBORS_PER_LINK).unwrap() {
+            t.apply(pdu(i, "eth1", 120), now);
+        }
+        assert_eq!(t.snapshot("eth0", now).len(), MAX_NEIGHBORS_PER_LINK);
+        // An existing neighbor can still refresh when the table is full.
+        assert_eq!(t.apply(pdu(0, "eth1", 120), now), Update::Refreshed);
+    }
+}

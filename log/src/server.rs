@@ -1,0 +1,183 @@
+use std::path::Path;
+
+use futures::{SinkExt, StreamExt};
+use nos_pki::{Identity, Incoming, Listener, Stream};
+use nos_proto::{IpcCodec, LogEvent, LogRequest, Role};
+use tokio::io::{split, ReadHalf, WriteHalf};
+use tokio::task::JoinHandle;
+use tokio_util::codec::{FramedRead, FramedWrite};
+use tracing::{debug, error, info, trace, warn};
+
+use crate::store::LogStore;
+
+/// Binds `listen_socket` and spawns the IPC accept loop.
+///
+/// Returns a `JoinHandle` the caller must keep alive for the server to run.
+pub fn start(
+    listen_socket: &Path,
+    store: LogStore,
+    identity: &Identity,
+) -> std::io::Result<JoinHandle<()>> {
+    let listener = identity.listen(listen_socket)?;
+    info!(socket = %listen_socket.display(), "log IPC server listening");
+    Ok(tokio::spawn(accept_loop(listener, store)))
+}
+
+/// Every daemon pushes its own logs; only people (and `Restd` on their
+/// behalf) read them back. No wildcard arm: a new request must be classified.
+fn allowed(role: Role, req: &LogRequest) -> bool {
+    match req {
+        LogRequest::Push(_) => role.is_daemon(),
+        LogRequest::GetLogs { .. } | LogRequest::Tail { .. } => {
+            matches!(role, Role::User | Role::Restd)
+        }
+    }
+}
+
+async fn accept_loop(listener: Listener, store: LogStore) {
+    loop {
+        match listener.accept().await {
+            Ok(incoming) => {
+                tokio::spawn(serve(incoming, store.clone()));
+            }
+            Err(e) => {
+                error!(error = %e, "log IPC accept loop terminated");
+                break;
+            }
+        }
+    }
+}
+
+/// Handles one connection for its whole lifetime. `Push` (sent continuously
+/// by every other component process) gets no reply, so the loop just keeps
+/// reading further requests on the same connection; `GetLogs` sends one
+/// reply and the connection typically closes right after (the client's
+/// choice, not enforced here); `Tail` sends one reply then switches into
+/// streaming new entries from the store's broadcast channel until the
+/// client's read side reports an error/EOF or a write to it fails.
+async fn serve(incoming: Incoming, store: LogStore) {
+    let (stream, peer) = match incoming.handshake().await {
+        Ok(ok) => ok,
+        Err(e) => {
+            debug!(error = %e, "log IPC tls handshake failed");
+            return;
+        }
+    };
+    let Some((role, name)) = peer.and_then(|p| Some((Role::parse(&p.role)?, p.name))) else {
+        warn!("log IPC peer's certificate carries no recognised role, dropping it");
+        return;
+    };
+    handle_connection(stream, role, name, store).await;
+}
+
+async fn handle_connection(stream: Stream, role: Role, name: String, store: LogStore) {
+    let (read_half, write_half) = split(stream);
+    let mut reader = FramedRead::new(read_half, IpcCodec::<LogRequest>::default());
+    let mut writer = FramedWrite::new(write_half, IpcCodec::<LogEvent>::default());
+
+    while let Some(msg) = reader.next().await {
+        let req = match msg {
+            Ok(req) => req,
+            Err(e) => {
+                warn!(error = %e, "log IPC read error");
+                break;
+            }
+        };
+        if !allowed(role, &req) {
+            warn!(role = role.as_str(), name = %name, "log request refused: this role may not send it");
+            break;
+        }
+        match req {
+            LogRequest::Push(entry) => store.record(entry).await,
+            LogRequest::GetLogs { source, limit } => {
+                let logs = store.snapshot(source.as_deref(), limit).await;
+                trace!(source = ?source, limit = ?limit, count = logs.len(), "served GetLogs query");
+                if writer.send(LogEvent::Logs(logs)).await.is_err() {
+                    break;
+                }
+            }
+            LogRequest::Tail { source } => {
+                let logs = store.snapshot(source.as_deref(), None).await;
+                if writer.send(LogEvent::Logs(logs)).await.is_err() {
+                    break;
+                }
+                debug!(source = ?source, "log tail subscription started");
+                let result = tail(&mut reader, &mut writer, &store, source.as_deref()).await;
+                debug!("log tail subscription ended");
+                if !result {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Streams new matching entries to `writer` until the client disconnects
+/// (a read error/EOF on `reader`, or a failed write). Returns `false` when
+/// the connection should be torn down.
+async fn tail(
+    reader: &mut FramedRead<ReadHalf<Stream>, IpcCodec<LogRequest>>,
+    writer: &mut FramedWrite<WriteHalf<Stream>, IpcCodec<LogEvent>>,
+    store: &LogStore,
+    source: Option<&str>,
+) -> bool {
+    let mut rx = store.subscribe();
+    loop {
+        tokio::select! {
+            entry = rx.recv() => match entry {
+                Ok(entry) => {
+                    if source.is_some_and(|s| entry.source != s) {
+                        continue;
+                    }
+                    if writer.send(LogEvent::Line(entry)).await.is_err() {
+                        return false;
+                    }
+                }
+                // A slow subscriber that fell behind the broadcast channel's
+                // capacity — resubscribing loses only the gap, not the
+                // connection; a truly closed channel never happens while
+                // `store` (and thus its `tail_tx`) is still alive.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(skipped, "log tail subscriber lagged, entries dropped");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+            },
+            // Per this codebase's connection-lifecycle convention (see root
+            // CLAUDE.md's "Endpoint broker"/`SubscribeDiff` notes), a
+            // subscriber is only expected to send its request and never
+            // write again — so any activity here at all (EOF, a read error,
+            // or even an unexpected extra request) means it's time to tear
+            // the connection down rather than keep tailing.
+            _ = reader.next() => return false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemons_push_and_people_read() {
+        let push = LogRequest::Push(nos_proto::LogEntry {
+            timestamp_ms: 0,
+            level: nos_proto::LogLevel::Info,
+            source: String::new(),
+            target: String::new(),
+            message: String::new(),
+            fields: Vec::new(),
+        });
+        let get = LogRequest::GetLogs {
+            source: None,
+            limit: None,
+        };
+        for role in Role::ALL {
+            assert_eq!(allowed(role, &push), role != Role::User, "{role:?} push");
+            assert_eq!(
+                allowed(role, &get),
+                matches!(role, Role::User | Role::Restd),
+                "{role:?} read"
+            );
+        }
+    }
+}

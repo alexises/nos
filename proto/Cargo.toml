@@ -1,0 +1,24 @@
+[package]
+name    = "nos-proto"
+version = "0.1.0"
+edition = "2021"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+garde      = { workspace = true }
+ipnet      = { workspace = true }
+thiserror  = { workspace = true }
+postcard   = { workspace = true }
+tokio-util = { workspace = true }
+bytes      = { workspace = true }
+futures    = { workspace = true }
+nos-rpl    = { workspace = true }
+utoipa     = { workspace = true, optional = true }
+
+[features]
+# `ToSchema` derives for the REST API's OpenAPI spec (`nos-restd`); off for every other daemon.
+openapi = ["dep:utoipa"]
