@@ -48,6 +48,10 @@ pub const ASN_A4: u32 = 4_200_000_001;
 /// AS4_PATH (0xFA56EA02) behind an AS_TRANS in the 2-byte AS_PATH.
 pub const AS4_LEARNED_PREFIX: &str = "203.0.113.0/24";
 pub const AS4_HIDDEN_ASN: u32 = 4_200_000_002;
+/// The four-octet AGGREGATOR ASN ExaBGP hides behind AS_TRANS + AS4_AGGREGATOR
+/// (RFC 6793 §4.2.3) in the `as4` phase, and the aggregating router-id.
+pub const AS4_AGGREGATOR_ASN: u32 = 4_200_000_003;
+pub const AS4_AGGREGATOR_ID: &str = "192.0.2.9";
 /// RFC 7606: ExaBGP announces this with a 3-byte (malformed) COMMUNITY, which
 /// router-a must treat as a withdraw instead of resetting the session.
 pub const AS4_BAD_PREFIX: &str = "203.0.114.0/24";
