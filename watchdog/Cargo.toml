@@ -25,6 +25,7 @@ name = "nos-watchdogd"
 path = "src/main.rs"
 
 [dev-dependencies]
+argon2   = { version = "0.5", features = ["std", "password-hash", "rand"] }
 nos-pki  = { workspace = true, features = ["testing"] }
 proptest = { workspace = true }
 tempfile = { workspace = true }

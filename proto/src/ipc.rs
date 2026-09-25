@@ -50,6 +50,15 @@ pub enum Request {
     /// that touches at least one requested scope — other commits are not
     /// sent at all.
     SubscribeDiff { scopes: Vec<DiffScope> },
+    /// Watchdog-only compare-and-swap: replace `user`'s stored password hash
+    /// `old` with the stronger re-hash `new` of the same password, straight
+    /// in the running config (no transaction). Refused if `old` is no longer
+    /// the stored hash or `new` is not a hash.
+    UpgradePasswordHash {
+        user: String,
+        old: String,
+        new: String,
+    },
     /// Sets (`value` = `Some(json)`) or removes (`value` = `None`) the
     /// subsection of a named transaction's in-progress config addressed by
     /// `path` — see `nos_proto::config_path` for the path grammar. An empty

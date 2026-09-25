@@ -47,12 +47,11 @@ async fn env(users: Vec<User>) -> Env {
                 let (r, w) = split(stream);
                 let mut reader = FramedRead::new(r, IpcCodec::<Request>::default());
                 let mut writer = FramedWrite::new(w, IpcCodec::<Event>::default());
-                while let Some(Ok(Request::Get)) = reader.next().await {
-                    let config = Config {
-                        users: served.lock().unwrap().clone(),
-                        ..Config::default()
+                while let Some(Ok(request)) = reader.next().await {
+                    let Some(event) = stub_reply(&served, request) else {
+                        return;
                     };
-                    writer.send(Event::Config(config)).await.unwrap();
+                    writer.send(event).await.unwrap();
                 }
             });
         }
@@ -87,6 +86,30 @@ async fn env(users: Vec<User>) -> Env {
         broker: broker_socket,
         users,
     }
+}
+
+/// The stand-in `nos-configd`'s answer to one request.
+fn stub_reply(users: &Mutex<Vec<User>>, request: Request) -> Option<Event> {
+    Some(match request {
+        Request::Get => Event::Config(Config {
+            users: users.lock().unwrap().clone(),
+            ..Config::default()
+        }),
+        Request::UpgradePasswordHash { user, old, new } => {
+            let mut users = users.lock().unwrap();
+            match users
+                .iter_mut()
+                .find(|u| u.name == user && u.password == old)
+            {
+                Some(u) => {
+                    u.password = new;
+                    Event::Committed
+                }
+                None => Event::Error("stale".into()),
+            }
+        }
+        _ => return None,
+    })
 }
 
 fn user(name: &str, password: &str) -> User {
@@ -445,4 +468,42 @@ async fn rest_renewal_is_refused_for_a_deleted_user_and_server_certs_carry_the_r
         panic!("server certificate refused");
     };
     assert!(!ca_der.is_empty());
+}
+
+#[tokio::test]
+async fn a_weak_hash_is_upgraded_on_login_once() {
+    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+    let weak = argon2::Argon2::default()
+        .hash_password(b"s3cret", &SaltString::generate(&mut OsRng))
+        .unwrap()
+        .to_string();
+    let e = env(vec![User {
+        name: "alice".into(),
+        password: weak.clone(),
+    }])
+    .await;
+    let mut conn = dial(&e.anonymous(), &e.broker).await;
+    let (csr, _) = generate_csr().unwrap();
+
+    let event = ask(&mut conn, login("alice", "nope", csr.clone())).await;
+    assert!(matches!(event, WatchdogEvent::Denied(_)));
+    assert_eq!(
+        e.users.lock().unwrap()[0].password,
+        weak,
+        "wrong password must not upgrade"
+    );
+
+    let event = ask(&mut conn, login("alice", "s3cret", csr.clone())).await;
+    assert!(matches!(event, WatchdogEvent::Issued { .. }));
+    let upgraded = e.users.lock().unwrap()[0].password.clone();
+    assert!(upgraded.contains("m=65536,t=3,p=4"), "{upgraded}");
+    assert!(nos_password::verify("s3cret", &upgraded));
+
+    let event = ask(&mut conn, login("alice", "s3cret", csr)).await;
+    assert!(matches!(event, WatchdogEvent::Issued { .. }));
+    assert_eq!(
+        e.users.lock().unwrap()[0].password,
+        upgraded,
+        "no second upgrade"
+    );
 }

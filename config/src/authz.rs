@@ -14,6 +14,7 @@ pub fn allowed(role: Role, req: &Request) -> bool {
         | Request::Unsubscribe
         | Request::SubscribeDiff { .. }
         | Request::Describe { .. } => true,
+        Request::UpgradePasswordHash { .. } => role == Role::Watchdog,
         Request::Save
         | Request::OpenTransaction { .. }
         | Request::ApplyOp { .. }
@@ -49,6 +50,12 @@ mod tests {
             let may_edit = matches!(role, Role::User | Role::Restd);
             assert_eq!(allowed(role, &open()), may_edit, "{role:?} editing");
             assert_eq!(allowed(role, &Request::Save), may_edit, "{role:?} saving");
+            let upgrade = Request::UpgradePasswordHash {
+                user: "u".into(),
+                old: "a".into(),
+                new: "b".into(),
+            };
+            assert_eq!(allowed(role, &upgrade), role == Role::Watchdog, "{role:?}");
         }
     }
 }

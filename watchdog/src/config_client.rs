@@ -62,3 +62,36 @@ pub async fn fetch_users(identity: &Identity, socket_path: &Path) -> io::Result<
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "nos-configd did not answer"))?
 }
+
+/// Asks `nos-configd` to swap `user`'s hash `old` for `new` (see
+/// `Request::UpgradePasswordHash`).
+pub async fn upgrade_password_hash(
+    identity: &Identity,
+    socket_path: &Path,
+    user: &str,
+    old: &str,
+    new: String,
+) -> io::Result<()> {
+    let call = async {
+        let stream = identity.connect(socket_path, &configd()).await?;
+        let (r, w) = split(stream);
+        let mut writer = FramedWrite::new(w, IpcCodec::<Request>::default());
+        let mut reader = FramedRead::new(r, IpcCodec::<Event>::default());
+        writer
+            .send(Request::UpgradePasswordHash {
+                user: user.to_string(),
+                old: old.to_string(),
+                new,
+            })
+            .await?;
+        match reader.next().await {
+            Some(Ok(Event::Committed)) => Ok(()),
+            Some(Ok(other)) => Err(io::Error::other(format!("{other:?}"))),
+            Some(Err(e)) => Err(e),
+            None => Err(io::ErrorKind::UnexpectedEof.into()),
+        }
+    };
+    tokio::time::timeout(FETCH_TIMEOUT, call)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "nos-configd did not answer"))?
+}
