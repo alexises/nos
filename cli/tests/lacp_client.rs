@@ -23,6 +23,8 @@ fn sample() -> PortAggregateLacpSummary {
             partner_port_number: Some(4),
             selected: true,
             synchronized: true,
+            actor_churn: false,
+            partner_churn: false,
         }],
     }
 }

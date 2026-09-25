@@ -470,11 +470,17 @@ fn render_lacp_port(port: &nos_proto::LacpPortStatus) -> String {
         _ => "partner none".to_string(),
     };
     format!(
-        "  {}: port {}, receive {receive}, mux {mux}, {partner}, selected {}, synchronized {}",
+        "  {}: port {}, receive {receive}, mux {mux}, {partner}, selected {}, synchronized {}, churn {}",
         port.interface,
         port.actor_port_number,
         yes_no(port.selected),
         yes_no(port.synchronized),
+        match (port.actor_churn, port.partner_churn) {
+            (false, false) => "none",
+            (true, false) => "actor",
+            (false, true) => "partner",
+            (true, true) => "actor+partner",
+        },
     )
 }
 
@@ -2404,6 +2410,8 @@ mod tests {
                     partner_port_number: Some(9),
                     selected: true,
                     synchronized: true,
+                    actor_churn: false,
+                    partner_churn: false,
                 },
                 nos_proto::LacpPortStatus {
                     interface: "eth2".to_string(),
@@ -2415,13 +2423,15 @@ mod tests {
                     partner_port_number: None,
                     selected: false,
                     synchronized: false,
+                    actor_churn: false,
+                    partner_churn: true,
                 },
             ],
         };
         let out = render_lacp_summaries(&[summary]);
         assert!(out.contains("lacp bond1: system 02:00:00:00:00:ab, key 7, rate fast"));
         assert!(out.contains("eth1: port 4, receive current, mux distributing, partner 02:00:00:00:00:01 key 3 port 9, selected yes, synchronized yes"));
-        assert!(out.contains("eth2: port 5, receive defaulted, mux detached, partner none, selected no, synchronized no"));
+        assert!(out.contains("eth2: port 5, receive defaulted, mux detached, partner none, selected no, synchronized no, churn partner"));
     }
 
     #[test]
