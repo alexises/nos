@@ -66,13 +66,14 @@ pub use rib::{
 };
 pub use schema::{
     loopback_table_name, AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpInstance, BgpPeer,
-    BgpPeerGroup, BroadcastDomain, CommunityAlias, CommunityGroup, Config, EsRedundancy, Interface,
-    InterfaceAddress, LacpRate, LldpDestination, LldpSettings, NetworkType, NextHopMode, OspfArea,
-    OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstance, OspfProfile, Ospfv3Area,
-    Ospfv3Instance, Ospfv3Profile, PolicyDefinition, PortAggregate, PortAggregateMode, PrefixList,
-    PrefixListEntry, Redistribute, RedistributeSource, RedistributeTarget, RestApi, RoutingTable,
-    SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface, SwitchingProfile,
-    SwitchingProfileMember, User, VlanTag, CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT,
-    HELLO_INTERVAL_DEFAULT, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX,
-    PASSWORD_HASH_PREFIX, PRIORITY_DEFAULT, REST_API_PORT_DEFAULT,
+    BgpPeerGroup, BgpShutdown, BroadcastDomain, CommunityAlias, CommunityGroup, Config,
+    EsRedundancy, Interface, InterfaceAddress, LacpRate, LldpDestination, LldpSettings,
+    NetworkType, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstance,
+    OspfProfile, Ospfv3Area, Ospfv3Instance, Ospfv3Profile, PolicyDefinition, PortAggregate,
+    PortAggregateMode, PrefixList, PrefixListEntry, Redistribute, RedistributeSource,
+    RedistributeTarget, RestApi, RoutingTable, SourceAddress, StaticRoute, StaticRoutingInstance,
+    Subinterface, SwitchingProfile, SwitchingProfileMember, User, VlanTag,
+    CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT, HELLO_INTERVAL_DEFAULT,
+    HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX, PASSWORD_HASH_PREFIX, PRIORITY_DEFAULT,
+    REST_API_PORT_DEFAULT,
 };

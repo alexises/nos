@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ipnet::IpNet;
 use nos_proto::bgp::{BgpSessionState, PeerSummary};
-use nos_proto::{AddressFamily, BgpAoAlgorithm, BgpAuth, NextHopMode};
+use nos_proto::{AddressFamily, BgpAoAlgorithm, BgpAuth, BgpShutdown, NextHopMode};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::collision::{FsmCommand, PeerSlot, Role};
 use crate::fsm::{self, PeerContext};
+use crate::message::CeaseSubcode;
 use crate::rib::BgpRib;
 use crate::status::{PeerState, PeerStatus};
 use crate::tcp;
@@ -88,6 +89,9 @@ pub struct ResolvedPeer {
     /// peer-group's `import_policy`/`export_policy` names.
     pub import_policy: Arc<nos_rpl::CompiledPolicy>,
     pub export_policy: Arc<nos_rpl::CompiledPolicy>,
+    /// Effective administrative shutdown (the peer's own, else its
+    /// peer-group's): no session is opened or accepted while set.
+    pub shutdown: Option<BgpShutdown>,
 }
 
 /// A peer-group's `BgpAuth` translated into `nos-tcp-auth`'s wire-level
@@ -126,7 +130,8 @@ impl From<&BgpAuth> for ResolvedAuth {
 
 struct PeerTask {
     peer: ResolvedPeer,
-    task: JoinHandle<()>,
+    /// `None` for an administratively shut peer, which never dials out.
+    task: Option<JoinHandle<()>>,
 }
 
 struct Listeners {
@@ -290,7 +295,9 @@ impl SessionManager {
     pub async fn shutdown(&self) {
         let mut tasks = self.peer_tasks.lock().await;
         for (_, task) in tasks.drain() {
-            task.task.abort();
+            if let Some(t) = task.task {
+                t.abort();
+            }
         }
         drop(tasks);
         self.peers.write().await.clear();
@@ -399,6 +406,13 @@ impl SessionManager {
             );
             return;
         };
+        if slot.peer.shutdown.is_some() {
+            debug!(
+                instance = %self.instance, peer = %remote,
+                "rejecting inbound tcp connection from administratively shut peer"
+            );
+            return;
+        }
         if !slot.begin(Role::Passive).await {
             debug!(
                 instance = %self.instance, peer = %remote,
@@ -463,17 +477,36 @@ impl SessionManager {
 
         self.sync_listener_auth(&to_stop, &to_spawn).await;
 
+        // Tell every established session why it is going away (RFC 4486)
+        // before the tasks are aborted — an abort sends nothing. Concurrent,
+        // since each waits up to `CEASE_GRACE` for its NOTIFICATION to flush.
+        let mut stopped = Vec::new();
         for addr in &to_stop {
+            let slot = self.peers.write().await.remove(addr);
+            let (subcode, message) = cease_reason(current.get(addr), desired.get(addr));
+            stopped.push((*addr, slot, subcode, message));
+        }
+        futures::future::join_all(
+            stopped
+                .iter()
+                .map(|(_, slot, subcode, message)| async move {
+                    if let Some(slot) = slot {
+                        cease_established(slot, *subcode, message.clone()).await;
+                    }
+                }),
+        )
+        .await;
+
+        for (addr, slot, _, _) in stopped {
             // Both roles must stop: the active-connect loop owned here, and
             // any passively-accepted session, which is spawned per accepted
             // connection and tracked on the slot. Missing the passive one
             // left an established session running with the `ResolvedPeer` it
             // was accepted with — stale policies, auth and timers — for as
             // long as the session stayed up.
-            if let Some(task) = tasks.remove(addr) {
-                task.task.abort();
+            if let Some(task) = tasks.remove(&addr).and_then(|t| t.task) {
+                task.abort();
             }
-            let slot = self.peers.write().await.remove(addr);
             if let Some(slot) = slot {
                 slot.stop_passive().await;
             }
@@ -485,7 +518,7 @@ impl SessionManager {
             // (and keep being advertised) until something else happened to
             // evict them, which is exactly what a changed import policy must
             // not do.
-            self.bgp_rib.lock().await.peer_disconnected(*addr);
+            self.bgp_rib.lock().await.peer_disconnected(addr);
         }
         for peer in to_spawn {
             let slot = PeerSlot::new(peer.clone());
@@ -493,13 +526,15 @@ impl SessionManager {
                 .write()
                 .await
                 .insert(peer.remote_address, slot.clone());
-            let task = tokio::spawn(active_connect_loop(
-                self.instance.clone(),
-                slot,
-                self.vrf.subscribe(),
-                self.local.subscribe(),
-                self.bgp_rib.clone(),
-            ));
+            let task = peer.shutdown.is_none().then(|| {
+                tokio::spawn(active_connect_loop(
+                    self.instance.clone(),
+                    slot,
+                    self.vrf.subscribe(),
+                    self.local.subscribe(),
+                    self.bgp_rib.clone(),
+                ))
+            });
             tasks.insert(peer.remote_address, PeerTask { peer, task });
         }
     }
@@ -550,6 +585,40 @@ impl SessionManager {
     }
 }
 
+/// How long `reconcile_peers` waits for a Cease NOTIFICATION to be written
+/// and the session to end before it aborts the task regardless.
+const CEASE_GRACE: Duration = Duration::from_secs(1);
+
+/// The RFC 4486 Cease subcode (and RFC 9003 message) for taking a running
+/// peer down: `wanted` is `None` when it left the config entirely.
+fn cease_reason(
+    running: Option<&ResolvedPeer>,
+    wanted: Option<&ResolvedPeer>,
+) -> (CeaseSubcode, Option<String>) {
+    match (running, wanted) {
+        (_, None) => (CeaseSubcode::PeerDeconfigured, None),
+        (Some(old), Some(new)) if new.shutdown.is_some() && new.shutdown != old.shutdown => (
+            CeaseSubcode::AdministrativeShutdown,
+            new.shutdown.as_ref().and_then(|s| s.message.clone()),
+        ),
+        _ => (CeaseSubcode::OtherConfigurationChange, None),
+    }
+}
+
+/// Asks an `Established` session to send a Cease and close, and waits (up to
+/// `CEASE_GRACE`) for it to end. A no-op for a peer that isn't established.
+async fn cease_established(slot: &PeerSlot, subcode: CeaseSubcode, message: Option<String>) {
+    if !slot.is_established().await || !slot.send_command(FsmCommand::Cease { subcode, message }) {
+        return;
+    }
+    let _ = tokio::time::timeout(CEASE_GRACE, async {
+        while slot.is_established().await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+}
+
 /// Which of a `Listeners`' two raw fds matches `addr`'s IP version —
 /// `TCP_MD5SIG`/TCP-AO keys are scoped to one socket family, so a peer's key
 /// only ever goes on the listener actually reachable by its address.
@@ -570,6 +639,7 @@ fn to_peer_summary(slot: &PeerSlot) -> PeerSummary {
     PeerSummary {
         remote_address: slot.peer.remote_address,
         peer_group: slot.peer.peer_group.clone(),
+        shutdown: slot.peer.shutdown.is_some(),
         remote_as: status.remote_asn,
         remote_bgp_id: status.remote_bgp_id,
         state: match status.state {
@@ -725,6 +795,7 @@ mod tests {
             route_server_client: false,
             import_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+            shutdown: None,
         }
     }
 
@@ -843,6 +914,43 @@ mod tests {
                 set_current: true,
                 set_rnext: false,
             }])
+        );
+    }
+
+    #[test]
+    fn shutting_a_peer_restarts_it_with_an_administrative_shutdown_cease() {
+        let addr: IpAddr = "10.0.0.1".parse().unwrap();
+        let running = peer("10.0.0.1");
+        let mut wanted = peer("10.0.0.1");
+        wanted.shutdown = Some(BgpShutdown {
+            message: Some("maint".to_string()),
+        });
+        let current = HashMap::from([(addr, running.clone())]);
+        let desired = HashMap::from([(addr, wanted.clone())]);
+        let (to_stop, to_spawn) = diff_peers(&current, &desired);
+        assert_eq!(to_stop, vec![addr]);
+        assert_eq!(to_spawn, vec![wanted.clone()]);
+        assert_eq!(
+            cease_reason(Some(&running), Some(&wanted)),
+            (
+                CeaseSubcode::AdministrativeShutdown,
+                Some("maint".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn cease_reason_for_removal_and_other_changes() {
+        let a = peer("10.0.0.1");
+        let mut b = peer("10.0.0.1");
+        b.hold_time = 30;
+        assert_eq!(
+            cease_reason(Some(&a), None),
+            (CeaseSubcode::PeerDeconfigured, None)
+        );
+        assert_eq!(
+            cease_reason(Some(&a), Some(&b)),
+            (CeaseSubcode::OtherConfigurationChange, None)
         );
     }
 }

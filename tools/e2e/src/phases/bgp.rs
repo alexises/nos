@@ -338,6 +338,73 @@ pub async fn mrai(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&learned(), learned_before, 40).await
 }
 
+/// RFC 4486 / RFC 9003 administrative shutdown: shutting router-a's peer-group,
+/// then its one peer alone, must send router-b a Cease/Administrative Shutdown
+/// carrying the operator's message, and keep the session down (router-b keeps
+/// dialling, router-a refuses) until it is cleared; removing the peer from
+/// router-a's config must send Cease/Peer De-configured.
+pub async fn shutdown(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let sent = |subcode: u8| format!("sent cease notification peer=.* subcode={subcode}");
+    let received = |subcode: u8, msg: &str| {
+        format!("received notification peer=.* code=6 subcode={subcode} shutdown_message=.*{msg}")
+    };
+    let rejected = "rejecting inbound tcp connection from administratively shut peer";
+
+    for (what, set, clear, msg) in [
+        (
+            "peer-group",
+            "--shutdown-peer-group",
+            "--unshutdown-peer-group",
+            "group maintenance",
+        ),
+        (
+            "peer",
+            "--shutdown-peer",
+            "--unshutdown-peer",
+            "peer maintenance",
+        ),
+    ] {
+        log(format!("shutting router-a's {what} with a message"));
+        let (sent_before, recv_before, est_b, rej_before) = (
+            a.count(&sent(2)),
+            b.count(&received(2, msg)),
+            b.count("bgp session established"),
+            a.count(rejected),
+        );
+        a.provision(&[set, msg]).await?;
+        a.wait_new(&sent(2), sent_before, 20).await?;
+        b.wait_new(&received(2, msg), recv_before, 20).await?;
+        // The session stays down: router-b keeps dialling, router-a refuses.
+        a.wait_new(rejected, rej_before, 20).await?;
+        b.assert_quiet("bgp session established", est_b, 10).await?;
+
+        log(format!("clearing the {what} shutdown"));
+        let (est_a, est_b) = (
+            a.count("bgp session established"),
+            b.count("bgp session established"),
+        );
+        a.provision(&[clear]).await?;
+        reestablished(a, est_a).await?;
+        reestablished(b, est_b).await?;
+    }
+
+    log("removing the peer from router-a's config: Cease / Peer De-configured");
+    let recv_before = b.count(&received(3, ""));
+    let est_b = b.count("bgp session established");
+    a.edit(|config| {
+        for instance in &mut config.bgp_instances {
+            instance.peers.clear();
+        }
+        Ok(())
+    })
+    .await?;
+    b.wait_new(&received(3, ""), recv_before, 20).await?;
+    // The base flags upsert the peer again.
+    a.provision::<&str>(&[]).await?;
+    reestablished(b, est_b).await
+}
+
 /// An export policy tagging the prefix with an RFC 1997 community that must
 /// survive encoding, the real session, and decoding into router-b's loc-rib.
 pub async fn communities(w: &mut World) -> anyhow::Result<()> {

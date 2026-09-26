@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
-    BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus,
+    BgpShutdown, BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus,
     EvpnRouteSummary, FieldDiff, Interface, InterfaceAddress, InterfaceStatus, LacpMuxState,
     LacpRate, LacpReceiveState, LinkInterfaceState, LogEntry, LogLevel, LsaSummary,
     NeighborSummary, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm, OspfInstance,
@@ -62,6 +62,7 @@ pub fn render_bgp_peer_group(group: &BgpPeerGroup, local_asn: u32) -> String {
             .mrai
             .map_or_else(String::new, |m| format!(", mrai {m}")),
     );
+    line.push_str(&render_shutdown(group.shutdown.as_ref()));
     if group.route_reflector_client {
         line.push_str(", route-reflector-client");
     }
@@ -100,11 +101,22 @@ fn render_bgp_auth(auth: Option<&BgpAuth>) -> String {
     }
 }
 
+/// `, shutdown` / `, shutdown "<message>"`, or nothing when unset.
+fn render_shutdown(shutdown: Option<&BgpShutdown>) -> String {
+    match shutdown {
+        None => String::new(),
+        Some(BgpShutdown { message: None }) => ", shutdown".to_string(),
+        Some(BgpShutdown { message: Some(m) }) => format!(", shutdown \"{m}\""),
+    }
+}
+
 /// Render one peer as human-readable text.
 pub fn render_bgp_peer(peer: &BgpPeer) -> String {
     format!(
-        "peer {}: peer-group {}",
-        peer.remote_address, peer.peer_group
+        "peer {}: peer-group {}{}",
+        peer.remote_address,
+        peer.peer_group,
+        render_shutdown(peer.shutdown.as_ref())
     )
 }
 
@@ -693,7 +705,11 @@ pub fn render_bgp_summary(instance: &str, peers: &[PeerSummary]) -> String {
             "  {} AS {remote_as} peer-group {} {} uptime {uptime} hold-time {hold_time}",
             peer.remote_address,
             peer.peer_group,
-            render_bgp_session_state(peer.state),
+            if peer.shutdown {
+                "Idle (shutdown)"
+            } else {
+                render_bgp_session_state(peer.state)
+            },
         ));
     }
     lines.join("\n")
@@ -1911,6 +1927,7 @@ mod tests {
             route_server_client: false,
             import_policy: None,
             export_policy: None,
+            shutdown: None,
         }
     }
 
@@ -2062,6 +2079,7 @@ mod tests {
         inst.peers = vec![BgpPeer {
             remote_address: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             peer_group: "pg1".to_string(),
+            shutdown: None,
         }];
         assert_eq!(
             render_bgp_instance(&inst),
@@ -2174,6 +2192,7 @@ mod tests {
             uptime_secs: None,
             negotiated_hold_time: None,
             negotiated_keepalive: None,
+            shutdown: false,
         }
     }
 

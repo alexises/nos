@@ -189,6 +189,7 @@ mod tests {
                 route_server_client: false,
                 import_policy: None,
                 export_policy: None,
+                shutdown: None,
             },
             BgpPeerGroup {
                 name: "invalid".to_string(),
@@ -205,6 +206,7 @@ mod tests {
                 route_server_client: false,
                 import_policy: None,
                 export_policy: None,
+                shutdown: None,
             },
         ];
         let cfg = config_with(vec![inst]);
@@ -233,6 +235,7 @@ mod tests {
             route_server_client,
             import_policy: None,
             export_policy: None,
+            shutdown: None,
         }
     }
 

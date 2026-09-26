@@ -30,6 +30,8 @@ pub struct PeerSummary {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub remote_address: IpAddr,
     pub peer_group: String,
+    /// The peer (or its peer-group) is administratively shut.
+    pub shutdown: bool,
     /// Known only once negotiated (i.e. at least `OpenConfirm`).
     pub remote_as: Option<u32>,
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]

@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
+use super::bgp_peer_group::{valid_shutdown, BgpShutdown};
 use super::Config;
 
 /// Associates a remote address with a peer-group, by name — the bulk of
@@ -18,6 +19,10 @@ pub struct BgpPeer {
 
     #[garde(custom(|name, ctx: &Config| peer_group_exists(name, ctx)))]
     pub peer_group: String,
+
+    /// Overrides the peer-group's own `shutdown` — see `BgpShutdown`.
+    #[garde(custom(|s: &Option<BgpShutdown>, _ctx: &Config| valid_shutdown(s.as_ref())))]
+    pub shutdown: Option<BgpShutdown>,
 }
 
 /// Peer remote-addresses are unique across the whole config — see
@@ -87,6 +92,7 @@ mod tests {
             route_server_client: false,
             import_policy: None,
             export_policy: None,
+            shutdown: None,
         }
     }
 
@@ -102,6 +108,7 @@ mod tests {
         let peer = BgpPeer {
             remote_address: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             peer_group: "pg1".to_string(),
+            shutdown: None,
         };
         let cfg = config_with(vec![instance("r1", vec![group("pg1")], vec![peer])]);
         cfg.validate_with(&cfg).unwrap();
@@ -112,6 +119,7 @@ mod tests {
         let peer = BgpPeer {
             remote_address: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             peer_group: "does-not-exist".to_string(),
+            shutdown: None,
         };
         let cfg = config_with(vec![instance("r1", vec![group("pg1")], vec![peer])]);
         assert!(cfg.validate_with(&cfg).is_err());
@@ -122,10 +130,12 @@ mod tests {
         let peer_a = BgpPeer {
             remote_address: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             peer_group: "pg1".to_string(),
+            shutdown: None,
         };
         let peer_b = BgpPeer {
             remote_address: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             peer_group: "pg2".to_string(),
+            shutdown: None,
         };
         let cfg = config_with(vec![
             instance("r1", vec![group("pg1")], vec![peer_a]),
@@ -141,6 +151,7 @@ mod tests {
         let peer = BgpPeer {
             remote_address: IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 2)),
             peer_group: "pg1".to_string(),
+            shutdown: None,
         };
         let cfg = config_with(vec![instance("r1", vec![group("pg1")], vec![peer])]);
         cfg.validate_with(&cfg).unwrap();

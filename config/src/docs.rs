@@ -374,6 +374,29 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              changes to one prefix within the interval collapse into the latest. Withdrawals are \
              never delayed. Unset or 0 sends every change immediately.",
         ),
+        Topic::SetBgpPeerGroupShutdown => (
+            "Administratively shut every peer in a peer-group.",
+            "Sets shutdown on a peer-group (RFC 4486): no session is opened or accepted for \
+             any peer in it, and an established session is closed with a Cease / \
+             Administrative Shutdown NOTIFICATION. An optional message (at most 255 bytes) is \
+             sent to the peer as an RFC 9003 shutdown communication. A peer with its own \
+             shutdown setting is unaffected by this one.",
+        ),
+        Topic::ClearBgpPeerGroupShutdown => (
+            "Bring a shut peer-group back up.",
+            "Unsets shutdown on a peer-group; its peers connect again.",
+        ),
+        Topic::SetBgpPeerShutdown => (
+            "Administratively shut one BGP peer.",
+            "Sets shutdown on a single peer (RFC 4486), overriding its peer-group: no session \
+             is opened or accepted, and an established one is closed with a Cease / \
+             Administrative Shutdown NOTIFICATION carrying the optional message (at most 255 \
+             bytes, RFC 9003). The peer must already exist.",
+        ),
+        Topic::ClearBgpPeerShutdown => (
+            "Bring a shut BGP peer back up.",
+            "Unsets shutdown on a peer; it follows its peer-group again.",
+        ),
         Topic::ClearBgpPeerGroupMrai => (
             "Clear a peer-group's BGP MinRouteAdvertisementInterval.",
             "Unsets the mrai field on a peer-group, reverting to unpaced advertisements.",
@@ -926,6 +949,10 @@ mod tests {
         Topic::ClearBgpPeerGroupConnectRetryTime,
         Topic::SetBgpPeerGroupMrai,
         Topic::ClearBgpPeerGroupMrai,
+        Topic::SetBgpPeerGroupShutdown,
+        Topic::ClearBgpPeerGroupShutdown,
+        Topic::SetBgpPeerShutdown,
+        Topic::ClearBgpPeerShutdown,
         Topic::SetBgpPeerGroupMd5Auth,
         Topic::SetBgpPeerGroupAoKey,
         Topic::RemoveBgpPeerGroupAoKey,

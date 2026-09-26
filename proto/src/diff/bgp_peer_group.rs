@@ -1,4 +1,6 @@
-use crate::schema::{AddressFamily, BgpAoAlgorithm, BgpAuth, BgpPeerGroup, SourceAddress};
+use crate::schema::{
+    AddressFamily, BgpAoAlgorithm, BgpAuth, BgpPeerGroup, BgpShutdown, SourceAddress,
+};
 
 use super::{DiffStatus, FieldDiff, SectionDiff};
 
@@ -36,6 +38,15 @@ pub fn diff_bgp_peer_groups(base: &[BgpPeerGroup], candidate: &[BgpPeerGroup]) -
 
 fn header_for(name: &str) -> String {
     format!("peer-group {name}")
+}
+
+/// Shared with `bgp_peer.rs`, whose `shutdown` renders identically.
+pub(super) fn shutdown_str(s: Option<&BgpShutdown>) -> String {
+    match s {
+        None => "no".to_string(),
+        Some(BgpShutdown { message: None }) => "yes".to_string(),
+        Some(BgpShutdown { message: Some(m) }) => format!("yes, message \"{m}\""),
+    }
 }
 
 fn source_address_str(pg: &BgpPeerGroup) -> String {
@@ -192,6 +203,13 @@ fn changed_fields(base: &BgpPeerGroup, candidate: &BgpPeerGroup) -> Vec<FieldDif
             new: Some(export_policy_str(candidate)),
         });
     }
+    if base.shutdown != candidate.shutdown {
+        fields.push(FieldDiff {
+            label: "shutdown".to_string(),
+            old: Some(shutdown_str(base.shutdown.as_ref())),
+            new: Some(shutdown_str(candidate.shutdown.as_ref())),
+        });
+    }
     fields
 }
 
@@ -339,6 +357,7 @@ mod tests {
             route_server_client: false,
             import_policy: None,
             export_policy: None,
+            shutdown: None,
         }
     }
 

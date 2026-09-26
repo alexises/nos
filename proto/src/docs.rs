@@ -262,6 +262,14 @@ pub enum Topic {
     SetBroadcastDomainArpRedistribute,
     /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetConnectedRedistribute)` / `ClearConnectedRedistribute`
     SetBroadcastDomainConnectedRedistribute,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetShutdown)`
+    SetBgpPeerGroupShutdown,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearShutdown)`
+    ClearBgpPeerGroupShutdown,
+    /// `ConfigOp::BgpPeer(BgpPeerOp::SetShutdown)`
+    SetBgpPeerShutdown,
+    /// `ConfigOp::BgpPeer(BgpPeerOp::ClearShutdown)`
+    ClearBgpPeerShutdown,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

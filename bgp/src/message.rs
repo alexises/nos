@@ -195,7 +195,33 @@ pub enum CeaseSubcode {
     #[allow(dead_code)] // generic fallback, not yet triggered by any code path
     Other = 0,
     AdministrativeShutdown = 2,
+    PeerDeconfigured = 3,
+    OtherConfigurationChange = 6,
     ConnectionCollisionResolution = 7,
+}
+
+/// RFC 9003 §2: the NOTIFICATION data of a Cease/Administrative Shutdown (2)
+/// or Administrative Reset (4) is `length(1) || UTF-8 text`, at most 255
+/// octets of text. Over-long text is cut on a character boundary.
+pub fn encode_shutdown_message(text: &str) -> Bytes {
+    let mut end = text.len().min(255);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut data = Vec::with_capacity(end + 1);
+    data.push(u8::try_from(end).unwrap_or(u8::MAX));
+    data.extend_from_slice(&text.as_bytes()[..end]);
+    Bytes::from(data)
+}
+
+/// The inverse of [`encode_shutdown_message`]; `None` if `data` isn't a
+/// well-formed shutdown communication (empty, length mismatch, not UTF-8).
+pub fn decode_shutdown_message(data: &[u8]) -> Option<String> {
+    let (&len, text) = data.split_first()?;
+    if usize::from(len) != text.len() {
+        return None;
+    }
+    String::from_utf8(text.to_vec()).ok()
 }
 
 /// One OPEN capability this crate understands. An unrecognized capability
@@ -2478,5 +2504,35 @@ mod tests {
         };
         assert_eq!(decode_pmsi(&encode_pmsi(&p)), Some(p));
         assert_eq!(decode_pmsi(&[0, 2, 0, 0, 1, 1, 2, 3, 4]), None);
+    }
+}
+
+#[cfg(test)]
+mod shutdown_message_tests {
+    use super::*;
+
+    #[test]
+    fn round_trips() {
+        let data = encode_shutdown_message("maintenance");
+        assert_eq!(data[0], 11);
+        assert_eq!(
+            decode_shutdown_message(&data).as_deref(),
+            Some("maintenance")
+        );
+    }
+
+    #[test]
+    fn truncates_on_a_char_boundary() {
+        // 100 x 3-byte chars = 300 bytes; the cut must land on a boundary <= 255.
+        let data = encode_shutdown_message(&"€".repeat(100));
+        assert_eq!(usize::from(data[0]), 255);
+        assert_eq!(decode_shutdown_message(&data), Some("€".repeat(85)));
+    }
+
+    #[test]
+    fn malformed_is_rejected() {
+        assert_eq!(decode_shutdown_message(&[]), None);
+        assert_eq!(decode_shutdown_message(&[5, b'a']), None);
+        assert_eq!(decode_shutdown_message(&[1, 0xff]), None);
     }
 }

@@ -24,8 +24,8 @@ pub mod user;
 pub use bgp_instance::BgpInstance;
 pub use bgp_peer::BgpPeer;
 pub use bgp_peer_group::{
-    AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpPeerGroup, NextHopMode, SourceAddress,
-    CONNECT_RETRY_TIME_DEFAULT_SECS, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR,
+    AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpPeerGroup, BgpShutdown, NextHopMode,
+    SourceAddress, CONNECT_RETRY_TIME_DEFAULT_SECS, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR,
 };
 pub use broadcast_domain::BroadcastDomain;
 pub use community_alias::CommunityAlias;

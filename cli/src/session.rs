@@ -1190,6 +1190,29 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             }),
             after: PathAfter::Stay,
         },
+        Command::Set(SetTarget::BgpPeerShutdown {
+            instance,
+            remote_address,
+            message,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::BgpPeer(BgpPeerOp::SetShutdown {
+                instance,
+                remote_address,
+                message,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::PeerShutdownRelative {
+            remote_address,
+            message,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::BgpPeer(BgpPeerOp::SetShutdown {
+                instance: path.bgp_instance()?.to_string(),
+                remote_address,
+                message,
+            }),
+            after: PathAfter::Stay,
+        },
         Command::Set(SetTarget::RoutingTable { name, bgp_instance }) => Resolved::ApplyOp {
             op: ConfigOp::RoutingTable(RoutingTableOp::SetBgpInstance { name, bgp_instance }),
             after: PathAfter::Stay,
@@ -2263,6 +2286,28 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 }
             })?,
         },
+        Command::Delete(DeleteTarget::Shutdown) => peer_group_clear(path, |instance, name| {
+            BgpPeerGroupOp::ClearShutdown { instance, name }
+        })?,
+        Command::Delete(DeleteTarget::BgpPeerShutdown {
+            instance,
+            remote_address,
+        }) => Resolved::ApplyOp {
+            op: ConfigOp::BgpPeer(BgpPeerOp::ClearShutdown {
+                instance,
+                remote_address,
+            }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::PeerShutdownRelative { remote_address }) => {
+            Resolved::ApplyOp {
+                op: ConfigOp::BgpPeer(BgpPeerOp::ClearShutdown {
+                    instance: path.bgp_instance()?.to_string(),
+                    remote_address,
+                }),
+                after: PathAfter::Stay,
+            }
+        }
         Command::Delete(DeleteTarget::Mrai) => peer_group_clear(path, |instance, name| {
             BgpPeerGroupOp::ClearMrai { instance, name }
         })?,
@@ -2443,6 +2488,11 @@ fn peer_group_set_op(instance: String, group: String, field: BgpPeerGroupField) 
                 connect_retry_time,
             }
         }
+        BgpPeerGroupField::Shutdown(message) => BgpPeerGroupOp::SetShutdown {
+            instance,
+            name: group,
+            message,
+        },
         BgpPeerGroupField::Mrai(mrai) => BgpPeerGroupOp::SetMrai {
             instance,
             name: group,

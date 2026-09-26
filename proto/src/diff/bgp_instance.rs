@@ -209,6 +209,7 @@ mod tests {
             route_server_client: false,
             import_policy: None,
             export_policy: None,
+            shutdown: None,
         };
 
         let mut base_instance = instance("r1", 65000);

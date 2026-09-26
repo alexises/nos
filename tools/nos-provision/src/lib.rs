@@ -217,6 +217,25 @@ pub struct Args {
     #[arg(long)]
     pub mrai: Option<u16>,
 
+    /// If set, administratively shuts `--peer-group` with this RFC 9003
+    /// shutdown message (`BgpPeerGroupOp::SetShutdown`); an empty string
+    /// shuts it without a message.
+    #[arg(long)]
+    pub shutdown_peer_group: Option<String>,
+
+    /// If set, administratively shuts `--peer` alone, with this message
+    /// (`BgpPeerOp::SetShutdown`); an empty string means no message.
+    #[arg(long)]
+    pub shutdown_peer: Option<String>,
+
+    /// If set, clears `--peer-group`'s shutdown (`BgpPeerGroupOp::ClearShutdown`).
+    #[arg(long)]
+    pub unshutdown_peer_group: bool,
+
+    /// If set, clears `--peer`'s own shutdown (`BgpPeerOp::ClearShutdown`).
+    #[arg(long)]
+    pub unshutdown_peer: bool,
+
     /// If set, configures `--bgp-instance`'s RFC 4456 cluster-id
     /// (`BgpInstanceOp::SetClusterId`) — only meaningful alongside
     /// `--route-reflector-client`.
@@ -933,6 +952,34 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             instance: args.bgp_instance.clone(),
             name: args.peer_group.clone(),
             mrai,
+        }));
+    }
+
+    let message = |m: &String| (!m.is_empty()).then(|| m.clone());
+    if let Some(m) = &args.shutdown_peer_group {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetShutdown {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            message: message(m),
+        }));
+    }
+    if args.unshutdown_peer_group {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearShutdown {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+        }));
+    }
+    if let Some(m) = &args.shutdown_peer {
+        ops.push(ConfigOp::BgpPeer(BgpPeerOp::SetShutdown {
+            instance: args.bgp_instance.clone(),
+            remote_address: args.peer,
+            message: message(m),
+        }));
+    }
+    if args.unshutdown_peer {
+        ops.push(ConfigOp::BgpPeer(BgpPeerOp::ClearShutdown {
+            instance: args.bgp_instance.clone(),
+            remote_address: args.peer,
         }));
     }
 
