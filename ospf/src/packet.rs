@@ -111,9 +111,14 @@ impl CryptoAlgorithm {
         // `new_from_slice` calls below never actually fail.
         match self {
             CryptoAlgorithm::Md5 => {
+                // RFC 2328 D.4.3 (a): "the 16 byte MD5 key is appended" — a
+                // shorter key is zero-padded, a longer one truncated.
+                let mut md5_key = [0u8; 16];
+                let n = key.len().min(16);
+                md5_key[..n].copy_from_slice(&key[..n]);
                 let mut hasher = Md5::new();
                 hasher.update(data);
-                hasher.update(key);
+                hasher.update(md5_key);
                 hasher.finalize().to_vec()
             }
             CryptoAlgorithm::HmacSha1 => {
@@ -1500,5 +1505,45 @@ mod tests {
         mac.update(packet);
         mac.update(&[0x87, 0x8F, 0xE1, 0xF3].repeat(8));
         assert_eq!(digest, &mac.finalize().into_bytes()[..]);
+    }
+
+    #[test]
+    fn md5_key_is_zero_padded_or_truncated_to_16_bytes() {
+        // RFC 2328 D.4.3 (a): MD5(packet || 16-byte key).
+        let digest_for = |key: &[u8]| {
+            let encoded = encode_hello(
+                &sample(),
+                &OutgoingAuth::Crypto {
+                    key_id: 1,
+                    algorithm: CryptoAlgorithm::Md5,
+                    key,
+                    sequence: 1,
+                    extended: None,
+                },
+            );
+            encoded[encoded.len() - 16..].to_vec()
+        };
+        let packet = {
+            let e = encode_hello(
+                &sample(),
+                &OutgoingAuth::Crypto {
+                    key_id: 1,
+                    algorithm: CryptoAlgorithm::Md5,
+                    key: b"secret",
+                    sequence: 1,
+                    extended: None,
+                },
+            );
+            e[..e.len() - 16].to_vec()
+        };
+        let mut hasher = Md5::new();
+        hasher.update(&packet);
+        hasher.update(b"secret\0\0\0\0\0\0\0\0\0\0");
+        assert_eq!(digest_for(b"secret"), hasher.finalize().to_vec());
+        // Bytes past the 16th don't matter.
+        assert_eq!(
+            digest_for(b"0123456789abcdefXYZ"),
+            digest_for(b"0123456789abcdef")
+        );
     }
 }
