@@ -4,7 +4,7 @@ use std::os::fd::{AsRawFd, RawFd};
 
 use socket2::SockRef;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::session::ResolvedAuth;
 
@@ -20,6 +20,7 @@ pub async fn connect(
     source: Option<IpAddr>,
     vrf: Option<&str>,
     auth: Option<&ResolvedAuth>,
+    max_hops: Option<u8>,
 ) -> io::Result<TcpStream> {
     let socket = new_socket(remote.is_ipv4())?;
     if let Some(vrf) = vrf {
@@ -27,6 +28,9 @@ pub async fn connect(
     }
     if let Some(auth) = auth {
         apply_auth(socket.as_raw_fd(), remote.ip(), auth)?;
+    }
+    if let Some(hops) = max_hops {
+        apply_max_hops(socket.as_raw_fd(), remote.ip(), hops)?;
     }
     if let Some(source) = source {
         if source.is_ipv4() == remote.is_ipv4() {
@@ -39,6 +43,14 @@ pub async fn connect(
         }
     }
     socket.connect(remote).await
+}
+
+/// Enables RFC 5082 GTSM on a connect socket or an accepted stream (a shared
+/// listener can't carry it: the minimum TTL is per socket, not per peer).
+pub fn apply_max_hops(fd: RawFd, peer: IpAddr, hops: u8) -> io::Result<()> {
+    nos_tcp_auth::set_max_hops(fd, peer.is_ipv6(), hops)?;
+    debug!(%peer, hops, "max hops applied");
+    Ok(())
 }
 
 /// Installs `auth` on `fd`, scoped to `peer` — used both for an outbound
@@ -83,6 +95,16 @@ pub fn bind_listener(local: SocketAddr, vrf: Option<&str>) -> io::Result<TcpList
     socket.set_reuseaddr(true)?;
     if local.is_ipv6() {
         SockRef::from(&socket).set_only_v6(true)?;
+    }
+    // RFC 5082: the SYN-ACK and everything an accepted socket sends inherit
+    // the listener's TTL, and a GTSM peer drops anything below 255 — so it
+    // must be 255 here, before accept (`apply_max_hops` then adds the
+    // per-peer minimum). ponytail: also 255 for peers without max-hops, which
+    // is harmless; the per-peer minimum is what enforces GTSM.
+    if local.is_ipv6() {
+        SockRef::from(&socket).set_unicast_hops_v6(255)?;
+    } else {
+        SockRef::from(&socket).set_ttl(255)?;
     }
     if let Some(vrf) = vrf {
         bind_device(&socket, vrf)?;

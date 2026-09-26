@@ -123,6 +123,54 @@ fn set_md5_key_raw(fd: RawFd, peer: IpAddr, key: &[u8]) -> io::Result<()> {
     setsockopt(fd, TCP_MD5SIG, &sig)
 }
 
+/// Enables RFC 5082 GTSM on `fd` for a peer at most `hops` routers away
+/// (1 = directly connected): sends with TTL/hop-limit 255 and has the
+/// kernel drop received packets below `256 - hops` (`IP_MINTTL` /
+/// `IPV6_MINHOPCOUNT`). `hops` must be 1..=255. Unlike the key options this
+/// is per-socket, not per-peer, so on a listener it would affect every peer;
+/// apply it to a connect socket before `connect()` or an accepted stream.
+pub fn set_max_hops(fd: RawFd, v6: bool, hops: u8) -> io::Result<()> {
+    if hops == 0 {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    let min = libc::c_int::from(255 - (hops - 1));
+    let (level, ttl, minttl) = if v6 {
+        (
+            libc::IPPROTO_IPV6,
+            libc::IPV6_UNICAST_HOPS,
+            libc::IPV6_MINHOPCOUNT,
+        )
+    } else {
+        (libc::IPPROTO_IP, libc::IP_TTL, libc::IP_MINTTL)
+    };
+    setsockopt_int(fd, level, ttl, 255)?;
+    setsockopt_int(fd, level, minttl, min)
+}
+
+fn setsockopt_int(
+    fd: RawFd,
+    level: libc::c_int,
+    name: libc::c_int,
+    value: libc::c_int,
+) -> io::Result<()> {
+    // SAFETY: `fd` is a caller-supplied open socket and `&value` is a valid
+    // `c_int` for the `size_of::<c_int>()` bytes passed.
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            name,
+            std::ptr::from_ref(&value).cast::<libc::c_void>(),
+            libc::socklen_t::try_from(mem::size_of::<libc::c_int>()).expect("4 bytes"),
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 fn prefix_len(addr: IpAddr) -> u8 {
     match addr {
         IpAddr::V4(_) => 32,
@@ -329,5 +377,39 @@ mod tests {
         };
         let err = add_ao_key(-1, IpAddr::V4(Ipv4Addr::LOCALHOST), &key).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+}
+
+#[cfg(test)]
+mod max_hops_tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    fn get(fd: RawFd, level: libc::c_int, name: libc::c_int) -> libc::c_int {
+        let mut v: libc::c_int = 0;
+        let mut len = libc::socklen_t::try_from(mem::size_of::<libc::c_int>()).unwrap();
+        // SAFETY: valid fd and a c_int-sized out buffer.
+        let r = unsafe {
+            libc::getsockopt(
+                fd,
+                level,
+                name,
+                std::ptr::from_mut(&mut v).cast(),
+                &raw mut len,
+            )
+        };
+        assert_eq!(r, 0);
+        v
+    }
+
+    #[test]
+    fn sets_ttl_255_and_min_ttl() {
+        let s = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        set_max_hops(s.as_raw_fd(), false, 1).unwrap();
+        assert_eq!(get(s.as_raw_fd(), libc::IPPROTO_IP, libc::IP_TTL), 255);
+        assert_eq!(get(s.as_raw_fd(), libc::IPPROTO_IP, libc::IP_MINTTL), 255);
+        set_max_hops(s.as_raw_fd(), false, 3).unwrap();
+        assert_eq!(get(s.as_raw_fd(), libc::IPPROTO_IP, libc::IP_MINTTL), 253);
+        assert!(set_max_hops(s.as_raw_fd(), false, 0).is_err());
     }
 }

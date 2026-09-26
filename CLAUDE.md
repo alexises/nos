@@ -258,6 +258,7 @@ nos-e2e reconnect     # kill one side's nos-bgpd, confirm the other detects it a
 nos-e2e collision     # restart both nos-bgpd processes at once, check for/report a collision event
 nos-e2e shutdown      # shut router-a's peer-group, then its peer alone, with an RFC 9003 message: router-b logs the Cease/Administrative Shutdown text and the session stays down until cleared; removing the peer sends Cease/Peer De-configured
 nos-e2e redistribute  # configure a static route + "redistribute from static to bgp" on router-a, confirm router-b learns it, pushes it to its own nos-ribd, and installs it as a real kernel route
+nos-e2e gtsm          # set max-hops 1 (RFC 5082 GTSM) on both routers' peer-groups, confirm the session still establishes with TTL 255 / min-TTL 255
 nos-e2e auth          # configure a matching md5-password on both routers (still establishes), then a mismatched one (does not)
 nos-e2e loopback      # configure a loopback interface on router-a, confirm its kernel device/VRF enslavement/address, then remove it
 nos-e2e mtu           # configure a non-default mtu on router-a's eth0, confirm nos-interfaced applies it to the real kernel link
@@ -298,8 +299,8 @@ nos-e2e pki           # each daemon holds its watchdog-minted identity, every ip
 nos-e2e pki-rotation  # self-contained: 20s certificates rotated every 6s; after every original certificate has expired, a restarted nos-ribd is reconnected to by the long-lived nos-bgpd and a route reaches the kernel
 nos-e2e logs [n]      # the last n log lines of every running router, via REST
 nos-e2e down          # tear down containers, volumes, and the network
-nos-e2e all           # up + established + reconnect + collision + shutdown + redistribute + auth + loopback + mtu + port-aggregate + lacp + lldp + switching + svi + routed-subinterface + source-address + rest + policy + redistribute-policy + communities + mrai + evpn + evpn-fdb + evpn-esi + evpn-dataplane + evpn-single-active + reflector + route-server + as4 + malformed-update + ospf + asbr + ospf-dr + ospf-spf + ospf-lfa + abr + ospf-auth + ospf-aging + ospf-dbd-pagination + ospf-mtu-pagination + ospfv3 + ospfv3-dr + pki + pki-rotation, in sequence
-nos-e2e base          # up + established + reconnect + collision + shutdown + redistribute + auth, then tears itself down (CI-friendly)
+nos-e2e all           # up + established + reconnect + collision + shutdown + redistribute + auth + gtsm + loopback + mtu + port-aggregate + lacp + lldp + switching + svi + routed-subinterface + source-address + rest + policy + redistribute-policy + communities + mrai + evpn + evpn-fdb + evpn-esi + evpn-dataplane + evpn-single-active + reflector + route-server + as4 + malformed-update + ospf + asbr + ospf-dr + ospf-spf + ospf-lfa + abr + ospf-auth + ospf-aging + ospf-dbd-pagination + ospf-mtu-pagination + ospfv3 + ospfv3-dr + pki + pki-rotation, in sequence
+nos-e2e base          # up + established + reconnect + collision + shutdown + redistribute + auth + gtsm, then tears itself down (CI-friendly)
 nos-e2e drivers       # up + established + loopback + mtu + port-aggregate + lacp + lldp + switching + svi + routed-subinterface + source-address + rest, then tears itself down (CI-friendly)
 nos-e2e rpl           # up + established + redistribute + policy + redistribute-policy + communities + mrai, then tears itself down (CI-friendly)
 nos-e2e ospf-suite    # up + established + ospf + asbr + ospf-dr + ospf-spf + ospf-lfa + abr + ospf-auth + ospf-aging + ospf-dbd-pagination + ospf-mtu-pagination + ospfv3 + ospfv3-dr, then tears itself down (CI-friendly)

@@ -2308,6 +2308,9 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 after: PathAfter::Stay,
             }
         }
+        Command::Delete(DeleteTarget::MaxHops) => peer_group_clear(path, |instance, name| {
+            BgpPeerGroupOp::ClearMaxHops { instance, name }
+        })?,
         Command::Delete(DeleteTarget::Mrai) => peer_group_clear(path, |instance, name| {
             BgpPeerGroupOp::ClearMrai { instance, name }
         })?,
@@ -2492,6 +2495,11 @@ fn peer_group_set_op(instance: String, group: String, field: BgpPeerGroupField) 
             instance,
             name: group,
             message,
+        },
+        BgpPeerGroupField::MaxHops(max_hops) => BgpPeerGroupOp::SetMaxHops {
+            instance,
+            name: group,
+            max_hops,
         },
         BgpPeerGroupField::Mrai(mrai) => BgpPeerGroupOp::SetMrai {
             instance,

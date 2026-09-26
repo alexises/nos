@@ -2032,3 +2032,23 @@ pub async fn evpn_single_active(w: &mut World) -> anyhow::Result<()> {
 
     dataplane_teardown(w).await
 }
+
+/// RFC 5082 GTSM: `max-hops 1` on both peer-groups (TTL 255 out, kernel drops
+/// below 255 in) still establishes in both directions over the directly
+/// connected network — proving the SYN-ACK and accepted sockets really carry
+/// TTL 255. No negative check: a peer with max-hops only on one side still
+/// gets a session, since the listener always sends 255 (see `bind_listener`),
+/// so the packets that side would drop never exist in this topology.
+pub async fn gtsm(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let (base_a, base_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+    );
+    a.provision(&["--max-hops", "1"]).await?;
+    b.provision(&["--max-hops", "1"]).await?;
+    a.wait("max hops applied").await?;
+    b.wait("max hops applied").await?;
+    reestablished(a, base_a).await?;
+    reestablished(b, base_b).await
+}

@@ -180,6 +180,12 @@ pub struct BgpPeerGroup {
     #[garde(skip)]
     pub mrai: Option<u16>,
 
+    /// RFC 5082 GTSM: the most router hops away the peer may be (1 =
+    /// directly connected, 1..=254). Sends with TTL/hop-limit 255 and drops
+    /// received packets below `256 - max_hops`. `None` disables it.
+    #[garde(custom(|h: &Option<u8>, _ctx: &Config| valid_max_hops(*h)))]
+    pub max_hops: Option<u8>,
+
     /// `None` opens sessions with no transport authentication at all.
     /// Secrets are stored clear-text, like every other field in this config
     /// — see `BgpAuth`.
@@ -387,6 +393,13 @@ fn valid_connect_retry_time(connect_retry_time: Option<u16>) -> garde::Result {
     }
 }
 
+fn valid_max_hops(max_hops: Option<u8>) -> garde::Result {
+    match max_hops {
+        None | Some(1..=254) => Ok(()),
+        Some(_) => Err(garde::Error::new("max-hops must be between 1 and 254")),
+    }
+}
+
 /// Cross-field check for a `BgpInstance`'s whole `peer_groups` list — garde's
 /// per-field `custom` closures only ever see `(field_value, &Config)`, never
 /// a sibling field on the same struct, so this must be wired on
@@ -445,6 +458,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             mrai: None,
+            max_hops: None,
             auth: None,
             next_hop: None,
             route_reflector_client: false,

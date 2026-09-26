@@ -71,6 +71,8 @@ pub struct ResolvedPeer {
     pub connect_retry_time: Duration,
     /// RFC 4271 §9.2.1.1; zero disables pacing (see `crate::mrai`).
     pub mrai: Duration,
+    /// RFC 5082 GTSM hop count (see `tcp::apply_max_hops`); `None` = off.
+    pub max_hops: Option<u8>,
     pub auth: Option<ResolvedAuth>,
     /// The owning peer-group's configured next-hop override, if any —
     /// threaded straight through to `fsm::PeerContext`.
@@ -413,6 +415,15 @@ impl SessionManager {
             );
             return;
         }
+        if let Some(hops) = slot.peer.max_hops {
+            if let Err(error) = tcp::apply_max_hops(stream.as_raw_fd(), remote, hops) {
+                warn!(
+                    instance = %self.instance, peer = %remote, %error,
+                    "cannot apply max-hops to inbound connection, dropping it"
+                );
+                return;
+            }
+        }
         if !slot.begin(Role::Passive).await {
             debug!(
                 instance = %self.instance, peer = %remote,
@@ -723,6 +734,7 @@ async fn active_connect_loop(
                     slot.peer.source_address,
                     Some(&vrf_name),
                     slot.peer.auth.as_ref(),
+                    slot.peer.max_hops,
                 )
                 .await
                 {
@@ -788,6 +800,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: fsm::CONNECT_RETRY_TIME,
             mrai: Duration::ZERO,
+            max_hops: None,
             auth: None,
             next_hop: None,
             address_families: vec![AddressFamily::Ipv4Unicast],

@@ -217,6 +217,11 @@ pub struct Args {
     #[arg(long)]
     pub mrai: Option<u16>,
 
+    /// If set, sets `--peer-group`'s RFC 5082 `max-hops`
+    /// (`BgpPeerGroupOp::SetMaxHops`).
+    #[arg(long)]
+    pub max_hops: Option<u8>,
+
     /// If set, administratively shuts `--peer-group` with this RFC 9003
     /// shutdown message (`BgpPeerGroupOp::SetShutdown`); an empty string
     /// shuts it without a message.
@@ -952,6 +957,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             instance: args.bgp_instance.clone(),
             name: args.peer_group.clone(),
             mrai,
+        }));
+    }
+
+    if let Some(max_hops) = args.max_hops {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetMaxHops {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            max_hops,
         }));
     }
 
