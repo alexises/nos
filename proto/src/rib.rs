@@ -91,6 +91,9 @@ pub struct OspfRoute {
     /// from `nos-ospfv3d` (no LFA there yet).
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub backup_next_hop: Option<IpAddr>,
+    /// SPF cost to `prefix` — what BGP's RFC 4271 §9.1.2.2(d) step compares
+    /// (via `RibRequest::IgpCosts`) for paths whose `NEXT_HOP` falls in it.
+    pub metric: u32,
 }
 
 /// Sent by the owning `nos-ospfd` instance to `nos-ribd` over a persistent,
@@ -144,6 +147,11 @@ pub enum RibRequest {
     /// analogue of `PushBgpRoutes` above (its own SPF computation, not BGP
     /// best-path selection, is what changes here).
     PushOspfRoutes(Vec<OspfRouteUpdate>),
+    /// One-shot: the IGP cost of every prefix whose best non-BGP candidate
+    /// is known (`Static` = 0, `Ospf` = its SPF metric). BGP resolves each
+    /// path's `NEXT_HOP` against this for decision step (d); `Bgp`-sourced
+    /// routes are excluded so a next hop never resolves recursively.
+    IgpCosts,
 }
 
 /// Messages sent from a `nos-ribd` instance to a client.
@@ -166,4 +174,6 @@ pub enum RibEvent {
     /// Reply to `GetTableId`. `None` under the same conditions as
     /// `VrfName(None)` — normal/transient, never an error.
     TableId(Option<u32>),
+    /// Reply to `IgpCosts`.
+    IgpCosts(Vec<(IpNet, u32)>),
 }

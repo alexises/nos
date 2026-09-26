@@ -13,8 +13,8 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-/// A route's next hop plus its LFA backup, if any.
-type Hops = (IpAddr, Option<IpAddr>);
+/// A route's next hop, its LFA backup (if any) and its SPF metric.
+type Hops = (IpAddr, Option<IpAddr>, u32);
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -152,7 +152,11 @@ async fn compute_routes(links: &Arc<LinkManager>) -> HashMap<IpNet, Hops> {
         .map(|e| {
             (
                 IpNet::V4(e.prefix),
-                (IpAddr::V4(e.next_hop), e.backup_next_hop.map(IpAddr::V4)),
+                (
+                    IpAddr::V4(e.next_hop),
+                    e.backup_next_hop.map(IpAddr::V4),
+                    e.metric,
+                ),
             )
         })
         .collect()
@@ -170,12 +174,15 @@ async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>)
 fn to_routes(routes: &HashMap<IpNet, Hops>) -> Vec<OspfRoute> {
     routes
         .iter()
-        .map(|(&prefix, &(next_hop, backup_next_hop))| OspfRoute {
-            prefix,
-            next_hop,
-            interface_id: None,
-            backup_next_hop,
-        })
+        .map(
+            |(&prefix, &(next_hop, backup_next_hop, metric))| OspfRoute {
+                prefix,
+                next_hop,
+                interface_id: None,
+                backup_next_hop,
+                metric,
+            },
+        )
         .collect()
 }
 
@@ -196,6 +203,7 @@ fn diff_routes(
                 next_hop: hops.0,
                 interface_id: None,
                 backup_next_hop: hops.1,
+                metric: hops.2,
             }));
         }
     }
@@ -214,7 +222,7 @@ mod tests {
     fn routes(pairs: &[(&str, &str)]) -> HashMap<IpNet, Hops> {
         pairs
             .iter()
-            .map(|(p, gw)| (p.parse().unwrap(), (gw.parse().unwrap(), None)))
+            .map(|(p, gw)| (p.parse().unwrap(), (gw.parse().unwrap(), None, 10)))
             .collect()
     }
 
@@ -240,6 +248,7 @@ mod tests {
                 prefix: "10.0.0.0/24".parse().unwrap(),
                 next_hop: "10.0.0.2".parse().unwrap(),
                 backup_next_hop: None,
+                metric: 10,
             })]
         );
     }
@@ -265,6 +274,7 @@ mod tests {
                 prefix: "10.0.2.0/24".parse().unwrap(),
                 next_hop: "10.0.2.1".parse().unwrap(),
                 backup_next_hop: None,
+                metric: 10,
             }),
             OspfRouteUpdate::Remove("10.0.1.0/24".parse().unwrap()),
         ];
@@ -277,8 +287,8 @@ mod tests {
         let gw: IpAddr = "10.0.0.1".parse().unwrap();
         let bk: IpAddr = "10.0.9.9".parse().unwrap();
         let p: IpNet = "10.0.0.0/24".parse().unwrap();
-        let last_sent = HashMap::from([(p, (gw, None))]);
-        let new_routes = HashMap::from([(p, (gw, Some(bk)))]);
+        let last_sent = HashMap::from([(p, (gw, None, 10))]);
+        let new_routes = HashMap::from([(p, (gw, Some(bk), 10))]);
         assert_eq!(
             diff_routes(&last_sent, &new_routes),
             vec![OspfRouteUpdate::Add(OspfRoute {
@@ -286,6 +296,7 @@ mod tests {
                 next_hop: gw,
                 interface_id: None,
                 backup_next_hop: Some(bk),
+                metric: 10,
             })]
         );
     }

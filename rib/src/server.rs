@@ -60,6 +60,7 @@ fn allowed(role: Role, req: &RibRequest) -> bool {
         // `nos-ospfv3d` shares the OSPF route source: its SPF results are
         // pushed with the same request.
         RibRequest::PushOspfRoutes(_) => matches!(role, Role::Ospfd | Role::Ospfv3d),
+        RibRequest::IgpCosts => matches!(role, Role::User | Role::Restd | Role::Bgpd),
     }
 }
 
@@ -144,6 +145,7 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
             apply_ospf_route_update(ctx, updates).await;
             None
         }
+        RibRequest::IgpCosts => Some(RibEvent::IgpCosts(ctx.rib.read().await.igp_costs())),
     }
 }
 
@@ -242,6 +244,7 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
     for update in updates {
         match update {
             OspfRouteUpdate::Full(routes) => {
+                guard.set_ospf_metrics(routes.iter().map(|r| (r.prefix, r.metric)));
                 guard.replace_source(
                     RouteSource::Ospf,
                     routes.into_iter().map(|r| RibEntry {
@@ -255,6 +258,7 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
                 full_replace = true;
             }
             OspfRouteUpdate::Add(r) => {
+                guard.set_ospf_metric(r.prefix, Some(r.metric));
                 let entry = RibEntry {
                     prefix: r.prefix,
                     gateway: r.next_hop,
@@ -273,6 +277,7 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
                 }
             }
             OspfRouteUpdate::Remove(prefix) => {
+                guard.set_ospf_metric(prefix, None);
                 match guard.remove_and_diff(&prefix, RouteSource::Ospf) {
                     BestPathChange::Unchanged => {}
                     BestPathChange::Installed(e) => {
@@ -355,5 +360,13 @@ mod authz_tests {
             assert!(allowed(role, &RibRequest::GetVrfName), "{role:?}");
         }
         assert!(!allowed(Role::Lacpd, &RibRequest::GetVrfName));
+    }
+
+    #[test]
+    fn igp_costs_are_for_bgpd_and_readers_only() {
+        for role in Role::ALL {
+            let expected = matches!(role, Role::User | Role::Restd | Role::Bgpd);
+            assert_eq!(allowed(role, &RibRequest::IgpCosts), expected, "{role:?}");
+        }
     }
 }

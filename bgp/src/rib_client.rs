@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use futures::{SinkExt, StreamExt};
+use ipnet::IpNet;
 use nos_proto::{IpcCodec, RibEvent, RibRequest, Role};
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::trace;
@@ -28,6 +29,20 @@ pub async fn get_vrf_name(rib_socket: &Path) -> Option<String> {
     } else {
         trace!("nos-ribd gave no well-formed GetVrfName reply");
         None
+    }
+}
+
+/// One-shot query of every prefix's IGP cost (`RibRequest::IgpCosts`), for
+/// BGP decision step (d). `None` on any failure — the caller just polls again.
+pub async fn get_igp_costs(rib_socket: &Path) -> Option<Vec<(IpNet, u32)>> {
+    let stream = nos_pki::connect_role(rib_socket, Role::Ribd).await.ok()?;
+    let (r, w) = tokio::io::split(stream);
+    let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
+    let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
+    writer.send(RibRequest::IgpCosts).await.ok()?;
+    match reader.next().await {
+        Some(Ok(RibEvent::IgpCosts(costs))) => Some(costs),
+        _ => None,
     }
 }
 
@@ -109,5 +124,15 @@ mod tests {
 
         let name = get_vrf_name(&path).await;
         assert_eq!(name, None);
+    }
+
+    #[tokio::test]
+    async fn returns_igp_costs_on_well_formed_reply() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rib.sock");
+        let net: IpNet = "10.0.0.0/24".parse().unwrap();
+        serve_once(&path, move |_req| Some(RibEvent::IgpCosts(vec![(net, 20)])));
+
+        assert_eq!(get_igp_costs(&path).await, Some(vec![(net, 20)]));
     }
 }
