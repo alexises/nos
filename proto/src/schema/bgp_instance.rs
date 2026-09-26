@@ -94,6 +94,11 @@ pub(crate) fn valid_route_reflection_and_server(instances: &[BgpInstance]) -> ga
                     "route-reflector-client requires an iBGP peer-group (remote-as must equal this instance's asn)",
                 ));
             }
+            if group.damping.is_some() && group.remote_as == instance.asn {
+                return Err(garde::Error::new(
+                    "damping requires an eBGP peer-group (remote-as must differ from this instance's asn)",
+                ));
+            }
             if group.route_server_client && group.remote_as == instance.asn {
                 return Err(garde::Error::new(
                     "route-server-client requires an eBGP peer-group (remote-as must differ from this instance's asn)",
@@ -183,6 +188,7 @@ mod tests {
                 keepalive_interval: Some(10),
                 connect_retry_time: None,
                 mrai: None,
+                damping: None,
                 max_hops: None,
                 auth: None,
                 next_hop: None,
@@ -201,6 +207,7 @@ mod tests {
                 keepalive_interval: Some(30),
                 connect_retry_time: None,
                 mrai: None,
+                damping: None,
                 max_hops: None,
                 auth: None,
                 next_hop: None,
@@ -231,6 +238,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             mrai: None,
+            damping: None,
             max_hops: None,
             auth: None,
             next_hop: None,
@@ -280,5 +288,28 @@ mod tests {
         inst.peer_groups = vec![group_with_flags("pg1", 65001, false, true)];
         let cfg = config_with(vec![inst]);
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn damping_needs_an_ebgp_group_and_sane_values() {
+        let d = crate::schema::BgpDamping::default();
+        let check = |remote_as: u32, damping: crate::schema::BgpDamping| {
+            let mut inst = instance("r1", 65000);
+            let mut g = group_with_flags("pg1", remote_as, false, false);
+            g.damping = Some(damping);
+            inst.peer_groups = vec![g];
+            let cfg = config_with(vec![inst]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(check(65001, d));
+        assert!(!check(65000, d), "iBGP group");
+        assert!(
+            !check(65001, crate::schema::BgpDamping { suppress: 750, ..d }),
+            "suppress <= reuse"
+        );
+        assert!(!check(
+            65001,
+            crate::schema::BgpDamping { half_life: 0, ..d }
+        ));
     }
 }

@@ -203,6 +203,7 @@ async fn resync(
                     Duration::from_secs(u64::from(s))
                 }),
             mrai: Duration::from_secs(u64::from(group.mrai.unwrap_or(0))),
+            damping: group.damping,
             max_hops: group.max_hops,
             auth: group.auth.as_ref().map(ResolvedAuth::from),
             next_hop: group.next_hop,

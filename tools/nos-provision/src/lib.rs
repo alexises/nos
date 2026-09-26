@@ -217,6 +217,21 @@ pub struct Args {
     #[arg(long)]
     pub mrai: Option<u16>,
 
+    /// If any is set, enables `--peer-group`'s RFC 2439 flap damping
+    /// (`BgpPeerGroupOp::SetDamping`); the ones left out keep RFC 7196's defaults.
+    #[arg(long)]
+    pub damping_half_life: Option<u32>,
+    #[arg(long)]
+    pub damping_reuse: Option<u32>,
+    #[arg(long)]
+    pub damping_suppress: Option<u32>,
+    #[arg(long)]
+    pub damping_max_suppress: Option<u32>,
+
+    /// Disables `--peer-group`'s flap damping (`BgpPeerGroupOp::ClearDamping`).
+    #[arg(long)]
+    pub clear_damping: bool,
+
     /// If set, sets `--peer-group`'s RFC 5082 `max-hops`
     /// (`BgpPeerGroupOp::SetMaxHops`).
     #[arg(long)]
@@ -993,6 +1008,34 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::BgpPeer(BgpPeerOp::ClearShutdown {
             instance: args.bgp_instance.clone(),
             remote_address: args.peer,
+        }));
+    }
+
+    if [
+        args.damping_half_life,
+        args.damping_reuse,
+        args.damping_suppress,
+        args.damping_max_suppress,
+    ]
+    .iter()
+    .any(Option::is_some)
+    {
+        let d = nos_proto::BgpDamping::default();
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetDamping {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            damping: nos_proto::BgpDamping {
+                half_life: args.damping_half_life.unwrap_or(d.half_life),
+                reuse: args.damping_reuse.unwrap_or(d.reuse),
+                suppress: args.damping_suppress.unwrap_or(d.suppress),
+                max_suppress: args.damping_max_suppress.unwrap_or(d.max_suppress),
+            },
+        }));
+    }
+    if args.clear_damping {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearDamping {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
         }));
     }
 

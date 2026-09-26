@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{
-    AddressFamily, BgpAoKey, BgpAuth, BgpPeerGroup, BgpShutdown, Config, NextHopMode, SourceAddress,
+    AddressFamily, BgpAoKey, BgpAuth, BgpDamping, BgpPeerGroup, BgpShutdown, Config, NextHopMode,
+    SourceAddress,
 };
 
 use super::bgp_instance::find_instance_mut;
@@ -83,6 +84,15 @@ pub enum BgpPeerGroupOp {
         mrai: u16,
     },
     ClearMrai {
+        instance: String,
+        name: String,
+    },
+    SetDamping {
+        instance: String,
+        name: String,
+        damping: BgpDamping,
+    },
+    ClearDamping {
         instance: String,
         name: String,
     },
@@ -208,6 +218,7 @@ impl BgpPeerGroupOp {
                         keepalive_interval: None,
                         connect_retry_time: None,
                         mrai: None,
+                        damping: None,
                         max_hops: None,
                         auth: None,
                         next_hop: None,
@@ -327,6 +338,18 @@ impl BgpPeerGroupOp {
             }
             BgpPeerGroupOp::ClearMrai { instance, name } => {
                 find_group_mut(config, instance, name)?.mrai = None;
+                Ok(())
+            }
+            BgpPeerGroupOp::SetDamping {
+                instance,
+                name,
+                damping,
+            } => {
+                find_group_mut(config, instance, name)?.damping = Some(*damping);
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearDamping { instance, name } => {
+                find_group_mut(config, instance, name)?.damping = None;
                 Ok(())
             }
             BgpPeerGroupOp::SetMaxHops {
@@ -537,6 +560,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             mrai: None,
+            damping: None,
             max_hops: None,
             auth: None,
             next_hop: None,
@@ -810,6 +834,29 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].peer_groups[0].keepalive_interval, None);
+    }
+
+    #[test]
+    fn set_and_clear_damping() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetDamping {
+            instance: "r1".into(),
+            name: "pg1".into(),
+            damping: BgpDamping::default(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].damping,
+            Some(BgpDamping::default())
+        );
+        BgpPeerGroupOp::ClearDamping {
+            instance: "r1".into(),
+            name: "pg1".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].damping, None);
     }
 
     #[test]

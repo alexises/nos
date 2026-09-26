@@ -346,6 +346,77 @@ pub async fn mrai(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&learned(), learned_before, 40).await
 }
 
+/// RFC 2439 flap damping: router-a damps what it receives from router-b
+/// (half-life 20s, suppress 2000, reuse 750). Router-b flaps its redistributed
+/// prefix three times (via its redistribute policy) -> router-a suppresses it,
+/// so a fourth announcement reaches adj-rib-in but never loc-rib, until the
+/// penalty decays below reuse and the route is released.
+pub async fn damping(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let withdrawn = format!("loc-rib route for {REDISTRIBUTE_PREFIX} withdrawn");
+    let file = policy_file(
+        "reject-for-damping",
+        &format!("if this.prefix in {REDISTRIBUTE_PREFIX}:\n    reject\nelse:\n    accept\n"),
+    )?;
+    let accept = redistribute();
+    let mut reject = accept.clone();
+    reject.extend([
+        "--policy-name",
+        "reject-for-damping",
+        "--policy-source-file",
+        &file,
+        "--redistribute-policy",
+        "reject-for-damping",
+    ]);
+
+    let est = a.count("bgp session established");
+    a.provision(&[
+        "--damping-half-life",
+        "20",
+        "--damping-reuse",
+        "750",
+        "--damping-suppress",
+        "2000",
+        "--damping-max-suppress",
+        "40",
+    ])
+    .await?;
+    reestablished(a, est).await?;
+
+    log("flapping router-b's prefix three times: router-a must suppress it");
+    let suppressed = format!("route suppressed by flap damping.*{REDISTRIBUTE_PREFIX}");
+    let suppressed_before = a.count(&suppressed);
+    for _ in 0..3 {
+        let learned_before = a.count(&learned());
+        b.provision(&accept).await?;
+        a.wait_new(&learned(), learned_before, 30).await?;
+        let withdrawn_before = a.count(&withdrawn);
+        b.provision(&reject).await?;
+        a.wait_new(&withdrawn, withdrawn_before, 30).await?;
+    }
+    a.wait_new(&suppressed, suppressed_before, 10).await?;
+
+    log("announcing it again: learned into adj-rib-in, but held out of loc-rib");
+    let (learned_before, loc_before) = (a.count(&learned()), a.count(&loc_rib()));
+    b.provision(&accept).await?;
+    a.wait_new(&learned(), learned_before, 30).await?;
+    a.assert_quiet(&loc_rib(), loc_before, 8).await?;
+
+    log("waiting for the penalty to decay below reuse: the route must be released");
+    a.wait_new(
+        &format!("route released from flap damping.*{REDISTRIBUTE_PREFIX}"),
+        0,
+        90,
+    )
+    .await?;
+    a.wait_new(&loc_rib(), loc_before, 10).await?;
+
+    log("removing damping from router-a's peer-group");
+    let est = a.count("bgp session established");
+    a.provision(&["--clear-damping"]).await?;
+    reestablished(a, est).await
+}
+
 /// RFC 4486 / RFC 9003 administrative shutdown: shutting router-a's peer-group,
 /// then its one peer alone, must send router-b a Cease/Administrative Shutdown
 /// carrying the operator's message, and keep the session down (router-b keeps

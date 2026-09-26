@@ -37,6 +37,7 @@ pub enum BgpPeerGroupField {
     KeepaliveInterval(u16),
     ConnectRetryTime(u16),
     Mrai(u16),
+    Damping(nos_proto::BgpDamping),
     MaxHops(u8),
     /// `shutdown [<message>]`.
     Shutdown(Option<String>),
@@ -524,6 +525,8 @@ pub enum DeleteTarget {
     ConnectRetryTime,
     /// `delete mrai` — only valid while navigated into a peer-group.
     Mrai,
+    /// `delete damping` — only valid while navigated into a peer-group.
+    Damping,
     /// `delete max-hops` — only valid while navigated into a peer-group.
     MaxHops,
     /// `delete auth` — shared with an `OspfProfile`'s crypto/simple auth
@@ -1384,6 +1387,13 @@ fn parse_set(t: &[&str]) -> Option<Command> {
         ["shutdown", msg @ ..] => Command::Set(SetTarget::PeerGroupRelative {
             field: BgpPeerGroupField::Shutdown(join_message(msg)),
         }),
+        ["bgp", "instance", instance, "peer-group", group, "damping", rest @ ..] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::Damping(parse_damping(rest)?),
+            })
+        }
         ["bgp", "instance", instance, "peer-group", group, "next-hop", "self"] => {
             Command::Set(SetTarget::BgpPeerGroup {
                 instance: (*instance).to_string(),
@@ -1527,6 +1537,9 @@ fn parse_set(t: &[&str]) -> Option<Command> {
         }),
         ["mrai", n] => Command::Set(SetTarget::PeerGroupRelative {
             field: BgpPeerGroupField::Mrai(n.parse::<u16>().ok()?),
+        }),
+        ["damping", rest @ ..] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::Damping(parse_damping(rest)?),
         }),
         ["md5-password", password] => Command::Set(SetTarget::PeerGroupRelative {
             field: BgpPeerGroupField::Md5Password((*password).to_string()),
@@ -2196,6 +2209,7 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
         ["keepalive-interval"] => Command::Delete(DeleteTarget::KeepaliveInterval),
         ["connect-retry-time"] => Command::Delete(DeleteTarget::ConnectRetryTime),
         ["mrai"] => Command::Delete(DeleteTarget::Mrai),
+        ["damping"] => Command::Delete(DeleteTarget::Damping),
         ["max-hops"] => Command::Delete(DeleteTarget::MaxHops),
         ["auth"] => Command::Delete(DeleteTarget::Auth),
         ["ao-key", send_id] => Command::Delete(DeleteTarget::AoKey(send_id.parse::<u8>().ok()?)),
@@ -2495,6 +2509,24 @@ fn parse_ao_algorithm(token: &str) -> Option<BgpAoAlgorithm> {
     }
 }
 
+/// `[half-life N] [reuse N] [suppress N] [max-suppress N]` in any order;
+/// omitted values keep `BgpDamping::default()` (RFC 7196).
+fn parse_damping(mut t: &[&str]) -> Option<nos_proto::BgpDamping> {
+    let mut d = nos_proto::BgpDamping::default();
+    while let [key, n, rest @ ..] = t {
+        let n = n.parse::<u32>().ok()?;
+        match *key {
+            "half-life" => d.half_life = n,
+            "reuse" => d.reuse = n,
+            "suppress" => d.suppress = n,
+            "max-suppress" => d.max_suppress = n,
+            _ => return None,
+        }
+        t = rest;
+    }
+    t.is_empty().then_some(d)
+}
+
 fn parse_ospf_crypto_algorithm(token: &str) -> Option<OspfCryptoAlgorithm> {
     match token {
         "md5" => Some(OspfCryptoAlgorithm::Md5),
@@ -2549,6 +2581,24 @@ mod tests {
         assert_eq!(
             Command::parse("delete max-hops"),
             Command::Delete(DeleteTarget::MaxHops)
+        );
+    }
+
+    #[test]
+    fn parses_damping() {
+        assert_eq!(
+            Command::parse("set damping suppress 2000 half-life 30"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::Damping(nos_proto::BgpDamping {
+                    suppress: 2000,
+                    half_life: 30,
+                    ..Default::default()
+                }),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete damping"),
+            Command::Delete(DeleteTarget::Damping)
         );
     }
 

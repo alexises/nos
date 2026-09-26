@@ -412,6 +412,21 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Clear a peer-group's BGP MinRouteAdvertisementInterval.",
             "Unsets the mrai field on a peer-group, reverting to unpaced advertisements.",
         ),
+        Topic::SetBgpPeerGroupDamping => (
+            "Enable route flap damping on a peer-group.",
+            "Sets the damping block on an eBGP peer-group (RFC 2439; optional arguments `half-life <s>`, `reuse <n>`, `suppress <n>`, `max-suppress <s>` in any order): each withdrawal of a route \
+             received from a peer in this group adds 1000 to that prefix's penalty (500 for an \
+             attribute change), the penalty halves every half-life seconds, the route is \
+             suppressed while it is at or above suppress and released once it decays below \
+             reuse, and max-suppress caps how long a route can stay suppressed. Unset values \
+             default to RFC 7196's recommendation (half-life 900, reuse 750, suppress 6000, \
+             max-suppress 3600).",
+        ),
+        Topic::ClearBgpPeerGroupDamping => (
+            "Disable route flap damping on a peer-group.",
+            "Unsets the damping block on a peer-group; every route it receives is used as soon \
+             as it arrives.",
+        ),
         Topic::SetBgpPeerGroupMd5Auth => (
             "Set a peer-group's BGP MD5 password.",
             "Sets a single RFC 2385 TCP MD5 signature password on a peer-group's sessions, \
@@ -966,6 +981,8 @@ mod tests {
         Topic::ClearBgpPeerGroupShutdown,
         Topic::SetBgpPeerShutdown,
         Topic::ClearBgpPeerShutdown,
+        Topic::SetBgpPeerGroupDamping,
+        Topic::ClearBgpPeerGroupDamping,
         Topic::SetBgpPeerGroupMd5Auth,
         Topic::SetBgpPeerGroupAoKey,
         Topic::RemoveBgpPeerGroupAoKey,

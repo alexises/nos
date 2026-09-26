@@ -119,6 +119,41 @@ pub struct BgpShutdown {
     pub message: Option<String>,
 }
 
+/// RFC 2439 route flap damping of routes received from a peer-group, all times
+/// in seconds. A route's penalty rises on each flap, halves every `half_life`,
+/// suppresses the route at `>= suppress` and releases it below `reuse`; it
+/// never exceeds the ceiling implied by `max_suppress`. `Default` is RFC 7196's
+/// conservative recommendation. eBGP peer-groups only (`bgp_instance`).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BgpDamping {
+    pub half_life: u32,
+    pub reuse: u32,
+    pub suppress: u32,
+    pub max_suppress: u32,
+}
+
+impl Default for BgpDamping {
+    fn default() -> Self {
+        Self {
+            half_life: 900,
+            reuse: 750,
+            suppress: 6000,
+            max_suppress: 3600,
+        }
+    }
+}
+
+pub(super) fn valid_damping(d: Option<&BgpDamping>) -> garde::Result {
+    let Some(d) = d else { return Ok(()) };
+    if d.half_life == 0 || d.reuse == 0 || d.suppress <= d.reuse || d.max_suppress < d.half_life {
+        return Err(garde::Error::new(
+            "damping needs half-life > 0, reuse > 0, suppress > reuse and max-suppress >= half-life",
+        ));
+    }
+    Ok(())
+}
+
 /// RFC 9003 §2: the shutdown communication is at most 255 octets of UTF-8.
 pub const SHUTDOWN_MESSAGE_MAX: usize = 255;
 
@@ -179,6 +214,11 @@ pub struct BgpPeerGroup {
     /// are exempt). `None` (or 0) disables pacing — every change is sent at once.
     #[garde(skip)]
     pub mrai: Option<u16>,
+
+    /// RFC 2439 flap damping of routes received from this group; `None`
+    /// disables it. See `BgpDamping`.
+    #[garde(custom(|d: &Option<BgpDamping>, _ctx: &Config| valid_damping(d.as_ref())))]
+    pub damping: Option<BgpDamping>,
 
     /// RFC 5082 GTSM: the most router hops away the peer may be (1 =
     /// directly connected, 1..=254). Sends with TTL/hop-limit 255 and drops
@@ -458,6 +498,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             mrai: None,
+            damping: None,
             max_hops: None,
             auth: None,
             next_hop: None,

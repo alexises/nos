@@ -67,11 +67,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ipnet::IpNet;
-use nos_proto::{AddressFamily, NextHopMode, RedistributeUpdate};
+use nos_proto::{AddressFamily, BgpDamping, NextHopMode, RedistributeUpdate};
 use nos_rpl::CompiledPolicy;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::damping::{Damping, CHANGE_PENALTY, WITHDRAW_PENALTY};
 use crate::evpn::EvpnNlri;
 use crate::message::{self, UpdateMessage};
 
@@ -167,6 +168,7 @@ fn learn_evpn(
 /// `touched` either way so best-path selection re-runs for it.
 fn learn_prefix(
     table: &mut HashMap<IpNet, RibRoute>,
+    damping: &mut Damping,
     touched: &mut HashSet<IpNet>,
     from: IpAddr,
     prefix: IpNet,
@@ -175,6 +177,17 @@ fn learn_prefix(
 ) {
     match apply_policy(prefix, candidate, import_policy) {
         Some(route) => {
+            if damping.enabled(from) {
+                if let Some(old) = table.get(&prefix) {
+                    let same = RibRoute {
+                        received_at: old.received_at,
+                        ..route.clone()
+                    } == *old;
+                    if !same {
+                        damping.flap(from, prefix, CHANGE_PENALTY, Instant::now());
+                    }
+                }
+            }
             info!(
                 peer = %from,
                 atomic_aggregate = route.atomic_aggregate,
@@ -184,7 +197,9 @@ fn learn_prefix(
             table.insert(prefix, route);
         }
         None => {
-            table.remove(&prefix);
+            if table.remove(&prefix).is_some() {
+                damping.flap(from, prefix, WITHDRAW_PENALTY, Instant::now());
+            }
         }
     }
     touched.insert(prefix);
@@ -449,6 +464,9 @@ pub struct BgpRib {
     /// collecting a fresh `Vec` on every touched prefix, so its capacity is
     /// retained across calls once it reaches the peer count.
     peer_scratch: Vec<IpAddr>,
+    /// RFC 2439 flap-damping state for received routes; a suppressed
+    /// (peer, prefix) stays in `adj_rib_in` but is not a best-path candidate.
+    damping: Damping,
     /// This instance's owning `RoutingTable` name (`BgpInstance.routing_table`),
     /// set by `session::SessionManager::reconcile`. Read by `push_snapshot`
     /// to resolve which `nos-ribd` instance, if any, this instance's best
@@ -484,6 +502,7 @@ impl BgpRib {
             rs_sent: HashMap::new(),
             rs_next_id: HashMap::new(),
             peer_scratch: Vec::new(),
+            damping: Damping::default(),
             owning_routing_table: None,
         }
     }
@@ -696,8 +715,23 @@ impl BgpRib {
         out
     }
 
+    /// Enables (or with `None` disables) RFC 2439 damping of routes from `peer`.
+    pub fn set_peer_damping(&mut self, peer: IpAddr, params: Option<BgpDamping>) {
+        self.damping.set_params(peer, params);
+    }
+
+    /// Decays penalties and re-decides every prefix whose suppression ended.
+    pub fn damping_tick(&mut self) {
+        for (_, prefix) in self.damping.tick(Instant::now()) {
+            self.recompute_and_propagate(prefix);
+        }
+    }
+
     pub fn peer_disconnected(&mut self, peer: IpAddr) {
         self.peer_outboxes.remove(&peer);
+        // ponytail: a session reset forgets its flap history (RFC 2439 allows
+        // keeping it); keep entries across resets to damp session flaps too.
+        self.damping.clear_peer(peer);
         self.stale.remove(&peer);
         self.adj_rib_out.remove(&peer);
         self.evpn_adj_rib_out.remove(&peer);
@@ -797,6 +831,8 @@ impl BgpRib {
             for prefix in &withdrawn {
                 if table.remove(prefix).is_some() {
                     touched.insert(*prefix);
+                    self.damping
+                        .flap(from, *prefix, WITHDRAW_PENALTY, Instant::now());
                 }
             }
         }
@@ -860,6 +896,7 @@ impl BgpRib {
                     };
                     learn_prefix(
                         table,
+                        &mut self.damping,
                         &mut touched,
                         from,
                         IpNet::V4(*prefix),
@@ -873,7 +910,15 @@ impl BgpRib {
                             next_hop: Some(mp.next_hop),
                             ..base_route.clone()
                         };
-                        learn_prefix(table, &mut touched, from, *prefix, candidate, import_policy);
+                        learn_prefix(
+                            table,
+                            &mut self.damping,
+                            &mut touched,
+                            from,
+                            *prefix,
+                            candidate,
+                            import_policy,
+                        );
                     }
                     if !mp.evpn.is_empty() {
                         learn_evpn(
@@ -993,6 +1038,9 @@ impl BgpRib {
             candidates.push((route.clone(), None));
         }
         for (peer, table) in &self.adj_rib_in {
+            if self.damping.is_suppressed(*peer, &prefix) {
+                continue;
+            }
             if let Some(route) = table.get(&prefix) {
                 candidates.push((route.clone(), Some(*peer)));
             }
@@ -1101,7 +1149,7 @@ impl BgpRib {
                 current.insert(RouteOrigin::Local, route.clone());
             }
             for (src, table) in &self.adj_rib_in {
-                if *src == peer {
+                if *src == peer || self.damping.is_suppressed(*src, &prefix) {
                     continue; // never echo the destination's own contribution
                 }
                 if let Some(route) = table.get(&prefix) {
@@ -3913,5 +3961,91 @@ mod tests {
 
         rib.set_routing_table(Some("rt1".to_string()));
         assert_eq!(rib.push_snapshot().0, Some("rt1".to_string()));
+    }
+
+    #[test]
+    fn flapping_route_is_suppressed_then_released_after_decay() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        // Ceiling 1500 = suppress, so two flaps suppress; decays under 750 in ~1s.
+        rib.set_peer_damping(
+            peer,
+            Some(BgpDamping {
+                half_life: 1,
+                reuse: 750,
+                suppress: 1500,
+                max_suppress: 1,
+            }),
+        );
+        let p = prefix("1.2.3.0/24");
+        let announce = ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1");
+        let withdraw = UpdateMessage {
+            withdrawn_routes: vec!["1.2.3.0/24".parse().unwrap()],
+            ..empty_update()
+        };
+        for _ in 0..2 {
+            rib.handle_update(
+                peer,
+                false,
+                v4("192.0.2.1"),
+                &announce,
+                &nos_rpl::ACCEPT_ALL,
+            );
+            rib.handle_update(
+                peer,
+                false,
+                v4("192.0.2.1"),
+                &withdraw,
+                &nos_rpl::ACCEPT_ALL,
+            );
+        }
+        rib.handle_update(
+            peer,
+            false,
+            v4("192.0.2.1"),
+            &announce,
+            &nos_rpl::ACCEPT_ALL,
+        );
+        assert!(rib.damping.is_suppressed(peer, &p));
+        assert!(
+            !rib.push_snapshot().1.contains_key(&p),
+            "suppressed route in loc-rib"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        rib.damping_tick();
+        assert!(
+            rib.push_snapshot().1.contains_key(&p),
+            "released route missing"
+        );
+    }
+
+    #[test]
+    fn identical_readvertisement_is_not_a_flap() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        rib.set_peer_damping(
+            peer,
+            Some(BgpDamping {
+                half_life: 900,
+                reuse: 750,
+                suppress: 1000,
+                max_suppress: 3600,
+            }),
+        );
+        let announce = ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1");
+        for _ in 0..5 {
+            rib.handle_update(
+                peer,
+                false,
+                v4("192.0.2.1"),
+                &announce,
+                &nos_rpl::ACCEPT_ALL,
+            );
+        }
+        assert!(!rib.damping.is_suppressed(peer, &prefix("1.2.3.0/24")));
+        assert!(rib.push_snapshot().1.contains_key(&prefix("1.2.3.0/24")));
     }
 }

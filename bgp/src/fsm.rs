@@ -212,6 +212,8 @@ pub struct PeerContext {
     pub keepalive_override: Option<u16>,
     /// The peer-group's MRAI; zero means unpaced (see `crate::mrai`).
     pub mrai: Duration,
+    /// The peer-group's RFC 2439 flap damping, if enabled (see `crate::damping`).
+    pub damping: Option<nos_proto::BgpDamping>,
     /// The peer-group's configured next-hop override, if any — `None` lets
     /// `crate::rib::build_advertisement` fall back to the eBGP/iBGP-dependent
     /// default.
@@ -991,7 +993,9 @@ pub async fn run(
                             extended_message = *extended_message,
                             "extended message negotiated"
                         );
-                        bgp_rib.lock().await.peer_established(
+                        let mut rib = bgp_rib.lock().await;
+                        rib.set_peer_damping(peer.remote_address, peer.damping);
+                        rib.peer_established(
                             peer.remote_address,
                             remote_is_ibgp,
                             local_addr,
