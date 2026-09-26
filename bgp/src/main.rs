@@ -109,6 +109,11 @@ async fn main() -> anyhow::Result<()> {
         sessions.clone(),
         shutdown_rx.clone(),
     );
+    let igp_task = nos_bgp::igp_client::spawn(
+        args.watchdog_socket.clone(),
+        sessions.clone(),
+        shutdown_rx.clone(),
+    );
     let fdb_push_task = fdb_push_client::spawn(
         args.watchdog_socket.clone(),
         sessions.clone(),
@@ -151,6 +156,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Err(e) = fdb_push_task.await {
         warn!(instance = %args.instance, error = %e, "fdb push task ended abnormally");
+    }
+    if let Err(e) = igp_task.await {
+        warn!(instance = %args.instance, error = %e, "igp task ended abnormally");
     }
     server_task.abort();
     damping_task.abort();

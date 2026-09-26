@@ -19,9 +19,11 @@
 //! `Egp` < `Incomplete`); (5) lowest `MULTI_EXIT_DISC`, only compared
 //! between routes sharing the same neighboring AS (`AS_PATH`'s first
 //! entry), missing MED treated as 0; (6) an eBGP-learned route beats an
-//! iBGP-learned one; (7) lowest IGP metric to the next-hop — **not
-//! implemented**: this NOS has no IGP protocol yet, so this step is a
-//! documented no-op rather than a fabricated metric; (8) oldest route
+//! iBGP-learned one; (7) lowest IGP metric to the next-hop, resolved by
+//! longest-prefix match against the table `igp_client` polls from
+//! `nos-ribd` (`set_igp`) — an unresolvable next hop (or a directly
+//! connected one, which `nos-ribd` doesn't hold) counts as 0, since the RIB
+//! has no connected routes to tell them apart; (8) oldest route
 //! wins (by `received_at`), only between two eBGP-learned candidates,
 //! per RFC 4271's anti-flap tie-break; (9) lowest BGP Identifier
 //! (router-id) of the advertising peer; (10) lowest advertising peer
@@ -445,6 +447,8 @@ pub struct BgpRib {
     /// deny-all default — see `proto`'s `Redistribute.policy` doc comment).
     redistribute_policy: Arc<CompiledPolicy>,
     loc_rib: HashMap<IpNet, RibRoute>,
+    /// IGP cost per prefix, as last polled from `nos-ribd` — decision step (d).
+    igp: HashMap<IpNet, u32>,
     /// Per prefix, the runner-up path's next hop (a different next hop from
     /// the winner's), pushed to `nos-ribd` as the kernel backup route.
     backups: HashMap<IpNet, IpAddr>,
@@ -496,6 +500,7 @@ impl BgpRib {
             redistributed: HashMap::new(),
             redistribute_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             loc_rib: HashMap::new(),
+            igp: HashMap::new(),
             backups: HashMap::new(),
             adj_rib_out: HashMap::new(),
             peer_outboxes: HashMap::new(),
@@ -718,6 +723,21 @@ impl BgpRib {
     /// Enables (or with `None` disables) RFC 2439 damping of routes from `peer`.
     pub fn set_peer_damping(&mut self, peer: IpAddr, params: Option<BgpDamping>) {
         self.damping.set_params(peer, params);
+    }
+
+    /// Installs a fresh IGP cost table (see `igp_client`) and, if it changed,
+    /// re-decides every prefix — an IGP change is not a BGP event, so nothing
+    /// else would trigger it.
+    pub fn set_igp(&mut self, igp: HashMap<IpNet, u32>) {
+        if igp == self.igp {
+            return;
+        }
+        self.igp = igp;
+        tracing::info!(costs = ?self.igp, "igp costs updated");
+        let prefixes: Vec<IpNet> = self.loc_rib.keys().copied().collect();
+        for prefix in prefixes {
+            self.recompute_and_propagate(prefix);
+        }
     }
 
     /// Decays penalties and re-decides every prefix whose suppression ended.
@@ -1046,10 +1066,10 @@ impl BgpRib {
             }
         }
 
-        let best = best_path(&candidates);
+        let best = best_path(&candidates, &self.igp);
         match best
             .as_ref()
-            .and_then(|b| runner_up_next_hop(&candidates, b))
+            .and_then(|b| runner_up_next_hop(&candidates, b, &self.igp))
         {
             Some(nh) => {
                 self.backups.insert(prefix, nh);
@@ -1280,6 +1300,7 @@ pub type Hops = (IpAddr, Option<IpAddr>);
 fn runner_up_next_hop(
     candidates: &[(RibRoute, Option<IpAddr>)],
     best: &RibRoute,
+    igp: &HashMap<IpNet, u32>,
 ) -> Option<IpAddr> {
     if candidates.len() < 2 {
         return None;
@@ -1289,14 +1310,32 @@ fn runner_up_next_hop(
         .filter(|(r, _)| r.next_hop.is_some() && r.next_hop != best.next_hop)
         .cloned()
         .collect();
-    best_path(&others)?.next_hop
+    best_path(&others, igp)?.next_hop
+}
+
+/// Cost of the longest `igp` prefix covering `next_hop`; 0 when there is no
+/// next hop (a local route) or nothing covers it.
+fn igp_cost(igp: &HashMap<IpNet, u32>, next_hop: Option<IpAddr>) -> u32 {
+    let Some(addr) = next_hop else { return 0 };
+    if igp.is_empty() {
+        return 0;
+    }
+    let max = if addr.is_ipv4() { 32 } else { 128 };
+    (0..=max)
+        .rev()
+        .find_map(|len| igp.get(&IpNet::new(addr, len).ok()?.trunc()))
+        .copied()
+        .unwrap_or(0)
 }
 
 /// The full RFC 4271 §9.1.2.2 decision process — see the module doc
 /// comment for the ten-step order. `candidates` is `(route, source_peer)`
 /// — `source_peer` is `None` for a locally-redistributed route, used only
 /// for the final tiebreak (step 10).
-fn best_path(candidates: &[(RibRoute, Option<IpAddr>)]) -> Option<RibRoute> {
+fn best_path(
+    candidates: &[(RibRoute, Option<IpAddr>)],
+    igp: &HashMap<IpNet, u32>,
+) -> Option<RibRoute> {
     candidates
         .iter()
         .max_by(|(a, a_peer), (b, b_peer)| {
@@ -1313,8 +1352,9 @@ fn best_path(candidates: &[(RibRoute, Option<IpAddr>)]) -> Option<RibRoute> {
                 .then_with(|| origin_rank(b.bgp_origin).cmp(&origin_rank(a.bgp_origin))) // step 4
                 .then_with(|| compare_med(a, b)) // step 5
                 .then_with(|| b.learned_via_ibgp.cmp(&a.learned_via_ibgp)) // step 6: eBGP beats iBGP
-                // Step 7 (IGP metric to next-hop) is a documented no-op:
-                // this NOS has no IGP protocol to source a metric from.
+                // Step 7: lower IGP cost to the next hop wins (evaluated
+                // lazily — only reached when steps 1-6 tie).
+                .then_with(|| igp_cost(igp, b.next_hop).cmp(&igp_cost(igp, a.next_hop)))
                 .then_with(|| {
                     // Step 8: oldest route wins, only between two
                     // eBGP-learned candidates (RFC 4271's anti-flap rule).
@@ -3421,6 +3461,45 @@ mod tests {
                 use_mp: false,
             })]
         );
+    }
+
+    #[test]
+    fn lower_igp_cost_to_next_hop_wins_and_follows_igp_changes() {
+        let mut rib = new_rib(65000);
+        // Both iBGP with equal attributes; peer_a has the lower router-id, so
+        // without step (d) it would win at step 9.
+        let peer_a = addr("10.0.0.1");
+        let peer_b = addr("10.0.0.2");
+        let _rx_a = register_peer(&mut rib, peer_a, true, addr("10.0.0.254"));
+        let _rx_b = register_peer(&mut rib, peer_b, true, addr("10.0.0.253"));
+        rib.set_routing_table(Some("rt1".to_string()));
+        for (peer, rid, nh) in [
+            (peer_a, "1.1.1.1", "10.1.0.1"),
+            (peer_b, "5.5.5.5", "10.2.0.1"),
+        ] {
+            rib.handle_update(
+                peer,
+                true,
+                v4(rid),
+                &update_with("9.9.9.0/24", vec![65001], nh, message::Origin::Igp, None),
+                &nos_rpl::ACCEPT_ALL,
+            );
+        }
+        let best = |rib: &BgpRib| rib.push_snapshot().1[&prefix("9.9.9.0/24")].0;
+        assert_eq!(best(&rib), addr("10.1.0.1"));
+
+        let igp = |a: u32, b: u32| {
+            HashMap::from([(prefix("10.1.0.0/16"), a), (prefix("10.2.0.0/16"), b)])
+        };
+        rib.set_igp(igp(30, 10));
+        assert_eq!(best(&rib), addr("10.2.0.1"));
+        rib.set_igp(igp(10, 30));
+        assert_eq!(best(&rib), addr("10.1.0.1"));
+        // Longest match wins: a /24 for peer_a's next hop overrides its /16.
+        let mut more = igp(10, 20);
+        more.insert(prefix("10.1.0.0/24"), 99);
+        rib.set_igp(more);
+        assert_eq!(best(&rib), addr("10.2.0.1"));
     }
 
     #[test]

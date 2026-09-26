@@ -343,6 +343,12 @@ pub async fn ospf_spf(w: &mut World) -> anyhow::Result<()> {
         "added route prefix={OSPF_SPF_LOOPBACK_ADDRESS}.*source=Some(Ospf)"
     ))
     .await?;
+    // Issue #20: router-a's nos-bgpd polls nos-ribd's IGP costs (BGP decision
+    // step d) and must see the OSPF route with its real, non-zero SPF metric.
+    a.wait(&format!(
+        "igp costs updated.*{OSPF_SPF_LOOPBACK_ADDRESS}: [1-9]"
+    ))
+    .await?;
 
     b.provision(&["--clear-ospf-loopback-profile"]).await?;
     a.wait(&format!("removed route prefix={OSPF_SPF_LOOPBACK_ADDRESS}"))

@@ -86,6 +86,9 @@ fn diff_best(before: Option<&RibEntry>, after: Option<RibEntry>) -> BestPathChan
 #[derive(Debug, Clone, Default)]
 pub struct Rib {
     entries: HashMap<IpNet, Vec<RibEntry>>,
+    /// SPF cost per `Ospf`-sourced prefix, kept beside `entries` (not in
+    /// `RibEntry`) since the kernel diff must not see a metric-only change.
+    ospf_metrics: HashMap<IpNet, u32>,
 }
 
 impl Rib {
@@ -207,6 +210,38 @@ impl Rib {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Replaces every recorded OSPF metric (a `Full` push).
+    pub fn set_ospf_metrics(&mut self, metrics: impl IntoIterator<Item = (IpNet, u32)>) {
+        self.ospf_metrics = metrics.into_iter().collect();
+    }
+
+    /// Records (`Some`) or forgets (`None`) one prefix's OSPF metric.
+    pub fn set_ospf_metric(&mut self, prefix: IpNet, metric: Option<u32>) {
+        match metric {
+            Some(m) => self.ospf_metrics.insert(prefix, m),
+            None => self.ospf_metrics.remove(&prefix),
+        };
+    }
+
+    /// IGP cost per prefix: its best non-BGP candidate's cost (`Static` 0,
+    /// `Ospf` its SPF metric). `Bgp` candidates never count.
+    pub fn igp_costs(&self) -> Vec<(IpNet, u32)> {
+        self.entries
+            .iter()
+            .filter_map(|(prefix, candidates)| {
+                let best = candidates
+                    .iter()
+                    .filter(|e| e.source != RouteSource::Bgp)
+                    .min_by_key(|e| e.source.preference())?;
+                let cost = match best.source {
+                    RouteSource::Ospf => self.ospf_metrics.get(prefix).copied().unwrap_or(0),
+                    _ => 0,
+                };
+                Some((*prefix, cost))
+            })
+            .collect()
+    }
 }
 
 /// Clones and sorts a prefix's candidates best (lowest preference value)
@@ -268,6 +303,31 @@ mod tests {
             static_routing_instances: instances,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn igp_costs_use_best_non_bgp_candidate() {
+        let mut rib = Rib::new();
+        let entry = |p: &str, source| RibEntry {
+            prefix: p.parse().unwrap(),
+            gateway: "10.0.0.1".parse().unwrap(),
+            source,
+            interface_id: None,
+            backup: None,
+        };
+        rib.insert(entry("10.1.0.0/16", RouteSource::Ospf));
+        rib.insert(entry("10.2.0.0/16", RouteSource::Static));
+        rib.insert(entry("10.3.0.0/16", RouteSource::Bgp));
+        rib.set_ospf_metric("10.1.0.0/16".parse().unwrap(), Some(25));
+        let mut costs = rib.igp_costs();
+        costs.sort();
+        assert_eq!(
+            costs,
+            vec![
+                ("10.1.0.0/16".parse().unwrap(), 25),
+                ("10.2.0.0/16".parse().unwrap(), 0)
+            ]
+        );
     }
 
     #[test]

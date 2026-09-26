@@ -243,6 +243,11 @@ impl SessionManager {
         self.bgp_rib.lock().await.damping_tick();
     }
 
+    /// Installs the IGP cost table polled by `igp_client`.
+    pub async fn set_igp(&self, igp: std::collections::HashMap<IpNet, u32>) {
+        self.bgp_rib.lock().await.set_igp(igp);
+    }
+
     /// This instance's owning routing table name and current best-path
     /// snapshot, for `rib_push_client`'s poll loop.
     pub async fn bgp_push_snapshot(&self) -> (Option<String>, HashMap<IpNet, crate::rib::Hops>) {
