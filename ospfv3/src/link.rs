@@ -187,8 +187,10 @@ pub async fn run(
     local_router_id: Ipv4Addr,
     lsdb: Arc<Mutex<Lsdb>>,
     status: StatusHandle,
-    dbd_max_headers: usize,
+    dbd_max_headers: Option<usize>,
 ) {
+    let dbd_max_headers =
+        dbd_max_headers.unwrap_or_else(|| exchange::mtu_based_max_headers(cfg.mtu));
     let socket = match OspfSocket::open(&cfg.kernel_interface, cfg.interface_id) {
         Ok(s) => s,
         Err(e) => {
@@ -935,7 +937,8 @@ pub struct LinkManager {
     /// each one as part of this router's own router-referenced prefix set.
     loopback_prefixes: Mutex<HashMap<Ipv4Addr, Vec<(Ipv6Net, u16)>>>,
     age_multiplier: u16,
-    dbd_max_headers: usize,
+    /// `Some` only from `--dbd-max-headers` (test/debug); `None` derives it per link from its MTU.
+    dbd_max_headers: Option<usize>,
     /// RFC 8362 Full mode: originate the extended (TLV) LSA set instead of
     /// the legacy one. ponytail: no Sparse mode, and legacy LSAs from before
     /// a toggle are simply left to age out rather than flushed early.
@@ -981,7 +984,7 @@ impl LinkManager {
         LsaTypes::new(self.extended_lsa.load(Ordering::Relaxed))
     }
 
-    pub fn new(age_multiplier: u16, dbd_max_headers: usize) -> Arc<Self> {
+    pub fn new(age_multiplier: u16, dbd_max_headers: Option<usize>) -> Arc<Self> {
         let manager = Arc::new(Self {
             links: Mutex::new(HashMap::new()),
             lsdbs: Mutex::new(HashMap::new()),
@@ -1747,7 +1750,7 @@ mod tests {
 
     #[tokio::test]
     async fn originate_link_lsas_installs_one_per_live_link() {
-        let manager = LinkManager::new(1, exchange::DEFAULT_DBD_MAX_HEADERS);
+        let manager = LinkManager::new(1, None);
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let cfg = link("eth0.0", 10);
         manager
@@ -1776,7 +1779,7 @@ mod tests {
 
     #[tokio::test]
     async fn extended_mode_originates_only_extended_lsas() {
-        let manager = LinkManager::new(1, exchange::DEFAULT_DBD_MAX_HEADERS);
+        let manager = LinkManager::new(1, None);
         manager.set_extended_lsa(true);
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let cfg = link("eth0.0", 10);
@@ -1804,7 +1807,7 @@ mod tests {
 
     #[tokio::test]
     async fn originate_intra_area_prefix_lsas_includes_loopback_for_area_with_no_live_link() {
-        let manager = LinkManager::new(1, exchange::DEFAULT_DBD_MAX_HEADERS);
+        let manager = LinkManager::new(1, None);
         let area = Ipv4Addr::UNSPECIFIED;
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let stub: Ipv6Net = "2001:db8:9::/128".parse().unwrap();

@@ -637,6 +637,10 @@ pub struct Args {
     /// Same shape as `--ospf-profile` (requires `--ospfv3-area`).
     #[arg(long)]
     pub ospfv3_profile: Option<String>,
+    /// If set (requires `--ospfv3-profile`), overrides the MTU `OSPFv3`
+    /// believes the profile's links have (`Ospfv3ProfileOp::SetMtu`).
+    #[arg(long)]
+    pub ospfv3_profile_mtu: Option<u16>,
     /// Same shape as `--ospf-interface-profile`, joining `OSPFv3` instead
     /// (`SubinterfaceOp::SetOspfv3Profile`).
     #[arg(long)]
@@ -1585,10 +1589,20 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }));
         if let Some(name) = args.ospfv3_profile.clone() {
             ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::Ensure {
-                instance,
+                instance: instance.clone(),
                 area_id,
-                name,
+                name: name.clone(),
             }));
+            if let Some(mtu) = args.ospfv3_profile_mtu {
+                ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetMtu {
+                    instance,
+                    area_id,
+                    name,
+                    mtu,
+                }));
+            }
+        } else if args.ospfv3_profile_mtu.is_some() {
+            bail!("--ospfv3-profile-mtu requires --ospfv3-profile to also be set");
         }
     } else if args.ospfv3_profile.is_some() {
         bail!("--ospfv3-profile requires --ospfv3-area to also be set");

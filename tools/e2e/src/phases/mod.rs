@@ -58,6 +58,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "ospf-mtu-pagination" => ospf::ospf_mtu_pagination(w).await,
         "ospfv3" => ospf::ospfv3_phase(w).await,
         "ospfv3-dr" => ospf::ospfv3_dr(w).await,
+        "ospfv3-mtu-pagination" => ospf::ospfv3_mtu_pagination(w).await,
         "pki" => pki::pki(w).await,
         "pki-rotation" => pki::pki_rotation(w).await,
         other => bail!("unknown phase '{other}'"),
@@ -117,6 +118,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "ospf-mtu-pagination",
             "ospfv3",
             "ospfv3-dr",
+            "ospfv3-mtu-pagination",
         ],
         "multi" => &[
             "as4",
@@ -182,6 +184,7 @@ pub const ALL: &[&str] = &[
     "ospf-mtu-pagination",
     "ospfv3",
     "ospfv3-dr",
+    "ospfv3-mtu-pagination",
     "pki",
     "pki-rotation",
 ];
