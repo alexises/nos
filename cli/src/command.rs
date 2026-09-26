@@ -2060,6 +2060,36 @@ fn parse_set(t: &[&str]) -> Option<Command> {
             cidr: cidr.parse::<IpNet>().ok()?,
             range: None,
         }),
+        ["prefix-list", name, "entry", cidr, "orlonger"] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Set(SetTarget::PrefixListEntry {
+                name: (*name).to_string(),
+                range: Some((cidr.prefix_len(), cidr.max_prefix_len())),
+                cidr,
+            })
+        }
+        ["prefix-list", name, "entry", cidr, "upto", max] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Set(SetTarget::PrefixListEntry {
+                name: (*name).to_string(),
+                range: Some((cidr.prefix_len(), max.parse::<u8>().ok()?)),
+                cidr,
+            })
+        }
+        ["entry", cidr, "orlonger"] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Set(SetTarget::PrefixListEntryRelative {
+                range: Some((cidr.prefix_len(), cidr.max_prefix_len())),
+                cidr,
+            })
+        }
+        ["entry", cidr, "upto", max] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Set(SetTarget::PrefixListEntryRelative {
+                range: Some((cidr.prefix_len(), max.parse::<u8>().ok()?)),
+                cidr,
+            })
+        }
         ["entry", cidr, "range", min, max] => Command::Set(SetTarget::PrefixListEntryRelative {
             cidr: cidr.parse::<IpNet>().ok()?,
             range: Some((min.parse::<u8>().ok()?, max.parse::<u8>().ok()?)),
@@ -2407,6 +2437,36 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
             cidr: cidr.parse::<IpNet>().ok()?,
             range: None,
         }),
+        ["prefix-list", name, "entry", cidr, "orlonger"] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Delete(DeleteTarget::PrefixListEntry {
+                name: (*name).to_string(),
+                range: Some((cidr.prefix_len(), cidr.max_prefix_len())),
+                cidr,
+            })
+        }
+        ["prefix-list", name, "entry", cidr, "upto", max] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Delete(DeleteTarget::PrefixListEntry {
+                name: (*name).to_string(),
+                range: Some((cidr.prefix_len(), max.parse::<u8>().ok()?)),
+                cidr,
+            })
+        }
+        ["entry", cidr, "orlonger"] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Delete(DeleteTarget::PrefixListEntryRelative {
+                range: Some((cidr.prefix_len(), cidr.max_prefix_len())),
+                cidr,
+            })
+        }
+        ["entry", cidr, "upto", max] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Delete(DeleteTarget::PrefixListEntryRelative {
+                range: Some((cidr.prefix_len(), max.parse::<u8>().ok()?)),
+                cidr,
+            })
+        }
         ["entry", cidr, "range", min, max] => {
             Command::Delete(DeleteTarget::PrefixListEntryRelative {
                 cidr: cidr.parse::<IpNet>().ok()?,
@@ -4544,6 +4604,25 @@ mod tests {
             Command::parse("set member 65000:200"),
             Command::Set(SetTarget::CommunityGroupMemberRelative {
                 member: "65000:200".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn set_prefix_list_entry_orlonger_and_upto_shorthands() {
+        assert_eq!(
+            Command::parse("set prefix-list BLOCKS entry 10.0.0.0/8 orlonger"),
+            Command::Set(SetTarget::PrefixListEntry {
+                name: "BLOCKS".to_string(),
+                cidr: "10.0.0.0/8".parse().unwrap(),
+                range: Some((8, 32)),
+            })
+        );
+        assert_eq!(
+            Command::parse("set entry 10.0.0.0/8 upto 24"),
+            Command::Set(SetTarget::PrefixListEntryRelative {
+                cidr: "10.0.0.0/8".parse().unwrap(),
+                range: Some((8, 24)),
             })
         );
     }

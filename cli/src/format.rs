@@ -1250,10 +1250,17 @@ pub fn render_community_group(group: &CommunityGroup) -> String {
 }
 
 /// Render one `PrefixListEntry` the same way for every caller — `<cidr>` for
-/// an exact-match entry, `<cidr> range(<min>,<max>)` otherwise.
+/// an exact-match entry, `<cidr> orlonger`/`<cidr> upto <max>` when the range starts at the
+/// cidr's own length, `<cidr> range(<min>,<max>)` otherwise.
 pub fn render_prefix_list_entry(entry: &PrefixListEntry) -> String {
     match entry.range {
         None => entry.cidr.to_string(),
+        Some((min, max)) if min == entry.cidr.prefix_len() && max == entry.cidr.max_prefix_len() => {
+            format!("{} orlonger", entry.cidr)
+        }
+        Some((min, max)) if min == entry.cidr.prefix_len() => {
+            format!("{} upto {max}", entry.cidr)
+        }
         Some((min, max)) => format!("{} range({min},{max})", entry.cidr),
     }
 }
