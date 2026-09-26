@@ -8,6 +8,11 @@ pub enum ApiError {
     /// No valid client certificate, or a login that failed.
     Unauthorized(String),
     NotFound(String),
+    /// RFC 6585 §4: too many failed logins; try again in `retry_after_secs`.
+    TooManyRequests {
+        detail: String,
+        retry_after_secs: u64,
+    },
     /// Well-formed request the config rejected (commit-time validation).
     Unprocessable(String),
     /// A daemon this endpoint needs isn't reachable right now.
@@ -46,6 +51,15 @@ impl IntoResponse for ApiError {
                 return resp;
             }
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m),
+            ApiError::TooManyRequests {
+                detail,
+                retry_after_secs,
+            } => {
+                let mut resp = problem(StatusCode::TOO_MANY_REQUESTS, detail);
+                resp.headers_mut()
+                    .insert(header::RETRY_AFTER, HeaderValue::from(retry_after_secs));
+                return resp;
+            }
             ApiError::Unprocessable(m) => (StatusCode::UNPROCESSABLE_ENTITY, m),
             ApiError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
             ApiError::BadGateway(m) => (StatusCode::BAD_GATEWAY, m),
