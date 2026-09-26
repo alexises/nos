@@ -903,6 +903,41 @@ async fn guesses_at_one_account_are_serialised() {
     );
 }
 
+/// RFC 6585: after five failures the account gets 429 + Retry-After at once.
+#[tokio::test]
+async fn too_many_failed_logins_get_429_with_retry_after() {
+    let f = fixture(vec![]).await;
+    let guess = |user: &str, password: &str| {
+        let body = json!({"user": user, "password": password, "csr": "AQID"});
+        HttpRequest::builder()
+            .method(Method::POST)
+            .uri("/v1/login")
+            .header(header::CONTENT_TYPE, "application/json")
+            .extension(PeerUser(None))
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    for _ in 0..5 {
+        let resp = f.app.clone().oneshot(guess(USER, "nope")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+    let started = std::time::Instant::now();
+    // Even the right password is refused while locked out.
+    let resp = f.app.clone().oneshot(guess(USER, PASSWORD)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let secs: u64 = resp.headers()[header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=60).contains(&secs), "{secs}");
+    assert_eq!(
+        resp.headers()[header::CONTENT_TYPE],
+        "application/problem+json"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
+}
+
 #[tokio::test]
 async fn renewal_is_for_the_user_the_certificate_names() {
     let f = fixture(vec![]).await;

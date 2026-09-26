@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::{Extension, Json};
@@ -30,15 +30,46 @@ use crate::ipc::Daemons;
 // (each still costs an argon2 verify). Add a per-source limit if that matters.
 const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(1);
 
+/// After this many failures inside `FAILED_LOGIN_WINDOW` (counted from the
+/// first), further attempts on the account get `429` until the window ends.
+const MAX_FAILED_LOGINS: u32 = 5;
+const FAILED_LOGIN_WINDOW: Duration = Duration::from_secs(60);
+
 /// One attempt at a time per username, so guessing one account's password is
 /// limited to one guess per `FAILED_LOGIN_DELAY` however many streams or
 /// connections the guesses arrive on.
 #[derive(Default)]
-pub struct LoginGate(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
+pub struct LoginGate {
+    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Per username: failures so far and when the window opened.
+    failures: Mutex<HashMap<String, (u32, Instant)>>,
+}
 
 impl LoginGate {
+    /// Seconds until `user` may try again, if it is locked out.
+    fn retry_after(&self, user: &str) -> Option<u64> {
+        let failures = self.failures.lock().expect("login gate lock");
+        let &(count, since) = failures.get(user)?;
+        let left = FAILED_LOGIN_WINDOW.checked_sub(since.elapsed())?;
+        (count >= MAX_FAILED_LOGINS).then(|| left.as_secs() + 1)
+    }
+
+    fn record_failure(&self, user: &str) {
+        let mut failures = self.failures.lock().expect("login gate lock");
+        // Drop expired windows so made-up usernames can't grow the map forever.
+        failures.retain(|_, (_, since)| since.elapsed() < FAILED_LOGIN_WINDOW);
+        failures
+            .entry(user.to_string())
+            .or_insert((0, Instant::now()))
+            .0 += 1;
+    }
+
+    fn clear(&self, user: &str) {
+        self.failures.lock().expect("login gate lock").remove(user);
+    }
+
     fn lock_for(&self, user: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.0
+        self.locks
             .lock()
             .expect("login gate lock")
             .entry(user.to_string())
@@ -48,7 +79,7 @@ impl LoginGate {
 
     /// Forgets `user` once nobody else is waiting on it.
     fn release(&self, user: &str, mine: &Arc<tokio::sync::Mutex<()>>) {
-        let mut gates = self.0.lock().expect("login gate lock");
+        let mut gates = self.locks.lock().expect("login gate lock");
         // The map's copy and ours: nobody else holds it.
         if Arc::strong_count(mine) == 2 {
             gates.remove(user);
@@ -122,7 +153,8 @@ fn certificate(reply: WatchdogEvent) -> ApiResult<Json<Certificate>> {
     responses(
         (status = 200, body = Certificate),
         (status = 400, body = ErrorBody, description = "malformed certificate request"),
-        (status = 401, body = ErrorBody, description = "unknown user or wrong password")
+        (status = 401, body = ErrorBody, description = "unknown user or wrong password"),
+        (status = 429, body = ErrorBody, description = "too many failed attempts for this user; see Retry-After")
     )
 )]
 pub async fn login(
@@ -132,6 +164,14 @@ pub async fn login(
     let csr_der = decode_csr(&body.csr)?;
     let gate = d.login_gate.lock_for(&body.user);
     let held = gate.lock().await;
+    if let Some(retry_after_secs) = d.login_gate.retry_after(&body.user) {
+        drop(held);
+        d.login_gate.release(&body.user, &gate);
+        return Err(ApiError::TooManyRequests {
+            detail: "too many failed logins for this user".into(),
+            retry_after_secs,
+        });
+    }
     let reply = d
         .broker(WatchdogRequest::RestLogin {
             user: body.user.clone(),
@@ -140,7 +180,10 @@ pub async fn login(
         })
         .await;
     if matches!(&reply, Ok(WatchdogEvent::Denied(m)) if m == INVALID_CREDENTIALS) {
+        d.login_gate.record_failure(&body.user);
         tokio::time::sleep(FAILED_LOGIN_DELAY).await;
+    } else if matches!(&reply, Ok(WatchdogEvent::Issued { .. })) {
+        d.login_gate.clear(&body.user);
     }
     drop(held);
     d.login_gate.release(&body.user, &gate);
