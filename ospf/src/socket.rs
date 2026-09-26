@@ -63,6 +63,9 @@ impl OspfSocket {
         // distinguishes it from a real peer's — treats itself as a
         // neighbor, chasing its own DBD negotiation over unicast loopback.
         socket.set_multicast_loop_v4(false)?;
+        // Link-local scope only (conventional; this NOS has no virtual links).
+        socket.set_ttl(1)?;
+        socket.set_multicast_ttl_v4(1)?;
         socket.set_nonblocking(true)?;
         Ok(Self {
             inner: AsyncFd::new(socket)?,

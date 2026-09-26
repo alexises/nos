@@ -146,7 +146,10 @@ async fn both_full_p2p(a: &Router, b: &Router) -> anyhow::Result<()> {
 
 /// At least one router logged a DBD chunk with more remaining.
 async fn paginated(a: &Router, b: &Router) -> anyhow::Result<()> {
-    let pat = "ospf dbd chunk sent, more remaining";
+    paginated_with(a, b, "ospf dbd chunk sent, more remaining").await
+}
+
+async fn paginated_with(a: &Router, b: &Router, pat: &str) -> anyhow::Result<()> {
     if a.wait(pat).await.is_ok() || b.wait(pat).await.is_ok() {
         log("pagination triggered: a dbd chunk with more remaining was sent");
         Ok(())
@@ -526,6 +529,41 @@ pub async fn ospf_mtu_pagination(w: &mut World) -> anyhow::Result<()> {
 }
 
 // --- OSPFv3 (RFC 5340) ---
+
+/// `ospf_mtu_pagination` for `OSPFv3`, self-contained: a real
+/// `Ospfv3Profile.mtu` override alone (no `--dbd-max-headers`) drives
+/// `exchange::mtu_based_max_headers` — each router already holds several LSAs
+/// (Router, Link, Intra-Area-Prefix) before the DBD exchange, so no ASBR needed.
+pub async fn ospfv3_mtu_pagination(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    let mtu = |mut f: Vec<String>| {
+        f.extend(strings(&[
+            "--ospfv3-profile-mtu",
+            &OSPF_MTU_VALUE.to_string(),
+        ]));
+        f
+    };
+    a.provision_flags(&with_base(
+        A,
+        mtu(ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)),
+    ))
+    .await?;
+    b.provision_flags(&with_base(
+        B,
+        mtu(ospfv3(OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B)),
+    ))
+    .await?;
+    paginated_with(a, b, "ospfv3 dbd chunk sent, more remaining").await?;
+    a.wait(&format!(
+        "ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}"
+    ))
+    .await?;
+    b.wait(&format!(
+        "ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID}"
+    ))
+    .await
+}
 
 pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);

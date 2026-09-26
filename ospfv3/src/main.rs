@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use nos_log_client::ForwardingLayer;
-use nos_ospfv3::exchange;
 use nos_ospfv3::link::LinkManager;
 use nos_ospfv3::{reconcile, rib_push_client, server, watchdog_client};
 use nos_pki::Identity;
@@ -47,9 +46,8 @@ struct Args {
     lsa_age_multiplier: u16,
 
     /// RFC 2328 §10.8's per-DBD-packet LSA-header budget override
-    /// (unchanged by RFC 5340). Phase 1 has no MTU-driven per-link
-    /// derivation (see `exchange`'s own doc comment) — this always falls
-    /// back to `exchange::DEFAULT_DBD_MAX_HEADERS` when unset.
+    /// (unchanged by RFC 5340), test/debug only — when unset each link
+    /// derives it from its own MTU (`exchange::mtu_based_max_headers`).
     #[arg(long)]
     dbd_max_headers: Option<usize>,
 }
@@ -92,10 +90,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from(format!("/run/nos/ospfv3-{}.sock", args.instance)));
 
     let (routing_table_tx, routing_table_rx) = watch::channel(None::<String>);
-    let dbd_max_headers = args
-        .dbd_max_headers
-        .unwrap_or(exchange::DEFAULT_DBD_MAX_HEADERS);
-    let links = LinkManager::new(args.lsa_age_multiplier, dbd_max_headers);
+    let links = LinkManager::new(args.lsa_age_multiplier, args.dbd_max_headers);
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),

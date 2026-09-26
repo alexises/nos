@@ -8,11 +8,10 @@
 //!
 //! Real RFC 2328 §10.8 pagination: the local LSDB summary is chunked into
 //! `max_headers`-sized pieces, one chunk per DD sequence number, each acked
-//! before the next is sent, in both directions. Unlike `ospf::exchange`,
-//! Phase 1 has no MTU-driven `max_headers` derivation (that was a later,
-//! separate `ospf` phase, `ospf-mtu-pagination` — out of scope here per the
-//! `OSPFv3` Phase 1 plan): `max_headers` is always `DEFAULT_DBD_MAX_HEADERS`,
-//! overridable only via `nos-ospfv3d`'s `--dbd-max-headers` test/debug flag.
+//! before the next is sent, in both directions. Like `ospf::exchange`,
+//! `max_headers` is derived from the link's effective MTU
+//! (`mtu_based_max_headers`) unless `nos-ospfv3d`'s `--dbd-max-headers`
+//! test/debug flag overrides it.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
@@ -24,9 +23,21 @@ use crate::lsdb::Lsdb;
 use crate::neighbor::{Event, NeighborState};
 use crate::packet::{DbdPacket, LsAckPacket, LsrPacket, LsuPacket};
 
-/// A conservative fixed per-DBD-packet LSA-header budget — see this
-/// module's own doc comment for why Phase 1 has no MTU-derived alternative.
+/// Fixed per-DBD-packet LSA-header budget for tests that don't care about
+/// the real MTU-derived one (`mtu_based_max_headers`).
 pub const DEFAULT_DBD_MAX_HEADERS: usize = 64;
+
+/// How many LSA headers fit in one DBD packet on a link of this MTU: the
+/// MTU minus the IPv6 header (40), the `OSPFv3` header (16) and the fixed DBD
+/// body (12), over `LSA_HEADER_LEN` — floored at 1 so a tiny MTU still makes
+/// progress.
+pub fn mtu_based_max_headers(mtu: u16) -> usize {
+    (mtu as usize)
+        .saturating_sub(40 + 16 + 12)
+        .checked_div(lsa::LSA_HEADER_LEN)
+        .unwrap_or(0)
+        .max(1)
+}
 
 /// One neighbor's DBD/LSR/LSU exchange state, from `ExStart` onward.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -401,6 +412,13 @@ fn compute_request_list(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mtu_derived_budget() {
+        assert_eq!(super::mtu_based_max_headers(1500), 71);
+        assert_eq!(super::mtu_based_max_headers(68), 1);
+        assert_eq!(super::mtu_based_max_headers(0), 1);
+    }
+
     use super::*;
 
     fn router_id(s: &str) -> Ipv4Addr {

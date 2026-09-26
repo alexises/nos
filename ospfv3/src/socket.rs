@@ -69,6 +69,9 @@ impl OspfSocket {
         // neighbor (identical reasoning to `ospf::socket`'s own note).
         socket.set_multicast_loop_v6(false)?;
         set_checksum_offset(&socket)?;
+        // Link-local scope only (conventional; no virtual links here).
+        socket.set_unicast_hops_v6(1)?;
+        socket.set_multicast_hops_v6(1)?;
         socket.set_nonblocking(true)?;
         Ok(Self {
             inner: AsyncFd::new(socket)?,
