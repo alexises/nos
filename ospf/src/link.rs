@@ -127,27 +127,40 @@ pub enum LinkAuthConfig {
     Crypto {
         keys: Vec<(u8, packet::CryptoAlgorithm, Vec<u8>)>,
         current_key_id: u8,
+        /// RFC 7474 (`OspfProfile.extended_sequence_numbers`): `AuType` 3
+        /// with a persisted-boot-count 64-bit sequence number.
+        extended: bool,
     },
 }
 
 impl LinkAuthConfig {
-    fn as_policy(&self) -> packet::AuthPolicy<'_> {
+    fn is_extended(&self) -> bool {
+        matches!(self, LinkAuthConfig::Crypto { extended: true, .. })
+    }
+
+    /// `source` is the received packet's IP source address (RFC 7474 binds
+    /// the digest to it).
+    fn as_policy(&self, source: Ipv4Addr) -> packet::AuthPolicy<'_> {
         match self {
             LinkAuthConfig::None => packet::AuthPolicy::None,
             LinkAuthConfig::Simple { password } => packet::AuthPolicy::Simple { password },
-            LinkAuthConfig::Crypto { keys, .. } => packet::AuthPolicy::Crypto { keys },
+            LinkAuthConfig::Crypto { keys, extended, .. } => packet::AuthPolicy::Crypto {
+                keys,
+                extended: extended.then_some(source),
+            },
         }
     }
 
     /// Builds what to sign an outgoing packet with, given this send's own
     /// crypto sequence number (only meaningful for `Crypto`).
-    fn as_outgoing(&self, sequence: u32) -> packet::OutgoingAuth<'_> {
+    fn as_outgoing(&self, sequence: u64, local_addr: Ipv4Addr) -> packet::OutgoingAuth<'_> {
         match self {
             LinkAuthConfig::None => packet::OutgoingAuth::None,
             LinkAuthConfig::Simple { password } => packet::OutgoingAuth::Simple { password },
             LinkAuthConfig::Crypto {
                 keys,
                 current_key_id,
+                extended,
             } => {
                 let (key_id, algorithm, key) = keys
                     .iter()
@@ -158,6 +171,7 @@ impl LinkAuthConfig {
                     algorithm: *algorithm,
                     key,
                     sequence,
+                    extended: extended.then_some(local_addr),
                 }
             }
         }
@@ -195,7 +209,10 @@ pub struct NeighborInfo {
     /// from this neighbor — `None` until its first Crypto-authenticated
     /// packet. Only ever populated/checked when `LinkConfig.auth` is
     /// `Crypto`; see `run()`'s receive loop.
-    pub last_crypto_seq: Option<u32>,
+    ///
+    /// Keyed by packet type under RFC 7474 (its replay rule is per type), by
+    /// a single `0` slot under RFC 2328's classic `AuType` 2.
+    pub last_crypto_seq: HashMap<u8, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -291,6 +308,7 @@ pub async fn run(
     lsdb: Arc<Mutex<Lsdb>>,
     status: StatusHandle,
     dbd_max_headers: Option<usize>,
+    boot_count: u32,
 ) {
     let socket = match OspfSocket::open(&cfg.kernel_interface, cfg.local_addr) {
         Ok(s) => s,
@@ -330,9 +348,12 @@ pub async fn run(
     // Floored at wall-clock seconds so it never regresses across a link
     // restart (a fresh `next_crypto_seq` call always floors back up to
     // "now" if the in-memory counter would otherwise be behind).
-    let mut next_seq = crypto_seq_floor();
+    let mut next_seq = initial_crypto_seq(&cfg.auth, boot_count);
 
     info!(link = %cfg.attach_point, vrf = %cfg.vrf, "ospf link driver started");
+    if cfg.auth.is_extended() {
+        info!(link = %cfg.attach_point, boot_count, "ospf link using rfc 7474 extended sequence numbers");
+    }
     if is_broadcast {
         info!(link = %cfg.attach_point, "ospf interface reached waiting");
     }
@@ -345,7 +366,7 @@ pub async fn run(
             result = socket.recv_packet() => {
                 match result {
                     Ok((source, data)) => {
-                        let policy = cfg.auth.as_policy();
+                        let policy = cfg.auth.as_policy(source);
                         match packet::decode(&data, &policy) {
                             Ok(pkt) if !accept_crypto_sequence(&cfg, &status, &data, &pkt) => {
                                 warn!(
@@ -429,21 +450,35 @@ pub async fn run(
 /// Wall-clock unix-seconds floor for the outgoing crypto sequence number —
 /// mirrors `initial_dd_sequence_number`'s use of `SystemTime`, but must
 /// specifically never regress (RFC 2328 D.4.3's anti-replay guarantee),
-/// which subsec-nanos-based randomness doesn't provide.
-fn crypto_seq_floor() -> u32 {
+/// which subsec-nanos-based randomness doesn't provide. Only used for the
+/// classic `AuType` 2; RFC 7474 links use the persisted boot count instead.
+fn crypto_seq_floor() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX))
+        .map_or(0, |d| d.as_secs().min(u64::from(u32::MAX)))
 }
 
-/// Bumps `counter` to the next value to sign an outgoing packet with:
-/// whichever is larger of one past its previous value or the current
-/// wall-clock floor — guarantees non-decreasing even across a link restart
-/// (a fresh process starts `counter` at `crypto_seq_floor()` again, always
-/// at or above any previously-sent value from a real clock that doesn't run
-/// backwards).
-fn next_crypto_seq(counter: &mut u32) -> u32 {
-    *counter = counter.saturating_add(1).max(crypto_seq_floor());
+/// The starting outgoing sequence: RFC 7474's `boot_count << 32` (counter
+/// 0), or the classic wall-clock floor.
+fn initial_crypto_seq(auth: &LinkAuthConfig, boot_count: u32) -> u64 {
+    if auth.is_extended() {
+        u64::from(boot_count) << 32
+    } else {
+        crypto_seq_floor()
+    }
+}
+
+/// Bumps `counter` to the next value to sign an outgoing packet with. RFC
+/// 7474: one past the previous value — the low 32 bits carry into the boot
+/// count on wrap, keeping the 64-bit value strictly increasing (u64 overflow
+/// is unreachable). Classic: whichever is larger of one past the previous
+/// value or the wall-clock floor, non-decreasing even across a link restart.
+fn next_crypto_seq(counter: &mut u64, auth: &LinkAuthConfig) -> u64 {
+    *counter = if auth.is_extended() {
+        *counter + 1
+    } else {
+        counter.saturating_add(1).max(crypto_seq_floor())
+    };
     *counter
 }
 
@@ -467,17 +502,18 @@ fn accept_crypto_sequence(
         return true;
     };
     let router_id = packet::router_id(pkt);
+    let slot = if cfg.auth.is_extended() { data[1] } else { 0 };
     let last_seq = status
         .borrow()
         .neighbors
         .get(&router_id)
-        .and_then(|n| n.last_crypto_seq);
+        .and_then(|n| n.last_crypto_seq.get(&slot).copied());
     if last_seq.is_some_and(|last| seq <= last) {
         return false;
     }
     status.send_modify(|s| {
         if let Some(n) = s.neighbors.get_mut(&router_id) {
-            n.last_crypto_seq = Some(seq);
+            n.last_crypto_seq.insert(slot, seq);
         }
     });
     true
@@ -488,7 +524,7 @@ fn send_hello(
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
-    next_seq: &mut u32,
+    next_seq: &mut u64,
 ) {
     let current = status.borrow();
     let neighbors: Vec<Ipv4Addr> = current
@@ -519,7 +555,9 @@ fn send_hello(
         backup_designated_router,
         neighbors,
     };
-    let auth = cfg.auth.as_outgoing(next_crypto_seq(next_seq));
+    let auth = cfg
+        .auth
+        .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
     if let Err(e) = socket.send_multicast(&packet::encode_hello(&pkt, &auth)) {
         warn!(link = %cfg.attach_point, error = %e, "failed to send ospf hello");
     }
@@ -578,7 +616,7 @@ fn handle_hello(
                 last_hello_received: Instant::now(),
                 address: source,
                 adjacency: None,
-                last_crypto_seq: None,
+                last_crypto_seq: HashMap::new(),
             });
         entry.state = new_state;
         entry.priority = hello.router_priority;
@@ -618,7 +656,7 @@ fn advance_adjacencies(
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
-    next_seq: &mut u32,
+    next_seq: &mut u64,
 ) {
     let snapshot = status.borrow().clone();
     let eligible: Vec<Ipv4Addr> = snapshot
@@ -643,7 +681,9 @@ fn advance_adjacencies(
             continue;
         };
         let (adj, dbd) = start_negotiation(cfg, local_router_id);
-        let auth = cfg.auth.as_outgoing(next_crypto_seq(next_seq));
+        let auth = cfg
+            .auth
+            .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
         if let Err(e) = socket.send_unicast(neighbor_addr, &packet::encode_dbd(&dbd, &auth)) {
             warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf dbd");
         }
@@ -862,7 +902,7 @@ fn execute_actions(
     status: &StatusHandle,
     neighbor_id: Ipv4Addr,
     actions: Vec<exchange::Action>,
-    next_seq: &mut u32,
+    next_seq: &mut u64,
 ) {
     let Some(neighbor_addr) = status
         .borrow()
@@ -876,7 +916,9 @@ fn execute_actions(
         // Each packet sent gets its own crypto sequence number — RFC 2328
         // D.4.3's non-decreasing guarantee is per packet, not per action
         // batch.
-        let auth = cfg.auth.as_outgoing(next_crypto_seq(next_seq));
+        let auth = cfg
+            .auth
+            .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
         let (kind, payload) = match action {
             exchange::Action::SendDbd(pkt) => {
                 // A genuine mid-pagination continuation chunk (not the
@@ -945,13 +987,15 @@ fn retransmit_pending(
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
-    next_seq: &mut u32,
+    next_seq: &mut u64,
 ) {
     let snapshot = status.borrow().clone();
     for (neighbor_id, info) in &snapshot.neighbors {
         let Some(adj) = &info.adjacency else { continue };
         if let Some(dbd) = &adj.last_dbd_sent {
-            let auth = cfg.auth.as_outgoing(next_crypto_seq(next_seq));
+            let auth = cfg
+                .auth
+                .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
             if let Err(e) = socket.send_unicast(info.address, &packet::encode_dbd(dbd, &auth)) {
                 warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf dbd");
             }
@@ -968,7 +1012,9 @@ fn retransmit_pending(
                 area_id: cfg.area_id,
                 requests: adj.request_list.clone(),
             };
-            let auth = cfg.auth.as_outgoing(next_crypto_seq(next_seq));
+            let auth = cfg
+                .auth
+                .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
             if let Err(e) = socket.send_unicast(info.address, &packet::encode_lsr(&lsr, &auth)) {
                 warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsr");
             }
@@ -983,7 +1029,9 @@ fn retransmit_pending(
                     .map(|l| (**l).clone())
                     .collect(),
             };
-            let auth = cfg.auth.as_outgoing(next_crypto_seq(next_seq));
+            let auth = cfg
+                .auth
+                .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
             if let Err(e) = socket.send_unicast(info.address, &packet::encode_lsu(&lsu, &auth)) {
                 warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsu");
             }
@@ -1015,7 +1063,7 @@ async fn flood_full_neighbors(
     local_router_id: Ipv4Addr,
     lsdb: &Mutex<Lsdb>,
     status: &StatusHandle,
-    next_seq: &mut u32,
+    next_seq: &mut u64,
 ) {
     let full_neighbors: Vec<(Ipv4Addr, Ipv4Addr)> = status
         .borrow()
@@ -1036,7 +1084,9 @@ async fn flood_full_neighbors(
     // receive side (`accept_crypto_sequence` keys on the sender's own
     // `router_id`), so two different neighbors each independently accepting
     // the same sequence number is correct, not a replay.
-    let auth = cfg.auth.as_outgoing(next_crypto_seq(next_seq));
+    let auth = cfg
+        .auth
+        .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
     let payload = packet::encode_lsu(
         &LsuPacket {
             router_id: local_router_id,
@@ -1237,6 +1287,8 @@ pub struct LinkManager {
     /// force multi-packet pagination deterministically over a small lab
     /// LSDB. See `main.rs`'s `--dbd-max-headers`.
     dbd_max_headers: Option<usize>,
+    /// Source of RFC 7474 boot counts, one per extended-auth link (re)start.
+    boots: crate::boot::BootCounter,
     /// Raw (pre-policy) redistributed prefixes from `OspfRequest::
     /// RedistributeRoutes`. A `HashSet`, not a map — the `RedistributedRoute`
     /// gateway is never used: this router always originates with
@@ -1252,7 +1304,11 @@ pub struct LinkManager {
 }
 
 impl LinkManager {
-    pub fn new(age_multiplier: u16, dbd_max_headers: Option<usize>) -> Arc<Self> {
+    pub fn new(
+        age_multiplier: u16,
+        dbd_max_headers: Option<usize>,
+        boots: crate::boot::BootCounter,
+    ) -> Arc<Self> {
         let manager = Arc::new(Self {
             links: Mutex::new(HashMap::new()),
             lsdbs: Mutex::new(HashMap::new()),
@@ -1260,6 +1316,7 @@ impl LinkManager {
             stub_networks: Mutex::new(HashMap::new()),
             age_multiplier,
             dbd_max_headers,
+            boots,
             redistribute_raw: Mutex::new(HashSet::new()),
             redistribute_filtered: Mutex::new(HashSet::new()),
         });
@@ -1615,12 +1672,20 @@ impl LinkManager {
             let key = cfg.attach_point.clone();
             let lsdb = self.lsdb_for(cfg.area_id).await;
             let (status_tx, status_rx) = watch::channel(LinkStatus::new(cfg.network_type));
+            // A fresh boot count per (re)start keeps RFC 7474 sequence numbers
+            // increasing across link restarts inside one process too.
+            let boot_count = if cfg.auth.is_extended() {
+                self.boots.next()
+            } else {
+                0
+            };
             let task = tokio::spawn(run(
                 cfg.clone(),
                 local_router_id,
                 lsdb,
                 status_tx,
                 self.dbd_max_headers,
+                boot_count,
             ));
             links.insert(
                 key,
@@ -2123,7 +2188,7 @@ mod tests {
             last_hello_received: Instant::now(),
             address,
             adjacency: None,
-            last_crypto_seq: None,
+            last_crypto_seq: HashMap::new(),
         }
     }
 
@@ -2336,7 +2401,11 @@ mod tests {
         // Regression test for the area-union fix: an area with only a
         // loopback stub network and no live `LinkConfig` must still get a
         // Router-LSA originated for it.
-        let manager = LinkManager::new(1, Some(exchange::DEFAULT_DBD_MAX_HEADERS));
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
         let area = Ipv4Addr::UNSPECIFIED;
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let subnet: Ipv4Net = "192.168.9.0/24".parse().unwrap();
@@ -2367,7 +2436,11 @@ mod tests {
 
     #[tokio::test]
     async fn originate_summary_lsas_installs_type3_into_every_other_area() {
-        let manager = LinkManager::new(1, Some(exchange::DEFAULT_DBD_MAX_HEADERS));
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
         let area0 = Ipv4Addr::UNSPECIFIED;
         let area1 = Ipv4Addr::new(0, 0, 0, 1);
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
@@ -2410,7 +2483,11 @@ mod tests {
 
     #[tokio::test]
     async fn originate_summary_lsas_is_a_noop_with_only_one_area() {
-        let manager = LinkManager::new(1, Some(exchange::DEFAULT_DBD_MAX_HEADERS));
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
         let area = Ipv4Addr::UNSPECIFIED;
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let net: Ipv4Net = "192.168.12.0/24".parse().unwrap();
@@ -2436,7 +2513,11 @@ mod tests {
 
     #[tokio::test]
     async fn originate_summary_lsas_installs_type4_for_reachable_asbr() {
-        let manager = LinkManager::new(1, Some(exchange::DEFAULT_DBD_MAX_HEADERS));
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
         let area0 = Ipv4Addr::UNSPECIFIED;
         let area1 = Ipv4Addr::new(0, 0, 0, 1);
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
@@ -2542,7 +2623,11 @@ mod tests {
             }
         }
 
-        let manager = LinkManager::new(1, Some(exchange::DEFAULT_DBD_MAX_HEADERS));
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
         let area0 = Ipv4Addr::UNSPECIFIED;
         let area1 = Ipv4Addr::new(0, 0, 0, 1);
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
@@ -2648,7 +2733,11 @@ mod tests {
 
     #[tokio::test]
     async fn database_summaries_flattens_every_area() {
-        let manager = LinkManager::new(1, Some(exchange::DEFAULT_DBD_MAX_HEADERS));
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
         let area = Ipv4Addr::UNSPECIFIED;
         let router_id = Ipv4Addr::new(1, 1, 1, 1);
         let lsdb = manager.lsdb_for(area).await;
@@ -2745,5 +2834,96 @@ mod tests {
         let result = status.borrow();
         assert_eq!(result.dr, Some(neighbor_id));
         assert_eq!(result.bdr, Some(local_router_id));
+    }
+
+    fn ext_auth() -> LinkAuthConfig {
+        LinkAuthConfig::Crypto {
+            keys: vec![(1, packet::CryptoAlgorithm::HmacSha256, b"k".to_vec())],
+            current_key_id: 1,
+            extended: true,
+        }
+    }
+
+    #[test]
+    fn extended_sequence_starts_at_boot_count_and_carries_into_it() {
+        let auth = ext_auth();
+        let mut seq = initial_crypto_seq(&auth, 3);
+        assert_eq!(seq, 3 << 32);
+        assert_eq!(next_crypto_seq(&mut seq, &auth), (3 << 32) + 1);
+        // Low 32 bits wrapping carries into the boot count: still increasing.
+        seq = (3 << 32) | u64::from(u32::MAX);
+        assert_eq!(next_crypto_seq(&mut seq, &auth), 4 << 32);
+        // A later link start (higher boot count) is above everything sent before.
+        assert!(initial_crypto_seq(&auth, 4) >= seq);
+    }
+
+    #[test]
+    fn extended_replay_check_is_per_packet_type() {
+        let mut cfg = link("eth0.0", 10);
+        cfg.auth = ext_auth();
+        let mut n = neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2));
+        n.last_crypto_seq = HashMap::new();
+        let peer = Ipv4Addr::new(2, 2, 2, 2);
+        let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+        status.send_modify(|s| {
+            s.neighbors.insert(peer, n);
+        });
+        let keys = vec![(1, packet::CryptoAlgorithm::HmacSha256, b"k".to_vec())];
+        let src = Ipv4Addr::new(10, 0, 0, 2);
+        let hello = |seq: u64| {
+            let pkt = packet::HelloPacket {
+                router_id: peer,
+                area_id: Ipv4Addr::UNSPECIFIED,
+                hello_interval: 10,
+                dead_interval: 40,
+                router_priority: 1,
+                designated_router: Ipv4Addr::UNSPECIFIED,
+                backup_designated_router: Ipv4Addr::UNSPECIFIED,
+                neighbors: vec![],
+            };
+            let auth = packet::OutgoingAuth::Crypto {
+                key_id: 1,
+                algorithm: packet::CryptoAlgorithm::HmacSha256,
+                key: b"k",
+                sequence: seq,
+                extended: Some(src),
+            };
+            packet::encode_hello(&pkt, &auth)
+        };
+        let policy = packet::AuthPolicy::Crypto {
+            keys: &keys,
+            extended: Some(src),
+        };
+        let check = |data: &[u8]| {
+            let pkt = packet::decode(data, &policy).unwrap();
+            accept_crypto_sequence(&cfg, &status, data, &pkt)
+        };
+        assert!(check(&hello(10)));
+        assert!(!check(&hello(10)), "equal is a replay");
+        assert!(!check(&hello(9)), "lower is a replay");
+        assert!(check(&hello(11)));
+        // A different packet type keeps its own last-seen value: this DBD's
+        // (lower) number would be a replay if the slot were shared.
+        let dbd = packet::encode_dbd(
+            &packet::DbdPacket {
+                router_id: peer,
+                area_id: Ipv4Addr::UNSPECIFIED,
+                interface_mtu: 1500,
+                options: 0,
+                init: true,
+                more: false,
+                master: false,
+                dd_sequence_number: 1,
+                lsa_headers: vec![],
+            },
+            &packet::OutgoingAuth::Crypto {
+                key_id: 1,
+                algorithm: packet::CryptoAlgorithm::HmacSha256,
+                key: b"k",
+                sequence: 5,
+                extended: Some(src),
+            },
+        );
+        assert!(check(&dbd));
     }
 }

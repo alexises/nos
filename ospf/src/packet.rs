@@ -28,6 +28,10 @@ pub const TYPE_LSACK: u8 = 5;
 pub const AUTH_TYPE_NULL: u16 = 0;
 pub const AUTH_TYPE_SIMPLE: u16 = 1;
 pub const AUTH_TYPE_CRYPTO: u16 = 2;
+/// RFC 7474's extended cryptographic authentication: 32-bit Key ID, a 64-bit
+/// (boot count : sequence) number in the 8 octets after the packet, and the
+/// IP source address folded into the digest's `Apad`.
+pub const AUTH_TYPE_CRYPTO_EXT: u16 = 3;
 
 const HEADER_LEN: usize = 24;
 /// Hello body length excluding the trailing neighbor list: network mask,
@@ -153,7 +157,11 @@ pub enum OutgoingAuth<'a> {
         key_id: u8,
         algorithm: CryptoAlgorithm,
         key: &'a [u8],
-        sequence: u32,
+        /// `AuType` 2's 32-bit number (widened), or, with `extended`, RFC
+        /// 7474's full 64-bit boot-count-and-counter value.
+        sequence: u64,
+        /// `Some(ip source address)` selects RFC 7474 (`AuType` 3).
+        extended: Option<Ipv4Addr>,
     },
 }
 
@@ -171,6 +179,11 @@ pub enum AuthPolicy<'a> {
     /// intermediate allocation.
     Crypto {
         keys: &'a [(u8, CryptoAlgorithm, Vec<u8>)],
+        /// `Some(source)` requires RFC 7474 (`AuType` 3, digest bound to
+        /// `source` — the received packet's IP source); `None` requires
+        /// RFC 2328's `AuType` 2. A wire/config mismatch is an
+        /// `AuthTypeMismatch`.
+        extended: Option<Ipv4Addr>,
     },
 }
 
@@ -530,14 +543,37 @@ pub fn router_id(pkt: &OspfPacket) -> Ipv4Addr {
 /// knowledge, used by `link.rs` for its own stateful RFC 2328 D.4.3
 /// anti-replay bookkeeping (deliberately kept out of this module — see the
 /// module doc comment on staying pure/stateless).
-pub fn crypto_sequence(data: &[u8]) -> Option<u32> {
+pub fn crypto_sequence(data: &[u8]) -> Option<u64> {
     if data.len() < HEADER_LEN {
         return None;
     }
-    if u16::from_be_bytes([data[14], data[15]]) != AUTH_TYPE_CRYPTO {
-        return None;
+    match u16::from_be_bytes([data[14], data[15]]) {
+        AUTH_TYPE_CRYPTO => Some(u64::from(u32::from_be_bytes([
+            data[20], data[21], data[22], data[23],
+        ]))),
+        AUTH_TYPE_CRYPTO_EXT => {
+            let length = usize::from(u16::from_be_bytes([data[2], data[3]]));
+            let seq = data.get(length..length + 8)?;
+            Some(u64::from_be_bytes(seq.try_into().ok()?))
+        }
+        _ => None,
     }
-    Some(u32::from_be_bytes([data[20], data[21], data[22], data[23]]))
+}
+
+/// RFC 7474's digest input: the packet and its 64-bit sequence number
+/// followed by `Apad` — the IP source address then `0x878FE1F3` repeated to
+/// the hash length.
+fn ext_digest_input(
+    packet_and_seq: &[u8],
+    source: Ipv4Addr,
+    algorithm: CryptoAlgorithm,
+) -> Vec<u8> {
+    let mut input = packet_and_seq.to_vec();
+    input.extend_from_slice(&source.octets());
+    for _ in 0..(algorithm.digest_len() - 4) / 4 {
+        input.extend_from_slice(&0x878F_E1F3u32.to_be_bytes());
+    }
+    input
 }
 
 /// Builds the 24-byte common header (Appendix A.3.1) around `body`, fills in
@@ -575,6 +611,17 @@ fn encode_packet(
             buf.extend_from_slice(&field);
         }
         OutgoingAuth::Crypto {
+            key_id,
+            algorithm,
+            extended: Some(_),
+            ..
+        } => {
+            buf.extend_from_slice(&AUTH_TYPE_CRYPTO_EXT.to_be_bytes());
+            buf.extend_from_slice(&u32::from(*key_id).to_be_bytes()); // 32-bit Key ID
+            buf.extend_from_slice(&[0u8; 3]); // reserved
+            buf.push(u8::try_from(algorithm.digest_len()).unwrap_or(0));
+        }
+        OutgoingAuth::Crypto {
             key_id, algorithm, ..
         } => {
             buf.extend_from_slice(&AUTH_TYPE_CRYPTO.to_be_bytes());
@@ -601,9 +648,24 @@ fn encode_packet(
             algorithm,
             key,
             sequence,
+            extended: Some(source),
             ..
         } => {
-            buf[20..24].copy_from_slice(&sequence.to_be_bytes());
+            // RFC 7474: the 64-bit number follows the packet (outside the
+            // OSPF length field) and is covered by the digest.
+            buf.extend_from_slice(&sequence.to_be_bytes());
+            let digest = algorithm.digest(&ext_digest_input(&buf, *source, *algorithm), key);
+            buf.extend_from_slice(&digest);
+        }
+        OutgoingAuth::Crypto {
+            algorithm,
+            key,
+            sequence,
+            ..
+        } => {
+            // AuType 2 carries only 32 bits; the caller keeps it in range.
+            buf[20..24]
+                .copy_from_slice(&u32::try_from(*sequence).unwrap_or(u32::MAX).to_be_bytes());
             // Checksum field stays zero — not calculated for this AuType.
             let digest = algorithm.digest(&buf, key);
             buf.extend_from_slice(&digest);
@@ -660,7 +722,13 @@ fn verify_auth<'a>(data: &'a [u8], auth: &AuthPolicy<'_>) -> Result<&'a [u8], Pa
             }
             Ok(&data[HEADER_LEN..])
         }
-        (AUTH_TYPE_CRYPTO, AuthPolicy::Crypto { keys }) => {
+        (
+            AUTH_TYPE_CRYPTO,
+            AuthPolicy::Crypto {
+                keys,
+                extended: None,
+            },
+        ) => {
             let length = usize::from(u16::from_be_bytes([data[2], data[3]]));
             if length < HEADER_LEN || data.len() < length {
                 return Err(PacketError::TruncatedBody);
@@ -675,6 +743,34 @@ fn verify_auth<'a>(data: &'a [u8], auth: &AuthPolicy<'_>) -> Result<&'a [u8], Pa
             }
             let expected = algorithm.digest(&data[..length], key);
             if data[length..length + auth_data_len] != expected[..] {
+                return Err(PacketError::AuthFailed);
+            }
+            Ok(&data[HEADER_LEN..length])
+        }
+        (
+            AUTH_TYPE_CRYPTO_EXT,
+            AuthPolicy::Crypto {
+                keys,
+                extended: Some(source),
+            },
+        ) => {
+            let length = usize::from(u16::from_be_bytes([data[2], data[3]]));
+            if length < HEADER_LEN || data.len() < length + 8 {
+                return Err(PacketError::TruncatedBody);
+            }
+            let key_id = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
+            let auth_data_len = usize::from(data[23]);
+            let Some((_, algorithm, key)) = keys.iter().find(|(id, _, _)| u32::from(*id) == key_id)
+            else {
+                return Err(PacketError::AuthFailed);
+            };
+            let end = length + 8;
+            if auth_data_len != algorithm.digest_len() || data.len() < end + auth_data_len {
+                return Err(PacketError::TruncatedBody);
+            }
+            let expected =
+                algorithm.digest(&ext_digest_input(&data[..end], *source, *algorithm), key);
+            if data[end..end + auth_data_len] != expected[..] {
                 return Err(PacketError::AuthFailed);
             }
             Ok(&data[HEADER_LEN..length])
@@ -1164,13 +1260,17 @@ mod tests {
             algorithm: CryptoAlgorithm::Md5,
             key: b"secret",
             sequence: 42,
+            extended: None,
         };
         let encoded = encode_hello(&sample(), &auth);
         assert_eq!(u16::from_be_bytes([encoded[12], encoded[13]]), 0);
         assert_eq!(encoded.len(), HEADER_LEN + HELLO_BODY_FIXED_LEN + 4 + 16);
         let keys: &[(u8, CryptoAlgorithm, Vec<u8>)] =
             &[(1, CryptoAlgorithm::Md5, b"secret".to_vec())];
-        let policy = AuthPolicy::Crypto { keys };
+        let policy = AuthPolicy::Crypto {
+            keys,
+            extended: None,
+        };
         let decoded = decode_hello(&encoded, &policy).unwrap();
         assert_eq!(decoded, sample());
     }
@@ -1182,6 +1282,7 @@ mod tests {
             algorithm: CryptoAlgorithm::HmacSha256,
             key: b"secret",
             sequence: 1,
+            extended: None,
         };
         let encoded = encode_dbd(&sample_dbd(), &auth);
         assert_eq!(
@@ -1190,7 +1291,10 @@ mod tests {
         );
         let keys: &[(u8, CryptoAlgorithm, Vec<u8>)] =
             &[(1, CryptoAlgorithm::HmacSha256, b"secret".to_vec())];
-        let policy = AuthPolicy::Crypto { keys };
+        let policy = AuthPolicy::Crypto {
+            keys,
+            extended: None,
+        };
         let decoded = decode_dbd(&encoded, &policy).unwrap();
         assert_eq!(decoded, sample_dbd());
     }
@@ -1202,11 +1306,15 @@ mod tests {
             algorithm: CryptoAlgorithm::Md5,
             key: b"secret",
             sequence: 1,
+            extended: None,
         };
         let encoded = encode_hello(&sample(), &auth);
         let keys: &[(u8, CryptoAlgorithm, Vec<u8>)] =
             &[(2, CryptoAlgorithm::Md5, b"secret".to_vec())];
-        let policy = AuthPolicy::Crypto { keys };
+        let policy = AuthPolicy::Crypto {
+            keys,
+            extended: None,
+        };
         assert_eq!(
             decode_hello(&encoded, &policy),
             Err(PacketError::AuthFailed)
@@ -1220,11 +1328,15 @@ mod tests {
             algorithm: CryptoAlgorithm::Md5,
             key: b"secret",
             sequence: 1,
+            extended: None,
         };
         let encoded = encode_hello(&sample(), &auth);
         let keys: &[(u8, CryptoAlgorithm, Vec<u8>)] =
             &[(1, CryptoAlgorithm::Md5, b"wrongkey".to_vec())];
-        let policy = AuthPolicy::Crypto { keys };
+        let policy = AuthPolicy::Crypto {
+            keys,
+            extended: None,
+        };
         assert_eq!(
             decode_hello(&encoded, &policy),
             Err(PacketError::AuthFailed)
@@ -1238,6 +1350,7 @@ mod tests {
             algorithm: CryptoAlgorithm::Md5,
             key: b"secret",
             sequence: 0x1234_5678,
+            extended: None,
         };
         let encoded = encode_hello(&sample(), &auth);
         assert_eq!(crypto_sequence(&encoded), Some(0x1234_5678));
@@ -1255,6 +1368,100 @@ mod tests {
                 &OutgoingAuth::Simple { password: b"pw" }
             )),
             None
+        );
+    }
+
+    const SRC: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+
+    fn ext_keys() -> Vec<(u8, CryptoAlgorithm, Vec<u8>)> {
+        vec![(1, CryptoAlgorithm::HmacSha256, b"secret".to_vec())]
+    }
+
+    fn ext_auth(sequence: u64) -> OutgoingAuth<'static> {
+        OutgoingAuth::Crypto {
+            key_id: 1,
+            algorithm: CryptoAlgorithm::HmacSha256,
+            key: b"secret",
+            sequence,
+            extended: Some(SRC),
+        }
+    }
+
+    #[test]
+    fn extended_round_trips_with_seq_after_packet_outside_length() {
+        let seq = (7u64 << 32) | 9;
+        let encoded = encode_hello(&sample(), &ext_auth(seq));
+        let body = HEADER_LEN + HELLO_BODY_FIXED_LEN + 4;
+        assert_eq!(
+            u16::from_be_bytes([encoded[14], encoded[15]]),
+            AUTH_TYPE_CRYPTO_EXT
+        );
+        // OSPF length excludes the 8-byte sequence and the digest.
+        assert_eq!(
+            usize::from(u16::from_be_bytes([encoded[2], encoded[3]])),
+            body
+        );
+        assert_eq!(encoded.len(), body + 8 + 32);
+        assert_eq!(crypto_sequence(&encoded), Some(seq));
+        let keys = ext_keys();
+        let policy = AuthPolicy::Crypto {
+            keys: &keys,
+            extended: Some(SRC),
+        };
+        assert_eq!(decode_hello(&encoded, &policy).unwrap(), sample());
+    }
+
+    #[test]
+    fn extended_digest_is_bound_to_ip_source_and_sequence() {
+        let keys = ext_keys();
+        let encoded = encode_hello(&sample(), &ext_auth(5));
+        let other = AuthPolicy::Crypto {
+            keys: &keys,
+            extended: Some(Ipv4Addr::new(10, 0, 0, 2)),
+        };
+        assert_eq!(decode_hello(&encoded, &other), Err(PacketError::AuthFailed));
+        let mut tampered = encoded.clone();
+        let n = HEADER_LEN + HELLO_BODY_FIXED_LEN + 4;
+        tampered[n + 7] ^= 1; // flip the sequence's low bit
+        let policy = AuthPolicy::Crypto {
+            keys: &keys,
+            extended: Some(SRC),
+        };
+        assert_eq!(
+            decode_hello(&tampered, &policy),
+            Err(PacketError::AuthFailed)
+        );
+    }
+
+    #[test]
+    fn extended_and_classic_crypto_do_not_interoperate() {
+        let keys = ext_keys();
+        let ext = encode_hello(&sample(), &ext_auth(1));
+        let classic = AuthPolicy::Crypto {
+            keys: &keys,
+            extended: None,
+        };
+        assert_eq!(
+            decode_hello(&ext, &classic),
+            Err(PacketError::AuthTypeMismatch)
+        );
+        let plain = encode_hello(
+            &sample(),
+            &OutgoingAuth::Crypto {
+                key_id: 1,
+                algorithm: CryptoAlgorithm::HmacSha256,
+                key: b"secret",
+                sequence: 1,
+                extended: None,
+            },
+        );
+        let policy = AuthPolicy::Crypto {
+            keys: &keys,
+            extended: Some(SRC),
+        };
+        assert_eq!(
+            decode_hello(&plain, &policy),
+            Err(PacketError::AuthTypeMismatch)
         );
     }
 }

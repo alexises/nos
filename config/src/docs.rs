@@ -833,6 +833,16 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              interface MTU (queried from nos-interfaced) is used instead, falling back to 1500 \
              if unavailable.",
         ),
+        Topic::SetOspfProfileExtendedSequenceNumbers => (
+            "Enable or disable RFC 7474 extended cryptographic sequence numbers.",
+            "Sets extended-sequence-numbers on a profile. When enabled, every attach point using \
+             this profile signs with authentication type 3: a 64-bit sequence number (a boot \
+             count persisted by nos-ospfd in the high 32 bits, a per-packet counter in the low \
+             32) and a digest bound to the sender's IP address, so a captured packet cannot be \
+             replayed after a router restart. Requires crypto auth with hmac-sha keys only (not \
+             md5), and both ends of a link must enable it — type 3 and type 2 packets are not \
+             accepted by each other.",
+        ),
         Topic::ClearOspfProfileMtu => (
             "Clear an OSPF profile's MTU override.",
             "Unsets the mtu field on a profile, reverting to using the attach point's real \
@@ -1046,6 +1056,7 @@ mod tests {
         Topic::ClearOspfProfilePriority,
         Topic::SetOspfProfileMtu,
         Topic::ClearOspfProfileMtu,
+        Topic::SetOspfProfileExtendedSequenceNumbers,
         Topic::SetOspfProfileNetworkType,
         Topic::ClearOspfProfileNetworkType,
         Topic::SetOspfProfileSimpleAuth,

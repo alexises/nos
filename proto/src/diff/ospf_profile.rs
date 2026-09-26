@@ -164,6 +164,13 @@ fn changed_fields(base: &OspfProfile, candidate: &OspfProfile) -> Vec<FieldDiff>
             new: Some(auth_str(candidate)),
         });
     }
+    if base.extended_sequence_numbers != candidate.extended_sequence_numbers {
+        fields.push(FieldDiff {
+            label: "extended-sequence-numbers".to_string(),
+            old: Some(base.extended_sequence_numbers.to_string()),
+            new: Some(candidate.extended_sequence_numbers.to_string()),
+        });
+    }
     fields
 }
 
@@ -181,6 +188,7 @@ mod tests {
             mtu: None,
             network_type: None,
             auth: None,
+            extended_sequence_numbers: false,
         }
     }
 

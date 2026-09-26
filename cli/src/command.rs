@@ -76,6 +76,8 @@ pub enum OspfProfileField {
     Cost(u16),
     Priority(u8),
     Mtu(u16),
+    /// RFC 7474 (`OSPFv2` only) — `enable`/`disable`.
+    ExtendedSequenceNumbers(bool),
     NetworkType(NetworkType),
     SimplePassword(String),
     /// A new (or replacement) crypto key — `current` is set via the
@@ -1888,6 +1890,14 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 field: OspfProfileField::Mtu(n.parse::<u16>().ok()?),
             })
         }
+        ["ospf", "instance", instance, "area", area_id, "profile", name, "extended-sequence-numbers", state @ ("enable" | "disable")] => {
+            Command::Set(SetTarget::OspfProfile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::ExtendedSequenceNumbers(*state == "enable"),
+            })
+        }
         ["ospf", "instance", instance, "area", area_id, "profile", name, "network-type", "point-to-point"] => {
             Command::Set(SetTarget::OspfProfile {
                 instance: (*instance).to_string(),
@@ -2000,6 +2010,11 @@ fn parse_set(t: &[&str]) -> Option<Command> {
         ["priority", n] => Command::Set(SetTarget::OspfProfileRelative {
             field: OspfProfileField::Priority(n.parse::<u8>().ok()?),
         }),
+        ["extended-sequence-numbers", state @ ("enable" | "disable")] => {
+            Command::Set(SetTarget::OspfProfileRelative {
+                field: OspfProfileField::ExtendedSequenceNumbers(*state == "enable"),
+            })
+        }
         ["network-type", "point-to-point"] => Command::Set(SetTarget::OspfProfileRelative {
             field: OspfProfileField::NetworkType(NetworkType::PointToPoint),
         }),
@@ -4399,6 +4414,21 @@ mod tests {
                 area_id: "0.0.0.0".parse().unwrap(),
                 name: "p1".to_string(),
                 field: OspfProfileField::Mtu(1400),
+            })
+        );
+    }
+
+    #[test]
+    fn set_ospf_profile_extended_sequence_numbers() {
+        assert_eq!(
+            Command::parse(
+                "set ospf instance o1 area 0.0.0.0 profile p1 extended-sequence-numbers enable"
+            ),
+            Command::Set(SetTarget::OspfProfile {
+                instance: "o1".to_string(),
+                area_id: "0.0.0.0".parse().unwrap(),
+                name: "p1".to_string(),
+                field: OspfProfileField::ExtendedSequenceNumbers(true),
             })
         );
     }

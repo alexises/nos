@@ -768,6 +768,16 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Doc::FromConfig(Topic::SetOspfProfileMtu),
         Configuration),
     spec!(["set" "ospf" "instance" (OspfInstanceName) "area" (Plain) "profile" (OspfProfileName)
+           "extended-sequence-numbers" "enable"],
+        "set ospf instance <name> area <area-id> profile <profile-name> extended-sequence-numbers enable",
+        Doc::FromConfig(Topic::SetOspfProfileExtendedSequenceNumbers),
+        Configuration),
+    spec!(["set" "ospf" "instance" (OspfInstanceName) "area" (Plain) "profile" (OspfProfileName)
+           "extended-sequence-numbers" "disable"],
+        "set ospf instance <name> area <area-id> profile <profile-name> extended-sequence-numbers disable",
+        Doc::FromConfig(Topic::SetOspfProfileExtendedSequenceNumbers),
+        Configuration),
+    spec!(["set" "ospf" "instance" (OspfInstanceName) "area" (Plain) "profile" (OspfProfileName)
            "network-type" "point-to-point"],
         "set ospf instance <name> area <area-id> profile <profile-name> network-type point-to-point",
         Doc::FromConfig(Topic::SetOspfProfileNetworkType),

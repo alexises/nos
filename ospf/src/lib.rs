@@ -2,6 +2,7 @@
 // point-to-point and broadcast (RFC 2328 DR/BDR election) links (see
 // ospf/CLAUDE.md)
 
+pub mod boot;
 pub mod config_client;
 pub mod exchange;
 pub mod interface_client;

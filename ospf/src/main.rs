@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use nos_log_client::ForwardingLayer;
+use nos_ospf::boot::BootCounter;
 use nos_ospf::link::LinkManager;
 use nos_ospf::{reconcile, rib_push_client, server, watchdog_client};
 use nos_pki::Identity;
@@ -57,6 +58,11 @@ struct Args {
     /// pagination over a small lab LSDB.
     #[arg(long)]
     dbd_max_headers: Option<usize>,
+
+    /// Directory for this daemon's persisted state: the RFC 7474 boot count
+    /// (`<instance>.boot`), which must survive restarts.
+    #[arg(long, default_value = "/var/lib/nos/ospf")]
+    state_dir: PathBuf,
 }
 
 #[tokio::main]
@@ -97,7 +103,11 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from(format!("/run/nos/ospf-{}.sock", args.instance)));
 
     let (routing_table_tx, routing_table_rx) = watch::channel(None::<String>);
-    let links = LinkManager::new(args.lsa_age_multiplier, args.dbd_max_headers);
+    let links = LinkManager::new(
+        args.lsa_age_multiplier,
+        args.dbd_max_headers,
+        BootCounter::persistent(args.state_dir.join(format!("{}.boot", args.instance))),
+    );
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),

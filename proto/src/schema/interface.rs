@@ -837,6 +837,7 @@ mod tests {
                         mtu: None,
                         network_type: None,
                         auth: None,
+                        extended_sequence_numbers: false,
                     }],
                 }],
                 routing_table: None,
