@@ -47,6 +47,10 @@ OPEN validation (`fsm::handle_open`) checks, in order: BGP version (must be 4), 
 
 Every well-formed inbound message (not just KEEPALIVE) resets the hold timer, per RFC 4271 §4.4 — handled centrally in `fsm::run`'s read branch rather than per-message-type. UPDATE and ROUTE_REFRESH both bypass `step()`'s OpenSent/OpenConfirm/Established transition table entirely — they're short-circuited directly in `fsm::run`'s read branch, meaningful only once `Established` (silently logged and ignored otherwise, same as before that state). `Unhandled` now covers only genuinely unrecognized message types.
 
+### Extended optional parameters (RFC 9072)
+
+`message::parse_open` accepts the extended OPEN form (`opt_param_len == 255` then a `255` type octet, a 2-byte length, and 2-byte per-parameter lengths); `encode_open` emits it only when the capabilities exceed 255 bytes, otherwise the classic form byte-for-byte. Unit-tested only (nothing here generates that many capabilities yet).
+
 ### Four-octet AS numbers (RFC 6793)
 
 `BgpInstance.asn`/`BgpPeerGroup.remote_as` are `u32`, wider than OPEN's plain 2-byte "My Autonomous System" field, so `message::build_open` always advertises the four-octet AS number capability (code 65) and uses `AS_TRANS` (23456) as the 2-byte field's placeholder whenever the real ASN doesn't fit. `message::effective_remote_asn` reads the real value back out — preferring the capability when present, falling back to the plain field for interop with peers that never send it. An `AS_TRANS` value with no backing capability is treated as a malformed/bad-peer-AS OPEN, since it's otherwise meaningless.

@@ -752,12 +752,24 @@ fn parse_open(body: &[u8]) -> Result<OpenMessage, WireError> {
     let my_as = u16::from_be_bytes([body[1], body[2]]);
     let hold_time = u16::from_be_bytes([body[3], body[4]]);
     let bgp_identifier = Ipv4Addr::new(body[5], body[6], body[7], body[8]);
-    let opt_param_len = body[9] as usize;
-    let opt_params = &body[10..];
+    // RFC 9072: `opt_param_len == 255` followed by a `255` type octet marks the
+    // extended form — a 2-byte total length, then parameters with 2-byte lengths.
+    let extended = body[9] == 255 && body.get(10) == Some(&255);
+    let (opt_param_len, opt_params) = if extended {
+        if body.len() < 13 {
+            return Err(WireError::MalformedOpen);
+        }
+        (
+            usize::from(u16::from_be_bytes([body[11], body[12]])),
+            &body[13..],
+        )
+    } else {
+        (usize::from(body[9]), &body[10..])
+    };
     if opt_params.len() < opt_param_len {
         return Err(WireError::Truncated);
     }
-    let capabilities = parse_optional_parameters(&opt_params[..opt_param_len])?;
+    let capabilities = parse_optional_parameters(&opt_params[..opt_param_len], extended)?;
 
     Ok(OpenMessage {
         version,
@@ -773,22 +785,31 @@ fn parse_open(body: &[u8]) -> Result<OpenMessage, WireError> {
 /// collecting every capability from every Capabilities optional parameter
 /// encountered (RFC 5492 allows more than one, though this crate always
 /// encodes just one).
-fn parse_optional_parameters(mut params: &[u8]) -> Result<Vec<Capability>, WireError> {
+fn parse_optional_parameters(
+    mut params: &[u8],
+    extended: bool,
+) -> Result<Vec<Capability>, WireError> {
+    // RFC 9072: each parameter's length is 2 bytes in the extended form.
+    let header = if extended { 3 } else { 2 };
     let mut capabilities = Vec::new();
     while !params.is_empty() {
-        if params.len() < 2 {
+        if params.len() < header {
             return Err(WireError::Truncated);
         }
         let param_type = params[0];
-        let param_len = params[1] as usize;
-        if params.len() < 2 + param_len {
+        let param_len = if extended {
+            usize::from(u16::from_be_bytes([params[1], params[2]]))
+        } else {
+            usize::from(params[1])
+        };
+        if params.len() < header + param_len {
             return Err(WireError::Truncated);
         }
-        let param_value = &params[2..2 + param_len];
+        let param_value = &params[header..header + param_len];
         if param_type == OPT_PARAM_CAPABILITIES {
             capabilities.extend(parse_capabilities(param_value)?);
         }
-        params = &params[2 + param_len..];
+        params = &params[header + param_len..];
     }
     Ok(capabilities)
 }
@@ -926,39 +947,55 @@ fn encode_open(open: &OpenMessage) -> Vec<u8> {
                 cap_bytes.push(0);
             }
             Capability::AddPath(tuples) => {
-                cap_bytes.push(CAP_ADD_PATH);
-                cap_bytes.push(
-                    u8::try_from(tuples.len() * 4)
-                        .expect("this NOS's small, fixed capability set always fits in a u8"),
-                );
-                for tuple in tuples {
-                    cap_bytes.extend_from_slice(&tuple.afi.to_be_bytes());
-                    cap_bytes.push(tuple.safi);
-                    cap_bytes.push(tuple.send_receive);
+                // A capability's length is one octet (RFC 5492), so 63 tuples
+                // at most per instance; the code may repeat (RFC 5492 §4).
+                for chunk in tuples.chunks(63) {
+                    cap_bytes.push(CAP_ADD_PATH);
+                    cap_bytes.push(u8::try_from(chunk.len() * 4).unwrap_or(u8::MAX));
+                    for tuple in chunk {
+                        cap_bytes.extend_from_slice(&tuple.afi.to_be_bytes());
+                        cap_bytes.push(tuple.safi);
+                        cap_bytes.push(tuple.send_receive);
+                    }
                 }
             }
         }
     }
 
     let mut opt_params = Vec::new();
+    // RFC 9072: the extended form only when the parameter can't be 1-byte
+    // length encoded. Its u16 lengths can't overflow: an OPEN is capped at
+    // 4096 bytes by the codec.
+    let extended = cap_bytes.len() > 255;
     if !cap_bytes.is_empty() {
         opt_params.push(OPT_PARAM_CAPABILITIES);
-        opt_params.push(
-            u8::try_from(cap_bytes.len())
-                .expect("this NOS's small, fixed capability set always fits in a u8"),
-        );
+        if extended {
+            opt_params.extend_from_slice(
+                &u16::try_from(cap_bytes.len())
+                    .unwrap_or(u16::MAX)
+                    .to_be_bytes(),
+            );
+        } else {
+            opt_params.push(u8::try_from(cap_bytes.len()).unwrap_or(u8::MAX));
+        }
         opt_params.extend_from_slice(&cap_bytes);
     }
 
-    let mut body = Vec::with_capacity(10 + opt_params.len());
+    let mut body = Vec::with_capacity(13 + opt_params.len());
     body.push(open.version);
     body.extend_from_slice(&open.my_as.to_be_bytes());
     body.extend_from_slice(&open.hold_time.to_be_bytes());
     body.extend_from_slice(&open.bgp_identifier.octets());
-    body.push(
-        u8::try_from(opt_params.len())
-            .expect("this NOS's small, fixed capability set always fits in a u8"),
-    );
+    if extended {
+        body.extend_from_slice(&[255, 255]);
+        body.extend_from_slice(
+            &u16::try_from(opt_params.len())
+                .unwrap_or(u16::MAX)
+                .to_be_bytes(),
+        );
+    } else {
+        body.push(u8::try_from(opt_params.len()).unwrap_or(u8::MAX));
+    }
     body.extend_from_slice(&opt_params);
     body
 }
@@ -1876,6 +1913,77 @@ mod tests {
         let mut buf = BytesMut::new();
         codec.encode(msg, &mut buf).unwrap();
         codec.decode(&mut buf).unwrap().unwrap()
+    }
+
+    fn open_with_caps(n: u16) -> OpenMessage {
+        let mut open = build_open(65001, Ipv4Addr::new(1, 1, 1, 1), 90);
+        open.capabilities = (0..n)
+            .map(|afi| Capability::MultiProtocol { afi, safi: 1 })
+            .collect();
+        open
+    }
+
+    #[test]
+    fn open_over_255_bytes_uses_rfc9072_extended_form() {
+        let open = open_with_caps(60); // 60 * 6 = 360 bytes of capabilities
+        assert_eq!(encode_open(&open)[9..11], [255, 255]);
+        assert_eq!(
+            roundtrip(BgpMessage::Open(open.clone())),
+            BgpMessage::Open(open)
+        );
+    }
+
+    #[test]
+    fn oversize_add_path_capability_is_split() {
+        let tuples: Vec<_> = (0..100)
+            .map(|afi| AddPathTuple {
+                afi,
+                safi: 1,
+                send_receive: 3,
+            })
+            .collect();
+        let mut open = open_with_caps(0);
+        open.capabilities = vec![Capability::AddPath(tuples.clone())];
+        let BgpMessage::Open(back) = roundtrip(BgpMessage::Open(open)) else {
+            panic!("not an OPEN")
+        };
+        let got: Vec<_> = back
+            .capabilities
+            .into_iter()
+            .flat_map(|c| match c {
+                Capability::AddPath(t) => t,
+                _ => vec![],
+            })
+            .collect();
+        assert_eq!(got, tuples);
+    }
+
+    #[test]
+    fn small_open_keeps_one_byte_length() {
+        assert_ne!(encode_open(&open_with_caps(2))[9], 255);
+    }
+
+    #[test]
+    fn parses_peer_extended_open_with_unknown_param() {
+        let mut body = vec![4, 0xfd, 0xe9, 0, 90, 1, 1, 1, 1, 255, 255];
+        // unknown param (type 9, 2-byte len 1) then Capabilities (Route Refresh)
+        let params = [
+            9,
+            0,
+            1,
+            0xaa,
+            OPT_PARAM_CAPABILITIES,
+            0,
+            2,
+            CAP_ROUTE_REFRESH,
+            0,
+        ];
+        body.extend_from_slice(&u16::try_from(params.len()).unwrap().to_be_bytes());
+        body.extend_from_slice(&params);
+        assert_eq!(
+            parse_open(&body).unwrap().capabilities,
+            [Capability::RouteRefresh]
+        );
     }
 
     fn as_path_update(as_path: Vec<u32>) -> UpdateMessage {
