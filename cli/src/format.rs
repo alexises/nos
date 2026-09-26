@@ -1642,7 +1642,7 @@ mod tests {
         assert_eq!(
             render_config(&cfg),
             "hostname: nos\nno BGP instances configured\nno routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\nno interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno prefix lists configured\n\
+             no community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured\n\
              no port aggregates configured"
         );
@@ -1659,7 +1659,7 @@ mod tests {
             "hostname: nos\nbgp instance default: router-id 1.1.1.1, asn 65000, cluster-id default (= router-id)\n\
              no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno prefix lists configured\n\
+             no community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured\n\
              no port aggregates configured"
         );
@@ -1677,7 +1677,7 @@ mod tests {
              bgp instance vrf-b: router-id 1.1.1.1, asn 65002, cluster-id default (= router-id)\n\
              no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno prefix lists configured\n\
+             no community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured\n\
              no port aggregates configured"
         );
@@ -1773,7 +1773,7 @@ mod tests {
             "transaction 'demo':\nhostname: nos\nbgp instance r1: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)\n\
              no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno prefix lists configured\n\
+             no community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured\n\
              no port aggregates configured"
         );
