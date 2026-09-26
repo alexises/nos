@@ -374,6 +374,17 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              changes to one prefix within the interval collapse into the latest. Withdrawals are \
              never delayed. Unset or 0 sends every change immediately.",
         ),
+        Topic::SetBgpPeerGroupMaxHops => (
+            "Set how many router hops away a peer-group's peers may be.",
+            "Sets max-hops on a peer-group and enables the RFC 5082 Generalized TTL Security \
+             Mechanism: sessions are sent with TTL/hop-limit 255 and packets arriving with a \
+             lower value than 256 minus this number are dropped by the kernel. 1 means \
+             directly connected; up to 254. Both ends must enable it. Unset disables it.",
+        ),
+        Topic::ClearBgpPeerGroupMaxHops => (
+            "Clear a peer-group's max-hops.",
+            "Unsets max-hops on a peer-group, disabling the RFC 5082 TTL check.",
+        ),
         Topic::SetBgpPeerGroupShutdown => (
             "Administratively shut every peer in a peer-group.",
             "Sets shutdown on a peer-group (RFC 4486): no session is opened or accepted for \
@@ -949,6 +960,8 @@ mod tests {
         Topic::ClearBgpPeerGroupConnectRetryTime,
         Topic::SetBgpPeerGroupMrai,
         Topic::ClearBgpPeerGroupMrai,
+        Topic::SetBgpPeerGroupMaxHops,
+        Topic::ClearBgpPeerGroupMaxHops,
         Topic::SetBgpPeerGroupShutdown,
         Topic::ClearBgpPeerGroupShutdown,
         Topic::SetBgpPeerShutdown,

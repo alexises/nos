@@ -86,6 +86,15 @@ pub enum BgpPeerGroupOp {
         instance: String,
         name: String,
     },
+    SetMaxHops {
+        instance: String,
+        name: String,
+        max_hops: u8,
+    },
+    ClearMaxHops {
+        instance: String,
+        name: String,
+    },
     /// Sets `auth` to a single MD5 password, replacing any TCP-AO keys
     /// (the two mechanisms are mutually exclusive — the kernel accepts only
     /// one per socket).
@@ -199,6 +208,7 @@ impl BgpPeerGroupOp {
                         keepalive_interval: None,
                         connect_retry_time: None,
                         mrai: None,
+                        max_hops: None,
                         auth: None,
                         next_hop: None,
                         route_reflector_client: false,
@@ -317,6 +327,18 @@ impl BgpPeerGroupOp {
             }
             BgpPeerGroupOp::ClearMrai { instance, name } => {
                 find_group_mut(config, instance, name)?.mrai = None;
+                Ok(())
+            }
+            BgpPeerGroupOp::SetMaxHops {
+                instance,
+                name,
+                max_hops,
+            } => {
+                find_group_mut(config, instance, name)?.max_hops = Some(*max_hops);
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearMaxHops { instance, name } => {
+                find_group_mut(config, instance, name)?.max_hops = None;
                 Ok(())
             }
             BgpPeerGroupOp::SetMd5Auth {
@@ -515,6 +537,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             mrai: None,
+            max_hops: None,
             auth: None,
             next_hop: None,
             route_reflector_client: false,
@@ -787,6 +810,26 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].peer_groups[0].keepalive_interval, None);
+    }
+
+    #[test]
+    fn set_and_clear_max_hops() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetMaxHops {
+            instance: "r1".into(),
+            name: "pg1".into(),
+            max_hops: 1,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].max_hops, Some(1));
+        BgpPeerGroupOp::ClearMaxHops {
+            instance: "r1".into(),
+            name: "pg1".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].max_hops, None);
     }
 
     #[test]

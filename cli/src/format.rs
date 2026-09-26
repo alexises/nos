@@ -62,6 +62,11 @@ pub fn render_bgp_peer_group(group: &BgpPeerGroup, local_asn: u32) -> String {
             .mrai
             .map_or_else(String::new, |m| format!(", mrai {m}")),
     );
+    line.push_str(
+        &group
+            .max_hops
+            .map_or_else(String::new, |h| format!(", max-hops {h}")),
+    );
     line.push_str(&render_shutdown(group.shutdown.as_ref()));
     if group.route_reflector_client {
         line.push_str(", route-reflector-client");
@@ -1921,6 +1926,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             mrai: None,
+            max_hops: None,
             auth: None,
             next_hop: None,
             route_reflector_client: false,

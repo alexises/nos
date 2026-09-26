@@ -37,6 +37,7 @@ pub enum BgpPeerGroupField {
     KeepaliveInterval(u16),
     ConnectRetryTime(u16),
     Mrai(u16),
+    MaxHops(u8),
     /// `shutdown [<message>]`.
     Shutdown(Option<String>),
     Md5Password(String),
@@ -523,6 +524,8 @@ pub enum DeleteTarget {
     ConnectRetryTime,
     /// `delete mrai` — only valid while navigated into a peer-group.
     Mrai,
+    /// `delete max-hops` — only valid while navigated into a peer-group.
+    MaxHops,
     /// `delete auth` — shared with an `OspfProfile`'s crypto/simple auth
     /// (its schema has no field enum of its own to carry a separate
     /// variant, mirroring `BgpInstanceField::RouterId`'s exact precedent) —
@@ -1346,6 +1349,13 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 field: BgpPeerGroupField::ConnectRetryTime(n.parse::<u16>().ok()?),
             })
         }
+        ["bgp", "instance", instance, "peer-group", group, "max-hops", n] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::MaxHops(n.parse::<u8>().ok()?),
+            })
+        }
         ["bgp", "instance", instance, "peer-group", group, "mrai", n] => {
             Command::Set(SetTarget::BgpPeerGroup {
                 instance: (*instance).to_string(),
@@ -1511,6 +1521,9 @@ fn parse_set(t: &[&str]) -> Option<Command> {
         }),
         ["connect-retry-time", n] => Command::Set(SetTarget::PeerGroupRelative {
             field: BgpPeerGroupField::ConnectRetryTime(n.parse::<u16>().ok()?),
+        }),
+        ["max-hops", n] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::MaxHops(n.parse::<u8>().ok()?),
         }),
         ["mrai", n] => Command::Set(SetTarget::PeerGroupRelative {
             field: BgpPeerGroupField::Mrai(n.parse::<u16>().ok()?),
@@ -2183,6 +2196,7 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
         ["keepalive-interval"] => Command::Delete(DeleteTarget::KeepaliveInterval),
         ["connect-retry-time"] => Command::Delete(DeleteTarget::ConnectRetryTime),
         ["mrai"] => Command::Delete(DeleteTarget::Mrai),
+        ["max-hops"] => Command::Delete(DeleteTarget::MaxHops),
         ["auth"] => Command::Delete(DeleteTarget::Auth),
         ["ao-key", send_id] => Command::Delete(DeleteTarget::AoKey(send_id.parse::<u8>().ok()?)),
         ["routing-table", name] => Command::Delete(DeleteTarget::RoutingTable {
@@ -2521,6 +2535,20 @@ mod tests {
                 instance: "r1".to_string(),
                 remote_address: "192.0.2.1".parse().unwrap(),
             })
+        );
+    }
+
+    #[test]
+    fn parses_max_hops() {
+        assert_eq!(
+            Command::parse("set max-hops 1"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::MaxHops(1)
+            })
+        );
+        assert_eq!(
+            Command::parse("delete max-hops"),
+            Command::Delete(DeleteTarget::MaxHops)
         );
     }
 

@@ -87,6 +87,11 @@ fn mrai_str(pg: &BgpPeerGroup) -> String {
         .map_or_else(|| "default (0s, unpaced)".to_string(), |m| m.to_string())
 }
 
+fn max_hops_str(pg: &BgpPeerGroup) -> String {
+    pg.max_hops
+        .map_or_else(|| "unset".to_string(), |h| h.to_string())
+}
+
 /// Rendered in clear text, like every other field — see `BgpAuth`'s doc
 /// comment on why secrets are never masked in this codebase.
 fn auth_str(pg: &BgpPeerGroup) -> String {
@@ -182,6 +187,13 @@ fn changed_fields(base: &BgpPeerGroup, candidate: &BgpPeerGroup) -> Vec<FieldDif
             new: Some(mrai_str(candidate)),
         });
     }
+    if base.max_hops != candidate.max_hops {
+        fields.push(FieldDiff {
+            label: "max-hops".to_string(),
+            old: Some(max_hops_str(base)),
+            new: Some(max_hops_str(candidate)),
+        });
+    }
     if base.auth != candidate.auth {
         fields.push(FieldDiff {
             label: "auth".to_string(),
@@ -255,6 +267,11 @@ fn removed_section(pg: &BgpPeerGroup) -> SectionDiff {
                 new: None,
             },
             FieldDiff {
+                label: "max-hops".to_string(),
+                old: Some(max_hops_str(pg)),
+                new: None,
+            },
+            FieldDiff {
                 label: "auth".to_string(),
                 old: Some(auth_str(pg)),
                 new: None,
@@ -316,6 +333,11 @@ fn added_section(pg: &BgpPeerGroup) -> SectionDiff {
                 new: Some(mrai_str(pg)),
             },
             FieldDiff {
+                label: "max-hops".to_string(),
+                old: None,
+                new: Some(max_hops_str(pg)),
+            },
+            FieldDiff {
                 label: "auth".to_string(),
                 old: None,
                 new: Some(auth_str(pg)),
@@ -351,6 +373,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             mrai: None,
+            max_hops: None,
             auth: None,
             next_hop: None,
             route_reflector_client: false,

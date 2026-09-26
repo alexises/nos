@@ -35,6 +35,10 @@ Authentication is entirely socket-level and never reaches `fsm.rs` — by the ti
 
 Secrets are stored **clear-text** end-to-end (config, transaction diffs, `nos-cli` rendering) — this system has no encryption-at-rest anywhere, so there's no established masking convention to be consistent with. The raw `setsockopt(TCP_MD5SIG)`/`setsockopt(TCP_AO_ADD_KEY/DEL_KEY)` calls live in `nos-tcp-auth` (`tcp-auth/`, see root `CLAUDE.md`), not here — `nos-bgp` only ever calls its safe wrapper functions.
 
+### GTSM / `max-hops` (RFC 5082)
+
+A `BgpPeerGroup`'s `max_hops` (1..=254, CLI `set max-hops <n>`, `--max-hops` on `nos-provision`) sets TTL/hop-limit 255 and `IP_MINTTL`/`IPV6_MINHOPCOUNT` = `256 - n` via `nos_tcp_auth::set_max_hops`, applied by `tcp::apply_max_hops` on the outbound socket before `connect()` and on the accepted stream in `handle_inbound` (the minimum is per socket, so it can't live on the shared listener). `tcp::bind_listener` always sets the listener TTL to 255 so the SYN-ACK and accepted sockets pass a GTSM peer's check (found by `nos-e2e gtsm`: without it a GTSM active side drops the SYN-ACK). Consequence: enabling it on one side only still yields a session via that side's active connect. Not implemented: the default TTL 1 for directly connected eBGP (issue #10's last point). Verified by `nos-e2e gtsm`.
+
 ### BGP finite state machine
 
 `fsm.rs` implements the RFC 4271 states that need message exchange — `OpenSent`, `OpenConfirm`, `Established` — layered on top of the raw TCP connectivity above (Idle/Connect/Active remain `session.rs`'s retry-loop behavior; `fsm::run` is spawned only once a stream already exists, replacing what used to be `hold_until_closed`). `fsm::step` is the pure transition core (state + event -> next state + actions), unit-tested directly; `fsm::run` is the async orchestrator that owns the `BgpCodec`-framed socket and the hold/keepalive timers.
