@@ -87,10 +87,12 @@ pub struct OspfRoute {
     /// (RFC 2328 next-hops are ordinary routable IPv4 addresses, which the
     /// kernel resolves via its own routing table without needing one).
     pub interface_id: Option<u32>,
-    /// RFC 5286 loop-free alternate next hop, if one exists. Always `None`
-    /// from `nos-ospfv3d` (no LFA there yet).
+    /// RFC 5286 loop-free alternate next hop, if one exists.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub backup_next_hop: Option<IpAddr>,
+    /// Like `interface_id`, for `backup_next_hop` (which may leave over a
+    /// different link than the primary).
+    pub backup_interface_id: Option<u32>,
     /// SPF cost to `prefix` — what BGP's RFC 4271 §9.1.2.2(d) step compares
     /// (via `RibRequest::IgpCosts`) for paths whose `NEXT_HOP` falls in it.
     pub metric: u32,

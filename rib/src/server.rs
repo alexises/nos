@@ -177,6 +177,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
                         source: RouteSource::Bgp,
                         interface_id: None,
                         backup: r.backup_next_hop,
+                        backup_interface_id: None,
                     }),
                 );
                 full_replace = true;
@@ -188,6 +189,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
                     source: RouteSource::Bgp,
                     interface_id: None,
                     backup: r.backup_next_hop,
+                    backup_interface_id: None,
                 };
                 match guard.upsert_and_diff(entry) {
                     BestPathChange::Unchanged => {}
@@ -253,6 +255,7 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
                         source: RouteSource::Ospf,
                         interface_id: r.interface_id,
                         backup: r.backup_next_hop,
+                        backup_interface_id: r.backup_interface_id,
                     }),
                 );
                 full_replace = true;
@@ -265,6 +268,7 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
                     source: RouteSource::Ospf,
                     interface_id: r.interface_id,
                     backup: r.backup_next_hop,
+                    backup_interface_id: r.backup_interface_id,
                 };
                 match guard.upsert_and_diff(entry) {
                     BestPathChange::Unchanged => {}

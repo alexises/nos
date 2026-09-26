@@ -19,6 +19,7 @@ fn sample_rib() -> Rib {
         gateway: "10.0.0.1".parse().unwrap(),
         source: RouteSource::Static,
         backup: None,
+        backup_interface_id: None,
     });
     // Two competing candidates for the same prefix, to prove ordering.
     rib.insert(RibEntry {
@@ -27,6 +28,7 @@ fn sample_rib() -> Rib {
         gateway: "10.0.1.9".parse().unwrap(),
         source: RouteSource::Bgp,
         backup: None,
+        backup_interface_id: None,
     });
     rib.insert(RibEntry {
         interface_id: None,
@@ -34,6 +36,7 @@ fn sample_rib() -> Rib {
         gateway: "10.0.1.1".parse().unwrap(),
         source: RouteSource::Static,
         backup: None,
+        backup_interface_id: None,
     });
     rib
 }

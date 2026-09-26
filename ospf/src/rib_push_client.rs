@@ -180,6 +180,7 @@ fn to_routes(routes: &HashMap<IpNet, Hops>) -> Vec<OspfRoute> {
                 next_hop,
                 interface_id: None,
                 backup_next_hop,
+                backup_interface_id: None,
                 metric,
             },
         )
@@ -203,6 +204,7 @@ fn diff_routes(
                 next_hop: hops.0,
                 interface_id: None,
                 backup_next_hop: hops.1,
+                backup_interface_id: None,
                 metric: hops.2,
             }));
         }
@@ -248,6 +250,7 @@ mod tests {
                 prefix: "10.0.0.0/24".parse().unwrap(),
                 next_hop: "10.0.0.2".parse().unwrap(),
                 backup_next_hop: None,
+                backup_interface_id: None,
                 metric: 10,
             })]
         );
@@ -274,6 +277,7 @@ mod tests {
                 prefix: "10.0.2.0/24".parse().unwrap(),
                 next_hop: "10.0.2.1".parse().unwrap(),
                 backup_next_hop: None,
+                backup_interface_id: None,
                 metric: 10,
             }),
             OspfRouteUpdate::Remove("10.0.1.0/24".parse().unwrap()),
@@ -296,6 +300,7 @@ mod tests {
                 next_hop: gw,
                 interface_id: None,
                 backup_next_hop: Some(bk),
+                backup_interface_id: None,
                 metric: 10,
             })]
         );

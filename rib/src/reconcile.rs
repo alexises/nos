@@ -287,6 +287,7 @@ mod tests {
             gateway: gateway.parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         }
     }
 
@@ -374,6 +375,7 @@ mod tests {
                 gateway: "10.0.0.9".parse().unwrap(),
                 source: RouteSource::Bgp,
                 backup: None,
+                backup_interface_id: None,
             },
         );
 
@@ -404,6 +406,7 @@ mod tests {
             gateway: "2001:db8::1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         };
         routes.insert(entry.prefix, entry);
 
@@ -497,6 +500,7 @@ mod tests {
                 gateway: "10.0.0.9".parse().unwrap(),
                 source: RouteSource::Bgp,
                 backup: None,
+                backup_interface_id: None,
             },
         );
 

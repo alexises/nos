@@ -28,20 +28,21 @@ const MAX_CONCURRENT_ROUTE_OPS: usize = 64;
 
 /// Kernel route priority (metric) of a backup route. Primaries use the
 /// default (0, which the kernel reports as 0 for IPv4 and 1024 for IPv6), so
-/// any lower-preference value works; the kernel keeps both routes in the FIB
-/// and falls to this one the moment the primary is withdrawn — no netlink
-/// round trip needed at failover time.
-const BACKUP_METRIC: u32 = 1000;
+/// the backup must sit above that per family (an IPv6 backup at 1000 would
+/// beat its own primary); the kernel keeps both routes in the FIB and falls
+/// to this one the moment the primary is withdrawn — no netlink round trip
+/// needed at failover time.
+const BACKUP_METRIC_V4: u32 = 1000;
+const BACKUP_METRIC_V6: u32 = 2000;
 
 /// One kernel route of a prefix: `false` is the primary, `true` its backup.
 type Slot = (IpNet, bool);
 
-/// The kernel routes one winning entry wants: its primary, plus its backup
-/// (never with an interface id — only `OSPFv3` uses one, and it has no LFA).
+/// The kernel routes one winning entry wants: its primary, plus its backup.
 fn slots(prefix: IpNet, entry: &RibEntry) -> Vec<(Slot, GatewayAndInterface)> {
     let mut out = vec![((prefix, false), (entry.gateway, entry.interface_id))];
     if let Some(backup) = entry.backup {
-        out.push(((prefix, true), (backup, None)));
+        out.push(((prefix, true), (backup, entry.backup_interface_id)));
     }
     out
 }
@@ -188,7 +189,7 @@ impl LinuxRibDriver {
     /// one. `nos-ospfv3d`'s own SPF next-hops are always link-local (RFC
     /// 5340 §4.8) and always carry a `Some` here; every other route source
     /// passes `None` and needs none. `backup` installs it at
-    /// `BACKUP_METRIC` instead of the default priority.
+    /// the family's backup metric instead of the default priority.
     async fn add_route(
         &self,
         table_id: u32,
@@ -466,10 +467,12 @@ fn extract_route(route: &RouteMessage) -> Option<(Slot, IpAddr)> {
             _ => return None,
         });
 
-    let backup = route
-        .attributes
-        .iter()
-        .any(|attr| matches!(attr, RouteAttribute::Priority(BACKUP_METRIC)));
+    let backup = route.attributes.iter().any(|attr| {
+        matches!(
+            attr,
+            RouteAttribute::Priority(BACKUP_METRIC_V4 | BACKUP_METRIC_V6)
+        )
+    });
 
     IpNet::new(destination, route.header.destination_prefix_length)
         .ok()
@@ -477,7 +480,7 @@ fn extract_route(route: &RouteMessage) -> Option<(Slot, IpAddr)> {
 }
 
 /// Builds the `RouteMessage` for one kernel route, `None` on a
-/// prefix/gateway address-family mismatch. `backup` sets `BACKUP_METRIC`.
+/// prefix/gateway address-family mismatch. `backup` sets the family's backup metric.
 fn build_route(
     prefix: IpNet,
     gateway: IpAddr,
@@ -492,7 +495,7 @@ fn build_route(
                 .gateway(gateway)
                 .table_id(table_id);
             if backup {
-                builder = builder.priority(BACKUP_METRIC);
+                builder = builder.priority(BACKUP_METRIC_V4);
             }
             Some(builder.build())
         }
@@ -505,7 +508,7 @@ fn build_route(
                 builder = builder.output_interface(interface_id);
             }
             if backup {
-                builder = builder.priority(BACKUP_METRIC);
+                builder = builder.priority(BACKUP_METRIC_V6);
             }
             Some(builder.build())
         }
@@ -618,6 +621,7 @@ mod tests {
             source: RouteSource::Ospf,
             interface_id: None,
             backup: Some(addr("10.0.0.2")),
+            backup_interface_id: None,
         };
         assert_eq!(
             slots(p, &entry),
