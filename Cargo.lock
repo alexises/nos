@@ -2174,6 +2174,7 @@ name = "nos-rpl"
 version = "0.1.0"
 dependencies = [
  "ipnet",
+ "regex",
  "thiserror 1.0.69",
 ]
 

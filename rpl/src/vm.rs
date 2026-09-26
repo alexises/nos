@@ -40,6 +40,49 @@ pub enum Value {
     Enum(u8),
 }
 
+/// Compiled as-path regexes, matched against the path rendered as
+/// space-separated ASNs (`"65001 65002"`). `_` is the Cisco-style boundary
+/// (start, end or a space), so `_65001_` matches the ASN 65001 anywhere.
+#[derive(Debug, Clone)]
+pub struct AsPathRegexes(Vec<regex::Regex>);
+
+impl AsPathRegexes {
+    pub fn new(patterns: &[&str]) -> Result<Self, String> {
+        patterns
+            .iter()
+            .map(|p| {
+                regex::Regex::new(&p.replace('_', "(?:^| |$)"))
+                    .map_err(|e| format!("invalid as-path regex '{p}': {e}"))
+            })
+            .collect::<Result<_, _>>()
+            .map(Self)
+    }
+
+    // ponytail: allocates the rendered path per evaluation, only for
+    // scripts that use a regex; render lazily once per run if it shows up
+    // in profiles.
+    fn is_match(&self, as_path: &[u32]) -> bool {
+        let text = as_path
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.0.iter().any(|re| re.is_match(&text))
+    }
+}
+
+impl PartialEq for AsPathRegexes {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self
+                .0
+                .iter()
+                .zip(&other.0)
+                .all(|(a, b)| a.as_str() == b.as_str())
+    }
+}
+impl Eq for AsPathRegexes {}
+
 /// One instruction. List-typed fields (`as_path`, `cluster_list`) are never
 /// pushed onto the stack as a whole — `FieldLen`/`ListContains*` read
 /// straight from the borrowed slice in `Input` and push only the scalar
@@ -55,6 +98,11 @@ pub enum Op {
     ListContainsInt(FieldId, u32),
     ListContainsIp(FieldId, Ipv4Addr),
     ListContainsCommunity(FieldId, CommunityValue),
+    /// `this.bgp.as_path.matches(..)` / `this.bgp.as_path in LIST` — true if
+    /// any regex matches the current path.
+    AsPathMatches(AsPathRegexes),
+    /// `this.bgp.as_path.prepend(asn, count)`.
+    AsPathPrepend(u32, u8),
     CommunityAdd(FieldId, CommunityValue),
     CommunityRemove(FieldId, CommunityValue),
     CommunityClear(FieldId),
@@ -115,6 +163,15 @@ pub struct BgpInput<'a> {
     pub large_communities: &'a [(u32, u32, u32)],
 }
 
+/// Attribute rewrites beyond the always-carried ones on `Verdict::Accept`.
+/// Every field is "unchanged" by default so a policy that never touches it
+/// costs nothing (no allocation, and the consumer keeps its shared `Arc`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Edits {
+    /// The full replacement `AS_PATH`, only if the script prepended.
+    pub as_path: Option<Vec<u32>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     Accept {
@@ -123,6 +180,7 @@ pub enum Verdict {
         communities: Vec<u32>,
         extended_communities: Vec<u64>,
         large_communities: Vec<(u32, u32, u32)>,
+        edits: Edits,
     },
     Reject,
 }
@@ -154,6 +212,7 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
     let mut cur_extended_communities: Cow<[u64]> = Cow::Borrowed(input.bgp.extended_communities);
     let mut cur_large_communities: Cow<[(u32, u32, u32)]> =
         Cow::Borrowed(input.bgp.large_communities);
+    let mut cur_as_path: Cow<[u32]> = Cow::Borrowed(input.bgp.as_path);
     let mut pc = 0usize;
 
     macro_rules! push {
@@ -188,7 +247,7 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
             Op::FieldLen(id) => {
                 let n = match id {
                     FieldId::Prefix => i64::from(input.prefix.prefix_len()),
-                    FieldId::BgpAsPath => len_as_int(input.bgp.as_path.len()),
+                    FieldId::BgpAsPath => len_as_int(cur_as_path.len()),
                     FieldId::BgpClusterList => len_as_int(input.bgp.cluster_list.len()),
                     FieldId::BgpCommunities => len_as_int(cur_communities.len()),
                     FieldId::BgpExtCommunities => len_as_int(cur_extended_communities.len()),
@@ -199,7 +258,7 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
             }
             Op::ListContainsInt(id, n) => {
                 let found = match id {
-                    FieldId::BgpAsPath => input.bgp.as_path.contains(n),
+                    FieldId::BgpAsPath => cur_as_path.contains(n),
                     _ => unreachable!("check.rs rejects ListContainsInt for {id:?}"),
                 };
                 push!(Value::Bool(found));
@@ -225,6 +284,12 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                     _ => unreachable!("codegen.rs pairs FieldId/CommunityValue consistently"),
                 };
                 push!(Value::Bool(found));
+            }
+            Op::AsPathMatches(re) => push!(Value::Bool(re.is_match(&cur_as_path))),
+            Op::AsPathPrepend(asn, count) => {
+                cur_as_path
+                    .to_mut()
+                    .splice(0..0, std::iter::repeat_n(*asn, usize::from(*count)));
             }
             Op::Add => {
                 let b = as_int(pop!());
@@ -318,10 +383,10 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                 let d = as_int(pop!());
                 match id {
                     FieldId::BgpLocalPref => {
-                        cur_local_pref = to_u32_saturating(i64::from(cur_local_pref) + d)
+                        cur_local_pref = to_u32_saturating(i64::from(cur_local_pref) + d);
                     }
                     FieldId::BgpMed => {
-                        cur_med = Some(to_u32_saturating(i64::from(cur_med.unwrap_or(0)) + d))
+                        cur_med = Some(to_u32_saturating(i64::from(cur_med.unwrap_or(0)) + d));
                     }
                     _ => unreachable!("check.rs rejects AddField for {id:?}"),
                 }
@@ -374,6 +439,12 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                     communities: cur_communities.into_owned(),
                     extended_communities: cur_extended_communities.into_owned(),
                     large_communities: cur_large_communities.into_owned(),
+                    edits: Edits {
+                        as_path: match cur_as_path {
+                            Cow::Owned(v) => Some(v),
+                            Cow::Borrowed(_) => None,
+                        },
+                    },
                 }
             }
             Op::Reject => return Verdict::Reject,

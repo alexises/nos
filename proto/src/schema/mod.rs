@@ -1,3 +1,4 @@
+pub mod as_path_list;
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
@@ -21,6 +22,7 @@ pub mod static_routing_instance;
 pub mod switching_profile;
 pub mod user;
 
+pub use as_path_list::AsPathList;
 pub use bgp_instance::BgpInstance;
 pub use bgp_peer::BgpPeer;
 pub use bgp_peer_group::{
@@ -104,6 +106,9 @@ pub struct Config {
     #[garde(dive)]
     pub prefix_lists: Vec<PrefixList>,
 
+    #[garde(dive)]
+    pub as_path_lists: Vec<AsPathList>,
+
     #[garde(
         dive,
         custom(|domains, _ctx: &Config| broadcast_domain::valid_broadcast_domains(domains))
@@ -148,6 +153,7 @@ impl Default for Config {
             policy_definitions: Vec::new(),
             community_aliases: Vec::new(),
             community_groups: Vec::new(),
+            as_path_lists: Vec::new(),
             prefix_lists: Vec::new(),
             broadcast_domains: Vec::new(),
             switching_profiles: Vec::new(),

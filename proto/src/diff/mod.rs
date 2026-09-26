@@ -1,3 +1,4 @@
+pub mod as_path_list;
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
@@ -88,6 +89,7 @@ pub struct ConfigDiff {
     pub policy_definitions: Vec<SectionDiff>,
     pub community_aliases: Vec<SectionDiff>,
     pub community_groups: Vec<SectionDiff>,
+    pub as_path_lists: Vec<SectionDiff>,
     pub prefix_lists: Vec<SectionDiff>,
     pub broadcast_domains: Vec<SectionDiff>,
     pub switching_profiles: Vec<SectionDiff>,
@@ -109,6 +111,7 @@ impl ConfigDiff {
             && self.policy_definitions.is_empty()
             && self.community_aliases.is_empty()
             && self.community_groups.is_empty()
+            && self.as_path_lists.is_empty()
             && self.prefix_lists.is_empty()
             && self.broadcast_domains.is_empty()
             && self.switching_profiles.is_empty()
@@ -173,6 +176,11 @@ impl ConfigDiff {
             } else {
                 Vec::new()
             },
+            as_path_lists: if scopes.contains(&DiffScope::AsPathLists) {
+                self.as_path_lists.clone()
+            } else {
+                Vec::new()
+            },
             prefix_lists: if scopes.contains(&DiffScope::PrefixLists) {
                 self.prefix_lists.clone()
             } else {
@@ -220,6 +228,7 @@ pub enum DiffScope {
     PolicyDefinitions,
     CommunityAliases,
     CommunityGroups,
+    AsPathLists,
     PrefixLists,
     BroadcastDomains,
     SwitchingProfiles,
@@ -273,6 +282,10 @@ pub fn diff_configs(base: &Config, candidate: &Config) -> ConfigDiff {
         community_groups: community_group::diff_community_groups(
             &base.community_groups,
             &candidate.community_groups,
+        ),
+        as_path_lists: as_path_list::diff_as_path_lists(
+            &base.as_path_lists,
+            &candidate.as_path_lists,
         ),
         prefix_lists: prefix_list::diff_prefix_lists(&base.prefix_lists, &candidate.prefix_lists),
         broadcast_domains: broadcast_domain::diff_broadcast_domains(

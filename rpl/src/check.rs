@@ -27,6 +27,7 @@ fn stmt_terminates(stmt: &Stmt) -> bool {
         StmtKind::Accept | StmtKind::Reject => true,
         StmtKind::Set(..)
         | StmtKind::SetRelative(..)
+        | StmtKind::AsPathPrepend(..)
         | StmtKind::CommunityAdd(..)
         | StmtKind::CommunityRemove(..)
         | StmtKind::CommunityClear(..) => false,

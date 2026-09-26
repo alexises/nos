@@ -161,6 +161,9 @@ pub enum EditTarget {
     CommunityGroup {
         name: String,
     },
+    AsPathList {
+        name: String,
+    },
     PrefixList {
         name: String,
     },
@@ -407,6 +410,10 @@ pub enum SetTarget {
     CommunityGroupMember { name: String, member: String },
     /// Context-relative — only valid while navigated into a community-group.
     CommunityGroupMemberRelative { member: String },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    AsPathListPattern { name: String, pattern: String },
+    /// Context-relative — only valid while navigated into an as-path-list.
+    AsPathListPatternRelative { pattern: String },
     /// Fully-qualified — works from anywhere in configuration mode.
     PrefixListEntry {
         name: String,
@@ -752,6 +759,19 @@ pub enum DeleteTarget {
     },
     CommunityGroup {
         name: String,
+    },
+    AsPathList {
+        name: String,
+    },
+    /// `delete as-path-list <name> pattern <p>` — qualified.
+    AsPathListPattern {
+        name: String,
+        pattern: String,
+    },
+    /// `delete pattern <p>` — relative, only valid while navigated into an
+    /// as-path-list.
+    AsPathListPatternRelative {
+        pattern: String,
     },
     /// `delete community-group <name> member <m>` — qualified.
     CommunityGroupMember {
@@ -1101,6 +1121,9 @@ fn parse_edit(t: &[&str]) -> Option<Command> {
             name: (*name).to_string(),
         }),
         ["community-group", name] => Command::Edit(EditTarget::CommunityGroup {
+            name: (*name).to_string(),
+        }),
+        ["as-path-list", name] => Command::Edit(EditTarget::AsPathList {
             name: (*name).to_string(),
         }),
         ["prefix-list", name] => Command::Edit(EditTarget::PrefixList {
@@ -2044,6 +2067,13 @@ fn parse_set(t: &[&str]) -> Option<Command> {
         ["member", member] => Command::Set(SetTarget::CommunityGroupMemberRelative {
             member: (*member).to_string(),
         }),
+        ["as-path-list", name, "pattern", pattern] => Command::Set(SetTarget::AsPathListPattern {
+            name: (*name).to_string(),
+            pattern: (*pattern).to_string(),
+        }),
+        ["pattern", pattern] => Command::Set(SetTarget::AsPathListPatternRelative {
+            pattern: (*pattern).to_string(),
+        }),
         ["prefix-list", name, "entry", cidr] => Command::Set(SetTarget::PrefixListEntry {
             name: (*name).to_string(),
             cidr: cidr.parse::<IpNet>().ok()?,
@@ -2417,6 +2447,18 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
         }
         ["member", member] => Command::Delete(DeleteTarget::CommunityGroupMemberRelative {
             member: (*member).to_string(),
+        }),
+        ["as-path-list", name] => Command::Delete(DeleteTarget::AsPathList {
+            name: (*name).to_string(),
+        }),
+        ["as-path-list", name, "pattern", pattern] => {
+            Command::Delete(DeleteTarget::AsPathListPattern {
+                name: (*name).to_string(),
+                pattern: (*pattern).to_string(),
+            })
+        }
+        ["pattern", pattern] => Command::Delete(DeleteTarget::AsPathListPatternRelative {
+            pattern: (*pattern).to_string(),
         }),
         ["prefix-list", name] => Command::Delete(DeleteTarget::PrefixList {
             name: (*name).to_string(),
@@ -4587,6 +4629,29 @@ mod tests {
             Command::parse("set value 65000:100"),
             Command::Set(SetTarget::CommunityAliasValueRelative {
                 value: "65000:100".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn as_path_list_edit_set_delete() {
+        assert_eq!(
+            Command::parse("edit as-path-list TRANSIT"),
+            Command::Edit(EditTarget::AsPathList {
+                name: "TRANSIT".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("set as-path-list TRANSIT pattern ^65001_"),
+            Command::Set(SetTarget::AsPathListPattern {
+                name: "TRANSIT".to_string(),
+                pattern: "^65001_".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete pattern ^65001_"),
+            Command::Delete(DeleteTarget::AsPathListPatternRelative {
+                pattern: "^65001_".to_string(),
             })
         );
     }

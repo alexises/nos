@@ -3,12 +3,12 @@ use std::net::Ipv4Addr;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
-    AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
-    BgpShutdown, BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus,
-    EvpnRouteSummary, FieldDiff, Interface, InterfaceAddress, InterfaceStatus, LacpMuxState,
-    LacpRate, LacpReceiveState, LinkInterfaceState, LogEntry, LogLevel, LsaSummary,
-    NeighborSummary, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm, OspfInstance,
-    OspfNeighborState, OspfProfile, Ospfv3Area, Ospfv3Instance, Ospfv3LsaSummary,
+    AddressFamily, AsPathList, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup,
+    BgpSessionState, BgpShutdown, BroadcastDomain, CommunityAlias, CommunityGroup, Config,
+    ConfigDiff, DiffStatus, EvpnRouteSummary, FieldDiff, Interface, InterfaceAddress,
+    InterfaceStatus, LacpMuxState, LacpRate, LacpReceiveState, LinkInterfaceState, LogEntry,
+    LogLevel, LsaSummary, NeighborSummary, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm,
+    OspfInstance, OspfNeighborState, OspfProfile, Ospfv3Area, Ospfv3Instance, Ospfv3LsaSummary,
     Ospfv3NeighborSummary, Ospfv3Profile, PeerSummary, PolicyDefinition, PortAggregate,
     PortAggregateLacpSummary, PortAggregateStatus, PrefixList, PrefixListEntry, PrefixRoutes,
     RouteSourceKind, RoutingTable, SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance,
@@ -964,6 +964,11 @@ pub fn render_config(config: &Config) -> String {
     } else {
         lines.extend(config.community_groups.iter().map(render_community_group));
     }
+    if config.as_path_lists.is_empty() {
+        lines.push("no as-path lists configured".to_string());
+    } else {
+        lines.extend(config.as_path_lists.iter().map(render_as_path_list));
+    }
     if config.prefix_lists.is_empty() {
         lines.push("no prefix lists configured".to_string());
     } else {
@@ -1169,6 +1174,15 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
                 || format!("community-group '{name}' not found"),
                 render_community_group,
             ),
+        Path::AsPathList(name) => snapshot
+            .config
+            .as_path_lists
+            .iter()
+            .find(|l| &l.name == name)
+            .map_or_else(
+                || format!("as-path-list '{name}' not found"),
+                render_as_path_list,
+            ),
         Path::PrefixList(name) => snapshot
             .config
             .prefix_lists
@@ -1249,13 +1263,25 @@ pub fn render_community_group(group: &CommunityGroup) -> String {
     format!("community-group {}: members [{members}]", group.name)
 }
 
+/// Render one as-path-list as human-readable text.
+pub fn render_as_path_list(list: &AsPathList) -> String {
+    let patterns = if list.patterns.is_empty() {
+        "none".to_string()
+    } else {
+        list.patterns.join(", ")
+    };
+    format!("as-path-list {}: patterns [{patterns}]", list.name)
+}
+
 /// Render one `PrefixListEntry` the same way for every caller — `<cidr>` for
 /// an exact-match entry, `<cidr> orlonger`/`<cidr> upto <max>` when the range starts at the
 /// cidr's own length, `<cidr> range(<min>,<max>)` otherwise.
 pub fn render_prefix_list_entry(entry: &PrefixListEntry) -> String {
     match entry.range {
         None => entry.cidr.to_string(),
-        Some((min, max)) if min == entry.cidr.prefix_len() && max == entry.cidr.max_prefix_len() => {
+        Some((min, max))
+            if min == entry.cidr.prefix_len() && max == entry.cidr.max_prefix_len() =>
+        {
             format!("{} orlonger", entry.cidr)
         }
         Some((min, max)) if min == entry.cidr.prefix_len() => {

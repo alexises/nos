@@ -77,7 +77,7 @@ const FIELDS: &[(&[&str], FieldInfo)] = &[
         FieldInfo {
             id: FieldId::BgpAsPath,
             ty: FieldType::ListInt,
-            mutable: false,
+            mutable: true,
         },
     ),
     (

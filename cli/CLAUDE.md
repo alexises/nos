@@ -108,6 +108,10 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | `set member <alias-or-literal>` / `set community-group <name> member <alias-or-literal>` | Adds a member (an existing community-alias's name, or an inline literal) to the group (relative / fully-qualified) |
 | `delete member <m>` / `delete community-group <name> member <m>` | Removes a member from the group (relative / fully-qualified) |
 | `delete` / `delete community-group <name>` | Deletes the current community-group (returns to the transaction root) or a named one |
+| `edit as-path-list <name>` | Creates the as-path-list in the transaction if missing, then navigates into it |
+| `set pattern <regex>` / `set as-path-list <name> pattern <regex>` | Adds an AS-path regex (matched against the space-separated ASNs; `_` is a start/end/space boundary) to the list (relative / fully-qualified) |
+| `delete pattern <regex>` / `delete as-path-list <name> pattern <regex>` | Removes a pattern (relative / fully-qualified) |
+| `delete` / `delete as-path-list <name>` | Deletes the current as-path-list (returns to the transaction root) or a named one |
 | `edit prefix-list <name>` | Creates the prefix-list in the transaction if missing, then navigates into it |
 | `set entry <cidr> [range <min> <max>]` / `set prefix-list <name> entry <cidr> [range <min> <max>]` | Adds an entry (exact-match, or a length range narrowing `<cidr>`) to the list (relative / fully-qualified) |
 | `delete entry <cidr> [range <min> <max>]` / `delete prefix-list <name> entry <cidr> [range <min> <max>]` | Removes an entry from the list (relative / fully-qualified) |

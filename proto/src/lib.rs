@@ -46,7 +46,7 @@ pub use lacp::{
 pub use lldp::{LldpEvent, LldpNeighbor, LldpRequest};
 pub use log::{LogEntry, LogEvent, LogLevel, LogRequest};
 pub use ops::{
-    BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, CommunityAliasOp,
+    AsPathListOp, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, CommunityAliasOp,
     CommunityGroupOp, ConfigOp, InterfaceOp, LldpOp, OpError, OspfAreaOp, OspfInstanceOp,
     OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp,
     PortAggregateOp, PortAggregateSubinterfaceOp, PrefixListOp, RoutingTableOp, StaticRouteOp,
@@ -65,14 +65,14 @@ pub use rib::{
     RouteEntry, RouteSourceKind,
 };
 pub use schema::{
-    loopback_table_name, AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpDamping, BgpInstance,
-    BgpPeer, BgpPeerGroup, BgpShutdown, BroadcastDomain, CommunityAlias, CommunityGroup, Config,
-    EsRedundancy, Interface, InterfaceAddress, LacpRate, LldpDestination, LldpSettings,
-    NetworkType, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstance,
-    OspfProfile, Ospfv3Area, Ospfv3Instance, Ospfv3Profile, PolicyDefinition, PortAggregate,
-    PortAggregateMode, PrefixList, PrefixListEntry, Redistribute, RedistributeSource,
-    RedistributeTarget, RestApi, RoutingTable, SourceAddress, StaticRoute, StaticRoutingInstance,
-    Subinterface, SwitchingProfile, SwitchingProfileMember, User, VlanTag,
+    loopback_table_name, AddressFamily, AsPathList, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpDamping,
+    BgpInstance, BgpPeer, BgpPeerGroup, BgpShutdown, BroadcastDomain, CommunityAlias,
+    CommunityGroup, Config, EsRedundancy, Interface, InterfaceAddress, LacpRate, LldpDestination,
+    LldpSettings, NetworkType, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey,
+    OspfInstance, OspfProfile, Ospfv3Area, Ospfv3Instance, Ospfv3Profile, PolicyDefinition,
+    PortAggregate, PortAggregateMode, PrefixList, PrefixListEntry, Redistribute,
+    RedistributeSource, RedistributeTarget, RestApi, RoutingTable, SourceAddress, StaticRoute,
+    StaticRoutingInstance, Subinterface, SwitchingProfile, SwitchingProfileMember, User, VlanTag,
     CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT, HELLO_INTERVAL_DEFAULT,
     HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX, PASSWORD_HASH_PREFIX, PRIORITY_DEFAULT,
     REST_API_PORT_DEFAULT,

@@ -121,23 +121,33 @@ fn apply_policy(
     mut candidate: RibRoute,
     policy: &CompiledPolicy,
 ) -> Option<RibRoute> {
-    match nos_rpl::vm::run(policy, &to_policy_input(prefix, &candidate)) {
-        nos_rpl::Verdict::Reject => None,
-        nos_rpl::Verdict::Accept {
-            local_pref,
-            med,
-            communities,
-            extended_communities,
-            large_communities,
-        } => {
-            candidate.local_pref = local_pref;
-            candidate.med = med;
-            candidate.communities = communities;
-            candidate.extended_communities = extended_communities;
-            candidate.large_communities = large_communities;
-            Some(candidate)
-        }
+    let verdict = nos_rpl::vm::run(policy, &to_policy_input(prefix, &candidate));
+    apply_verdict(&mut candidate, verdict).then_some(candidate)
+}
+
+/// Writes an accepting verdict's attribute rewrites back onto `route`;
+/// `false` means the verdict was a reject (and `route` is untouched).
+fn apply_verdict(route: &mut RibRoute, verdict: nos_rpl::Verdict) -> bool {
+    let nos_rpl::Verdict::Accept {
+        local_pref,
+        med,
+        communities,
+        extended_communities,
+        large_communities,
+        edits,
+    } = verdict
+    else {
+        return false;
+    };
+    route.local_pref = local_pref;
+    route.med = med;
+    route.communities = communities;
+    route.extended_communities = extended_communities;
+    route.large_communities = large_communities;
+    if let Some(as_path) = edits.as_path {
+        route.as_path = Arc::new(as_path);
     }
+    true
 }
 
 /// Stores one `MP_REACH_NLRI` batch's EVPN routes in a peer's EVPN Adj-RIB-In,
@@ -244,7 +254,7 @@ pub struct EvpnRoute {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RibRoute {
     pub origin: RouteOrigin,
-    /// Never mutated in place by RPL (`as_path` is a read-only policy input)
+    /// Never mutated in place by RPL (a `prepend` replaces the whole `Arc`)
     /// — shared via `Arc` so cloning a `RibRoute` (candidate collection,
     /// `loc_rib`/`adj_rib_in` storage) never deep-copies this list.
     pub as_path: Arc<Vec<u32>>,
@@ -1425,24 +1435,12 @@ fn build_advertisement(
     // `best` is shadowed with a possibly policy-adjusted owned copy so every
     // rewrite below (`AS_PATH`, `LOCAL_PREF`, `MED`, reflection) sees the
     // policy's `local_pref`/`med`, not the pre-policy values.
-    let best = match nos_rpl::vm::run(&outbox.export_policy, &to_policy_input(prefix, best)) {
-        nos_rpl::Verdict::Reject => return None,
-        nos_rpl::Verdict::Accept {
-            local_pref,
-            med,
-            communities,
-            extended_communities,
-            large_communities,
-        } => {
-            let mut adjusted = best.clone();
-            adjusted.local_pref = local_pref;
-            adjusted.med = med;
-            adjusted.communities = communities;
-            adjusted.extended_communities = extended_communities;
-            adjusted.large_communities = large_communities;
-            adjusted
-        }
-    };
+    let verdict = nos_rpl::vm::run(&outbox.export_policy, &to_policy_input(prefix, best));
+    let mut adjusted = best.clone();
+    if !apply_verdict(&mut adjusted, verdict) {
+        return None;
+    }
+    let best = adjusted;
     let best = &best;
 
     let mode = outbox.next_hop_mode.unwrap_or(if outbox.is_ibgp {
@@ -1455,8 +1453,8 @@ fn build_advertisement(
         NextHopMode::Unchanged => best.next_hop.or(outbox.local_addr)?,
     };
 
-    // `as_path` is never mutated by RPL (read-only policy input), so it's
-    // still shared with whatever's stored in loc_rib/adj_rib_in at this
+    // `as_path` is only replaced (never mutated in place) by an RPL
+    // `prepend`, so when the script didn't touch it it's still shared with whatever's stored in loc_rib/adj_rib_in at this
     // point — `Arc::clone` is a refcount bump, not a deep copy. The one
     // real content copy this function can't avoid is the eBGP prepend
     // case, where the result genuinely differs per destination peer;
@@ -2265,6 +2263,43 @@ mod tests {
             })
             .expect("expected an announcement for 198.51.100.0/24");
         assert_eq!(adv.communities, vec![(65001 << 16) | 100]);
+    }
+
+    #[test]
+    fn export_policy_prepend_lands_behind_our_own_asn() {
+        let mut rib = new_rib(65001);
+        let peer = addr("10.0.0.1");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        rib.peer_established(
+            peer,
+            false,
+            Some(addr("10.0.0.254")),
+            all_afs(),
+            false,
+            None,
+            false,
+            false,
+            HashSet::new(),
+            Arc::new(
+                nos_rpl::compile(
+                    "this.bgp.as_path.prepend(64999, 2)\naccept\n",
+                    &nos_rpl::Symbols::EMPTY,
+                )
+                .unwrap(),
+            ),
+            tx,
+        );
+
+        rib.apply_redistribute_update(full_update(vec![("198.51.100.0/24", "10.9.9.9")]));
+
+        let adv = recv_all(&mut rx)
+            .into_iter()
+            .find_map(|u| match u {
+                OutboundUpdate::Announce(a) if a.prefix == prefix("198.51.100.0/24") => Some(a),
+                _ => None,
+            })
+            .expect("expected an announcement for 198.51.100.0/24");
+        assert_eq!(adv.as_path, vec![65001, 64999, 64999]);
     }
 
     #[test]

@@ -15,7 +15,7 @@ mod symbols;
 pub mod vm;
 
 pub use symbols::{PrefixListEntry, Symbols};
-pub use vm::{BgpInput, CompiledPolicy, Input, Op, Origin, Value, Verdict};
+pub use vm::{AsPathRegexes, BgpInput, CompiledPolicy, Edits, Input, Op, Origin, Value, Verdict};
 
 use std::fmt;
 use std::sync::LazyLock;
@@ -133,6 +133,7 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                edits: Edits::default(),
             }
         );
     }

@@ -11,6 +11,7 @@ pub enum Token {
     Dedent,
     Ident(String),
     Int(i64),
+    Str(String),
     Prefix(IpNet),
     IpAddr(IpAddr),
     If,
@@ -142,6 +143,17 @@ fn lex_line(line: &str, lineno: usize, out: &mut Vec<SpannedToken>) -> Result<()
                 token: classify_numeric(text, lineno)?,
                 line: lineno,
             });
+            continue;
+        }
+        if c == '"' {
+            let Some(len) = line[i + 1..].find('"') else {
+                return Err(CompileError::new(lineno, "unterminated string literal"));
+            };
+            out.push(SpannedToken {
+                token: Token::Str(line[i + 1..i + 1 + len].to_string()),
+                line: lineno,
+            });
+            i += len + 2;
             continue;
         }
         if c.is_ascii_alphabetic() || c == '_' {
