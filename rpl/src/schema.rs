@@ -18,6 +18,8 @@ pub enum FieldId {
     BgpLocalPref,
     BgpMed,
     BgpNextHop,
+    BgpPeer,
+    BgpPeerAs,
     BgpLearnedViaIbgp,
     BgpRouterId,
     BgpOriginatorId,
@@ -69,7 +71,7 @@ const FIELDS: &[(&[&str], FieldInfo)] = &[
         FieldInfo {
             id: FieldId::BgpOrigin,
             ty: FieldType::Enum("origin"),
-            mutable: false,
+            mutable: true,
         },
     ),
     (
@@ -101,6 +103,22 @@ const FIELDS: &[(&[&str], FieldInfo)] = &[
         FieldInfo {
             id: FieldId::BgpNextHop,
             ty: FieldType::OptionalIp,
+            mutable: true,
+        },
+    ),
+    (
+        &["bgp", "peer"],
+        FieldInfo {
+            id: FieldId::BgpPeer,
+            ty: FieldType::OptionalIp,
+            mutable: false,
+        },
+    ),
+    (
+        &["bgp", "peer_as"],
+        FieldInfo {
+            id: FieldId::BgpPeerAs,
+            ty: FieldType::Int,
             mutable: false,
         },
     ),

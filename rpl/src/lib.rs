@@ -15,7 +15,9 @@ mod symbols;
 pub mod vm;
 
 pub use symbols::{PrefixListEntry, Symbols};
-pub use vm::{AsPathRegexes, BgpInput, CompiledPolicy, Edits, Input, Op, Origin, Value, Verdict};
+pub use vm::{
+    AsPathRegexes, BgpInput, CompiledPolicy, Edits, Input, NextHopSet, Op, Origin, Value, Verdict,
+};
 
 use std::fmt;
 use std::sync::LazyLock;
@@ -120,6 +122,8 @@ mod tests {
                 router_id: None,
                 originator_id: None,
                 cluster_list: &[],
+                peer: None,
+                peer_as: 0,
                 communities: &[],
                 extended_communities: &[],
                 large_communities: &[],
@@ -152,6 +156,8 @@ mod tests {
                 router_id: None,
                 originator_id: None,
                 cluster_list: &[],
+                peer: None,
+                peer_as: 0,
                 communities: &[],
                 extended_communities: &[],
                 large_communities: &[],

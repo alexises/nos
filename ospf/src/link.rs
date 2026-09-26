@@ -1930,6 +1930,8 @@ fn passes_redistribute_policy(prefix: Ipv4Net, policy: &CompiledPolicy) -> bool 
             router_id: None,
             originator_id: None,
             cluster_list: &[],
+            peer: None,
+            peer_as: 0,
             communities: &[],
             extended_communities: &[],
             large_communities: &[],

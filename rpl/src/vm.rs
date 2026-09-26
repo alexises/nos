@@ -103,6 +103,15 @@ pub enum Op {
     AsPathMatches(AsPathRegexes),
     /// `this.bgp.as_path.prepend(asn, count)`.
     AsPathPrepend(u32, u8),
+    /// `this.bgp.<field> == <ip literal>` on an optional-address field:
+    /// false when the field is unset.
+    OptIpEq(FieldId, IpAddr),
+    /// Pops an `Enum` and sets `this.bgp.origin`.
+    SetOrigin,
+    /// Pops an `Ip` and sets `this.bgp.next_hop`.
+    SetNextHop,
+    /// `set this.bgp.next_hop = self`.
+    SetNextHopSelf,
     CommunityAdd(FieldId, CommunityValue),
     CommunityRemove(FieldId, CommunityValue),
     CommunityClear(FieldId),
@@ -158,6 +167,11 @@ pub struct BgpInput<'a> {
     pub router_id: Option<Ipv4Addr>,
     pub originator_id: Option<Ipv4Addr>,
     pub cluster_list: &'a [Ipv4Addr],
+    /// The neighbor this route is being imported from / exported to; `None`
+    /// (and `peer_as == 0`, never a real ASN) for a locally-redistributed
+    /// route, which has no neighbor.
+    pub peer: Option<IpAddr>,
+    pub peer_as: u32,
     pub communities: &'a [u32],
     pub extended_communities: &'a [u64],
     pub large_communities: &'a [(u32, u32, u32)],
@@ -170,6 +184,18 @@ pub struct BgpInput<'a> {
 pub struct Edits {
     /// The full replacement `AS_PATH`, only if the script prepended.
     pub as_path: Option<Vec<u32>>,
+    pub origin: Option<Origin>,
+    pub next_hop: NextHopSet,
+}
+
+/// What a policy did to the route's next hop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NextHopSet {
+    #[default]
+    Unchanged,
+    /// `set this.bgp.next_hop = self`.
+    SelfAddress,
+    Addr(IpAddr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +239,8 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
     let mut cur_large_communities: Cow<[(u32, u32, u32)]> =
         Cow::Borrowed(input.bgp.large_communities);
     let mut cur_as_path: Cow<[u32]> = Cow::Borrowed(input.bgp.as_path);
+    let mut cur_origin = input.bgp.origin;
+    let mut next_hop_edit = NextHopSet::Unchanged;
     let mut pc = 0usize;
 
     macro_rules! push {
@@ -233,7 +261,8 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
             Op::LoadField(id) => {
                 let v = match id {
                     FieldId::Prefix => Value::Prefix(input.prefix),
-                    FieldId::BgpOrigin => Value::Enum(input.bgp.origin as u8),
+                    FieldId::BgpOrigin => Value::Enum(cur_origin as u8),
+                    FieldId::BgpPeerAs => Value::Int(i64::from(input.bgp.peer_as)),
                     FieldId::BgpLocalPref => Value::Int(i64::from(cur_local_pref)),
                     FieldId::BgpLearnedViaIbgp => Value::Bool(input.bgp.learned_via_ibgp),
                     _ => unreachable!("check.rs rejects LoadField for {id:?}"),
@@ -291,6 +320,32 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                     .to_mut()
                     .splice(0..0, std::iter::repeat_n(*asn, usize::from(*count)));
             }
+            Op::OptIpEq(id, ip) => {
+                let cur = match id {
+                    FieldId::BgpNextHop => match next_hop_edit {
+                        NextHopSet::Addr(a) => Some(a),
+                        NextHopSet::SelfAddress => None,
+                        NextHopSet::Unchanged => input.bgp.next_hop,
+                    },
+                    FieldId::BgpPeer => input.bgp.peer,
+                    FieldId::BgpRouterId => input.bgp.router_id.map(IpAddr::V4),
+                    FieldId::BgpOriginatorId => input.bgp.originator_id.map(IpAddr::V4),
+                    _ => unreachable!("codegen.rs only emits OptIpEq for optional-ip fields"),
+                };
+                push!(Value::Bool(cur == Some(*ip)));
+            }
+            Op::SetOrigin => {
+                cur_origin = match pop!() {
+                    Value::Enum(0) => Origin::Igp,
+                    Value::Enum(1) => Origin::Egp,
+                    _ => Origin::Incomplete,
+                };
+            }
+            Op::SetNextHop => match pop!() {
+                Value::Ip(a) => next_hop_edit = NextHopSet::Addr(a),
+                other => unreachable!("codegen.rs guarantees an Ip here, got {other:?}"),
+            },
+            Op::SetNextHopSelf => next_hop_edit = NextHopSet::SelfAddress,
             Op::Add => {
                 let b = as_int(pop!());
                 let a = as_int(pop!());
@@ -444,6 +499,8 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                             Cow::Owned(v) => Some(v),
                             Cow::Borrowed(_) => None,
                         },
+                        origin: (cur_origin != input.bgp.origin).then_some(cur_origin),
+                        next_hop: next_hop_edit,
                     },
                 }
             }

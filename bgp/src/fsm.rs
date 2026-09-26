@@ -995,6 +995,7 @@ pub async fn run(
                         );
                         let mut rib = bgp_rib.lock().await;
                         rib.set_peer_damping(peer.remote_address, peer.damping);
+                        rib.set_peer_asn(peer.remote_address, *remote_asn);
                         rib.peer_established(
                             peer.remote_address,
                             remote_is_ibgp,
