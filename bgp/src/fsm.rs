@@ -22,7 +22,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::Instant;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use nos_proto::{AddressFamily, NextHopMode, HOLD_TIME_FLOOR};
 
@@ -254,6 +254,8 @@ struct RemoteInfo {
     /// The peer sent the four-octet AS capability (RFC 6793); `false` means
     /// 2-byte `AS_PATH` + `AS4_PATH` in both directions.
     four_octet_as: bool,
+    /// The peer sent the RFC 8654 Extended Message capability (we always do).
+    extended_message: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,6 +295,7 @@ enum Action {
         add_path_ipv4: bool,
         add_path_ipv6: bool,
         four_octet_as: bool,
+        extended_message: bool,
     },
     Close,
 }
@@ -326,6 +329,7 @@ fn step(state: State, event: Event, ctx: &NegotiationContext) -> (Option<State>,
                 add_path_ipv4: remote.add_path_ipv4,
                 add_path_ipv6: remote.add_path_ipv6,
                 four_octet_as: remote.four_octet_as,
+                extended_message: remote.extended_message,
             }],
         ),
         (State::Established(remote), Event::KeepaliveReceived) => {
@@ -427,6 +431,9 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
         add_path_ipv4,
         add_path_ipv6,
         four_octet_as: message::four_octet_asn(open).is_some(),
+        extended_message: open
+            .capabilities
+            .contains(&message::Capability::ExtendedMessage),
     };
     (
         Some(State::OpenConfirm(remote)),
@@ -743,6 +750,7 @@ pub async fn run(
             ctx.transport_afi,
         ));
         open.capabilities.push(message::Capability::RouteRefresh);
+        open.capabilities.push(message::Capability::ExtendedMessage);
         if peer.is_rs_client {
             // Only ever advertised for a route-server-client peer-group,
             // unlike this crate's other capabilities — see `bgp/CLAUDE.md`'s
@@ -791,13 +799,17 @@ pub async fn run(
                 () = cease.notified() => Event::CollisionLost,
                 Some(update) = outbox_rx.recv() => {
                     if let Some(update) = mrai.push(update, Instant::now()) {
-                        let _ = writer.send(outbound_update_to_message(update)).await;
+                        if let Err(e) = writer.send(outbound_update_to_message(update)).await {
+                            warn!(error = %e, "could not send update");
+                        }
                     }
                     continue;
                 }
                 () = sleep_until_opt(mrai.deadline()) => {
                     for update in mrai.flush(Instant::now()) {
-                        let _ = writer.send(outbound_update_to_message(update)).await;
+                        if let Err(e) = writer.send(outbound_update_to_message(update)).await {
+                            warn!(error = %e, "could not send update");
+                        }
                     }
                     continue;
                 }
@@ -901,6 +913,7 @@ pub async fn run(
                         add_path_ipv4,
                         add_path_ipv6,
                         four_octet_as,
+                        extended_message,
                     } => {
                         slot.mark_established(role).await;
                         let mut negotiated_afs = HashSet::new();
@@ -934,6 +947,12 @@ pub async fn run(
                         writer.encoder_mut().add_path_afis = add_path_afis;
                         reader.decoder_mut().two_octet_as = !*four_octet_as;
                         writer.encoder_mut().two_octet_as = !*four_octet_as;
+                        reader.decoder_mut().extended = *extended_message;
+                        writer.encoder_mut().extended = *extended_message;
+                        info!(
+                            extended_message = *extended_message,
+                            "extended message negotiated"
+                        );
                         bgp_rib.lock().await.peer_established(
                             peer.remote_address,
                             remote_is_ibgp,
@@ -1391,6 +1410,23 @@ mod tests {
     }
 
     #[test]
+    fn extended_message_follows_the_peers_capability() {
+        let mut with_cap = valid_open(65002, 90);
+        with_cap
+            .capabilities
+            .push(message::Capability::ExtendedMessage);
+        let (Some(State::OpenConfirm(r)), _) = handle_open(&with_cap, &ctx(65002)) else {
+            panic!("expected OpenConfirm");
+        };
+        assert!(r.extended_message);
+        let (Some(State::OpenConfirm(r)), _) = handle_open(&valid_open(65002, 90), &ctx(65002))
+        else {
+            panic!("expected OpenConfirm");
+        };
+        assert!(!r.extended_message);
+    }
+
+    #[test]
     fn four_octet_as_follows_the_peers_capability() {
         let with_cap = valid_open(65002, 90);
         let (Some(State::OpenConfirm(r)), _) = handle_open(&with_cap, &ctx(65002)) else {
@@ -1417,6 +1453,7 @@ mod tests {
             add_path_ipv4: false,
             add_path_ipv6: false,
             four_octet_as: true,
+            extended_message: false,
         };
         let (next, actions) = step(
             State::OpenConfirm(remote),
@@ -1441,6 +1478,7 @@ mod tests {
             add_path_ipv4: false,
             add_path_ipv6: false,
             four_octet_as: true,
+            extended_message: false,
         };
         for state in [
             State::OpenSent,
@@ -1468,6 +1506,7 @@ mod tests {
             add_path_ipv4: false,
             add_path_ipv6: false,
             four_octet_as: true,
+            extended_message: false,
         };
         for (state, event, subcode) in [
             (State::OpenSent, Event::KeepaliveReceived, 1),
@@ -1528,6 +1567,7 @@ mod tests {
             add_path_ipv4: false,
             add_path_ipv6: false,
             four_octet_as: true,
+            extended_message: false,
         };
         let (next, actions) = step(
             State::Established(remote),
@@ -1550,6 +1590,7 @@ mod tests {
             add_path_ipv4: false,
             add_path_ipv6: false,
             four_octet_as: true,
+            extended_message: false,
         };
         let (next, actions) = step(
             State::Established(remote),

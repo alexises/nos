@@ -45,7 +45,15 @@ async fn reestablished(r: &Router, baseline: usize) -> anyhow::Result<()> {
 
 pub async fn established(w: &mut World) -> anyhow::Result<()> {
     w.a()?.established().await?;
-    w.b()?.established().await
+    w.b()?.established().await?;
+    // RFC 8654: both nos-bgpd always advertise Extended Message, so each side
+    // must have negotiated it with the other.
+    w.a()?
+        .wait("extended message negotiated extended_message=true")
+        .await?;
+    w.b()?
+        .wait("extended message negotiated extended_message=true")
+        .await
 }
 
 pub async fn reconnect(w: &mut World) -> anyhow::Result<()> {

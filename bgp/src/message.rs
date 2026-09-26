@@ -40,6 +40,9 @@ pub const BGP_VERSION: u8 = 4;
 const MARKER: [u8; 16] = [0xFF; 16];
 const HEADER_LEN: usize = 19;
 const MAX_MESSAGE_LEN: usize = 4096;
+/// RFC 8654 §4: ceiling once both sides advertised the Extended Message
+/// capability — never applies to OPEN or KEEPALIVE.
+const MAX_EXTENDED_MESSAGE_LEN: usize = 65535;
 
 /// RFC 6793 placeholder used in OPEN's 2-byte "My Autonomous System" field
 /// whenever the real ASN doesn't fit in 2 bytes; the real value then travels
@@ -59,6 +62,8 @@ const CAP_FOUR_OCTET_ASN: u8 = 65;
 const CAP_MULTIPROTOCOL: u8 = 1;
 /// RFC 2918 §3 Route Refresh capability: no payload.
 const CAP_ROUTE_REFRESH: u8 = 2;
+/// RFC 8654 §3 Extended Message capability: no payload.
+const CAP_EXTENDED_MESSAGE: u8 = 6;
 /// RFC 8950 §3 Extended Next Hop Encoding capability: one or more `NLRI-AFI(2)
 /// NLRI-SAFI(2) NextHop-AFI(2)` tuples — note the NLRI-SAFI field is 2 bytes
 /// here, unlike `CAP_MULTIPROTOCOL`'s 1-byte SAFI.
@@ -123,7 +128,7 @@ const MAX_AS_PATH_SEGMENT_LEN: usize = 255;
 pub enum WireError {
     #[error("bgp message marker is not all-ones")]
     BadMarker,
-    #[error("bgp message length {0} out of the 19..=4096 range")]
+    #[error("bgp message length {0} out of the allowed range (19..=4096, or ..=65535 for UPDATE/NOTIFICATION/ROUTE-REFRESH once RFC 8654 is negotiated)")]
     BadLength(u16),
     #[error("bgp message body shorter than its declared field lengths")]
     Truncated,
@@ -243,6 +248,9 @@ pub enum Capability {
     },
     /// RFC 2918 code 2: this session accepts `ROUTE_REFRESH` messages.
     RouteRefresh,
+    /// RFC 8654 code 6: messages up to 65535 bytes (UPDATE, NOTIFICATION,
+    /// ROUTE-REFRESH) when both sides advertise it.
+    ExtendedMessage,
     /// RFC 7911 code 69: one or more AFI/SAFI ADD-PATH grants.
     AddPath(Vec<AddPathTuple>),
 }
@@ -484,6 +492,21 @@ pub struct BgpCodec {
     /// §4.2): `AS_PATH` is then 2-byte in both directions, with `AS4_PATH`
     /// carrying the real path. Set at the same point as `add_path_afis`.
     pub two_octet_as: bool,
+    /// True once both sides advertised RFC 8654 Extended Message: UPDATE,
+    /// NOTIFICATION and ROUTE-REFRESH may then be up to 65535 bytes. Set at the
+    /// same point as `add_path_afis`.
+    pub extended: bool,
+}
+
+impl BgpCodec {
+    fn max_len(&self, message_type: u8) -> usize {
+        // RFC 8654 §4: OPEN and KEEPALIVE stay at 4096 even when negotiated.
+        if self.extended && message_type != TYPE_OPEN && message_type != TYPE_KEEPALIVE {
+            MAX_EXTENDED_MESSAGE_LEN
+        } else {
+            MAX_MESSAGE_LEN
+        }
+    }
 }
 
 impl Decoder for BgpCodec {
@@ -498,14 +521,14 @@ impl Decoder for BgpCodec {
             return Err(WireError::BadMarker);
         }
         let length = u16::from_be_bytes([src[16], src[17]]);
-        if (length as usize) < HEADER_LEN || (length as usize) > MAX_MESSAGE_LEN {
+        let message_type = src[18];
+        if (length as usize) < HEADER_LEN || (length as usize) > self.max_len(message_type) {
             return Err(WireError::BadLength(length));
         }
         if src.len() < length as usize {
             src.reserve(length as usize - src.len());
             return Ok(None);
         }
-        let message_type = src[18];
 
         let mut frame = src.split_to(length as usize);
         frame.advance(HEADER_LEN);
@@ -539,21 +562,174 @@ impl Encoder<BgpMessage> for BgpCodec {
     fn encode(&mut self, item: BgpMessage, dst: &mut BytesMut) -> Result<(), WireError> {
         let (message_type, body) = match item {
             BgpMessage::Open(open) => (TYPE_OPEN, encode_open(&open)),
-            BgpMessage::Update(update) => (TYPE_UPDATE, encode_update(&update, self.two_octet_as)),
+            BgpMessage::Update(update) => {
+                // One UPDATE too big for this session's limit is split into
+                // several (RFC 4271 §4.3 / RFC 8654): halve its largest NLRI
+                // list until every piece fits.
+                let max_body = self.max_len(TYPE_UPDATE) - HEADER_LEN;
+                let mut pieces = Vec::new();
+                split_update(&update, self.two_octet_as, max_body, &mut pieces)?;
+                for body in pieces {
+                    put_frame(dst, TYPE_UPDATE, &body);
+                }
+                return Ok(());
+            }
             BgpMessage::Keepalive => (TYPE_KEEPALIVE, Vec::new()),
             BgpMessage::Notification(n) => (TYPE_NOTIFICATION, encode_notification(&n)),
             BgpMessage::RouteRefresh(rr) => (TYPE_ROUTE_REFRESH, encode_route_refresh(rr)),
             BgpMessage::Unhandled { message_type, body } => (message_type, body.to_vec()),
         };
         let total_len = HEADER_LEN + body.len();
-        let total_len = u16::try_from(total_len).map_err(|_| WireError::BadLength(u16::MAX))?;
-        dst.reserve(total_len as usize);
-        dst.put_slice(&MARKER);
-        dst.put_u16(total_len);
-        dst.put_u8(message_type);
-        dst.put_slice(&body);
+        // Never send more than the peer will accept: 4096 unless RFC 8654 was
+        // negotiated (and never for OPEN/KEEPALIVE).
+        if total_len > self.max_len(message_type) {
+            return Err(WireError::BadLength(
+                u16::try_from(total_len).unwrap_or(u16::MAX),
+            ));
+        }
+        put_frame(dst, message_type, &body);
         Ok(())
     }
+}
+
+/// Frame `body` (already checked against the session limit, so its length
+/// fits a `u16`).
+fn put_frame(dst: &mut BytesMut, message_type: u8, body: &[u8]) {
+    let total_len = u16::try_from(HEADER_LEN + body.len()).unwrap_or(u16::MAX);
+    dst.reserve(total_len as usize);
+    dst.put_slice(&MARKER);
+    dst.put_u16(total_len);
+    dst.put_u8(message_type);
+    dst.put_slice(body);
+}
+
+/// Which NLRI list of an UPDATE `split_update` halves.
+enum SplitField {
+    Withdrawn,
+    Nlri,
+    MpReachNlri(usize),
+    MpReachEvpn(usize),
+    MpUnreachWithdrawn(usize),
+    MpUnreachEvpn(usize),
+}
+
+// Split `v` (and its aligned path ids, if any) at `mid`; returns the tails.
+fn tail<T>(v: &mut Vec<T>, ids: &mut Vec<u32>, mid: usize) -> (Vec<T>, Vec<u32>) {
+    let ids_tail = if ids.is_empty() {
+        vec![]
+    } else {
+        ids.split_off(mid)
+    };
+    (v.split_off(mid), ids_tail)
+}
+
+/// Encode `update` into `out`, halving its largest NLRI list recursively until
+/// every body is at most `max_body` bytes. The second half carries only that
+/// list (plus the path attributes when it announces), so nothing is announced
+/// or withdrawn twice. An UPDATE with nothing left to split is an error.
+fn split_update(
+    update: &UpdateMessage,
+    two_octet_as: bool,
+    max_body: usize,
+    out: &mut Vec<Vec<u8>>,
+) -> Result<(), WireError> {
+    let body = encode_update(update, two_octet_as);
+    if body.len() <= max_body {
+        out.push(body);
+        return Ok(());
+    }
+    let mut lists = vec![
+        (SplitField::Withdrawn, update.withdrawn_routes.len()),
+        (SplitField::Nlri, update.nlri.len()),
+    ];
+    for (i, m) in update.mp_reach.iter().enumerate() {
+        lists.push((SplitField::MpReachNlri(i), m.nlri.len()));
+        lists.push((SplitField::MpReachEvpn(i), m.evpn.len()));
+    }
+    for (i, m) in update.mp_unreach.iter().enumerate() {
+        lists.push((SplitField::MpUnreachWithdrawn(i), m.withdrawn.len()));
+        lists.push((SplitField::MpUnreachEvpn(i), m.evpn.len()));
+    }
+    let (field, len) = lists
+        .into_iter()
+        .max_by_key(|(_, len)| *len)
+        .expect("lists is never empty");
+    if len < 2 {
+        return Err(WireError::BadLength(
+            u16::try_from(HEADER_LEN + body.len()).unwrap_or(u16::MAX),
+        ));
+    }
+    let mid = len / 2;
+    // `first` keeps everything but the tail of `field`; `second` is `field`'s
+    // tail alone.
+    let mut first = update.clone();
+    let mut second = UpdateMessage {
+        withdrawn_routes: vec![],
+        withdrawn_path_ids: vec![],
+        nlri: vec![],
+        nlri_path_ids: vec![],
+        attributes: None,
+        mp_reach: vec![],
+        mp_unreach: vec![],
+    };
+    match field {
+        SplitField::Withdrawn => {
+            (second.withdrawn_routes, second.withdrawn_path_ids) = tail(
+                &mut first.withdrawn_routes,
+                &mut first.withdrawn_path_ids,
+                mid,
+            );
+        }
+        SplitField::Nlri => {
+            (second.nlri, second.nlri_path_ids) =
+                tail(&mut first.nlri, &mut first.nlri_path_ids, mid);
+            second.attributes.clone_from(&first.attributes);
+        }
+        SplitField::MpReachNlri(i) => {
+            let m = &mut first.mp_reach[i];
+            let (nlri, ids) = tail(&mut m.nlri, &mut m.nlri_path_ids, mid);
+            second.mp_reach.push(MpReachNlri {
+                nlri,
+                nlri_path_ids: ids,
+                evpn: vec![],
+                ..m.clone()
+            });
+            second.attributes.clone_from(&first.attributes);
+        }
+        SplitField::MpReachEvpn(i) => {
+            let m = &mut first.mp_reach[i];
+            let evpn = m.evpn.split_off(mid);
+            second.mp_reach.push(MpReachNlri {
+                nlri: vec![],
+                nlri_path_ids: vec![],
+                evpn,
+                ..m.clone()
+            });
+            second.attributes.clone_from(&first.attributes);
+        }
+        SplitField::MpUnreachWithdrawn(i) => {
+            let m = &mut first.mp_unreach[i];
+            let (withdrawn, ids) = tail(&mut m.withdrawn, &mut m.withdrawn_path_ids, mid);
+            second.mp_unreach.push(MpUnreachNlri {
+                withdrawn,
+                withdrawn_path_ids: ids,
+                evpn: vec![],
+                ..m.clone()
+            });
+        }
+        SplitField::MpUnreachEvpn(i) => {
+            let m = &mut first.mp_unreach[i];
+            let evpn = m.evpn.split_off(mid);
+            second.mp_unreach.push(MpUnreachNlri {
+                withdrawn: vec![],
+                withdrawn_path_ids: vec![],
+                evpn,
+                ..m.clone()
+            });
+        }
+    }
+    split_update(&first, two_octet_as, max_body, out)?;
+    split_update(&second, two_octet_as, max_body, out)
 }
 
 fn parse_open(body: &[u8]) -> Result<OpenMessage, WireError> {
@@ -631,6 +807,9 @@ fn parse_capabilities(mut data: &[u8]) -> Result<Vec<Capability>, WireError> {
             }
             CAP_ROUTE_REFRESH if cap_len == 0 => {
                 capabilities.push(Capability::RouteRefresh);
+            }
+            CAP_EXTENDED_MESSAGE if cap_len == 0 => {
+                capabilities.push(Capability::ExtendedMessage);
             }
             CAP_EXTENDED_NEXT_HOP if cap_len.is_multiple_of(6) => {
                 for tuple in cap_value.as_chunks::<6>().0 {
@@ -722,6 +901,10 @@ fn encode_open(open: &OpenMessage) -> Vec<u8> {
             }
             Capability::RouteRefresh => {
                 cap_bytes.push(CAP_ROUTE_REFRESH);
+                cap_bytes.push(0);
+            }
+            Capability::ExtendedMessage => {
+                cap_bytes.push(CAP_EXTENDED_MESSAGE);
                 cap_bytes.push(0);
             }
             Capability::AddPath(tuples) => {
@@ -1427,7 +1610,7 @@ fn encode_attribute(out: &mut Vec<u8>, flags: u8, attr_type: u8, value: &[u8]) {
         out.push(flags | ATTR_FLAG_EXTENDED_LENGTH);
         out.push(attr_type);
         // Only reached for an attribute value over 255 bytes (a very long
-        // AS_PATH) — still far under a whole message's 4096-byte cap.
+        // AS_PATH) — still far under a whole message's 4096-byte cap (65535 with RFC 8654).
         out.extend_from_slice(&u16::try_from(value.len()).unwrap_or(u16::MAX).to_be_bytes());
     }
     out.extend_from_slice(value);
@@ -1640,7 +1823,7 @@ fn encode_attributes(update: &UpdateMessage, two_octet_as: bool) -> Vec<u8> {
 
 /// Mirror image of `parse_update`. Byte lengths for the withdrawn-routes and
 /// path-attributes sections always fit comfortably in a `u16` in practice —
-/// the whole message is capped at `MAX_MESSAGE_LEN` (4096) bytes by
+/// the whole message is capped at `MAX_MESSAGE_LEN` (4096, or 65535 with RFC 8654) bytes by
 /// `BgpCodec::encode`, which will itself reject the overall frame if
 /// something pathological ever made it larger.
 fn encode_update(update: &UpdateMessage, two_octet_as: bool) -> Vec<u8> {
@@ -1701,6 +1884,139 @@ mod tests {
             mp_reach: vec![],
             mp_unreach: vec![],
         }
+    }
+
+    fn unhandled(message_type: u8, body_len: usize) -> BgpMessage {
+        BgpMessage::Unhandled {
+            message_type,
+            body: Bytes::from(vec![0u8; body_len]),
+        }
+    }
+
+    #[test]
+    fn extended_message_capability_roundtrips() {
+        let mut open = build_open(65001, Ipv4Addr::new(1, 1, 1, 1), 90);
+        open.capabilities.push(Capability::ExtendedMessage);
+        let BgpMessage::Open(back) = roundtrip(BgpMessage::Open(open)) else {
+            panic!("expected OPEN");
+        };
+        assert!(back.capabilities.contains(&Capability::ExtendedMessage));
+    }
+
+    #[test]
+    fn message_length_limit_follows_extended_negotiation() {
+        // 5000 bytes: over 4096, under 65535.
+        let mut plain = BgpCodec::default();
+        assert!(plain
+            .encode(unhandled(99, 5000), &mut BytesMut::new())
+            .is_err());
+
+        let mut ext = BgpCodec {
+            extended: true,
+            ..BgpCodec::default()
+        };
+        let mut buf = BytesMut::new();
+        ext.encode(unhandled(99, 5000), &mut buf).unwrap();
+        // A non-extended decoder refuses it, an extended one accepts it.
+        assert!(matches!(
+            BgpCodec::default().decode(&mut buf.clone()),
+            Err(WireError::BadLength(_))
+        ));
+        assert!(matches!(
+            ext.decode(&mut buf),
+            Ok(Some(BgpMessage::Unhandled { .. }))
+        ));
+        // Never more than 65535, negotiated or not.
+        assert!(ext
+            .encode(unhandled(99, 65535), &mut BytesMut::new())
+            .is_err());
+        // OPEN and KEEPALIVE stay at 4096 even when negotiated.
+        assert!(ext
+            .encode(unhandled(TYPE_OPEN, 5000), &mut BytesMut::new())
+            .is_err());
+        assert!(ext
+            .encode(unhandled(TYPE_KEEPALIVE, 5000), &mut BytesMut::new())
+            .is_err());
+    }
+
+    fn decode_all(codec: &mut BgpCodec, buf: &mut BytesMut) -> Vec<BgpMessage> {
+        let mut out = vec![];
+        while let Some(m) = codec.decode(buf).unwrap() {
+            out.push(m);
+        }
+        out
+    }
+
+    fn many_prefixes(n: u32) -> Vec<Ipv4Net> {
+        (0..n)
+            .map(|i| Ipv4Net::new(Ipv4Addr::from(0x0a00_0000 + (i << 8)), 24).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn oversize_update_is_split_to_the_session_limit() {
+        let mut update = as_path_update(vec![65001]);
+        update.nlri = many_prefixes(3000); // ~12 KB of NLRI
+        update.withdrawn_routes = many_prefixes(10);
+
+        let mut codec = BgpCodec::default();
+        let mut buf = BytesMut::new();
+        codec
+            .encode(BgpMessage::Update(update.clone()), &mut buf)
+            .unwrap();
+        let msgs = decode_all(&mut codec, &mut buf);
+        assert!(msgs.len() >= 3);
+        let (mut nlri, mut withdrawn) = (0, 0);
+        for m in &msgs {
+            let BgpMessage::Update(u) = m else { panic!() };
+            nlri += u.nlri.len();
+            withdrawn += u.withdrawn_routes.len();
+            if !u.nlri.is_empty() {
+                assert!(u.attributes.is_some());
+            }
+        }
+        assert_eq!((nlri, withdrawn), (3000, 10));
+
+        // Negotiated: the same UPDATE fits in one message.
+        let mut ext = BgpCodec {
+            extended: true,
+            ..BgpCodec::default()
+        };
+        let mut buf = BytesMut::new();
+        ext.encode(BgpMessage::Update(update), &mut buf).unwrap();
+        assert_eq!(decode_all(&mut ext, &mut buf).len(), 1);
+    }
+
+    #[test]
+    fn oversize_mp_update_splits_and_unsplittable_update_errors() {
+        let mut update = as_path_update(vec![65001]);
+        update.nlri = vec![];
+        update.mp_unreach = vec![MpUnreachNlri {
+            afi: 2,
+            safi: 1,
+            withdrawn: (0..1000u128)
+                .map(|i| IpNet::V6(ipnet::Ipv6Net::new(Ipv6Addr::from(i << 70), 64).unwrap()))
+                .collect(),
+            withdrawn_path_ids: vec![],
+            evpn: vec![],
+        }];
+        let mut codec = BgpCodec::default();
+        let mut buf = BytesMut::new();
+        codec.encode(BgpMessage::Update(update), &mut buf).unwrap();
+        let total: usize = decode_all(&mut codec, &mut buf)
+            .iter()
+            .map(|m| match m {
+                BgpMessage::Update(u) => u.mp_unreach.iter().map(|m| m.withdrawn.len()).sum(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(total, 1000);
+
+        // One prefix but a >4096-byte AS_PATH: nothing to split.
+        let huge = as_path_update((1..=2000).collect());
+        assert!(BgpCodec::default()
+            .encode(BgpMessage::Update(huge), &mut BytesMut::new())
+            .is_err());
     }
 
     fn two_octet_codec() -> BgpCodec {
