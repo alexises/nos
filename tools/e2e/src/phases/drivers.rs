@@ -651,6 +651,11 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     // router-b really gets a ROUTE-REFRESH, and a peer with no session is a 404.
     let refresh = format!("bgp: sent route refresh request to peer peer={IP_B}");
     let refresh_base = a.count(&refresh);
+    // RFC 7313: both nos speakers negotiate Enhanced Route Refresh, so the
+    // resend comes back bracketed by BoRR/EoRR.
+    let borr = format!("bgp: received BoRR peer={IP_B}");
+    let eorr = format!("bgp: received EoRR peer={IP_B}");
+    let (borr_base, eorr_base) = (a.count(&borr), a.count(&eorr));
     expect_body(
         &a.rest_expect(
             Method::POST,
@@ -662,6 +667,8 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
         "\"route_refresh\":\"sent\"",
     )?;
     a.wait_new(&refresh, refresh_base, 30).await?;
+    a.wait_new(&borr, borr_base, 30).await?;
+    a.wait_new(&eorr, eorr_base, 30).await?;
     a.rest_expect(
         Method::POST,
         "/v1/bgp/r1/peer/10.50.0.99/soft-in",
