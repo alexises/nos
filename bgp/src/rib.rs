@@ -294,6 +294,12 @@ pub enum OutboundUpdate {
     /// An EVPN route originated by `nos-fdbd` (see `evpn_out`).
     AnnounceEvpn(AdvertisedEvpn),
     WithdrawEvpn(EvpnNlri),
+    /// RFC 7313 Begin/End-of-Route-Refresh marker for one family, queued in
+    /// order with the resent routes it brackets.
+    RefreshMarker {
+        family: AddressFamily,
+        subtype: u8,
+    },
 }
 
 /// A route rewritten for advertisement toward one specific peer.
@@ -401,6 +407,9 @@ pub struct BgpRib {
     // import policy (RPL's `Input` is prefix-shaped) or re-advertisement, since
     // nothing consumes EVPN routes yet. Add a Loc-RIB when a MAC-VRF does.
     evpn_adj_rib_in: HashMap<IpAddr, HashMap<EvpnNlri, EvpnRoute>>,
+    /// RFC 7313: prefixes in a peer's Adj-RIB-In marked stale by a `BoRR` and
+    /// not yet re-announced; purged by the matching `EoRR`.
+    stale: HashMap<IpAddr, HashSet<IpNet>>,
     /// EVPN routes originated by each `nos-fdbd` (keyed by broadcast domain),
     /// and what was last announced to each peer — see `evpn_out`.
     evpn_local: HashMap<String, HashMap<nos_proto::EvpnKey, nos_proto::EvpnRoute>>,
@@ -461,6 +470,7 @@ impl BgpRib {
             cluster_id: Ipv4Addr::UNSPECIFIED,
             adj_rib_in: HashMap::new(),
             evpn_adj_rib_in: HashMap::new(),
+            stale: HashMap::new(),
             evpn_local: HashMap::new(),
             evpn_adj_rib_out: HashMap::new(),
             fdb_domains: Vec::new(),
@@ -588,10 +598,14 @@ impl BgpRib {
     /// a no-op. Does not touch `adj_rib_out`: a resend re-announces exactly
     /// the prefix set already recorded as sent, so the withdrawal-diffing
     /// bookkeeping `recompute_and_propagate` relies on is unaffected.
-    pub fn resend_all(&mut self, peer: IpAddr, family: AddressFamily) {
+    pub fn resend_all(&mut self, peer: IpAddr, family: AddressFamily, enhanced: bool) {
         let Some(outbox) = self.peer_outboxes.get(&peer) else {
             return;
         };
+        let marker = |subtype| OutboundUpdate::RefreshMarker { family, subtype };
+        if enhanced {
+            let _ = outbox.tx.send(marker(message::REFRESH_BORR));
+        }
         for (prefix, best) in &self.loc_rib {
             if family_of(*prefix) != family {
                 continue;
@@ -607,6 +621,43 @@ impl BgpRib {
                 self.cluster_id,
             ) {
                 let _ = outbox.tx.send(OutboundUpdate::Announce(adv));
+            }
+        }
+        if enhanced {
+            let _ = outbox.tx.send(marker(message::REFRESH_EORR));
+        }
+    }
+
+    /// RFC 7313 `BoRR` received: every `family` route currently held from
+    /// `peer` becomes stale until the peer re-announces it.
+    pub fn begin_refresh_in(&mut self, peer: IpAddr, family: AddressFamily) {
+        let Some(table) = self.adj_rib_in.get(&peer) else {
+            return;
+        };
+        let set = self.stale.entry(peer).or_default();
+        set.extend(table.keys().copied().filter(|p| family_of(*p) == family));
+    }
+
+    /// RFC 7313 `EoRR` received: withdraw every `family` route from `peer`
+    /// that the refresh did not re-announce.
+    pub fn end_refresh_in(&mut self, peer: IpAddr, family: AddressFamily) {
+        let Some(set) = self.stale.get_mut(&peer) else {
+            return;
+        };
+        let purge: Vec<IpNet> = set
+            .iter()
+            .copied()
+            .filter(|p| family_of(*p) == family)
+            .collect();
+        set.retain(|p| family_of(*p) != family);
+        for prefix in purge {
+            if self
+                .adj_rib_in
+                .get_mut(&peer)
+                .is_some_and(|t| t.remove(&prefix).is_some())
+            {
+                info!(peer = %peer, %prefix, "bgp: purged stale route at end of route refresh");
+                self.recompute_and_propagate(prefix);
             }
         }
     }
@@ -647,6 +698,7 @@ impl BgpRib {
 
     pub fn peer_disconnected(&mut self, peer: IpAddr) {
         self.peer_outboxes.remove(&peer);
+        self.stale.remove(&peer);
         self.adj_rib_out.remove(&peer);
         self.evpn_adj_rib_out.remove(&peer);
         self.rs_sent.retain(|(p, _), _| *p != peer);
@@ -698,6 +750,26 @@ impl BgpRib {
                 .map(|u| u.withdrawn.len())
                 .sum::<usize>();
         let mut touched: HashSet<IpNet> = HashSet::with_capacity(touched_capacity);
+
+        // RFC 7313: any prefix the peer mentions again is no longer stale.
+        if let Some(stale) = self.stale.get_mut(&from) {
+            for p in &update.nlri {
+                stale.remove(&IpNet::V4(*p));
+            }
+            for p in &update.withdrawn_routes {
+                stale.remove(&IpNet::V4(*p));
+            }
+            for mp in &update.mp_reach {
+                for p in &mp.nlri {
+                    stale.remove(p);
+                }
+            }
+            for mp in &update.mp_unreach {
+                for p in &mp.withdrawn {
+                    stale.remove(p);
+                }
+            }
+        }
 
         let withdrawn: Vec<IpNet> = update
             .withdrawn_routes
@@ -2274,8 +2346,8 @@ mod tests {
         recv_all(&mut v4_rx);
         recv_all(&mut v6_rx);
 
-        rib.resend_all(v4_peer, AddressFamily::Ipv4Unicast);
-        rib.resend_all(v6_peer, AddressFamily::Ipv6Unicast);
+        rib.resend_all(v4_peer, AddressFamily::Ipv4Unicast, false);
+        rib.resend_all(v6_peer, AddressFamily::Ipv6Unicast, false);
 
         let v4_updates = recv_all(&mut v4_rx);
         assert_eq!(v4_updates.len(), 1);
@@ -2292,7 +2364,7 @@ mod tests {
         ));
 
         // Requesting the family a peer didn't negotiate is a silent no-op.
-        rib.resend_all(v4_peer, AddressFamily::Ipv6Unicast);
+        rib.resend_all(v4_peer, AddressFamily::Ipv6Unicast, false);
         assert!(recv_all(&mut v4_rx).is_empty());
     }
 
@@ -2754,7 +2826,9 @@ mod tests {
         updates.sort_by_key(|u| match u {
             OutboundUpdate::Withdraw(p, _, _) => p.to_string(),
             OutboundUpdate::Announce(a) => a.prefix.to_string(),
-            OutboundUpdate::AnnounceEvpn(_) | OutboundUpdate::WithdrawEvpn(_) => String::new(),
+            OutboundUpdate::AnnounceEvpn(_)
+            | OutboundUpdate::WithdrawEvpn(_)
+            | OutboundUpdate::RefreshMarker { .. } => String::new(),
         });
         assert_eq!(
             updates,
@@ -2956,6 +3030,57 @@ mod tests {
                 None
             )]
         );
+    }
+
+    #[test]
+    fn enhanced_refresh_purges_unrefreshed_routes_at_eorr() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        let policy = accept_all_policy();
+        for p in ["192.0.2.0/24", "198.51.100.0/24"] {
+            let u = update_with(p, vec![65001], "10.0.0.1", message::Origin::Igp, None);
+            rib.handle_update(peer, false, v4("1.1.1.1"), &u, &policy);
+        }
+        let v4f = AddressFamily::Ipv4Unicast;
+        rib.begin_refresh_in(peer, v4f);
+        // Only one prefix is re-announced during the refresh.
+        let u = update_with(
+            "192.0.2.0/24",
+            vec![65001],
+            "10.0.0.1",
+            message::Origin::Igp,
+            None,
+        );
+        rib.handle_update(peer, false, v4("1.1.1.1"), &u, &policy);
+        rib.end_refresh_in(peer, v4f);
+        assert!(rib.adj_rib_in[&peer].contains_key(&prefix("192.0.2.0/24")));
+        assert!(!rib.adj_rib_in[&peer].contains_key(&prefix("198.51.100.0/24")));
+    }
+
+    #[test]
+    fn enhanced_resend_is_bracketed_by_markers() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let mut rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
+        recv_all(&mut rx);
+        rib.resend_all(peer, AddressFamily::Ipv4Unicast, true);
+        let got = recv_all(&mut rx);
+        assert!(matches!(
+            got.as_slice(),
+            [
+                OutboundUpdate::RefreshMarker {
+                    subtype: message::REFRESH_BORR,
+                    ..
+                },
+                OutboundUpdate::Announce(_),
+                OutboundUpdate::RefreshMarker {
+                    subtype: message::REFRESH_EORR,
+                    ..
+                },
+            ]
+        ));
     }
 
     fn update_with(
@@ -3697,7 +3822,9 @@ mod tests {
         assert!(updates.iter().all(|u| match u {
             OutboundUpdate::Announce(r) => r.path_id.is_none(),
             OutboundUpdate::Withdraw(_, _, id) => id.is_none(),
-            OutboundUpdate::AnnounceEvpn(_) | OutboundUpdate::WithdrawEvpn(_) => true,
+            OutboundUpdate::AnnounceEvpn(_)
+            | OutboundUpdate::WithdrawEvpn(_)
+            | OutboundUpdate::RefreshMarker { .. } => true,
         }));
         // Still transparent (no AS_PATH prepend) — that's governed by
         // is_rs_client alone, independent of ADD-PATH negotiation. Only

@@ -64,6 +64,15 @@ impl Mrai {
         }
     }
 
+    /// Everything held, regardless of its due time.
+    pub fn drain(&mut self) -> Vec<OutboundUpdate> {
+        self.next_due = None;
+        self.pending
+            .drain()
+            .map(|(_, (route, _))| OutboundUpdate::Announce(route))
+            .collect()
+    }
+
     pub fn deadline(&self) -> Option<Instant> {
         self.next_due
     }

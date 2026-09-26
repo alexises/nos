@@ -62,6 +62,8 @@ const CAP_FOUR_OCTET_ASN: u8 = 65;
 const CAP_MULTIPROTOCOL: u8 = 1;
 /// RFC 2918 §3 Route Refresh capability: no payload.
 const CAP_ROUTE_REFRESH: u8 = 2;
+/// RFC 7313 Enhanced Route Refresh capability: no payload.
+const CAP_ENHANCED_ROUTE_REFRESH: u8 = 70;
 /// RFC 8654 §3 Extended Message capability: no payload.
 const CAP_EXTENDED_MESSAGE: u8 = 6;
 /// RFC 8950 §3 Extended Next Hop Encoding capability: one or more `NLRI-AFI(2)
@@ -248,6 +250,8 @@ pub enum Capability {
     },
     /// RFC 2918 code 2: this session accepts `ROUTE_REFRESH` messages.
     RouteRefresh,
+    /// RFC 7313 code 70: `ROUTE_REFRESH` may carry BoRR/EoRR subtypes.
+    EnhancedRouteRefresh,
     /// RFC 8654 code 6: messages up to 65535 bytes (UPDATE, NOTIFICATION,
     /// ROUTE-REFRESH) when both sides advertise it.
     ExtendedMessage,
@@ -285,12 +289,19 @@ pub struct NotificationMessage {
     pub data: Bytes,
 }
 
-/// RFC 2918 `ROUTE_REFRESH`: `AFI(2) reserved(1) SAFI(1)`.
+/// RFC 2918 `ROUTE_REFRESH`: `AFI(2) reserved(1) SAFI(1)`; RFC 7313 turns
+/// the reserved octet into the message subtype.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouteRefreshMessage {
     pub afi: u16,
+    pub subtype: u8,
     pub safi: u8,
 }
+
+/// RFC 7313 §3.2 subtypes: 0 is the plain request, 1/2 bracket the refresh.
+pub const REFRESH_REQUEST: u8 = 0;
+pub const REFRESH_BORR: u8 = 1;
+pub const REFRESH_EORR: u8 = 2;
 
 /// RFC 4271 §4.3 `ORIGIN` path attribute values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -808,6 +819,9 @@ fn parse_capabilities(mut data: &[u8]) -> Result<Vec<Capability>, WireError> {
             CAP_ROUTE_REFRESH if cap_len == 0 => {
                 capabilities.push(Capability::RouteRefresh);
             }
+            CAP_ENHANCED_ROUTE_REFRESH if cap_len == 0 => {
+                capabilities.push(Capability::EnhancedRouteRefresh);
+            }
             CAP_EXTENDED_MESSAGE if cap_len == 0 => {
                 capabilities.push(Capability::ExtendedMessage);
             }
@@ -859,7 +873,7 @@ fn parse_route_refresh(body: &[u8]) -> Result<RouteRefreshMessage, WireError> {
     }
     Ok(RouteRefreshMessage {
         afi: u16::from_be_bytes([body[0], body[1]]),
-        // body[2] is the reserved octet.
+        subtype: body[2],
         safi: body[3],
     })
 }
@@ -867,7 +881,7 @@ fn parse_route_refresh(body: &[u8]) -> Result<RouteRefreshMessage, WireError> {
 fn encode_route_refresh(rr: RouteRefreshMessage) -> Vec<u8> {
     let mut body = Vec::with_capacity(4);
     body.extend_from_slice(&rr.afi.to_be_bytes());
-    body.push(0); // reserved
+    body.push(rr.subtype);
     body.push(rr.safi);
     body
 }
@@ -901,6 +915,10 @@ fn encode_open(open: &OpenMessage) -> Vec<u8> {
             }
             Capability::RouteRefresh => {
                 cap_bytes.push(CAP_ROUTE_REFRESH);
+                cap_bytes.push(0);
+            }
+            Capability::EnhancedRouteRefresh => {
+                cap_bytes.push(CAP_ENHANCED_ROUTE_REFRESH);
                 cap_bytes.push(0);
             }
             Capability::ExtendedMessage => {
@@ -2264,6 +2282,7 @@ mod tests {
     #[test]
     fn route_refresh_roundtrips() {
         let rr = RouteRefreshMessage {
+            subtype: REFRESH_BORR,
             afi: AFI_IPV6,
             safi: 1,
         };

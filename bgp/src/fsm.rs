@@ -256,6 +256,8 @@ struct RemoteInfo {
     four_octet_as: bool,
     /// The peer sent the RFC 8654 Extended Message capability (we always do).
     extended_message: bool,
+    /// The peer sent the RFC 7313 Enhanced Route Refresh capability (we always do).
+    enhanced_refresh: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,6 +436,9 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
         extended_message: open
             .capabilities
             .contains(&message::Capability::ExtendedMessage),
+        enhanced_refresh: open
+            .capabilities
+            .contains(&message::Capability::EnhancedRouteRefresh),
     };
     (
         Some(State::OpenConfirm(remote)),
@@ -562,11 +567,32 @@ async fn resend_loc_rib(
         );
         return;
     };
-    bgp_rib.lock().await.resend_all(peer.remote_address, family);
-    info!(
-        peer = %peer.remote_address, afi = rr.afi,
-        "bgp: received route refresh, resending loc-rib"
-    );
+    // RFC 7313: markers only mean something on a session that negotiated it.
+    let State::Established(remote) = state else {
+        return;
+    };
+    let mut rib = bgp_rib.lock().await;
+    match rr.subtype {
+        message::REFRESH_REQUEST => {
+            rib.resend_all(peer.remote_address, family, remote.enhanced_refresh);
+            info!(
+                peer = %peer.remote_address, afi = rr.afi,
+                "bgp: received route refresh, resending loc-rib"
+            );
+        }
+        message::REFRESH_BORR if remote.enhanced_refresh => {
+            rib.begin_refresh_in(peer.remote_address, family);
+            debug!(peer = %peer.remote_address, afi = rr.afi, "bgp: received BoRR");
+        }
+        message::REFRESH_EORR if remote.enhanced_refresh => {
+            rib.end_refresh_in(peer.remote_address, family);
+            debug!(peer = %peer.remote_address, afi = rr.afi, "bgp: received EoRR");
+        }
+        subtype => debug!(
+            peer = %peer.remote_address, subtype,
+            "ignoring route-refresh with unusable subtype"
+        ),
+    }
 }
 
 /// RFC 2918 outbound: request a refresh for every address family this
@@ -587,6 +613,7 @@ async fn send_route_refresh(
         let _ = writer
             .send(BgpMessage::RouteRefresh(RouteRefreshMessage {
                 afi,
+                subtype: message::REFRESH_REQUEST,
                 safi: 1,
             }))
             .await;
@@ -750,6 +777,8 @@ pub async fn run(
             ctx.transport_afi,
         ));
         open.capabilities.push(message::Capability::RouteRefresh);
+        open.capabilities
+            .push(message::Capability::EnhancedRouteRefresh);
         open.capabilities.push(message::Capability::ExtendedMessage);
         if peer.is_rs_client {
             // Only ever advertised for a route-server-client peer-group,
@@ -798,6 +827,15 @@ pub async fn run(
                 }
                 () = cease.notified() => Event::CollisionLost,
                 Some(update) = outbox_rx.recv() => {
+                    // RFC 7313: EoRR must follow every route it brackets, so
+                    // release anything MRAI is still holding first.
+                    if matches!(update, OutboundUpdate::RefreshMarker { subtype: message::REFRESH_EORR, .. }) {
+                        for held in mrai.drain() {
+                            if let Err(e) = writer.send(outbound_update_to_message(held)).await {
+                                warn!(error = %e, "could not send update");
+                            }
+                        }
+                    }
                     if let Some(update) = mrai.push(update, Instant::now()) {
                         if let Err(e) = writer.send(outbound_update_to_message(update)).await {
                             warn!(error = %e, "could not send update");
@@ -1089,6 +1127,13 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     withdrawn_path_ids: path_ids,
                     evpn: Vec::new(),
                 }],
+            })
+        }
+        OutboundUpdate::RefreshMarker { family, subtype } => {
+            BgpMessage::RouteRefresh(RouteRefreshMessage {
+                afi: afi_of(family),
+                subtype,
+                safi: safi_of(family),
             })
         }
         OutboundUpdate::AnnounceEvpn(route) => BgpMessage::Update(message::UpdateMessage {
@@ -1454,6 +1499,7 @@ mod tests {
             add_path_ipv6: false,
             four_octet_as: true,
             extended_message: false,
+            enhanced_refresh: false,
         };
         let (next, actions) = step(
             State::OpenConfirm(remote),
@@ -1479,6 +1525,7 @@ mod tests {
             add_path_ipv6: false,
             four_octet_as: true,
             extended_message: false,
+            enhanced_refresh: false,
         };
         for state in [
             State::OpenSent,
@@ -1507,6 +1554,7 @@ mod tests {
             add_path_ipv6: false,
             four_octet_as: true,
             extended_message: false,
+            enhanced_refresh: false,
         };
         for (state, event, subcode) in [
             (State::OpenSent, Event::KeepaliveReceived, 1),
@@ -1568,6 +1616,7 @@ mod tests {
             add_path_ipv6: false,
             four_octet_as: true,
             extended_message: false,
+            enhanced_refresh: false,
         };
         let (next, actions) = step(
             State::Established(remote),
@@ -1591,6 +1640,7 @@ mod tests {
             add_path_ipv6: false,
             four_octet_as: true,
             extended_message: false,
+            enhanced_refresh: false,
         };
         let (next, actions) = step(
             State::Established(remote),
