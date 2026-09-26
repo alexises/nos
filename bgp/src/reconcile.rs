@@ -210,6 +210,7 @@ async fn resync(
             route_server_client: group.route_server_client,
             import_policy: policy_cache.resolve(group.import_policy.as_deref()),
             export_policy: policy_cache.resolve(group.export_policy.as_deref()),
+            shutdown: peer.shutdown.clone().or_else(|| group.shutdown.clone()),
         });
     }
 

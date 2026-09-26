@@ -109,6 +109,28 @@ pub enum NextHopMode {
     Unchanged,
 }
 
+/// Administrative shutdown (RFC 4486 Cease/Administrative Shutdown). While set
+/// on a peer-group, or on an individual `BgpPeer` (which overrides the group),
+/// no session is opened or accepted; an established one is closed with a
+/// NOTIFICATION carrying `message` as an RFC 9003 shutdown communication.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BgpShutdown {
+    pub message: Option<String>,
+}
+
+/// RFC 9003 §2: the shutdown communication is at most 255 octets of UTF-8.
+pub const SHUTDOWN_MESSAGE_MAX: usize = 255;
+
+pub(super) fn valid_shutdown(s: Option<&BgpShutdown>) -> garde::Result {
+    match s.and_then(|s| s.message.as_ref()) {
+        Some(m) if m.len() > SHUTDOWN_MESSAGE_MAX => Err(garde::Error::new(
+            "shutdown message must be at most 255 bytes",
+        )),
+        _ => Ok(()),
+    }
+}
+
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
 #[garde(context(Config as ctx))]
@@ -200,6 +222,10 @@ pub struct BgpPeerGroup {
     /// advertisement instead of receipt.
     #[garde(custom(|p: &Option<String>, ctx: &Config| policy_reference_valid(p.as_ref(), ctx)))]
     pub export_policy: Option<String>,
+
+    /// See `BgpShutdown`. Appended last, like every later-added field.
+    #[garde(custom(|s: &Option<BgpShutdown>, _ctx: &Config| valid_shutdown(s.as_ref())))]
+    pub shutdown: Option<BgpShutdown>,
 }
 
 /// `"accept-all"`/`"deny-all"` are always valid regardless of what's
@@ -425,6 +451,7 @@ mod tests {
             route_server_client: false,
             import_policy: None,
             export_policy: None,
+            shutdown: None,
         }
     }
 

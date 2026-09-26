@@ -69,6 +69,12 @@ The loser is torn down with `NOTIFICATION(Cease, ConnectionCollisionResolution)`
 
 Because `BgpRib` is keyed by peer **address** rather than by connection, both connections for a peer share one set of RIB state, so `fsm::run` deregisters (`BgpRib::peer_disconnected`) on its way out **only if it registered** — i.e. only if it reached `Established` and ran `Action::ReportEstablished` (`fsm::run`'s own `registered` flag). A collision loser never registers, and tearing one down used to wipe the *winner's* `adj_rib_in` and, worse, its `peer_outbox` — leaving a session that stayed `Established` but could never advertise to that peer again, with no event that would ever restore it short of a session flap. Guarded by `handshake.rs`'s `collision_leaves_exactly_one_side_running`, which asserts the shared `BgpRib` still has the peer (`BgpRib::has_peer`) after the collision resolves.
 
+### Administrative shutdown (RFC 4486 / RFC 9003)
+
+`BgpPeerGroup.shutdown` and `BgpPeer.shutdown` (`Option<BgpShutdown { message }>`, ops `SetShutdown`/`ClearShutdown` on `BgpPeerGroupOp`/`BgpPeerOp`, CLI `set shutdown [<message>]` in a peer-group / `set peer <addr> shutdown [<message>]`) shut a whole group or one peer; the peer's own value wins over its group's (`reconcile::resync` resolves it into `ResolvedPeer.shutdown`). A shut peer keeps its `PeerSlot` (so it shows as `Idle (shutdown)` in `show bgp brief`) but gets no `active_connect_loop`, and `handle_inbound` drops its inbound connections.
+
+Every session that `reconcile_peers` stops is told why first (`FsmCommand::Cease` on the slot's command channel, waited on for up to `CEASE_GRACE`, then aborted as before): subcode 2 Administrative Shutdown with the message as an RFC 9003 `len(1) || UTF-8` communication (≤255 bytes, cut on a char boundary) when the shutdown was just set, 3 Peer De-configured when the peer left the config, 6 Other Configuration Change for any other restart (`session::cease_reason`). A received NOTIFICATION is logged (`received notification peer=… code=… subcode=… shutdown_message=…`, the message decoded for Cease 2/4). Not implemented: Maximum Prefixes (1), Connection Rejected (5) toward a shut peer's inbound attempts, a one-shot non-persistent reset verb. Verified by `nos-e2e shutdown`.
+
 ### Route refresh (RFC 2918)
 
 `message::build_open` (via `fsm::run`) always advertises the Route Refresh capability (code 2, no payload) — unconditional, like every other capability this NOS sends, with no peer-group opt-out. Both directions are supported once `Established`:

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{
-    AddressFamily, BgpAoKey, BgpAuth, BgpPeerGroup, Config, NextHopMode, SourceAddress,
+    AddressFamily, BgpAoKey, BgpAuth, BgpPeerGroup, BgpShutdown, Config, NextHopMode, SourceAddress,
 };
 
 use super::bgp_instance::find_instance_mut;
@@ -172,6 +172,16 @@ pub enum BgpPeerGroupOp {
         instance: String,
         name: String,
     },
+    /// Administratively shuts the whole peer-group (see `BgpShutdown`).
+    SetShutdown {
+        instance: String,
+        name: String,
+        message: Option<String>,
+    },
+    ClearShutdown {
+        instance: String,
+        name: String,
+    },
 }
 
 impl BgpPeerGroupOp {
@@ -195,8 +205,23 @@ impl BgpPeerGroupOp {
                         route_server_client: false,
                         import_policy: None,
                         export_policy: None,
+                        shutdown: None,
                     });
                 }
+                Ok(())
+            }
+            BgpPeerGroupOp::SetShutdown {
+                instance,
+                name,
+                message,
+            } => {
+                find_group_mut(config, instance, name)?.shutdown = Some(BgpShutdown {
+                    message: message.clone(),
+                });
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearShutdown { instance, name } => {
+                find_group_mut(config, instance, name)?.shutdown = None;
                 Ok(())
             }
             BgpPeerGroupOp::SetRemoteAs {
@@ -496,6 +521,7 @@ mod tests {
             route_server_client: false,
             import_policy: None,
             export_policy: None,
+            shutdown: None,
         }
     }
 

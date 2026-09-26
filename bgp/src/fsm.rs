@@ -643,6 +643,20 @@ async fn apply_collision_verdict(
 /// point — but only if it actually registered, since `BgpRib` is keyed by
 /// peer address and a collision loser shares one with its winner (see
 /// `registered` below).
+/// Logs a received NOTIFICATION; for a Cease/Administrative Shutdown or Reset
+/// (RFC 9003) also the peer's shutdown communication, if it sent a valid one.
+fn log_notification(peer: IpAddr, n: &NotificationMessage) {
+    let is_shutdown = n.error_code == ErrorCode::Cease as u8 && matches!(n.error_subcode, 2 | 4);
+    let message = is_shutdown
+        .then(|| message::decode_shutdown_message(&n.data))
+        .flatten();
+    info!(
+        peer = %peer, code = n.error_code, subcode = n.error_subcode,
+        shutdown_message = message.as_deref().unwrap_or(""),
+        "received notification"
+    );
+}
+
 #[allow(clippy::similar_names)] // add_path_afis (wire AFI ints) vs. add_path_afs (AddressFamily)
 pub async fn run(
     stream: TcpStream,
@@ -797,6 +811,29 @@ pub async fn run(
                         FsmCommand::SendRouteRefresh => {
                             send_route_refresh(&mut writer, &state, &peer).await;
                         }
+                        FsmCommand::Cease { subcode, message } => {
+                            let data = match (subcode, &message) {
+                                (CeaseSubcode::AdministrativeShutdown, Some(m)) => {
+                                    message::encode_shutdown_message(m)
+                                }
+                                _ => Bytes::new(),
+                            };
+                            let _ = writer
+                                .send(BgpMessage::Notification(NotificationMessage {
+                                    error_code: ErrorCode::Cease as u8,
+                                    error_subcode: subcode as u8,
+                                    data,
+                                }))
+                                .await;
+                            info!(
+                                peer = %peer.remote_address, subcode = subcode as u8,
+                                "sent cease notification"
+                            );
+                            break 'session FsmOutcome::NotificationSent {
+                                code: ErrorCode::Cease as u8,
+                                subcode: subcode as u8,
+                            };
+                        }
                     }
                     continue;
                 }
@@ -804,7 +841,10 @@ pub async fn run(
 
             let is_open_event = matches!(event, Event::OpenReceived(_));
             let notification_received = match &event {
-                Event::NotificationReceived(n) => Some((n.error_code, n.error_subcode)),
+                Event::NotificationReceived(n) => {
+                    log_notification(peer.remote_address, n);
+                    Some((n.error_code, n.error_subcode))
+                }
                 _ => None,
             };
             let (mut next_state, mut actions) = step(state, event, &ctx);

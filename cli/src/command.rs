@@ -37,6 +37,8 @@ pub enum BgpPeerGroupField {
     KeepaliveInterval(u16),
     ConnectRetryTime(u16),
     Mrai(u16),
+    /// `shutdown [<message>]`.
+    Shutdown(Option<String>),
     Md5Password(String),
     /// A new (or replacement) TCP-AO key — `current`/`rnext` are set via the
     /// separate `AoCurrentKey`/`AoRnextKey` variants, not here.
@@ -242,6 +244,17 @@ pub enum SetTarget {
     PeerRelative {
         remote_address: IpAddr,
         peer_group: String,
+    },
+    /// `set bgp instance <i> peer <addr> shutdown [<message>]`.
+    BgpPeerShutdown {
+        instance: String,
+        remote_address: IpAddr,
+        message: Option<String>,
+    },
+    /// Context-relative — only valid while navigated into a BGP instance.
+    PeerShutdownRelative {
+        remote_address: IpAddr,
+        message: Option<String>,
     },
     /// Fully-qualified — works from anywhere in configuration mode.
     RoutingTable { name: String, bgp_instance: String },
@@ -483,6 +496,17 @@ pub enum DeleteTarget {
     PeerRelative {
         remote_address: IpAddr,
     },
+    /// `delete bgp instance <i> peer <addr> shutdown`.
+    BgpPeerShutdown {
+        instance: String,
+        remote_address: IpAddr,
+    },
+    /// Only valid while navigated into a BGP instance.
+    PeerShutdownRelative {
+        remote_address: IpAddr,
+    },
+    /// `delete shutdown` — only valid while navigated into a peer-group.
+    Shutdown,
     /// `delete source-address` — only valid while navigated into a
     /// peer-group.
     SourceAddress,
@@ -1204,6 +1228,11 @@ fn port_aggregate_field_delete(name: &str, rest: &[&str]) -> Option<PortAggregat
     })
 }
 
+/// The free-text tail of `shutdown [<message>]`; `None` when omitted.
+fn join_message(words: &[&str]) -> Option<String> {
+    (!words.is_empty()).then(|| words.join(" "))
+}
+
 fn parse_set(t: &[&str]) -> Option<Command> {
     Some(match t {
         ["bgp", "instance", name, "asn", n] => Command::Set(SetTarget::BgpInstance {
@@ -1324,6 +1353,27 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 field: BgpPeerGroupField::Mrai(n.parse::<u16>().ok()?),
             })
         }
+        ["bgp", "instance", instance, "peer-group", group, "shutdown", msg @ ..] => {
+            Command::Set(SetTarget::BgpPeerGroup {
+                instance: (*instance).to_string(),
+                group: (*group).to_string(),
+                field: BgpPeerGroupField::Shutdown(join_message(msg)),
+            })
+        }
+        ["bgp", "instance", instance, "peer", ip, "shutdown", msg @ ..] => {
+            Command::Set(SetTarget::BgpPeerShutdown {
+                instance: (*instance).to_string(),
+                remote_address: ip.parse::<IpAddr>().ok()?,
+                message: join_message(msg),
+            })
+        }
+        ["peer", ip, "shutdown", msg @ ..] => Command::Set(SetTarget::PeerShutdownRelative {
+            remote_address: ip.parse::<IpAddr>().ok()?,
+            message: join_message(msg),
+        }),
+        ["shutdown", msg @ ..] => Command::Set(SetTarget::PeerGroupRelative {
+            field: BgpPeerGroupField::Shutdown(join_message(msg)),
+        }),
         ["bgp", "instance", instance, "peer-group", group, "next-hop", "self"] => {
             Command::Set(SetTarget::BgpPeerGroup {
                 instance: (*instance).to_string(),
@@ -2101,6 +2151,16 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
             instance: (*instance).to_string(),
             remote_address: ip.parse::<IpAddr>().ok()?,
         }),
+        ["bgp", "instance", instance, "peer", ip, "shutdown"] => {
+            Command::Delete(DeleteTarget::BgpPeerShutdown {
+                instance: (*instance).to_string(),
+                remote_address: ip.parse::<IpAddr>().ok()?,
+            })
+        }
+        ["peer", ip, "shutdown"] => Command::Delete(DeleteTarget::PeerShutdownRelative {
+            remote_address: ip.parse::<IpAddr>().ok()?,
+        }),
+        ["shutdown"] => Command::Delete(DeleteTarget::Shutdown),
         ["peer", ip] => Command::Delete(DeleteTarget::PeerRelative {
             remote_address: ip.parse::<IpAddr>().ok()?,
         }),
@@ -2435,6 +2495,34 @@ fn parse_ospf_crypto_algorithm(token: &str) -> Option<OspfCryptoAlgorithm> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_shutdown_with_and_without_a_message() {
+        assert_eq!(
+            Command::parse("set shutdown planned maintenance"),
+            Command::Set(SetTarget::PeerGroupRelative {
+                field: BgpPeerGroupField::Shutdown(Some("planned maintenance".to_string())),
+            })
+        );
+        assert_eq!(
+            Command::parse("set peer 192.0.2.1 shutdown"),
+            Command::Set(SetTarget::PeerShutdownRelative {
+                remote_address: "192.0.2.1".parse().unwrap(),
+                message: None,
+            })
+        );
+        assert_eq!(
+            Command::parse("delete shutdown"),
+            Command::Delete(DeleteTarget::Shutdown)
+        );
+        assert_eq!(
+            Command::parse("delete bgp instance r1 peer 192.0.2.1 shutdown"),
+            Command::Delete(DeleteTarget::BgpPeerShutdown {
+                instance: "r1".to_string(),
+                remote_address: "192.0.2.1".parse().unwrap(),
+            })
+        );
+    }
 
     #[test]
     fn parses_mrai() {

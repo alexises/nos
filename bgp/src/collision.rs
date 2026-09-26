@@ -40,11 +40,18 @@ pub enum Role {
 
 /// An operator-triggered action against a peer's live session, delivered
 /// through `PeerSlot`'s command channel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsmCommand {
     /// `clear bgp <instance> <peer> soft-in` — ask this peer to resend its
     /// Adj-RIB-Out to us, for every address family this session negotiated.
     SendRouteRefresh,
+    /// The peer is being administratively shut, de-configured or restarted
+    /// with new config: send a Cease NOTIFICATION (`message` becomes an
+    /// RFC 9003 shutdown communication, for subcode 2 only) and close.
+    Cease {
+        subcode: crate::message::CeaseSubcode,
+        message: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -372,6 +379,7 @@ mod tests {
             route_server_client: false,
             import_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+            shutdown: None,
         })
     }
 

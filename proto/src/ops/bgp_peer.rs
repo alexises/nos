@@ -2,7 +2,7 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{BgpPeer, Config};
+use crate::schema::{BgpPeer, BgpShutdown, Config};
 
 use super::bgp_instance::find_instance_mut;
 use super::OpError;
@@ -20,6 +20,17 @@ pub enum BgpPeerOp {
         peer_group: String,
     },
     Delete {
+        instance: String,
+        remote_address: IpAddr,
+    },
+    /// Administratively shuts this one peer, overriding its peer-group's own
+    /// `shutdown` (see `BgpShutdown`). The peer must already exist.
+    SetShutdown {
+        instance: String,
+        remote_address: IpAddr,
+        message: Option<String>,
+    },
+    ClearShutdown {
         instance: String,
         remote_address: IpAddr,
     },
@@ -43,8 +54,26 @@ impl BgpPeerOp {
                     None => inst.peers.push(BgpPeer {
                         remote_address: *remote_address,
                         peer_group: peer_group.clone(),
+                        shutdown: None,
                     }),
                 }
+                Ok(())
+            }
+            BgpPeerOp::SetShutdown {
+                instance,
+                remote_address,
+                message,
+            } => {
+                find_peer_mut(config, instance, remote_address)?.shutdown = Some(BgpShutdown {
+                    message: message.clone(),
+                });
+                Ok(())
+            }
+            BgpPeerOp::ClearShutdown {
+                instance,
+                remote_address,
+            } => {
+                find_peer_mut(config, instance, remote_address)?.shutdown = None;
                 Ok(())
             }
             BgpPeerOp::Delete {
@@ -64,6 +93,21 @@ impl BgpPeerOp {
             }
         }
     }
+}
+
+fn find_peer_mut<'a>(
+    config: &'a mut Config,
+    instance: &str,
+    remote_address: &IpAddr,
+) -> Result<&'a mut BgpPeer, OpError> {
+    find_instance_mut(config, instance)?
+        .peers
+        .iter_mut()
+        .find(|p| &p.remote_address == remote_address)
+        .ok_or_else(|| OpError::BgpPeerNotFound {
+            instance: instance.to_string(),
+            remote_address: *remote_address,
+        })
 }
 
 #[cfg(test)]
@@ -119,6 +163,7 @@ mod tests {
             vec![BgpPeer {
                 remote_address: addr(192, 0, 2, 1),
                 peer_group: "pg1".to_string(),
+                shutdown: None,
             }],
         )]);
         BgpPeerOp::Set {
@@ -152,6 +197,7 @@ mod tests {
             vec![BgpPeer {
                 remote_address: addr(192, 0, 2, 1),
                 peer_group: "pg1".to_string(),
+                shutdown: None,
             }],
         )]);
         BgpPeerOp::Delete {
