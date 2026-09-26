@@ -181,6 +181,8 @@ pub const OSPFV3_PROFILE: &str = "ospfv3-profile1";
 pub const OSPFV3_ADDRESS_A: &str = "2001:db8:1::1/64";
 pub const OSPFV3_ADDRESS_B: &str = "2001:db8:1::2/64";
 pub const OSPFV3_LOOPBACK_ADDRESS: &str = "2001:db8:2::1/128";
+/// router-b's loopback for `ospfv3-lfa` (`OSPFV3_LOOPBACK_ADDRESS` is router-a's).
+pub const OSPFV3_LFA_LOOPBACK_ADDRESS: &str = "2001:db8:4::1/128";
 /// 0xA021 (E-Router-LSA) as `lsa_type` prints in the logs.
 pub const LSA_TYPE_E_ROUTER: u16 = 0xA021;
 pub const OSPFV3_BROADCAST_ADDRESS_A: &str = "2001:db8:3::1/64";

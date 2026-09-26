@@ -49,6 +49,9 @@ pub struct RibEntry {
     /// the driver as a second route at a higher metric. Part of equality, so
     /// a backup-only change counts as a change of the winner.
     pub backup: Option<IpAddr>,
+    /// `interface_id` of `backup` — it can leave over a different link than
+    /// the primary, and an IPv6 link-local backup needs one just the same.
+    pub backup_interface_id: Option<u32>,
 }
 
 /// Whether a mutation actually changed a prefix's *winning* candidate —
@@ -278,6 +281,7 @@ pub fn build_from_config(cfg: &Config, table_name: &str) -> Option<Rib> {
                     source: RouteSource::Static,
                     interface_id: None,
                     backup: None,
+                    backup_interface_id: None,
                 });
             }
         } else {
@@ -314,6 +318,7 @@ mod tests {
             source,
             interface_id: None,
             backup: None,
+            backup_interface_id: None,
         };
         rib.insert(entry("10.1.0.0/16", RouteSource::Ospf));
         rib.insert(entry("10.2.0.0/16", RouteSource::Static));
@@ -346,6 +351,7 @@ mod tests {
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         });
         assert_eq!(
             rib.best_route(&prefix).unwrap().gateway,
@@ -366,6 +372,7 @@ mod tests {
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
             backup: None,
+            backup_interface_id: None,
         });
         rib.insert(RibEntry {
             interface_id: None,
@@ -373,6 +380,7 @@ mod tests {
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         });
         assert_eq!(rib.best_route(&prefix).unwrap().source, RouteSource::Static);
     }
@@ -388,6 +396,7 @@ mod tests {
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         });
         rib.insert(RibEntry {
             interface_id: None,
@@ -395,6 +404,7 @@ mod tests {
             gateway: "10.0.1.1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         });
         assert_eq!(rib.best_routes().len(), 2);
     }
@@ -410,6 +420,7 @@ mod tests {
             gateway: "10.0.1.1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         });
         rib.insert(RibEntry {
             interface_id: None,
@@ -417,6 +428,7 @@ mod tests {
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
             backup: None,
+            backup_interface_id: None,
         });
         rib.insert(RibEntry {
             interface_id: None,
@@ -424,6 +436,7 @@ mod tests {
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         });
 
         let all = rib.all_routes();
@@ -448,6 +461,7 @@ mod tests {
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         });
         rib.insert(RibEntry {
             interface_id: None,
@@ -455,6 +469,7 @@ mod tests {
             gateway: "10.0.1.1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         });
 
         let (matched, candidates) = rib.lookup("10.0.1.5".parse().unwrap()).unwrap();
@@ -498,6 +513,7 @@ mod tests {
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
             backup: None,
+            backup_interface_id: None,
         });
         rib.replace_source(
             RouteSource::Static,
@@ -507,6 +523,7 @@ mod tests {
                 gateway: "10.0.0.1".parse().unwrap(),
                 source: RouteSource::Static,
                 backup: None,
+                backup_interface_id: None,
             }],
         );
         let candidates = rib
@@ -530,6 +547,7 @@ mod tests {
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         });
         rib.replace_source(RouteSource::Static, Vec::new());
         assert!(rib.is_empty());
@@ -545,6 +563,7 @@ mod tests {
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         });
         rib.upsert(RibEntry {
             interface_id: None,
@@ -552,6 +571,7 @@ mod tests {
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
             backup: None,
+            backup_interface_id: None,
         });
         rib.upsert(RibEntry {
             interface_id: None,
@@ -559,6 +579,7 @@ mod tests {
             gateway: "10.0.0.99".parse().unwrap(),
             source: RouteSource::Bgp,
             backup: None,
+            backup_interface_id: None,
         });
         let candidates = rib
             .all_routes()
@@ -584,6 +605,7 @@ mod tests {
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
             backup: None,
+            backup_interface_id: None,
         };
         assert_eq!(
             rib.upsert_and_diff(entry.clone()),
@@ -602,6 +624,7 @@ mod tests {
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         });
         // Static already wins this prefix, so a new/changed Bgp candidate
         // never becomes the winner — no kernel-visible change.
@@ -612,6 +635,7 @@ mod tests {
                 gateway: "10.0.0.9".parse().unwrap(),
                 source: RouteSource::Bgp,
                 backup: None,
+                backup_interface_id: None,
             }),
             BestPathChange::Unchanged
         );
@@ -627,6 +651,7 @@ mod tests {
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
             backup: None,
+            backup_interface_id: None,
         };
         assert_eq!(
             rib.upsert_and_diff(bgp_entry),
@@ -636,6 +661,7 @@ mod tests {
                 gateway: "10.0.0.9".parse().unwrap(),
                 source: RouteSource::Bgp,
                 backup: None,
+                backup_interface_id: None,
             })
         );
         let static_entry = RibEntry {
@@ -644,6 +670,7 @@ mod tests {
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         };
         assert_eq!(
             rib.upsert_and_diff(static_entry.clone()),
@@ -661,6 +688,7 @@ mod tests {
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
             backup: None,
+            backup_interface_id: None,
         });
         assert_eq!(
             rib.remove_and_diff(&prefix, RouteSource::Bgp),
@@ -678,6 +706,7 @@ mod tests {
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         });
         rib.insert(RibEntry {
             interface_id: None,
@@ -685,6 +714,7 @@ mod tests {
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
             backup: None,
+            backup_interface_id: None,
         });
         // Static still wins after Bgp's candidate is removed.
         assert_eq!(
@@ -703,6 +733,7 @@ mod tests {
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         });
         rib.insert(RibEntry {
             interface_id: None,
@@ -710,6 +741,7 @@ mod tests {
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
             backup: None,
+            backup_interface_id: None,
         });
         assert_eq!(
             rib.remove_and_diff(&prefix, RouteSource::Static),
@@ -719,6 +751,7 @@ mod tests {
                 gateway: "10.0.0.9".parse().unwrap(),
                 source: RouteSource::Bgp,
                 backup: None,
+                backup_interface_id: None,
             })
         );
     }
@@ -733,6 +766,7 @@ mod tests {
             gateway: "10.0.0.1".parse().unwrap(),
             source: RouteSource::Static,
             backup: None,
+            backup_interface_id: None,
         });
         rib.insert(RibEntry {
             interface_id: None,
@@ -740,6 +774,7 @@ mod tests {
             gateway: "10.0.0.9".parse().unwrap(),
             source: RouteSource::Bgp,
             backup: None,
+            backup_interface_id: None,
         });
         rib.remove(&prefix, RouteSource::Bgp);
         let candidates = rib

@@ -82,6 +82,15 @@ pub struct RouteEntry {
     /// verbatim by `rib_push_client`.
     pub interface_id: u32,
     pub metric: u32,
+    /// RFC 5286 loop-free alternate (a different first hop than `next_hop`
+    /// that provably won't loop the packet back through us), if one exists,
+    /// with its own outgoing `interface_id` — it may leave over another link.
+    /// Filled in by `compute` after `collect_prefix_routes`.
+    pub backup_next_hop: Option<Ipv6Addr>,
+    pub backup_interface_id: Option<u32>,
+    /// The vertex this prefix hangs off — what the loop-free test is
+    /// evaluated against, since the prefix metric cancels out of it.
+    egress: Vertex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,17 +162,121 @@ pub fn compute(root: Ipv4Addr, lsas: &[std::sync::Arc<Lsa>]) -> Vec<RouteEntry> 
         })
         .collect();
 
-    let (dist, next_hop) = run_dijkstra(root, &routers, &networks, &links);
+    let (dist, next_hop) = run_dijkstra(root, &routers, &networks, Some(&links));
     let mut out: HashMap<(Ipv6Addr, u8), RouteEntry> = HashMap::new();
     collect_prefix_routes(root, &routers, &prefix_lsas, &dist, &next_hop, &mut out);
+
+    let alternates = alternates(root, &routers, &networks, &links);
+    for route in out.values_mut() {
+        if let Some(a) = pick_backup(route, &alternates, &dist) {
+            route.backup_next_hop = Some(a.addr);
+            route.backup_interface_id = Some(a.interface_id);
+        }
+    }
     out.into_values().collect()
+}
+
+/// One candidate first hop for a loop-free alternate: a router adjacent to
+/// root, reached at its link-local `addr` over root's `interface_id`, with
+/// the shortest-path distances *from that router* to every vertex.
+struct Alternate {
+    addr: Ipv6Addr,
+    interface_id: u32,
+    /// Root's cost of the link to it.
+    link_cost: u32,
+    /// Its shortest distance back to root.
+    to_root: u32,
+    dist_from: HashMap<Vertex, u32>,
+}
+
+/// RFC 5286 basic loop-free alternates: every root-adjacent router (p2p
+/// neighbor, or another router on a transit network root sits on), each with
+/// its own distance-only Dijkstra over the same LSDB.
+///
+/// `ponytail:` one full Dijkstra per neighbor per area on every SPF run, link
+/// protection only (RFC 5286 §3.1's inequality) — same ceiling as
+/// `ospf::spf::alternates`.
+fn alternates(
+    root: Ipv4Addr,
+    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
+    links: &LinkLocalAddresses,
+) -> Vec<Alternate> {
+    let Some(root_lsa) = routers.get(&root) else {
+        return Vec::new();
+    };
+    // (neighbor router-id, its link-local address, root's ifindex, root's cost)
+    let mut candidates: Vec<(Ipv4Addr, Ipv6Addr, u32, u32)> = Vec::new();
+    for l in &root_lsa.links {
+        let cost = u32::from(l.metric);
+        match l.link_type {
+            LINK_TYPE_POINT_TO_POINT => {
+                let w = l.neighbor_router_id;
+                if let Some((addr, ifid)) = p2p_next_hop(routers, links, root, w) {
+                    candidates.push((w, addr, ifid, cost));
+                }
+            }
+            LINK_TYPE_TRANSIT_NETWORK => {
+                let network_id = lsa::interface_id_key(l.neighbor_interface_id);
+                let Some(net) = networks.get(&network_id) else {
+                    continue;
+                };
+                for &r in net.attached_routers.iter().filter(|&&r| r != root) {
+                    if let Some(addr) = network_next_hop(routers, links, network_id, r) {
+                        candidates.push((r, addr, l.interface_id, cost));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    candidates
+        .into_iter()
+        .filter_map(|(id, addr, interface_id, link_cost)| {
+            let dist_from = run_dijkstra(id, routers, networks, None).0;
+            let to_root = *dist_from.get(&Vertex::Router(root))?;
+            Some(Alternate {
+                addr,
+                interface_id,
+                link_cost,
+                to_root,
+                dist_from,
+            })
+        })
+        .collect()
+}
+
+/// The best alternate for `route`: among candidates whose address differs
+/// from the primary next hop and that satisfy RFC 5286 §3.1's loop-free
+/// inequality `dist(N, E) < dist(N, root) + dist(root, E)` for the route's
+/// egress vertex `E`, the one with the lowest total cost (ties: lowest
+/// address, for determinism).
+fn pick_backup<'a>(
+    route: &RouteEntry,
+    alternates: &'a [Alternate],
+    dist: &HashMap<Vertex, u32>,
+) -> Option<&'a Alternate> {
+    let root_to_egress = *dist.get(&route.egress)?;
+    alternates
+        .iter()
+        .filter(|a| a.addr != route.next_hop)
+        .filter_map(|a| {
+            let n_to_egress = *a.dist_from.get(&route.egress)?;
+            (n_to_egress < a.to_root.saturating_add(root_to_egress)).then_some((
+                a.link_cost.saturating_add(n_to_egress),
+                a.addr,
+                a,
+            ))
+        })
+        .min_by_key(|&(cost, addr, _)| (cost, addr))
+        .map(|(_, _, a)| a)
 }
 
 fn run_dijkstra(
     root: Ipv4Addr,
     routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
     networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
-    links: &LinkLocalAddresses,
+    links: Option<&LinkLocalAddresses>,
 ) -> (HashMap<Vertex, u32>, HashMap<Vertex, NextHop>) {
     let root_vertex = Vertex::Router(root);
     let mut dist: HashMap<Vertex, u32> = HashMap::new();
@@ -191,13 +304,18 @@ fn run_dijkstra(
             }
             let candidate = d.saturating_add(edge_cost);
             if candidate < *dist.get(&next_vertex).unwrap_or(&u32::MAX) {
-                let Some(nh) =
-                    derive_next_hop(vertex, next_vertex, root, routers, links, &next_hop)
-                else {
-                    continue;
-                };
+                // `links: None` is a distance-only run (LFA neighbors), which
+                // has no use for next hops and must not drop vertices whose
+                // derivation fails from a non-root point of view.
+                if let Some(links) = links {
+                    let Some(nh) =
+                        derive_next_hop(vertex, next_vertex, root, routers, links, &next_hop)
+                    else {
+                        continue;
+                    };
+                    next_hop.insert(next_vertex, nh);
+                }
                 dist.insert(next_vertex, candidate);
-                next_hop.insert(next_vertex, nh);
                 heap.push(HeapEntry {
                     dist: candidate,
                     vertex: next_vertex,
@@ -403,6 +521,9 @@ fn collect_prefix_routes(
                     next_hop: nh,
                     interface_id,
                     metric: d.saturating_add(u32::from(entry.metric)),
+                    backup_next_hop: None,
+                    backup_interface_id: None,
+                    egress: vertex,
                 },
             );
         }
@@ -553,6 +674,83 @@ mod tests {
                     .collect(),
             }),
         })
+    }
+
+    /// r1(root) — r2, r1 — r3, r2 — r3 (cost `cost_23`); r2 owns a prefix.
+    fn triangle(cost_23: u16) -> Vec<Arc<Lsa>> {
+        let (r1, r2, r3) = (router_id(1), router_id(2), router_id(3));
+        vec![
+            router_lsa(r1, vec![p2p(r2, 1, 1, 1), p2p(r3, 2, 1, 1)]),
+            router_lsa(r2, vec![p2p(r1, 1, 1, 1), p2p(r3, 2, 2, cost_23)]),
+            router_lsa(r3, vec![p2p(r1, 1, 2, 1), p2p(r2, 2, 2, cost_23)]),
+            link_lsa(r2, 1, "fe80::2".parse().unwrap()),
+            link_lsa(r3, 1, "fe80::3".parse().unwrap()),
+            router_prefix_lsa(r2, vec![("2001:db8:2::/64".parse().unwrap(), 1)]),
+        ]
+    }
+
+    #[test]
+    fn triangle_gets_loop_free_alternate_with_its_own_interface() {
+        let routes = compute(router_id(1), &triangle(1));
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].next_hop, "fe80::2".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(routes[0].interface_id, 1);
+        // 3 reaches 2 directly (1) < 3→root (1) + root→2 (1); root's link to
+        // 3 is its own interface 2, not the primary's 1.
+        assert_eq!(
+            routes[0].backup_next_hop,
+            Some("fe80::3".parse::<Ipv6Addr>().unwrap())
+        );
+        assert_eq!(routes[0].backup_interface_id, Some(2));
+    }
+
+    #[test]
+    fn neighbor_whose_best_path_loops_through_root_is_not_an_alternate() {
+        // 3's shortest way to 2 is back through root (1+1=2 < 10), so
+        // 2 < 1 + 1 fails: it would loop.
+        let routes = compute(router_id(1), &triangle(10));
+        assert_eq!(routes[0].backup_next_hop, None);
+        assert_eq!(routes[0].backup_interface_id, None);
+    }
+
+    #[test]
+    fn single_neighbor_has_no_alternate() {
+        let (r1, r2) = (router_id(1), router_id(2));
+        let routes = compute(
+            r1,
+            &[
+                router_lsa(r1, vec![p2p(r2, 1, 1, 1)]),
+                router_lsa(r2, vec![p2p(r1, 1, 1, 1)]),
+                link_lsa(r2, 1, "fe80::2".parse().unwrap()),
+                router_prefix_lsa(r2, vec![("2001:db8:2::/64".parse().unwrap(), 1)]),
+            ],
+        );
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].backup_next_hop, None);
+    }
+
+    #[test]
+    fn transit_network_peer_is_an_alternate() {
+        // root and 2 and 3 share network (DR = root, if 10); 3 also has a
+        // direct link to 2 so it doesn't route back through root.
+        let (r1, r2, r3) = (router_id(1), router_id(2), router_id(3));
+        let lsas = [
+            router_lsa(r1, vec![transit(10, 10, r1, 1)]),
+            router_lsa(r2, vec![transit(10, 20, r1, 1), p2p(r3, 21, 31, 1)]),
+            router_lsa(r3, vec![transit(10, 30, r1, 1), p2p(r2, 31, 21, 1)]),
+            network_lsa(10, r1, vec![r1, r2, r3]),
+            link_lsa(r2, 20, "fe80::2".parse().unwrap()),
+            link_lsa(r3, 30, "fe80::3".parse().unwrap()),
+            router_prefix_lsa(r2, vec![("2001:db8:2::/64".parse().unwrap(), 1)]),
+        ];
+        let routes = compute(r1, &lsas);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].next_hop, "fe80::2".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(
+            routes[0].backup_next_hop,
+            Some("fe80::3".parse::<Ipv6Addr>().unwrap())
+        );
+        assert_eq!(routes[0].backup_interface_id, Some(10));
     }
 
     #[test]

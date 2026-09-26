@@ -747,3 +747,31 @@ pub async fn ospfv3_dr(w: &mut World) -> anyhow::Result<()> {
     ))
     .await
 }
+
+/// RFC 5286 loop-free alternate over OSPFv3 (requires `ospfv3-dr`, which puts
+/// router-c on the shared bridge): router-a reaches router-b's loopback via b
+/// itself (primary) or via c, whose own shortest path to b doesn't run back
+/// through a. The backup is a link-local next hop, so `nos-ribd` must install
+/// it with its own outgoing interface and at a metric *above* the primary's
+/// (an IPv6 primary is 1024).
+pub async fn ospfv3_lfa(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let prefix = OSPFV3_LFA_LOOPBACK_ADDRESS;
+    let primary = format!("added route prefix={prefix}.*source=Some(Ospf) backup=false");
+    let backup = format!("added route prefix={prefix}.*source=Some(Ospf) backup=true");
+    let (p0, b0) = (a.count(&primary), a.count(&backup));
+    b.provision(&[
+        "--ospfv3-loopback-address",
+        prefix,
+        "--ospfv3-loopback-profile",
+        OSPFV3_PROFILE,
+    ])
+    .await?;
+    a.wait_new(&primary, p0, 60).await?;
+    a.wait_new(&backup, b0, 60).await?;
+
+    let removed = format!("removed route prefix={prefix}.*backup=true");
+    let r0 = a.count(&removed);
+    b.provision(&["--clear-ospfv3-loopback-profile"]).await?;
+    a.wait_new(&removed, r0, 60).await
+}

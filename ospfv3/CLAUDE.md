@@ -6,6 +6,7 @@ One `nos-ospfv3d --instance <name>` process per `Ospfv3Instance`, spawned by `no
 - Hello / DBD / LSR / LSU / LSAck reaching `Full` over point-to-point and broadcast links (DR/BDR election and neighbor FSM come from `nos-ospf-common`).
 - Single-area SPF (RFC 5340 §4.8/§16) with next hops from Link-LSAs (never a live neighbor table), pushed to `nos-ribd` (`rib_push_client`).
 - RFC 8362 Full mode (`extended-lsa`, `--ospfv3-extended-lsa`): E-Router/E-Link/E-Intra-Area-Prefix LSAs instead of the legacy set. No Sparse mode.
+- RFC 5286 basic loop-free alternates (`spf::alternates`/`pick_backup`, same inequality and `ponytail:` ceiling as `nos-ospfd`: link protection only, one distance-only Dijkstra per neighbor — `run_dijkstra(.., links: None)` skips next-hop derivation, which would otherwise drop vertices from a non-root viewpoint). Differs from v2: the backup is link-local too, so it carries its own `backup_interface_id` (`OspfRoute`/`RibEntry`) and can leave over a different link than the primary; and `nos-ribd` installs an IPv6 backup at 2000, not 1000 (an IPv6 primary is 1024). Verified by `nos-e2e ospfv3-lfa`.
 - **Not yet** (OSPFv2-only for now): authentication, ABR, ASBR/redistribution, RFC 5838 multi-instance.
 
 ## Layout
@@ -19,4 +20,4 @@ One `nos-ospfv3d --instance <name>` process per `Ospfv3Instance`, spawned by `no
 - Timers (`--lsa-age-multiplier`) are test-only, like in `nos-ospfd`.
 
 ## Verification
-`nos-e2e ospfv3`, `ospfv3-dr`, `ospfv3-mtu-pagination` (see root `CLAUDE.md`).
+`nos-e2e ospfv3`, `ospfv3-dr`, `ospfv3-lfa`, `ospfv3-mtu-pagination` (see root `CLAUDE.md`).

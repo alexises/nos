@@ -129,11 +129,33 @@ async fn run(
     }
 }
 
-/// `(gateway, interface_id, metric)` per prefix — `interface_id` is always `Some`
-/// (root's own local ifindex, per `spf::RouteEntry::interface_id`'s doc
-/// comment), kept `Option` only to match `OspfRoute::interface_id`'s own
-/// shape on the wire.
-async fn compute_routes(links: &Arc<LinkManager>) -> HashMap<IpNet, (IpAddr, Option<u32>, u32)> {
+/// What one prefix is pushed as: the next hop (`interface_id` is always `Some`
+/// — root's own local ifindex, per `spf::RouteEntry::interface_id`'s doc
+/// comment — kept `Option` only to match `OspfRoute`'s wire shape), its LFA
+/// backup with the backup's own ifindex, and the metric.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Pushed {
+    next_hop: IpAddr,
+    interface_id: Option<u32>,
+    backup_next_hop: Option<IpAddr>,
+    backup_interface_id: Option<u32>,
+    metric: u32,
+}
+
+impl Pushed {
+    fn route(self, prefix: IpNet) -> OspfRoute {
+        OspfRoute {
+            prefix,
+            next_hop: self.next_hop,
+            interface_id: self.interface_id,
+            backup_next_hop: self.backup_next_hop,
+            backup_interface_id: self.backup_interface_id,
+            metric: self.metric,
+        }
+    }
+}
+
+async fn compute_routes(links: &Arc<LinkManager>) -> HashMap<IpNet, Pushed> {
     links
         .compute_routes()
         .await
@@ -141,7 +163,13 @@ async fn compute_routes(links: &Arc<LinkManager>) -> HashMap<IpNet, (IpAddr, Opt
         .map(|e| {
             (
                 IpNet::V6(e.prefix),
-                (IpAddr::V6(e.next_hop), Some(e.interface_id), e.metric),
+                Pushed {
+                    next_hop: IpAddr::V6(e.next_hop),
+                    interface_id: Some(e.interface_id),
+                    backup_next_hop: e.backup_next_hop.map(IpAddr::V6),
+                    backup_interface_id: e.backup_interface_id,
+                    metric: e.metric,
+                },
             )
         })
         .collect()
@@ -154,34 +182,19 @@ async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>)
     }
 }
 
-fn to_routes(routes: &HashMap<IpNet, (IpAddr, Option<u32>, u32)>) -> Vec<OspfRoute> {
-    routes
-        .iter()
-        .map(|(&prefix, &(next_hop, interface_id, metric))| OspfRoute {
-            prefix,
-            next_hop,
-            interface_id,
-            backup_next_hop: None,
-            metric,
-        })
-        .collect()
+fn to_routes(routes: &HashMap<IpNet, Pushed>) -> Vec<OspfRoute> {
+    routes.iter().map(|(&p, &r)| r.route(p)).collect()
 }
 
 /// Mirrors `ospf::rib_push_client::diff_routes` exactly.
 fn diff_routes(
-    last_sent: &HashMap<IpNet, (IpAddr, Option<u32>, u32)>,
-    new_routes: &HashMap<IpNet, (IpAddr, Option<u32>, u32)>,
+    last_sent: &HashMap<IpNet, Pushed>,
+    new_routes: &HashMap<IpNet, Pushed>,
 ) -> Vec<OspfRouteUpdate> {
     let mut updates = Vec::new();
-    for (&prefix, &(next_hop, interface_id, metric)) in new_routes {
-        if last_sent.get(&prefix) != Some(&(next_hop, interface_id, metric)) {
-            updates.push(OspfRouteUpdate::Add(OspfRoute {
-                prefix,
-                next_hop,
-                interface_id,
-                backup_next_hop: None,
-                metric,
-            }));
+    for (&prefix, &pushed) in new_routes {
+        if last_sent.get(&prefix) != Some(&pushed) {
+            updates.push(OspfRouteUpdate::Add(pushed.route(prefix)));
         }
     }
     for prefix in last_sent.keys() {
@@ -196,11 +209,37 @@ fn diff_routes(
 mod tests {
     use super::*;
 
-    fn routes(pairs: &[(&str, &str)]) -> HashMap<IpNet, (IpAddr, Option<u32>, u32)> {
+    fn routes(pairs: &[(&str, &str)]) -> HashMap<IpNet, Pushed> {
         pairs
             .iter()
-            .map(|(p, gw)| (p.parse().unwrap(), (gw.parse().unwrap(), Some(1), 10)))
+            .map(|(p, gw)| {
+                (
+                    p.parse().unwrap(),
+                    Pushed {
+                        next_hop: gw.parse().unwrap(),
+                        interface_id: Some(1),
+                        backup_next_hop: None,
+                        backup_interface_id: None,
+                        metric: 10,
+                    },
+                )
+            })
             .collect()
+    }
+
+    #[test]
+    fn diff_backup_only_change_is_add() {
+        let last_sent = routes(&[("2001:db8::/64", "fe80::1")]);
+        let mut new_routes = last_sent.clone();
+        let p: IpNet = "2001:db8::/64".parse().unwrap();
+        new_routes.get_mut(&p).unwrap().backup_next_hop = Some("fe80::2".parse().unwrap());
+        new_routes.get_mut(&p).unwrap().backup_interface_id = Some(2);
+        let updates = diff_routes(&last_sent, &new_routes);
+        assert_eq!(updates.len(), 1);
+        assert!(matches!(
+            &updates[0],
+            OspfRouteUpdate::Add(r) if r.backup_interface_id == Some(2)
+        ));
     }
 
     #[test]
@@ -225,6 +264,7 @@ mod tests {
                 next_hop: "fe80::2".parse().unwrap(),
                 interface_id: Some(1),
                 backup_next_hop: None,
+                backup_interface_id: None,
                 metric: 10,
             })]
         );
@@ -257,6 +297,7 @@ mod tests {
                 next_hop: "fe80::1".parse().unwrap(),
                 interface_id: Some(1),
                 backup_next_hop: None,
+                backup_interface_id: None,
                 metric: 10,
             }),
             OspfRouteUpdate::Remove("2001:db8:2::/64".parse().unwrap()),
