@@ -202,13 +202,13 @@ fn learn_prefix(
     table: &mut HashMap<IpNet, RibRoute>,
     damping: &mut Damping,
     touched: &mut HashSet<IpNet>,
-    from: IpAddr,
+    peer: (IpAddr, u32),
     prefix: IpNet,
     candidate: RibRoute,
     import_policy: &CompiledPolicy,
-    peer_as: u32,
 ) {
-    match apply_policy(prefix, candidate, import_policy, Some((from, peer_as))) {
+    let (from, _) = peer;
+    match apply_policy(prefix, candidate, import_policy, Some(peer)) {
         Some(route) => {
             if damping.enabled(from) {
                 if let Some(old) = table.get(&prefix) {
@@ -614,7 +614,6 @@ impl BgpRib {
         self.peer_outboxes.insert(
             peer,
             PeerOutbox {
-                remote_asn,
                 tx,
                 is_ibgp,
                 local_addr,
@@ -623,6 +622,7 @@ impl BgpRib {
                 next_hop_mode,
                 is_rr_client,
                 is_rs_client,
+                remote_asn,
                 add_path_afs,
                 export_policy,
             },
@@ -965,11 +965,10 @@ impl BgpRib {
                         table,
                         &mut self.damping,
                         &mut touched,
-                        from,
+                        (from, peer_as),
                         IpNet::V4(*prefix),
                         candidate,
                         import_policy,
-                        peer_as,
                     );
                 }
                 for mp in &update.mp_reach {
@@ -982,11 +981,10 @@ impl BgpRib {
                             table,
                             &mut self.damping,
                             &mut touched,
-                            from,
+                            (from, peer_as),
                             *prefix,
                             candidate,
                             import_policy,
-                            peer_as,
                         );
                     }
                     if !mp.evpn.is_empty() {
