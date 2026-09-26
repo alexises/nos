@@ -23,6 +23,9 @@ pub(super) fn redistribute() -> Vec<&'static str> {
     ]
 }
 
+/// The ASN router-a's export policy prepends twice in the `communities` phase.
+const PREPEND_ASN: u32 = 64999;
+
 fn loc_rib() -> String {
     format!("loc-rib best path for {REDISTRIBUTE_PREFIX} updated")
 }
@@ -243,7 +246,11 @@ pub async fn policy(w: &mut World) -> anyhow::Result<()> {
     );
     let file = policy_file(
         "reject-redistribute-prefix",
-        &format!("if this.prefix in {REDISTRIBUTE_PREFIX}:\n    reject\nelse:\n    accept\n"),
+        // Neighbor context (`peer_as`) and an as-path regex, on a real
+        // session: router-a's route arrives with the path [ASN_A] from ASN_A.
+        &format!(
+            "if this.bgp.peer_as == {ASN_A} and this.bgp.as_path.matches(\"^{ASN_A}$\"):\n    reject\nelse:\n    accept\n"
+        ),
     )?;
     b.provision(&[
         "--policy-name",
@@ -500,7 +507,10 @@ pub async fn communities(w: &mut World) -> anyhow::Result<()> {
 
     let file = policy_file(
         "tag-redistribute-with-community",
-        &format!("this.bgp.communities.add({COMMUNITY_AA}:{COMMUNITY_NN})\naccept\n"),
+        // The prepend lands behind router-a's own ASN (added on export).
+        &format!(
+            "this.bgp.communities.add({COMMUNITY_AA}:{COMMUNITY_NN})\nthis.bgp.as_path.prepend({PREPEND_ASN}, 2)\naccept\n"
+        ),
     )?;
     let mut flags = redistribute();
     flags.extend([
@@ -535,6 +545,11 @@ pub async fn communities(w: &mut World) -> anyhow::Result<()> {
     // The tagged route can land a moment after the session is up.
     b.wait(&format!(
         "{} .*communities=\\[{COMMUNITY_PACKED}\\]",
+        loc_rib()
+    ))
+    .await?;
+    b.wait(&format!(
+        "{} .*as_path=\\[{ASN_A}, {PREPEND_ASN}, {PREPEND_ASN}\\]",
         loc_rib()
     ))
     .await?;
