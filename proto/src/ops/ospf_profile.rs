@@ -82,6 +82,13 @@ pub enum OspfProfileOp {
         area_id: Ipv4Addr,
         name: String,
     },
+    /// Toggles RFC 7474 extended cryptographic sequence numbers.
+    SetExtendedSequenceNumbers {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        enabled: bool,
+    },
     SetNetworkType {
         instance: String,
         area_id: Ipv4Addr,
@@ -154,6 +161,7 @@ impl OspfProfileOp {
                         mtu: None,
                         network_type: None,
                         auth: None,
+                        extended_sequence_numbers: false,
                     });
                 }
                 Ok(())
@@ -260,6 +268,16 @@ impl OspfProfileOp {
                 name,
             } => {
                 find_profile_mut(config, instance, *area_id, name)?.mtu = None;
+                Ok(())
+            }
+            OspfProfileOp::SetExtendedSequenceNumbers {
+                instance,
+                area_id,
+                name,
+                enabled,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.extended_sequence_numbers =
+                    *enabled;
                 Ok(())
             }
             OspfProfileOp::SetNetworkType {
@@ -431,6 +449,7 @@ mod tests {
             mtu: None,
             network_type: None,
             auth: None,
+            extended_sequence_numbers: false,
         }
     }
 

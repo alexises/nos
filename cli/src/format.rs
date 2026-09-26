@@ -179,8 +179,13 @@ pub fn render_ospf_area(area: &OspfArea) -> String {
 
 /// Render one OSPF profile as human-readable text.
 pub fn render_ospf_profile(profile: &OspfProfile) -> String {
+    let extended = if profile.extended_sequence_numbers {
+        " extended-sequence-numbers"
+    } else {
+        ""
+    };
     format!(
-        "profile {}: auth {}",
+        "profile {}: auth {}{extended}",
         profile.name,
         render_ospf_auth(profile.auth.as_ref())
     )
@@ -2077,6 +2082,7 @@ mod tests {
             mtu: None,
             network_type: None,
             auth: None,
+            extended_sequence_numbers: false,
         }
     }
 

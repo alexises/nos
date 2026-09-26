@@ -216,6 +216,8 @@ pub enum Topic {
     SetOspfProfileMtu,
     /// `ConfigOp::OspfProfile(OspfProfileOp::ClearMtu)`
     ClearOspfProfileMtu,
+    /// `ConfigOp::OspfProfile(OspfProfileOp::SetExtendedSequenceNumbers)`
+    SetOspfProfileExtendedSequenceNumbers,
     /// `ConfigOp::OspfProfile(OspfProfileOp::SetNetworkType)`
     SetOspfProfileNetworkType,
     /// `ConfigOp::OspfProfile(OspfProfileOp::ClearNetworkType)`

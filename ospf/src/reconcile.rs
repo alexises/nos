@@ -664,6 +664,7 @@ fn resolve_auth(profile: &nos_proto::OspfProfile) -> LinkAuthConfig {
                     })
                     .collect(),
                 current_key_id,
+                extended: profile.extended_sequence_numbers,
             }
         }
     }

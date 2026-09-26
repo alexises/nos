@@ -2674,6 +2674,14 @@ fn ospf_profile_set_op(
             name,
             mtu,
         },
+        OspfProfileField::ExtendedSequenceNumbers(enabled) => {
+            OspfProfileOp::SetExtendedSequenceNumbers {
+                instance,
+                area_id,
+                name,
+                enabled,
+            }
+        }
         OspfProfileField::NetworkType(network_type) => OspfProfileOp::SetNetworkType {
             instance,
             area_id,
@@ -2772,7 +2780,8 @@ fn ospfv3_profile_set_op(
         },
         OspfProfileField::SimplePassword(_)
         | OspfProfileField::CryptoKey { .. }
-        | OspfProfileField::CryptoCurrentKey(_) => {
+        | OspfProfileField::CryptoCurrentKey(_)
+        | OspfProfileField::ExtendedSequenceNumbers(_) => {
             return Err("ospfv3 profiles support no authentication in this NOS build".to_string());
         }
     }))

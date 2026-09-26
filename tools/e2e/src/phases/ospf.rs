@@ -455,7 +455,52 @@ pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
     log("restoring the matching crypto key on router-a");
     a.provision_flags(&with_base(A, with_key("topsecretkey", OSPF_ROUTER_ID)))
         .await?;
-    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 60).await
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 60).await?;
+
+    // RFC 7474: AuType 3 with a persisted boot count. Both ends enabled reach
+    // Full again; one end alone is an auth-type mismatch and blocks it.
+    let ext = |k: &str, rid: &str, on: bool| {
+        let mut f = with_key(k, rid);
+        f.extend(["--ospf-extended-seq".to_string(), on.to_string()]);
+        f
+    };
+    let before = a.count(&full_p2p(OSPF_ROUTER_ID_B));
+    log("enabling rfc 7474 extended sequence numbers on router-a only");
+    let auth_failures = b.count("ospf packet authentication failed link=eth0.0");
+    a.provision_flags(&with_base(A, ext("topsecretkey", OSPF_ROUTER_ID, true)))
+        .await?;
+    b.wait_new(
+        "ospf packet authentication failed link=eth0.0",
+        auth_failures,
+        30,
+    )
+    .await?;
+    a.assert_quiet(&full_p2p(OSPF_ROUTER_ID_B), before, 8)
+        .await?;
+
+    log("enabling rfc 7474 extended sequence numbers on router-b too");
+    b.provision_flags(&with_base(B, ext("topsecretkey", OSPF_ROUTER_ID_B, true)))
+        .await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 60).await?;
+    a.wait("ospf link using rfc 7474 extended sequence numbers")
+        .await?;
+
+    // Restart router-b's nos-ospfd: a fresh process must take a higher boot
+    // count from the persisted file, so router-a's replay check accepts it.
+    let before = a.count(&full_p2p(OSPF_ROUTER_ID_B));
+    let boots = b.count("ospf link using rfc 7474 extended sequence numbers");
+    let replays = a.count("crypto sequence number not increasing");
+    log("killing router-b's nos-ospfd; it must return to Full without replay drops");
+    w.dock.kill_process("router-b", "nos-ospfd").await?;
+    b.wait_new(
+        "ospf link using rfc 7474 extended sequence numbers",
+        boots,
+        60,
+    )
+    .await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 90).await?;
+    a.assert_quiet("crypto sequence number not increasing", replays, 5)
+        .await
 }
 
 /// RFC 2328 §14 aging. Self-contained: both nos-ospfd processes start with a

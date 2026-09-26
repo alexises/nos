@@ -189,6 +189,16 @@ pub struct OspfProfile {
     /// `None` is RFC 2328 `AuType` 0 (Null) — no authentication.
     #[garde(custom(|a: &Option<OspfAuth>, _ctx: &Config| valid_auth(a.as_ref())))]
     pub auth: Option<OspfAuth>,
+
+    /// RFC 7474: sign with `AuType` 3 — a 64-bit (persisted boot count :
+    /// counter) sequence number and a digest bound to the IP source address —
+    /// closing the replay window across router restarts. Only valid with
+    /// `Crypto` auth using HMAC-SHA keys (no MD5); both ends of a link must
+    /// agree, since `AuType` 3 and 2 don't interoperate. Checked one level
+    /// up in `valid_profile_timers`, since it needs the sibling `auth`.
+    #[garde(skip)]
+    #[serde(default)]
+    pub extended_sequence_numbers: bool,
 }
 
 fn valid_cost(cost: Option<u16>) -> garde::Result {
@@ -220,6 +230,15 @@ fn unique_name(name: &str, ctx: &Config) -> garde::Result {
 /// shallower (`OspfProfile` has no further-nested collection to skip over).
 pub(crate) fn valid_profile_timers(profiles: &[OspfProfile]) -> garde::Result {
     for p in profiles {
+        if p.extended_sequence_numbers {
+            let ok = matches!(&p.auth, Some(OspfAuth::Crypto { keys })
+                if keys.iter().all(|k| k.algorithm != OspfCryptoAlgorithm::Md5));
+            if !ok {
+                return Err(garde::Error::new(
+                    "extended-sequence-numbers requires crypto auth with hmac-sha keys only",
+                ));
+            }
+        }
         if let (Some(hello), Some(dead)) = (p.hello_interval, p.dead_interval) {
             if dead <= hello {
                 return Err(garde::Error::new(
@@ -251,6 +270,7 @@ mod tests {
             mtu: None,
             network_type: None,
             auth: None,
+            extended_sequence_numbers: false,
         }
     }
 
@@ -276,6 +296,28 @@ mod tests {
             ospf_instances: instances,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn extended_sequence_numbers_needs_hmac_sha_crypto() {
+        let key = |algorithm| OspfAuth::Crypto {
+            keys: vec![OspfCryptoKey {
+                key_id: 1,
+                algorithm,
+                key: "k".to_string(),
+                is_current: true,
+            }],
+        };
+        let check = |auth: Option<OspfAuth>| {
+            let mut p = profile("p1");
+            p.extended_sequence_numbers = true;
+            p.auth = auth;
+            let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+            cfg.validate_with(&cfg)
+        };
+        assert!(check(None).is_err());
+        assert!(check(Some(key(OspfCryptoAlgorithm::Md5))).is_err());
+        assert!(check(Some(key(OspfCryptoAlgorithm::HmacSha256))).is_ok());
     }
 
     #[test]
@@ -340,6 +382,7 @@ mod tests {
             mtu: None,
             network_type: None,
             auth: None,
+            extended_sequence_numbers: false,
         }
     }
 

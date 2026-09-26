@@ -614,6 +614,13 @@ pub struct Args {
     #[arg(long)]
     pub ospf_profile_mtu: Option<u16>,
 
+    /// If set (requires `--ospf-profile`), enables/disables RFC 7474
+    /// extended cryptographic sequence numbers on it
+    /// (`OspfProfileOp::SetExtendedSequenceNumbers`) — needs a matching
+    /// hmac-sha `--ospf-crypto-key` to commit.
+    #[arg(long)]
+    pub ospf_extended_seq: Option<bool>,
+
     /// If set, adds this IPv6 address to `--interface`'s
     /// `--subinterface-tag` subinterface alongside `--address` — `OSPFv3`
     /// (RFC 5340) needs a real IPv6 prefix on the link, distinct from
@@ -1508,6 +1515,16 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     password,
                 }));
             }
+            if let Some(enabled) = args.ospf_extended_seq {
+                ops.push(ConfigOp::OspfProfile(
+                    OspfProfileOp::SetExtendedSequenceNumbers {
+                        instance: instance.clone(),
+                        area_id,
+                        name: name.clone(),
+                        enabled,
+                    },
+                ));
+            }
             if let Some(spec) = args.ospf_crypto_key.clone() {
                 let key = parse_ospf_crypto_key(&spec)?;
                 ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetCryptoKey {
@@ -1527,13 +1544,16 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             if args.ospf_profile_mtu.is_some() {
                 bail!("--ospf-profile-mtu requires --ospf-profile to also be set");
             }
+            if args.ospf_extended_seq.is_some() {
+                bail!("--ospf-extended-seq requires --ospf-profile to also be set");
+            }
         }
     } else if args.ospf_profile.is_some() {
         bail!("--ospf-profile requires --ospf-area to also be set");
     } else if args.ospf_simple_password.is_some() || args.ospf_crypto_key.is_some() {
         bail!("--ospf-simple-password/--ospf-crypto-key require --ospf-profile to also be set");
-    } else if args.ospf_profile_mtu.is_some() {
-        bail!("--ospf-profile-mtu requires --ospf-profile to also be set");
+    } else if args.ospf_profile_mtu.is_some() || args.ospf_extended_seq.is_some() {
+        bail!("--ospf-profile-mtu/--ospf-extended-seq require --ospf-profile to also be set");
     }
 
     if let Some(profile) = args.ospf_interface_profile.clone() {
