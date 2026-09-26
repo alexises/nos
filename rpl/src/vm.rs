@@ -78,6 +78,9 @@ pub enum Op {
     JumpIfFalse(usize),
     Jump(usize),
     SetField(FieldId),
+    /// Pops a signed delta and adds it (saturating) to a numeric field; an
+    /// unset `med` counts as 0.
+    AddField(FieldId),
     Accept,
     Reject,
 }
@@ -309,6 +312,18 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                     FieldId::BgpLocalPref => cur_local_pref = to_u32_saturating(v),
                     FieldId::BgpMed => cur_med = Some(to_u32_saturating(v)),
                     _ => unreachable!("check.rs rejects SetField for {id:?}"),
+                }
+            }
+            Op::AddField(id) => {
+                let d = as_int(pop!());
+                match id {
+                    FieldId::BgpLocalPref => {
+                        cur_local_pref = to_u32_saturating(i64::from(cur_local_pref) + d)
+                    }
+                    FieldId::BgpMed => {
+                        cur_med = Some(to_u32_saturating(i64::from(cur_med.unwrap_or(0)) + d))
+                    }
+                    _ => unreachable!("check.rs rejects AddField for {id:?}"),
                 }
             }
             Op::CommunityAdd(id, val) => match (id, val) {

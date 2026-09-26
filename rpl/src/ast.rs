@@ -75,6 +75,9 @@ pub enum StmtKind {
         else_body: Option<Vec<Stmt>>,
     },
     Set(Expr, Expr),
+    /// `set this.bgp.local_pref += <expr>` / `-= <expr>` — the bool is
+    /// `true` for `-=`.
+    SetRelative(Expr, bool, Expr),
     /// `this.bgp.communities.add(65000:100)` — adds one value to a settable
     /// community-list field.
     CommunityAdd(Expr, Expr),

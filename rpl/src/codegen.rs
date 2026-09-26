@@ -86,6 +86,24 @@ impl Codegen<'_> {
                 expect_ty(value_ty, Ty::Int, value.line)?;
                 self.emit(Op::SetField(info.id), -1);
             }
+            StmtKind::SetRelative(target, negate, value) => {
+                let info = resolve_settable_field(target)?;
+                if !matches!(info.ty, FieldType::Int | FieldType::OptionalInt) {
+                    return Err(CompileError::new(
+                        target.line,
+                        "'+=' / '-=' is only valid on a numeric field",
+                    ));
+                }
+                if *negate {
+                    self.emit(Op::LoadConstInt(0), 1);
+                }
+                let value_ty = self.compile_expr(value)?;
+                expect_ty(value_ty, Ty::Int, value.line)?;
+                if *negate {
+                    self.emit(Op::Sub, -1);
+                }
+                self.emit(Op::AddField(info.id), -1);
+            }
             StmtKind::CommunityAdd(target, value) => {
                 let info = resolve_settable_field(target)?;
                 for val in self.community_values_for(info.ty, value)? {
@@ -774,6 +792,26 @@ mod tests {
                 large_communities: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn relative_set_adds_and_subtracts_saturating() {
+        let policy = compile_src(
+            "set this.bgp.local_pref += 50\nset this.bgp.med -= 5\nset this.bgp.med += 20\naccept\n",
+        );
+        let (prefix, as_path, cluster) = default_input("10.0.0.0/8");
+        let input = make_input(prefix, &as_path, 100, None, &cluster);
+        let Verdict::Accept { local_pref, med, .. } = vm::run(&policy, &input) else {
+            panic!("expected accept");
+        };
+        // unset med counts as 0: 0 - 5 saturates to 0, then + 20.
+        assert_eq!((local_pref, med), (150, Some(20)));
+    }
+
+    #[test]
+    fn relative_set_rejects_non_numeric_field() {
+        let err = compile_err("set this.bgp.origin += 1\naccept\n");
+        assert!(err.message.contains("numeric") || err.message.contains("settable"));
     }
 
     #[test]
