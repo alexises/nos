@@ -161,6 +161,9 @@ pub enum EditTarget {
     CommunityGroup {
         name: String,
     },
+    AsPathList {
+        name: String,
+    },
     PrefixList {
         name: String,
     },
@@ -407,6 +410,10 @@ pub enum SetTarget {
     CommunityGroupMember { name: String, member: String },
     /// Context-relative — only valid while navigated into a community-group.
     CommunityGroupMemberRelative { member: String },
+    /// Fully-qualified — works from anywhere in configuration mode.
+    AsPathListPattern { name: String, pattern: String },
+    /// Context-relative — only valid while navigated into an as-path-list.
+    AsPathListPatternRelative { pattern: String },
     /// Fully-qualified — works from anywhere in configuration mode.
     PrefixListEntry {
         name: String,
@@ -752,6 +759,19 @@ pub enum DeleteTarget {
     },
     CommunityGroup {
         name: String,
+    },
+    AsPathList {
+        name: String,
+    },
+    /// `delete as-path-list <name> pattern <p>` — qualified.
+    AsPathListPattern {
+        name: String,
+        pattern: String,
+    },
+    /// `delete pattern <p>` — relative, only valid while navigated into an
+    /// as-path-list.
+    AsPathListPatternRelative {
+        pattern: String,
     },
     /// `delete community-group <name> member <m>` — qualified.
     CommunityGroupMember {
@@ -1101,6 +1121,9 @@ fn parse_edit(t: &[&str]) -> Option<Command> {
             name: (*name).to_string(),
         }),
         ["community-group", name] => Command::Edit(EditTarget::CommunityGroup {
+            name: (*name).to_string(),
+        }),
+        ["as-path-list", name] => Command::Edit(EditTarget::AsPathList {
             name: (*name).to_string(),
         }),
         ["prefix-list", name] => Command::Edit(EditTarget::PrefixList {
@@ -2044,6 +2067,13 @@ fn parse_set(t: &[&str]) -> Option<Command> {
         ["member", member] => Command::Set(SetTarget::CommunityGroupMemberRelative {
             member: (*member).to_string(),
         }),
+        ["as-path-list", name, "pattern", pattern] => Command::Set(SetTarget::AsPathListPattern {
+            name: (*name).to_string(),
+            pattern: (*pattern).to_string(),
+        }),
+        ["pattern", pattern] => Command::Set(SetTarget::AsPathListPatternRelative {
+            pattern: (*pattern).to_string(),
+        }),
         ["prefix-list", name, "entry", cidr] => Command::Set(SetTarget::PrefixListEntry {
             name: (*name).to_string(),
             cidr: cidr.parse::<IpNet>().ok()?,
@@ -2060,6 +2090,36 @@ fn parse_set(t: &[&str]) -> Option<Command> {
             cidr: cidr.parse::<IpNet>().ok()?,
             range: None,
         }),
+        ["prefix-list", name, "entry", cidr, "orlonger"] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Set(SetTarget::PrefixListEntry {
+                name: (*name).to_string(),
+                range: Some((cidr.prefix_len(), cidr.max_prefix_len())),
+                cidr,
+            })
+        }
+        ["prefix-list", name, "entry", cidr, "upto", max] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Set(SetTarget::PrefixListEntry {
+                name: (*name).to_string(),
+                range: Some((cidr.prefix_len(), max.parse::<u8>().ok()?)),
+                cidr,
+            })
+        }
+        ["entry", cidr, "orlonger"] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Set(SetTarget::PrefixListEntryRelative {
+                range: Some((cidr.prefix_len(), cidr.max_prefix_len())),
+                cidr,
+            })
+        }
+        ["entry", cidr, "upto", max] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Set(SetTarget::PrefixListEntryRelative {
+                range: Some((cidr.prefix_len(), max.parse::<u8>().ok()?)),
+                cidr,
+            })
+        }
         ["entry", cidr, "range", min, max] => Command::Set(SetTarget::PrefixListEntryRelative {
             cidr: cidr.parse::<IpNet>().ok()?,
             range: Some((min.parse::<u8>().ok()?, max.parse::<u8>().ok()?)),
@@ -2388,6 +2448,18 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
         ["member", member] => Command::Delete(DeleteTarget::CommunityGroupMemberRelative {
             member: (*member).to_string(),
         }),
+        ["as-path-list", name] => Command::Delete(DeleteTarget::AsPathList {
+            name: (*name).to_string(),
+        }),
+        ["as-path-list", name, "pattern", pattern] => {
+            Command::Delete(DeleteTarget::AsPathListPattern {
+                name: (*name).to_string(),
+                pattern: (*pattern).to_string(),
+            })
+        }
+        ["pattern", pattern] => Command::Delete(DeleteTarget::AsPathListPatternRelative {
+            pattern: (*pattern).to_string(),
+        }),
         ["prefix-list", name] => Command::Delete(DeleteTarget::PrefixList {
             name: (*name).to_string(),
         }),
@@ -2407,6 +2479,36 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
             cidr: cidr.parse::<IpNet>().ok()?,
             range: None,
         }),
+        ["prefix-list", name, "entry", cidr, "orlonger"] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Delete(DeleteTarget::PrefixListEntry {
+                name: (*name).to_string(),
+                range: Some((cidr.prefix_len(), cidr.max_prefix_len())),
+                cidr,
+            })
+        }
+        ["prefix-list", name, "entry", cidr, "upto", max] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Delete(DeleteTarget::PrefixListEntry {
+                name: (*name).to_string(),
+                range: Some((cidr.prefix_len(), max.parse::<u8>().ok()?)),
+                cidr,
+            })
+        }
+        ["entry", cidr, "orlonger"] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Delete(DeleteTarget::PrefixListEntryRelative {
+                range: Some((cidr.prefix_len(), cidr.max_prefix_len())),
+                cidr,
+            })
+        }
+        ["entry", cidr, "upto", max] => {
+            let cidr = cidr.parse::<IpNet>().ok()?;
+            Command::Delete(DeleteTarget::PrefixListEntryRelative {
+                range: Some((cidr.prefix_len(), max.parse::<u8>().ok()?)),
+                cidr,
+            })
+        }
         ["entry", cidr, "range", min, max] => {
             Command::Delete(DeleteTarget::PrefixListEntryRelative {
                 cidr: cidr.parse::<IpNet>().ok()?,
@@ -4532,6 +4634,29 @@ mod tests {
     }
 
     #[test]
+    fn as_path_list_edit_set_delete() {
+        assert_eq!(
+            Command::parse("edit as-path-list TRANSIT"),
+            Command::Edit(EditTarget::AsPathList {
+                name: "TRANSIT".to_string()
+            })
+        );
+        assert_eq!(
+            Command::parse("set as-path-list TRANSIT pattern ^65001_"),
+            Command::Set(SetTarget::AsPathListPattern {
+                name: "TRANSIT".to_string(),
+                pattern: "^65001_".to_string(),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete pattern ^65001_"),
+            Command::Delete(DeleteTarget::AsPathListPatternRelative {
+                pattern: "^65001_".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn set_community_group_member_qualified_and_relative() {
         assert_eq!(
             Command::parse("set community-group CUSTOMERS member CUSTOMER_A"),
@@ -4544,6 +4669,25 @@ mod tests {
             Command::parse("set member 65000:200"),
             Command::Set(SetTarget::CommunityGroupMemberRelative {
                 member: "65000:200".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn set_prefix_list_entry_orlonger_and_upto_shorthands() {
+        assert_eq!(
+            Command::parse("set prefix-list BLOCKS entry 10.0.0.0/8 orlonger"),
+            Command::Set(SetTarget::PrefixListEntry {
+                name: "BLOCKS".to_string(),
+                cidr: "10.0.0.0/8".parse().unwrap(),
+                range: Some((8, 32)),
+            })
+        );
+        assert_eq!(
+            Command::parse("set entry 10.0.0.0/8 upto 24"),
+            Command::Set(SetTarget::PrefixListEntryRelative {
+                cidr: "10.0.0.0/8".parse().unwrap(),
+                range: Some((8, 24)),
             })
         );
     }

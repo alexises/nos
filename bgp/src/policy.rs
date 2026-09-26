@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use nos_proto::schema::{CommunityAlias, CommunityGroup, PolicyDefinition, PrefixList};
+use nos_proto::schema::{AsPathList, CommunityAlias, CommunityGroup, PolicyDefinition, PrefixList};
 use nos_rpl::CompiledPolicy;
 use tracing::error;
 
@@ -43,6 +43,7 @@ impl PolicyCache {
         aliases: &[CommunityAlias],
         groups: &[CommunityGroup],
         prefix_lists: &[PrefixList],
+        as_path_lists: &[AsPathList],
     ) {
         // Owned, pre-resolved buffers backing the `nos_rpl::Symbols` view
         // below — `Symbols` only borrows, so something has to own the
@@ -106,10 +107,25 @@ impl PolicyCache {
             .map(|(n, e)| (*n, e.as_slice()))
             .collect();
 
+        let as_path_list_patterns: Vec<(&str, Vec<&str>)> = as_path_lists
+            .iter()
+            .map(|l| {
+                (
+                    l.name.as_str(),
+                    l.patterns.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        let as_path_list_refs: Vec<(&str, &[&str])> = as_path_list_patterns
+            .iter()
+            .map(|(n, p)| (*n, p.as_slice()))
+            .collect();
+
         let symbols = nos_rpl::Symbols {
             aliases: &alias_refs,
             groups: &group_refs,
             prefix_lists: &prefix_list_refs,
+            as_path_lists: &as_path_list_refs,
         };
 
         let mut next = HashMap::with_capacity(policies.len());
@@ -183,6 +199,8 @@ mod tests {
                 router_id: None,
                 originator_id: None,
                 cluster_list: &[],
+                peer: None,
+                peer_as: 0,
                 communities: &[],
                 extended_communities: &[],
                 large_communities: &[],
@@ -215,7 +233,7 @@ mod tests {
     #[test]
     fn named_policy_resolves_after_resync() {
         let mut cache = PolicyCache::default();
-        cache.resync(&[policy("p1", "accept\n")], &[], &[], &[]);
+        cache.resync(&[policy("p1", "accept\n")], &[], &[], &[], &[]);
         assert!(accepts(&cache.resolve(Some("p1"))));
     }
 
@@ -228,7 +246,7 @@ mod tests {
     #[test]
     fn failed_recompile_keeps_previous_version() {
         let mut cache = PolicyCache::default();
-        cache.resync(&[policy("p1", "accept\n")], &[], &[], &[]);
+        cache.resync(&[policy("p1", "accept\n")], &[], &[], &[], &[]);
         assert!(accepts(&cache.resolve(Some("p1"))));
 
         // A syntactically invalid source should never actually reach here
@@ -236,6 +254,7 @@ mod tests {
         // degrade gracefully rather than losing the last-known-good policy.
         cache.resync(
             &[policy("p1", "if this.prefix in :\n    accept\n")],
+            &[],
             &[],
             &[],
             &[],
@@ -261,6 +280,7 @@ mod tests {
             )],
             &[alias],
             &[group],
+            &[],
             &[],
         );
         // Default `accepts()` input carries no communities, so the group
@@ -288,6 +308,7 @@ mod tests {
             &[],
             &[],
             &[list],
+            &[],
         );
         assert!(accepts(&cache.resolve(Some("p1"))));
     }

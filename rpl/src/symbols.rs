@@ -24,6 +24,9 @@ pub struct Symbols<'a> {
     pub aliases: &'a [(&'a str, &'a [i64])],
     pub groups: &'a [(&'a str, &'a [&'a [i64]])],
     pub prefix_lists: &'a [(&'a str, &'a [PrefixListEntry])],
+    /// Named as-path lists: each entry is one regex (see `Op::AsPathMatches`);
+    /// a list matches if ANY entry does.
+    pub as_path_lists: &'a [(&'a str, &'a [&'a str])],
 }
 
 impl Symbols<'_> {
@@ -31,5 +34,6 @@ impl Symbols<'_> {
         aliases: &[],
         groups: &[],
         prefix_lists: &[],
+        as_path_lists: &[],
     };
 }

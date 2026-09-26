@@ -1,12 +1,12 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use nos_proto::{
-    loopback_table_name, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp,
-    CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, LldpOp, OspfAreaOp, OspfCryptoKey,
-    OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
-    PolicyDefinitionOp, PortAggregateOp, PrefixListEntry, PrefixListOp, RoutingTableOp,
-    StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, TransactionBase,
-    UserOp,
+    loopback_table_name, AsPathListOp, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp,
+    BroadcastDomainOp, CommunityAliasOp, CommunityGroupOp, ConfigOp, InterfaceOp, LldpOp,
+    OspfAreaOp, OspfCryptoKey, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp,
+    Ospfv3ProfileOp, PolicyDefinitionOp, PortAggregateOp, PrefixListEntry, PrefixListOp,
+    RoutingTableOp, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp,
+    TransactionBase, UserOp,
 };
 
 use crate::command::{
@@ -57,6 +57,7 @@ pub enum Path {
     PolicyDefinition(String),
     CommunityAlias(String),
     CommunityGroup(String),
+    AsPathList(String),
     PrefixList(String),
     BroadcastDomain(String),
     SwitchingProfile(String),
@@ -633,6 +634,7 @@ const NO_CURRENT_STATIC_ROUTING_INSTANCE: &str = "no current static routing inst
 const NO_CURRENT_INTERFACE: &str = "no current interface — use 'edit interface <name>' or the fully-qualified 'set interface <name> ...' form";
 const NO_CURRENT_COMMUNITY_ALIAS: &str = "no current community-alias — use 'edit community-alias <name>' or the fully-qualified 'set community-alias <name> ...' form";
 const NO_CURRENT_COMMUNITY_GROUP: &str = "no current community-group — use 'edit community-group <name>' or the fully-qualified 'set community-group <name> ...' form";
+const NO_CURRENT_AS_PATH_LIST: &str = "no current as-path-list — use 'edit as-path-list <name>' or the fully-qualified 'set as-path-list <name> ...' form";
 const NO_CURRENT_PREFIX_LIST: &str = "no current prefix-list — use 'edit prefix-list <name>' or the fully-qualified 'set prefix-list <name> ...' form";
 const NO_CURRENT_SWITCHING_PROFILE: &str = "no current switching-profile — use 'edit switching-profile <name>' or the fully-qualified 'set switching-profile <name> ...' form";
 const NO_CURRENT_PORT_AGGREGATE: &str = "no current port-aggregate — use 'edit port-aggregate <name>' or the fully-qualified 'set port-aggregate <name> ...' form";
@@ -724,6 +726,13 @@ impl Path {
         match self {
             Path::CommunityGroup(name) => Ok(name),
             _ => Err(NO_CURRENT_COMMUNITY_GROUP),
+        }
+    }
+
+    fn as_path_list(&self) -> Result<&str, &'static str> {
+        match self {
+            Path::AsPathList(name) => Ok(name),
+            _ => Err(NO_CURRENT_AS_PATH_LIST),
         }
     }
 
@@ -1002,6 +1011,10 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
         Command::Edit(EditTarget::CommunityGroup { name }) => Resolved::ApplyOp {
             op: ConfigOp::CommunityGroup(CommunityGroupOp::Ensure { name: name.clone() }),
             after: PathAfter::To(Path::CommunityGroup(name)),
+        },
+        Command::Edit(EditTarget::AsPathList { name }) => Resolved::ApplyOp {
+            op: ConfigOp::AsPathList(AsPathListOp::Ensure { name: name.clone() }),
+            after: PathAfter::To(Path::AsPathList(name)),
         },
         Command::Edit(EditTarget::PrefixList { name }) => Resolved::ApplyOp {
             op: ConfigOp::PrefixList(PrefixListOp::Ensure { name: name.clone() }),
@@ -1540,6 +1553,17 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
             }),
             after: PathAfter::Stay,
         },
+        Command::Set(SetTarget::AsPathListPattern { name, pattern }) => Resolved::ApplyOp {
+            op: ConfigOp::AsPathList(AsPathListOp::AddPattern { name, pattern }),
+            after: PathAfter::Stay,
+        },
+        Command::Set(SetTarget::AsPathListPatternRelative { pattern }) => Resolved::ApplyOp {
+            op: ConfigOp::AsPathList(AsPathListOp::AddPattern {
+                name: path.as_path_list()?.to_string(),
+                pattern,
+            }),
+            after: PathAfter::Stay,
+        },
         Command::Set(SetTarget::PrefixListEntry { name, cidr, range }) => Resolved::ApplyOp {
             op: ConfigOp::PrefixList(PrefixListOp::AddEntry {
                 name,
@@ -1846,6 +1870,10 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 op: ConfigOp::CommunityGroup(CommunityGroupOp::Delete { name: name.clone() }),
                 after: PathAfter::ToRoot,
             },
+            Path::AsPathList(name) => Resolved::ApplyOp {
+                op: ConfigOp::AsPathList(AsPathListOp::Delete { name: name.clone() }),
+                after: PathAfter::ToRoot,
+            },
             Path::PrefixList(name) => Resolved::ApplyOp {
                 op: ConfigOp::PrefixList(PrefixListOp::Delete { name: name.clone() }),
                 after: PathAfter::ToRoot,
@@ -2089,6 +2117,21 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 after: PathAfter::Stay,
             }
         }
+        Command::Delete(DeleteTarget::AsPathList { name }) => Resolved::ApplyOp {
+            op: ConfigOp::AsPathList(AsPathListOp::Delete { name }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::AsPathListPattern { name, pattern }) => Resolved::ApplyOp {
+            op: ConfigOp::AsPathList(AsPathListOp::RemovePattern { name, pattern }),
+            after: PathAfter::Stay,
+        },
+        Command::Delete(DeleteTarget::AsPathListPatternRelative { pattern }) => Resolved::ApplyOp {
+            op: ConfigOp::AsPathList(AsPathListOp::RemovePattern {
+                name: path.as_path_list()?.to_string(),
+                pattern,
+            }),
+            after: PathAfter::Stay,
+        },
         Command::Delete(DeleteTarget::PrefixList { name }) => Resolved::ApplyOp {
             op: ConfigOp::PrefixList(PrefixListOp::Delete { name }),
             after: PathAfter::Stay,

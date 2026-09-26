@@ -376,10 +376,26 @@ fn resolve_redistribute_policy(
         .map(|(n, e)| (*n, e.as_slice()))
         .collect();
 
+    let as_path_lists: Vec<(&str, Vec<&str>)> = cfg
+        .as_path_lists
+        .iter()
+        .map(|l| {
+            (
+                l.name.as_str(),
+                l.patterns.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    let as_path_list_refs: Vec<(&str, &[&str])> = as_path_lists
+        .iter()
+        .map(|(n, p)| (*n, p.as_slice()))
+        .collect();
+
     let symbols = nos_rpl::Symbols {
         aliases: &alias_refs,
         groups: &group_refs,
         prefix_lists: &prefix_list_refs,
+        as_path_lists: &as_path_list_refs,
     };
 
     match nos_rpl::compile(&def.source, &symbols) {

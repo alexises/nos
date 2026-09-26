@@ -1,3 +1,4 @@
+pub mod as_path_list;
 pub mod bgp_instance;
 pub mod bgp_peer;
 pub mod bgp_peer_group;
@@ -23,6 +24,7 @@ pub mod subinterface;
 pub mod switching_profile;
 pub mod user;
 
+pub use as_path_list::AsPathListOp;
 pub use bgp_instance::BgpInstanceOp;
 pub use bgp_peer::BgpPeerOp;
 pub use bgp_peer_group::BgpPeerGroupOp;
@@ -77,6 +79,7 @@ pub enum ConfigOp {
     PolicyDefinition(PolicyDefinitionOp),
     CommunityAlias(CommunityAliasOp),
     CommunityGroup(CommunityGroupOp),
+    AsPathList(AsPathListOp),
     PrefixList(PrefixListOp),
     BroadcastDomain(BroadcastDomainOp),
     SwitchingProfile(SwitchingProfileOp),
@@ -113,6 +116,7 @@ impl ConfigOp {
             ConfigOp::PolicyDefinition(op) => op.apply(config),
             ConfigOp::CommunityAlias(op) => op.apply(config),
             ConfigOp::CommunityGroup(op) => op.apply(config),
+            ConfigOp::AsPathList(op) => op.apply(config),
             ConfigOp::PrefixList(op) => op.apply(config),
             ConfigOp::BroadcastDomain(op) => op.apply(config),
             ConfigOp::SwitchingProfile(op) => op.apply(config),
@@ -168,6 +172,10 @@ pub enum OpError {
     CommunityGroupNotFound(String),
     #[error("member '{member}' not found in community group '{name}'")]
     CommunityGroupMemberNotFound { name: String, member: String },
+    #[error("as-path list '{0}' not found")]
+    AsPathListNotFound(String),
+    #[error("pattern '{pattern}' not found in as-path list '{name}'")]
+    AsPathListPatternNotFound { name: String, pattern: String },
     #[error("prefix list '{0}' not found")]
     PrefixListNotFound(String),
     #[error("entry '{entry:?}' not found in prefix list '{name}'")]

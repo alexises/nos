@@ -8,4 +8,5 @@ workspace = true
 
 [dependencies]
 ipnet    = { workspace = true }
+regex    = { workspace = true }
 thiserror = { workspace = true }

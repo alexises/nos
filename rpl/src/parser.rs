@@ -127,6 +127,7 @@ impl Parser<'_> {
             ("add", 1) => StmtKind::CommunityAdd(target, args.remove(0)),
             ("remove", 1) => StmtKind::CommunityRemove(target, args.remove(0)),
             ("clear", 0) => StmtKind::CommunityClear(target),
+            ("prepend", 1 | 2) => StmtKind::AsPathPrepend(target, args),
             _ => {
                 return Err(CompileError::new(
                     line,
@@ -168,10 +169,21 @@ impl Parser<'_> {
     fn parse_set(&mut self) -> Result<StmtKind, CompileError> {
         self.expect(&Token::Set)?;
         let target = self.parse_postfix()?;
+        let relative = match self.peek() {
+            Token::Plus => Some(false),
+            Token::Minus => Some(true),
+            _ => None,
+        };
+        if relative.is_some() {
+            self.advance();
+        }
         self.expect(&Token::Assign)?;
         let value = self.parse_expr()?;
         self.expect(&Token::Newline)?;
-        Ok(StmtKind::Set(target, value))
+        Ok(match relative {
+            Some(negate) => StmtKind::SetRelative(target, negate, value),
+            None => StmtKind::Set(target, value),
+        })
     }
 
     fn parse_expr(&mut self) -> Result<Expr, CompileError> {
@@ -318,6 +330,7 @@ impl Parser<'_> {
                     ExprKind::ColonLit(parts)
                 }
             }
+            Token::Str(s) => ExprKind::StrLit(s),
             Token::Prefix(p) => ExprKind::PrefixLit(p),
             Token::IpAddr(a) => ExprKind::IpLit(a),
             Token::LParen => {

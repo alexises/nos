@@ -9,7 +9,7 @@ use std::net::IpAddr;
 use crate::ast::{BinOp, Expr, ExprKind, Policy, Postfix, Stmt, StmtKind, UnaryOp};
 use crate::schema::{self, FieldInfo, FieldType};
 use crate::symbols::Symbols;
-use crate::vm::{CommunityValue, CompiledPolicy, Op, MAX_STACK_DEPTH};
+use crate::vm::{AsPathRegexes, CommunityValue, CompiledPolicy, Op, MAX_STACK_DEPTH};
 use crate::CompileError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,9 +82,78 @@ impl Codegen<'_> {
             }
             StmtKind::Set(target, value) => {
                 let info = resolve_settable_field(target)?;
+                match info.ty {
+                    FieldType::Int | FieldType::OptionalInt => {
+                        let value_ty = self.compile_expr(value)?;
+                        expect_ty(value_ty, Ty::Int, value.line)?;
+                        self.emit(Op::SetField(info.id), -1);
+                    }
+                    FieldType::Enum(name) => {
+                        let value_ty = self.compile_expr(value)?;
+                        expect_ty(value_ty, Ty::Enum(name), value.line)?;
+                        self.emit(Op::SetOrigin, -1);
+                    }
+                    FieldType::OptionalIp => {
+                        if matches!(&value.kind, ExprKind::Ident(n) if n == "self") {
+                            self.emit(Op::SetNextHopSelf, 0);
+                        } else {
+                            let value_ty = self.compile_expr(value)?;
+                            expect_ty(value_ty, Ty::Ip, value.line)?;
+                            self.emit(Op::SetNextHop, -1);
+                        }
+                    }
+                    _ => {
+                        return Err(CompileError::new(
+                            target.line,
+                            "this field can't be assigned with 'set'",
+                        ))
+                    }
+                }
+            }
+            StmtKind::SetRelative(target, negate, value) => {
+                let info = resolve_settable_field(target)?;
+                if !matches!(info.ty, FieldType::Int | FieldType::OptionalInt) {
+                    return Err(CompileError::new(
+                        target.line,
+                        "'+=' / '-=' is only valid on a numeric field",
+                    ));
+                }
+                if *negate {
+                    self.emit(Op::LoadConstInt(0), 1);
+                }
                 let value_ty = self.compile_expr(value)?;
                 expect_ty(value_ty, Ty::Int, value.line)?;
-                self.emit(Op::SetField(info.id), -1);
+                if *negate {
+                    self.emit(Op::Sub, -1);
+                }
+                self.emit(Op::AddField(info.id), -1);
+            }
+            StmtKind::AsPathPrepend(target, args) => {
+                let info = resolve_settable_field(target)?;
+                if info.id != schema::FieldId::BgpAsPath {
+                    return Err(CompileError::new(
+                        target.line,
+                        "'.prepend(..)' is only valid on 'this.bgp.as_path'",
+                    ));
+                }
+                let asn = int_literal(&args[0], "an AS number")?;
+                let asn = u32::try_from(asn).map_err(|_| {
+                    CompileError::new(args[0].line, "AS number literal out of range")
+                })?;
+                let count = match args.get(1) {
+                    Some(e) => int_literal(e, "a repeat count")?,
+                    None => 1,
+                };
+                let count = u8::try_from(count)
+                    .ok()
+                    .filter(|n| (1..=MAX_PREPEND).contains(n))
+                    .ok_or_else(|| {
+                        CompileError::new(
+                            stmt.line,
+                            format!("prepend count must be between 1 and {MAX_PREPEND}"),
+                        )
+                    })?;
+                self.emit(Op::AsPathPrepend(asn, count), 0);
             }
             StmtKind::CommunityAdd(target, value) => {
                 let info = resolve_settable_field(target)?;
@@ -177,6 +246,10 @@ impl Codegen<'_> {
                 self.emit(Op::LoadConstEnum(discriminant), 1);
                 Ok(Ty::Enum(enum_name))
             }
+            ExprKind::StrLit(_) => Err(CompileError::new(
+                expr.line,
+                "a string literal is only valid as the argument to '.matches(..)'",
+            )),
             ExprKind::ColonLit(_) => Err(CompileError::new(
                 expr.line,
                 "a colon-separated literal is only valid as an argument to '.contains(..)', '.add(..)', or '.remove(..)'",
@@ -238,6 +311,16 @@ impl Codegen<'_> {
                 Ok(Ty::Bool)
             }
             BinOp::Eq | BinOp::Ne => {
+                // An optional address field (`next_hop`, `peer`, ...) can't
+                // be pushed when unset, so comparing it to a literal is its
+                // own op: an unset field is simply never equal.
+                if let (Some(id), ExprKind::IpLit(ip)) = (optional_ip_field(lhs), &rhs.kind) {
+                    self.emit(Op::OptIpEq(id, *ip), 1);
+                    if op == BinOp::Ne {
+                        self.emit(Op::Not, 0);
+                    }
+                    return Ok(Ty::Bool);
+                }
                 let lt = self.compile_expr(lhs)?;
                 let rt = self.compile_expr(rhs)?;
                 if lt != rt {
@@ -257,6 +340,23 @@ impl Codegen<'_> {
                 Ok(Ty::Bool)
             }
             BinOp::In => {
+                if let (ExprKind::Ident(name), true) = (&rhs.kind, is_as_path(lhs)) {
+                    let Some((_, patterns)) = self
+                        .symbols
+                        .as_path_lists
+                        .iter()
+                        .find(|(n, _)| *n == name.as_str())
+                    else {
+                        return Err(CompileError::new(
+                            rhs.line,
+                            format!("undefined as-path-list '{name}'"),
+                        ));
+                    };
+                    let re =
+                        AsPathRegexes::new(patterns).map_err(|e| CompileError::new(rhs.line, e))?;
+                    self.emit(Op::AsPathMatches(re), 1);
+                    return Ok(Ty::Bool);
+                }
                 if let ExprKind::Ident(name) = &rhs.kind {
                     let Some((_, entries)) = self
                         .symbols
@@ -324,6 +424,24 @@ impl Codegen<'_> {
             )),
             Postfix::Call(name, args) if name == "contains" => {
                 self.compile_contains(info, args, line)
+            }
+            Postfix::Call(name, args)
+                if name == "matches" && info.id == schema::FieldId::BgpAsPath =>
+            {
+                let [Expr {
+                    kind: ExprKind::StrLit(pattern),
+                    ..
+                }] = args.as_slice()
+                else {
+                    return Err(CompileError::new(
+                        line,
+                        "'.matches(..)' takes exactly one string literal",
+                    ));
+                };
+                let re = AsPathRegexes::new(&[pattern.as_str()])
+                    .map_err(|e| CompileError::new(line, e))?;
+                self.emit(Op::AsPathMatches(re), 1);
+                Ok(Ty::Bool)
             }
             Postfix::Call(other, _) => Err(CompileError::new(
                 line,
@@ -588,6 +706,43 @@ fn body_halts(body: &[Stmt]) -> bool {
     )
 }
 
+/// Largest `.prepend(asn, count)` repeat — what real networks use is 1-5;
+/// the cap just stops a typo from building a 255-hop path.
+const MAX_PREPEND: u8 = 16;
+
+fn int_literal(expr: &Expr, what: &str) -> Result<i64, CompileError> {
+    match expr.kind {
+        ExprKind::IntLit(n) => Ok(n),
+        _ => Err(CompileError::new(
+            expr.line,
+            format!("expected an integer literal for {what}"),
+        )),
+    }
+}
+
+/// The `FieldId` of `this.<field>` when it is exactly an optional-address
+/// field (see `Op::OptIpEq`).
+fn optional_ip_field(expr: &Expr) -> Option<schema::FieldId> {
+    let ExprKind::This(segments) = &expr.kind else {
+        return None;
+    };
+    let names: Vec<String> = segments
+        .iter()
+        .map(|s| match s {
+            Postfix::Field(n) => Some(n.clone()),
+            Postfix::Call(..) => None,
+        })
+        .collect::<Option<_>>()?;
+    let (info, consumed) = schema::resolve_field(&names)?;
+    (consumed == names.len() && info.ty == FieldType::OptionalIp).then_some(info.id)
+}
+
+/// `this.bgp.as_path` exactly, with no suffix.
+fn is_as_path(expr: &Expr) -> bool {
+    matches!(&expr.kind, ExprKind::This(s)
+        if matches!(s.as_slice(), [Postfix::Field(a), Postfix::Field(b)] if a == "bgp" && b == "as_path"))
+}
+
 fn resolve_settable_field(expr: &Expr) -> Result<&'static FieldInfo, CompileError> {
     let ExprKind::This(segments) = &expr.kind else {
         return Err(CompileError::new(
@@ -655,7 +810,7 @@ mod tests {
     use crate::parser::parse;
     use crate::schema::FieldId;
     use crate::symbols::PrefixListEntry;
-    use crate::vm::{self, BgpInput, Input, Origin, Verdict};
+    use crate::vm::{self, BgpInput, Edits, Input, NextHopSet, Origin, Verdict};
     use std::net::Ipv4Addr;
 
     fn compile_src(src: &str) -> CompiledPolicy {
@@ -702,6 +857,8 @@ mod tests {
                 learned_via_ibgp: false,
                 router_id: None,
                 originator_id: None,
+                peer: None,
+                peer_as: 0,
                 cluster_list,
                 communities: &[],
                 extended_communities: &[],
@@ -728,6 +885,8 @@ mod tests {
                 router_id: None,
                 originator_id: None,
                 cluster_list: &[],
+                peer: None,
+                peer_as: 0,
                 communities,
                 extended_communities,
                 large_communities,
@@ -772,8 +931,131 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                edits: Edits::default(),
             }
         );
+    }
+
+    #[test]
+    fn relative_set_adds_and_subtracts_saturating() {
+        let policy = compile_src(
+            "set this.bgp.local_pref += 50\nset this.bgp.med -= 5\nset this.bgp.med += 20\naccept\n",
+        );
+        let (prefix, as_path, cluster) = default_input("10.0.0.0/8");
+        let input = make_input(prefix, &as_path, 100, None, &cluster);
+        let Verdict::Accept {
+            local_pref, med, ..
+        } = vm::run(&policy, &input)
+        else {
+            panic!("expected accept");
+        };
+        // unset med counts as 0: 0 - 5 saturates to 0, then + 20.
+        assert_eq!((local_pref, med), (150, Some(20)));
+    }
+
+    #[test]
+    fn relative_set_rejects_non_numeric_field() {
+        let err = compile_err("set this.bgp.origin += 1\naccept\n");
+        assert!(err.message.contains("numeric") || err.message.contains("settable"));
+    }
+
+    #[test]
+    fn as_path_prepend_and_regex_match() {
+        let policy = compile_src(
+            "if this.bgp.as_path.matches(\"^65001_\"):\n    this.bgp.as_path.prepend(65000, 2)\n    accept\nelse:\n    reject\n",
+        );
+        let (prefix, _, cluster) = default_input("10.0.0.0/8");
+        let hit = vec![65001, 65002];
+        let Verdict::Accept { edits, .. } =
+            vm::run(&policy, &make_input(prefix, &hit, 100, None, &cluster))
+        else {
+            panic!("expected accept");
+        };
+        assert_eq!(edits.as_path, Some(vec![65000, 65000, 65001, 65002]));
+        let miss = vec![65002, 65001];
+        assert_eq!(
+            vm::run(&policy, &make_input(prefix, &miss, 100, None, &cluster)),
+            Verdict::Reject
+        );
+    }
+
+    #[test]
+    fn as_path_list_matches_any_entry_and_undefined_is_error() {
+        let patterns: &[&str] = &["^65001$", "_65009_"];
+        let lists: &[(&str, &[&str])] = &[("TRANSIT", patterns)];
+        let symbols = Symbols {
+            as_path_lists: lists,
+            ..Symbols::EMPTY
+        };
+        let policy = compile_src_with(
+            "if this.bgp.as_path in TRANSIT:\n    reject\nelse:\n    accept\n",
+            &symbols,
+        );
+        let (prefix, _, cluster) = default_input("10.0.0.0/8");
+        for (path, rejected) in [
+            (vec![65001], true),
+            (vec![1, 65009, 2], true),
+            (vec![65010], false),
+        ] {
+            let v = vm::run(&policy, &make_input(prefix, &path, 100, None, &cluster));
+            assert_eq!(v == Verdict::Reject, rejected, "{path:?}");
+        }
+        let err = compile_err("if this.bgp.as_path in NOPE:\n    reject\nelse:\n    accept\n");
+        assert!(err.message.contains("undefined as-path-list"));
+    }
+
+    #[test]
+    fn bad_regex_and_bad_prepend_are_compile_errors() {
+        assert!(compile_err(
+            "if this.bgp.as_path.matches(\"(\"):\n    accept\nelse:\n    reject\n"
+        )
+        .message
+        .contains("invalid as-path regex"));
+        assert!(compile_err("this.bgp.as_path.prepend(65000, 99)\naccept\n")
+            .message
+            .contains("prepend count"));
+        assert!(compile_err("set this.bgp.as_path = 1\naccept\n")
+            .message
+            .contains("can't be assigned"));
+    }
+
+    #[test]
+    fn set_origin_next_hop_and_peer_match() {
+        let policy = compile_src(
+            "if this.bgp.peer_as == 65100 and this.bgp.peer == 10.0.0.1:\n    set this.bgp.origin = origin.incomplete\n    set this.bgp.next_hop = 192.0.2.1\n    if this.bgp.next_hop == 192.0.2.1:\n        accept\n    else:\n        reject\nelse:\n    set this.bgp.next_hop = self\n    accept\n",
+        );
+        let (prefix, as_path, cluster) = default_input("10.0.0.0/8");
+        let mut input = make_input(prefix, &as_path, 100, None, &cluster);
+        input.bgp.peer = Some("10.0.0.1".parse().unwrap());
+        input.bgp.peer_as = 65100;
+        let Verdict::Accept { edits, .. } = vm::run(&policy, &input) else {
+            panic!("expected accept");
+        };
+        assert_eq!(edits.origin, Some(Origin::Incomplete));
+        assert_eq!(
+            edits.next_hop,
+            NextHopSet::Addr("192.0.2.1".parse().unwrap())
+        );
+        // Locally-redistributed (no peer): falls to the else branch.
+        input.bgp.peer = None;
+        input.bgp.peer_as = 0;
+        let Verdict::Accept { edits, .. } = vm::run(&policy, &input) else {
+            panic!("expected accept");
+        };
+        assert_eq!(
+            (edits.origin, edits.next_hop),
+            (None, NextHopSet::SelfAddress)
+        );
+    }
+
+    #[test]
+    fn next_hop_needs_an_address_and_origin_needs_an_enum() {
+        assert!(compile_err("set this.bgp.next_hop = 5\naccept\n")
+            .message
+            .contains("Ip"));
+        assert!(compile_err("set this.bgp.origin = 1\naccept\n")
+            .message
+            .contains("Enum"));
     }
 
     #[test]
@@ -791,6 +1073,7 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                edits: Edits::default(),
             }
         );
     }
@@ -811,6 +1094,7 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                edits: Edits::default(),
             }
         );
     }
@@ -840,6 +1124,7 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                edits: Edits::default(),
             }
         );
     }
@@ -858,6 +1143,7 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                edits: Edits::default(),
             }
         );
     }
@@ -890,6 +1176,7 @@ mod tests {
                 communities: vec![(65000 << 16) | 200],
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                edits: Edits::default(),
             }
         );
     }
@@ -909,6 +1196,7 @@ mod tests {
                 communities: vec![(65000 << 16) | 100],
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                edits: Edits::default(),
             }
         );
     }
@@ -931,6 +1219,7 @@ mod tests {
                 communities: vec![(65000 << 16) | 200],
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                edits: Edits::default(),
             }
         );
     }
@@ -950,6 +1239,7 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                edits: Edits::default(),
             }
         );
     }
@@ -971,6 +1261,7 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: vec![packed],
                 large_communities: Vec::new(),
+                edits: Edits::default(),
             }
         );
     }
@@ -990,6 +1281,7 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: vec![(65000, 1, 1)],
+                edits: Edits::default(),
             }
         );
     }
@@ -1012,7 +1304,7 @@ mod tests {
 
     #[test]
     fn adding_to_immutable_list_field_is_a_compile_error() {
-        let err = compile_err("this.bgp.as_path.add(65000:100)\naccept\n");
+        let err = compile_err("this.bgp.cluster_list.add(65000:100)\naccept\n");
         assert!(err.to_string().contains("not settable"));
     }
 
@@ -1030,7 +1322,7 @@ mod tests {
 
     #[test]
     fn setting_immutable_field_is_a_compile_error() {
-        let err = compile_err("set this.bgp.origin = 1\naccept\n");
+        let err = compile_err("set this.bgp.router_id = 1\naccept\n");
         assert!(err.to_string().contains("not settable"));
     }
 
@@ -1055,6 +1347,7 @@ mod tests {
             aliases,
             groups: &[],
             prefix_lists: &[],
+            as_path_lists: &[],
         };
         let policy = compile_src_with(
             "if this.bgp.communities.contains(CUSTOMER_A):\n    reject\nelse:\n    accept\n",
@@ -1075,6 +1368,7 @@ mod tests {
             aliases: &[],
             groups,
             prefix_lists: &[],
+            as_path_lists: &[],
         };
         let policy = compile_src_with(
             "if this.bgp.communities.contains(CUSTOMERS):\n    reject\nelse:\n    accept\n",
@@ -1092,6 +1386,7 @@ mod tests {
                 communities: vec![(65000 << 16) | 999],
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                edits: Edits::default(),
             }
         );
     }
@@ -1106,6 +1401,7 @@ mod tests {
             aliases: &[],
             groups,
             prefix_lists: &[],
+            as_path_lists: &[],
         };
         let policy = compile_src_with("this.bgp.communities.add(CUSTOMERS)\naccept\n", &symbols);
         let prefix: ipnet::IpNet = "10.0.0.0/8".parse().unwrap();
@@ -1118,6 +1414,7 @@ mod tests {
                 communities: vec![(65000 << 16) | 100, (65000 << 16) | 200],
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                edits: Edits::default(),
             }
         );
     }
@@ -1143,6 +1440,7 @@ mod tests {
             aliases: &[],
             groups: &[],
             prefix_lists: lists,
+            as_path_lists: &[],
         };
         let policy = compile_src_with(
             "if this.prefix in BLOCKS:\n    reject\nelse:\n    accept\n",
@@ -1163,6 +1461,7 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                edits: Edits::default(),
             }
         );
     }
@@ -1178,6 +1477,7 @@ mod tests {
             aliases: &[],
             groups: &[],
             prefix_lists: lists,
+            as_path_lists: &[],
         };
         let policy = compile_src_with(
             "if this.prefix in BLOCKS:\n    reject\nelse:\n    accept\n",
@@ -1198,6 +1498,7 @@ mod tests {
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
                 large_communities: Vec::new(),
+                edits: Edits::default(),
             }
         );
     }

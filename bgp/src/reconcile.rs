@@ -52,6 +52,7 @@ pub async fn run(
                 DiffScope::CommunityAliases,
                 DiffScope::CommunityGroups,
                 DiffScope::PrefixLists,
+                DiffScope::AsPathLists,
             ],
         )
         .await
@@ -126,6 +127,7 @@ async fn resync(
         &cfg.community_aliases,
         &cfg.community_groups,
         &cfg.prefix_lists,
+        &cfg.as_path_lists,
     );
 
     let Some(own) = cfg.bgp_instances.iter().find(|i| i.name == instance) else {

@@ -3,12 +3,12 @@ use std::net::Ipv4Addr;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
-    AddressFamily, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup, BgpSessionState,
-    BgpShutdown, BroadcastDomain, CommunityAlias, CommunityGroup, Config, ConfigDiff, DiffStatus,
-    EvpnRouteSummary, FieldDiff, Interface, InterfaceAddress, InterfaceStatus, LacpMuxState,
-    LacpRate, LacpReceiveState, LinkInterfaceState, LogEntry, LogLevel, LsaSummary,
-    NeighborSummary, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm, OspfInstance,
-    OspfNeighborState, OspfProfile, Ospfv3Area, Ospfv3Instance, Ospfv3LsaSummary,
+    AddressFamily, AsPathList, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup,
+    BgpSessionState, BgpShutdown, BroadcastDomain, CommunityAlias, CommunityGroup, Config,
+    ConfigDiff, DiffStatus, EvpnRouteSummary, FieldDiff, Interface, InterfaceAddress,
+    InterfaceStatus, LacpMuxState, LacpRate, LacpReceiveState, LinkInterfaceState, LogEntry,
+    LogLevel, LsaSummary, NeighborSummary, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm,
+    OspfInstance, OspfNeighborState, OspfProfile, Ospfv3Area, Ospfv3Instance, Ospfv3LsaSummary,
     Ospfv3NeighborSummary, Ospfv3Profile, PeerSummary, PolicyDefinition, PortAggregate,
     PortAggregateLacpSummary, PortAggregateStatus, PrefixList, PrefixListEntry, PrefixRoutes,
     RouteSourceKind, RoutingTable, SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance,
@@ -964,6 +964,11 @@ pub fn render_config(config: &Config) -> String {
     } else {
         lines.extend(config.community_groups.iter().map(render_community_group));
     }
+    if config.as_path_lists.is_empty() {
+        lines.push("no as-path lists configured".to_string());
+    } else {
+        lines.extend(config.as_path_lists.iter().map(render_as_path_list));
+    }
     if config.prefix_lists.is_empty() {
         lines.push("no prefix lists configured".to_string());
     } else {
@@ -1169,6 +1174,15 @@ pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String
                 || format!("community-group '{name}' not found"),
                 render_community_group,
             ),
+        Path::AsPathList(name) => snapshot
+            .config
+            .as_path_lists
+            .iter()
+            .find(|l| &l.name == name)
+            .map_or_else(
+                || format!("as-path-list '{name}' not found"),
+                render_as_path_list,
+            ),
         Path::PrefixList(name) => snapshot
             .config
             .prefix_lists
@@ -1249,11 +1263,30 @@ pub fn render_community_group(group: &CommunityGroup) -> String {
     format!("community-group {}: members [{members}]", group.name)
 }
 
+/// Render one as-path-list as human-readable text.
+pub fn render_as_path_list(list: &AsPathList) -> String {
+    let patterns = if list.patterns.is_empty() {
+        "none".to_string()
+    } else {
+        list.patterns.join(", ")
+    };
+    format!("as-path-list {}: patterns [{patterns}]", list.name)
+}
+
 /// Render one `PrefixListEntry` the same way for every caller — `<cidr>` for
-/// an exact-match entry, `<cidr> range(<min>,<max>)` otherwise.
+/// an exact-match entry, `<cidr> orlonger`/`<cidr> upto <max>` when the range starts at the
+/// cidr's own length, `<cidr> range(<min>,<max>)` otherwise.
 pub fn render_prefix_list_entry(entry: &PrefixListEntry) -> String {
     match entry.range {
         None => entry.cidr.to_string(),
+        Some((min, max))
+            if min == entry.cidr.prefix_len() && max == entry.cidr.max_prefix_len() =>
+        {
+            format!("{} orlonger", entry.cidr)
+        }
+        Some((min, max)) if min == entry.cidr.prefix_len() => {
+            format!("{} upto {max}", entry.cidr)
+        }
         Some((min, max)) => format!("{} range({min},{max})", entry.cidr),
     }
 }
@@ -1609,7 +1642,7 @@ mod tests {
         assert_eq!(
             render_config(&cfg),
             "hostname: nos\nno BGP instances configured\nno routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\nno interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno prefix lists configured\n\
+             no community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured\n\
              no port aggregates configured"
         );
@@ -1626,7 +1659,7 @@ mod tests {
             "hostname: nos\nbgp instance default: router-id 1.1.1.1, asn 65000, cluster-id default (= router-id)\n\
              no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno prefix lists configured\n\
+             no community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured\n\
              no port aggregates configured"
         );
@@ -1644,7 +1677,7 @@ mod tests {
              bgp instance vrf-b: router-id 1.1.1.1, asn 65002, cluster-id default (= router-id)\n\
              no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno prefix lists configured\n\
+             no community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured\n\
              no port aggregates configured"
         );
@@ -1740,7 +1773,7 @@ mod tests {
             "transaction 'demo':\nhostname: nos\nbgp instance r1: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)\n\
              no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno prefix lists configured\n\
+             no community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured\n\
              no port aggregates configured"
         );

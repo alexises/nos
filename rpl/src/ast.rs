@@ -36,6 +36,8 @@ pub enum BinOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     IntLit(i64),
+    /// `"^65001_"` — only valid as the argument to `.matches(..)`.
+    StrLit(String),
     PrefixLit(IpNet),
     IpLit(IpAddr),
     /// `origin.igp` — an enum type name plus a variant name.
@@ -75,12 +77,18 @@ pub enum StmtKind {
         else_body: Option<Vec<Stmt>>,
     },
     Set(Expr, Expr),
+    /// `set this.bgp.local_pref += <expr>` / `-= <expr>` — the bool is
+    /// `true` for `-=`.
+    SetRelative(Expr, bool, Expr),
     /// `this.bgp.communities.add(65000:100)` — adds one value to a settable
     /// community-list field.
     CommunityAdd(Expr, Expr),
     /// `this.bgp.communities.remove(65000:100)` — removes one value, if
     /// present, from a settable community-list field.
     CommunityRemove(Expr, Expr),
+    /// `this.bgp.as_path.prepend(65000[, 3])` — the args are the ASN and an
+    /// optional repeat count.
+    AsPathPrepend(Expr, Vec<Expr>),
     /// `this.bgp.communities.clear()` — empties a settable community-list
     /// field.
     CommunityClear(Expr),

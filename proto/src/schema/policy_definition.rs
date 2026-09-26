@@ -40,7 +40,7 @@ fn valid_name(name: &String, ctx: &Config) -> garde::Result {
 /// Runs the real RPL compiler at commit time, so a syntactically or
 /// semantically invalid policy is rejected before it ever reaches a
 /// `nos-bgpd` instance — see root `CLAUDE.md`'s "Config schema changes".
-/// `ctx`'s `community_aliases`/`community_groups`/`prefix_lists` resolve any
+/// `ctx`'s `community_aliases`/`community_groups`/`prefix_lists`/`as_path_lists` resolve any
 /// bare-identifier reference the script makes — an undefined name surfaces
 /// as an ordinary `CompileError` here, exactly like any other compile error,
 /// which is this system's whole cross-reference-validation story for those
@@ -107,10 +107,26 @@ fn valid_source(source: &str, ctx: &Config) -> garde::Result {
         .map(|(n, e)| (*n, e.as_slice()))
         .collect();
 
+    let as_path_lists: Vec<(&str, Vec<&str>)> = ctx
+        .as_path_lists
+        .iter()
+        .map(|l| {
+            (
+                l.name.as_str(),
+                l.patterns.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    let as_path_list_refs: Vec<(&str, &[&str])> = as_path_lists
+        .iter()
+        .map(|(n, p)| (*n, p.as_slice()))
+        .collect();
+
     let symbols = nos_rpl::Symbols {
         aliases: &alias_refs,
         groups: &group_refs,
         prefix_lists: &prefix_list_refs,
+        as_path_lists: &as_path_list_refs,
     };
 
     nos_rpl::compile(source, &symbols)
@@ -188,6 +204,18 @@ mod tests {
             )],
             ..Default::default()
         };
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn script_referencing_as_path_list_passes_and_undefined_fails() {
+        let script = "if this.bgp.as_path in TRANSIT:\n    reject\nelse:\n    accept\n";
+        let mut cfg = config_with(vec![policy("p", script)]);
+        assert!(cfg.validate_with(&cfg).is_err());
+        cfg.as_path_lists = vec![crate::schema::AsPathList {
+            name: "TRANSIT".to_string(),
+            patterns: vec!["_65009_".to_string()],
+        }];
         cfg.validate_with(&cfg).unwrap();
     }
 

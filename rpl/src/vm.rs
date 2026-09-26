@@ -40,6 +40,49 @@ pub enum Value {
     Enum(u8),
 }
 
+/// Compiled as-path regexes, matched against the path rendered as
+/// space-separated ASNs (`"65001 65002"`). `_` is the Cisco-style boundary
+/// (start, end or a space), so `_65001_` matches the ASN 65001 anywhere.
+#[derive(Debug, Clone)]
+pub struct AsPathRegexes(Vec<regex::Regex>);
+
+impl AsPathRegexes {
+    pub fn new(patterns: &[&str]) -> Result<Self, String> {
+        patterns
+            .iter()
+            .map(|p| {
+                regex::Regex::new(&p.replace('_', "(?:^| |$)"))
+                    .map_err(|e| format!("invalid as-path regex '{p}': {e}"))
+            })
+            .collect::<Result<_, _>>()
+            .map(Self)
+    }
+
+    // ponytail: allocates the rendered path per evaluation, only for
+    // scripts that use a regex; render lazily once per run if it shows up
+    // in profiles.
+    fn is_match(&self, as_path: &[u32]) -> bool {
+        let text = as_path
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.0.iter().any(|re| re.is_match(&text))
+    }
+}
+
+impl PartialEq for AsPathRegexes {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self
+                .0
+                .iter()
+                .zip(&other.0)
+                .all(|(a, b)| a.as_str() == b.as_str())
+    }
+}
+impl Eq for AsPathRegexes {}
+
 /// One instruction. List-typed fields (`as_path`, `cluster_list`) are never
 /// pushed onto the stack as a whole — `FieldLen`/`ListContains*` read
 /// straight from the borrowed slice in `Input` and push only the scalar
@@ -55,6 +98,20 @@ pub enum Op {
     ListContainsInt(FieldId, u32),
     ListContainsIp(FieldId, Ipv4Addr),
     ListContainsCommunity(FieldId, CommunityValue),
+    /// `this.bgp.as_path.matches(..)` / `this.bgp.as_path in LIST` — true if
+    /// any regex matches the current path.
+    AsPathMatches(AsPathRegexes),
+    /// `this.bgp.as_path.prepend(asn, count)`.
+    AsPathPrepend(u32, u8),
+    /// `this.bgp.<field> == <ip literal>` on an optional-address field:
+    /// false when the field is unset.
+    OptIpEq(FieldId, IpAddr),
+    /// Pops an `Enum` and sets `this.bgp.origin`.
+    SetOrigin,
+    /// Pops an `Ip` and sets `this.bgp.next_hop`.
+    SetNextHop,
+    /// `set this.bgp.next_hop = self`.
+    SetNextHopSelf,
     CommunityAdd(FieldId, CommunityValue),
     CommunityRemove(FieldId, CommunityValue),
     CommunityClear(FieldId),
@@ -78,6 +135,9 @@ pub enum Op {
     JumpIfFalse(usize),
     Jump(usize),
     SetField(FieldId),
+    /// Pops a signed delta and adds it (saturating) to a numeric field; an
+    /// unset `med` counts as 0.
+    AddField(FieldId),
     Accept,
     Reject,
 }
@@ -107,9 +167,35 @@ pub struct BgpInput<'a> {
     pub router_id: Option<Ipv4Addr>,
     pub originator_id: Option<Ipv4Addr>,
     pub cluster_list: &'a [Ipv4Addr],
+    /// The neighbor this route is being imported from / exported to; `None`
+    /// (and `peer_as == 0`, never a real ASN) for a locally-redistributed
+    /// route, which has no neighbor.
+    pub peer: Option<IpAddr>,
+    pub peer_as: u32,
     pub communities: &'a [u32],
     pub extended_communities: &'a [u64],
     pub large_communities: &'a [(u32, u32, u32)],
+}
+
+/// Attribute rewrites beyond the always-carried ones on `Verdict::Accept`.
+/// Every field is "unchanged" by default so a policy that never touches it
+/// costs nothing (no allocation, and the consumer keeps its shared `Arc`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Edits {
+    /// The full replacement `AS_PATH`, only if the script prepended.
+    pub as_path: Option<Vec<u32>>,
+    pub origin: Option<Origin>,
+    pub next_hop: NextHopSet,
+}
+
+/// What a policy did to the route's next hop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NextHopSet {
+    #[default]
+    Unchanged,
+    /// `set this.bgp.next_hop = self`.
+    SelfAddress,
+    Addr(IpAddr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +206,7 @@ pub enum Verdict {
         communities: Vec<u32>,
         extended_communities: Vec<u64>,
         large_communities: Vec<(u32, u32, u32)>,
+        edits: Edits,
     },
     Reject,
 }
@@ -151,6 +238,9 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
     let mut cur_extended_communities: Cow<[u64]> = Cow::Borrowed(input.bgp.extended_communities);
     let mut cur_large_communities: Cow<[(u32, u32, u32)]> =
         Cow::Borrowed(input.bgp.large_communities);
+    let mut cur_as_path: Cow<[u32]> = Cow::Borrowed(input.bgp.as_path);
+    let mut cur_origin = input.bgp.origin;
+    let mut next_hop_edit = NextHopSet::Unchanged;
     let mut pc = 0usize;
 
     macro_rules! push {
@@ -171,7 +261,8 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
             Op::LoadField(id) => {
                 let v = match id {
                     FieldId::Prefix => Value::Prefix(input.prefix),
-                    FieldId::BgpOrigin => Value::Enum(input.bgp.origin as u8),
+                    FieldId::BgpOrigin => Value::Enum(cur_origin as u8),
+                    FieldId::BgpPeerAs => Value::Int(i64::from(input.bgp.peer_as)),
                     FieldId::BgpLocalPref => Value::Int(i64::from(cur_local_pref)),
                     FieldId::BgpLearnedViaIbgp => Value::Bool(input.bgp.learned_via_ibgp),
                     _ => unreachable!("check.rs rejects LoadField for {id:?}"),
@@ -185,7 +276,7 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
             Op::FieldLen(id) => {
                 let n = match id {
                     FieldId::Prefix => i64::from(input.prefix.prefix_len()),
-                    FieldId::BgpAsPath => len_as_int(input.bgp.as_path.len()),
+                    FieldId::BgpAsPath => len_as_int(cur_as_path.len()),
                     FieldId::BgpClusterList => len_as_int(input.bgp.cluster_list.len()),
                     FieldId::BgpCommunities => len_as_int(cur_communities.len()),
                     FieldId::BgpExtCommunities => len_as_int(cur_extended_communities.len()),
@@ -196,7 +287,7 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
             }
             Op::ListContainsInt(id, n) => {
                 let found = match id {
-                    FieldId::BgpAsPath => input.bgp.as_path.contains(n),
+                    FieldId::BgpAsPath => cur_as_path.contains(n),
                     _ => unreachable!("check.rs rejects ListContainsInt for {id:?}"),
                 };
                 push!(Value::Bool(found));
@@ -223,6 +314,38 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                 };
                 push!(Value::Bool(found));
             }
+            Op::AsPathMatches(re) => push!(Value::Bool(re.is_match(&cur_as_path))),
+            Op::AsPathPrepend(asn, count) => {
+                cur_as_path
+                    .to_mut()
+                    .splice(0..0, std::iter::repeat_n(*asn, usize::from(*count)));
+            }
+            Op::OptIpEq(id, ip) => {
+                let cur = match id {
+                    FieldId::BgpNextHop => match next_hop_edit {
+                        NextHopSet::Addr(a) => Some(a),
+                        NextHopSet::SelfAddress => None,
+                        NextHopSet::Unchanged => input.bgp.next_hop,
+                    },
+                    FieldId::BgpPeer => input.bgp.peer,
+                    FieldId::BgpRouterId => input.bgp.router_id.map(IpAddr::V4),
+                    FieldId::BgpOriginatorId => input.bgp.originator_id.map(IpAddr::V4),
+                    _ => unreachable!("codegen.rs only emits OptIpEq for optional-ip fields"),
+                };
+                push!(Value::Bool(cur == Some(*ip)));
+            }
+            Op::SetOrigin => {
+                cur_origin = match pop!() {
+                    Value::Enum(0) => Origin::Igp,
+                    Value::Enum(1) => Origin::Egp,
+                    _ => Origin::Incomplete,
+                };
+            }
+            Op::SetNextHop => match pop!() {
+                Value::Ip(a) => next_hop_edit = NextHopSet::Addr(a),
+                other => unreachable!("codegen.rs guarantees an Ip here, got {other:?}"),
+            },
+            Op::SetNextHopSelf => next_hop_edit = NextHopSet::SelfAddress,
             Op::Add => {
                 let b = as_int(pop!());
                 let a = as_int(pop!());
@@ -311,6 +434,18 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                     _ => unreachable!("check.rs rejects SetField for {id:?}"),
                 }
             }
+            Op::AddField(id) => {
+                let d = as_int(pop!());
+                match id {
+                    FieldId::BgpLocalPref => {
+                        cur_local_pref = to_u32_saturating(i64::from(cur_local_pref) + d);
+                    }
+                    FieldId::BgpMed => {
+                        cur_med = Some(to_u32_saturating(i64::from(cur_med.unwrap_or(0)) + d));
+                    }
+                    _ => unreachable!("check.rs rejects AddField for {id:?}"),
+                }
+            }
             Op::CommunityAdd(id, val) => match (id, val) {
                 (FieldId::BgpCommunities, CommunityValue::Standard(n)) => {
                     let list = cur_communities.to_mut();
@@ -359,6 +494,14 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                     communities: cur_communities.into_owned(),
                     extended_communities: cur_extended_communities.into_owned(),
                     large_communities: cur_large_communities.into_owned(),
+                    edits: Edits {
+                        as_path: match cur_as_path {
+                            Cow::Owned(v) => Some(v),
+                            Cow::Borrowed(_) => None,
+                        },
+                        origin: (cur_origin != input.bgp.origin).then_some(cur_origin),
+                        next_hop: next_hop_edit,
+                    },
                 }
             }
             Op::Reject => return Verdict::Reject,

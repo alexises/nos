@@ -85,7 +85,11 @@ pub use evpn_out::AdvertisedEvpn;
 /// "Execution model". A plain function, not an adapter trait: there is
 /// exactly one producer (`RibRoute`) today, so a trait would add indirection
 /// with nothing to abstract over yet.
-fn to_policy_input(prefix: IpNet, route: &RibRoute) -> nos_rpl::Input<'_> {
+fn to_policy_input(
+    prefix: IpNet,
+    route: &RibRoute,
+    peer: Option<(IpAddr, u32)>,
+) -> nos_rpl::Input<'_> {
     nos_rpl::Input {
         prefix,
         bgp: nos_rpl::BgpInput {
@@ -102,6 +106,8 @@ fn to_policy_input(prefix: IpNet, route: &RibRoute) -> nos_rpl::Input<'_> {
             router_id: route.router_id,
             originator_id: route.originator_id,
             cluster_list: &route.cluster_list,
+            peer: peer.map(|(addr, _)| addr),
+            peer_as: peer.map_or(0, |(_, asn)| asn),
             communities: &route.communities,
             extended_communities: &route.extended_communities,
             large_communities: &route.large_communities,
@@ -120,24 +126,48 @@ fn apply_policy(
     prefix: IpNet,
     mut candidate: RibRoute,
     policy: &CompiledPolicy,
+    peer: Option<(IpAddr, u32)>,
 ) -> Option<RibRoute> {
-    match nos_rpl::vm::run(policy, &to_policy_input(prefix, &candidate)) {
-        nos_rpl::Verdict::Reject => None,
-        nos_rpl::Verdict::Accept {
-            local_pref,
-            med,
-            communities,
-            extended_communities,
-            large_communities,
-        } => {
-            candidate.local_pref = local_pref;
-            candidate.med = med;
-            candidate.communities = communities;
-            candidate.extended_communities = extended_communities;
-            candidate.large_communities = large_communities;
-            Some(candidate)
-        }
+    let verdict = nos_rpl::vm::run(policy, &to_policy_input(prefix, &candidate, peer));
+    apply_verdict(&mut candidate, verdict).map(|_| candidate)
+}
+
+/// Writes an accepting verdict's attribute rewrites back onto `route` and
+/// returns the policy's next-hop edit; `None` means the verdict was a reject
+/// (and `route` is untouched). An explicit next-hop address is stored on the
+/// route; `SelfAddress` only means something when advertising, so it is
+/// returned for `build_advertisement` and ignored on import.
+fn apply_verdict(route: &mut RibRoute, verdict: nos_rpl::Verdict) -> Option<nos_rpl::NextHopSet> {
+    let nos_rpl::Verdict::Accept {
+        local_pref,
+        med,
+        communities,
+        extended_communities,
+        large_communities,
+        edits,
+    } = verdict
+    else {
+        return None;
+    };
+    route.local_pref = local_pref;
+    route.med = med;
+    route.communities = communities;
+    route.extended_communities = extended_communities;
+    route.large_communities = large_communities;
+    if let Some(as_path) = edits.as_path {
+        route.as_path = Arc::new(as_path);
     }
+    if let Some(origin) = edits.origin {
+        route.bgp_origin = match origin {
+            nos_rpl::Origin::Igp => message::Origin::Igp,
+            nos_rpl::Origin::Egp => message::Origin::Egp,
+            nos_rpl::Origin::Incomplete => message::Origin::Incomplete,
+        };
+    }
+    if let nos_rpl::NextHopSet::Addr(a) = edits.next_hop {
+        route.next_hop = Some(a);
+    }
+    Some(edits.next_hop)
 }
 
 /// Stores one `MP_REACH_NLRI` batch's EVPN routes in a peer's EVPN Adj-RIB-In,
@@ -172,12 +202,13 @@ fn learn_prefix(
     table: &mut HashMap<IpNet, RibRoute>,
     damping: &mut Damping,
     touched: &mut HashSet<IpNet>,
-    from: IpAddr,
+    peer: (IpAddr, u32),
     prefix: IpNet,
     candidate: RibRoute,
     import_policy: &CompiledPolicy,
 ) {
-    match apply_policy(prefix, candidate, import_policy) {
+    let (from, _) = peer;
+    match apply_policy(prefix, candidate, import_policy, Some(peer)) {
         Some(route) => {
             if damping.enabled(from) {
                 if let Some(old) = table.get(&prefix) {
@@ -244,7 +275,7 @@ pub struct EvpnRoute {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RibRoute {
     pub origin: RouteOrigin,
-    /// Never mutated in place by RPL (`as_path` is a read-only policy input)
+    /// Never mutated in place by RPL (a `prepend` replaces the whole `Arc`)
     /// — shared via `Arc` so cloning a `RibRoute` (candidate collection,
     /// `loc_rib`/`adj_rib_in` storage) never deep-copies this list.
     pub as_path: Arc<Vec<u32>>,
@@ -396,6 +427,8 @@ struct PeerOutbox {
     /// RFC 7947 route-server client — see `build_advertisement`'s `AS_PATH`
     /// exception and `BgpRib::propagate_rs_view`.
     is_rs_client: bool,
+    /// See `BgpRib::peer_asns`.
+    remote_asn: u32,
     /// Address families this peer negotiated RFC 7911 ADD-PATH for (always
     /// empty unless `is_rs_client`) — gates `propagate_rs_view`'s per-source
     /// multi-path fan-out; a family missing here still gets the ordinary
@@ -455,6 +488,9 @@ pub struct BgpRib {
     /// What we've last told each peer, for correct withdrawals.
     adj_rib_out: HashMap<IpAddr, HashSet<IpNet>>,
     peer_outboxes: HashMap<IpAddr, PeerOutbox>,
+    /// Each peer's negotiated remote ASN (see `set_peer_asn`), for RPL's
+    /// `this.bgp.peer_as`. Kept across resets like damping params.
+    peer_asns: HashMap<IpAddr, u32>,
     /// Per `route_server_client` peer, per prefix, the path id and last-sent
     /// snapshot of every source currently advertised to it — see
     /// `propagate_rs_view`.
@@ -504,6 +540,7 @@ impl BgpRib {
             backups: HashMap::new(),
             adj_rib_out: HashMap::new(),
             peer_outboxes: HashMap::new(),
+            peer_asns: HashMap::new(),
             rs_sent: HashMap::new(),
             rs_next_id: HashMap::new(),
             peer_scratch: Vec::new(),
@@ -573,6 +610,7 @@ impl BgpRib {
         export_policy: Arc<CompiledPolicy>,
         tx: mpsc::UnboundedSender<OutboundUpdate>,
     ) {
+        let remote_asn = self.peer_asns.get(&peer).copied().unwrap_or(0);
         self.peer_outboxes.insert(
             peer,
             PeerOutbox {
@@ -584,6 +622,7 @@ impl BgpRib {
                 next_hop_mode,
                 is_rr_client,
                 is_rs_client,
+                remote_asn,
                 add_path_afs,
                 export_policy,
             },
@@ -721,6 +760,13 @@ impl BgpRib {
     }
 
     /// Enables (or with `None` disables) RFC 2439 damping of routes from `peer`.
+    /// Records the remote ASN negotiated in a peer's OPEN, so import and
+    /// export policies can match `this.bgp.peer_as`. Call before
+    /// `peer_established`.
+    pub fn set_peer_asn(&mut self, peer: IpAddr, asn: u32) {
+        self.peer_asns.insert(peer, asn);
+    }
+
     pub fn set_peer_damping(&mut self, peer: IpAddr, params: Option<BgpDamping>) {
         self.damping.set_params(peer, params);
     }
@@ -792,6 +838,7 @@ impl BgpRib {
         update: &UpdateMessage,
         import_policy: &CompiledPolicy,
     ) {
+        let peer_as = self.peer_asns.get(&from).copied().unwrap_or(0);
         // Sized from the message's own known counts so this doesn't rehash
         // its way up on every insert — bounded by the total NLRI/withdrawn
         // entries this one UPDATE could possibly touch.
@@ -918,7 +965,7 @@ impl BgpRib {
                         table,
                         &mut self.damping,
                         &mut touched,
-                        from,
+                        (from, peer_as),
                         IpNet::V4(*prefix),
                         candidate,
                         import_policy,
@@ -934,7 +981,7 @@ impl BgpRib {
                             table,
                             &mut self.damping,
                             &mut touched,
-                            from,
+                            (from, peer_as),
                             *prefix,
                             candidate,
                             import_policy,
@@ -998,7 +1045,12 @@ impl BgpRib {
     /// this to decide whether `recompute_and_propagate` is warranted.
     fn refilter_redistribute(&mut self, prefix: IpNet) -> bool {
         let new = if self.redistribute_raw.contains(&prefix) {
-            apply_policy(prefix, redistributed_route(), &self.redistribute_policy)
+            apply_policy(
+                prefix,
+                redistributed_route(),
+                &self.redistribute_policy,
+                None,
+            )
         } else {
             None
         };
@@ -1425,24 +1477,13 @@ fn build_advertisement(
     // `best` is shadowed with a possibly policy-adjusted owned copy so every
     // rewrite below (`AS_PATH`, `LOCAL_PREF`, `MED`, reflection) sees the
     // policy's `local_pref`/`med`, not the pre-policy values.
-    let best = match nos_rpl::vm::run(&outbox.export_policy, &to_policy_input(prefix, best)) {
-        nos_rpl::Verdict::Reject => return None,
-        nos_rpl::Verdict::Accept {
-            local_pref,
-            med,
-            communities,
-            extended_communities,
-            large_communities,
-        } => {
-            let mut adjusted = best.clone();
-            adjusted.local_pref = local_pref;
-            adjusted.med = med;
-            adjusted.communities = communities;
-            adjusted.extended_communities = extended_communities;
-            adjusted.large_communities = large_communities;
-            adjusted
-        }
-    };
+    let verdict = nos_rpl::vm::run(
+        &outbox.export_policy,
+        &to_policy_input(prefix, best, Some((peer, outbox.remote_asn))),
+    );
+    let mut adjusted = best.clone();
+    let nh_edit = apply_verdict(&mut adjusted, verdict)?;
+    let best = adjusted;
     let best = &best;
 
     let mode = outbox.next_hop_mode.unwrap_or(if outbox.is_ibgp {
@@ -1450,13 +1491,18 @@ fn build_advertisement(
     } else {
         NextHopMode::SelfAddress
     });
-    let next_hop = match mode {
-        NextHopMode::SelfAddress => outbox.local_addr?,
-        NextHopMode::Unchanged => best.next_hop.or(outbox.local_addr)?,
+    let next_hop = match (nh_edit, mode) {
+        (nos_rpl::NextHopSet::Addr(a), _) => a,
+        (nos_rpl::NextHopSet::SelfAddress, _) | (_, NextHopMode::SelfAddress) => {
+            outbox.local_addr?
+        }
+        (nos_rpl::NextHopSet::Unchanged, NextHopMode::Unchanged) => {
+            best.next_hop.or(outbox.local_addr)?
+        }
     };
 
-    // `as_path` is never mutated by RPL (read-only policy input), so it's
-    // still shared with whatever's stored in loc_rib/adj_rib_in at this
+    // `as_path` is only replaced (never mutated in place) by an RPL
+    // `prepend`, so when the script didn't touch it it's still shared with whatever's stored in loc_rib/adj_rib_in at this
     // point — `Arc::clone` is a refcount bump, not a deep copy. The one
     // real content copy this function can't avoid is the eBGP prepend
     // case, where the result genuinely differs per destination peer;
@@ -2265,6 +2311,113 @@ mod tests {
             })
             .expect("expected an announcement for 198.51.100.0/24");
         assert_eq!(adv.communities, vec![(65001 << 16) | 100]);
+    }
+
+    #[test]
+    fn export_policy_prepend_lands_behind_our_own_asn() {
+        let mut rib = new_rib(65001);
+        let peer = addr("10.0.0.1");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        rib.peer_established(
+            peer,
+            false,
+            Some(addr("10.0.0.254")),
+            all_afs(),
+            false,
+            None,
+            false,
+            false,
+            HashSet::new(),
+            Arc::new(
+                nos_rpl::compile(
+                    "this.bgp.as_path.prepend(64999, 2)\naccept\n",
+                    &nos_rpl::Symbols::EMPTY,
+                )
+                .unwrap(),
+            ),
+            tx,
+        );
+
+        rib.apply_redistribute_update(full_update(vec![("198.51.100.0/24", "10.9.9.9")]));
+
+        let adv = recv_all(&mut rx)
+            .into_iter()
+            .find_map(|u| match u {
+                OutboundUpdate::Announce(a) if a.prefix == prefix("198.51.100.0/24") => Some(a),
+                _ => None,
+            })
+            .expect("expected an announcement for 198.51.100.0/24");
+        assert_eq!(adv.as_path, vec![65001, 64999, 64999]);
+    }
+
+    #[test]
+    fn import_policy_matches_peer_as_and_adds_to_local_pref() {
+        let mut rib = new_rib(65000);
+        let source = addr("10.0.0.1");
+        let observer = addr("10.0.0.2");
+        let _source_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
+        let mut observer_rx = register_peer(&mut rib, observer, true, addr("10.0.0.253"));
+        rib.set_peer_asn(source, 65099);
+
+        let policy = nos_rpl::compile(
+            "if this.bgp.peer_as == 65099:\n    set this.bgp.local_pref += 400\n    accept\nelse:\n    reject\n",
+            &nos_rpl::Symbols::EMPTY,
+        )
+        .unwrap();
+        rib.handle_update(
+            source,
+            false,
+            v4("192.0.2.1"),
+            &ebgp_update(vec!["1.2.3.0/24"], vec![], "10.0.0.1"),
+            &policy,
+        );
+
+        let adv = recv_all(&mut observer_rx)
+            .into_iter()
+            .find_map(|u| match u {
+                OutboundUpdate::Announce(a) if a.prefix == prefix("1.2.3.0/24") => Some(a),
+                _ => None,
+            })
+            .expect("expected an announcement for 1.2.3.0/24");
+        assert_eq!(adv.local_pref, Some(500));
+    }
+
+    #[test]
+    fn export_policy_can_set_next_hop_and_origin() {
+        let mut rib = new_rib(65001);
+        let peer = addr("10.0.0.1");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        rib.peer_established(
+            peer,
+            false,
+            Some(addr("10.0.0.254")),
+            all_afs(),
+            false,
+            None,
+            false,
+            false,
+            HashSet::new(),
+            Arc::new(
+                nos_rpl::compile(
+                    "set this.bgp.next_hop = 192.0.2.99\nset this.bgp.origin = origin.incomplete\naccept\n",
+                    &nos_rpl::Symbols::EMPTY,
+                )
+                .unwrap(),
+            ),
+            tx,
+        );
+
+        rib.apply_redistribute_update(full_update(vec![("198.51.100.0/24", "10.9.9.9")]));
+
+        let adv = recv_all(&mut rx)
+            .into_iter()
+            .find_map(|u| match u {
+                OutboundUpdate::Announce(a) if a.prefix == prefix("198.51.100.0/24") => Some(a),
+                _ => None,
+            })
+            .expect("expected an announcement for 198.51.100.0/24");
+        assert_eq!(adv.next_hop, addr("192.0.2.99"));
+        assert_eq!(adv.origin, message::Origin::Incomplete);
     }
 
     #[test]
