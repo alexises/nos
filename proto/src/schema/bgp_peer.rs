@@ -86,6 +86,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             mrai: None,
+            damping: None,
             max_hops: None,
             auth: None,
             next_hop: None,

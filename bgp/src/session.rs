@@ -71,6 +71,8 @@ pub struct ResolvedPeer {
     pub connect_retry_time: Duration,
     /// RFC 4271 §9.2.1.1; zero disables pacing (see `crate::mrai`).
     pub mrai: Duration,
+    /// RFC 2439 flap damping of routes received from this peer.
+    pub damping: Option<nos_proto::BgpDamping>,
     /// RFC 5082 GTSM hop count (see `tcp::apply_max_hops`); `None` = off.
     pub max_hops: Option<u8>,
     pub auth: Option<ResolvedAuth>,
@@ -234,6 +236,11 @@ impl SessionManager {
     ) {
         let rib = self.bgp_rib.lock().await;
         (rib.fdb_domains().to_vec(), rib.evpn_push_snapshot())
+    }
+
+    /// Decays flap-damping penalties and re-decides any released prefixes.
+    pub async fn damping_tick(&self) {
+        self.bgp_rib.lock().await.damping_tick();
     }
 
     /// This instance's owning routing table name and current best-path
@@ -436,6 +443,7 @@ impl SessionManager {
         let local = *self.local.borrow();
         let remote_as = slot.peer.remote_as;
         let mrai = slot.peer.mrai;
+        let damping = slot.peer.damping;
         let local_hold_time = slot.peer.hold_time;
         let keepalive_override = slot.peer.keepalive_interval;
         let next_hop = slot.peer.next_hop;
@@ -457,6 +465,7 @@ impl SessionManager {
                     local_hold_time,
                     keepalive_override,
                     mrai,
+                    damping,
                     next_hop,
                     address_families,
                     is_rr_client,
@@ -754,6 +763,7 @@ async fn active_connect_loop(
                                 local_hold_time: slot.peer.hold_time,
                                 keepalive_override: slot.peer.keepalive_interval,
                                 mrai: slot.peer.mrai,
+                                damping: slot.peer.damping,
                                 next_hop: slot.peer.next_hop,
                                 address_families: slot.peer.address_families.clone(),
                                 is_rr_client: slot.peer.route_reflector_client,
@@ -800,6 +810,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: fsm::CONNECT_RETRY_TIME,
             mrai: Duration::ZERO,
+            damping: None,
             max_hops: None,
             auth: None,
             next_hop: None,

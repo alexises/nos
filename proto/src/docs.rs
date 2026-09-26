@@ -106,6 +106,10 @@ pub enum Topic {
     SetBgpPeerGroupMaxHops,
     /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearMaxHops)`
     ClearBgpPeerGroupMaxHops,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetDamping)`
+    SetBgpPeerGroupDamping,
+    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearDamping)`
+    ClearBgpPeerGroupDamping,
     /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetMd5Auth)`
     SetBgpPeerGroupMd5Auth,
     /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoKey)`

@@ -2314,6 +2314,9 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
         Command::Delete(DeleteTarget::Mrai) => peer_group_clear(path, |instance, name| {
             BgpPeerGroupOp::ClearMrai { instance, name }
         })?,
+        Command::Delete(DeleteTarget::Damping) => peer_group_clear(path, |instance, name| {
+            BgpPeerGroupOp::ClearDamping { instance, name }
+        })?,
         Command::Delete(DeleteTarget::ConnectRetryTime) => {
             peer_group_clear(path, |instance, name| {
                 BgpPeerGroupOp::ClearConnectRetryTime { instance, name }
@@ -2500,6 +2503,11 @@ fn peer_group_set_op(instance: String, group: String, field: BgpPeerGroupField) 
             instance,
             name: group,
             max_hops,
+        },
+        BgpPeerGroupField::Damping(damping) => BgpPeerGroupOp::SetDamping {
+            instance,
+            name: group,
+            damping,
         },
         BgpPeerGroupField::Mrai(mrai) => BgpPeerGroupOp::SetMrai {
             instance,

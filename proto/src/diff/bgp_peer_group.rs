@@ -87,6 +87,18 @@ fn mrai_str(pg: &BgpPeerGroup) -> String {
         .map_or_else(|| "default (0s, unpaced)".to_string(), |m| m.to_string())
 }
 
+fn damping_str(pg: &BgpPeerGroup) -> String {
+    pg.damping.map_or_else(
+        || "unset".to_string(),
+        |d| {
+            format!(
+                "half-life {} reuse {} suppress {} max-suppress {}",
+                d.half_life, d.reuse, d.suppress, d.max_suppress
+            )
+        },
+    )
+}
+
 fn max_hops_str(pg: &BgpPeerGroup) -> String {
     pg.max_hops
         .map_or_else(|| "unset".to_string(), |h| h.to_string())
@@ -187,6 +199,13 @@ fn changed_fields(base: &BgpPeerGroup, candidate: &BgpPeerGroup) -> Vec<FieldDif
             new: Some(mrai_str(candidate)),
         });
     }
+    if base.damping != candidate.damping {
+        fields.push(FieldDiff {
+            label: "damping".to_string(),
+            old: Some(damping_str(base)),
+            new: Some(damping_str(candidate)),
+        });
+    }
     if base.max_hops != candidate.max_hops {
         fields.push(FieldDiff {
             label: "max-hops".to_string(),
@@ -267,6 +286,11 @@ fn removed_section(pg: &BgpPeerGroup) -> SectionDiff {
                 new: None,
             },
             FieldDiff {
+                label: "damping".to_string(),
+                old: Some(damping_str(pg)),
+                new: None,
+            },
+            FieldDiff {
                 label: "max-hops".to_string(),
                 old: Some(max_hops_str(pg)),
                 new: None,
@@ -333,6 +357,11 @@ fn added_section(pg: &BgpPeerGroup) -> SectionDiff {
                 new: Some(mrai_str(pg)),
             },
             FieldDiff {
+                label: "damping".to_string(),
+                old: None,
+                new: Some(damping_str(pg)),
+            },
+            FieldDiff {
                 label: "max-hops".to_string(),
                 old: None,
                 new: Some(max_hops_str(pg)),
@@ -373,6 +402,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             mrai: None,
+            damping: None,
             max_hops: None,
             auth: None,
             next_hop: None,

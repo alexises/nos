@@ -114,6 +114,16 @@ async fn main() -> anyhow::Result<()> {
         sessions.clone(),
         shutdown_rx.clone(),
     );
+    let damping_task = tokio::spawn({
+        let sessions = sessions.clone();
+        async move {
+            let mut tick = tokio::time::interval(nos_bgp::damping::TICK);
+            loop {
+                tick.tick().await;
+                sessions.damping_tick().await;
+            }
+        }
+    });
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),
@@ -143,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
         warn!(instance = %args.instance, error = %e, "fdb push task ended abnormally");
     }
     server_task.abort();
+    damping_task.abort();
 
     info!(instance = %args.instance, "shutting down");
     Ok(())

@@ -65,8 +65,8 @@ pub use rib::{
     RouteEntry, RouteSourceKind,
 };
 pub use schema::{
-    loopback_table_name, AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpInstance, BgpPeer,
-    BgpPeerGroup, BgpShutdown, BroadcastDomain, CommunityAlias, CommunityGroup, Config,
+    loopback_table_name, AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpDamping, BgpInstance,
+    BgpPeer, BgpPeerGroup, BgpShutdown, BroadcastDomain, CommunityAlias, CommunityGroup, Config,
     EsRedundancy, Interface, InterfaceAddress, LacpRate, LldpDestination, LldpSettings,
     NetworkType, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstance,
     OspfProfile, Ospfv3Area, Ospfv3Instance, Ospfv3Profile, PolicyDefinition, PortAggregate,
