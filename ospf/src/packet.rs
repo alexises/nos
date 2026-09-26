@@ -560,20 +560,39 @@ pub fn crypto_sequence(data: &[u8]) -> Option<u64> {
     }
 }
 
+/// RFC 5709 §3.3's `Apad` — `0x878FE1F3` repeated to the hash length — that
+/// stands in the trailer while the HMAC is computed. RFC 7474 replaces its
+/// first four octets with the packet's IP source address (`source`).
+fn apad(algorithm: CryptoAlgorithm, source: Option<Ipv4Addr>) -> Vec<u8> {
+    let mut pad = Vec::with_capacity(algorithm.digest_len());
+    let mut words = algorithm.digest_len() / 4;
+    if let Some(source) = source {
+        pad.extend_from_slice(&source.octets());
+        words -= 1;
+    }
+    for _ in 0..words {
+        pad.extend_from_slice(&0x878F_E1F3u32.to_be_bytes());
+    }
+    pad
+}
+
 /// RFC 7474's digest input: the packet and its 64-bit sequence number
-/// followed by `Apad` — the IP source address then `0x878FE1F3` repeated to
-/// the hash length.
+/// followed by `Apad` with the IP source address.
 fn ext_digest_input(
     packet_and_seq: &[u8],
     source: Ipv4Addr,
     algorithm: CryptoAlgorithm,
 ) -> Vec<u8> {
-    let mut input = packet_and_seq.to_vec();
-    input.extend_from_slice(&source.octets());
-    for _ in 0..(algorithm.digest_len() - 4) / 4 {
-        input.extend_from_slice(&0x878F_E1F3u32.to_be_bytes());
+    [packet_and_seq, &apad(algorithm, Some(source))].concat()
+}
+
+/// `AuType` 2's digest over `data` (the packet): plain MD5 hashes the packet
+/// then the key, the RFC 5709 HMAC-SHA family hashes the packet then `Apad`.
+fn classic_digest(algorithm: CryptoAlgorithm, data: &[u8], key: &[u8]) -> Vec<u8> {
+    match algorithm {
+        CryptoAlgorithm::Md5 => algorithm.digest(data, key),
+        _ => algorithm.digest(&[data, &apad(algorithm, None)].concat(), key),
     }
-    input
 }
 
 /// Builds the 24-byte common header (Appendix A.3.1) around `body`, fills in
@@ -667,7 +686,7 @@ fn encode_packet(
             buf[20..24]
                 .copy_from_slice(&u32::try_from(*sequence).unwrap_or(u32::MAX).to_be_bytes());
             // Checksum field stays zero — not calculated for this AuType.
-            let digest = algorithm.digest(&buf, key);
+            let digest = classic_digest(*algorithm, &buf, key);
             buf.extend_from_slice(&digest);
         }
     }
@@ -741,7 +760,7 @@ fn verify_auth<'a>(data: &'a [u8], auth: &AuthPolicy<'_>) -> Result<&'a [u8], Pa
             if auth_data_len != algorithm.digest_len() || data.len() < length + auth_data_len {
                 return Err(PacketError::TruncatedBody);
             }
-            let expected = algorithm.digest(&data[..length], key);
+            let expected = classic_digest(*algorithm, &data[..length], key);
             if data[length..length + auth_data_len] != expected[..] {
                 return Err(PacketError::AuthFailed);
             }
@@ -1463,5 +1482,23 @@ mod tests {
             decode_hello(&plain, &policy),
             Err(PacketError::AuthTypeMismatch)
         );
+    }
+
+    #[test]
+    fn hmac_sha256_digest_covers_packet_then_apad() {
+        // RFC 5709 §3.3: HMAC(K, packet || Apad), Apad = 0x878FE1F3 x (L/4).
+        let auth = OutgoingAuth::Crypto {
+            key_id: 1,
+            algorithm: CryptoAlgorithm::HmacSha256,
+            key: b"secret",
+            sequence: 1,
+            extended: None,
+        };
+        let encoded = encode_hello(&sample(), &auth);
+        let (packet, digest) = encoded.split_at(encoded.len() - 32);
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(b"secret").unwrap();
+        mac.update(packet);
+        mac.update(&[0x87, 0x8F, 0xE1, 0xF3].repeat(8));
+        assert_eq!(digest, &mac.finalize().into_bytes()[..]);
     }
 }
