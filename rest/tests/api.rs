@@ -520,6 +520,17 @@ async fn errors_are_problem_json_with_the_right_status() {
             "application/problem+json",
             "{uri}"
         );
+        // RFC 9110 §15.5.2 / §15.5.6.
+        if want == StatusCode::UNAUTHORIZED {
+            let c = resp.headers()[header::WWW_AUTHENTICATE].to_str().unwrap();
+            assert!(
+                c.contains("Mutual") && c.contains("/v1/login"),
+                "{uri}: {c}"
+            );
+        }
+        if want == StatusCode::METHOD_NOT_ALLOWED {
+            assert!(resp.headers().contains_key(header::ALLOW), "{uri}");
+        }
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();

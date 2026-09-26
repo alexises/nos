@@ -1,4 +1,4 @@
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 /// Every failure a handler can report, rendered as an RFC 9457 problem document.
@@ -35,7 +35,16 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, msg) = match self {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
-            ApiError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m),
+            ApiError::Unauthorized(m) => {
+                // RFC 9110 §15.5.2: a 401 MUST carry a challenge. The scheme is
+                // a client certificate, so this names the flow that gets one.
+                let mut resp = problem(StatusCode::UNAUTHORIZED, m);
+                resp.headers_mut().insert(
+                    header::WWW_AUTHENTICATE,
+                    HeaderValue::from_static(r#"Mutual realm="nos", login="/v1/login""#),
+                );
+                return resp;
+            }
             ApiError::NotFound(m) => (StatusCode::NOT_FOUND, m),
             ApiError::Unprocessable(m) => (StatusCode::UNPROCESSABLE_ENTITY, m),
             ApiError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
@@ -74,6 +83,8 @@ pub async fn problem_for_framework_errors(resp: Response) -> Response {
         return resp;
     }
     let status = resp.status();
+    // RFC 9110 §15.5.6: axum's 405 carries `Allow`; keep it.
+    let allow = resp.headers().get(header::ALLOW).cloned();
     // Framework messages are one short line; cap the read anyway.
     let bytes = axum::body::to_bytes(resp.into_body(), 4096)
         .await
@@ -84,7 +95,11 @@ pub async fn problem_for_framework_errors(resp: Response) -> Response {
     } else {
         text
     };
-    problem(status, detail)
+    let mut out = problem(status, detail);
+    if let Some(allow) = allow {
+        out.headers_mut().insert(header::ALLOW, allow);
+    }
+    out
 }
 
 /// Media type of every error response (RFC 9457).
