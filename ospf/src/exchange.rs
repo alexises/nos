@@ -73,6 +73,14 @@ pub struct AdjacencyData {
     /// `max_headers` at a time (`pop_chunk`), one chunk per DD sequence
     /// number, until empty.
     pub summary_remaining: VecDeque<LsaHeader>,
+    /// RFC 2328 §13.5 delayed acknowledgment: headers of LSAs received from
+    /// this neighbor and not yet acknowledged. `on_lsu_received` appends
+    /// here instead of answering each LSU with its own `LSAck`; `link.rs`'s
+    /// `RXMT_INTERVAL` sweep (`flush_pending_acks`) sends them as one packet.
+    pub pending_acks: Vec<LsaHeader>,
+    /// When `pending_acks` last went from empty to non-empty — purely for
+    /// the "how long was this batch held" figure the flush logs.
+    pub pending_acks_since: Option<std::time::Instant>,
 }
 
 /// Pops up to `max` headers off the front of `remaining` for the next DBD
@@ -471,20 +479,26 @@ pub fn on_lsr_received(adj: &mut AdjacencyData, lsdb: &Lsdb, lsr: &LsrPacket) ->
 
 /// Handles one received LSU: installs every carried LSA into `lsdb` (RFC
 /// 2328 §13's "is this instance newer" check, via `Lsdb::install`), clears
-/// any now-satisfied entries from the request list, and acks every LSA
-/// regardless of whether it was actually newer — an ack for a stale
-/// instance still stops the sender retransmitting it forever. Fires
-/// `LoadingDone` once the request list is fully drained. Returns the
-/// actions to carry out alongside the headers that were *actually*
-/// installed/superseded (excluding rejected duplicates) — `link.rs` uses
-/// the latter to avoid logging a fresh "installed" line for a duplicate its
-/// own periodic resend produces.
+/// any now-satisfied entries from the request list, and queues an ack for
+/// every LSA regardless of whether it was actually newer — an ack for a
+/// stale instance still stops the sender retransmitting it forever. Acks
+/// are *delayed* (RFC 2328 §13.5): appended to `adj.pending_acks` for
+/// `link.rs`'s next `RXMT_INTERVAL` sweep to send as one `LSAck`, not
+/// returned as a `SendLsAck` action — `ponytail:` the RFC's direct
+/// (immediate) ack cases key off "was this LSA flooded back out in
+/// response", a signal this crate's periodic-resend flooding has no
+/// equivalent of, so every ack is delayed. Fires `LoadingDone` once the
+/// request list is fully drained. Returns the actions to carry out
+/// alongside the headers that were *actually* installed/superseded
+/// (excluding rejected duplicates) — `link.rs` uses the latter to avoid
+/// logging a fresh "installed" line for a duplicate its own periodic
+/// resend produces.
 pub fn on_lsu_received(
     adj: &mut AdjacencyData,
     lsdb: &mut Lsdb,
     lsu: &LsuPacket,
 ) -> (Vec<Action>, Vec<LsaHeader>) {
-    let mut acked = Vec::with_capacity(lsu.lsas.len());
+    let acked = &mut adj.pending_acks;
     let mut newly_installed = Vec::new();
     for l in &lsu.lsas {
         let key = l.header.key();
@@ -511,11 +525,22 @@ pub fn on_lsu_received(
         acked.push(l.header);
         adj.request_list.retain(|k| *k != key);
     }
-    let mut actions = vec![Action::SendLsAck(acked)];
+    let mut actions = Vec::new();
     if adj.request_list.is_empty() {
         actions.push(Action::NeighborEvent(Event::LoadingDone));
     }
     (actions, newly_installed)
+}
+
+/// RFC 2328 §13.5: takes every queued ack for this neighbor as one `LSAck`
+/// to send now — `None` if nothing is pending. Called by `link.rs` on every
+/// `RXMT_INTERVAL` sweep.
+pub fn take_pending_acks(adj: &mut AdjacencyData) -> Option<Action> {
+    if adj.pending_acks.is_empty() {
+        return None;
+    }
+    adj.pending_acks_since = None;
+    Some(Action::SendLsAck(std::mem::take(&mut adj.pending_acks)))
 }
 
 /// Handles one received `LSAck`: RFC 2328 §10.9 — stop retransmitting
@@ -1454,14 +1479,16 @@ mod tests {
         let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu);
         assert!(adj.request_list.is_empty());
         assert!(lsdb.get(&l.header.key()).is_some());
-        assert_eq!(
-            actions,
-            vec![
-                Action::SendLsAck(vec![l.header]),
-                Action::NeighborEvent(Event::LoadingDone),
-            ]
-        );
+        assert_eq!(actions, vec![Action::NeighborEvent(Event::LoadingDone)]);
+        assert_eq!(adj.pending_acks, vec![l.header]);
         assert_eq!(newly_installed, vec![l.header]);
+        // RFC 2328 §13.5: the ack goes out on the next sweep, as one packet.
+        assert_eq!(
+            take_pending_acks(&mut adj),
+            Some(Action::SendLsAck(vec![l.header]))
+        );
+        assert!(adj.pending_acks.is_empty());
+        assert_eq!(take_pending_acks(&mut adj), None);
     }
 
     #[test]
@@ -1476,13 +1503,8 @@ mod tests {
             lsas: vec![l.clone()],
         };
         let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu);
-        assert_eq!(
-            actions,
-            vec![
-                Action::SendLsAck(vec![l.header]),
-                Action::NeighborEvent(Event::LoadingDone),
-            ]
-        );
+        assert_eq!(actions, vec![Action::NeighborEvent(Event::LoadingDone)]);
+        assert_eq!(adj.pending_acks, vec![l.header]);
         assert!(newly_installed.is_empty());
     }
 
@@ -1501,7 +1523,8 @@ mod tests {
         };
         let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu);
         assert_eq!(adj.request_list, vec![header("2.2.2.2", 1).key()]);
-        assert_eq!(actions, vec![Action::SendLsAck(vec![l.header])]);
+        assert!(actions.is_empty());
+        assert_eq!(adj.pending_acks, vec![l.header]);
         assert_eq!(newly_installed, vec![l.header]);
     }
 
@@ -1521,7 +1544,8 @@ mod tests {
         let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu);
         assert!(lsdb.get(&l.header.key()).is_none());
         assert!(newly_installed.is_empty());
-        assert_eq!(actions[0], Action::SendLsAck(vec![l.header]));
+        assert!(!actions.iter().any(|a| matches!(a, Action::SendLsAck(_))));
+        assert_eq!(adj.pending_acks, vec![l.header]);
 
         let mut adj = AdjacencyData {
             request_list: vec![l.header.key()],
@@ -1550,6 +1574,28 @@ mod tests {
         let (_, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu);
         assert_eq!(newly_installed, vec![flushed.header]);
         assert_eq!(lsdb.get(&l.header.key()).unwrap().header.age, lsa::MAX_AGE);
+    }
+
+    /// RFC 2328 §13.5: acks for LSAs from several LSUs accumulate into one
+    /// `LSAck` at the next sweep.
+    #[test]
+    fn lsu_acks_accumulate_across_lsus_until_taken() {
+        let mut adj = AdjacencyData::default();
+        let mut lsdb = Lsdb::new();
+        let first = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
+        let second = full_lsa("2.2.2.2", 0x8000_0001u32.cast_signed());
+        for l in [&first, &second] {
+            let lsu = LsuPacket {
+                router_id: router_id("9.9.9.10"),
+                area_id: Ipv4Addr::UNSPECIFIED,
+                lsas: vec![l.clone()],
+            };
+            on_lsu_received(&mut adj, &mut lsdb, &lsu);
+        }
+        assert_eq!(
+            take_pending_acks(&mut adj),
+            Some(Action::SendLsAck(vec![first.header, second.header]))
+        );
     }
 
     #[test]
