@@ -8,6 +8,16 @@
 //! discriminated by the value itself, the same pattern `nos-rib`'s own `Rib`
 //! already uses.
 //!
+//! Before any of it runs, RFC 4271 §9.1.2's feasibility check: a peer-learned
+//! candidate whose `NEXT_HOP` no route in the IGP table polled from `nos-ribd`
+//! covers is unfeasible and is dropped from the candidate set outright
+//! (`next_hop_feasible`) — not merely tie-broken — once that table has been
+//! fetched at least once (`igp_ready`; before that every candidate is kept,
+//! so a fresh start never blackholes what it just learned). Directly connected
+//! next hops resolve because `nos-ribd` holds every applied address as a
+//! `Connected` route. The runner-up/backup path is picked from the same
+//! filtered set, so it needs a resolvable next hop just the same.
+//!
 //! Best path selection (`best_path`) implements the full RFC 4271 §9.1.2.2
 //! decision process, in order: (1) higher `LOCAL_PREF`; (2) a
 //! locally-redistributed route beats any peer-learned route (not an RFC
@@ -21,9 +31,8 @@
 //! entry), missing MED treated as 0; (6) an eBGP-learned route beats an
 //! iBGP-learned one; (7) lowest IGP metric to the next-hop, resolved by
 //! longest-prefix match against the table `igp_client` polls from
-//! `nos-ribd` (`set_igp`) — an unresolvable next hop (or a directly
-//! connected one, which `nos-ribd` doesn't hold) counts as 0, since the RIB
-//! has no connected routes to tell them apart; (8) oldest route
+//! `nos-ribd` (`set_igp`) — a directly connected one is a `Connected` route
+//! at cost 0, an unresolvable one never gets here (see above); (8) oldest route
 //! wins (by `received_at`), only between two eBGP-learned candidates,
 //! per RFC 4271's anti-flap tie-break; (9) lowest BGP Identifier
 //! (router-id) of the advertising peer; (10) lowest advertising peer
@@ -72,7 +81,7 @@ use ipnet::IpNet;
 use nos_proto::{AddressFamily, BgpDamping, NextHopMode, RedistributeUpdate};
 use nos_rpl::CompiledPolicy;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::damping::{Damping, CHANGE_PENALTY, WITHDRAW_PENALTY};
 use crate::evpn::EvpnNlri;
@@ -501,6 +510,10 @@ pub struct BgpRib {
     loc_rib: HashMap<IpNet, RibRoute>,
     /// IGP cost per prefix, as last polled from `nos-ribd` — decision step (d).
     igp: HashMap<IpNet, u32>,
+    /// Whether `igp` has been fetched at least once — before that, no
+    /// candidate is excluded for an unresolvable next hop (see the module
+    /// doc comment).
+    igp_ready: bool,
     /// Per prefix, the runner-up path's next hop (a different next hop from
     /// the winner's), pushed to `nos-ribd` as the kernel backup route.
     backups: HashMap<IpNet, IpAddr>,
@@ -560,6 +573,7 @@ impl BgpRib {
             redistribute_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             loc_rib: HashMap::new(),
             igp: HashMap::new(),
+            igp_ready: false,
             backups: HashMap::new(),
             adj_rib_out: HashMap::new(),
             peer_outboxes: HashMap::new(),
@@ -795,18 +809,46 @@ impl BgpRib {
         self.damping.set_params(peer, params);
     }
 
-    /// Installs a fresh IGP cost table (see `igp_client`) and, if it changed,
-    /// re-decides every prefix — an IGP change is not a BGP event, so nothing
-    /// else would trigger it.
+    /// Installs a fresh IGP cost table (see `igp_client`) and, if it changed
+    /// (or this is the first table ever fetched, which turns the feasibility
+    /// check on), re-decides every prefix — an IGP change is not a BGP event,
+    /// so nothing else would trigger it. Every Adj-RIB-In prefix is
+    /// re-decided, not only the Loc-RIB: a candidate excluded as unfeasible
+    /// isn't in the Loc-RIB, and a new IGP route is exactly what admits it.
     pub fn set_igp(&mut self, igp: HashMap<IpNet, u32>) {
-        if igp == self.igp {
+        let first = !self.igp_ready;
+        self.igp_ready = true;
+        if !first && igp == self.igp {
             return;
         }
         self.igp = igp;
         tracing::info!(costs = ?self.igp, "igp costs updated");
-        let prefixes: Vec<IpNet> = self.loc_rib.keys().copied().collect();
+        let prefixes: HashSet<IpNet> = self
+            .loc_rib
+            .keys()
+            .chain(self.adj_rib_in.values().flat_map(HashMap::keys))
+            .copied()
+            .collect();
         for prefix in prefixes {
             self.recompute_and_propagate(prefix);
+        }
+    }
+
+    /// RFC 4271 §9.1.2: a candidate is feasible if it has no next hop of its
+    /// own (a locally-redistributed route), if no IGP table has been fetched
+    /// yet (startup), or if some route in that table covers its next hop —
+    /// which includes `nos-ribd`'s `Connected` routes, so a directly
+    /// connected next hop resolves. No link-local exception is needed:
+    /// `RibRoute.next_hop` can never be a link-local address, because
+    /// `message::decode_mp_reach` keeps only the global half of an RFC 2545
+    /// next-hop field (see `message.rs`'s
+    /// `mp_reach_accepts_global_plus_link_local_next_hop` test) and the
+    /// legacy `NEXT_HOP` attribute is IPv4 — revisit this if that parsing
+    /// ever changes.
+    fn next_hop_feasible(&self, next_hop: Option<IpAddr>) -> bool {
+        match next_hop {
+            None => true,
+            Some(addr) => !self.igp_ready || igp_lookup(&self.igp, addr).is_some(),
         }
     }
 
@@ -1158,6 +1200,15 @@ impl BgpRib {
                 candidates.push((route.clone(), Some(*peer)));
             }
         }
+        // RFC 4271 §9.1.2: an unresolvable next hop is unfeasible — out of
+        // the decision process (and the backup pick below) entirely.
+        candidates.retain(|(route, peer)| {
+            let feasible = self.next_hop_feasible(route.next_hop);
+            if !feasible {
+                debug!(peer = ?peer, %prefix, next_hop = ?route.next_hop, "bgp: candidate excluded, next hop unresolvable");
+            }
+            feasible
+        });
 
         let best = best_path(&candidates, &self.igp);
         match best
@@ -1245,6 +1296,11 @@ impl BgpRib {
     /// more than one path for the same prefix only ever contributes its
     /// latest one here. Add per-path `adj_rib_in` keying if a client needs
     /// to submit multiple paths itself.
+    ///
+    /// Deliberately *not* filtered by `next_hop_feasible`: RFC 7947 §2.2.2
+    /// transparency means a client sees every other client's path as
+    /// submitted, and whether *this* instance can resolve a next hop says
+    /// nothing about whether the client can.
     fn propagate_rs_view(&mut self, prefix: IpNet) {
         let rs_peers: Vec<IpAddr> = self
             .peer_outboxes
@@ -1406,19 +1462,24 @@ fn runner_up_next_hop(
     best_path(&others, igp)?.next_hop
 }
 
-/// Cost of the longest `igp` prefix covering `next_hop`; 0 when there is no
-/// next hop (a local route) or nothing covers it.
-fn igp_cost(igp: &HashMap<IpNet, u32>, next_hop: Option<IpAddr>) -> u32 {
-    let Some(addr) = next_hop else { return 0 };
+/// Cost of the longest `igp` prefix covering `addr`, `None` if nothing does.
+fn igp_lookup(igp: &HashMap<IpNet, u32>, addr: IpAddr) -> Option<u32> {
     if igp.is_empty() {
-        return 0;
+        return None;
     }
     let max = if addr.is_ipv4() { 32 } else { 128 };
     (0..=max)
         .rev()
         .find_map(|len| igp.get(&IpNet::new(addr, len).ok()?.trunc()))
         .copied()
-        .unwrap_or(0)
+}
+
+/// Cost of the longest `igp` prefix covering `next_hop`; 0 when there is no
+/// next hop (a local route) or nothing covers it (only reachable before the
+/// first IGP poll — afterwards such a candidate is unfeasible, see
+/// `BgpRib::next_hop_feasible`).
+fn igp_cost(igp: &HashMap<IpNet, u32>, next_hop: Option<IpAddr>) -> u32 {
+    next_hop.and_then(|addr| igp_lookup(igp, addr)).unwrap_or(0)
 }
 
 /// The full RFC 4271 §9.1.2.2 decision process — see the module doc
@@ -3699,6 +3760,159 @@ mod tests {
         more.insert(prefix("10.1.0.0/24"), 99);
         rib.set_igp(more);
         assert_eq!(best(&rib), addr("10.2.0.1"));
+    }
+
+    // --- RFC 4271 §9.1.2 next-hop feasibility ---
+
+    /// One peer-learned route for `9.9.9.0/24` with next hop `10.1.0.1`.
+    fn learn_one(rib: &mut BgpRib, peer: IpAddr, next_hop: &str) {
+        rib.handle_update(
+            peer,
+            false,
+            v4("5.5.5.5"),
+            &update_with(
+                "9.9.9.0/24",
+                vec![65001],
+                next_hop,
+                message::Origin::Igp,
+                None,
+            ),
+            &nos_rpl::ACCEPT_ALL,
+        );
+    }
+
+    #[test]
+    fn unresolved_next_hop_excluded_once_igp_ready_and_admitted_when_igp_learns_it() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        rib.set_routing_table(Some("rt1".to_string()));
+        // The IGP knows the peer's own subnet, not the advertised next hop.
+        rib.set_igp(HashMap::from([(prefix("10.0.0.0/24"), 0)]));
+
+        learn_one(&mut rib, peer, "10.1.0.1");
+        assert!(
+            rib.push_snapshot().1.is_empty(),
+            "unfeasible route reached the loc-rib"
+        );
+        assert!(rib.loc_rib.is_empty());
+
+        // An IGP route covering the next hop appears: no BGP event, but the
+        // candidate must be re-decided and win.
+        rib.set_igp(HashMap::from([
+            (prefix("10.0.0.0/24"), 0),
+            (prefix("10.1.0.0/16"), 20),
+        ]));
+        assert_eq!(
+            rib.push_snapshot().1[&prefix("9.9.9.0/24")].0,
+            addr("10.1.0.1")
+        );
+
+        // ...and disappears again: withdrawn from the loc-rib.
+        rib.set_igp(HashMap::from([(prefix("10.0.0.0/24"), 0)]));
+        assert!(rib.loc_rib.is_empty());
+    }
+
+    #[test]
+    fn unresolved_next_hop_not_excluded_before_first_igp_poll() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        rib.set_routing_table(Some("rt1".to_string()));
+
+        learn_one(&mut rib, peer, "10.1.0.1");
+        assert_eq!(
+            rib.push_snapshot().1[&prefix("9.9.9.0/24")].0,
+            addr("10.1.0.1")
+        );
+
+        // The very first poll — even an empty table — turns the check on.
+        rib.set_igp(HashMap::new());
+        assert!(rib.loc_rib.is_empty());
+    }
+
+    #[test]
+    fn local_redistributed_route_never_filtered() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let mut rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        rib.set_igp(HashMap::new());
+
+        rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
+        assert!(rib.loc_rib.contains_key(&prefix("192.168.1.0/24")));
+        assert!(matches!(
+            recv_all(&mut rx).as_slice(),
+            [OutboundUpdate::Announce(_)]
+        ));
+    }
+
+    #[test]
+    fn route_server_client_still_sees_infeasible_path_transparently() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let rs_client = addr("10.0.0.2");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        let mut rs_rx = register_peer_full(
+            &mut rib,
+            rs_client,
+            false,
+            addr("10.0.0.253"),
+            false,
+            true,
+            [AddressFamily::Ipv4Unicast].into_iter().collect(),
+        );
+        rib.set_igp(HashMap::new());
+
+        learn_one(&mut rib, peer, "10.1.0.1");
+        // Not in this instance's own loc-rib...
+        assert!(rib.loc_rib.is_empty());
+        // ...but the route-server client gets the path as submitted.
+        let updates = recv_all(&mut rs_rx);
+        assert!(
+            matches!(
+                updates.as_slice(),
+                [OutboundUpdate::Announce(AdvertisedRoute {
+                    path_id: Some(_),
+                    ..
+                })]
+            ),
+            "{updates:?}"
+        );
+    }
+
+    #[test]
+    fn runner_up_backup_also_requires_resolvable_next_hop() {
+        let mut rib = new_rib(65000);
+        let peer_a = addr("10.0.0.1");
+        let peer_b = addr("10.0.0.2");
+        let _rx_a = register_peer(&mut rib, peer_a, true, addr("10.0.0.254"));
+        let _rx_b = register_peer(&mut rib, peer_b, true, addr("10.0.0.253"));
+        rib.set_routing_table(Some("rt1".to_string()));
+        // Only peer_a's next hop resolves.
+        rib.set_igp(HashMap::from([(prefix("10.1.0.0/16"), 10)]));
+        for (peer, nh) in [(peer_a, "10.1.0.1"), (peer_b, "10.2.0.1")] {
+            rib.handle_update(
+                peer,
+                true,
+                v4("5.5.5.5"),
+                &update_with("9.9.9.0/24", vec![65001], nh, message::Origin::Igp, None),
+                &nos_rpl::ACCEPT_ALL,
+            );
+        }
+        assert_eq!(
+            rib.push_snapshot().1[&prefix("9.9.9.0/24")],
+            (addr("10.1.0.1"), None)
+        );
+
+        // Once peer_b's resolves too, it becomes the backup.
+        rib.set_igp(HashMap::from([
+            (prefix("10.1.0.0/16"), 10),
+            (prefix("10.2.0.0/16"), 10),
+        ]));
+        assert_eq!(
+            rib.push_snapshot().1[&prefix("9.9.9.0/24")],
+            (addr("10.1.0.1"), Some(addr("10.2.0.1")))
+        );
     }
 
     #[test]

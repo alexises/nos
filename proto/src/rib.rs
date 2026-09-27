@@ -12,6 +12,9 @@ pub enum RouteSourceKind {
     Static,
     Bgp,
     Ospf,
+    /// A directly-connected prefix, derived by `nos-ribd` from the
+    /// addresses `nos-interfaced` applied in this table.
+    Connected,
 }
 
 /// One candidate route for a prefix.

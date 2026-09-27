@@ -216,7 +216,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
     }
 
     if full_replace {
-        let routes = guard.best_routes();
+        let routes = guard.best_routes_for_kernel();
         drop(guard);
         info!(table = %ctx.table, prefixes = routes.len(), "applying bgp-pushed routes to kernel");
         if let Err(e) = ctx.driver.apply(&ctx.table, &routes).await {
@@ -296,7 +296,7 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
     }
 
     if full_replace {
-        let routes = guard.best_routes();
+        let routes = guard.best_routes_for_kernel();
         drop(guard);
         info!(table = %ctx.table, prefixes = routes.len(), "applying ospf-pushed routes to kernel");
         if let Err(e) = ctx.driver.apply(&ctx.table, &routes).await {
@@ -332,6 +332,7 @@ fn to_source_kind(source: RouteSource) -> RouteSourceKind {
         RouteSource::Static => RouteSourceKind::Static,
         RouteSource::Bgp => RouteSourceKind::Bgp,
         RouteSource::Ospf => RouteSourceKind::Ospf,
+        RouteSource::Connected => RouteSourceKind::Connected,
     }
 }
 

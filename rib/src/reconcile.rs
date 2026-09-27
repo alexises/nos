@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use nos_proto::{
-    Config, DiffScope, Event, IpNet, Redistribute, RedistributeSource, RedistributeTarget,
-    RedistributedRoute,
+    BroadcastDomainStatus, Config, DiffScope, Event, InterfaceStatus, IpNet, Redistribute,
+    RedistributeSource, RedistributeTarget, RedistributedRoute, ServiceRef,
 };
 use tokio::sync::{watch, RwLock};
 use tokio::time::sleep;
@@ -15,8 +15,10 @@ use tracing::{debug, error, info, trace, warn};
 use crate::bgp_client;
 use crate::config_client;
 use crate::driver::RibDriver;
+use crate::interface_client;
 use crate::ospf_client;
 use crate::rib::{build_from_config, Rib, RibEntry, RouteSource};
+use crate::watchdog_client;
 
 /// Fixed reconnect delay for the config subscription, matching
 /// `nos-watchdog`'s `bgp_instances::RECONNECT_DELAY` for consistency across
@@ -41,6 +43,10 @@ const REAPPLY_INTERVAL: Duration = Duration::from_secs(10);
 /// untouched) — rather than incremental diff application, since
 /// `SectionDiff`/`FieldDiff` only carry pre-formatted display strings, not
 /// structured route data (see `nos_proto::diff::routing_table`/`static_routing_instance`).
+/// The `Connected` candidates are rebuilt the same way, from what
+/// `nos-interfaced` (resolved through `watchdog_socket`) reports it applied
+/// — so a new address is visible to `show route` and to `nos-bgpd`'s
+/// next-hop check within one `REAPPLY_INTERVAL` at worst.
 ///
 /// On exit, tears down this table's kernel VRF/routes via `driver` (see
 /// `RibDriver::teardown`) — the same SIGINT `nos-watchdog` sends both for
@@ -49,8 +55,10 @@ const REAPPLY_INTERVAL: Duration = Duration::from_secs(10);
 /// real removal. That's an accepted tradeoff: the driver's persisted
 /// table-id registry (see `driver::table_registry`) is untouched by
 /// `teardown`, so the next `apply` recreates the exact same VRF name.
+#[allow(clippy::too_many_arguments)] // one socket/channel per collaborator, wired once by main.rs
 pub async fn run(
     config_socket: PathBuf,
+    watchdog_socket: PathBuf,
     table: String,
     rib: Arc<RwLock<Rib>>,
     driver: Arc<dyn RibDriver>,
@@ -76,7 +84,7 @@ pub async fn run(
                     tokio::select! {
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(_))) => {
-                                resync(&config_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx).await;
+                                resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -89,7 +97,7 @@ pub async fn run(
                             }
                         },
                         _ = reapply.tick() => {
-                            resync(&config_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx).await;
+                            resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx).await;
                         }
                         _ = shutdown.changed() => break,
                     }
@@ -120,6 +128,7 @@ pub async fn run(
 
 async fn resync(
     config_socket: &Path,
+    watchdog_socket: &Path,
     table: &str,
     rib: &Arc<RwLock<Rib>>,
     driver: &dyn RibDriver,
@@ -141,10 +150,22 @@ async fn resync(
                 );
                 Vec::new()
             };
+            let connected = fetch_connected(watchdog_socket, &cfg, table).await;
 
             let mut guard = rib.write().await;
             guard.replace_source(RouteSource::Static, static_entries);
-            let routes = guard.best_routes();
+            match connected {
+                Some(entries) => {
+                    debug!(table = %table, connected = entries.len(), "resolved connected prefixes");
+                    guard.replace_source(RouteSource::Connected, entries);
+                }
+                // Same "keep the last good set on a transient failure" rule
+                // as nos-bgpd's `igp_client`.
+                None => {
+                    debug!(table = %table, "nos-interfaced unreachable, keeping previous connected prefixes");
+                }
+            }
+            let routes = guard.best_routes_for_kernel();
             drop(guard);
 
             debug!(table = %table, prefixes = routes.len(), "recomputed RIB");
@@ -168,6 +189,69 @@ async fn resync(
             warn!(table = %table, error = %e, "failed to fetch running config, keeping previous RIB");
         }
     }
+}
+
+/// Asks `nos-interfaced` (resolved via the broker, `ServiceRef::Interfaces`)
+/// for every interface, plus each `cfg.broadcast_domains` entry in `table`
+/// with an SVI address (one `GetBroadcastDomain` each — there is no "list
+/// every domain" request, the same per-name lookup `nos-fdbd` does), and
+/// derives this table's `Connected` candidates. `None` if any call failed.
+async fn fetch_connected(
+    watchdog_socket: &Path,
+    cfg: &Config,
+    table: &str,
+) -> Option<Vec<RibEntry>> {
+    let socket = watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
+    let interfaces = interface_client::get_interfaces(&socket).await?;
+    let mut domains = Vec::new();
+    for d in &cfg.broadcast_domains {
+        if d.routing_table.as_deref() == Some(table) && !d.addresses.is_empty() {
+            domains.push(interface_client::get_broadcast_domain(&socket, &d.name).await?);
+        }
+    }
+    Some(connected_entries(table, &interfaces, &domains))
+}
+
+/// The `Connected` candidates of `table`: the network of every address on an
+/// interface (a loopback's flat `addresses`, or any `Subinterface`'s per
+/// tag) or broadcast-domain SVI whose `routing_table` is `table`. The entry's
+/// `gateway` is the local address itself — display only, never installed
+/// (see `RouteSource::Connected`). A prefix addressed twice keeps the first
+/// address seen. Pure, so it's unit-tested without IPC.
+fn connected_entries(
+    table: &str,
+    interfaces: &[InterfaceStatus],
+    domains: &[BroadcastDomainStatus],
+) -> Vec<RibEntry> {
+    let in_table = |rt: &Option<String>| rt.as_deref() == Some(table);
+    let mut entries: Vec<RibEntry> = Vec::new();
+    let addressed = interfaces
+        .iter()
+        .flat_map(|i| {
+            std::iter::once((&i.routing_table, &i.addresses)).chain(
+                i.subinterfaces
+                    .iter()
+                    .map(|s| (&s.routing_table, &s.addresses)),
+            )
+        })
+        .chain(domains.iter().map(|d| (&d.routing_table, &d.addresses)))
+        .filter(|(rt, _)| in_table(rt))
+        .flat_map(|(_, addresses)| addresses.iter().map(|a| a.address));
+    for address in addressed {
+        let prefix = address.trunc();
+        if entries.iter().any(|e| e.prefix == prefix) {
+            continue;
+        }
+        entries.push(RibEntry {
+            prefix,
+            gateway: address.addr(),
+            source: RouteSource::Connected,
+            interface_id: None,
+            backup: None,
+            backup_interface_id: None,
+        });
+    }
+    entries
 }
 
 /// Computes the `bgp_client::RedistributeTarget` to publish for `table`,
@@ -270,6 +354,8 @@ async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>)
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
     use super::*;
     use nos_proto::RoutingTable;
 
@@ -289,6 +375,101 @@ mod tests {
             backup: None,
             backup_interface_id: None,
         }
+    }
+
+    fn addrs(list: &[&str]) -> Vec<nos_proto::InterfaceAddress> {
+        list.iter()
+            .map(|a| nos_proto::InterfaceAddress {
+                address: a.parse().unwrap(),
+                label: None,
+            })
+            .collect()
+    }
+
+    fn iface(
+        name: &str,
+        flat: (&[&str], Option<&str>),
+        subs: &[(u16, &[&str], Option<&str>)],
+    ) -> InterfaceStatus {
+        InterfaceStatus {
+            name: name.into(),
+            addresses: addrs(flat.0),
+            routing_table: flat.1.map(String::from),
+            switching_profile: None,
+            port_aggregate: None,
+            mtu: 1500,
+            subinterfaces: subs
+                .iter()
+                .map(|(tag, a, rt)| nos_proto::SubinterfaceStatus {
+                    tag: *tag,
+                    addresses: addrs(a),
+                    routing_table: rt.map(String::from),
+                    link_local_address: None,
+                })
+                .collect(),
+            link_local_address: None,
+        }
+    }
+
+    fn domain(name: &str, a: &[&str], rt: Option<&str>) -> BroadcastDomainStatus {
+        BroadcastDomainStatus {
+            name: name.into(),
+            addresses: addrs(a),
+            routing_table: rt.map(String::from),
+            link_local_address: None,
+            bridge_name: None,
+        }
+    }
+
+    #[test]
+    fn connected_entries_cover_loopback_subinterface_and_svi_addresses_of_this_table() {
+        let interfaces = vec![
+            iface("loopback-rt1", (&["203.0.113.1/32"], Some("rt1")), &[]),
+            iface(
+                "eth0",
+                (&[], None),
+                &[
+                    (0, &["10.50.0.2/24"], Some("rt1")),
+                    (300, &["192.0.2.1/24", "2001:db8::1/64"], Some("rt1")),
+                    (301, &["10.99.0.1/24"], Some("rt2")),
+                ],
+            ),
+            iface("loopback-rt2", (&["203.0.113.2/32"], Some("rt2")), &[]),
+        ];
+        let domains = vec![
+            domain("bd-svi", &["203.0.113.65/28"], Some("rt1")),
+            domain("bd-other", &["203.0.113.81/28"], Some("rt2")),
+        ];
+        let mut got: Vec<(String, String)> = connected_entries("rt1", &interfaces, &domains)
+            .into_iter()
+            .map(|e| {
+                assert_eq!(e.source, RouteSource::Connected);
+                (e.prefix.to_string(), e.gateway.to_string())
+            })
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("10.50.0.0/24".into(), "10.50.0.2".into()),
+                ("192.0.2.0/24".into(), "192.0.2.1".into()),
+                ("2001:db8::/64".into(), "2001:db8::1".into()),
+                ("203.0.113.1/32".into(), "203.0.113.1".into()),
+                ("203.0.113.64/28".into(), "203.0.113.65".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn connected_entries_keep_first_address_for_a_prefix_seen_twice() {
+        let interfaces = vec![iface(
+            "eth0",
+            (&[], None),
+            &[(0, &["10.0.0.1/24", "10.0.0.2/24"], Some("rt1"))],
+        )];
+        let got = connected_entries("rt1", &interfaces, &[]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].gateway, "10.0.0.1".parse::<IpAddr>().unwrap());
     }
 
     #[test]
