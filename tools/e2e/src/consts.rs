@@ -90,6 +90,11 @@ pub const LACP_SYSTEM_ID_B: &str = "02:00:00:00:0b:01";
 /// the even `EVPN_VNI`), and a MAC pinned behind the bond.
 pub const ESI: &str = "00:11:22:33:44:55:66:77:88:99";
 pub const ESI_PEER_ORIGIN: &str = "10.50.0.1";
+/// `evpn-esi`: a PE that advertises only a bare Type-4 for `ESI` — no per-EVI
+/// A-D for `EVPN_VNI` — lower than router-a's own address, proving RFC 7432
+/// §8.5 / RFC 8584 §2.1's per-EVI membership requirement: it must never win
+/// the DF election for `EVPN_DOMAIN` despite outranking router-a numerically.
+pub const ESI_PEER_NO_EVI_ORIGIN: &str = "10.49.0.1";
 /// `evpn-esi`: router-a's `--df-wait` — long enough to read the port's real
 /// flood flags while it is still blocked.
 pub const DF_WAIT_SECS: u32 = 12;
