@@ -1344,6 +1344,52 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
     })
     .await?;
 
+    log("mac mobility (RFC 7432 §15): GoBGP announces a MAC, then the local helper pins the same one — the local claim must win");
+    gobgp_owned(w, macadv("add", EVPN_MOBILE_MAC, rt_g)).await?;
+    a.wait(&installed(EVPN_MOBILE_MAC)).await?;
+    let removed_base = a.count(&removed(EVPN_MOBILE_MAC));
+    // A real frame's dynamic learning clears the kernel's own extern_learn
+    // bridge entry as it moves to the new port; this manual pin (standing in
+    // for that, like the earlier `EVPN_LOCAL_MAC` one) has to do the same
+    // explicitly, or `bridge fdb add` refuses the still-conflicting entry
+    // nos-fdbd installed for GoBGP's remote copy.
+    netns_a(
+        w,
+        &[
+            "bridge",
+            "fdb",
+            "del",
+            EVPN_MOBILE_MAC,
+            "dev",
+            &vxlan,
+            "master",
+        ],
+    )
+    .await?;
+    netns_a(
+        w,
+        &[
+            "bridge",
+            "fdb",
+            "add",
+            EVPN_MOBILE_MAC,
+            "dev",
+            EVPN_PORT,
+            "master",
+            "static",
+        ],
+    )
+    .await?;
+    a.wait(&format!(
+        "local mac learned domain={EVPN_DOMAIN} mac={EVPN_MOBILE_MAC}"
+    ))
+    .await?;
+    // A genuine local re-learn always outranks GoBGP's stale (sequence-0)
+    // remote copy (RFC 7432 §7.7), so nos-bgpd stops advertising it to
+    // nos-fdbd and the earlier remote installation is torn down.
+    a.wait_new(&removed(EVPN_MOBILE_MAC), removed_base, 30)
+        .await?;
+
     log("unsetting the vni stops nos-fdbd and deletes the vxlan device");
     netns_a(w, &["ip", "link", "del", EVPN_PORT]).await?;
     let mut clear = evpn_flags();

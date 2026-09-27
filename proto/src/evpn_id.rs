@@ -144,6 +144,23 @@ pub fn parse_esi_label(c: u64) -> Option<bool> {
     (b[0] == 0x06 && b[1] == 0x01).then_some(b[2] & 1 == 1)
 }
 
+/// The MAC Mobility extended community (RFC 7432 §7.7, type 0x06 subtype
+/// 0x00): a flags octet (bit 0 is the Sticky/static bit), a reserved octet,
+/// then a 4-byte big-endian sequence number.
+#[must_use]
+pub fn mac_mobility_ext(seq: u32, sticky: bool) -> u64 {
+    let s = seq.to_be_bytes();
+    u64::from_be_bytes([0x06, 0x00, u8::from(sticky), 0, s[0], s[1], s[2], s[3]])
+}
+
+/// `Some((seq, sticky))` when `c` is a MAC Mobility extended community.
+#[must_use]
+pub fn parse_mac_mobility(c: u64) -> Option<(u32, bool)> {
+    let b = c.to_be_bytes();
+    (b[0] == 0x06 && b[1] == 0x00)
+        .then(|| (u32::from_be_bytes([b[4], b[5], b[6], b[7]]), b[2] & 1 == 1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +172,23 @@ mod tests {
         assert_eq!(parse_esi_label(esi_label_ext(true)), Some(true));
         assert_eq!(parse_esi_label(esi_label_ext(false)), Some(false));
         assert_eq!(parse_esi_label(ENCAP_VXLAN), None);
+    }
+
+    #[test]
+    fn mac_mobility_carries_sequence_and_sticky_bit() {
+        assert_eq!(mac_mobility_ext(0, false), 0x0600_0000_0000_0000);
+        assert_eq!(mac_mobility_ext(1, false), 0x0600_0000_0000_0001);
+        assert_eq!(mac_mobility_ext(1, true), 0x0600_0100_0000_0001);
+        assert_eq!(
+            parse_mac_mobility(mac_mobility_ext(42, true)),
+            Some((42, true))
+        );
+        assert_eq!(
+            parse_mac_mobility(mac_mobility_ext(42, false)),
+            Some((42, false))
+        );
+        assert_eq!(parse_mac_mobility(esi_label_ext(true)), None);
+        assert_eq!(parse_mac_mobility(ENCAP_VXLAN), None);
     }
 
     #[test]

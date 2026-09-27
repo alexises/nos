@@ -78,6 +78,10 @@ pub const EVPN_HOST_IP: &str = "198.51.100.7";
 pub const EVPN_SVI_ADDRESS: &str = "203.0.113.1/24";
 pub const EVPN_SVI_IP: &str = "203.0.113.1";
 pub const EVPN_REMOTE_IP: &str = "192.0.2.10";
+/// `evpn-fdb`'s MAC mobility check (RFC 7432 §7.7/§15): GoBGP announces this
+/// one first, then the local helper pins the *same* MAC on `EVPN_PORT` — a
+/// local-vs-remote conflict — and router-a's own local claim must win.
+pub const EVPN_MOBILE_MAC: &str = "aa:bb:cc:00:00:03";
 /// `lacp`: each router's configured LACP Actor System ID (`lacp-system-id`).
 pub const LACP_SYSTEM_ID_A: &str = "02:00:00:00:0a:01";
 pub const LACP_SYSTEM_ID_B: &str = "02:00:00:00:0b:01";

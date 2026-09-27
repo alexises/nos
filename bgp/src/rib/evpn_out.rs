@@ -12,16 +12,20 @@
 //!
 //! ponytail: EVPN bypasses export policy (RPL's `Input` is prefix-shaped) and
 //! the local routes are announced verbatim — no best-path between a local and
-//! a received route for the same NLRI, no MAC mobility.
+//! a received route for the same NLRI, other than RFC 7432 §15 MAC mobility
+//! (`with_local_mobility`/`mac_mobility_recheck`, below).
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::time::Instant;
 
 use nos_proto::fdb::AD_TAG_ES;
 use nos_proto::{AddressFamily, EvpnKey, EvpnRoute as WireRoute, EvpnUpdate};
+use tracing::warn;
 
 use super::{BgpRib, OutboundUpdate, PeerOutbox};
 use crate::evpn::EvpnNlri;
+use crate::mac_mobility::format_mac;
 use crate::message::Pmsi;
 
 /// One EVPN route rewritten for one peer.
@@ -111,10 +115,17 @@ fn advertise(outbox: &PeerOutbox, local_asn: u32, r: &WireRoute) -> Option<Adver
 impl BgpRib {
     /// Applies one `RedistributeMacs` push from `nos-fdbd`'s `domain`.
     pub fn apply_evpn_local(&mut self, domain: &str, update: EvpnUpdate) {
+        let now = Instant::now();
         match update {
             EvpnUpdate::Full(routes) => {
-                let new: HashMap<EvpnKey, WireRoute> =
-                    routes.into_iter().map(|r| (r.key.clone(), r)).collect();
+                let prepared: Vec<(WireRoute, bool)> = routes
+                    .into_iter()
+                    .map(|r| self.with_local_mobility(r, now))
+                    .collect();
+                let new: HashMap<EvpnKey, WireRoute> = prepared
+                    .iter()
+                    .map(|(r, _)| (r.key.clone(), r.clone()))
+                    .collect();
                 let old = self
                     .evpn_local
                     .insert(domain.to_string(), new.clone())
@@ -126,11 +137,14 @@ impl BgpRib {
                         self.withdraw_evpn(&nlri_of(r));
                     }
                 }
-                for r in new.values() {
-                    self.announce_evpn(r);
+                for (r, wins) in &prepared {
+                    if *wins {
+                        self.announce_evpn(r);
+                    }
                 }
             }
             EvpnUpdate::Add(r) => {
+                let (r, wins) = self.with_local_mobility(r, now);
                 let old = self
                     .evpn_local
                     .entry(domain.to_string())
@@ -139,7 +153,9 @@ impl BgpRib {
                 if let Some(old) = old.filter(|o| nlri_of(o) != nlri_of(&r)) {
                     self.withdraw_evpn(&nlri_of(&old));
                 }
-                self.announce_evpn(&r);
+                if wins {
+                    self.announce_evpn(&r);
+                }
             }
             EvpnUpdate::Remove(key) => {
                 let old = self.evpn_local.get_mut(domain).and_then(|t| t.remove(&key));
@@ -147,6 +163,62 @@ impl BgpRib {
                     self.withdraw_evpn(&nlri_of(&r));
                 }
             }
+        }
+    }
+
+    /// Attaches an RFC 7432 §7.7 MAC Mobility community to a Type-2 route
+    /// pushed by `nos-fdbd`, with a sequence one past whatever `(VNI, MAC)`'s
+    /// current winner (local or remote) holds if some other owner currently
+    /// holds it — so a genuine local re-learn always outranks a stale remote
+    /// copy — or `owner`'s own unchanged sequence when it already holds it
+    /// (an ordinary re-push isn't a re-learn). Registers it as a mobility
+    /// candidate either way. Returns the (possibly rewritten) route and
+    /// whether it's the current winner and should actually be announced —
+    /// `false` only when `(VNI, MAC)` is frozen as a duplicate (see
+    /// `mac_mobility::MacMobility`). A route with no `(VNI, MAC)` identity
+    /// (only Type-2 has one) passes through unchanged, always announced.
+    fn with_local_mobility(&mut self, mut r: WireRoute, now: Instant) -> (WireRoute, bool) {
+        let Some((vni, mac)) = super::evpn_mac_key(&nlri_of(&r)) else {
+            return (r, true);
+        };
+        let seq = self.mac_mobility.local_seq(vni, mac, r.next_hop);
+        r.ext_communities
+            .retain(|c| nos_proto::evpn_id::parse_mac_mobility(*c).is_none());
+        r.ext_communities
+            .push(nos_proto::evpn_id::mac_mobility_ext(seq, false));
+        let wins = self
+            .mac_mobility
+            .candidate(vni, mac, r.next_hop, seq, false, now);
+        if !wins {
+            warn!(vni, mac = %format_mac(mac), "local mac not advertised: mobility frozen");
+        }
+        (r, wins)
+    }
+
+    /// After a remote MAC/IP route is learned (`rib.rs`'s `handle_update`,
+    /// right after registering it as a mobility candidate), withdraws any
+    /// local advertisement for the same `(VNI, MAC)` that no longer wins —
+    /// RFC 7432 §15: a PE that learns a remote route with a properly higher
+    /// sequence number for a MAC it also advertises locally must withdraw
+    /// its own claim. The MAC stays known to `nos-fdbd`'s own local-MAC
+    /// bookkeeping; a later fresh push (a real local re-learn) picks a new,
+    /// higher sequence and reclaims it via `apply_evpn_local`.
+    pub(super) fn mac_mobility_recheck(&mut self, vni: u32, mac: [u8; 6]) {
+        let Some(winner) = self.mac_mobility.winner(vni, mac) else {
+            return;
+        };
+        let stale: Vec<WireRoute> = self
+            .evpn_local
+            .values()
+            .flat_map(HashMap::values)
+            .filter(|r| {
+                super::evpn_mac_key(&nlri_of(r)) == Some((vni, mac)) && r.next_hop != winner
+            })
+            .cloned()
+            .collect();
+        for r in stale {
+            self.withdraw_evpn(&nlri_of(&r));
+            warn!(vni, mac = %format_mac(mac), "local mac mobility lost: remote advertisement now wins");
         }
     }
 
@@ -192,11 +264,23 @@ impl BgpRib {
     }
 
     /// Every received Type-2/3/4 route, across peers, as the wire shape
-    /// `nos-fdbd` consumes. A MAC (or MAC+IP) learned from two peers collapses
-    /// to one entry (last one iterated wins) — see `EvpnKey`.
+    /// `nos-fdbd` consumes. A Type-2 MAC (or MAC+IP) learned from two peers
+    /// under two different RDs still collapses to at most one entry — the
+    /// RFC 7432 §15 mobility winner for its `(VNI, MAC)`, not an arbitrary
+    /// iteration order — since `nos-fdbd`'s own `EvpnKey` keeps different RDs
+    /// apart (see `mac_mobility`).
     pub fn evpn_push_snapshot(&self) -> HashMap<EvpnKey, WireRoute> {
         let mut out = HashMap::new();
         for (nlri, route) in self.evpn_adj_rib_in.values().flatten() {
+            // RFC 7432 §15: only the MAC-mobility winner for a Type-2's
+            // (VNI, MAC) reaches nos-fdbd — a losing PE's copy (a different
+            // RD, so it wouldn't otherwise collide with the winner's own key
+            // below) is filtered out here instead.
+            if let Some((vni, mac)) = super::evpn_mac_key(nlri) {
+                if self.mac_mobility.winner(vni, mac) != Some(route.next_hop) {
+                    continue;
+                }
+            }
             let (key, vni, esi) = match nlri {
                 EvpnNlri::MacIp {
                     rd,
