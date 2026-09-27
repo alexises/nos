@@ -76,6 +76,7 @@ use tracing::{info, warn};
 
 use crate::damping::{Damping, CHANGE_PENALTY, WITHDRAW_PENALTY};
 use crate::evpn::EvpnNlri;
+use crate::mac_mobility::MacMobility;
 use crate::message::{self, UpdateMessage};
 
 mod evpn_out;
@@ -170,10 +171,21 @@ fn apply_verdict(route: &mut RibRoute, verdict: nos_rpl::Verdict) -> Option<nos_
     Some(edits.next_hop)
 }
 
+/// A Type-2 route's `(VNI, MAC)` mobility identity — `None` for every other
+/// EVPN route type, which RFC 7432 §15 mobility doesn't apply to.
+fn evpn_mac_key(nlri: &EvpnNlri) -> Option<(u32, [u8; 6])> {
+    match nlri {
+        EvpnNlri::MacIp { mac, labels, .. } => Some((labels.first().copied().unwrap_or(0), *mac)),
+        _ => None,
+    }
+}
+
 /// Stores one `MP_REACH_NLRI` batch's EVPN routes in a peer's EVPN Adj-RIB-In,
-/// logging only routes that are new or changed.
+/// logging only routes that are new or changed, and registers each Type-2's
+/// `(VNI, MAC)` as an RFC 7432 §15 mobility candidate.
 fn learn_evpn(
     table: &mut HashMap<EvpnNlri, EvpnRoute>,
+    mac_mobility: &mut MacMobility,
     from: IpAddr,
     mp: &message::MpReachNlri,
     extended_communities: &[u64],
@@ -185,6 +197,13 @@ fn learn_evpn(
             pmsi_vni: pmsi.map(|p| p.vni),
             extended_communities: extended_communities.to_vec(),
         };
+        if let Some((vni, mac)) = evpn_mac_key(nlri) {
+            let (seq, sticky) = extended_communities
+                .iter()
+                .find_map(|c| nos_proto::evpn_id::parse_mac_mobility(*c))
+                .unwrap_or((0, false));
+            mac_mobility.candidate(vni, mac, mp.next_hop, seq, sticky, Instant::now());
+        }
         if table.insert(nlri.clone(), route.clone()) != Some(route) {
             info!(peer = %from, route_type = nlri.route_type(), route = %nlri, next_hop = %mp.next_hop, "evpn route learned");
         }
@@ -507,6 +526,10 @@ pub struct BgpRib {
     /// RFC 2439 flap-damping state for received routes; a suppressed
     /// (peer, prefix) stays in `adj_rib_in` but is not a best-path candidate.
     damping: Damping,
+    /// RFC 7432 §15 EVPN MAC mobility: which advertisement (local or from a
+    /// peer) for a `(VNI, MAC)` is authoritative, and §15.2 duplicate-MAC
+    /// freezing — see `evpn_out`.
+    mac_mobility: MacMobility,
     /// This instance's owning `RoutingTable` name (`BgpInstance.routing_table`),
     /// set by `session::SessionManager::reconcile`. Read by `push_snapshot`
     /// to resolve which `nos-ribd` instance, if any, this instance's best
@@ -545,6 +568,7 @@ impl BgpRib {
             rs_next_id: HashMap::new(),
             peer_scratch: Vec::new(),
             damping: Damping::default(),
+            mac_mobility: MacMobility::default(),
             owning_routing_table: None,
         }
     }
@@ -793,6 +817,12 @@ impl BgpRib {
         }
     }
 
+    /// Expires old EVPN MAC-mobility move history and lifts any freeze whose
+    /// window has passed quietly — see `mac_mobility`.
+    pub fn mac_mobility_tick(&mut self) {
+        self.mac_mobility.tick(Instant::now());
+    }
+
     pub fn peer_disconnected(&mut self, peer: IpAddr) {
         self.peer_outboxes.remove(&peer);
         // ponytail: a session reset forgets its flap history (RFC 2439 allows
@@ -804,6 +834,9 @@ impl BgpRib {
         self.rs_sent.retain(|(p, _), _| *p != peer);
         self.rs_next_id.retain(|(p, _), _| *p != peer);
         if let Some(routes) = self.evpn_adj_rib_in.remove(&peer) {
+            // mac_mobility's record of this route's (vni, mac) is
+            // deliberately left alone (see its own doc comment): a future
+            // re-learn, local or remote, still needs to outrank it.
             for nlri in routes.keys() {
                 info!(peer = %peer, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
             }
@@ -885,11 +918,13 @@ impl BgpRib {
             )
             .collect();
         for nlri in update.mp_unreach.iter().flat_map(|u| &u.evpn) {
-            if self
+            // mac_mobility's record of this route's (vni, mac) is
+            // deliberately left alone here too — see peer_disconnected.
+            let removed = self
                 .evpn_adj_rib_in
                 .get_mut(&from)
-                .is_some_and(|t| t.remove(nlri).is_some())
-            {
+                .is_some_and(|t| t.remove(nlri).is_some());
+            if removed {
                 info!(peer = %from, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
             }
         }
@@ -930,6 +965,7 @@ impl BgpRib {
                     "dropping bgp update: originator_id is our own router-id (rfc 4456 reflection loop prevention)"
                 );
             } else {
+                let mut evpn_recheck: Vec<(u32, [u8; 6])> = Vec::new();
                 let table = self.adj_rib_in.entry(from).or_default();
                 // This UPDATE adds at most this many entries — reserving
                 // once lets the per-peer table grow in fewer, larger steps
@@ -990,12 +1026,17 @@ impl BgpRib {
                     if !mp.evpn.is_empty() {
                         learn_evpn(
                             self.evpn_adj_rib_in.entry(from).or_default(),
+                            &mut self.mac_mobility,
                             from,
                             mp,
                             &attrs.extended_communities,
                             attrs.pmsi,
                         );
+                        evpn_recheck.extend(mp.evpn.iter().filter_map(evpn_mac_key));
                     }
+                }
+                for (vni, mac) in evpn_recheck {
+                    self.mac_mobility_recheck(vni, mac);
                 }
             }
         }
@@ -1814,7 +1855,12 @@ mod tests {
         // eBGP: our ASN prepended; the VTEP next-hop is untouched.
         assert_eq!(adv.as_path, vec![65000]);
         assert_eq!(adv.next_hop, addr("192.0.2.9"));
-        assert_eq!(adv.extended_communities, vec![0x0002_fde8_0000_2774]);
+        // The stored RT plus a freshly attached RFC 7432 §7.7 MAC Mobility
+        // community (sequence 0, not sticky — see `with_local_mobility`).
+        assert_eq!(
+            adv.extended_communities,
+            vec![0x0002_fde8_0000_2774, 0x0600_0000_0000_0000]
+        );
         assert!(recv_all(&mut plain_rx).is_empty(), "EVPN not negotiated");
 
         // An identical re-push is not re-announced.

@@ -8,6 +8,7 @@ pub mod fdb_push_client;
 pub mod fsm;
 pub mod igp_client;
 pub mod interface_client;
+pub mod mac_mobility;
 pub mod message;
 pub mod mrai;
 pub mod policy;

@@ -126,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 tick.tick().await;
                 sessions.damping_tick().await;
+                sessions.mac_mobility_tick().await;
             }
         }
     });

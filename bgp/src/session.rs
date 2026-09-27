@@ -244,6 +244,12 @@ impl SessionManager {
         self.bgp_rib.lock().await.damping_tick();
     }
 
+    /// Expires old EVPN MAC-mobility move history and lifts any freeze whose
+    /// window has passed quietly.
+    pub async fn mac_mobility_tick(&self) {
+        self.bgp_rib.lock().await.mac_mobility_tick();
+    }
+
     /// Installs the IGP cost table polled by `igp_client`.
     pub async fn set_igp(&self, igp: std::collections::HashMap<IpNet, u32>) {
         self.bgp_rib.lock().await.set_igp(igp);
