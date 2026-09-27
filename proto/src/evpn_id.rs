@@ -78,6 +78,11 @@ pub fn parse_rt(text: &str) -> Option<u64> {
 /// subtype 0x0c, tunnel type 8).
 pub const ENCAP_VXLAN: u64 = 0x030c_0000_0000_0008;
 
+/// RFC 7432 §7.8 Default Gateway extended community (type 0x03, subtype
+/// 0x0d, all-zero value) — marks a Type-2 as the anycast gateway MAC/IP for
+/// its subnet, so a remote PE knows it may proxy ARP/ND for it.
+pub const DEFAULT_GATEWAY: u64 = 0x030d_0000_0000_0000;
+
 /// An Ethernet Segment Identifier (RFC 7432 §5): a type byte + 9 value bytes.
 pub type Esi = [u8; 10];
 
@@ -164,6 +169,12 @@ pub fn parse_mac_mobility(c: u64) -> Option<(u32, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_gateway_is_distinct_from_encap_vxlan() {
+        assert_eq!(DEFAULT_GATEWAY, 0x030d_0000_0000_0000);
+        assert_ne!(DEFAULT_GATEWAY, ENCAP_VXLAN);
+    }
 
     #[test]
     fn esi_label_carries_the_single_active_bit() {

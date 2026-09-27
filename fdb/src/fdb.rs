@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nos_proto::evpn_id::{
-    es_import_rt, esi_label_ext, format_esi, parse_esi_label, Esi, ENCAP_VXLAN,
+    es_import_rt, esi_label_ext, format_esi, parse_esi_label, Esi, DEFAULT_GATEWAY, ENCAP_VXLAN,
 };
 use nos_proto::fdb::AD_TAG_ES;
 use nos_proto::{
@@ -286,11 +286,12 @@ fn esi_of(r: &Ready, port: Option<&String>) -> Esi {
 
 /// This domain's originated routes: one Type-3 for the domain, one Type-2
 /// per local MAC and one Type-2 (MAC+IP) per local neighbour / SVI address
-/// (carrying the ESI of the port the MAC sits behind), and, per attached
-/// Ethernet Segment whose port has carrier (not in `down`), one Type-4 and
-/// the two Type-1 Ethernet A-D routes (per-ES and per-EVI). A segment going
-/// down withdraws all three — that is what tells the other PEs to stop
-/// sending its MACs here.
+/// (carrying the ESI of the port the MAC sits behind, and — for an SVI
+/// address, RFC 7432 §7.8 — the Default Gateway extended community), and,
+/// per attached Ethernet Segment whose port has carrier (not in `down`), one
+/// Type-4 and the two Type-1 Ethernet A-D routes (per-ES and per-EVI). A
+/// segment going down withdraws all three — that is what tells the other PEs
+/// to stop sending its MACs here.
 fn local_routes(
     r: &Ready,
     macs: &BTreeMap<Mac, String>,
@@ -322,7 +323,13 @@ fn local_routes(
             mac: *m,
             ip: *ip,
         };
-        out.insert(key.clone(), route(key, esi_of(r, macs.get(m))));
+        let mut evpn_route = route(key.clone(), esi_of(r, macs.get(m)));
+        // RFC 7432 §7.8: mark the SVI's own address as the anycast gateway,
+        // never a real ARP/ND-learned host behind a local port.
+        if r.connected.contains(ip) {
+            evpn_route.ext_communities.push(DEFAULT_GATEWAY);
+        }
+        out.insert(key, evpn_route);
     }
     let mut esis: BTreeMap<Esi, bool> = BTreeMap::new();
     for p in r.es_ports.iter().filter(|p| !down.contains(&p.port)) {
@@ -1483,9 +1490,24 @@ mod tests {
         // Type-3, the local MAC 7, MAC+IP for host 7 (host 8 is not behind a
         // local port) and MAC+IP for the SVI with the bridge's own MAC.
         assert_eq!(t.routes.len(), 4);
-        assert!(t.routes.keys().any(|k| matches!(k,
-            EvpnKey::MacIp { mac, ip, .. }
-                if *mac == [0, 0, 0, 0, 0, 0xfe] && ip.to_string() == "203.0.113.1")));
+        let svi = t
+            .routes
+            .iter()
+            .find(|(k, _)| {
+                matches!(k, EvpnKey::MacIp { mac, ip, .. }
+                    if *mac == [0, 0, 0, 0, 0, 0xfe] && ip.to_string() == "203.0.113.1")
+            })
+            .expect("svi route");
+        // RFC 7432 §7.8: only the SVI's own address is the anycast gateway.
+        assert!(svi.1.ext_communities.contains(&DEFAULT_GATEWAY));
+        let host = t
+            .routes
+            .iter()
+            .find(
+                |(k, _)| matches!(k, EvpnKey::MacIp { ip, .. } if ip.to_string() == "198.51.100.7"),
+            )
+            .expect("arp-learned host route");
+        assert!(!host.1.ext_communities.contains(&DEFAULT_GATEWAY));
         assert!(!t.routes.keys().any(|k| matches!(k,
             EvpnKey::MacIp { ip, .. } if ip.to_string() == "198.51.100.8")));
         let table = fdb.table().await;

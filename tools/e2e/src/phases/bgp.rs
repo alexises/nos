@@ -1272,6 +1272,13 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
             .any(|l| l.contains("macadv") && l.contains(EVPN_SVI_IP))
     })
     .await?;
+    // RFC 7432 §7.8: the SVI's own Type-2 carries the Default Gateway
+    // extended community, so a remote PE knows it may proxy ARP/ND for it.
+    gobgp_evpn_rib(w, "tagged the SVI address as the default gateway", |rib| {
+        rib.lines()
+            .any(|l| l.contains(EVPN_SVI_IP) && l.contains("[default-gateway]"))
+    })
+    .await?;
 
     log("redistribute from arp: a neighbour behind a local port is a Type-2 with the IP");
     netns_a(
@@ -1297,6 +1304,13 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
     gobgp_evpn_rib(w, "showed the neighbour's MAC+IP", |rib| {
         rib.lines()
             .any(|l| l.contains(EVPN_LOCAL_MAC) && l.contains(EVPN_HOST_IP))
+    })
+    .await?;
+    // The default-gateway community is scoped to the SVI's own route, never
+    // a real ARP-learned host.
+    gobgp_evpn_rib(w, "did not tag the ARP-learned host as a gateway", |rib| {
+        rib.lines()
+            .any(|l| l.contains(EVPN_HOST_IP) && !l.contains("[default-gateway]"))
     })
     .await?;
     let base = a.count(&format!(
