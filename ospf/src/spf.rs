@@ -33,7 +33,7 @@ use ipnet::Ipv4Net;
 use crate::lsa::{
     AsExternalLsaBody, Lsa, LsaBody, NetworkLsaBody, RouterLsaBody, SummaryLsaBody,
     LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK, LINK_TYPE_TRANSIT_NETWORK,
-    LSA_TYPE_ASBR_SUMMARY, LSA_TYPE_AS_EXTERNAL, LSA_TYPE_NETWORK_SUMMARY,
+    LSA_TYPE_ASBR_SUMMARY, LSA_TYPE_AS_EXTERNAL, LSA_TYPE_NETWORK_SUMMARY, MAX_AGE,
 };
 
 /// `ponytail:` RFC 2328 §16.4's E1/E2 external-metric-type distinction is not
@@ -102,6 +102,15 @@ impl PartialOrd for HeapEntry {
     }
 }
 
+/// RFC 2328 §16.1 step 2: an LSA at `MaxAge` (being flushed, see `lsdb.rs`'s
+/// hold) takes no part in the routing computation.
+fn live_lsas(lsas: &[Arc<Lsa>]) -> Vec<Arc<Lsa>> {
+    lsas.iter()
+        .filter(|l| l.header.age < MAX_AGE)
+        .cloned()
+        .collect()
+}
+
 /// Builds the `routers`/`networks` lookup maps `run_dijkstra` and every
 /// collector pass need — shared by `compute` and `intra_area_routes` so
 /// neither duplicates the filter.
@@ -133,6 +142,8 @@ fn routers_and_networks(
 /// stub-network leaves, transit-network prefixes, RFC 2328 §16.3 inter-area
 /// routes (Type-3 Summary-LSA) and §16.4 AS-external routes alike.
 pub fn compute(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<RouteEntry> {
+    let live = live_lsas(lsas);
+    let lsas = &live[..];
     let (routers, networks) = routers_and_networks(lsas);
     // Plain `Vec`s, not `HashMap`s keyed by advertising_router — one ASBR/ABR
     // can originate more than one Type-5/Type-3/Type-4 for different
@@ -308,6 +319,8 @@ pub struct IntraAreaRoutes {
 }
 
 pub fn intra_area_routes(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> IntraAreaRoutes {
+    let live = live_lsas(lsas);
+    let lsas = &live[..];
     let (routers, networks) = routers_and_networks(lsas);
     let (dist, next_hop) = run_dijkstra(root, &routers, &networks);
 

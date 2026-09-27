@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -59,6 +60,14 @@ const ORIGINATION_INTERVAL: Duration = Duration::from_secs(2);
 /// `age` stays a wire-correct simulated-seconds value regardless of what a
 /// test harness sets the multiplier to.
 const AGE_TICK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long `LinkManager::shutdown` keeps the link tasks alive after
+/// prematurely aging every self-originated LSA (RFC 2328 §14.1), so each
+/// link's own `RXMT_INTERVAL` resend actually carries the `MaxAge` copies out
+/// before the process exits: one resend period plus a second of margin.
+/// Well inside `nos-watchdogd`'s 10s SIGINT-to-SIGKILL budget (root
+/// `CLAUDE.md`, "Process supervision") — recheck if `RXMT_INTERVAL` grows.
+const PREMATURE_AGE_FLOOD_WINDOW: Duration = Duration::from_secs(6);
 
 /// One link's fully-resolved desired state — diffed wholesale by
 /// `LinkManager::reconcile`, mirroring `bgp::session::ResolvedPeer`: any
@@ -1343,6 +1352,10 @@ pub struct LinkManager {
     /// mirroring `bgp::BgpRib::set_redistribute_policy`'s "called
     /// unconditionally, re-filters eagerly" contract.
     redistribute_filtered: Mutex<HashSet<Ipv4Net>>,
+    /// Set by `shutdown`: stops the origination tick from reoriginating the
+    /// LSAs it just flushed while their `MaxAge` copies are still being
+    /// flooded (`PREMATURE_AGE_FLOOD_WINDOW`). Aging keeps running.
+    shutting_down: AtomicBool,
 }
 
 impl LinkManager {
@@ -1361,6 +1374,7 @@ impl LinkManager {
             boots,
             redistribute_raw: Mutex::new(HashSet::new()),
             redistribute_filtered: Mutex::new(HashSet::new()),
+            shutting_down: AtomicBool::new(false),
         });
         let background = Arc::clone(&manager);
         // Runs for the process's lifetime — like every link driver task, it
@@ -1374,6 +1388,9 @@ impl LinkManager {
             loop {
                 tokio::select! {
                     _ = origination_tick.tick() => {
+                        if background.shutting_down.load(Ordering::Relaxed) {
+                            continue;
+                        }
                         if let Some(router_id) = *background.router_id.lock().await {
                             background.originate_router_lsas(router_id).await;
                             background.originate_as_external_lsas(router_id).await;
@@ -1450,17 +1467,36 @@ impl LinkManager {
 
         // An area with only a loopback stub and no live link would
         // otherwise never appear here at all — union both sets of area
-        // ids rather than iterating `by_area` alone.
+        // ids rather than iterating `by_area` alone. An area this router
+        // holds an LSDB for but has left entirely (no link, no stub) is
+        // visited too, so its Router-/Network-LSAs get withdrawn.
         let area_ids: HashSet<Ipv4Addr> = by_area
             .keys()
             .copied()
             .chain(stub_networks.keys().copied())
+            .chain(self.lsdbs.lock().await.keys().copied())
             .collect();
 
         for area_id in area_ids {
             let links = by_area.get(&area_id).cloned().unwrap_or_default();
             let lsdb = self.lsdb_for(area_id).await;
             let mut lsdb = lsdb.lock().await;
+
+            if links.is_empty() && !stub_networks.contains_key(&area_id) {
+                withdraw_undesired(
+                    &mut lsdb,
+                    local_router_id,
+                    lsa::LSA_TYPE_ROUTER,
+                    &HashSet::new(),
+                );
+                withdraw_undesired(
+                    &mut lsdb,
+                    local_router_id,
+                    lsa::LSA_TYPE_NETWORK,
+                    &HashSet::new(),
+                );
+                continue;
+            }
 
             let mut router_links = router_lsa_links(local_router_id, &links);
             for (subnet, cost) in stub_networks.get(&area_id).into_iter().flatten() {
@@ -1483,6 +1519,7 @@ impl LinkManager {
                 }),
             );
 
+            let mut network_ids = HashSet::new();
             for (cfg, status) in &links {
                 if status.interface_state != InterfaceState::Dr {
                     continue;
@@ -1502,6 +1539,7 @@ impl LinkManager {
                     continue;
                 }
                 let network_mask = local_subnet(cfg).map_or(Ipv4Addr::UNSPECIFIED, |n| n.netmask());
+                network_ids.insert(cfg.local_addr);
                 install_self_originated(
                     &mut lsdb,
                     local_router_id,
@@ -1513,6 +1551,13 @@ impl LinkManager {
                     }),
                 );
             }
+            // No longer DR on a link (or the link is gone): flush its Network-LSA.
+            withdraw_undesired(
+                &mut lsdb,
+                local_router_id,
+                lsa::LSA_TYPE_NETWORK,
+                &network_ids,
+            );
         }
     }
 
@@ -1542,6 +1587,7 @@ impl LinkManager {
             .copied()
             .collect();
         let area_ids: Vec<Ipv4Addr> = self.lsdbs.lock().await.keys().copied().collect();
+        let desired: HashSet<Ipv4Addr> = prefixes.iter().map(Ipv4Net::network).collect();
 
         for area_id in area_ids {
             let lsdb = self.lsdb_for(area_id).await;
@@ -1560,6 +1606,14 @@ impl LinkManager {
                     }),
                 );
             }
+            // RFC 2328 §14.1: a prefix no longer redistributed is flushed,
+            // not left to age out over `MAX_AGE`.
+            withdraw_undesired(
+                &mut lsdb,
+                local_router_id,
+                lsa::LSA_TYPE_AS_EXTERNAL,
+                &desired,
+            );
         }
     }
 
@@ -1582,18 +1636,21 @@ impl LinkManager {
             .iter()
             .map(|(id, lsdb)| (*id, Arc::clone(lsdb)))
             .collect();
-        if areas.len() < 2 {
-            return;
-        }
-
+        // A single-area router summarizes nothing (and, `lsdbs` never
+        // shrinking, can't hold a stale summary either); the per-area
+        // withdrawal below is then a cheap no-op header scan.
         let mut per_area: HashMap<Ipv4Addr, spf::IntraAreaRoutes> = HashMap::new();
-        for (area_id, lsdb) in &areas {
-            let lsas = lsdb.lock().await.all();
-            per_area.insert(*area_id, spf::intra_area_routes(local_router_id, &lsas));
+        if areas.len() >= 2 {
+            for (area_id, lsdb) in &areas {
+                let lsas = lsdb.lock().await.all();
+                per_area.insert(*area_id, spf::intra_area_routes(local_router_id, &lsas));
+            }
         }
 
         for (dest_area, dest_lsdb) in &areas {
             let mut dest_lsdb = dest_lsdb.lock().await;
+            let mut network_ids = HashSet::new();
+            let mut asbr_ids = HashSet::new();
             for (src_area, view) in &per_area {
                 if src_area == dest_area {
                     continue;
@@ -1605,6 +1662,7 @@ impl LinkManager {
                     // src_area processed here (HashMap iteration order) wins;
                     // not worth cross-area coordination machinery for a case
                     // that shouldn't occur.
+                    network_ids.insert(route.prefix.network());
                     install_self_originated(
                         &mut dest_lsdb,
                         local_router_id,
@@ -1617,6 +1675,7 @@ impl LinkManager {
                     );
                 }
                 for &(asbr, dist) in &view.asbrs {
+                    asbr_ids.insert(asbr);
                     install_self_originated(
                         &mut dest_lsdb,
                         local_router_id,
@@ -1629,6 +1688,20 @@ impl LinkManager {
                     );
                 }
             }
+            // RFC 2328 §14.1: a prefix/ASBR no longer intra-area to some
+            // other area is flushed, not left to age out over `MAX_AGE`.
+            withdraw_undesired(
+                &mut dest_lsdb,
+                local_router_id,
+                lsa::LSA_TYPE_NETWORK_SUMMARY,
+                &network_ids,
+            );
+            withdraw_undesired(
+                &mut dest_lsdb,
+                local_router_id,
+                lsa::LSA_TYPE_ASBR_SUMMARY,
+                &asbr_ids,
+            );
         }
     }
 
@@ -1806,9 +1879,43 @@ impl LinkManager {
         merged.into_values().collect()
     }
 
-    /// Aborts every link task. Called once when `crate::reconcile::run`'s
-    /// loop exits on shutdown.
+    /// RFC 2328 §14.1, in bulk: prematurely ages every LSA this router
+    /// originated, in every area. Returns how many were withdrawn.
+    async fn withdraw_all_self_originated(&self) -> usize {
+        let Some(router_id) = *self.router_id.lock().await else {
+            return 0;
+        };
+        let areas: Vec<Arc<Mutex<Lsdb>>> = self.lsdbs.lock().await.values().cloned().collect();
+        let mut withdrawn = 0;
+        for lsdb in areas {
+            let mut lsdb = lsdb.lock().await;
+            for header in lsdb.headers() {
+                if header.advertising_router == router_id
+                    && withdraw_self_originated(&mut lsdb, &header.key())
+                {
+                    withdrawn += 1;
+                }
+            }
+        }
+        withdrawn
+    }
+
+    /// Graceful shutdown: flushes every self-originated LSA (RFC 2328
+    /// §14.1) and keeps the link tasks alive for `PREMATURE_AGE_FLOOD_WINDOW`
+    /// so their periodic resend carries the `MaxAge` copies to every neighbor
+    /// — which then drops this router's routes at once instead of only when
+    /// its LSAs age out an hour later — then aborts every link task. Called
+    /// once when `crate::reconcile::run`'s loop exits on shutdown.
     pub async fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Relaxed);
+        let withdrawn = self.withdraw_all_self_originated().await;
+        if withdrawn > 0 {
+            info!(
+                withdrawn,
+                "ospf flushing self-originated lsas before shutdown"
+            );
+            tokio::time::sleep(PREMATURE_AGE_FLOOD_WINDOW).await;
+        }
         for (_, entry) in self.links.lock().await.drain() {
             entry.task.abort();
         }
@@ -1988,10 +2095,20 @@ fn install_self_originated(
         .is_some_and(|e| e.header.age >= lsa::LS_REFRESH_TIME);
     let sequence_number = match &existing {
         Some(e) if e.body == body && !needs_refresh => return,
-        Some(e) => e.header.sequence_number.wrapping_add(1),
+        // RFC 2328 §12.1.6: at `MaxSequenceNumber` the instance is flushed
+        // (at that same sequence number — never the reserved 0x8000_0000 a
+        // wrapping increment would produce) and re-originated at
+        // `INITIAL_SEQUENCE_NUMBER` only once the flush has been flooded:
+        // `Lsdb::age_and_evict` evicts it after `MAX_AGE_HOLD_TICKS`, and
+        // the `None` arm below then takes over.
+        Some(e) if e.header.sequence_number == lsa::MAX_SEQUENCE_NUMBER => {
+            withdraw_self_originated(lsdb, &key);
+            return;
+        }
+        Some(e) => e.header.sequence_number + 1,
         None => lsa::INITIAL_SEQUENCE_NUMBER,
     };
-    lsdb.install(Lsa {
+    let mut fresh = Lsa {
         header: LsaHeader {
             age: 0,
             options: 0,
@@ -2003,12 +2120,69 @@ fn install_self_originated(
             length: 0,
         },
         body,
-    });
+    };
+    // Held with its wire checksum, so a neighbor's echo of it is a duplicate
+    // rather than "newer" — see `lsa::fill_checksum`.
+    lsa::fill_checksum(&mut fresh);
+    lsdb.install(fresh);
     info!(
         lsa_type, link_state_id = %link_state_id, advertising_router = %local_router_id,
         refreshed = needs_refresh,
         "ospf lsa originated"
     );
+}
+
+/// RFC 2328 §14.1 premature aging: flushes this router's own `key` by
+/// reinstalling it at `MAX_AGE` with its sequence number *unchanged*.
+/// `lsa::is_newer` only reaches its `MaxAge` tie-break when sequence number and
+/// checksum already tie — which they do here, the body being untouched and
+/// the checksum excluding the age field — so every neighbor accepts the
+/// flushed copy as newer and `flood_full_neighbors`' next resend carries it.
+/// Not bumping is also what makes this usable at `MAX_SEQUENCE_NUMBER` (see
+/// `install_self_originated`). No-op (returns `false`) if `key` isn't held
+/// or is already at `MAX_AGE`.
+fn withdraw_self_originated(lsdb: &mut Lsdb, key: &LsaKey) -> bool {
+    let Some(existing) = lsdb.get(key) else {
+        return false;
+    };
+    if existing.header.age >= lsa::MAX_AGE {
+        return false;
+    }
+    let mut flushed = (*existing).clone();
+    flushed.header.age = lsa::MAX_AGE;
+    lsdb.install(flushed);
+    info!(
+        lsa_type = key.lsa_type, link_state_id = %key.link_state_id,
+        advertising_router = %key.advertising_router,
+        "ospf lsa prematurely aged"
+    );
+    true
+}
+
+/// The inverse of an origination pass's `install_self_originated` loop:
+/// withdraws every live self-originated LSA of `lsa_type` whose link-state
+/// id isn't in `desired` — i.e. something this router advertised earlier
+/// and no longer does.
+fn withdraw_undesired(
+    lsdb: &mut Lsdb,
+    local_router_id: Ipv4Addr,
+    lsa_type: u8,
+    desired: &HashSet<Ipv4Addr>,
+) {
+    let stale: Vec<LsaKey> = lsdb
+        .headers()
+        .into_iter()
+        .filter(|h| {
+            h.advertising_router == local_router_id
+                && h.lsa_type == lsa_type
+                && h.age < lsa::MAX_AGE
+                && !desired.contains(&h.link_state_id)
+        })
+        .map(|h| h.key())
+        .collect();
+    for key in stale {
+        withdraw_self_originated(lsdb, &key);
+    }
 }
 
 /// Inserts `prefix` into `raw` if it's IPv4 — see `LinkManager::
@@ -2529,6 +2703,266 @@ mod tests {
             panic!("expected summary lsa")
         };
         assert_eq!(body1.metric, 5);
+    }
+
+    fn router_key(router_id: Ipv4Addr) -> LsaKey {
+        LsaKey {
+            lsa_type: lsa::LSA_TYPE_ROUTER,
+            link_state_id: router_id,
+            advertising_router: router_id,
+        }
+    }
+
+    fn router_body(flags: u8) -> LsaBody {
+        LsaBody::Router(RouterLsaBody {
+            flags,
+            links: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn withdraw_self_originated_sets_max_age_and_keeps_sequence_number() {
+        let mut lsdb = Lsdb::new();
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let key = router_key(router_id);
+        assert!(!withdraw_self_originated(&mut lsdb, &key));
+
+        install_self_originated(
+            &mut lsdb,
+            router_id,
+            lsa::LSA_TYPE_ROUTER,
+            router_id,
+            router_body(0),
+        );
+        install_self_originated(
+            &mut lsdb,
+            router_id,
+            lsa::LSA_TYPE_ROUTER,
+            router_id,
+            router_body(1),
+        );
+        assert!(withdraw_self_originated(&mut lsdb, &key));
+        let flushed = lsdb.get(&key).unwrap();
+        assert_eq!(flushed.header.age, lsa::MAX_AGE);
+        assert_eq!(
+            flushed.header.sequence_number,
+            lsa::INITIAL_SEQUENCE_NUMBER + 1
+        );
+        assert_eq!(flushed.body, router_body(1));
+        // Already flushed: a no-op.
+        assert!(!withdraw_self_originated(&mut lsdb, &key));
+    }
+
+    /// A neighbor's echo of a self-originated LSA (decoded from the wire, so
+    /// with the real checksum) must be a duplicate of the held instance, not
+    /// newer — otherwise it would supersede a prematurely aged one.
+    #[test]
+    fn self_originated_lsa_ties_with_its_own_wire_copy() {
+        let mut lsdb = Lsdb::new();
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        install_self_originated(
+            &mut lsdb,
+            router_id,
+            lsa::LSA_TYPE_ROUTER,
+            router_id,
+            router_body(0),
+        );
+        let held = lsdb.get(&router_key(router_id)).unwrap();
+        let echo = lsa::decode_lsa(&lsa::encode_lsa(&held)).unwrap();
+        assert_ne!(held.header.checksum, 0);
+        assert_eq!(
+            lsa::is_newer(&echo.header, &held.header),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(lsdb.install(echo), crate::lsdb::InstallOutcome::Rejected);
+    }
+
+    /// Issue #32 / RFC 2328 §12.1.6: at `MaxSequenceNumber` the LSA is
+    /// flushed at that number (never `0x8000_0000`), held for the flood window,
+    /// then re-originated at `InitialSequenceNumber`.
+    #[test]
+    fn install_self_originated_at_max_sequence_flushes_then_restarts_at_initial() {
+        let mut lsdb = Lsdb::new();
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let key = router_key(router_id);
+        lsdb.install(Lsa {
+            header: LsaHeader {
+                age: 100,
+                options: 0,
+                lsa_type: lsa::LSA_TYPE_ROUTER,
+                link_state_id: router_id,
+                advertising_router: router_id,
+                sequence_number: lsa::MAX_SEQUENCE_NUMBER,
+                checksum: 0,
+                length: 0,
+            },
+            body: router_body(0),
+        });
+
+        install_self_originated(
+            &mut lsdb,
+            router_id,
+            lsa::LSA_TYPE_ROUTER,
+            router_id,
+            router_body(1),
+        );
+        let flushed = lsdb.get(&key).unwrap();
+        assert_eq!(flushed.header.sequence_number, lsa::MAX_SEQUENCE_NUMBER);
+        assert_eq!(flushed.header.age, lsa::MAX_AGE);
+        assert_eq!(flushed.body, router_body(0));
+
+        // Deferred while the flushed copy is still held.
+        for _ in 0..crate::lsdb::MAX_AGE_HOLD_TICKS - 1 {
+            assert!(lsdb.age_and_evict(1).is_empty());
+            install_self_originated(
+                &mut lsdb,
+                router_id,
+                lsa::LSA_TYPE_ROUTER,
+                router_id,
+                router_body(1),
+            );
+            assert_eq!(
+                lsdb.get(&key).unwrap().header.sequence_number,
+                lsa::MAX_SEQUENCE_NUMBER
+            );
+        }
+        assert_eq!(lsdb.age_and_evict(1), vec![key]);
+
+        install_self_originated(
+            &mut lsdb,
+            router_id,
+            lsa::LSA_TYPE_ROUTER,
+            router_id,
+            router_body(1),
+        );
+        let fresh = lsdb.get(&key).unwrap();
+        assert_eq!(fresh.header.sequence_number, lsa::INITIAL_SEQUENCE_NUMBER);
+        assert_eq!(fresh.header.age, 0);
+        assert_eq!(fresh.body, router_body(1));
+    }
+
+    #[tokio::test]
+    async fn originate_as_external_lsas_withdraws_a_prefix_no_longer_redistributed() {
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
+        let area = Ipv4Addr::UNSPECIFIED;
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let kept: Ipv4Net = "192.0.2.0/24".parse().unwrap();
+        let dropped: Ipv4Net = "198.51.100.0/24".parse().unwrap();
+        manager.lsdb_for(area).await;
+        *manager.redistribute_filtered.lock().await = HashSet::from([kept, dropped]);
+        manager.originate_as_external_lsas(router_id).await;
+        *manager.redistribute_filtered.lock().await = HashSet::from([kept]);
+        manager.originate_as_external_lsas(router_id).await;
+
+        let lsdb = manager.lsdb_for(area).await;
+        let lsdb = lsdb.lock().await;
+        let key = |p: Ipv4Net| LsaKey {
+            lsa_type: lsa::LSA_TYPE_AS_EXTERNAL,
+            link_state_id: p.network(),
+            advertising_router: router_id,
+        };
+        let flushed = lsdb.get(&key(dropped)).unwrap();
+        assert_eq!(flushed.header.age, lsa::MAX_AGE);
+        assert_eq!(flushed.header.sequence_number, lsa::INITIAL_SEQUENCE_NUMBER);
+        let live = lsdb.get(&key(kept)).unwrap();
+        assert_eq!(live.header.age, 0);
+        assert_eq!(live.header.sequence_number, lsa::INITIAL_SEQUENCE_NUMBER);
+    }
+
+    #[tokio::test]
+    async fn leaving_an_area_withdraws_its_router_lsa_and_the_summaries_of_it() {
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
+        let area0 = Ipv4Addr::UNSPECIFIED;
+        let area1 = Ipv4Addr::new(0, 0, 0, 1);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let net0: Ipv4Net = "192.168.10.0/24".parse().unwrap();
+        let net1: Ipv4Net = "192.168.11.0/24".parse().unwrap();
+        manager
+            .reconcile(
+                Vec::new(),
+                HashMap::from([(area0, vec![(net0, 5)]), (area1, vec![(net1, 7)])]),
+                router_id,
+            )
+            .await;
+        manager.originate_router_lsas(router_id).await;
+        manager.originate_summary_lsas(router_id).await;
+
+        // The area1 loopback goes away: area1 keeps its (now empty) LSDB.
+        manager
+            .reconcile(
+                Vec::new(),
+                HashMap::from([(area0, vec![(net0, 5)])]),
+                router_id,
+            )
+            .await;
+        manager.originate_router_lsas(router_id).await;
+        manager.originate_summary_lsas(router_id).await;
+
+        let lsdb1 = manager.lsdb_for(area1).await;
+        assert_eq!(
+            lsdb1
+                .lock()
+                .await
+                .get(&router_key(router_id))
+                .unwrap()
+                .header
+                .age,
+            lsa::MAX_AGE
+        );
+        let lsdb0 = manager.lsdb_for(area0).await;
+        let lsdb0 = lsdb0.lock().await;
+        let summary = lsdb0
+            .get(&LsaKey {
+                lsa_type: lsa::LSA_TYPE_NETWORK_SUMMARY,
+                link_state_id: net1.network(),
+                advertising_router: router_id,
+            })
+            .unwrap();
+        assert_eq!(summary.header.age, lsa::MAX_AGE);
+        assert_eq!(summary.header.sequence_number, lsa::INITIAL_SEQUENCE_NUMBER);
+        assert_eq!(lsdb0.get(&router_key(router_id)).unwrap().header.age, 0);
+    }
+
+    #[tokio::test]
+    async fn withdraw_all_self_originated_flushes_every_area() {
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
+        let area0 = Ipv4Addr::UNSPECIFIED;
+        let area1 = Ipv4Addr::new(0, 0, 0, 1);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let net0: Ipv4Net = "192.168.10.0/24".parse().unwrap();
+        let net1: Ipv4Net = "192.168.11.0/24".parse().unwrap();
+        manager
+            .reconcile(
+                Vec::new(),
+                HashMap::from([(area0, vec![(net0, 5)]), (area1, vec![(net1, 7)])]),
+                router_id,
+            )
+            .await;
+        manager.originate_router_lsas(router_id).await;
+        manager.originate_summary_lsas(router_id).await;
+
+        // Two Router-LSAs plus one Type-3 per area.
+        assert_eq!(manager.withdraw_all_self_originated().await, 4);
+        for area in [area0, area1] {
+            let lsdb = manager.lsdb_for(area).await;
+            for header in lsdb.lock().await.headers() {
+                assert_eq!(header.advertising_router, router_id);
+                assert_eq!(header.age, lsa::MAX_AGE, "{header:?}");
+            }
+        }
+        assert_eq!(manager.withdraw_all_self_originated().await, 0);
     }
 
     #[tokio::test]

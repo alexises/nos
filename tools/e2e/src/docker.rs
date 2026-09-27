@@ -308,11 +308,23 @@ impl Dock {
         Ok((code.unwrap_or(-1), out))
     }
 
-    /// The runtime image has no `ps`/`pgrep`, so scan `/proc/*/comm` (POSIX sh only).
+    /// SIGKILL: the process gets no chance to shut down cleanly.
     pub async fn kill_process(&self, container: &str, comm: &str) -> anyhow::Result<()> {
+        self.signal_process(container, comm, "-9").await
+    }
+
+    /// Sends `signal` (a `kill` flag, e.g. `-TERM`) to every process named
+    /// `comm`. The runtime image has no `ps`/`pgrep`, so scan `/proc/*/comm`
+    /// (POSIX sh only).
+    pub async fn signal_process(
+        &self,
+        container: &str,
+        comm: &str,
+        signal: &str,
+    ) -> anyhow::Result<()> {
         let script = format!(
             "for p in /proc/[0-9]*; do [ -r \"$p/comm\" ] || continue; \
-             if [ \"$(cat \"$p/comm\" 2>/dev/null)\" = \"{comm}\" ]; then kill -9 \"${{p#/proc/}}\"; fi; done"
+             if [ \"$(cat \"$p/comm\" 2>/dev/null)\" = \"{comm}\" ]; then kill {signal} \"${{p#/proc/}}\"; fi; done"
         );
         self.exec(container, &["sh", "-c", &script]).await?;
         Ok(())

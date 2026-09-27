@@ -197,6 +197,14 @@ pub struct Args {
     #[arg(long)]
     pub redistribute_to_ospf_policy: Option<String>,
 
+    /// If set, removes `--routing-table`'s redistribute rule
+    /// (`RoutingTableOp::ClearRedistribute`) — for verifying that a
+    /// redistributed prefix's AS-external-LSA is actually withdrawn (RFC
+    /// 2328 §14.1) rather than left to age out. Mutually exclusive with
+    /// `--redistribute`/`--redistribute-to-ospf`.
+    #[arg(long)]
+    pub clear_redistribute_to_ospf: bool,
+
     /// If set, configures an RFC 2385 TCP MD5 password on `--peer-group`
     /// (`BgpPeerGroupOp::SetMd5Auth`) — for verifying session authentication
     /// end to end (matching passwords on both routers establish; a
@@ -983,6 +991,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 to: RedistributeTarget::Ospf,
                 policy: args.redistribute_to_ospf_policy.clone(),
             },
+        }));
+    }
+    if args.clear_redistribute_to_ospf {
+        if args.redistribute || args.redistribute_to_ospf {
+            bail!("--clear-redistribute-to-ospf is mutually exclusive with --redistribute/--redistribute-to-ospf");
+        }
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
+            name: args.routing_table.clone(),
         }));
     }
 

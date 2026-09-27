@@ -487,6 +487,21 @@ pub fn on_lsu_received(
     let mut acked = Vec::with_capacity(lsu.lsas.len());
     let mut newly_installed = Vec::new();
     for l in &lsu.lsas {
+        let key = l.header.key();
+        // RFC 2328 §13 step 4: a MaxAge instance of an LSA this router holds
+        // no copy of is acknowledged and discarded, never installed — except
+        // one it asked for during exchange (the RFC's "a neighbor is in
+        // Exchange/Loading" carve-out, narrowed to this adjacency's own
+        // request list). Without this, two routers each holding the flushed
+        // copy for its flood window (`Lsdb::MAX_AGE_HOLD_TICKS`) would keep
+        // reinstalling each other's echo of it forever.
+        if l.header.age >= lsa::MAX_AGE
+            && lsdb.get(&key).is_none()
+            && !adj.request_list.contains(&key)
+        {
+            acked.push(l.header);
+            continue;
+        }
         if !matches!(
             lsdb.install(l.clone()),
             crate::lsdb::InstallOutcome::Rejected
@@ -494,7 +509,7 @@ pub fn on_lsu_received(
             newly_installed.push(l.header);
         }
         acked.push(l.header);
-        adj.request_list.retain(|k| *k != l.header.key());
+        adj.request_list.retain(|k| *k != key);
     }
     let mut actions = vec![Action::SendLsAck(acked)];
     if adj.request_list.is_empty() {
@@ -1488,6 +1503,53 @@ mod tests {
         assert_eq!(adj.request_list, vec![header("2.2.2.2", 1).key()]);
         assert_eq!(actions, vec![Action::SendLsAck(vec![l.header])]);
         assert_eq!(newly_installed, vec![l.header]);
+    }
+
+    /// RFC 2328 §13 step 4: a `MaxAge` LSA with no held instance is acked but
+    /// not installed — unless this adjacency asked for it.
+    #[test]
+    fn lsu_with_unheld_max_age_lsa_is_acked_but_discarded() {
+        let mut adj = AdjacencyData::default();
+        let mut lsdb = Lsdb::new();
+        let mut l = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
+        l.header.age = lsa::MAX_AGE;
+        let lsu = LsuPacket {
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsas: vec![l.clone()],
+        };
+        let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu);
+        assert!(lsdb.get(&l.header.key()).is_none());
+        assert!(newly_installed.is_empty());
+        assert_eq!(actions[0], Action::SendLsAck(vec![l.header]));
+
+        let mut adj = AdjacencyData {
+            request_list: vec![l.header.key()],
+            ..Default::default()
+        };
+        let (_, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu);
+        assert_eq!(newly_installed, vec![l.header]);
+        assert!(adj.request_list.is_empty());
+    }
+
+    /// A flushed copy (same sequence/checksum, age `MaxAge`) of a held LSA
+    /// supersedes it — `is_newer`'s `MaxAge` tie-break.
+    #[test]
+    fn lsu_with_max_age_copy_of_held_lsa_supersedes_it() {
+        let mut adj = AdjacencyData::default();
+        let mut lsdb = Lsdb::new();
+        let l = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
+        lsdb.install(l.clone());
+        let mut flushed = l.clone();
+        flushed.header.age = lsa::MAX_AGE;
+        let lsu = LsuPacket {
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsas: vec![flushed.clone()],
+        };
+        let (_, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu);
+        assert_eq!(newly_installed, vec![flushed.header]);
+        assert_eq!(lsdb.get(&l.header.key()).unwrap().header.age, lsa::MAX_AGE);
     }
 
     #[test]

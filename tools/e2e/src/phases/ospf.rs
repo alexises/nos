@@ -302,7 +302,25 @@ pub async fn asbr_phase(w: &mut World) -> anyhow::Result<()> {
         route,
         60,
     )
-    .await
+    .await?;
+
+    // RFC 2328 §14.1: dropping the redistribute rule must flush the Type-5 —
+    // prematurely aged on router-a, MaxAge-flushed on router-b and its kernel
+    // route removed — in seconds, not after the 3600s MaxAge. The static route
+    // itself stays. (nos-ospfd re-filters its redistributed set on its 10s
+    // resync, so the bound is that plus one resend period plus the MaxAge hold.)
+    let aged = a.count("ospf lsa prematurely aged.*lsa_type=5");
+    let flushed_pat =
+        format!("ospf lsa maxage flushed.*lsa_type=5.*advertising_router={OSPF_ROUTER_ID}");
+    let flushed = b.count(&flushed_pat);
+    let removed_pat = format!("removed route prefix={ASBR_PREFIX}");
+    let removed = b.count(&removed_pat);
+    log("removing the redistribute rule on router-a; its type-5 must be flushed");
+    a.provision(&["--clear-redistribute-to-ospf"]).await?;
+    a.wait_new("ospf lsa prematurely aged.*lsa_type=5", aged, 30)
+        .await?;
+    b.wait_new(&flushed_pat, flushed, 30).await?;
+    b.wait_new(&removed_pat, removed, 30).await
 }
 
 /// A third router with a lower router-id joins the broadcast segment: the
@@ -449,7 +467,26 @@ pub async fn abr(w: &mut World) -> anyhow::Result<()> {
     a.wait(&format!(
         "added route prefix={OSPF_ABR_LOOPBACK_ADDRESS}.*source=Some(Ospf)"
     ))
-    .await
+    .await?;
+
+    // RFC 2328 §14.1: the loopback leaving area 1 (router-b's only presence
+    // there) must flush the Type-3 — prematurely aged on router-b, MaxAge-
+    // flushed on router-a and its kernel route removed — within seconds.
+    let aged = b.count("ospf lsa prematurely aged.*lsa_type=3");
+    let flushed = a.count("ospf lsa maxage flushed.*lsa_type=3");
+    log("removing router-b's area-1 loopback; its type-3 summary must be flushed");
+    b.provision(&[
+        "--loopback-remove-address",
+        OSPF_ABR_LOOPBACK_ADDRESS,
+        "--clear-ospf-loopback-profile",
+    ])
+    .await?;
+    b.wait_new("ospf lsa prematurely aged.*lsa_type=3", aged, 30)
+        .await?;
+    a.wait_new("ospf lsa maxage flushed.*lsa_type=3", flushed, 30)
+        .await?;
+    a.wait(&format!("removed route prefix={OSPF_ABR_LOOPBACK_ADDRESS}"))
+        .await
 }
 
 /// RFC 5709 HMAC-SHA-256: matching keys reach/stay Full with real per-packet
@@ -561,6 +598,27 @@ pub async fn ospf_aging(w: &mut World) -> anyhow::Result<()> {
         20,
     )
     .await?;
+
+    // Graceful shutdown (SIGTERM — a SIGKILL never reaches the handler):
+    // router-b's nos-ospfd must prematurely age its own LSAs (RFC 2328 §14.1)
+    // and keep flooding long enough for router-a to flush them within
+    // seconds. The watchdog then respawns it; reconverge before the
+    // router-a-focused steps below.
+    let flushed_pat = format!("ospf lsa maxage flushed.*advertising_router={OSPF_ROUTER_ID_B}");
+    let flushed = a.count(&flushed_pat);
+    let (full_a, full_b) = (
+        a.count(&full_p2p(OSPF_ROUTER_ID_B)),
+        b.count(&full_p2p(OSPF_ROUTER_ID)),
+    );
+    log("sending SIGTERM to router-b's nos-ospfd; it must flush its lsas before exiting");
+    w.dock
+        .signal_process("router-b", "nos-ospfd", "-TERM")
+        .await?;
+    b.wait("ospf flushing self-originated lsas before shutdown")
+        .await?;
+    a.wait_new(&flushed_pat, flushed, 30).await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), full_a, 90).await?;
+    b.wait_new(&full_p2p(OSPF_ROUTER_ID), full_b, 90).await?;
 
     // Stop router-a's nos-ospfd so it stops refreshing: router-b's held copy
     // must then age out purely on its own local clock.
