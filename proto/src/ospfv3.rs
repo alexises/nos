@@ -54,6 +54,11 @@ pub struct Ospfv3LsaSummary {
     pub sequence_number: i32,
     pub age: u16,
     pub checksum: u16,
+    /// The owning link's attach point (same naming as
+    /// `Ospfv3NeighborSummary.link`) for a link-local-scoped LSA (RFC 5340
+    /// §4.5.1: Link-LSA/E-Link-LSA, held per link and never flooded past
+    /// it); `None` for an area-scoped one.
+    pub link: Option<String>,
 }
 
 /// Messages sent from a client to one `nos-ospfv3d` instance's IPC socket.

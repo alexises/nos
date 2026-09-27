@@ -46,6 +46,13 @@ const SCOPE_AREA: u16 = 0x2000;
 /// S2/S1 scope bits: `00` = link-local scope.
 const SCOPE_LINK_LOCAL: u16 = 0x0000;
 
+/// RFC 5340 §4.5.1 / §A.4.2.1: whether `lsa_type`'s S2/S1 bits say
+/// link-local scope — such an LSA lives in its link's own store and is
+/// never flooded past that link (`link.rs`'s per-link `Lsdb`).
+pub fn is_link_local_scope(lsa_type: u16) -> bool {
+    lsa_type & (SCOPE_AREA | 0x4000) == SCOPE_LINK_LOCAL
+}
+
 /// RFC 5340 §A.4.3 Router-LSA — area-scoped, function code 1.
 pub const LSA_TYPE_ROUTER: u16 = SCOPE_AREA | 1;
 /// RFC 5340 §A.4.4 Network-LSA — area-scoped, function code 2.
@@ -806,6 +813,22 @@ pub fn is_newer(a: &LsaHeader, b: &LsaHeader) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_local_scope_is_only_the_two_link_lsa_types() {
+        assert!(is_link_local_scope(LSA_TYPE_LINK));
+        assert!(is_link_local_scope(LSA_TYPE_E_LINK));
+        for t in [
+            LSA_TYPE_ROUTER,
+            LSA_TYPE_NETWORK,
+            LSA_TYPE_INTRA_AREA_PREFIX,
+            LSA_TYPE_E_ROUTER,
+            LSA_TYPE_E_NETWORK,
+            LSA_TYPE_E_INTRA_AREA_PREFIX,
+        ] {
+            assert!(!is_link_local_scope(t), "{t:#06x}");
+        }
+    }
 
     fn router_lsa() -> Lsa {
         Lsa {
