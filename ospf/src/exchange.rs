@@ -22,6 +22,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::lsa::{self, Lsa, LsaHeader, LsaKey};
 use crate::lsdb::Lsdb;
@@ -497,6 +498,7 @@ pub fn on_lsu_received(
     adj: &mut AdjacencyData,
     lsdb: &mut Lsdb,
     lsu: &LsuPacket,
+    now: Instant,
 ) -> (Vec<Action>, Vec<LsaHeader>) {
     let acked = &mut adj.pending_acks;
     let mut newly_installed = Vec::new();
@@ -516,11 +518,15 @@ pub fn on_lsu_received(
             acked.push(l.header);
             continue;
         }
-        if !matches!(
-            lsdb.install(l.clone()),
-            crate::lsdb::InstallOutcome::Rejected
-        ) {
-            newly_installed.push(l.header);
+        match lsdb.install_received(l.clone(), now) {
+            // RFC 2328 §13 step 5a (`MinLSArrival`): discarded, and neither
+            // acknowledged nor treated as answering a request — the sender's
+            // retransmission brings it back.
+            crate::lsdb::InstallOutcome::TooSoon => continue,
+            crate::lsdb::InstallOutcome::Rejected => {}
+            crate::lsdb::InstallOutcome::Installed | crate::lsdb::InstallOutcome::Superseded => {
+                newly_installed.push(l.header);
+            }
         }
         acked.push(l.header);
         adj.request_list.retain(|k| *k != key);
@@ -1476,7 +1482,7 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![l.clone()],
         };
-        let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu);
+        let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
         assert!(adj.request_list.is_empty());
         assert!(lsdb.get(&l.header.key()).is_some());
         assert_eq!(actions, vec![Action::NeighborEvent(Event::LoadingDone)]);
@@ -1502,7 +1508,7 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![l.clone()],
         };
-        let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu);
+        let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
         assert_eq!(actions, vec![Action::NeighborEvent(Event::LoadingDone)]);
         assert_eq!(adj.pending_acks, vec![l.header]);
         assert!(newly_installed.is_empty());
@@ -1521,7 +1527,7 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![l.clone()],
         };
-        let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu);
+        let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
         assert_eq!(adj.request_list, vec![header("2.2.2.2", 1).key()]);
         assert!(actions.is_empty());
         assert_eq!(adj.pending_acks, vec![l.header]);
@@ -1541,7 +1547,7 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![l.clone()],
         };
-        let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu);
+        let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
         assert!(lsdb.get(&l.header.key()).is_none());
         assert!(newly_installed.is_empty());
         assert!(!actions.iter().any(|a| matches!(a, Action::SendLsAck(_))));
@@ -1551,7 +1557,7 @@ mod tests {
             request_list: vec![l.header.key()],
             ..Default::default()
         };
-        let (_, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu);
+        let (_, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
         assert_eq!(newly_installed, vec![l.header]);
         assert!(adj.request_list.is_empty());
     }
@@ -1571,7 +1577,7 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![flushed.clone()],
         };
-        let (_, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu);
+        let (_, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
         assert_eq!(newly_installed, vec![flushed.header]);
         assert_eq!(lsdb.get(&l.header.key()).unwrap().header.age, lsa::MAX_AGE);
     }
@@ -1590,12 +1596,56 @@ mod tests {
                 area_id: Ipv4Addr::UNSPECIFIED,
                 lsas: vec![l.clone()],
             };
-            on_lsu_received(&mut adj, &mut lsdb, &lsu);
+            on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
         }
         assert_eq!(
             take_pending_acks(&mut adj),
             Some(Action::SendLsAck(vec![first.header, second.header]))
         );
+    }
+
+    /// RFC 2328 §13 step 5a: a newer instance within `MinLSArrival` of the
+    /// last received one is discarded — not installed, not acked, and not
+    /// counted as answering a request.
+    #[test]
+    fn lsu_with_newer_instance_too_soon_is_discarded_without_ack() {
+        let first = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
+        let second = full_lsa("1.1.1.1", 0x8000_0002u32.cast_signed());
+        let mut adj = AdjacencyData {
+            request_list: vec![second.header.key()],
+            ..Default::default()
+        };
+        let mut lsdb = Lsdb::new();
+        let t0 = Instant::now();
+        lsdb.install_received(first.clone(), t0);
+        let lsu = LsuPacket {
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsas: vec![second.clone()],
+        };
+        let (actions, newly_installed) = on_lsu_received(
+            &mut adj,
+            &mut lsdb,
+            &lsu,
+            t0 + crate::lsdb::MIN_LS_ARRIVAL / 2,
+        );
+        assert!(newly_installed.is_empty());
+        assert!(adj.pending_acks.is_empty());
+        assert!(actions.is_empty());
+        assert_eq!(adj.request_list, vec![second.header.key()]);
+        assert_eq!(
+            lsdb.get(&first.header.key())
+                .unwrap()
+                .header
+                .sequence_number,
+            first.header.sequence_number
+        );
+
+        let (actions, newly_installed) =
+            on_lsu_received(&mut adj, &mut lsdb, &lsu, t0 + crate::lsdb::MIN_LS_ARRIVAL);
+        assert_eq!(newly_installed, vec![second.header]);
+        assert_eq!(adj.pending_acks, vec![second.header]);
+        assert_eq!(actions, vec![Action::NeighborEvent(Event::LoadingDone)]);
     }
 
     #[test]

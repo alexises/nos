@@ -854,7 +854,7 @@ async fn handle_lsu(
 
     let (actions, newly_installed) = {
         let mut lsdb = lsdb.lock().await;
-        exchange::on_lsu_received(&mut adj, &mut lsdb, lsu)
+        exchange::on_lsu_received(&mut adj, &mut lsdb, lsu, std::time::Instant::now())
     };
     if adj.pending_acks_since.is_none() && !adj.pending_acks.is_empty() {
         adj.pending_acks_since = Some(std::time::Instant::now());
@@ -2168,6 +2168,12 @@ fn install_self_originated(
             withdraw_self_originated(lsdb, &key);
             return;
         }
+        // RFC 2328 §12.4 / Appendix B `MinLSInterval`: changed content is
+        // not re-originated until the held instance is that old — the next
+        // `ORIGINATION_INTERVAL` tick retries. `age` is the local clock
+        // since origination (a neighbor's echo never supersedes it, see
+        // `lsa::fill_checksum`), so no extra timestamp is needed.
+        Some(e) if e.header.age < lsa::MIN_LS_INTERVAL => return,
         Some(e) => e.header.sequence_number + 1,
         None => lsa::INITIAL_SEQUENCE_NUMBER,
     };
@@ -2797,6 +2803,7 @@ mod tests {
             router_id,
             router_body(0),
         );
+        lsdb.age_and_evict(lsa::MIN_LS_INTERVAL);
         install_self_originated(
             &mut lsdb,
             router_id,
@@ -3316,39 +3323,48 @@ mod tests {
         assert_eq!(summaries[0].checksum, 0xabcd);
     }
 
+    /// RFC 2328 §12.4 `MinLSInterval`: changed content is held back until
+    /// the held instance is `MIN_LS_INTERVAL` old, then re-originated with a
+    /// bumped sequence number.
     #[test]
-    fn install_self_originated_changed_body_bumps_sequence_number() {
+    fn install_self_originated_changed_body_bumps_sequence_number_after_min_ls_interval() {
         let mut lsdb = Lsdb::new();
         let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let key = router_key(local_router_id);
         install_self_originated(
             &mut lsdb,
             local_router_id,
             lsa::LSA_TYPE_ROUTER,
             local_router_id,
-            LsaBody::Router(RouterLsaBody {
-                flags: 0,
-                links: Vec::new(),
-            }),
+            router_body(0),
         );
+        lsdb.age_and_evict(lsa::MIN_LS_INTERVAL - 1);
         install_self_originated(
             &mut lsdb,
             local_router_id,
             lsa::LSA_TYPE_ROUTER,
             local_router_id,
-            LsaBody::Router(RouterLsaBody {
-                flags: 1,
-                links: Vec::new(),
-            }),
+            router_body(1),
         );
-        let key = LsaKey {
-            lsa_type: lsa::LSA_TYPE_ROUTER,
-            link_state_id: local_router_id,
-            advertising_router: local_router_id,
-        };
+        let held = lsdb.get(&key).unwrap();
+        assert_eq!(held.header.sequence_number, lsa::INITIAL_SEQUENCE_NUMBER);
+        assert_eq!(held.body, router_body(0));
+
+        lsdb.age_and_evict(1);
+        install_self_originated(
+            &mut lsdb,
+            local_router_id,
+            lsa::LSA_TYPE_ROUTER,
+            local_router_id,
+            router_body(1),
+        );
+        let held = lsdb.get(&key).unwrap();
         assert_eq!(
-            lsdb.get(&key).unwrap().header.sequence_number,
+            held.header.sequence_number,
             lsa::INITIAL_SEQUENCE_NUMBER + 1
         );
+        assert_eq!(held.header.age, 0);
+        assert_eq!(held.body, router_body(1));
     }
 
     #[test]
