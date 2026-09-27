@@ -304,6 +304,8 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
         // on_dbd_in_exstart` (this negotiation attempt itself always
         // carries no summary data, per RFC 2328 §10.6).
         summary_remaining: std::collections::VecDeque::new(),
+        pending_acks: Vec::new(),
+        pending_acks_since: None,
     };
     (adj, dbd)
 }
@@ -449,6 +451,7 @@ pub async fn run(
                 advance_adjacencies(&socket, &cfg, local_router_id, &status, &mut next_seq);
             }
             _ = rxmt_sweep.tick() => {
+                flush_pending_acks(&socket, &cfg, local_router_id, &status, &mut next_seq);
                 retransmit_pending(&socket, &cfg, local_router_id, &status, &mut next_seq);
                 flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &status, &mut next_seq).await;
             }
@@ -767,7 +770,18 @@ async fn handle_dbd(
         (neighbor.state, neighbor.adjacency.clone()?)
     };
 
-    let local_lsdb_headers = lsdb.lock().await.headers();
+    // A MaxAge entry is never offered in the summary: it may be evicted
+    // (`Lsdb::MAX_AGE_HOLD_TICKS`) before the neighbor's LSR for it lands,
+    // which would read as `BadLSReq` and restart the adjacency for nothing.
+    // The periodic resend still carries the flush to an already-`Full`
+    // neighbor.
+    let local_lsdb_headers: Vec<LsaHeader> = lsdb
+        .lock()
+        .await
+        .headers()
+        .into_iter()
+        .filter(|h| h.age < lsa::MAX_AGE)
+        .collect();
     let actions = exchange::on_dbd_received(
         &mut adj,
         old_state,
@@ -842,6 +856,9 @@ async fn handle_lsu(
         let mut lsdb = lsdb.lock().await;
         exchange::on_lsu_received(&mut adj, &mut lsdb, lsu)
     };
+    if adj.pending_acks_since.is_none() && !adj.pending_acks.is_empty() {
+        adj.pending_acks_since = Some(std::time::Instant::now());
+    }
     for header in &newly_installed {
         info!(
             link = %cfg.attach_point, neighbor = %lsu.router_id,
@@ -1023,6 +1040,52 @@ fn execute_actions(
         if let Err(e) = socket.send_unicast(neighbor_addr, &payload) {
             warn!(link = %cfg.attach_point, neighbor = %neighbor_id, kind, error = %e, "failed to send ospf packet");
         }
+    }
+}
+
+/// RFC 2328 §13.5 delayed acknowledgment: sends each neighbor's queued acks
+/// (`AdjacencyData::pending_acks`, filled by `on_lsu_received`) as one
+/// `LSAck`. Runs on the `RXMT_INTERVAL` sweep — the RFC only requires the
+/// delay to stay below `RxmtInterval`, and one more tick per link keeps
+/// `run()`'s `select!` no wider.
+fn flush_pending_acks(
+    socket: &OspfSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+    next_seq: &mut u64,
+) {
+    let mut flushes = Vec::new();
+    status.send_if_modified(|s| {
+        for (neighbor_id, info) in &mut s.neighbors {
+            let Some(adj) = &mut info.adjacency else {
+                continue;
+            };
+            let held = adj.pending_acks_since;
+            if let Some(action) = exchange::take_pending_acks(adj) {
+                flushes.push((*neighbor_id, held, action));
+            }
+        }
+        // Nothing here changes what `originate_router_lsas` snapshots.
+        false
+    });
+    for (neighbor_id, held, action) in flushes {
+        if let exchange::Action::SendLsAck(headers) = &action {
+            info!(
+                link = %cfg.attach_point, neighbor = %neighbor_id, acked = headers.len(),
+                delayed_ms = held.map_or(0, |t| t.elapsed().as_millis()),
+                "ospf lsack sent"
+            );
+        }
+        execute_actions(
+            socket,
+            cfg,
+            local_router_id,
+            status,
+            neighbor_id,
+            vec![action],
+            next_seq,
+        );
     }
 }
 

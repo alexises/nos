@@ -324,7 +324,13 @@ pub async fn asbr_phase(w: &mut World) -> anyhow::Result<()> {
     a.wait_new("ospf lsa prematurely aged.*lsa_type=5", aged, 30)
         .await?;
     b.wait_new(&flushed_pat, flushed, 30).await?;
-    b.wait_new(&removed_pat, removed, 30).await
+    b.wait_new(&removed_pat, removed, 30).await?;
+
+    // RFC 2328 §13.5 delayed acknowledgment: router-b acks router-a's periodic
+    // LSUs on its own RxmtInterval sweep, so some batch is held a second or
+    // more before it goes out — impossible with an immediate per-LSU ack.
+    b.wait_new("ospf lsack sent.*delayed_ms=[1-9][0-9][0-9][0-9]", 0, 30)
+        .await
 }
 
 /// A third router with a lower router-id joins the broadcast segment: the
