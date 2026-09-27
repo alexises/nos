@@ -48,6 +48,11 @@ pub const MAX_AGE: u16 = 3600;
 /// so it never reaches `MAX_AGE` while its originator is still alive.
 pub const LS_REFRESH_TIME: u16 = 1800;
 
+/// RFC 2328 §12.4 / Appendix B's `MinLSInterval` — the minimum age a
+/// self-originated instance must reach before it may be re-originated with
+/// changed content (see `link::install_self_originated`).
+pub const MIN_LS_INTERVAL: u16 = 5;
+
 /// RFC 2328 §12.1.6's `InitialSequenceNumber` — every self-originated LSA
 /// starts here and increments by one on each refresh.
 pub const INITIAL_SEQUENCE_NUMBER: i32 = i32::MIN + 1;

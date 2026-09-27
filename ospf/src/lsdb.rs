@@ -7,8 +7,15 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::lsa::{self, Lsa, LsaHeader, LsaKey};
+
+/// RFC 2328 §13 step 5a / Appendix B's `MinLSArrival` — a newer instance of
+/// an LSA received via flooding within this long of the previous received
+/// instance is discarded (`InstallOutcome::TooSoon`), not installed and not
+/// acknowledged, so a flapping originator can't drive reflood storms.
+pub const MIN_LS_ARRIVAL: Duration = Duration::from_secs(1);
 
 /// How many `age_and_evict` ticks an entry sits at `MAX_AGE` before it's
 /// evicted. RFC 2328 §14 removes a `MaxAge` LSA once it's off every neighbor's
@@ -24,6 +31,10 @@ pub struct Lsdb {
     /// Ticks each entry has already spent at `MAX_AGE` — see
     /// `MAX_AGE_HOLD_TICKS`.
     max_age_ticks: HashMap<LsaKey, u16>,
+    /// When each key's current instance was last accepted via flooding
+    /// (`install_received`) — see `MIN_LS_ARRIVAL`. Self-originated installs
+    /// don't record here: they're paced by `lsa::MIN_LS_INTERVAL` instead.
+    last_received: HashMap<LsaKey, Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +46,9 @@ pub enum InstallOutcome {
     /// The given instance wasn't newer than what's already held — RFC 2328
     /// §13's "database copy is more recent or the same" case.
     Rejected,
+    /// Newer, but received less than `MIN_LS_ARRIVAL` after the held
+    /// instance was — RFC 2328 §13 step 5a: discard without acknowledging.
+    TooSoon,
 }
 
 impl Lsdb {
@@ -64,6 +78,29 @@ impl Lsdb {
         }
     }
 
+    /// `install` for an instance received via flooding, paced by
+    /// `MIN_LS_ARRIVAL`: a newer instance arriving within it of the last one
+    /// accepted for the same key is `TooSoon` and left uninstalled — the
+    /// sender's retransmission brings it back after `RxmtInterval`.
+    pub fn install_received(&mut self, lsa: Lsa, now: Instant) -> InstallOutcome {
+        let key = lsa.header.key();
+        let too_soon = self
+            .last_received
+            .get(&key)
+            .is_some_and(|last| now.duration_since(*last) < MIN_LS_ARRIVAL);
+        let newer = self.entries.get(&key).is_none_or(|existing| {
+            lsa::is_newer(&lsa.header, &existing.header) == Ordering::Greater
+        });
+        if too_soon && newer {
+            return InstallOutcome::TooSoon;
+        }
+        let outcome = self.install(lsa);
+        if outcome != InstallOutcome::Rejected {
+            self.last_received.insert(key, now);
+        }
+        outcome
+    }
+
     pub fn get(&self, key: &LsaKey) -> Option<Arc<Lsa>> {
         self.entries.get(key).cloned()
     }
@@ -89,12 +126,14 @@ impl Lsdb {
     pub fn age_and_evict(&mut self, delta: u16) -> Vec<LsaKey> {
         let mut evicted = Vec::new();
         let max_age_ticks = &mut self.max_age_ticks;
+        let last_received = &mut self.last_received;
         self.entries.retain(|key, lsa| {
             if lsa.header.age >= lsa::MAX_AGE {
                 let ticks = max_age_ticks.entry(*key).or_insert(0);
                 *ticks += 1;
                 if *ticks >= MAX_AGE_HOLD_TICKS {
                     max_age_ticks.remove(key);
+                    last_received.remove(key);
                     evicted.push(*key);
                     return false;
                 }
@@ -238,5 +277,46 @@ mod tests {
         assert_eq!(db.install(lsa(2)), InstallOutcome::Superseded);
         assert!(db.age_and_evict(1).is_empty());
         assert_eq!(db.get(&lsa(2).header.key()).unwrap().header.age, 1);
+    }
+
+    /// RFC 2328 §13 step 5a: a newer instance within `MIN_LS_ARRIVAL` of the
+    /// last received one is `TooSoon` and leaves the held one untouched; at
+    /// or past it, it supersedes as usual.
+    #[test]
+    fn install_received_paces_newer_instances_by_min_ls_arrival() {
+        let mut db = Lsdb::new();
+        let t0 = Instant::now();
+        let key = lsa(1).header.key();
+        assert_eq!(db.install_received(lsa(1), t0), InstallOutcome::Installed);
+        assert_eq!(
+            db.install_received(lsa(2), t0 + MIN_LS_ARRIVAL / 2),
+            InstallOutcome::TooSoon
+        );
+        assert_eq!(db.get(&key).unwrap().header.sequence_number, 1);
+        // A duplicate is still just rejected, never `TooSoon`.
+        assert_eq!(
+            db.install_received(lsa(1), t0 + MIN_LS_ARRIVAL / 2),
+            InstallOutcome::Rejected
+        );
+        assert_eq!(
+            db.install_received(lsa(2), t0 + MIN_LS_ARRIVAL),
+            InstallOutcome::Superseded
+        );
+        assert_eq!(db.get(&key).unwrap().header.sequence_number, 2);
+        // The pacing clock restarts from the accepted instance.
+        assert_eq!(
+            db.install_received(lsa(3), t0 + MIN_LS_ARRIVAL + MIN_LS_ARRIVAL / 2),
+            InstallOutcome::TooSoon
+        );
+    }
+
+    /// A self-originated install never records an arrival, so a received
+    /// newer instance right after it isn't paced against it.
+    #[test]
+    fn install_received_is_not_paced_against_a_local_install() {
+        let mut db = Lsdb::new();
+        let t0 = Instant::now();
+        db.install(lsa(1));
+        assert_eq!(db.install_received(lsa(2), t0), InstallOutcome::Superseded);
     }
 }
