@@ -6,13 +6,12 @@
 //! domain has exactly one VNI, so each domain elects independently and
 //! different domains spread over different PEs.
 //!
-//! Pure: `Fdb` feeds it the Type-4 origins it received and applies the answer.
+//! Pure: `Fdb` feeds it the Type-4 origins it received (already restricted by
+//! `plan_df` to PEs also attached to this domain's own EVI) and applies the
+//! answer.
 //!
 //! The DF wait timer (§8.5 step 3) is `Fdb::sync_df`'s: this only answers
 //! "who would be the DF".
-//!
-//! ponytail: every PE on the segment is assumed to serve every domain (no
-//! Type-1 per-EVI routes to say otherwise).
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;

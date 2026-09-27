@@ -380,9 +380,12 @@ fn local_routes(
 }
 
 /// Elects the Designated Forwarder of every segment this domain attaches to,
-/// from the Type-4 routes received so far. Other PEs are recognised by their
-/// Type-4's originating address; our own is `r.vtep`. A segment whose port is
-/// in `down` is never the DF.
+/// from the Type-4 routes received so far, restricted to PEs also attached to
+/// this domain's own EVI (a held per-EVI Ethernet A-D for our VNI, RFC 7432
+/// §8.5 / RFC 8584 §2.1) — a PE on the segment that never joined this EVI is
+/// not a candidate for it. Other PEs are recognised by their Type-4's
+/// originating address; our own is `r.vtep`. A segment whose port is in
+/// `down` is never the DF.
 fn plan_df(
     r: &Ready,
     received: &HashMap<EvpnKey, EvpnRoute>,
@@ -399,6 +402,7 @@ fn plan_df(
                     _ => None,
                 })
                 .filter(|o| *o != r.vtep)
+                .filter(|o| ads.get(&p.esi).is_some_and(|a| a.evi.contains(o)))
                 .collect();
             let up = !down.contains(&p.port);
             Segment {
@@ -1706,9 +1710,12 @@ mod tests {
         assert_eq!(calls(&driver), ["ensure 10100", "flood eth1 true"]);
         assert!(fdb.table().await.segments[0].designated_forwarder);
 
-        // A PE with a lower address: [192.0.1.9, 192.0.2.1], 10100 % 2 == 0,
-        // so it is the DF and we are not.
+        // A PE with a lower address, attached to this EVI too (a per-EVI A-D
+        // for our VNI): [192.0.1.9, 192.0.2.1], 10100 % 2 == 0, so it is the
+        // DF and we are not.
         fdb.apply_push(EvpnUpdate::Add(es_route(ESI, "192.0.1.9")))
+            .await;
+        fdb.apply_push(EvpnUpdate::Add(evi_ad(ESI, "192.0.1.9")))
             .await;
         assert_eq!(calls(&driver), ["flood eth1 false"]);
         let t = fdb.table().await;
@@ -1733,6 +1740,30 @@ mod tests {
         calls(&driver);
         fdb.set_ready(None).await;
         assert_eq!(calls(&driver), ["remove 10100", "flood eth1 true"]);
+    }
+
+    #[tokio::test]
+    async fn a_peer_with_no_per_evi_ad_is_not_a_df_candidate() {
+        let driver = Arc::new(Recorder::default());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
+        fdb.set_ready(Some(ready_with_segment())).await;
+        calls(&driver);
+
+        // A lower-addressed PE's bare Type-4, with no per-EVI A-D for our
+        // VNI, does not make it a candidate (RFC 7432 §8.5 / RFC 8584 §2.1):
+        // it is on the segment but never joined this EVI, so we stay DF.
+        fdb.apply_push(EvpnUpdate::Add(es_route(ESI, "192.0.1.9")))
+            .await;
+        assert!(calls(&driver).is_empty());
+        let t = fdb.table().await;
+        assert!(t.segments[0].designated_forwarder);
+        assert_eq!(t.segments[0].pes, vec![VTEP.parse::<IpAddr>().unwrap()]);
+
+        // Its per-EVI A-D arriving makes it a real candidate: we lose the election.
+        fdb.apply_push(EvpnUpdate::Add(evi_ad(ESI, "192.0.1.9")))
+            .await;
+        assert_eq!(calls(&driver), ["flood eth1 false"]);
+        assert!(!fdb.table().await.segments[0].designated_forwarder);
     }
 
     #[tokio::test]
@@ -1808,9 +1839,11 @@ mod tests {
         assert_eq!(calls(&driver), ["ensure 10100", "flood eth1 true"]);
         assert!(fdb.table().await.segments[0].single_active);
 
-        // A PE with a lower address is the DF: the port is blocked, but it
-        // still floods (only forwarding decides).
+        // A PE with a lower address, also attached to this EVI, is the DF:
+        // the port is blocked, but it still floods (only forwarding decides).
         fdb.apply_push(EvpnUpdate::Add(es_route(ESI, "192.0.1.9")))
+            .await;
+        fdb.apply_push(EvpnUpdate::Add(evi_ad(ESI, "192.0.1.9")))
             .await;
         assert_eq!(calls(&driver), ["fwd eth1 false"]);
         assert!(!fdb.table().await.segments[0].designated_forwarder);
@@ -1839,6 +1872,8 @@ mod tests {
         let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
         fdb.set_ready(Some(ready_with_segment())).await;
         fdb.apply_push(EvpnUpdate::Add(es_route(ESI, "192.0.1.9")))
+            .await;
+        fdb.apply_push(EvpnUpdate::Add(evi_ad(ESI, "192.0.1.9")))
             .await;
         calls(&driver);
         // All-active non-DF: BUM flooding off, forwarding untouched.

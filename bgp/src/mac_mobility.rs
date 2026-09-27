@@ -272,7 +272,7 @@ mod tests {
         for i in 0..MOVE_LIMIT {
             let t = t0 + Duration::from_secs(i as u64 + 1);
             let owner = if i % 2 == 0 { b } else { a };
-            assert!(m.candidate(100, [1; 6], owner, i as u32 + 1, false, t));
+            assert!(m.candidate(100, [1; 6], owner, u32::try_from(i).unwrap() + 1, false, t));
         }
         let winner_before = m.winner(100, [1; 6]).unwrap();
         // One more real move crosses the threshold (len == MOVE_LIMIT + 1) and freezes.

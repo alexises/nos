@@ -1604,16 +1604,50 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     };
     bridge_port_flood(w, "router-a", &bond, true).await?;
 
-    log("a second PE on the segment with a lower address wins the election");
+    log("a peer with only a bare Type-4 (no per-EVI A-D) is not a df candidate for this domain");
+    let peer_es_no_evi = |verb: &'static str| {
+        let mut v = strings(&[
+            "global",
+            "rib",
+            verb,
+            "-a",
+            "evpn",
+            "esi",
+            ESI_PEER_NO_EVI_ORIGIN,
+        ]);
+        v.push("esi".to_string());
+        v.extend(strings(&GOBGP_ESI));
+        v.extend(strings(&["rd", "65010:2"]));
+        if verb == "add" {
+            v.extend(strings(&["rt", "65010:2", "encap", "vxlan"]));
+        }
+        v
+    };
+    let base = a.count(&role("non-df"));
+    gobgp_owned(w, peer_es_no_evi("add")).await?;
+    a.assert_quiet(&role("non-df"), base, 5).await?;
+    gobgp_owned(w, peer_es_no_evi("del")).await?;
+
+    log("a second PE on the segment, also attached to this EVI (per-EVI A-D), with a lower address wins the election");
     let base = a.count(&role("non-df"));
     gobgp_owned(w, peer_es("add")).await?;
+    gobgp_owned(
+        w,
+        gobgp_ad("add", &GOBGP_ESI, false, (ESI_PEER_ORIGIN, "65010:1")),
+    )
+    .await?;
     a.wait_new(&role("non-df"), base, 30).await?;
     a.wait(&flooding(false)).await?;
     bridge_port_flood(w, "router-a", &bond, false).await?;
 
-    log("its Type-4 withdrawn: router-a is the DF again and the bond floods");
+    log("its Type-4 and per-EVI A-D withdrawn: router-a is the DF again and the bond floods");
     let base = a.count(&role("df"));
     gobgp_owned(w, peer_es("del")).await?;
+    gobgp_owned(
+        w,
+        gobgp_ad("del", &GOBGP_ESI, false, (ESI_PEER_ORIGIN, "65010:1")),
+    )
+    .await?;
     a.wait_new(&role("df"), base, 30).await?;
     bridge_port_flood(w, "router-a", &bond, true).await?;
 
@@ -1786,6 +1820,11 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     log("back to non-DF, then clearing the ESI restores flooding and withdraws it");
     let base = a.count(&role("non-df"));
     gobgp_owned(w, peer_es("add")).await?;
+    gobgp_owned(
+        w,
+        gobgp_ad("add", &GOBGP_ESI, false, (ESI_PEER_ORIGIN, "65010:1")),
+    )
+    .await?;
     a.wait_new(&role("non-df"), base, 30).await?;
     bridge_port_flood(w, "router-a", &bond, false).await?;
     let mut clear = flags.clone();
