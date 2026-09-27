@@ -2,7 +2,10 @@
 //! protocol-89 sockets between real containers, SPF routes into real kernel
 //! tables, DR/BDR election on a real Linux bridge, authentication, aging.
 
+use std::time::Duration;
+
 use anyhow::bail;
+use reqwest::Method;
 
 use crate::consts::*;
 use crate::router::{log, strings, Router, A, B};
@@ -748,10 +751,44 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// RFC 5340 §4.5.1 (#46): every Link-LSA (legacy 8 or RFC 8362 E-Link
+/// 0x8028 — both may coexist after `ospfv3` toggled extended-lsa) router-c
+/// holds from `router_id` must belong to the bridge link, the only link it
+/// shares with that router — router-a/b also run `eth0.0` in the same area,
+/// and its Link-LSA must never have been offered over the bridge.
+async fn assert_only_broadcast_link_lsas(c: &Router, router_id: &str) -> anyhow::Result<()> {
+    let body = c
+        .rest_expect(Method::GET, "/v1/ospfv3/database", None, 200)
+        .await?;
+    let report: serde_json::Value = serde_json::from_str(&body)?;
+    let rows = report[0]["result"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("ospfv3 database has no result: {body}"))?;
+    let want = serde_json::json!(format!("broadcast-domain:{BD}"));
+    let mut seen = 0;
+    for row in rows {
+        if row["advertising_router"] == router_id
+            && matches!(row["lsa_type"].as_u64(), Some(8 | 0x8028))
+        {
+            seen += 1;
+            if row["link"] != want {
+                bail!("leaked link-local lsa from {router_id} on router-c: {row}");
+            }
+        }
+    }
+    if seen == 0 {
+        bail!("router-c holds no link-lsa from {router_id} at all: {body}");
+    }
+    Ok(())
+}
+
 /// Reuses `ospf-dr`'s router-c and the same bd-ospf bridge (a BroadcastDomain
 /// has independent `ospf_profile`/`ospfv3_profile` fields, so both protocols
 /// run over one real bridge): the identical DR/BDR election and DrOther-Full
-/// restriction, over the new address family.
+/// restriction, over the new address family. Then, with router-c `Full` to
+/// both, that no Link-LSA from router-a/b's *other* link leaked onto the
+/// bridge — right at `Full` (the DBD-summary path) and again after a
+/// periodic full resend (`RXMT_INTERVAL`, the flood path).
 pub async fn ospfv3_dr(w: &mut World) -> anyhow::Result<()> {
     let (a, b, c) = (w.a()?, w.b()?, w.c()?);
     c.provision_flags(&with_base(
@@ -819,7 +856,14 @@ pub async fn ospfv3_dr(w: &mut World) -> anyhow::Result<()> {
     b.wait(&format!(
         "ospfv3 neighbor reached full {link} neighbor={OSPFV3_ROUTER_ID_C}"
     ))
-    .await
+    .await?;
+
+    log("router-c holds only the bridge's own link-lsas (rfc 5340 §4.5.1)");
+    assert_only_broadcast_link_lsas(c, OSPFV3_ROUTER_ID).await?;
+    assert_only_broadcast_link_lsas(c, OSPFV3_ROUTER_ID_B).await?;
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_only_broadcast_link_lsas(c, OSPFV3_ROUTER_ID).await?;
+    assert_only_broadcast_link_lsas(c, OSPFV3_ROUTER_ID_B).await
 }
 
 /// RFC 5286 loop-free alternate over OSPFv3 (requires `ospfv3-dr`, which puts

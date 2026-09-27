@@ -335,13 +335,20 @@ fn on_dbd_in_exchange(
     }
 }
 
-/// Handles one received LSR: looks up every requested LSA in `lsdb`. If any
-/// requested LSA isn't held, that's RFC 2328 §10.7's `BadLSReq` — negotiation
-/// restarts from scratch rather than sending a partial/wrong answer.
-pub fn on_lsr_received(adj: &mut AdjacencyData, lsdb: &Lsdb, lsr: &LsrPacket) -> Vec<Action> {
+/// Handles one received LSR: looks up every requested LSA in the link's
+/// area store or its own link-local store (a key only ever lives in one —
+/// see `on_lsu_received`). If any requested LSA isn't held, that's RFC 2328
+/// §10.7's `BadLSReq` — negotiation restarts from scratch rather than
+/// sending a partial/wrong answer.
+pub fn on_lsr_received(
+    adj: &mut AdjacencyData,
+    area_lsdb: &Lsdb,
+    link_local_lsdb: &Lsdb,
+    lsr: &LsrPacket,
+) -> Vec<Action> {
     let mut found = Vec::with_capacity(lsr.requests.len());
     for key in &lsr.requests {
-        match lsdb.get(key) {
+        match area_lsdb.get(key).or_else(|| link_local_lsdb.get(key)) {
             Some(l) => found.push(l),
             None => return vec![Action::NeighborEvent(Event::SeqNumberMismatch)],
         }
@@ -355,21 +362,30 @@ pub fn on_lsr_received(adj: &mut AdjacencyData, lsdb: &Lsdb, lsr: &LsrPacket) ->
     vec![Action::SendLsu(found)]
 }
 
-/// Handles one received LSU: installs every carried LSA into `lsdb`, clears
-/// any now-satisfied entries from the request list, and acks every LSA.
-/// Fires `LoadingDone` once the request list is fully drained. Returns the
-/// actions to carry out alongside the headers that were *actually*
-/// installed/superseded (excluding rejected duplicates).
+/// Handles one received LSU: installs every carried LSA — a link-local-scoped
+/// one (RFC 5340 §4.5.1, Link-LSA/E-Link-LSA) into this link's own
+/// `link_local_lsdb`, anything else into the area's `area_lsdb`; one LSU
+/// legitimately mixes both — clears any now-satisfied entries from the
+/// request list, and acks every LSA. Fires `LoadingDone` once the request
+/// list is fully drained. Returns the actions to carry out alongside the
+/// headers that were *actually* installed/superseded (excluding rejected
+/// duplicates).
 pub fn on_lsu_received(
     adj: &mut AdjacencyData,
-    lsdb: &mut Lsdb,
+    area_lsdb: &mut Lsdb,
+    link_local_lsdb: &mut Lsdb,
     lsu: &LsuPacket,
 ) -> (Vec<Action>, Vec<LsaHeader>) {
     let mut acked = Vec::with_capacity(lsu.lsas.len());
     let mut newly_installed = Vec::new();
     for l in &lsu.lsas {
+        let store = if lsa::is_link_local_scope(l.header.lsa_type) {
+            &mut *link_local_lsdb
+        } else {
+            &mut *area_lsdb
+        };
         if !matches!(
-            lsdb.install(l.clone()),
+            store.install(l.clone()),
             crate::lsdb::InstallOutcome::Rejected
         ) {
             newly_installed.push(l.header);
@@ -878,10 +894,48 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             requests: vec![l.header.key()],
         };
-        let actions = on_lsr_received(&mut adj, &lsdb, &lsr);
+        let actions = on_lsr_received(&mut adj, &lsdb, &Lsdb::new(), &lsr);
         assert_eq!(actions.len(), 1);
         assert!(matches!(&actions[0], Action::SendLsu(lsas) if lsas.len() == 1));
         assert!(adj.retransmission_list.contains_key(&l.header.key()));
+    }
+
+    fn link_lsa(seq: i32) -> Lsa {
+        let mut l = full_lsa("1.1.1.1", seq);
+        l.header.lsa_type = lsa::LSA_TYPE_LINK;
+        l.header.link_state_id = Ipv4Addr::new(0, 0, 0, 3);
+        l.body = lsa::LsaBody::Link(lsa::LinkLsaBody {
+            priority: 1,
+            options: 0,
+            link_local_address: "fe80::1".parse().unwrap(),
+            prefixes: Vec::new(),
+        });
+        l
+    }
+
+    #[test]
+    fn lsr_is_answered_from_whichever_store_holds_the_key() {
+        let mut adj = AdjacencyData::default();
+        let mut area = Lsdb::new();
+        let mut link_local = Lsdb::new();
+        let router = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
+        let link = link_lsa(0x8000_0001u32.cast_signed());
+        area.install(router.clone());
+        link_local.install(link.clone());
+        let lsr = LsrPacket {
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            requests: vec![router.header.key(), link.header.key()],
+        };
+        let actions = on_lsr_received(&mut adj, &area, &link_local, &lsr);
+        assert!(matches!(&actions[0], Action::SendLsu(lsas) if lsas.len() == 2));
+        // A Link-LSA held only by a *different* link's store is not servable
+        // here — that is exactly the RFC 5340 §4.5.1 leak this guards.
+        let actions = on_lsr_received(&mut adj, &area, &Lsdb::new(), &lsr);
+        assert_eq!(
+            actions,
+            vec![Action::NeighborEvent(Event::SeqNumberMismatch)]
+        );
     }
 
     #[test]
@@ -893,7 +947,7 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             requests: vec![header("1.1.1.1", 1).key()],
         };
-        let actions = on_lsr_received(&mut adj, &lsdb, &lsr);
+        let actions = on_lsr_received(&mut adj, &lsdb, &Lsdb::new(), &lsr);
         assert_eq!(
             actions,
             vec![Action::NeighborEvent(Event::SeqNumberMismatch)]
@@ -913,7 +967,8 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![l.clone()],
         };
-        let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu);
+        let (actions, newly_installed) =
+            on_lsu_received(&mut adj, &mut lsdb, &mut Lsdb::new(), &lsu);
         assert!(adj.request_list.is_empty());
         assert!(lsdb.get(&l.header.key()).is_some());
         assert_eq!(
@@ -924,6 +979,26 @@ mod tests {
             ]
         );
         assert_eq!(newly_installed, vec![l.header]);
+    }
+
+    #[test]
+    fn lsu_routes_each_lsa_to_its_scope_store() {
+        let mut adj = AdjacencyData::default();
+        let mut area = Lsdb::new();
+        let mut link_local = Lsdb::new();
+        let router = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
+        let link = link_lsa(0x8000_0001u32.cast_signed());
+        let lsu = LsuPacket {
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsas: vec![router.clone(), link.clone()],
+        };
+        let (_, newly_installed) = on_lsu_received(&mut adj, &mut area, &mut link_local, &lsu);
+        assert_eq!(newly_installed.len(), 2);
+        assert!(area.get(&router.header.key()).is_some());
+        assert!(area.get(&link.header.key()).is_none());
+        assert!(link_local.get(&link.header.key()).is_some());
+        assert!(link_local.get(&router.header.key()).is_none());
     }
 
     #[test]

@@ -897,7 +897,7 @@ pub fn render_ospfv3_database(instance: &str, entries: &[Ospfv3LsaSummary]) -> S
     for lsa in entries {
         lines.push(format!(
             "  area {} type {} link-state-id {} advertising-router {} \
-             sequence 0x{:08x} age {} checksum 0x{:04x}",
+             sequence 0x{:08x} age {} checksum 0x{:04x} link {}",
             lsa.area_id,
             lsa.lsa_type,
             lsa.link_state_id,
@@ -905,6 +905,7 @@ pub fn render_ospfv3_database(instance: &str, entries: &[Ospfv3LsaSummary]) -> S
             lsa.sequence_number,
             lsa.age,
             lsa.checksum,
+            lsa.link.as_deref().unwrap_or("-"),
         ));
     }
     lines.join("\n")
