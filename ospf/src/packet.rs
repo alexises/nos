@@ -33,6 +33,12 @@ pub const AUTH_TYPE_CRYPTO: u16 = 2;
 /// IP source address folded into the digest's `Apad`.
 pub const AUTH_TYPE_CRYPTO_EXT: u16 = 3;
 
+/// RFC 2328 Appendix A.2's `E` (`ExternalRoutingCapability`) Options bit —
+/// checked by `handle_hello`'s RFC 2328 §10.5 packet-validity check. This NOS
+/// has no stub-area concept, so it always sets this bit and always requires
+/// a peer to as well (see `ospf::link::handle_hello`'s doc comment).
+pub const OPTION_E: u8 = 0x02;
+
 const HEADER_LEN: usize = 24;
 /// Hello body length excluding the trailing neighbor list: network mask,
 /// hello-interval, options, router-priority, router-dead-interval,
@@ -192,19 +198,21 @@ pub enum AuthPolicy<'a> {
     },
 }
 
-/// One Hello packet's contents. `network_mask` is still omitted — RFC 2328
-/// §10.5 says to ignore it on a point-to-point/virtual link, and this NOS
-/// never validates it on a broadcast link either (no address-mask-based
-/// subnet check is implemented), so there's nothing meaningful to do with
-/// it in either direction; it's sent as `0.0.0.0` and ignored on decode.
-/// `router_priority`/`designated_router`/`backup_designated_router` are
-/// real fields, used by `ospf::election`'s DR/BDR election on a `Broadcast`
-/// link (sent, but functionally inert, on a `PointToPoint` one).
+/// One Hello packet's contents. `network_mask`/`options` back
+/// `ospf::link::handle_hello`'s RFC 2328 §10.5 packet-validity check — the
+/// mask is ignored by that check on a point-to-point/virtual link (RFC 2328
+/// §10.5), and `options` only ever carries the `E`-bit meaningfully today
+/// (see `OPTION_E`). `router_priority`/`designated_router`/
+/// `backup_designated_router` are real fields, used by `ospf::election`'s
+/// DR/BDR election on a `Broadcast` link (sent, but functionally inert, on a
+/// `PointToPoint` one).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelloPacket {
     pub router_id: Ipv4Addr,
     pub area_id: Ipv4Addr,
+    pub network_mask: Ipv4Addr,
     pub hello_interval: u16,
+    pub options: u8,
     pub dead_interval: u32,
     pub router_priority: u8,
     pub designated_router: Ipv4Addr,
@@ -275,10 +283,9 @@ pub enum OspfPacket {
 /// Encodes `pkt` as a Hello packet, computing and filling in the checksum.
 pub fn encode_hello(pkt: &HelloPacket, auth: &OutgoingAuth<'_>) -> Vec<u8> {
     let mut body = Vec::with_capacity(HELLO_BODY_FIXED_LEN + pkt.neighbors.len() * 4);
-    // Network mask stays zero/ignored — see `HelloPacket`'s doc comment.
-    body.extend_from_slice(&Ipv4Addr::UNSPECIFIED.octets());
+    body.extend_from_slice(&pkt.network_mask.octets());
     body.extend_from_slice(&pkt.hello_interval.to_be_bytes());
-    body.push(0); // options
+    body.push(pkt.options);
     body.push(pkt.router_priority);
     body.extend_from_slice(&pkt.dead_interval.to_be_bytes());
     body.extend_from_slice(&pkt.designated_router.octets());
@@ -299,7 +306,9 @@ pub fn decode_hello(data: &[u8], auth: &AuthPolicy<'_>) -> Result<HelloPacket, P
     if body.len() < HELLO_BODY_FIXED_LEN {
         return Err(PacketError::TruncatedBody);
     }
+    let network_mask = read_ipv4(body, 0);
     let hello_interval = u16::from_be_bytes([body[4], body[5]]);
+    let options = body[6];
     let router_priority = body[7];
     let dead_interval = u32::from_be_bytes([body[8], body[9], body[10], body[11]]);
     let designated_router = read_ipv4(body, 12);
@@ -319,7 +328,9 @@ pub fn decode_hello(data: &[u8], auth: &AuthPolicy<'_>) -> Result<HelloPacket, P
     Ok(HelloPacket {
         router_id,
         area_id,
+        network_mask,
         hello_interval,
+        options,
         dead_interval,
         router_priority,
         designated_router,
@@ -849,7 +860,9 @@ mod tests {
         HelloPacket {
             router_id: Ipv4Addr::new(9, 9, 9, 9),
             area_id: Ipv4Addr::UNSPECIFIED,
+            network_mask: Ipv4Addr::new(255, 255, 255, 0),
             hello_interval: 10,
+            options: OPTION_E,
             dead_interval: 40,
             router_priority: 1,
             designated_router: Ipv4Addr::new(9, 9, 9, 9),

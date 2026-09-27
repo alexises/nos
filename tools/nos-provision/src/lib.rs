@@ -663,6 +663,13 @@ pub struct Args {
     #[arg(long)]
     pub ospf_profile_mtu: Option<u16>,
 
+    /// If set (requires `--ospf-profile`), overrides this profile's
+    /// hello-interval (`OspfProfileOp::SetHelloInterval`) — for verifying
+    /// RFC 2328 §10.5's packet-validity check drops a Hello whose
+    /// hello-interval doesn't match the receiving interface's own.
+    #[arg(long)]
+    pub ospf_profile_hello_interval: Option<u16>,
+
     /// If set (requires `--ospf-profile`), enables/disables RFC 7474
     /// extended cryptographic sequence numbers on it
     /// (`OspfProfileOp::SetExtendedSequenceNumbers`) — needs a matching
@@ -1586,6 +1593,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     mtu,
                 }));
             }
+            if let Some(hello_interval) = args.ospf_profile_hello_interval {
+                ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetHelloInterval {
+                    instance: instance.clone(),
+                    area_id,
+                    name: name.clone(),
+                    hello_interval,
+                }));
+            }
             if let Some(password) = args.ospf_simple_password.clone() {
                 ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetSimpleAuth {
                     instance: instance.clone(),
@@ -1623,6 +1638,9 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             if args.ospf_profile_mtu.is_some() {
                 bail!("--ospf-profile-mtu requires --ospf-profile to also be set");
             }
+            if args.ospf_profile_hello_interval.is_some() {
+                bail!("--ospf-profile-hello-interval requires --ospf-profile to also be set");
+            }
             if args.ospf_extended_seq.is_some() {
                 bail!("--ospf-extended-seq requires --ospf-profile to also be set");
             }
@@ -1631,8 +1649,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         bail!("--ospf-profile requires --ospf-area to also be set");
     } else if args.ospf_simple_password.is_some() || args.ospf_crypto_key.is_some() {
         bail!("--ospf-simple-password/--ospf-crypto-key require --ospf-profile to also be set");
-    } else if args.ospf_profile_mtu.is_some() || args.ospf_extended_seq.is_some() {
-        bail!("--ospf-profile-mtu/--ospf-extended-seq require --ospf-profile to also be set");
+    } else if args.ospf_profile_mtu.is_some()
+        || args.ospf_profile_hello_interval.is_some()
+        || args.ospf_extended_seq.is_some()
+    {
+        bail!(
+            "--ospf-profile-mtu/--ospf-profile-hello-interval/--ospf-extended-seq require \
+             --ospf-profile to also be set"
+        );
     }
 
     if let Some(profile) = args.ospf_interface_profile.clone() {

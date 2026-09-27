@@ -548,7 +548,9 @@ fn send_hello(
     let pkt = packet::HelloPacket {
         router_id: local_router_id,
         area_id: cfg.area_id,
+        network_mask: local_netmask(cfg),
         hello_interval: cfg.hello_interval,
+        options: packet::OPTION_E,
         dead_interval: u32::from(cfg.dead_interval),
         router_priority: cfg.priority,
         designated_router,
@@ -576,11 +578,51 @@ fn handle_hello(
     waiting: bool,
 ) -> bool {
     // RFC 2328 §10.5's packet-validity check precedes any neighbor event —
-    // a mismatched area is logged and dropped, not fed into the FSM.
+    // a mismatched area/timer/mask/E-bit is logged and dropped, not fed into
+    // the FSM (a peer with different timers would otherwise be accepted and
+    // the adjacency would flap at whichever dead interval is shorter).
     if hello.area_id != cfg.area_id {
         warn!(
             link = %cfg.attach_point, area = %hello.area_id, expected = %cfg.area_id,
             "dropping ospf hello with mismatched area"
+        );
+        return false;
+    }
+    if hello.hello_interval != cfg.hello_interval {
+        warn!(
+            link = %cfg.attach_point, hello_interval = hello.hello_interval, expected = cfg.hello_interval,
+            "dropping ospf hello with mismatched hello-interval"
+        );
+        return false;
+    }
+    if hello.dead_interval != u32::from(cfg.dead_interval) {
+        warn!(
+            link = %cfg.attach_point, dead_interval = hello.dead_interval, expected = cfg.dead_interval,
+            "dropping ospf hello with mismatched dead-interval"
+        );
+        return false;
+    }
+    // NetworkMask is meaningless on point-to-point/virtual links (RFC 2328
+    // §10.5) — this NOS has neither NBMA nor point-to-multipoint, so
+    // `Broadcast` is the only network type it's ever checked on.
+    if cfg.network_type == NetworkType::Broadcast {
+        let expected_mask = local_netmask(cfg);
+        if hello.network_mask != expected_mask {
+            warn!(
+                link = %cfg.attach_point, network_mask = %hello.network_mask, expected = %expected_mask,
+                "dropping ospf hello with mismatched network mask"
+            );
+            return false;
+        }
+    }
+    // This NOS has no stub-area concept, so our own E-bit is always set —
+    // a peer that ever clears its own can never be a legitimate neighbor
+    // today, but the comparison is real (not a no-op) so it starts doing
+    // something meaningful the moment stub areas exist on either side.
+    if hello.options & packet::OPTION_E == 0 {
+        warn!(
+            link = %cfg.attach_point, neighbor = %hello.router_id,
+            "dropping ospf hello with mismatched e-bit"
         );
         return false;
     }
@@ -1848,6 +1890,14 @@ fn local_subnet(cfg: &LinkConfig) -> Option<Ipv4Net> {
     Ipv4Net::new(cfg.local_addr, cfg.local_prefix_len).ok()
 }
 
+/// This link's own subnet mask — RFC 2328 §10.5's `NetworkMask`, both sent
+/// (`send_hello`) and checked against on receipt (`handle_hello`, skipped on
+/// point-to-point). `UNSPECIFIED` if `local_prefix_len` is somehow invalid,
+/// same fallback as `local_subnet`.
+fn local_netmask(cfg: &LinkConfig) -> Ipv4Addr {
+    local_subnet(cfg).map_or(Ipv4Addr::UNSPECIFIED, |n| n.netmask())
+}
+
 /// RFC 2328 §12.4.1's Router-LSA link entries for every currently-running
 /// link in one area: one type-1 (point-to-point) entry per link with at
 /// least one neighbor, one type-2 (transit-network) entry per link with a
@@ -2874,7 +2924,9 @@ mod tests {
             let pkt = packet::HelloPacket {
                 router_id: peer,
                 area_id: Ipv4Addr::UNSPECIFIED,
+                network_mask: Ipv4Addr::UNSPECIFIED,
                 hello_interval: 10,
+                options: packet::OPTION_E,
                 dead_interval: 40,
                 router_priority: 1,
                 designated_router: Ipv4Addr::UNSPECIFIED,
@@ -2925,5 +2977,150 @@ mod tests {
             },
         );
         assert!(check(&dbd));
+    }
+
+    /// A Hello matching `cfg` exactly — the baseline `handle_hello` tests
+    /// mutate one field away from.
+    fn matching_hello(cfg: &LinkConfig, router_id: Ipv4Addr) -> packet::HelloPacket {
+        packet::HelloPacket {
+            router_id,
+            area_id: cfg.area_id,
+            network_mask: local_netmask(cfg),
+            hello_interval: cfg.hello_interval,
+            options: packet::OPTION_E,
+            dead_interval: u32::from(cfg.dead_interval),
+            router_priority: 1,
+            designated_router: Ipv4Addr::UNSPECIFIED,
+            backup_designated_router: Ipv4Addr::UNSPECIFIED,
+            neighbors: vec![],
+        }
+    }
+
+    #[test]
+    fn handle_hello_accepts_a_matching_hello() {
+        let cfg = link("eth0.0", 10);
+        let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let peer = Ipv4Addr::new(9, 9, 9, 9);
+        let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+        let mut deadline = Instant::now();
+        handle_hello(
+            &cfg,
+            local_router_id,
+            &status,
+            Ipv4Addr::new(10, 0, 0, 2),
+            &matching_hello(&cfg, peer),
+            &mut deadline,
+            false,
+        );
+        assert_eq!(
+            status.borrow().neighbors.get(&peer).unwrap().state,
+            NeighborState::Init
+        );
+    }
+
+    #[test]
+    fn handle_hello_drops_mismatched_hello_interval() {
+        let cfg = link("eth0.0", 10);
+        let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let peer = Ipv4Addr::new(9, 9, 9, 9);
+        let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+        let mut deadline = Instant::now();
+        let mut hello = matching_hello(&cfg, peer);
+        hello.hello_interval = 5;
+        handle_hello(
+            &cfg,
+            local_router_id,
+            &status,
+            Ipv4Addr::new(10, 0, 0, 2),
+            &hello,
+            &mut deadline,
+            false,
+        );
+        assert!(!status.borrow().neighbors.contains_key(&peer));
+    }
+
+    #[test]
+    fn handle_hello_drops_mismatched_dead_interval() {
+        let cfg = link("eth0.0", 10);
+        let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let peer = Ipv4Addr::new(9, 9, 9, 9);
+        let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+        let mut deadline = Instant::now();
+        let mut hello = matching_hello(&cfg, peer);
+        hello.dead_interval = 41;
+        handle_hello(
+            &cfg,
+            local_router_id,
+            &status,
+            Ipv4Addr::new(10, 0, 0, 2),
+            &hello,
+            &mut deadline,
+            false,
+        );
+        assert!(!status.borrow().neighbors.contains_key(&peer));
+    }
+
+    #[test]
+    fn handle_hello_skips_network_mask_check_on_point_to_point() {
+        let cfg = link("eth0.0", 10);
+        let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let peer = Ipv4Addr::new(9, 9, 9, 9);
+        let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+        let mut deadline = Instant::now();
+        let mut hello = matching_hello(&cfg, peer);
+        hello.network_mask = Ipv4Addr::new(255, 255, 0, 0); // wrong, but p2p ignores it
+        handle_hello(
+            &cfg,
+            local_router_id,
+            &status,
+            Ipv4Addr::new(10, 0, 0, 2),
+            &hello,
+            &mut deadline,
+            false,
+        );
+        assert!(status.borrow().neighbors.contains_key(&peer));
+    }
+
+    #[test]
+    fn handle_hello_drops_mismatched_network_mask_on_broadcast() {
+        let mut cfg = link("bd1", 10);
+        cfg.network_type = NetworkType::Broadcast;
+        let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let peer = Ipv4Addr::new(9, 9, 9, 9);
+        let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::Broadcast));
+        let mut deadline = Instant::now();
+        let mut hello = matching_hello(&cfg, peer);
+        hello.network_mask = Ipv4Addr::new(255, 255, 0, 0);
+        handle_hello(
+            &cfg,
+            local_router_id,
+            &status,
+            Ipv4Addr::new(10, 0, 0, 2),
+            &hello,
+            &mut deadline,
+            false,
+        );
+        assert!(!status.borrow().neighbors.contains_key(&peer));
+    }
+
+    #[test]
+    fn handle_hello_drops_mismatched_e_bit() {
+        let cfg = link("eth0.0", 10);
+        let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let peer = Ipv4Addr::new(9, 9, 9, 9);
+        let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+        let mut deadline = Instant::now();
+        let mut hello = matching_hello(&cfg, peer);
+        hello.options = 0;
+        handle_hello(
+            &cfg,
+            local_router_id,
+            &status,
+            Ipv4Addr::new(10, 0, 0, 2),
+            &hello,
+            &mut deadline,
+            false,
+        );
+        assert!(!status.borrow().neighbors.contains_key(&peer));
     }
 }

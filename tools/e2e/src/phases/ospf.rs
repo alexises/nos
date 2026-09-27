@@ -170,9 +170,38 @@ async fn router_a_holds_two_lsas(a: &Router) -> anyhow::Result<()> {
 
 pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
+
+    // RFC 2328 §10.5's Hello packet-validity check (issue #31): a mismatched
+    // hello-interval must be dropped before the neighbor even reaches Init,
+    // not accepted into the FSM (where a real mismatch would just flap the
+    // adjacency at whichever dead interval is shorter).
+    let hello_interval = |mut f: Vec<String>, secs: u16| {
+        f.extend(strings(&[
+            "--ospf-profile-hello-interval",
+            &secs.to_string(),
+        ]));
+        f
+    };
     a.provision_flags(&with_base(A, ospf(OSPF_ROUTER_ID)))
         .await?;
-    b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
+    b.provision_flags(&with_base(B, hello_interval(ospf(OSPF_ROUTER_ID_B), 5)))
+        .await?;
+    a.wait("dropping ospf hello with mismatched hello-interval")
+        .await?;
+    log("confirming the mismatched-hello-interval neighbor never reaches init");
+    a.assert_quiet(
+        &format!("ospf neighbor state changed to init link=eth0.0 neighbor={OSPF_ROUTER_ID_B}"),
+        0,
+        8,
+    )
+    .await?;
+
+    // Restore explicitly to router-a's own default (10s, `HELLO_INTERVAL_DEFAULT`)
+    // rather than just re-provisioning `ospf(...)` with no override — a
+    // transaction is built onto the *current* running config, so omitting
+    // the flag would leave the mismatched value from above still set.
+    log("restoring router-b's matching hello-interval");
+    b.provision_flags(&with_base(B, hello_interval(ospf(OSPF_ROUTER_ID_B), 10)))
         .await?;
 
     // nos-watchdogd really spawned a nos-ospfd for the new OspfInstance, and
