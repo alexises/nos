@@ -846,7 +846,7 @@ async fn handle_lsu(
         info!(
             link = %cfg.attach_point, neighbor = %lsu.router_id,
             lsa_type = header.lsa_type, link_state_id = %header.link_state_id,
-            advertising_router = %header.advertising_router,
+            advertising_router = %header.advertising_router, age = header.age,
             "ospf lsa installed"
         );
     }

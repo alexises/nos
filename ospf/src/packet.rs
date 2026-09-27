@@ -434,7 +434,17 @@ pub fn decode_lsr(data: &[u8], auth: &AuthPolicy<'_>) -> Result<LsrPacket, Packe
     })
 }
 
-/// Encodes `pkt` as an LSU packet.
+/// RFC 2328 Appendix C.3's `InfTransDelay` — the estimated seconds it takes
+/// an LSU to cross this link, added to every LSA's age on the way out
+/// (§13.3) so ages keep advancing across hops even between age ticks.
+/// `ponytail:` fixed, not a per-`OspfProfile` field — same reasoning as
+/// `link::RXMT_INTERVAL`.
+pub const INF_TRANS_DELAY: u16 = 1;
+
+/// Encodes `pkt` as an LSU packet. Each LSA goes out with its age bumped by
+/// `INF_TRANS_DELAY` (saturating at `MaxAge`, RFC 2328 §13.3) — only the
+/// wire copy, the caller's LSDB instance is untouched; the LSA checksum
+/// excludes the age field, so it's unaffected.
 pub fn encode_lsu(pkt: &LsuPacket, auth: &OutgoingAuth<'_>) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(
@@ -443,7 +453,13 @@ pub fn encode_lsu(pkt: &LsuPacket, auth: &OutgoingAuth<'_>) -> Vec<u8> {
             .to_be_bytes(),
     );
     for l in &pkt.lsas {
-        body.extend_from_slice(&lsa::encode_lsa(l));
+        let mut delayed = l.clone();
+        delayed.header.age = l
+            .header
+            .age
+            .saturating_add(INF_TRANS_DELAY)
+            .min(lsa::MAX_AGE);
+        body.extend_from_slice(&lsa::encode_lsa(&delayed));
     }
     encode_packet(TYPE_LSU, pkt.router_id, pkt.area_id, &body, auth)
 }
@@ -1122,6 +1138,23 @@ mod tests {
         assert_eq!(decoded.lsas.len(), pkt.lsas.len());
         assert_eq!(decoded.lsas[0].body, pkt.lsas[0].body);
         assert_eq!(decoded.lsas[1].body, pkt.lsas[1].body);
+    }
+
+    /// RFC 2328 §13.3: the wire age is the stored age plus `InfTransDelay`,
+    /// saturating at `MaxAge`; the checksum is unaffected.
+    #[test]
+    fn lsu_adds_inf_trans_delay_to_each_lsa_age() {
+        let mut pkt = sample_lsu();
+        pkt.lsas[0].header.age = 100;
+        pkt.lsas[1].header.age = lsa::MAX_AGE;
+        let decoded =
+            decode_lsu(&encode_lsu(&pkt, &OutgoingAuth::None), &AuthPolicy::None).unwrap();
+        assert_eq!(decoded.lsas[0].header.age, 100 + INF_TRANS_DELAY);
+        assert_eq!(decoded.lsas[1].header.age, lsa::MAX_AGE);
+        // The stored instance is untouched.
+        assert_eq!(pkt.lsas[0].header.age, 100);
+        let undelayed = lsa::decode_lsa(&lsa::encode_lsa(&pkt.lsas[0])).unwrap();
+        assert_eq!(decoded.lsas[0].header.checksum, undelayed.header.checksum);
     }
 
     #[test]

@@ -240,6 +240,10 @@ pub async fn ospf_phase(w: &mut World) -> anyhow::Result<()> {
         .await?;
     b.wait(&format!("ospf lsa installed.*neighbor={OSPF_ROUTER_ID}"))
         .await?;
+    // RFC 2328 §13.3: every LSA crosses the link with InfTransDelay added to
+    // its age, so nothing ever lands at age 0 — not even a just-originated one.
+    a.wait_new("ospf lsa installed.*age=[1-9]", 0, 15).await?;
+    a.assert_quiet("ospf lsa installed.*age=0$", 0, 0).await?;
 
     // The same profile on a broadcast (multi-access) link: each router's own
     // bd-ospf bridge, trunked from eth0 over dot1q. Equal priority, so the
