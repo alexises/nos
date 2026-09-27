@@ -20,7 +20,7 @@ All **wire types** (`Config`, `BgpInstance`, `Request`, `Event`, `ConfigOp`, `Ip
 |------|------|------|
 | `ConfigStore` | `store.rs` | Cheap `Clone` handle (`Arc<Inner>`) over `running: RwLock<Config>` + `transactions: Mutex<HashMap<String, Transaction>>` + `broadcast::Sender<Arc<CommitUpdate>>` + `config_path` |
 | `CommitUpdate` | `store.rs` | Internal (never sent over the wire directly) — one commit's `{ config: Config, diff: ConfigDiff }`, broadcast together so `Subscribe` and `SubscribeDiff` connections can each take the half they need |
-| `ConfigError` | `error.rs` | `Validation`, `NoUsersLeft` (a commit may not remove every user), `TransactionNotFound`, `Op`, `PersistenceNotConfigured`, `Io`, `Persistence`, `Serialization` |
+| `ConfigError` | `error.rs` | `Validation`, `NoUsersLeft` (a commit may not remove every user), `TransactionNotFound`, `PreconditionFailed` (an `if_match` named a stale generation — message prefixed `precondition failed`, which `nos-restd` maps to 412), `Op`, `PersistenceNotConfigured`, `Io`, `Persistence`, `Serialization` |
 | `server::start()` | `server.rs` | Binds a TLS `nos_pki::Listener` on a Unix socket (`ListenAddr::Unix` only — the TCP listener was removed, since it would bypass mTLS), spawns per-connection tasks (handshake inside the task) each holding a cloned `ConfigStore` and the peer's role/name from its certificate |
 | `authz::allowed()` | `authz.rs` | Pure per-request allow-list: config reads (`Get`/`Subscribe*`/`Describe`) for every authenticated daemon and `User`; edits/`Save` for `User`/`Restd` only. No wildcard arm — a new `Request` variant won't compile until classified. A refused request gets `Event::Error("permission denied")` and the connection is closed |
 | `users::{hash_clear_passwords, seed_default_user}` | `users.rs` | Replaces clear-text `User.password`s with argon2id hashes (reusing an earlier hash the clear text still verifies against, so re-setting a password is no diff); called by `ConfigStore` after every edit and on load. `seed_default_user` adds `admin`/`admin` when there are no users (called from `main.rs`) |
@@ -37,15 +37,18 @@ store.save_to_disk().await                      // persist running config to con
 
 store.open_transaction(name, base).await        // TransactionSnapshot — create from Blank/Current, or resume if `name` exists
 store.apply_op(name, op).await                  // Result<TransactionSnapshot, ConfigError> — mutate a transaction, no validation
+store.set_transaction_path(name, path, value, if_match).await  // set/remove one JSON subsection (nos-restd), no validation
 store.get_transaction(name).await               // Result<TransactionSnapshot, ConfigError>
-store.commit_transaction(name).await            // validate → promote to running → broadcast → remove transaction
-store.discard_transaction(name).await           // remove transaction without touching running
+store.commit_transaction(name, if_match).await  // validate → promote to running → broadcast → remove transaction
+store.discard_transaction(name, if_match).await // remove transaction without touching running
 store.diff_transaction(name).await              // Result<ConfigDiff, ConfigError> — running vs. transaction, no validation
 
 store.start_ipc_server(&addr, &identity)        // bind TLS socket, start accept loop
 ```
 
 Lock ordering: always lock `transactions` before `running` to avoid deadlock.
+
+Every `Transaction` carries a `generation: u64` (0 when created, +1 per successful `apply_op`/`set_transaction_path`), reported in every `TransactionSnapshot`. `if_match: Option<u64>` on `set_transaction_path`/`commit_transaction`/`discard_transaction` (and the matching `Request` variants) is an RFC 9110 §13.1.1 precondition: `Some(g)` is compared against the current generation under the same `transactions` lock the mutation takes, so it is a real compare-and-set, and a mismatch is `ConfigError::PreconditionFailed` with nothing changed (the transaction stays); `None` is unconditional — `nos-cli`/`nos-provision` never send one, only `nos-restd` does (its `ETag`/`If-Match`).
 
 ## IPC server
 

@@ -222,15 +222,60 @@ impl Router {
         path: &str,
         body: Option<&str>,
     ) -> anyhow::Result<(u16, String)> {
+        let (status, _, text) = self.rest_full(client, method, path, body, None).await?;
+        Ok((status, text))
+    }
+
+    /// `rest_with` plus one extra request header (`If-Match`/`If-None-Match`),
+    /// also returning the reply's `ETag`: `(status, etag, body)`.
+    pub async fn rest_full(
+        &self,
+        client: &reqwest::Client,
+        method: Method,
+        path: &str,
+        body: Option<&str>,
+        extra: Option<(&str, &str)>,
+    ) -> anyhow::Result<(u16, Option<String>, String)> {
         let mut req = client.request(method, format!("{}{path}", self.rest.base()));
         if let Some(b) = body {
             req = req
                 .header("content-type", "application/json")
                 .body(b.to_string());
         }
+        if let Some((name, value)) = extra {
+            req = req.header(name, value);
+        }
         let resp = req.send().await?;
         let status = resp.status().as_u16();
-        Ok((status, resp.text().await?))
+        let etag = resp
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        Ok((status, etag, resp.text().await?))
+    }
+
+    /// `rest_full` with the harness's own certificate and `want` as the only
+    /// accepted status; returns `(etag, body)`.
+    pub async fn rest_expect_full(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&str>,
+        extra: Option<(&str, &str)>,
+        want: u16,
+    ) -> anyhow::Result<(Option<String>, String)> {
+        let client = self.rest.client().await?;
+        let (status, etag, text) = self
+            .rest_full(&client, method.clone(), path, body, extra)
+            .await?;
+        if status != want {
+            bail!(
+                "{}: {method} {path} {extra:?} -> {status} (want {want}): {text}",
+                self.name()
+            );
+        }
+        Ok((etag, text))
     }
 
     /// Like `rest`, but any status other than `want` is an error.
@@ -275,7 +320,10 @@ impl Router {
         .await
     }
 
-    /// Runs `f` against the running config inside a REST transaction.
+    /// Runs `f` against the running config inside a REST transaction. Every
+    /// write carries the `ETag` of the previous reply as `If-Match` (RFC 9110
+    /// §13.1.1), so a concurrent editor of the same transaction is a 412, not
+    /// a silent overwrite.
     pub async fn edit(
         &self,
         f: impl FnOnce(&mut Config) -> anyhow::Result<()>,
@@ -283,18 +331,33 @@ impl Router {
         let tx = "/v1/transactions/e2e";
         // A leftover transaction (a failed commit keeps it) would be resumed.
         let _ = self.rest(Method::DELETE, tx, None).await;
-        let opened = self
-            .rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)
+        let (etag, opened) = self
+            .rest_expect_full(Method::POST, &format!("{tx}?base=current"), None, None, 201)
             .await?;
+        let etag = etag.context("no ETag on the opened transaction")?;
         let snapshot: serde_json::Value = serde_json::from_str(&opened)?;
         let mut config: Config = serde_json::from_value(snapshot["config"].clone())
             .context("decoding the transaction's config")?;
         f(&mut config)?;
-        self.rest_expect(Method::PUT, tx, Some(&serde_json::to_string(&config)?), 200)
+        let (etag, _) = self
+            .rest_expect_full(
+                Method::PUT,
+                tx,
+                Some(&serde_json::to_string(&config)?),
+                Some(("if-match", &etag)),
+                200,
+            )
             .await?;
-        self.rest_expect(Method::POST, &format!("{tx}/commit"), None, 200)
-            .await
-            .map(drop)
+        let etag = etag.context("no ETag on the PUT reply")?;
+        self.rest_expect_full(
+            Method::POST,
+            &format!("{tx}/commit"),
+            None,
+            Some(("if-match", &etag)),
+            200,
+        )
+        .await
+        .map(drop)
     }
 
     // --- logs ---

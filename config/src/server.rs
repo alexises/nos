@@ -130,20 +130,24 @@ async fn dispatch_request(store: &ConfigStore, req: Request) -> Option<Event> {
                 Event::Error(e.to_string())
             }
         },
-        Request::CommitTransaction { name } => match store.commit_transaction(&name).await {
-            Ok(()) => Event::Committed,
-            Err(e) => {
-                warn!(transaction = %name, error = %e, "commit failed");
-                Event::Error(e.to_string())
+        Request::CommitTransaction { name, if_match } => {
+            match store.commit_transaction(&name, if_match).await {
+                Ok(()) => Event::Committed,
+                Err(e) => {
+                    warn!(transaction = %name, error = %e, "commit failed");
+                    Event::Error(e.to_string())
+                }
             }
-        },
-        Request::DiscardTransaction { name } => match store.discard_transaction(&name).await {
-            Ok(()) => Event::Discarded,
-            Err(e) => {
-                debug!(transaction = %name, error = %e, "discard transaction failed");
-                Event::Error(e.to_string())
+        }
+        Request::DiscardTransaction { name, if_match } => {
+            match store.discard_transaction(&name, if_match).await {
+                Ok(()) => Event::Discarded,
+                Err(e) => {
+                    debug!(transaction = %name, error = %e, "discard transaction failed");
+                    Event::Error(e.to_string())
+                }
             }
-        },
+        }
         Request::Describe { topic } => Event::Description(crate::docs::command_doc(topic)),
         Request::DiffTransaction { name } => match store.diff_transaction(&name).await {
             Ok(diff) => Event::Diff(diff),
@@ -152,9 +156,14 @@ async fn dispatch_request(store: &ConfigStore, req: Request) -> Option<Event> {
                 Event::Error(e.to_string())
             }
         },
-        Request::SetTransactionPath { name, path, value } => {
+        Request::SetTransactionPath {
+            name,
+            path,
+            value,
+            if_match,
+        } => {
             match store
-                .set_transaction_path(&name, &path, value.as_deref())
+                .set_transaction_path(&name, &path, value.as_deref(), if_match)
                 .await
             {
                 Ok(snap) => Event::Transaction(snap),

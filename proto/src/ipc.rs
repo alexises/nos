@@ -32,9 +32,13 @@ pub enum Request {
     /// Validates a named transaction and, if valid, atomically promotes it
     /// to the running config, broadcasts the change to subscribers, and
     /// removes the transaction. If invalid, the transaction is left intact.
-    CommitTransaction { name: String },
+    /// `if_match` is an RFC 9110 §13.1.1 precondition: `Some(g)` refuses the
+    /// commit unless the transaction's `generation` is still `g`; `None` is
+    /// unconditional.
+    CommitTransaction { name: String, if_match: Option<u64> },
     /// Deletes a named transaction without touching the running config.
-    DiscardTransaction { name: String },
+    /// `if_match` as on `CommitTransaction`.
+    DiscardTransaction { name: String, if_match: Option<u64> },
     /// One-shot: fetch the daemon-authored documentation for one operation
     /// (see `nos_proto::docs::CommandDoc`), so any client can show
     /// consistent help text without hardcoding its own copy. Scoped to a
@@ -63,11 +67,13 @@ pub enum Request {
     /// subsection of a named transaction's in-progress config addressed by
     /// `path` — see `nos_proto::config_path` for the path grammar. An empty
     /// `path` addresses the whole config. Like `ApplyOp`, never validates;
-    /// replies with `Event::Transaction`.
+    /// replies with `Event::Transaction`. `if_match` as on
+    /// `CommitTransaction`.
     SetTransactionPath {
         name: String,
         path: Vec<String>,
         value: Option<String>,
+        if_match: Option<u64>,
     },
 }
 
@@ -122,4 +128,8 @@ pub struct TransactionSnapshot {
     /// True if `OpenTransaction` attached to a pre-existing transaction
     /// rather than creating a new one.
     pub resumed: bool,
+    /// Monotonic per-transaction edit counter: 0 when created, +1 on every
+    /// successful `ApplyOp`/`SetTransactionPath`. The value an `if_match`
+    /// precondition (and `nos-restd`'s `ETag`) compares against.
+    pub generation: u64,
 }

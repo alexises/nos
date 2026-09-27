@@ -13,6 +13,9 @@ pub enum ApiError {
         detail: String,
         retry_after_secs: u64,
     },
+    /// RFC 9110 §13.1.1: the request's `If-Match` no longer matches the
+    /// transaction's current `ETag`; nothing was changed.
+    PreconditionFailed(String),
     /// Well-formed request the config rejected (commit-time validation).
     Unprocessable(String),
     /// A daemon this endpoint needs isn't reachable right now.
@@ -30,6 +33,8 @@ impl ApiError {
             ApiError::NotFound(msg)
         } else if msg.starts_with("validation failed") {
             ApiError::Unprocessable(msg)
+        } else if msg.starts_with("precondition failed") {
+            ApiError::PreconditionFailed(msg)
         } else {
             ApiError::BadRequest(msg)
         }
@@ -60,6 +65,7 @@ impl IntoResponse for ApiError {
                     .insert(header::RETRY_AFTER, HeaderValue::from(retry_after_secs));
                 return resp;
             }
+            ApiError::PreconditionFailed(m) => (StatusCode::PRECONDITION_FAILED, m),
             ApiError::Unprocessable(m) => (StatusCode::UNPROCESSABLE_ENTITY, m),
             ApiError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
             ApiError::BadGateway(m) => (StatusCode::BAD_GATEWAY, m),

@@ -766,6 +766,7 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
         .await?;
     a.rest_expect(Method::DELETE, &tx, None, 204).await?;
     a.rest_expect(Method::GET, &tx, None, 404).await?;
+    rest_etag(a).await?;
 
     expect_body(
         &a.rest_expect(Method::GET, "/openapi.json", None, 200)
@@ -813,6 +814,154 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
 
     rest_users(a).await?;
     rest_destructive(w).await
+}
+
+/// RFC 9110 §8.8/§13.1 on the transaction endpoints, against the real daemon:
+/// a strong `ETag` on every reply, a stale `If-Match` refused with 412 and
+/// nothing changed, the current one accepted, `If-None-Match` → 304.
+async fn rest_etag(a: &Router) -> anyhow::Result<()> {
+    let tx = format!("/v1/transactions/{REST_TX}");
+    let host = format!("{tx}/hostname");
+    let quoted = |etag: &Option<String>| -> anyhow::Result<String> {
+        let Some(e) = etag else {
+            bail!("router-a: reply carried no ETag")
+        };
+        let digits = e.strip_prefix('"').and_then(|s| s.strip_suffix('"'));
+        if digits.is_none_or(|d| d.is_empty() || !d.bytes().all(|b| b.is_ascii_digit())) {
+            bail!("router-a: ETag {e} is not a quoted decimal");
+        }
+        Ok(e.clone())
+    };
+    let orig = a.rest_expect(Method::GET, "/v1/config", None, 200).await?;
+    let orig: serde_json::Value = serde_json::from_str(&orig)?;
+    let orig_hostname = orig["hostname"].as_str().unwrap_or_default().to_string();
+
+    let (etag, _) = a
+        .rest_expect_full(Method::POST, &format!("{tx}?base=current"), None, None, 201)
+        .await?;
+    let opened = quoted(&etag)?;
+    let (etag, _) = a
+        .rest_expect_full(Method::GET, &tx, None, None, 200)
+        .await?;
+    if quoted(&etag)? != opened {
+        bail!("router-a: GET ETag {etag:?} differs from the opened one {opened}");
+    }
+
+    // Stale If-Match: 412 problem document, the value untouched.
+    let stale = "\"999999\"";
+    let (_, body) = a
+        .rest_expect_full(
+            Method::PUT,
+            &host,
+            Some("\"etag-host\""),
+            Some(("if-match", stale)),
+            412,
+        )
+        .await?;
+    expect_body(&body, "\"status\":412")?;
+    let (_, body) = a
+        .rest_expect_full(Method::GET, &host, None, None, 200)
+        .await?;
+    if body != format!("\"{orig_hostname}\"") {
+        bail!("router-a: hostname changed by a refused PUT: {body}");
+    }
+    // The current one: accepted, and the reply's tag moves on.
+    let (etag, _) = a
+        .rest_expect_full(
+            Method::PUT,
+            &host,
+            Some("\"etag-host\""),
+            Some(("if-match", &opened)),
+            200,
+        )
+        .await?;
+    let after_put = quoted(&etag)?;
+    if after_put == opened {
+        bail!("router-a: ETag did not change after a PUT ({opened})");
+    }
+
+    // A subsection DELETE: stale → 412, current → 204 with the new tag.
+    a.rest_expect_full(
+        Method::PUT,
+        &format!("{tx}/prefix-list/etag-pl"),
+        Some(r#"{"name":"etag-pl","entries":[]}"#),
+        Some(("if-match", &after_put)),
+        200,
+    )
+    .await?;
+    a.rest_expect_full(
+        Method::DELETE,
+        &format!("{tx}/prefix-list/etag-pl"),
+        None,
+        Some(("if-match", &after_put)),
+        412,
+    )
+    .await?;
+    let (etag, _) = a
+        .rest_expect_full(
+            Method::DELETE,
+            &format!("{tx}/prefix-list/etag-pl"),
+            None,
+            Some(("if-match", "*")),
+            204,
+        )
+        .await?;
+    let current = quoted(&etag)?;
+
+    // If-None-Match: current → 304 with no body; stale → 200 with the value.
+    let (etag, body) = a
+        .rest_expect_full(
+            Method::GET,
+            &tx,
+            None,
+            Some(("if-none-match", &current)),
+            304,
+        )
+        .await?;
+    if quoted(&etag)? != current || !body.is_empty() {
+        bail!("router-a: 304 carried ETag {etag:?} and body {body:?}");
+    }
+    let (_, body) = a
+        .rest_expect_full(
+            Method::GET,
+            &host,
+            None,
+            Some(("if-none-match", &opened)),
+            200,
+        )
+        .await?;
+    expect_body(&body, "\"etag-host\"")?;
+
+    // Commit: stale → 412 and the transaction stays open; current → 200.
+    a.rest_expect_full(
+        Method::POST,
+        &format!("{tx}/commit"),
+        None,
+        Some(("if-match", stale)),
+        412,
+    )
+    .await?;
+    a.rest_expect(Method::GET, &tx, None, 200).await?;
+    a.rest_expect_full(
+        Method::POST,
+        &format!("{tx}/commit"),
+        None,
+        Some(("if-match", &current)),
+        200,
+    )
+    .await?;
+    expect_body(
+        &a.rest_expect(Method::GET, "/v1/config", None, 200).await?,
+        "\"hostname\":\"etag-host\"",
+    )?;
+    log("router-a: transaction ETag/If-Match (412) and If-None-Match (304) verified");
+
+    // Put the hostname back the way the other phases expect it.
+    a.edit(|c| {
+        c.hostname = orig_hostname;
+        Ok(())
+    })
+    .await
 }
 
 /// The transport itself: post-quantum key exchange is mandatory, and requests

@@ -152,6 +152,7 @@ pub async fn commit_transaction(socket_path: &Path, name: &str) -> Result<(), Cl
     writer
         .send(Request::CommitTransaction {
             name: name.to_string(),
+            if_match: None,
         })
         .await?;
     match reader.next().await {
@@ -208,6 +209,7 @@ pub async fn discard_transaction(socket_path: &Path, name: &str) -> Result<(), C
     writer
         .send(Request::DiscardTransaction {
             name: name.to_string(),
+            if_match: None,
         })
         .await?;
     match reader.next().await {

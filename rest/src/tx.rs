@@ -9,7 +9,8 @@
 
 use axum::body::Bytes;
 use axum::extract::{Query, State};
-use axum::http::{StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use nos_proto::config_path;
 use nos_proto::{Config, ConfigDiff, Event, Request, TransactionBase, TransactionSnapshot};
@@ -68,13 +69,67 @@ pub struct OpenQuery {
     base: Option<String>,
 }
 
+/// The transaction's `ETag` (RFC 9110 §8.8.3): its generation as a strong,
+/// quoted decimal — every edit is a real content change, never `W/`.
+fn etag(generation: u64) -> (HeaderName, HeaderValue) {
+    (
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{generation}\"")).expect("digits are valid"),
+    )
+}
+
+/// A parsed `If-Match`/`If-None-Match` (RFC 9110 §13.1.1/§13.1.2).
+#[derive(Debug, PartialEq, Eq)]
+enum Condition {
+    /// `*` — any current representation.
+    Any,
+    /// `"<generation>"`.
+    Generation(u64),
+}
+
+impl Condition {
+    /// The header, if sent. Only one strong `"<digits>"` entity tag or `*` is
+    /// meaningful against a monotonic counter; anything else is a 400.
+    fn from_header(headers: &HeaderMap, name: &HeaderName) -> ApiResult<Option<Self>> {
+        let Some(raw) = headers.get(name) else {
+            return Ok(None);
+        };
+        let bad = || ApiError::BadRequest(format!("{name} must be * or a quoted decimal ETag"));
+        let s = raw.to_str().map_err(|_| bad())?.trim();
+        if s == "*" {
+            return Ok(Some(Condition::Any));
+        }
+        s.strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .and_then(|s| s.parse().ok())
+            .map(|g| Some(Condition::Generation(g)))
+            .ok_or_else(bad)
+    }
+
+    fn matches(&self, generation: u64) -> bool {
+        match self {
+            Condition::Any => true,
+            Condition::Generation(g) => *g == generation,
+        }
+    }
+}
+
+/// `If-Match` as the store's `if_match`: `*` is no store-side precondition,
+/// since the transaction's existence is already checked there (404).
+fn if_match(headers: &HeaderMap) -> ApiResult<Option<u64>> {
+    Ok(match Condition::from_header(headers, &header::IF_MATCH)? {
+        Some(Condition::Generation(g)) => Some(g),
+        Some(Condition::Any) | None => None,
+    })
+}
+
 /// `POST /v1/transactions/<tx>?base=blank|current` — open, or resume if it exists.
-#[utoipa::path(post, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Open (or resume) a transaction", params(("tx" = String, Path, description = "transaction name"), ("base" = Option<String>, Query, description = "blank | current (default current)")), responses((status = 201, body = TransactionSnapshot, description = "created"), (status = 200, body = TransactionSnapshot, description = "resumed"), (status = 400, body = ErrorBody)))]
+#[utoipa::path(post, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Open (or resume) a transaction", params(("tx" = String, Path, description = "transaction name"), ("base" = Option<String>, Query, description = "blank | current (default current)")), responses((status = 201, body = TransactionSnapshot, description = "created; `ETag` is the transaction's generation"), (status = 200, body = TransactionSnapshot, description = "resumed; `ETag` is the transaction's generation"), (status = 400, body = ErrorBody)))]
 pub async fn open(
     State(d): State<Daemons>,
     uri: Uri,
     Query(q): Query<OpenQuery>,
-) -> ApiResult<(StatusCode, Json<TransactionSnapshot>)> {
+) -> ApiResult<Response> {
     let (name, path) = split(&uri)?;
     if !path.is_empty() {
         return Err(ApiError::BadRequest(
@@ -96,26 +151,42 @@ pub async fn open(
     } else {
         StatusCode::CREATED
     };
-    Ok((status, Json(snap)))
+    Ok((status, [etag(snap.generation)], Json(snap)).into_response())
 }
 
 /// `GET /v1/transactions/<tx>[/<path>]` — the transaction, or one subsection of it.
-#[utoipa::path(get, path = "/v1/transactions/{tx}", tag = "transactions", summary = "The whole in-progress config", params(("tx" = String, Path, description = "transaction name")), responses((status = 200, body = TransactionSnapshot), (status = 404, body = ErrorBody, description = "no such transaction or config path")))]
-pub async fn get(State(d): State<Daemons>, uri: Uri) -> ApiResult<Json<Value>> {
+/// `If-None-Match` against the transaction's `ETag` gives `304` on a match.
+#[utoipa::path(get, path = "/v1/transactions/{tx}", tag = "transactions", summary = "The whole in-progress config", params(("tx" = String, Path, description = "transaction name"), ("If-None-Match" = Option<String>, Header, description = "RFC 9110 §13.1.2: `*` or the `ETag` of an earlier reply; 304 if it still matches")), responses((status = 200, body = TransactionSnapshot, description = "`ETag` is the transaction's generation"), (status = 304, description = "If-None-Match matched the transaction's current generation"), (status = 404, body = ErrorBody, description = "no such transaction or config path")))]
+pub async fn get(State(d): State<Daemons>, uri: Uri, headers: HeaderMap) -> ApiResult<Response> {
     let (name, path) = split(&uri)?;
     let snap = snapshot(d.config(Request::GetTransaction { name }).await?)?;
-    if path.is_empty() {
-        return Ok(Json(json!(snap)));
+    let value = if path.is_empty() {
+        json!(snap)
+    } else {
+        subsection(&snap, &path)?
+    };
+    let tag = etag(snap.generation);
+    if Condition::from_header(&headers, &header::IF_NONE_MATCH)?
+        .is_some_and(|c| c.matches(snap.generation))
+    {
+        // RFC 9110 §15.4.5: no body on a 304.
+        return Ok((StatusCode::NOT_MODIFIED, [tag]).into_response());
     }
-    Ok(Json(subsection(&snap, &path)?))
+    Ok(([tag], Json(value)).into_response())
 }
 
 /// `PUT /v1/transactions/<tx>[/<path>]` — set the whole config, or one
 /// subsection (creating a list element that doesn't exist yet). Replies with
 /// the stored value.
-#[utoipa::path(put, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Set the whole config", params(("tx" = String, Path, description = "transaction name")), request_body = Config, responses((status = 200, body = TransactionSnapshot), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such transaction or config path")))]
-pub async fn put(State(d): State<Daemons>, uri: Uri, body: Bytes) -> ApiResult<Json<Value>> {
+#[utoipa::path(put, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Set the whole config", params(("tx" = String, Path, description = "transaction name"), ("If-Match" = Option<String>, Header, description = "RFC 9110 §13.1.1: `*` or the `ETag` of an earlier reply; the edit is refused (412) unless it still matches")), request_body = Config, responses((status = 200, body = TransactionSnapshot, description = "`ETag` is the transaction's new generation"), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such transaction or config path"), (status = 412, body = ErrorBody, description = "If-Match did not match the transaction's current generation")))]
+pub async fn put(
+    State(d): State<Daemons>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<Response> {
     let (name, path) = split(&uri)?;
+    let if_match = if_match(&headers)?;
     let value = String::from_utf8(body.to_vec())
         .map_err(|_| ApiError::BadRequest("body is not UTF-8".to_string()))?;
     let snap = snapshot(
@@ -123,36 +194,45 @@ pub async fn put(State(d): State<Daemons>, uri: Uri, body: Bytes) -> ApiResult<J
             name,
             path: path.clone(),
             value: Some(value),
+            if_match,
         })
         .await?,
     )?;
-    if path.is_empty() {
-        return Ok(Json(json!(snap)));
-    }
-    Ok(Json(subsection(&snap, &path)?))
+    let value = if path.is_empty() {
+        json!(snap)
+    } else {
+        subsection(&snap, &path)?
+    };
+    Ok(([etag(snap.generation)], Json(value)).into_response())
 }
 
 /// `DELETE /v1/transactions/<tx>` discards the transaction;
-/// `DELETE /v1/transactions/<tx>/<path>` removes that subsection.
-#[utoipa::path(delete, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Discard the transaction", params(("tx" = String, Path, description = "transaction name")), responses((status = 204), (status = 404, body = ErrorBody, description = "no such transaction or config path")))]
-pub async fn delete(State(d): State<Daemons>, uri: Uri) -> ApiResult<StatusCode> {
+/// `DELETE /v1/transactions/<tx>/<path>` removes that subsection (the reply's
+/// `ETag` is the transaction's new generation).
+#[utoipa::path(delete, path = "/v1/transactions/{tx}", tag = "transactions", summary = "Discard the transaction", params(("tx" = String, Path, description = "transaction name"), ("If-Match" = Option<String>, Header, description = "RFC 9110 §13.1.1: `*` or the `ETag` of an earlier reply; refused (412) unless it still matches")), responses((status = 204), (status = 404, body = ErrorBody, description = "no such transaction or config path"), (status = 412, body = ErrorBody, description = "If-Match did not match the transaction's current generation")))]
+pub async fn delete(State(d): State<Daemons>, uri: Uri, headers: HeaderMap) -> ApiResult<Response> {
     let (name, path) = split(&uri)?;
+    let if_match = if_match(&headers)?;
     if path.is_empty() {
-        match d.config(Request::DiscardTransaction { name }).await? {
-            Event::Discarded => {}
-            other => return Err(unexpected("nos-configd", &other)),
+        match d
+            .config(Request::DiscardTransaction { name, if_match })
+            .await?
+        {
+            Event::Discarded => Ok(StatusCode::NO_CONTENT.into_response()),
+            other => Err(unexpected("nos-configd", &other)),
         }
     } else {
-        snapshot(
+        let snap = snapshot(
             d.config(Request::SetTransactionPath {
                 name,
                 path,
                 value: None,
+                if_match,
             })
             .await?,
         )?;
+        Ok((StatusCode::NO_CONTENT, [etag(snap.generation)]).into_response())
     }
-    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `GET /v1/transactions/<tx>/diff` — what a commit would change.
@@ -166,15 +246,60 @@ pub async fn diff(State(d): State<Daemons>, uri: Uri) -> ApiResult<Json<ConfigDi
 }
 
 /// `POST /v1/transactions/<tx>/commit` — validate and promote to running.
-/// On a validation error the transaction stays open (422).
-#[utoipa::path(post, path = "/v1/transactions/{tx}/commit", tag = "transactions", summary = "Validate and commit", params(("tx" = String, Path, description = "transaction name")), responses((status = 200, body = CommitResult), (status = 422, body = ErrorBody, description = "validation failed; the transaction stays open"), (status = 404, body = ErrorBody, description = "no such transaction or config path")))]
-pub async fn commit(State(d): State<Daemons>, uri: Uri) -> ApiResult<Json<Value>> {
+/// On a validation error (or a failed `If-Match`) the transaction stays open.
+#[utoipa::path(post, path = "/v1/transactions/{tx}/commit", tag = "transactions", summary = "Validate and commit", params(("tx" = String, Path, description = "transaction name"), ("If-Match" = Option<String>, Header, description = "RFC 9110 §13.1.1: `*` or the `ETag` of an earlier reply; refused (412) unless it still matches")), responses((status = 200, body = CommitResult), (status = 422, body = ErrorBody, description = "validation failed; the transaction stays open"), (status = 404, body = ErrorBody, description = "no such transaction or config path"), (status = 412, body = ErrorBody, description = "If-Match did not match the transaction's current generation; the transaction stays open")))]
+pub async fn commit(
+    State(d): State<Daemons>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
     let (name, _) = split(&uri)?;
+    let if_match = if_match(&headers)?;
     match d
-        .config(Request::CommitTransaction { name: name.clone() })
+        .config(Request::CommitTransaction {
+            name: name.clone(),
+            if_match,
+        })
         .await?
     {
         Event::Committed => Ok(Json(json!(CommitResult { committed: name }))),
         other => Err(unexpected("nos-configd", &other)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers(name: HeaderName, value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(name, HeaderValue::from_str(value).unwrap());
+        h
+    }
+
+    #[test]
+    fn conditions_parse_star_and_quoted_generation_only() {
+        let h = HeaderMap::new();
+        assert_eq!(Condition::from_header(&h, &header::IF_MATCH).unwrap(), None);
+        for (raw, want) in [("*", Condition::Any), ("\"17\"", Condition::Generation(17))] {
+            let h = headers(header::IF_MATCH, raw);
+            assert_eq!(
+                Condition::from_header(&h, &header::IF_MATCH).unwrap(),
+                Some(want)
+            );
+        }
+        for raw in ["17", "W/\"17\"", "\"x\"", "\"1\", \"2\""] {
+            let h = headers(header::IF_NONE_MATCH, raw);
+            assert!(matches!(
+                Condition::from_header(&h, &header::IF_NONE_MATCH),
+                Err(ApiError::BadRequest(_))
+            ));
+        }
+        assert_eq!(if_match(&headers(header::IF_MATCH, "*")).unwrap(), None);
+        assert_eq!(
+            if_match(&headers(header::IF_MATCH, "\"3\"")).unwrap(),
+            Some(3)
+        );
+        assert_eq!(etag(3).1, "\"3\"");
     }
 }

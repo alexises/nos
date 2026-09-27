@@ -12,6 +12,10 @@ pub enum ConfigError {
     HashUpgradeRefused,
     #[error("no transaction named '{0}'")]
     TransactionNotFound(String),
+    /// An `if_match` precondition (RFC 9110 §13.1.1) named a generation the
+    /// transaction has moved past. `nos-restd` keys on the message prefix.
+    #[error("precondition failed: transaction generation is {actual}, not {expected}")]
+    PreconditionFailed { expected: u64, actual: u64 },
     #[error("edit failed: {0}")]
     Op(#[from] nos_proto::OpError),
     #[error("config path: {0}")]
