@@ -3,6 +3,8 @@
 //! same password isn't a change) and the first-boot default user.
 
 use nos_proto::{Config, User, PASSWORD_HASH_PREFIX};
+use precis_core::profile::PrecisFastInvocation;
+use precis_profiles::UsernameCasePreserved;
 use tracing::warn;
 
 pub const DEFAULT_USER: &str = "admin";
@@ -10,6 +12,20 @@ pub const DEFAULT_PASSWORD: &str = "admin";
 
 fn is_clear(u: &User) -> bool {
     !u.password.starts_with(PASSWORD_HASH_PREFIX)
+}
+
+/// RFC 8265 PRECIS `UsernameCasePreserved`-normalizes every `User.name`
+/// (NFC + disallowed-code-point rejection) so two Unicode representations of
+/// the same visible name can never coexist as distinct users. Best-effort: a
+/// name that can't be PRECIS-enforced (disallowed code points) is left as
+/// given, so it still shows up as a plain diff and is rejected by
+/// `nos_proto`'s `valid_username` at commit rather than silently accepted.
+pub(crate) fn normalize_names(users: &mut [User]) {
+    for u in users.iter_mut() {
+        if let Ok(enforced) = UsernameCasePreserved::enforce(u.name.as_str()) {
+            u.name = enforced.into_owned();
+        }
+    }
 }
 
 /// Replaces every clear-text password in `users` with an argon2id hash. If a
@@ -65,6 +81,34 @@ mod tests {
     #[test]
     fn hash_prefix_matches_nos_password() {
         assert_eq!(PASSWORD_HASH_PREFIX, nos_password::HASH_PREFIX);
+    }
+
+    #[test]
+    fn nfd_name_normalizes_to_nfc() {
+        let mut users = vec![u("cafe\u{301}", "pw")];
+        normalize_names(&mut users);
+        assert_eq!(users[0].name, "caf\u{e9}");
+    }
+
+    #[test]
+    fn already_canonical_name_is_unchanged() {
+        let mut users = vec![u("caf\u{e9}", "pw")];
+        normalize_names(&mut users);
+        assert_eq!(users[0].name, "caf\u{e9}");
+    }
+
+    #[test]
+    fn disallowed_code_point_is_left_as_given() {
+        let mut users = vec![u("a\u{0}b", "pw")];
+        normalize_names(&mut users);
+        assert_eq!(users[0].name, "a\u{0}b");
+    }
+
+    #[test]
+    fn two_nfc_nfd_forms_normalize_to_the_same_name() {
+        let mut users = vec![u("caf\u{e9}", "pw"), u("cafe\u{301}", "pw2")];
+        normalize_names(&mut users);
+        assert_eq!(users[0].name, users[1].name);
     }
 
     #[test]

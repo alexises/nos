@@ -11,7 +11,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, info};
 
 use crate::error::ConfigError;
-use crate::users::hash_clear_passwords;
+use crate::users::{hash_clear_passwords, normalize_names};
 
 const BROADCAST_CAPACITY: usize = 16;
 
@@ -50,7 +50,9 @@ impl ConfigStore {
     pub fn new(initial: Config, config_path: Option<PathBuf>) -> Self {
         let mut initial = initial;
         sync_routing_table_refs(&mut initial);
-        // A clear-text password seeded in the file (or by `seed_default_user`) is hashed here.
+        // A name loaded from the file is PRECIS-normalized before a clear-text
+        // password seeded in the file (or by `seed_default_user`) is hashed here.
+        normalize_names(&mut initial.users);
         hash_clear_passwords(&mut initial.users, &[]);
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self(Arc::new(Inner {
@@ -172,10 +174,12 @@ impl ConfigStore {
         })
     }
 
-    /// Hashes any clear-text password `config` now holds, reusing a matching
-    /// hash from the transaction's previous users or the running config.
-    /// Caller holds the `transactions` lock (lock order: transactions, running).
+    /// PRECIS-normalizes every user name, then hashes any clear-text password
+    /// `config` now holds, reusing a matching hash from the transaction's
+    /// previous users or the running config. Caller holds the `transactions`
+    /// lock (lock order: transactions, running).
     async fn hash_users(&self, config: &mut Config, users_before: &[nos_proto::User]) {
+        normalize_names(&mut config.users);
         let running = self.0.running.read().await;
         hash_clear_passwords(&mut config.users, &[users_before, &running.users]);
     }

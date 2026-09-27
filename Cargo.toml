@@ -11,6 +11,8 @@ tracing     = "0.1"
 thiserror   = "1"
 bytes       = "1"
 garde       = { version = "0.22", features = ["derive", "full"] }
+precis-core     = "0.2"
+precis-profiles = "0.2"
 ipnet       = { version = "2", features = ["serde"] }
 postcard    = { version = "1", features = ["alloc"] }
 chrono      = { version = "0.4", default-features = false, features = ["std"] }
