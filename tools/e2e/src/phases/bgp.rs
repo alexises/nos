@@ -138,6 +138,141 @@ pub async fn auth(w: &mut World) -> anyhow::Result<()> {
     reestablished(a, before_a).await
 }
 
+fn expect_body(body: &str, needle: &str) -> anyhow::Result<()> {
+    if body.contains(needle) {
+        Ok(())
+    } else {
+        bail!("body lacks '{needle}': {body}")
+    }
+}
+
+/// RFC 5925 TCP-AO: `exclude_options` must match on both sides to establish,
+/// `TCP_AO_INFO` readback surfaces sane current/rnext key ids, and a real
+/// key-rollover sequence (add key 2 as rnext, promote it to current, remove
+/// key 1) keeps authenticating throughout. Each config change here restarts
+/// this peer's session — an auth change is an ordinary `ResolvedPeer` diff,
+/// like a changed `remote_as` (see `bgp/CLAUDE.md`'s "Session
+/// authentication") — so this proves the sequence keeps authenticating end
+/// to end, not that the session survives without a reconnect.
+pub async fn ao(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let secret = "correct-horse-battery-staple";
+
+    let (base_a, base_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+    );
+    for r in [a, b] {
+        r.provision(&[
+            "--ao-send-id",
+            "1",
+            "--ao-key-secret",
+            secret,
+            "--ao-current",
+        ])
+        .await?;
+    }
+    reestablished(a, base_a).await?;
+    reestablished(b, base_b).await?;
+
+    let (before_a, before_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+    );
+    log("setting exclude-options on router-a only (mismatched with router-b)");
+    a.provision(&[
+        "--ao-send-id",
+        "1",
+        "--ao-key-secret",
+        secret,
+        "--ao-current",
+        "--ao-exclude-options",
+    ])
+    .await?;
+    log("waiting 8s to confirm the session does NOT (re-)establish with mismatched TCP-AO exclude-options");
+    a.assert_quiet("bgp session established", before_a, 8)
+        .await?;
+    if b.count("bgp session established") > before_b {
+        bail!("session established despite mismatched TCP-AO exclude-options");
+    }
+
+    log("matching exclude-options on router-b too");
+    b.provision(&[
+        "--ao-send-id",
+        "1",
+        "--ao-key-secret",
+        secret,
+        "--ao-current",
+        "--ao-exclude-options",
+    ])
+    .await?;
+    reestablished(a, before_a).await?;
+    reestablished(b, before_b).await?;
+
+    log("checking TCP_AO_INFO readback surfaces key 1 as current on both sides");
+    expect_body(
+        &a.rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
+            .await?,
+        "\"ao_current_key\":1",
+    )?;
+    expect_body(
+        &b.rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
+            .await?,
+        "\"ao_current_key\":1",
+    )?;
+
+    log("rolling over to a second TCP-AO key (RFC 5925 §7.5)");
+    let (before_a, before_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+    );
+    for r in [a, b] {
+        r.provision(&[
+            "--ao-send-id",
+            "2",
+            "--ao-key-secret",
+            "second-secret",
+            "--ao-rnext",
+            "--ao-exclude-options",
+        ])
+        .await?;
+    }
+    reestablished(a, before_a).await?;
+    reestablished(b, before_b).await?;
+
+    let (before_a, before_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+    );
+    for r in [a, b] {
+        r.provision(&["--ao-promote-current", "2"]).await?;
+    }
+    reestablished(a, before_a).await?;
+    reestablished(b, before_b).await?;
+
+    let (before_a, before_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+    );
+    for r in [a, b] {
+        r.provision(&["--ao-remove-key", "1"]).await?;
+    }
+    reestablished(a, before_a).await?;
+    reestablished(b, before_b).await?;
+
+    log("checking TCP_AO_INFO readback surfaces key 2 as current on both sides after rollover");
+    expect_body(
+        &a.rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
+            .await?,
+        "\"ao_current_key\":2",
+    )?;
+    expect_body(
+        &b.rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
+            .await?,
+        "\"ao_current_key\":2",
+    )
+}
+
 /// RFC 4456 route reflector: router-a reflects between router-b and router-c,
 /// which are not peered with each other.
 pub async fn reflector(w: &mut World) -> anyhow::Result<()> {

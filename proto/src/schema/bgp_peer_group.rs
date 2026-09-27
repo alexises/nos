@@ -310,7 +310,10 @@ pub enum BgpAuth {
 /// KeyID/RNextKeyID); `is_current` marks the key actively signing outgoing
 /// segments (exactly one key must have this set); `is_rnext` optionally
 /// requests the peer switch to this key next, for rotation without a
-/// dropped session.
+/// dropped session; `exclude_options` (RFC 5925 §5.2, `#[serde(default)]`
+/// so pre-existing on-disk config still loads as today's always-include
+/// behavior) excludes TCP options from this key's MAC coverage — both peers
+/// must agree, or authentication fails.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BgpAoKey {
@@ -320,6 +323,8 @@ pub struct BgpAoKey {
     pub key: String,
     pub is_current: bool,
     pub is_rnext: bool,
+    #[serde(default)]
+    pub exclude_options: bool,
 }
 
 /// RFC 5925's two mandatory-to-implement algorithms.
@@ -716,6 +721,7 @@ mod tests {
             key: "secret".to_string(),
             is_current,
             is_rnext: false,
+            exclude_options: false,
         }
     }
 

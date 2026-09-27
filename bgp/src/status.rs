@@ -5,6 +5,7 @@
 //! `nos-cli`'s `show bgp brief`.
 
 use std::net::Ipv4Addr;
+use std::os::fd::RawFd;
 
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -30,6 +31,11 @@ pub struct PeerStatus {
     pub established_since: Option<Instant>,
     pub negotiated_hold_time: Option<u16>,
     pub negotiated_keepalive: Option<u16>,
+    /// The live socket fd of whichever connection is `Established`, captured
+    /// by `fsm::run` right before it stops owning the raw `TcpStream` — read
+    /// on demand for a `TCP_AO_INFO` readback (`session::to_peer_summary`),
+    /// never otherwise inspected here.
+    pub fd: Option<RawFd>,
 }
 
 impl Default for PeerStatus {
@@ -41,6 +47,7 @@ impl Default for PeerStatus {
             established_since: None,
             negotiated_hold_time: None,
             negotiated_keepalive: None,
+            fd: None,
         }
     }
 }
@@ -64,5 +71,6 @@ mod tests {
         assert_eq!(status.established_since, None);
         assert_eq!(status.negotiated_hold_time, None);
         assert_eq!(status.negotiated_keepalive, None);
+        assert_eq!(status.fd, None);
     }
 }

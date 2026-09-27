@@ -125,6 +125,7 @@ impl From<&BgpAuth> for ResolvedAuth {
                         key: k.key.clone().into_bytes(),
                         set_current: k.is_current,
                         set_rnext: k.is_rnext,
+                        exclude_options: k.exclude_options,
                     })
                     .collect(),
             ),
@@ -376,7 +377,7 @@ impl SessionManager {
         for peer in desired {
             if let Some(auth) = &peer.auth {
                 let fd = listener_fd_for(peer.remote_address, v4_fd, v6_fd);
-                match tcp::apply_auth(fd, peer.remote_address, auth) {
+                match tcp::apply_auth(fd, peer.remote_address, auth, true) {
                     Ok(()) => {
                         applied_auth.insert(peer.remote_address, auth.clone());
                     }
@@ -590,7 +591,7 @@ impl SessionManager {
             match &peer.auth {
                 Some(auth) => {
                     let fd = listener_fd_for(peer.remote_address, listeners.v4_fd, listeners.v6_fd);
-                    match tcp::apply_auth(fd, peer.remote_address, auth) {
+                    match tcp::apply_auth(fd, peer.remote_address, auth, true) {
                         Ok(()) => {
                             listeners
                                 .applied_auth
@@ -661,6 +662,16 @@ fn listener_fd_for(addr: IpAddr, v4_fd: RawFd, v6_fd: RawFd) -> RawFd {
 /// uptime measured right now instead.
 fn to_peer_summary(slot: &PeerSlot) -> PeerSummary {
     let status = *slot.status_receiver().borrow();
+    // ponytail: a session that ends between fsm::run returning and the next
+    // OpenSent write clearing `status.fd` leaves a brief window where this fd
+    // is stale/closed — get_ao_info then just errors (e.g. EBADF), reported
+    // as `None` below, same as "no AO auth configured". Upgrade path: none
+    // needed unless a closed fd is ever observed reused by an unrelated
+    // socket in that same microsecond-scale window.
+    let ao_info = match (&slot.peer.auth, status.fd) {
+        (Some(ResolvedAuth::Ao(_)), Some(fd)) => nos_tcp_auth::get_ao_info(fd).ok(),
+        _ => None,
+    };
     PeerSummary {
         remote_address: slot.peer.remote_address,
         peer_group: slot.peer.peer_group.clone(),
@@ -678,6 +689,11 @@ fn to_peer_summary(slot: &PeerSlot) -> PeerSummary {
             .map(|since| Instant::now().duration_since(since).as_secs()),
         negotiated_hold_time: status.negotiated_hold_time,
         negotiated_keepalive: status.negotiated_keepalive,
+        ao_current_key: ao_info.as_ref().map(|i| i.current_key),
+        ao_rnext_key: ao_info.as_ref().map(|i| i.rnext_key),
+        ao_packets_good: ao_info.as_ref().map(|i| i.pkt_good),
+        ao_packets_bad: ao_info.as_ref().map(|i| i.pkt_bad),
+        ao_packets_key_not_found: ao_info.as_ref().map(|i| i.pkt_key_not_found),
     }
 }
 
@@ -843,6 +859,32 @@ mod tests {
         assert_eq!(summary.uptime_secs, None);
         assert_eq!(summary.negotiated_hold_time, None);
         assert_eq!(summary.negotiated_keepalive, None);
+        assert_eq!(summary.ao_current_key, None);
+        assert_eq!(summary.ao_rnext_key, None);
+        assert_eq!(summary.ao_packets_good, None);
+        assert_eq!(summary.ao_packets_bad, None);
+        assert_eq!(summary.ao_packets_key_not_found, None);
+    }
+
+    /// A TCP-AO peer with no `fd` recorded yet (e.g. `OpenSent`, before
+    /// `Established`) reports no AO info either, even though `slot.peer.auth`
+    /// is `Some(ResolvedAuth::Ao(_))` — `to_peer_summary` must gate on both.
+    #[test]
+    fn to_peer_summary_of_ao_peer_with_no_fd_yet_has_no_ao_info() {
+        let mut p = peer("10.0.0.1");
+        p.auth = Some(ResolvedAuth::Ao(vec![nos_tcp_auth::AoKey {
+            send_id: 1,
+            recv_id: 1,
+            algorithm: nos_tcp_auth::AoAlgorithm::HmacSha1_96,
+            key: b"secret".to_vec(),
+            set_current: true,
+            set_rnext: false,
+            exclude_options: false,
+        }]));
+        let slot = PeerSlot::new(p);
+        let summary = to_peer_summary(&slot);
+        assert_eq!(summary.ao_current_key, None);
+        assert_eq!(summary.ao_rnext_key, None);
     }
 
     #[test]
@@ -931,6 +973,7 @@ mod tests {
                 key: "secret".to_string(),
                 is_current: true,
                 is_rnext: false,
+                exclude_options: true,
             }],
         };
         assert_eq!(
@@ -942,6 +985,7 @@ mod tests {
                 key: b"secret".to_vec(),
                 set_current: true,
                 set_rnext: false,
+                exclude_options: true,
             }])
         );
     }

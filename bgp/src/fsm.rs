@@ -12,6 +12,7 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -708,6 +709,10 @@ pub async fn run(
     // that differs from this address's own (RFC 8950 cross-family
     // next-hop), which is exactly why this is no longer restricted to IPv4.
     let local_addr = stream.local_addr().ok().map(|addr| addr.ip());
+    // Also captured here, for the same reason: `status.fd`, read on demand
+    // for a `TCP_AO_INFO` getsockopt once this session reaches `Established`
+    // (see `Action::ReportEstablished` below).
+    let fd = stream.as_raw_fd();
     let remote_is_ibgp = local.asn == peer.expected_remote_as;
     let (outbox_tx, mut outbox_rx) = mpsc::unbounded_channel::<OutboundUpdate>();
     let mut mrai = crate::mrai::Mrai::new(peer.mrai);
@@ -1017,6 +1022,7 @@ pub async fn run(
                             s.established_since = Some(Instant::now());
                             s.negotiated_hold_time = negotiated_hold_time;
                             s.negotiated_keepalive = negotiated_keepalive;
+                            s.fd = Some(fd);
                         });
                         info!(
                             peer = %peer.remote_address, remote_asn, remote_bgp_id = %remote_bgp_id,

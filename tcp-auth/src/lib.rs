@@ -20,6 +20,13 @@ pub const MAX_KEY_LEN: usize = 80;
 const TCP_MD5SIG: libc::c_int = 14;
 const TCP_AO_ADD_KEY: libc::c_int = 38;
 const TCP_AO_DEL_KEY: libc::c_int = 39;
+const TCP_AO_INFO: libc::c_int = 40;
+
+/// `TCP_AO_KEYF_EXCLUDE_OPT` (`include/uapi/linux/tcp.h`) — the
+/// `tcp_ao_add`/`tcp_ao_del`/`tcp_ao_info_opt` `keyflags`/`flags` bit
+/// (RFC 5925 §5.2) excluding TCP options from this key's MAC coverage. Bit 0
+/// of the same byte is `TCP_AO_KEYF_IFINDEX`, unused by this crate.
+const TCP_AO_KEYF_EXCLUDE_OPT: u8 = 1 << 1;
 
 /// RFC 5925's two mandatory-to-implement algorithms, named for the Linux
 /// crypto API (`alg_name` in `struct tcp_ao_add`).
@@ -41,7 +48,9 @@ impl AoAlgorithm {
 /// One TCP-AO key to install via [`add_ao_key`]. `set_current`/`set_rnext`
 /// mirror `struct tcp_ao_add`'s same-named bits — the kernel requires
 /// exactly one key with `set_current` for a socket to actually sign
-/// outgoing segments.
+/// outgoing segments. `exclude_options` is RFC 5925 §5.2's MAC-coverage
+/// choice (`TCP_AO_KEYF_EXCLUDE_OPT`) — both peers must agree on it or
+/// authentication fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AoKey {
     pub send_id: u8,
@@ -50,6 +59,7 @@ pub struct AoKey {
     pub key: Vec<u8>,
     pub set_current: bool,
     pub set_rnext: bool,
+    pub exclude_options: bool,
 }
 
 /// Sets (or replaces) this socket's `TCP_MD5SIG` key for `peer`. `key` must
@@ -78,7 +88,10 @@ pub fn add_ao_key(fd: RawFd, peer: IpAddr, key: &AoKey) -> io::Result<()> {
     write_sockaddr(&mut add.addr, peer);
     let alg_name = key.algorithm.kernel_name().as_bytes();
     add.alg_name[..alg_name.len()].copy_from_slice(alg_name);
-    add.ifindex = -1; // VRF scoping already applied via SO_BINDTODEVICE on this socket.
+    // 0, not -1: `ifindex` is only meaningful with `TCP_AO_KEYF_IFINDEX` set
+    // (never done here) — the kernel rejects any other value with EINVAL.
+    // VRF scoping is already applied via SO_BINDTODEVICE on this socket.
+    add.ifindex = 0;
     let mut flags: u32 = 0;
     if key.set_current {
         flags |= 1 << 0;
@@ -91,7 +104,11 @@ pub fn add_ao_key(fd: RawFd, peer: IpAddr, key: &AoKey) -> io::Result<()> {
     add.sndid = key.send_id;
     add.rcvid = key.recv_id;
     add.maclen = 0; // 0 => kernel default truncated MAC length for the algorithm.
-    add.keyflags = 0;
+    add.keyflags = if key.exclude_options {
+        TCP_AO_KEYF_EXCLUDE_OPT
+    } else {
+        0
+    };
     add.keylen = u8::try_from(key.key.len()).expect("checked above");
     add.key[..key.key.len()].copy_from_slice(&key.key);
     setsockopt(fd, TCP_AO_ADD_KEY, &add)
@@ -102,11 +119,63 @@ pub fn add_ao_key(fd: RawFd, peer: IpAddr, key: &AoKey) -> io::Result<()> {
 pub fn delete_ao_key(fd: RawFd, peer: IpAddr, send_id: u8, recv_id: u8) -> io::Result<()> {
     let mut del: TcpAoDel = zeroed();
     write_sockaddr(&mut del.addr, peer);
-    del.ifindex = -1;
+    del.ifindex = 0; // see add_ao_key's comment on ifindex.
     del.prefix = prefix_len(peer);
     del.sndid = send_id;
     del.rcvid = recv_id;
     setsockopt(fd, TCP_AO_DEL_KEY, &del)
+}
+
+/// One connection's live TCP-AO state, from `getsockopt(TCP_AO_INFO)`
+/// (RFC 5925 §7.2/§7.5): the `KeyID` currently signing outgoing segments, the
+/// `RNextKeyID` the peer is asking us to switch to, and per-connection
+/// verification counters since the kernel installed AO on this socket
+/// (reset on every reconnect, not cumulative across a peer's whole
+/// lifetime).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AoInfo {
+    pub current_key: u8,
+    pub rnext_key: u8,
+    pub pkt_good: u64,
+    pub pkt_bad: u64,
+    pub pkt_key_not_found: u64,
+}
+
+/// Reads `fd`'s current TCP-AO state (`getsockopt(TCP_AO_INFO)`). Errors if
+/// `fd` never had a TCP-AO key installed, or is no longer a valid/open fd
+/// (e.g. a session that ended between a caller reading `fd` and calling
+/// this).
+pub fn get_ao_info(fd: RawFd) -> io::Result<AoInfo> {
+    let mut info: TcpAoInfoOpt = zeroed();
+    let mut len = libc::socklen_t::try_from(mem::size_of::<TcpAoInfoOpt>())
+        .expect("fixed, small struct size");
+    // SAFETY: `fd` is caller-supplied, `info` is a valid `&mut` for `len`
+    // bytes matching the kernel's `TCP_AO_INFO` optval shape.
+    let ret = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            TCP_AO_INFO,
+            std::ptr::from_mut(&mut info).cast::<libc::c_void>(),
+            &raw mut len,
+        )
+    };
+    if ret != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if len as usize != mem::size_of::<TcpAoInfoOpt>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "kernel returned unexpected size for TCP_AO_INFO",
+        ));
+    }
+    Ok(AoInfo {
+        current_key: info.current_key,
+        rnext_key: info.rnext,
+        pkt_good: info.pkt_good,
+        pkt_bad: info.pkt_bad,
+        pkt_key_not_found: info.pkt_key_not_found,
+    })
 }
 
 fn set_md5_key_raw(fd: RawFd, peer: IpAddr, key: &[u8]) -> io::Result<()> {
@@ -305,6 +374,26 @@ struct TcpAoDel {
     keyflags: u8,
 }
 
+/// `struct tcp_ao_info_opt` (`include/uapi/linux/tcp.h`) — for
+/// `getsockopt(TCP_AO_INFO)`. Only ever used for reads here: the kernel's
+/// `set_current:1, set_rnext:1, ao_required:1, set_counters:1,
+/// accept_icmps:1, reserved:27` bitfield is "in" for setsockopt and purely
+/// "out" (kernel-reported current state) for getsockopt — this crate never
+/// calls `setsockopt(TCP_AO_INFO)` and never reads that bitfield back, only
+/// `current_key`/`rnext`/the `pkt_*` counters.
+#[repr(C, align(8))]
+struct TcpAoInfoOpt {
+    flags: u32,
+    reserved2: u16,
+    current_key: u8,
+    rnext: u8,
+    pkt_good: u64,
+    pkt_bad: u64,
+    pkt_key_not_found: u64,
+    pkt_ao_required: u64,
+    pkt_dropped_icmp: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv6Addr;
@@ -328,6 +417,12 @@ mod tests {
     fn tcp_ao_del_matches_kernel_layout() {
         assert_eq!(mem::size_of::<TcpAoDel>(), 128 + 4 + 4 + 2 + 6);
         assert_eq!(mem::align_of::<TcpAoDel>(), 8);
+    }
+
+    #[test]
+    fn tcp_ao_info_opt_matches_kernel_layout() {
+        assert_eq!(mem::size_of::<TcpAoInfoOpt>(), 4 + 2 + 1 + 1 + 8 * 5);
+        assert_eq!(mem::align_of::<TcpAoInfoOpt>(), 8);
     }
 
     #[test]
@@ -374,6 +469,7 @@ mod tests {
             key: vec![0u8; 81],
             set_current: true,
             set_rnext: false,
+            exclude_options: false,
         };
         let err = add_ao_key(-1, IpAddr::V4(Ipv4Addr::LOCALHOST), &key).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
