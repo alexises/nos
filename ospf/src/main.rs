@@ -72,6 +72,11 @@ async fn main() -> anyhow::Result<()> {
     let identity = Identity::from_stdin().context("reading this daemon's ipc identity")?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    // Log forwarding gets its own shutdown signal, flipped only once the
+    // reconcile task is done: its exit runs `LinkManager::shutdown`'s RFC
+    // 2328 §14.1 flush, whose log lines would otherwise never reach
+    // `nos-logd` (the forwarding loop stops as soon as its signal flips).
+    let (log_shutdown_tx, log_shutdown_rx) = watch::channel(false);
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -82,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
             format!("nos-ospfd[{}]", args.instance),
             args.log_socket.clone(),
             identity.clone(),
-            shutdown_rx.clone(),
+            log_shutdown_rx,
         ))
         .init();
     info!(instance = %args.instance, "nos-ospfd starting");
@@ -141,6 +146,7 @@ async fn main() -> anyhow::Result<()> {
     server_task.abort();
 
     info!(instance = %args.instance, "shutting down");
+    let _ = log_shutdown_tx.send(true);
     Ok(())
 }
 

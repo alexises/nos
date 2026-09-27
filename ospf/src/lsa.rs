@@ -52,6 +52,12 @@ pub const LS_REFRESH_TIME: u16 = 1800;
 /// starts here and increments by one on each refresh.
 pub const INITIAL_SEQUENCE_NUMBER: i32 = i32::MIN + 1;
 
+/// RFC 2328 §12.1.6's `MaxSequenceNumber` — an LSA that reaches it must be
+/// flushed (prematurely aged) before being re-originated at
+/// `INITIAL_SEQUENCE_NUMBER`; `0x8000_0000` in between is reserved and must
+/// never be produced (see `link::install_self_originated`).
+pub const MAX_SEQUENCE_NUMBER: i32 = i32::MAX;
+
 /// Identifies one LSA instance's slot in the database, independent of its
 /// sequence number/age/checksum — RFC 2328 keys the LSDB by exactly these
 /// three fields (§12.2).
@@ -352,6 +358,18 @@ pub fn encode_lsa(lsa: &Lsa) -> Vec<u8> {
     let checksum = lsa_checksum(&buf[2..]);
     buf[16..18].copy_from_slice(&checksum.to_be_bytes());
     buf
+}
+
+/// Fills in `header.checksum`/`header.length` exactly as `encode_lsa` puts
+/// them on the wire. A self-originated LSA is held locally with these set,
+/// so it compares *equal* (`is_newer`) to the copy every neighbor decodes
+/// and echoes back in its own periodic resend — with a zero checksum the
+/// echo would always look newer and supersede the local instance, including
+/// a prematurely aged one, undoing the flush.
+pub fn fill_checksum(lsa: &mut Lsa) {
+    let buf = encode_lsa(lsa);
+    lsa.header.checksum = u16::from_be_bytes([buf[16], buf[17]]);
+    lsa.header.length = u16::from_be_bytes([buf[18], buf[19]]);
 }
 
 /// Decodes one LSA from the start of `data` (which may contain more bytes
