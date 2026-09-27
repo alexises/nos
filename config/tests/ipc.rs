@@ -101,7 +101,7 @@ async fn get_returns_current_config() {
         .apply_op("t1", set_asn_op("default", 65000))
         .await
         .unwrap();
-    store.commit_transaction("t1").await.unwrap();
+    store.commit_transaction("t1", None).await.unwrap();
     let _srv = store
         .start_ipc_server(&ListenAddr::Unix(path.clone()), &server_identity())
         .unwrap();
@@ -147,7 +147,7 @@ async fn subscribe_receives_initial_snapshot_then_updates() {
         .apply_op("t1", set_asn_op("vrf-a", 65001))
         .await
         .unwrap();
-    store.commit_transaction("t1").await.unwrap();
+    store.commit_transaction("t1", None).await.unwrap();
 
     // Receive the update.
     let event = reader.next().await.unwrap().unwrap();
@@ -184,7 +184,7 @@ async fn unsubscribe_stops_updates() {
         .apply_op("t1", set_asn_op("vrf-b", 65002))
         .await
         .unwrap();
-    store.commit_transaction("t1").await.unwrap();
+    store.commit_transaction("t1", None).await.unwrap();
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     // No event should arrive within a short timeout.
@@ -226,7 +226,7 @@ async fn subscribe_survives_client_dropping_its_write_half() {
         .apply_op("t1", set_asn_op("vrf-c", 65003))
         .await
         .unwrap();
-    store.commit_transaction("t1").await.unwrap();
+    store.commit_transaction("t1", None).await.unwrap();
 
     let event = tokio::time::timeout(Duration::from_millis(200), reader.next())
         .await
@@ -271,7 +271,7 @@ async fn subscribe_diff_survives_client_dropping_its_write_half() {
         .apply_op("t1", set_asn_op("vrf-d", 65004))
         .await
         .unwrap();
-    store.commit_transaction("t1").await.unwrap();
+    store.commit_transaction("t1", None).await.unwrap();
 
     let event = tokio::time::timeout(Duration::from_millis(200), reader.next())
         .await
@@ -297,7 +297,7 @@ async fn subscribe_diff_reports_pre_existing_instance_as_added_then_incremental_
     store.open_transaction("t1", TransactionBase::Blank).await;
     store.apply_op("t1", ensure_op("r1")).await.unwrap();
     store.apply_op("t1", set_asn_op("r1", 65000)).await.unwrap();
-    store.commit_transaction("t1").await.unwrap();
+    store.commit_transaction("t1", None).await.unwrap();
 
     let _srv = store
         .start_ipc_server(&ListenAddr::Unix(path.clone()), &server_identity())
@@ -337,7 +337,7 @@ async fn subscribe_diff_reports_pre_existing_instance_as_added_then_incremental_
         )
         .await
         .unwrap();
-    store.commit_transaction("t2").await.unwrap();
+    store.commit_transaction("t2", None).await.unwrap();
 
     let event = reader.next().await.unwrap().unwrap();
     match event {
@@ -389,7 +389,7 @@ async fn subscribe_diff_skips_commits_outside_requested_scope() {
         .apply_op("t1", ConfigOp::SetHostname("router-b".to_string()))
         .await
         .unwrap();
-    store.commit_transaction("t1").await.unwrap();
+    store.commit_transaction("t1", None).await.unwrap();
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let result = tokio::time::timeout(Duration::from_millis(50), reader.next()).await;
@@ -412,7 +412,7 @@ async fn save_persists_running_config_to_disk() {
         .apply_op("t1", set_asn_op("default", 65000))
         .await
         .unwrap();
-    store.commit_transaction("t1").await.unwrap();
+    store.commit_transaction("t1", None).await.unwrap();
     let _srv = store
         .start_ipc_server(&ListenAddr::Unix(sock_path.clone()), &server_identity())
         .unwrap();
@@ -628,6 +628,7 @@ async fn commit_over_ipc_updates_running_visible_to_fresh_get() {
     writer
         .send(Request::CommitTransaction {
             name: "t1".to_string(),
+            if_match: None,
         })
         .await
         .unwrap();
@@ -681,6 +682,7 @@ async fn commit_invalid_over_ipc_returns_error_and_transaction_still_resumable()
     writer
         .send(Request::CommitTransaction {
             name: "t1".to_string(),
+            if_match: None,
         })
         .await
         .unwrap();
@@ -702,6 +704,71 @@ async fn commit_invalid_over_ipc_returns_error_and_transaction_still_resumable()
 }
 
 #[tokio::test]
+async fn stale_if_match_over_ipc_returns_precondition_error_and_keeps_transaction() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock_path = tmp.path().join("config.sock");
+
+    let store = ConfigStore::new(Config::default(), None);
+    let _srv = store
+        .start_ipc_server(&ListenAddr::Unix(sock_path.clone()), &server_identity())
+        .unwrap();
+
+    let (mut reader, mut writer) = connect(&sock_path).await;
+    writer
+        .send(Request::OpenTransaction {
+            name: "t1".to_string(),
+            base: TransactionBase::Blank,
+        })
+        .await
+        .unwrap();
+    reader.next().await.unwrap().unwrap();
+    writer
+        .send(Request::SetTransactionPath {
+            name: "t1".to_string(),
+            path: vec!["hostname".to_string()],
+            value: Some("\"h1\"".to_string()),
+            if_match: Some(0),
+        })
+        .await
+        .unwrap();
+    match reader.next().await.unwrap().unwrap() {
+        Event::Transaction(snap) => assert_eq!(snap.generation, 1),
+        other => panic!("expected Transaction event, got {other:?}"),
+    }
+
+    for req in [
+        Request::SetTransactionPath {
+            name: "t1".to_string(),
+            path: vec!["hostname".to_string()],
+            value: Some("\"h2\"".to_string()),
+            if_match: Some(0),
+        },
+        Request::CommitTransaction {
+            name: "t1".to_string(),
+            if_match: Some(0),
+        },
+    ] {
+        writer.send(req).await.unwrap();
+        match reader.next().await.unwrap().unwrap() {
+            Event::Error(msg) => assert!(msg.starts_with("precondition failed"), "{msg}"),
+            other => panic!("expected Error event, got {other:?}"),
+        }
+    }
+    writer
+        .send(Request::GetTransaction {
+            name: "t1".to_string(),
+        })
+        .await
+        .unwrap();
+    match reader.next().await.unwrap().unwrap() {
+        Event::Transaction(snap) => {
+            assert_eq!((snap.generation, snap.config.hostname.as_str()), (1, "h1"));
+        }
+        other => panic!("expected Transaction event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn commit_missing_transaction_over_ipc_returns_error() {
     let tmp = tempfile::tempdir().unwrap();
     let sock_path = tmp.path().join("config.sock");
@@ -715,6 +782,7 @@ async fn commit_missing_transaction_over_ipc_returns_error() {
     writer
         .send(Request::CommitTransaction {
             name: "missing".to_string(),
+            if_match: None,
         })
         .await
         .unwrap();
@@ -755,6 +823,7 @@ async fn discard_over_ipc_removes_transaction_so_reopen_is_fresh() {
     writer
         .send(Request::DiscardTransaction {
             name: "t1".to_string(),
+            if_match: None,
         })
         .await
         .unwrap();
@@ -825,6 +894,7 @@ async fn subscribed_client_receives_broadcast_after_named_transaction_commit() {
     writer_b
         .send(Request::CommitTransaction {
             name: "demo".to_string(),
+            if_match: None,
         })
         .await
         .unwrap();
@@ -893,6 +963,7 @@ async fn hostname_change_is_broadcast_to_all_subscribers() {
     writer_c
         .send(Request::CommitTransaction {
             name: "t1".to_string(),
+            if_match: None,
         })
         .await
         .unwrap();
@@ -961,6 +1032,7 @@ async fn routing_table_and_static_routing_instance_round_trip_over_ipc() {
     writer
         .send(Request::CommitTransaction {
             name: "t1".to_string(),
+            if_match: None,
         })
         .await
         .unwrap();
@@ -1026,6 +1098,7 @@ async fn commit_fails_when_static_routing_instance_referenced_table_is_missing_o
     writer
         .send(Request::CommitTransaction {
             name: "t1".to_string(),
+            if_match: None,
         })
         .await
         .unwrap();

@@ -153,15 +153,36 @@ async fn send_as(
     body: Option<Value>,
     user: Option<&str>,
 ) -> (StatusCode, Value) {
-    let req = HttpRequest::builder()
+    let (status, _, value) = send_full(app, method, uri, body, user, None).await;
+    (status, value)
+}
+
+/// `send_as` with one extra request header, also returning the reply's `ETag`.
+async fn send_full(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+    user: Option<&str>,
+    extra: Option<(header::HeaderName, &str)>,
+) -> (StatusCode, Option<String>, Value) {
+    let mut req = HttpRequest::builder()
         .method(method)
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/json")
-        .extension(PeerUser(user.map(str::to_string)))
+        .extension(PeerUser(user.map(str::to_string)));
+    if let Some((name, value)) = extra {
+        req = req.header(name, value);
+    }
+    let req = req
         .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
+    let etag = resp
+        .headers()
+        .get(header::ETAG)
+        .map(|v| v.to_str().unwrap().to_string());
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -171,7 +192,7 @@ async fn send_as(
         serde_json::from_slice(&bytes)
             .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()))
     };
-    (status, json)
+    (status, etag, json)
 }
 
 fn bgp_instance(name: &str, asn: u32) -> Value {
@@ -375,6 +396,169 @@ async fn errors_map_to_statuses_and_leave_the_transaction_intact() {
     );
     let (_, v) = send(app, Method::GET, "/v1/transactions/t3/hostname", None).await;
     assert_eq!(v, json!("bad host name!"));
+}
+
+/// RFC 9110 §8.8.1/§13.1.1/§13.1.2: a strong `ETag` on every transaction
+/// reply, `If-Match` → 412 (nothing changed), `If-None-Match` → 304 (no body).
+#[tokio::test]
+async fn etag_if_match_and_if_none_match_on_transactions() {
+    let f = fixture(vec![]).await;
+    let app = &f.app;
+    let tx = "/v1/transactions/t4";
+    let host = "/v1/transactions/t4/hostname";
+    let with = |m: Method,
+                uri: &'static str,
+                body: Option<Value>,
+                h: header::HeaderName,
+                v: &'static str| async move {
+        send_full(app, m, uri, body, Some(USER), Some((h, v))).await
+    };
+
+    let (s, etag, _) = send_full(
+        app,
+        Method::POST,
+        "/v1/transactions/t4?base=current",
+        None,
+        Some(USER),
+        None,
+    )
+    .await;
+    assert_eq!((s, etag.as_deref()), (StatusCode::CREATED, Some("\"0\"")));
+
+    // Stale `If-Match`: 412 problem document, the transaction untouched.
+    let (s, etag, e) = with(
+        Method::PUT,
+        host,
+        Some(json!("h1")),
+        header::IF_MATCH,
+        "\"9\"",
+    )
+    .await;
+    assert_eq!(
+        (s, etag, e["status"].clone()),
+        (StatusCode::PRECONDITION_FAILED, None, json!(412))
+    );
+    let (s, etag, v) = send_full(app, Method::GET, host, None, Some(USER), None).await;
+    assert_eq!(
+        (s, etag.as_deref(), v),
+        (StatusCode::OK, Some("\"0\""), json!("nos"))
+    );
+
+    // Matching (then `*`, then none at all): each edit bumps the tag.
+    let (s, etag, _) = with(
+        Method::PUT,
+        host,
+        Some(json!("h1")),
+        header::IF_MATCH,
+        "\"0\"",
+    )
+    .await;
+    assert_eq!((s, etag.as_deref()), (StatusCode::OK, Some("\"1\"")));
+    let (s, etag, _) = with(Method::PUT, host, Some(json!("h2")), header::IF_MATCH, "*").await;
+    assert_eq!((s, etag.as_deref()), (StatusCode::OK, Some("\"2\"")));
+    let (s, etag, _) = send_full(app, Method::PUT, host, Some(json!("h3")), Some(USER), None).await;
+    assert_eq!((s, etag.as_deref()), (StatusCode::OK, Some("\"3\"")));
+    assert_eq!(
+        with(Method::PUT, host, Some(json!("h4")), header::IF_MATCH, "3")
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // `If-None-Match`: current or `*` → 304 with the tag and no body; stale → 200.
+    let (s, etag, v) = with(Method::GET, tx, None, header::IF_NONE_MATCH, "\"3\"").await;
+    assert_eq!(
+        (s, etag.as_deref(), v),
+        (StatusCode::NOT_MODIFIED, Some("\"3\""), Value::Null)
+    );
+    let (s, _, v) = with(Method::GET, host, None, header::IF_NONE_MATCH, "*").await;
+    assert_eq!((s, v), (StatusCode::NOT_MODIFIED, Value::Null));
+    let (s, etag, v) = with(Method::GET, host, None, header::IF_NONE_MATCH, "\"2\"").await;
+    assert_eq!(
+        (s, etag.as_deref(), v),
+        (StatusCode::OK, Some("\"3\""), json!("h3"))
+    );
+    assert_eq!(
+        with(Method::GET, tx, None, header::IF_NONE_MATCH, "W/\"3\"")
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // A subsection DELETE and a commit honour it too; a refused commit keeps
+    // the transaction, and a subsection DELETE's 204 carries the new tag.
+    send(
+        app,
+        Method::PUT,
+        "/v1/transactions/t4/bgp-instance/r1",
+        Some(bgp_instance("r1", 1)),
+    )
+    .await;
+    let (s, _, _) = with(
+        Method::DELETE,
+        "/v1/transactions/t4/bgp-instance/r1",
+        None,
+        header::IF_MATCH,
+        "\"3\"",
+    )
+    .await;
+    assert_eq!(s, StatusCode::PRECONDITION_FAILED);
+    let (s, etag, _) = with(
+        Method::DELETE,
+        "/v1/transactions/t4/bgp-instance/r1",
+        None,
+        header::IF_MATCH,
+        "\"4\"",
+    )
+    .await;
+    assert_eq!(
+        (s, etag.as_deref()),
+        (StatusCode::NO_CONTENT, Some("\"5\""))
+    );
+    let (s, _, _) = with(
+        Method::POST,
+        "/v1/transactions/t4/commit",
+        None,
+        header::IF_MATCH,
+        "\"4\"",
+    )
+    .await;
+    assert_eq!(s, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(send(app, Method::GET, tx, None).await.0, StatusCode::OK);
+    let (s, _, _) = with(
+        Method::POST,
+        "/v1/transactions/t4/commit",
+        None,
+        header::IF_MATCH,
+        "\"5\"",
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        send(app, Method::GET, "/v1/config", None).await.1["hostname"],
+        "h3"
+    );
+
+    // Discarding the whole transaction: 412 when stale, 204 (no tag) when current.
+    send(app, Method::POST, "/v1/transactions/t5?base=blank", None).await;
+    let (s, _, _) = with(
+        Method::DELETE,
+        "/v1/transactions/t5",
+        None,
+        header::IF_MATCH,
+        "\"1\"",
+    )
+    .await;
+    assert_eq!(s, StatusCode::PRECONDITION_FAILED);
+    let (s, etag, _) = with(
+        Method::DELETE,
+        "/v1/transactions/t5",
+        None,
+        header::IF_MATCH,
+        "\"0\"",
+    )
+    .await;
+    assert_eq!((s, etag), (StatusCode::NO_CONTENT, None));
 }
 
 #[tokio::test]

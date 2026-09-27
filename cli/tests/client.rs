@@ -34,6 +34,7 @@ fn sample_snapshot() -> TransactionSnapshot {
         config: sample_config(),
         dirty: true,
         resumed: false,
+        generation: 0,
     }
 }
 
@@ -315,6 +316,7 @@ async fn commit_transaction_returns_ok_on_success() {
         listener,
         Request::CommitTransaction {
             name: "demo".to_string(),
+            if_match: None,
         },
         Event::Committed,
     ));
@@ -334,6 +336,7 @@ async fn commit_transaction_returns_daemon_error() {
         listener,
         Request::CommitTransaction {
             name: "demo".to_string(),
+            if_match: None,
         },
         Event::Error("validation failed".to_string()),
     ));
@@ -354,6 +357,7 @@ async fn discard_transaction_returns_ok_on_success() {
         listener,
         Request::DiscardTransaction {
             name: "demo".to_string(),
+            if_match: None,
         },
         Event::Discarded,
     ));
@@ -373,6 +377,7 @@ async fn discard_transaction_returns_daemon_error() {
         listener,
         Request::DiscardTransaction {
             name: "missing".to_string(),
+            if_match: None,
         },
         Event::Error("no transaction named 'missing'".to_string()),
     ));

@@ -132,7 +132,10 @@ async fn main() -> anyhow::Result<()> {
     send(
         &mut writer,
         &mut reader,
-        Request::CommitTransaction { name: txn.clone() },
+        Request::CommitTransaction {
+            name: txn.clone(),
+            if_match: None,
+        },
     )
     .await?;
 

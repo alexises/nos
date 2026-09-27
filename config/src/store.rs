@@ -19,6 +19,31 @@ const BROADCAST_CAPACITY: usize = 16;
 struct Transaction {
     config: Config,
     dirty: bool,
+    /// See `TransactionSnapshot::generation`.
+    generation: u64,
+}
+
+impl Transaction {
+    fn snapshot(&self, name: &str, resumed: bool) -> TransactionSnapshot {
+        TransactionSnapshot {
+            name: name.to_string(),
+            config: self.config.clone(),
+            dirty: self.dirty,
+            resumed,
+            generation: self.generation,
+        }
+    }
+
+    /// RFC 9110 §13.1.1: `Some(g)` must equal the current generation.
+    fn check(&self, if_match: Option<u64>) -> Result<(), ConfigError> {
+        match if_match {
+            Some(expected) if expected != self.generation => Err(ConfigError::PreconditionFailed {
+                expected,
+                actual: self.generation,
+            }),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// One committed change, broadcast to every subscriber connection — the new
@@ -90,31 +115,21 @@ impl ConfigStore {
         let mut txs = self.0.transactions.lock().await;
         if let Some(existing) = txs.get(name) {
             debug!(transaction = %name, resumed = true, "opened transaction");
-            return TransactionSnapshot {
-                name: name.to_string(),
-                config: existing.config.clone(),
-                dirty: existing.dirty,
-                resumed: true,
-            };
+            return existing.snapshot(name, true);
         }
         let config = match base {
             TransactionBase::Blank => Config::default(),
             TransactionBase::Current => self.0.running.read().await.clone(),
         };
-        txs.insert(
-            name.to_string(),
-            Transaction {
-                config: config.clone(),
-                dirty: false,
-            },
-        );
-        debug!(transaction = %name, ?base, resumed = false, "opened transaction");
-        TransactionSnapshot {
-            name: name.to_string(),
+        let txn = Transaction {
             config,
             dirty: false,
-            resumed: false,
-        }
+            generation: 0,
+        };
+        let snap = txn.snapshot(name, false);
+        txs.insert(name.to_string(), txn);
+        debug!(transaction = %name, ?base, resumed = false, "opened transaction");
+        snap
     }
 
     /// Applies one edit to a named transaction's in-progress config. Never
@@ -133,12 +148,8 @@ impl ConfigStore {
         op.apply(&mut txn.config)?;
         self.hash_users(&mut txn.config, &users_before).await;
         txn.dirty = true;
-        Ok(TransactionSnapshot {
-            name: name.to_string(),
-            config: txn.config.clone(),
-            dirty: true,
-            resumed: true,
-        })
+        txn.generation += 1;
+        Ok(txn.snapshot(name, true))
     }
 
     /// Sets or removes the subsection of a named transaction's in-progress
@@ -146,16 +157,20 @@ impl ConfigStore {
     /// the transactions lock, and all-or-nothing: the edit is applied to a
     /// JSON copy which must still deserialize as a `Config` before it
     /// replaces the transaction's config. Never runs `garde` validation.
+    /// `if_match` (checked under the same lock, so this is a real
+    /// compare-and-set) refuses the edit once the generation has moved on.
     pub async fn set_transaction_path(
         &self,
         name: &str,
         path: &[String],
         value: Option<&str>,
+        if_match: Option<u64>,
     ) -> Result<TransactionSnapshot, ConfigError> {
         let mut txs = self.0.transactions.lock().await;
         let txn = txs
             .get_mut(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        txn.check(if_match)?;
         let users_before = txn.config.users.clone();
         let mut doc = serde_json::to_value(&txn.config)?;
         match value {
@@ -165,13 +180,9 @@ impl ConfigStore {
         txn.config = serde_json::from_value(doc)?;
         self.hash_users(&mut txn.config, &users_before).await;
         txn.dirty = true;
+        txn.generation += 1;
         debug!(transaction = %name, path = %path.join("/"), remove = value.is_none(), "set transaction path");
-        Ok(TransactionSnapshot {
-            name: name.to_string(),
-            config: txn.config.clone(),
-            dirty: true,
-            resumed: true,
-        })
+        Ok(txn.snapshot(name, true))
     }
 
     /// PRECIS-normalizes every user name, then hashes any clear-text password
@@ -189,23 +200,23 @@ impl ConfigStore {
         let txn = txs
             .get(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
-        Ok(TransactionSnapshot {
-            name: name.to_string(),
-            config: txn.config.clone(),
-            dirty: txn.dirty,
-            resumed: true,
-        })
+        Ok(txn.snapshot(name, true))
     }
 
     /// Validates the named transaction and, if valid, atomically promotes it
     /// to running, broadcasts the change to subscribers, and removes the
-    /// transaction. If invalid, the transaction is left intact so the caller
-    /// can keep editing and retry.
-    pub async fn commit_transaction(&self, name: &str) -> Result<(), ConfigError> {
+    /// transaction. If invalid (or `if_match` names a stale generation), the
+    /// transaction is left intact so the caller can keep editing and retry.
+    pub async fn commit_transaction(
+        &self,
+        name: &str,
+        if_match: Option<u64>,
+    ) -> Result<(), ConfigError> {
         let mut txs = self.0.transactions.lock().await;
         let txn = txs
             .get(name)
             .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        txn.check(if_match)?;
         // Pass the config itself as the validation context (cross-reference checks).
         txn.config.validate_with(&txn.config)?;
         if txn.config.users.is_empty() && !self.0.running.read().await.users.is_empty() {
@@ -279,11 +290,18 @@ impl ConfigStore {
         Ok(diff_configs(&running, &candidate))
     }
 
-    /// Deletes a named transaction without touching the running config.
-    pub async fn discard_transaction(&self, name: &str) -> Result<(), ConfigError> {
+    /// Deletes a named transaction without touching the running config
+    /// (refused, and kept, if `if_match` names a stale generation).
+    pub async fn discard_transaction(
+        &self,
+        name: &str,
+        if_match: Option<u64>,
+    ) -> Result<(), ConfigError> {
         let mut txs = self.0.transactions.lock().await;
-        txs.remove(name)
-            .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?;
+        txs.get(name)
+            .ok_or_else(|| ConfigError::TransactionNotFound(name.to_string()))?
+            .check(if_match)?;
+        txs.remove(name);
         debug!(transaction = %name, "discarded transaction");
         Ok(())
     }
@@ -373,20 +391,20 @@ mod tests {
         store.open_transaction("t", TransactionBase::Blank).await;
         let body = serde_json::to_string(&instance("r1", 65000)).unwrap();
         let snap = store
-            .set_transaction_path("t", &segs("bgp-instance/r1"), Some(&body))
+            .set_transaction_path("t", &segs("bgp-instance/r1"), Some(&body), None)
             .await
             .unwrap();
         assert!(snap.dirty);
         assert_eq!(snap.config.bgp_instances.len(), 1);
 
         let snap = store
-            .set_transaction_path("t", &segs("hostname"), Some("\"rest-host\""))
+            .set_transaction_path("t", &segs("hostname"), Some("\"rest-host\""), None)
             .await
             .unwrap();
         assert_eq!(snap.config.hostname, "rest-host");
 
         let snap = store
-            .set_transaction_path("t", &segs("bgp-instance/r1"), None)
+            .set_transaction_path("t", &segs("bgp-instance/r1"), None, None)
             .await
             .unwrap();
         assert!(snap.config.bgp_instances.is_empty());
@@ -403,22 +421,27 @@ mod tests {
             ..Default::default()
         };
         store
-            .set_transaction_path("t", &[], Some(&serde_json::to_string(&whole).unwrap()))
+            .set_transaction_path(
+                "t",
+                &[],
+                Some(&serde_json::to_string(&whole).unwrap()),
+                None,
+            )
             .await
             .unwrap();
 
         // Type mismatch: rejected, transaction unchanged.
         assert!(store
-            .set_transaction_path("t", &segs("hostname"), Some("42"))
+            .set_transaction_path("t", &segs("hostname"), Some("42"), None)
             .await
             .is_err());
         // Unknown path / unknown transaction.
         assert!(store
-            .set_transaction_path("t", &segs("nope"), Some("1"))
+            .set_transaction_path("t", &segs("nope"), Some("1"), None)
             .await
             .is_err());
         assert!(store
-            .set_transaction_path("missing", &[], Some("{}"))
+            .set_transaction_path("missing", &[], Some("{}"), None)
             .await
             .is_err());
         assert_eq!(store.get_transaction("t").await.unwrap().config, whole);
@@ -517,7 +540,7 @@ mod tests {
         store.apply_op("t1", ensure_op("r1")).await.unwrap();
         store.apply_op("t1", set_asn_op("r1", 65000)).await.unwrap();
 
-        store.commit_transaction("t1").await.unwrap();
+        store.commit_transaction("t1", None).await.unwrap();
 
         let running = store.running_snapshot().await;
         assert_eq!(running.bgp_instances.len(), 1);
@@ -535,7 +558,7 @@ mod tests {
         // ASN 0 is invalid, and Ensure leaves asn at the placeholder 0.
         store.apply_op("t1", ensure_op("bad")).await.unwrap();
 
-        assert!(store.commit_transaction("t1").await.is_err());
+        assert!(store.commit_transaction("t1", None).await.is_err());
         assert!(store.running_snapshot().await.bgp_instances.is_empty());
 
         // The transaction must still be there, editable, for a retry.
@@ -547,7 +570,7 @@ mod tests {
     async fn commit_missing_transaction_returns_error() {
         let store = ConfigStore::new(Config::default(), None);
         assert!(matches!(
-            store.commit_transaction("missing").await,
+            store.commit_transaction("missing", None).await,
             Err(ConfigError::TransactionNotFound(_))
         ));
     }
@@ -584,7 +607,7 @@ mod tests {
         store.open_transaction("t1", TransactionBase::Blank).await;
         store.apply_op("t1", ensure_op("r1")).await.unwrap();
 
-        store.discard_transaction("t1").await.unwrap();
+        store.discard_transaction("t1", None).await.unwrap();
 
         assert!(matches!(
             store.get_transaction("t1").await,
@@ -594,10 +617,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generation_counts_edits_and_a_stale_if_match_is_refused_untouched() {
+        let store = ConfigStore::new(Config::default(), None);
+        assert_eq!(
+            store
+                .open_transaction("t", TransactionBase::Blank)
+                .await
+                .generation,
+            0
+        );
+        assert_eq!(
+            store
+                .apply_op("t", ensure_op("r1"))
+                .await
+                .unwrap()
+                .generation,
+            1
+        );
+        // A matching precondition passes and bumps; `None` is unconditional.
+        let snap = store
+            .set_transaction_path("t", &segs("hostname"), Some("\"h1\""), Some(1))
+            .await
+            .unwrap();
+        assert_eq!(snap.generation, 2);
+        let snap = store
+            .set_transaction_path("t", &segs("hostname"), Some("\"h2\""), None)
+            .await
+            .unwrap();
+        assert_eq!(snap.generation, 3);
+
+        // Stale: refused, nothing changed, the transaction stays.
+        let stale = Some(2);
+        assert!(matches!(
+            store
+                .set_transaction_path("t", &segs("hostname"), Some("\"h3\""), stale)
+                .await,
+            Err(ConfigError::PreconditionFailed {
+                expected: 2,
+                actual: 3
+            })
+        ));
+        assert!(matches!(
+            store.commit_transaction("t", stale).await,
+            Err(ConfigError::PreconditionFailed { .. })
+        ));
+        assert!(matches!(
+            store.discard_transaction("t", stale).await,
+            Err(ConfigError::PreconditionFailed { .. })
+        ));
+        let snap = store.get_transaction("t").await.unwrap();
+        assert_eq!((snap.generation, snap.config.hostname.as_str()), (3, "h2"));
+        assert!(store.running_snapshot().await.bgp_instances.is_empty());
+
+        // Current: discard goes through.
+        store.discard_transaction("t", Some(3)).await.unwrap();
+        assert!(matches!(
+            store.get_transaction("t").await,
+            Err(ConfigError::TransactionNotFound(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn discard_missing_transaction_returns_error() {
         let store = ConfigStore::new(Config::default(), None);
         assert!(matches!(
-            store.discard_transaction("missing").await,
+            store.discard_transaction("missing", None).await,
             Err(ConfigError::TransactionNotFound(_))
         ));
     }
@@ -620,10 +704,11 @@ mod tests {
             Transaction {
                 config: bad_config,
                 dirty: true,
+                generation: 0,
             },
         );
 
-        assert!(store.commit_transaction("t1").await.is_err());
+        assert!(store.commit_transaction("t1", None).await.is_err());
         assert!(store.running_snapshot().await.bgp_instances.is_empty());
     }
 
@@ -653,7 +738,7 @@ mod tests {
             .await
             .unwrap();
 
-        store.commit_transaction("t1").await.unwrap();
+        store.commit_transaction("t1", None).await.unwrap();
 
         let running = store.running_snapshot().await;
         assert_eq!(running.routing_tables.len(), 1);
@@ -688,7 +773,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(store.commit_transaction("t1").await.is_err());
+        assert!(store.commit_transaction("t1", None).await.is_err());
         assert!(store.running_snapshot().await.routing_tables.is_empty());
     }
 
@@ -714,7 +799,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(store.commit_transaction("t1").await.is_err());
+        assert!(store.commit_transaction("t1", None).await.is_err());
         assert!(store.running_snapshot().await.routing_tables.is_empty());
     }
 
@@ -749,7 +834,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(store.commit_transaction("t1").await.is_err());
+        assert!(store.commit_transaction("t1", None).await.is_err());
         assert!(store.running_snapshot().await.routing_tables.is_empty());
     }
 
@@ -773,7 +858,7 @@ mod tests {
             .await
             .unwrap();
 
-        store.commit_transaction("t1").await.unwrap();
+        store.commit_transaction("t1", None).await.unwrap();
 
         let running = store.running_snapshot().await;
         assert_eq!(running.static_routing_instances.len(), 1);
@@ -793,7 +878,7 @@ mod tests {
             .apply_op(tx, set_password_op(name, password))
             .await
             .unwrap();
-        store.commit_transaction(tx).await.unwrap();
+        store.commit_transaction(tx, None).await.unwrap();
     }
 
     #[tokio::test]
@@ -811,7 +896,7 @@ mod tests {
             .unwrap();
         assert_eq!(snap.config.users[0].password, hash);
         assert!(store.diff_transaction("t2").await.unwrap().is_empty());
-        store.discard_transaction("t2").await.unwrap();
+        store.discard_transaction("t2", None).await.unwrap();
 
         // A different password does change it, and shows up as a (hidden) diff.
         store.open_transaction("t3", TransactionBase::Current).await;
@@ -880,6 +965,7 @@ mod tests {
                 "t",
                 &segs("user/bob"),
                 Some(r#"{"name":"bob","password":"pw"}"#),
+                None,
             )
             .await
             .unwrap();
@@ -910,7 +996,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            store.commit_transaction("t2").await,
+            store.commit_transaction("t2", None).await,
             Err(ConfigError::NoUsersLeft)
         ));
         assert_eq!(store.running_snapshot().await.users.len(), 1);

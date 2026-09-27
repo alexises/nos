@@ -1786,6 +1786,7 @@ mod tests {
             },
             dirty,
             resumed: false,
+            generation: 0,
         }
     }
 
