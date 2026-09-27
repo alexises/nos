@@ -2577,6 +2577,7 @@ fn peer_group_set_op(instance: String, group: String, field: BgpPeerGroupField) 
                 key,
                 is_current: false,
                 is_rnext: false,
+                exclude_options: false,
             },
         },
         BgpPeerGroupField::AoCurrentKey(send_id) => BgpPeerGroupOp::SetAoCurrentKey {
@@ -3811,6 +3812,7 @@ mod tests {
                         key: "secret".to_string(),
                         is_current: false,
                         is_rnext: false,
+                        exclude_options: false,
                     },
                 }),
                 after: PathAfter::Stay,

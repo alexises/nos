@@ -43,6 +43,18 @@ pub struct PeerSummary {
     pub uptime_secs: Option<u64>,
     pub negotiated_hold_time: Option<u16>,
     pub negotiated_keepalive: Option<u16>,
+    /// RFC 5925 TCP-AO live per-connection state, from
+    /// `getsockopt(TCP_AO_INFO)` — `Some` only for an `Established` session
+    /// whose peer-group uses TCP-AO and whose readback succeeded just now;
+    /// `None` for MD5/no-auth peers, a non-`Established` peer, or a readback
+    /// that raced session teardown. Counters are since the kernel installed
+    /// AO on *this* connection (reset on every reconnect, not cumulative
+    /// across the peer's whole configured lifetime).
+    pub ao_current_key: Option<u8>,
+    pub ao_rnext_key: Option<u8>,
+    pub ao_packets_good: Option<u64>,
+    pub ao_packets_bad: Option<u64>,
+    pub ao_packets_key_not_found: Option<u64>,
 }
 
 /// One received EVPN (RFC 7432) route, for `show bgp evpn`. `route` is the

@@ -98,11 +98,20 @@ fn render_bgp_auth(auth: Option<&BgpAuth>) -> String {
                         BgpAoAlgorithm::HmacSha1_96 => "hmac-sha1",
                         BgpAoAlgorithm::AesCmac96 => "aes-cmac",
                     };
-                    let flags = match (k.is_current, k.is_rnext) {
-                        (true, true) => " (current, rnext)",
-                        (true, false) => " (current)",
-                        (false, true) => " (rnext)",
-                        (false, false) => "",
+                    let mut tags = Vec::new();
+                    if k.is_current {
+                        tags.push("current");
+                    }
+                    if k.is_rnext {
+                        tags.push("rnext");
+                    }
+                    if k.exclude_options {
+                        tags.push("exclude-options");
+                    }
+                    let flags = if tags.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", tags.join(", "))
                     };
                     format!("send-id {} {algorithm} {}{flags}", k.send_id, k.key)
                 })
@@ -718,8 +727,17 @@ pub fn render_bgp_summary(instance: &str, peers: &[PeerSummary]) -> String {
         let hold_time = peer
             .negotiated_hold_time
             .map_or_else(|| "-".to_string(), |h| h.to_string());
+        let ao = match (peer.ao_current_key, peer.ao_rnext_key) {
+            (Some(current), Some(rnext)) => format!(
+                " ao-current {current} ao-rnext {rnext} ao-good {} ao-bad {} ao-no-key {}",
+                peer.ao_packets_good.unwrap_or(0),
+                peer.ao_packets_bad.unwrap_or(0),
+                peer.ao_packets_key_not_found.unwrap_or(0),
+            ),
+            _ => String::new(),
+        };
         lines.push(format!(
-            "  {} AS {remote_as} peer-group {} {} uptime {uptime} hold-time {hold_time}",
+            "  {} AS {remote_as} peer-group {} {} uptime {uptime} hold-time {hold_time}{ao}",
             peer.remote_address,
             peer.peer_group,
             if peer.shutdown {
@@ -2047,6 +2065,7 @@ mod tests {
                 key: "secret".to_string(),
                 is_current: true,
                 is_rnext: false,
+                exclude_options: true,
             }],
         });
         assert_eq!(
@@ -2054,7 +2073,7 @@ mod tests {
             "peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
              connect-retry-time default (120s), \
-             auth ao-keys [send-id 1 hmac-sha1 secret (current)], \
+             auth ao-keys [send-id 1 hmac-sha1 secret (current, exclude-options)], \
              next-hop default (self, eBGP)"
         );
     }
@@ -2246,6 +2265,11 @@ mod tests {
             negotiated_hold_time: None,
             negotiated_keepalive: None,
             shutdown: false,
+            ao_current_key: None,
+            ao_rnext_key: None,
+            ao_packets_good: None,
+            ao_packets_bad: None,
+            ao_packets_key_not_found: None,
         }
     }
 
@@ -2294,6 +2318,25 @@ mod tests {
         assert_eq!(
             render_bgp_summary("r1", &[idle_peer("10.0.0.1")]),
             "bgp instance r1:\n  10.0.0.1 AS - peer-group pg1 Idle uptime - hold-time -"
+        );
+    }
+
+    #[test]
+    fn render_bgp_summary_with_ao_info_appends_key_and_counters() {
+        let mut peer = idle_peer("10.0.0.1");
+        peer.remote_as = Some(65002);
+        peer.state = BgpSessionState::Established;
+        peer.uptime_secs = Some(5);
+        peer.negotiated_hold_time = Some(90);
+        peer.ao_current_key = Some(1);
+        peer.ao_rnext_key = Some(2);
+        peer.ao_packets_good = Some(42);
+        peer.ao_packets_bad = Some(1);
+        peer.ao_packets_key_not_found = Some(0);
+        assert_eq!(
+            render_bgp_summary("r1", &[peer]),
+            "bgp instance r1:\n  10.0.0.1 AS 65002 peer-group pg1 Established uptime 00:00:05 \
+             hold-time 90 ao-current 1 ao-rnext 2 ao-good 42 ao-bad 1 ao-no-key 0"
         );
     }
 

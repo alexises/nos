@@ -27,7 +27,7 @@ pub async fn connect(
         bind_device(&socket, vrf)?;
     }
     if let Some(auth) = auth {
-        apply_auth(socket.as_raw_fd(), remote.ip(), auth)?;
+        apply_auth(socket.as_raw_fd(), remote.ip(), auth, false)?;
     }
     if let Some(hops) = max_hops {
         apply_max_hops(socket.as_raw_fd(), remote.ip(), hops)?;
@@ -59,12 +59,35 @@ pub fn apply_max_hops(fd: RawFd, peer: IpAddr, hops: u8) -> io::Result<()> {
 /// `session::SessionManager::sync_listener_auth`/`spawn_listeners`). Adding
 /// a TCP-AO key with a `(send_id, recv_id)` that already exists on `fd`
 /// replaces it in place, so this is also how a changed key gets applied.
-pub fn apply_auth(fd: RawFd, peer: IpAddr, auth: &ResolvedAuth) -> io::Result<()> {
+///
+/// `on_listener` must be `true` for the shared listening socket: the kernel
+/// rejects `TCP_AO_ADD_KEY`'s `set_current`/`set_rnext` bits with `EINVAL`
+/// on a socket in `LISTEN` state (found by running `nos-e2e ao` against a
+/// real kernel — there is no way to discover this from the header alone).
+/// This is harmless to drop there: those bits designate the key actively
+/// signing/rolling on *one* connection, a concept a listener itself has
+/// none of; the kernel still matches an accepted connection's key from the
+/// wire's KeyID/RNextKeyID against every key installed here, current or not.
+pub fn apply_auth(
+    fd: RawFd,
+    peer: IpAddr,
+    auth: &ResolvedAuth,
+    on_listener: bool,
+) -> io::Result<()> {
     match auth {
         ResolvedAuth::Md5(password) => nos_tcp_auth::set_md5_key(fd, peer, password.as_bytes()),
         ResolvedAuth::Ao(keys) => {
             for key in keys {
-                nos_tcp_auth::add_ao_key(fd, peer, key)?;
+                if on_listener && (key.set_current || key.set_rnext) {
+                    let key = nos_tcp_auth::AoKey {
+                        set_current: false,
+                        set_rnext: false,
+                        ..key.clone()
+                    };
+                    nos_tcp_auth::add_ao_key(fd, peer, &key)?;
+                } else {
+                    nos_tcp_auth::add_ao_key(fd, peer, key)?;
+                }
             }
             Ok(())
         }

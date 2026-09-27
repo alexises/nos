@@ -994,6 +994,7 @@ mod tests {
             key: "secret".to_string(),
             is_current: false,
             is_rnext: false,
+            exclude_options: false,
         }
     }
 

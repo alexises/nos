@@ -20,6 +20,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "collision" => bgp::collision(w).await,
         "redistribute" => bgp::redistribute_phase(w).await,
         "auth" => bgp::auth(w).await,
+        "ao" => bgp::ao(w).await,
         "gtsm" => bgp::gtsm(w).await,
         "policy" => bgp::policy(w).await,
         "redistribute-policy" => bgp::redistribute_policy(w).await,
@@ -78,6 +79,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "shutdown",
             "redistribute",
             "auth",
+            "ao",
             "gtsm",
         ],
         "drivers" => &[
@@ -150,6 +152,7 @@ pub const ALL: &[&str] = &[
     "shutdown",
     "redistribute",
     "auth",
+    "ao",
     "gtsm",
     "loopback",
     "mtu",

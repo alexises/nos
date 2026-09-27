@@ -18,12 +18,12 @@ use clap::Parser;
 
 use ipnet::IpNet;
 use nos_proto::{
-    AddressFamily, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, ConfigOp,
-    EsRedundancy, InterfaceOp, LacpRate, LldpDestination, LldpOp, OspfAreaOp, OspfCryptoAlgorithm,
-    OspfCryptoKey, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
-    PolicyDefinitionOp, PortAggregateMode, PortAggregateOp, Redistribute, RedistributeSource,
-    RedistributeTarget, RoutingTableOp, SourceAddress, StaticRouteOp, StaticRoutingInstanceOp,
-    SubinterfaceOp, SwitchingProfileOp, UserOp, VlanTag,
+    AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp,
+    BroadcastDomainOp, ConfigOp, EsRedundancy, InterfaceOp, LacpRate, LldpDestination, LldpOp,
+    OspfAreaOp, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp,
+    Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp, PortAggregateMode, PortAggregateOp,
+    Redistribute, RedistributeSource, RedistributeTarget, RoutingTableOp, SourceAddress,
+    StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, UserOp, VlanTag,
 };
 
 /// Clap-facing mirror of `nos_proto::PortAggregateMode` — `clap::ValueEnum`
@@ -74,6 +74,23 @@ impl From<LacpRateArg> for LacpRate {
         match rate {
             LacpRateArg::Slow => LacpRate::Slow,
             LacpRateArg::Fast => LacpRate::Fast,
+        }
+    }
+}
+
+/// Clap-facing mirror of `nos_proto::BgpAoAlgorithm`, for the same reason as
+/// `PortAggregateModeArg`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum BgpAoAlgorithmArg {
+    HmacSha1,
+    AesCmac,
+}
+
+impl From<BgpAoAlgorithmArg> for BgpAoAlgorithm {
+    fn from(algorithm: BgpAoAlgorithmArg) -> Self {
+        match algorithm {
+            BgpAoAlgorithmArg::HmacSha1 => BgpAoAlgorithm::HmacSha1_96,
+            BgpAoAlgorithmArg::AesCmac => BgpAoAlgorithm::AesCmac96,
         }
     }
 }
@@ -186,6 +203,38 @@ pub struct Args {
     /// mismatched one on either side does not).
     #[arg(long)]
     pub md5_password: Option<String>,
+
+    /// If set (with `--ao-key-secret`), upserts an RFC 5925 TCP-AO key on
+    /// `--peer-group` by this `SendID` (`BgpPeerGroupOp::SetAoKey`).
+    #[arg(long)]
+    pub ao_send_id: Option<u8>,
+    /// `RecvID` for the key set by `--ao-send-id`; defaults to the same value.
+    #[arg(long)]
+    pub ao_recv_id: Option<u8>,
+    #[arg(long, value_enum, default_value_t = BgpAoAlgorithmArg::HmacSha1)]
+    pub ao_algorithm: BgpAoAlgorithmArg,
+    /// Secret for the key set by `--ao-send-id`.
+    #[arg(long)]
+    pub ao_key_secret: Option<String>,
+    /// Marks the key set by `--ao-send-id` as the current key.
+    #[arg(long)]
+    pub ao_current: bool,
+    /// Marks the key set by `--ao-send-id` as the rnext key.
+    #[arg(long)]
+    pub ao_rnext: bool,
+    /// Sets `exclude_options` on the key set by `--ao-send-id`
+    /// (`TCP_AO_KEYF_EXCLUDE_OPT`, RFC 5925 §5.2) — both peers must agree.
+    #[arg(long)]
+    pub ao_exclude_options: bool,
+    /// Promotes an already-configured TCP-AO key to current, without
+    /// resending its secret (`BgpPeerGroupOp::SetAoCurrentKey`) — for
+    /// exercising RFC 5925 §7.5 rollover.
+    #[arg(long)]
+    pub ao_promote_current: Option<u8>,
+    /// Removes a configured TCP-AO key by `SendID`
+    /// (`BgpPeerGroupOp::RemoveAoKey`).
+    #[arg(long)]
+    pub ao_remove_key: Option<u8>,
 
     /// If set, marks `--peer-group` as an RFC 4456 route-reflector client
     /// (requires `--remote-as` to equal `--asn`, i.e. an iBGP peer-group).
@@ -935,6 +984,36 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             instance: args.bgp_instance.clone(),
             name: args.peer_group.clone(),
             password,
+        }));
+    }
+
+    if let (Some(send_id), Some(secret)) = (args.ao_send_id, args.ao_key_secret.clone()) {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoKey {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            key: BgpAoKey {
+                send_id,
+                recv_id: args.ao_recv_id.unwrap_or(send_id),
+                algorithm: args.ao_algorithm.into(),
+                key: secret,
+                is_current: args.ao_current,
+                is_rnext: args.ao_rnext,
+                exclude_options: args.ao_exclude_options,
+            },
+        }));
+    }
+    if let Some(send_id) = args.ao_promote_current {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoCurrentKey {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            send_id,
+        }));
+    }
+    if let Some(send_id) = args.ao_remove_key {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::RemoveAoKey {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            send_id,
         }));
     }
 
