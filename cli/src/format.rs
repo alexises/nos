@@ -664,6 +664,7 @@ fn render_route_source(source: RouteSourceKind) -> &'static str {
         RouteSourceKind::Static => "static",
         RouteSourceKind::Bgp => "bgp",
         RouteSourceKind::Ospf => "ospf",
+        RouteSourceKind::Connected => "connected",
     }
 }
 

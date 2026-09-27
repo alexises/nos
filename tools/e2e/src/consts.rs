@@ -168,6 +168,13 @@ pub const OSPF_BROADCAST_ADDRESS_C: &str = "203.0.113.67/28";
 /// A destination with no neighbor of its own, on router-b's loopback, so
 /// router-a can only learn it through a real SPF computation.
 pub const OSPF_SPF_LOOPBACK_ADDRESS: &str = "203.0.113.80/32";
+/// `next-hop-reachability`: what router-b advertises with its own loopback
+/// (`OSPF_SPF_LOOPBACK_ADDRESS`) as NEXT_HOP — a TEST-NET-2 sub-block, so a
+/// log grep for it never matches `REDISTRIBUTE_PREFIX`'s /24 line and vice
+/// versa (the strings differ).
+pub const NHR_PREFIX: &str = "198.51.100.192/26";
+/// The connected subnet of `OSPF_BROADCAST_ADDRESS_A`, as nos-ribd lists it.
+pub const OSPF_BROADCAST_SUBNET: &str = "203.0.113.64/28";
 /// `abr`: a fresh prefix in a second area (reusing the same prefix would
 /// recompute to the identical next-hop and produce no new "added route").
 pub const OSPF_AREA_1: &str = "0.0.0.1";

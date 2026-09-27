@@ -18,14 +18,27 @@ pub enum RouteSource {
     /// (see `crate::server::apply_ospf_route_update`) — its own SPF-computed
     /// routes, never a directly-connected destination (see `ospf::spf`).
     Ospf,
+    /// A directly-connected prefix: the network of an address
+    /// `nos-interfaced` applied to an interface/subinterface or a broadcast
+    /// domain's SVI in this table (`reconcile::connected_entries`, from
+    /// `InterfaceRequest::GetInterfaces`/`GetBroadcastDomain`). Rebuilt
+    /// wholesale on every resync like `Static`. Its `gateway` is the local
+    /// address itself, for display only: the kernel installs a connected
+    /// route on its own the moment the address is applied, so this source is
+    /// never installed (`Rib::best_routes_for_kernel`). It exists so
+    /// `igp_costs` can tell "directly connected" (cost 0) from "unresolvable"
+    /// (absent) — RFC 4271 §9.1.2's next-hop feasibility check in `nos-bgpd`.
+    Connected,
 }
 
 impl RouteSource {
-    /// Lower wins, like an administrative distance. Static beats Bgp beats
-    /// Ospf, matching conventional (Cisco-style) router defaults: an
-    /// explicit operator override beats eBGP beats an interior IGP route.
+    /// Lower wins, like an administrative distance. Connected beats Static
+    /// beats Bgp beats Ospf, matching conventional (Cisco-style) router
+    /// defaults: a directly-connected prefix beats an explicit operator
+    /// override beats eBGP beats an interior IGP route.
     fn preference(self) -> u8 {
         match self {
+            RouteSource::Connected => 0,
             RouteSource::Static => 1,
             RouteSource::Bgp => 20,
             RouteSource::Ospf => 110,
@@ -81,7 +94,8 @@ fn diff_best(before: Option<&RibEntry>, after: Option<RibEntry>) -> BestPathChan
 /// One routing table's candidate routes, keyed by prefix, potentially with
 /// more than one source contending for a prefix. Three independent writers
 /// mutate this: `crate::reconcile::resync` (config-driven, rebuilds the
-/// whole `Static` side from scratch on every resync), and
+/// whole `Static` side — and, from `nos-interfaced`'s applied addresses,
+/// the whole `Connected` side — from scratch on every resync), and
 /// `crate::server::apply_bgp_route_update`/`apply_ospf_route_update`
 /// (push-driven, incremental). Each writer only ever touches its own
 /// `RouteSource`'s candidates via `replace_source`/`upsert`/`remove`, so
@@ -185,6 +199,28 @@ impl Rib {
             .collect()
     }
 
+    /// `best_routes` for the driver: the winner per prefix among every
+    /// candidate *except* `Connected` ones, so a `Connected` prefix is left
+    /// to the kernel's own on-link route (which exists the instant
+    /// `nos-interfaced` applies the address, and which
+    /// `driver::linux::extract_route` already ignores as an unmanaged,
+    /// gateway-less route — so it never shows up on either side of the
+    /// dump-diff), while a `Static`/`Bgp`/`Ospf` candidate shadowed by a
+    /// `Connected` one for the same prefix is still installed as before.
+    pub fn best_routes_for_kernel(&self) -> HashMap<IpNet, RibEntry> {
+        self.entries
+            .iter()
+            .filter_map(|(prefix, candidates)| {
+                candidates
+                    .iter()
+                    .filter(|e| e.source != RouteSource::Connected)
+                    .min_by_key(|e| e.source.preference())
+                    .cloned()
+                    .map(|e| (*prefix, e))
+            })
+            .collect()
+    }
+
     /// Every prefix's full candidate list, each sorted best (winner) to
     /// worst by source preference, with prefixes themselves in ascending
     /// CIDR order — for serving an unfiltered `show route <table>` query.
@@ -227,8 +263,8 @@ impl Rib {
         };
     }
 
-    /// IGP cost per prefix: its best non-BGP candidate's cost (`Static` 0,
-    /// `Ospf` its SPF metric). `Bgp` candidates never count.
+    /// IGP cost per prefix: its best non-BGP candidate's cost (`Connected`/
+    /// `Static` 0, `Ospf` its SPF metric). `Bgp` candidates never count.
     pub fn igp_costs(&self) -> Vec<(IpNet, u32)> {
         self.entries
             .iter()
@@ -383,6 +419,53 @@ mod tests {
             backup_interface_id: None,
         });
         assert_eq!(rib.best_route(&prefix).unwrap().source, RouteSource::Static);
+    }
+
+    fn entry(prefix: &str, gateway: &str, source: RouteSource) -> RibEntry {
+        RibEntry {
+            interface_id: None,
+            prefix: prefix.parse().unwrap(),
+            gateway: gateway.parse().unwrap(),
+            source,
+            backup: None,
+            backup_interface_id: None,
+        }
+    }
+
+    #[test]
+    fn connected_beats_static_for_same_prefix() {
+        let mut rib = Rib::new();
+        rib.insert(entry("10.0.0.0/24", "10.0.0.1", RouteSource::Static));
+        rib.insert(entry("10.0.0.0/24", "10.0.0.2", RouteSource::Connected));
+        let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
+        assert_eq!(
+            rib.best_route(&prefix).unwrap().source,
+            RouteSource::Connected
+        );
+        // and counts as an IGP destination at cost 0
+        assert_eq!(rib.igp_costs(), vec![(prefix, 0)]);
+    }
+
+    #[test]
+    fn best_routes_for_kernel_excludes_connected_but_falls_back_to_static_for_same_prefix() {
+        let mut rib = Rib::new();
+        rib.insert(entry("10.0.0.0/24", "10.0.0.2", RouteSource::Connected));
+        rib.insert(entry("10.0.0.0/24", "10.0.0.1", RouteSource::Static));
+        let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
+        let kernel = rib.best_routes_for_kernel();
+        assert_eq!(kernel[&prefix].source, RouteSource::Static);
+        assert_eq!(rib.best_routes()[&prefix].source, RouteSource::Connected);
+    }
+
+    #[test]
+    fn best_routes_for_kernel_omits_connected_only_prefix_entirely() {
+        let mut rib = Rib::new();
+        rib.insert(entry("10.0.0.0/24", "10.0.0.2", RouteSource::Connected));
+        rib.insert(entry("10.0.1.0/24", "10.0.0.1", RouteSource::Static));
+        let kernel = rib.best_routes_for_kernel();
+        assert_eq!(kernel.len(), 1);
+        assert!(kernel.contains_key(&"10.0.1.0/24".parse::<IpNet>().unwrap()));
+        assert_eq!(rib.best_routes().len(), 2);
     }
 
     #[test]

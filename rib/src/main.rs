@@ -142,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
     let rib = Arc::new(RwLock::new(Rib::new()));
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
+        args.watchdog_socket.clone(),
         args.table.clone(),
         rib.clone(),
         driver.clone(),

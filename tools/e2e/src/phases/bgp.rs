@@ -447,6 +447,101 @@ pub async fn redistribute_policy(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&learned(), after_b, 60).await
 }
 
+/// RFC 4271 §9.1.2 next-hop feasibility. Requires `ospf-spf` to have run:
+/// router-b's loopback (`OSPF_SPF_LOOPBACK_ADDRESS`) exists but is out of OSPF
+/// again, so router-a has no route to it. Router-b advertises `NHR_PREFIX` with
+/// that loopback as NEXT_HOP (an export policy): router-a must see the
+/// candidate and exclude it, then admit it once the loopback is back in OSPF
+/// and its own SPF route makes the next hop resolvable — with no BGP event in
+/// between, purely off the IGP poll. First checks that nos-ribd lists
+/// router-a's own connected prefixes (its eth0 subnet and its ospf SVI's) as
+/// `Connected` — what makes a directly-connected next hop resolvable at all.
+/// The kernel side of the accepted route (a gateway that is itself only
+/// reachable via another route — Linux has no recursive next hops) is out of
+/// scope here.
+pub async fn next_hop_reachability(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+
+    let body = a
+        .rest_expect(Method::GET, "/v1/routes/rt1", None, 200)
+        .await?;
+    let table: serde_json::Value = serde_json::from_str(&body)?;
+    for subnet in [SUBNET, OSPF_BROADCAST_SUBNET] {
+        let connected = table.as_array().into_iter().flatten().any(|p| {
+            p["prefix"] == subnet
+                && p["candidates"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|c| c["source"] == "Connected")
+        });
+        if !connected {
+            bail!("router-a's rt1 lists no connected route for {subnet}: {body}");
+        }
+    }
+    log("router-a's rt1 lists its eth0 and svi subnets as connected");
+
+    let next_hop = OSPF_SPF_LOOPBACK_ADDRESS
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    let file = policy_file(
+        "next-hop-loopback",
+        &format!("set this.bgp.next_hop = {next_hop}\naccept\n"),
+    )?;
+    let advertise = vec![
+        "--static-route",
+        NHR_PREFIX,
+        "--static-gateway",
+        REDISTRIBUTE_GATEWAY,
+        "--redistribute",
+        "--policy-name",
+        "next-hop-loopback",
+        "--policy-source-file",
+        &file,
+        "--export-policy",
+        "next-hop-loopback",
+    ];
+    let mut with_ospf = advertise.clone();
+    with_ospf.extend(["--ospf-loopback-profile", OSPF_PROFILE]);
+    let mut withdraw = advertise.clone();
+    withdraw.extend([
+        "--redistribute-policy",
+        "deny-all",
+        "--clear-ospf-loopback-profile",
+    ]);
+
+    let excluded = format!("candidate excluded, next hop unresolvable.*prefix={NHR_PREFIX}");
+    let loc = format!("loc-rib best path for {NHR_PREFIX} updated");
+    let (ex0, loc0) = (a.count(&excluded), a.count(&loc));
+    let (est_a, est_b) = (
+        a.count("bgp session established"),
+        b.count("bgp session established"),
+    );
+    b.provision(&advertise).await?;
+    // A new export policy restarts router-b's session.
+    reestablished(a, est_a).await?;
+    reestablished(b, est_b).await?;
+    a.wait(&format!("learned route for {NHR_PREFIX} into adj-rib-in"))
+        .await?;
+    a.wait_new(&excluded, ex0, 60).await?;
+    log("waiting 6s to confirm router-a keeps the unfeasible route out of its loc-rib");
+    a.assert_quiet(&loc, loc0, 6).await?;
+
+    log("putting router-b's loopback back into ospf: the next hop becomes resolvable via spf");
+    let route = format!("added route prefix={OSPF_SPF_LOOPBACK_ADDRESS}.*source=Some(Ospf)");
+    let r0 = a.count(&route);
+    b.provision(&with_ospf).await?;
+    a.wait_new(&route, r0, 60).await?;
+    a.wait_new(&loc, loc0, 60).await?;
+
+    log("withdrawing the prefix and taking router-b's loopback out of ospf again");
+    let withdrawn = format!("loc-rib route for {NHR_PREFIX} withdrawn");
+    let w0 = a.count(&withdrawn);
+    b.provision(&withdraw).await?;
+    a.wait_new(&withdrawn, w0, 60).await
+}
+
 /// RFC 4271 §9.2.1.1 pacing: with `mrai 30` on router-a's peer-group, the first
 /// advertisement of the prefix goes out at once, a withdrawal is never held,
 /// and a re-advertisement seconds later is held until 30s after the first.
