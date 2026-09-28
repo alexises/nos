@@ -2,6 +2,9 @@
 members = ["proto", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tools/e2e", "tcp-auth", "rpl", "log-client", "l2-socket", "lacp", "lldp", "fdb", "rest", "password", "pki"]
 resolver = "2"
 
+[workspace.package]
+license = "GPL-3.0-only"
+
 [workspace.dependencies]
 tokio       = { version = "1", features = ["full"] }
 serde       = { version = "1", features = ["derive"] }
