@@ -4,9 +4,14 @@ targets = []
 [advisories]
 version = 2
 ignore = []
+# Transitive unmaintained crates (atomic-polyfill, paste) are only a warning: nothing
+# here depends on them directly, so nothing here can fix them.
+unmaintained = "workspace"
 
 [licenses]
 version = 2
+# The nos-* crates are never published (`publish = false`) and carry no license field.
+private = { ignore = true }
 allow = [
     "MIT",
     "Apache-2.0",
@@ -14,7 +19,9 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]

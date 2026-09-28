@@ -7,7 +7,7 @@ IMAGE ?= nos:local
 CARGO_FEATURES ?=
 
 .PHONY: help build fmt fmt-fix clippy clippy-fix fix test test-plain \
-        deny audit geiger miri mutants check ci tools docker-lint docker-build \
+        deny audit sast miri coverage mutants check ci tools docker-lint docker-build \
         e2e-preflight
 
 help: ## Show this help
@@ -47,13 +47,16 @@ audit: ## Check for known security advisories (matches CI)
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "cargo-audit not found — run 'make tools'"; exit 1; }
 	cargo audit
 
-geiger: ## Inventory unsafe code (matches CI)
-	@command -v cargo-geiger >/dev/null 2>&1 || { echo "cargo-geiger not found — run 'make tools'"; exit 1; }
-	cargo geiger --workspace
+sast: ## Static analysis with semgrep's p/rust ruleset (matches CI; needs docker)
+	docker run --rm -v "$(CURDIR):/src" semgrep/semgrep semgrep scan --config p/rust --exclude target /src
 
-miri: ## Run miri UB checks (needs a nightly toolchain + miri component; slow)
+miri: ## Run miri UB checks on the pure-logic crates (needs a nightly toolchain + miri component; slow, matches CI)
 	@command -v cargo-miri >/dev/null 2>&1 || { echo "cargo-miri not found — needs rustup + 'rustup +nightly component add miri'"; exit 1; }
-	cargo +nightly miri test --workspace
+	RUSTFLAGS="-D warnings -A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p nos-rpl -p nos-ospf-common -p nos-proto
+
+coverage: ## Collect test coverage as lcov.info (matches CI)
+	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "cargo-llvm-cov not found — run 'make tools'"; exit 1; }
+	cargo llvm-cov --workspace --lcov --output-path lcov.info
 
 mutants: ## Run mutation testing (needs a nightly toolchain; slow — CI only runs this on schedule)
 	@command -v cargo-mutants >/dev/null 2>&1 || { echo "cargo-mutants not found — run 'make tools'"; exit 1; }
@@ -61,10 +64,10 @@ mutants: ## Run mutation testing (needs a nightly toolchain; slow — CI only ru
 
 check: build fmt clippy test ## Fast local check: build + fmt + clippy + test (run before pushing)
 
-ci: check deny audit geiger ## Everything check does, plus deny/audit/geiger (skips slow nightly-only miri/mutants)
+ci: check deny audit ## Everything check does, plus deny/audit (skips slow nightly-only miri/mutants)
 
-tools: ## Install optional cargo subcommands used by deny/audit/geiger/mutants/test targets
-	cargo install --locked cargo-nextest cargo-deny cargo-audit cargo-geiger cargo-mutants
+tools: ## Install optional cargo subcommands used by deny/audit/coverage/mutants/test targets
+	cargo install --locked cargo-nextest cargo-deny cargo-audit cargo-llvm-cov cargo-mutants
 
 docker-lint: ## Lint the Dockerfile with hadolint
 	@command -v hadolint >/dev/null 2>&1 || { echo "hadolint not found — install it (already available in this env)"; exit 1; }

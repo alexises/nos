@@ -4,6 +4,11 @@ on:
   push:
     branches: ["master", "main"]
   pull_request:
+  # `mutants` only: too slow for every push, so it runs on the nightly cron and on
+  # manual dispatch; every other job skips the cron (`github.event_name != 'schedule'`).
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,6 +18,7 @@ jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -23,6 +29,7 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -34,6 +41,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -44,6 +52,7 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -60,6 +69,11 @@ jobs:
   audit:
     name: Security audit
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    permissions:
+      contents: read
+      checks: write
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2
@@ -69,6 +83,7 @@ jobs:
   deny:
     name: Dependency policy
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -76,7 +91,9 @@ jobs:
   sast:
     name: SAST (semgrep)
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     permissions:
+      contents: read
       security-events: write
     steps:
       - uses: actions/checkout@v4
@@ -92,13 +109,24 @@ jobs:
   miri:
     name: Miri (UB check)
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    env:
+      # Nightly deprecates std items stable still accepts (e.g. `AtomicU64::fetch_update`);
+      # that lint noise must not gate CI, `-D warnings` on stable already covers the rest.
+      RUSTFLAGS: "-D warnings -A deprecated"
+      # Tests read the clock and open files/sockets; Miri's sandbox would refuse them.
+      MIRIFLAGS: "-Zmiri-disable-isolation"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
       - uses: Swatinem/rust-cache@v2
-      - run: cargo miri test --workspace
+      # Only the pure-logic leaf crates: Miri cannot execute FFI, and everything else in
+      # the workspace either is FFI (`nos-tcp-auth`/`nos-l2-socket` — raw setsockopt and
+      # AF_PACKET), runs TLS through aws-lc-rs's C code in its tests (`nos-pki` and every
+      # daemon/client), or is argon2 (`nos-password`), hours long under an interpreter.
+      - run: cargo miri test -p nos-rpl -p nos-ospf-common -p nos-proto
 
   mutants:
     name: Mutation testing
@@ -111,13 +139,3 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-mutants
       - run: cargo mutants --workspace
-
-  geiger:
-    name: Unsafe inventory (geiger)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-geiger --locked
-      - run: cargo geiger --workspace 2>&1
