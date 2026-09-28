@@ -1,5 +1,6 @@
 [package]
 name = "nos-log-client"
+publish = false
 version = "0.1.0"
 edition = "2021"
 

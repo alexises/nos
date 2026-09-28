@@ -1,5 +1,6 @@
 [package]
 name    = "nos-rest"
+publish = false
 version = "0.1.0"
 edition = "2021"
 
@@ -41,4 +42,4 @@ tokio-rustls = { workspace = true }
 hyper        = { version = "1", features = ["client"] }
 nos-pki  = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }
-nos-config = { path = "../config" }
+nos-config = { path = "../config", version = "0.1.0" }
