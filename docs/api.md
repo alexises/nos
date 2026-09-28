@@ -1,6 +1,6 @@
 # The REST API
 
-`nos-restd` serves the whole router over HTTPS as JSON: every `show` query, the full transaction and configuration-editing workflow, and the live log stream. This page explains how to enable it, how to authenticate, and how to use it. Every example was run with `curl` against a real router.
+The REST API serves the whole router over HTTPS as JSON: every `show` query, the full transaction and configuration-editing workflow, and the live log stream. This page explains how to enable it, how to authenticate, and how to use it. Every example was run with `curl` against a real router.
 
 - [Enabling the API](#enabling-the-api)
 - [What a client needs](#what-a-client-needs)
@@ -17,7 +17,7 @@
 
 ## Enabling the API
 
-The API is off until you enable it for a routing table. `nos-restd` then runs inside that table's VRF and listens on exactly one address, which must be configured on an interface in the same routing table. It never listens on a wildcard address.
+The API is off until you enable it for a routing table. It then runs inside that table's VRF and listens on exactly one address, which must be configured on an interface in the same routing table. It never listens on a wildcard address.
 
 ```
 edge-1> configure rest
@@ -26,13 +26,9 @@ edge-1(rest)> commit
 transaction 'rest' committed
 ```
 
-| Command | Effect |
-|---|---|
-| `set routing-table <table> rest-api address <ip>` | Listen on `<ip>`, port 8080 (the default). |
-| `set routing-table <table> rest-api address <ip> port <port>` | Listen on `<ip>:<port>`. |
-| `delete routing-table <table> rest-api` | Stop the API for this table. |
+`set routing-table <table> rest-api address <ip>` listens on port 8080; add `port <port>` to choose another. `delete routing-table <table> rest-api` turns the API off again.
 
-If the address is not configured in the VRF yet, `nos-restd` keeps retrying every second and logs `rest api not listening yet: …` until it is. When the listener comes up it logs `rest api listening table=rt1 vrf=… address=10.50.0.2 port=8080`. Enable the API on a management routing table and address: every request needs a client certificate, but the address you choose decides who can reach the port in the first place.
+If the address is not configured in the VRF yet, the API keeps retrying every second and logs `rest api not listening yet: …` until it is. When the listener comes up it logs `rest api listening table=rt1 vrf=… address=10.50.0.2 port=8080`. Enable the API on a management routing table and address: every request needs a client certificate, but the address you choose decides who can reach the port in the first place.
 
 ## What a client needs
 
@@ -45,7 +41,7 @@ If the address is not configured in the VRF yet, `nos-restd` keeps retrying ever
   ```sh
   docker cp router-a:/run/nos/pki/rest-ca.crt .
   ```
-  It is regenerated whenever `nos-watchdogd` restarts; copy it again after a restart.
+  It changes whenever the router restarts, so copy it again after a restart.
 - **A client certificate** for a NOS user, on every request except `POST /v1/login`. Without one, every route, including `/openapi.json` and `/swagger-ui/`, answers 401:
   ```
   $ curl -sS --cacert rest-ca.crt -i $B/v1/config
@@ -143,24 +139,19 @@ $ $C $B/v1/bgp/summary | jq .
 
 ## Reading state: the show endpoints
 
-All are `GET`. Each returns the same data as the matching shell command, as JSON.
+All are `GET`, and each returns the same data as the matching shell command, as JSON:
 
-| Endpoint | Returns | Shell equivalent |
-|---|---|---|
-| `/v1/config` | The running config (users show only name and password hash) | `show config` |
-| `/v1/routes/{table}` | Every prefix with every candidate route, best first | `show route <table>` |
-| `/v1/routes/{table}/{addr}` | Longest-prefix match; 404 if nothing covers `addr` | `show route <table> <address>` |
-| `/v1/interfaces`, `/v1/interfaces/{name}` | Applied interface state | `show interface [<name>]` |
-| `/v1/port-aggregates`, `/v1/port-aggregates/{name}` | Bonds and members | `show port-aggregate [<name>]` |
-| `/v1/lacp`, `/v1/lacp/{name}` | LACP state per aggregate | `show lacp [<name>]` |
-| `/v1/lldp/neighbors` | LLDP neighbours | `show lldp neighbors` |
-| `/v1/bgp/summary` | BGP peers, per instance | `show bgp brief` |
-| `/v1/bgp/evpn` | Received EVPN routes, per instance | `show bgp evpn` |
-| `/v1/ospf/neighbors`, `/v1/ospf/database` | OSPF neighbours / LSDB, per instance | `show ospf neigh` / `show ospf database` |
-| `/v1/ospfv3/neighbors`, `/v1/ospfv3/database` | The same for OSPFv3 | `show ospfv3 neigh` / `show ospfv3 database` |
-| `/v1/fdb/{domain}` | A broadcast domain's MAC table and flood list | `show fdb <domain>` |
-| `/v1/logs?source=&limit=` | Log entries, optionally from one source, optionally only the last `limit` | `show log [<source>]` |
-| `/v1/logs/follow?source=&limit=` | The same, then new entries live (see [below](#following-the-log-server-sent-events)) | `show log [<source>] --follow` |
+- `/v1/config`: the running config. Users show only their name and password hash.
+- `/v1/routes/{table}`: every prefix with every candidate route, best first. `/v1/routes/{table}/{addr}` is the longest-prefix match for one address, or `404` if nothing covers it.
+- `/v1/interfaces` and `/v1/interfaces/{name}`: applied interface state.
+- `/v1/port-aggregates[/{name}]` and `/v1/lacp[/{name}]`: bonds, their members and LACP state.
+- `/v1/lldp/neighbors`: LLDP neighbours.
+- `/v1/bgp/summary` and `/v1/bgp/evpn`: BGP peers and received EVPN routes, per instance.
+- `/v1/ospf/neighbors`, `/v1/ospf/database`, and the same under `/v1/ospfv3/`: neighbours and LSDB, per instance.
+- `/v1/fdb/{domain}`: a broadcast domain's MAC table and flood list.
+- `/v1/logs?source=&limit=`: log entries, optionally from one source and only the last `limit`. `/v1/logs/follow` does the same, then streams new entries (see [below](#following-the-log-server-sent-events)).
+
+The shell command for each is listed in [CLI ↔ API mapping](cli-api-mapping.md#operational-commands).
 
 ```sh
 $ $C $B/v1/routes/rt1
@@ -174,11 +165,11 @@ $ $C "$B/v1/logs?source=nos-bgpd%5Br1%5D&limit=1" | jq '.[0].source'
 
 The `source` filter must match exactly, and per-instance sources contain brackets, so URL-encode them (`nos-bgpd[r1]` becomes `nos-bgpd%5Br1%5D`).
 
-The endpoints that cover every instance (`bgp`, `ospf`, `ospfv3`) return one entry per configured instance. An instance whose process is not running gets an error entry of its own instead of failing the whole request. An endpoint whose single backing process is unreachable returns `503`.
+The endpoints that cover every instance (`bgp`, `ospf`, `ospfv3`) return one entry per configured instance. An instance that cannot answer gets an error entry of its own rather than failing the whole request. If the service behind an endpoint is unavailable, the answer is `503`.
 
 ## Changing configuration: transactions
 
-Configuration changes over REST use the same named transactions as the shell (see [Concepts: Named transactions](concepts.md#named-transactions)):
+Configuration changes over REST use the same named transactions as the shell (see [Concepts: Named transactions](concepts.md#working-with-transactions)):
 
 | Request | Effect | Success |
 |---|---|---|
@@ -225,18 +216,15 @@ Every part of the configuration has a URL under `/v1/transactions/{tx}/`, built 
 - **The body is the JSON form of that part of the config**, exactly as `GET` returns it: a string for `hostname`, an object for a routing table, and so on. Every schema is in the [OpenAPI document](#the-openapi-document).
 - `diff` and `commit` are reserved: they are operations, never config sections.
 
-Some paths on the example router:
+Some paths on the example router, relative to `/v1/transactions/{tx}/`:
 
-| URL (after `/v1/transactions/{tx}/`) | Is |
-|---|---|
-| `hostname` | `"edge-1"` |
-| `routing-table/rt1` | the whole `rt1` object |
-| `routing-table/rt1/rest-api` | `{"address":"10.50.0.2","port":8080}` |
-| `bgp-instance/r1/peer-group/pg1/hold-time` | `null` (not set, so the default applies) |
-| `interface/eth0/subinterface/0/address` | `[{"address":"10.50.0.2/24","label":null}]` |
-| `static-routing-instance/s1/route/192.0.2.0%2F24` | `{"gateway":"10.50.0.3","subnet":"192.0.2.0/24"}` |
-| `ospf-instance/o1/area/0.0.0.0/profile/p1` | one OSPF interface profile |
-| `user/alice` | a user; a clear `password` in a `PUT` is hashed on the way in |
+- `hostname` is `"edge-1"`.
+- `routing-table/rt1` is the whole `rt1` object, and `routing-table/rt1/rest-api` is `{"address":"10.50.0.2","port":8080}`.
+- `bgp-instance/r1/peer-group/pg1/hold-time` is `null`: not set, so the default applies.
+- `interface/eth0/subinterface/0/address` is `[{"address":"10.50.0.2/24","label":null}]`.
+- `static-routing-instance/s1/route/192.0.2.0%2F24` is `{"gateway":"10.50.0.3","subnet":"192.0.2.0/24"}`.
+- `ospf-instance/o1/area/0.0.0.0/profile/p1` is one OSPF interface profile.
+- `user/alice` is a user; a clear `password` sent in a `PUT` is hashed on the way in.
 
 A `DELETE` removes that part of the config, and a `GET` of a path that does not exist is `404`:
 
@@ -281,9 +269,7 @@ The usual safe pattern for a script is: open the transaction and note its `ETag`
 
 Some requests change live state without touching configuration:
 
-| Request | Effect | Shell equivalent |
-|---|---|---|
-| `POST /v1/bgp/{instance}/peer/{peer}/soft-in` | Ask the peer to resend its routes (RFC 2918 route refresh). `404` if the peer is not configured or its session is not Established; `503` if the instance is not running. | `clear bgp <instance> <peer> soft-in` |
+`POST /v1/bgp/{instance}/peer/{peer}/soft-in` asks a peer to resend its routes (an RFC 2918 route refresh), like `clear bgp <instance> <peer> soft-in` in the shell. It answers `404` if the peer is not configured or its session is not Established, and `503` if the instance is not running.
 
 ```sh
 $ $C -X POST $B/v1/bgp/r1/peer/10.50.0.3/soft-in
@@ -313,19 +299,17 @@ Every error response is an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) pr
 {"type":"about:blank","title":"Unprocessable Entity","status":422,"detail":"validation failed:\nrouting_tables[0].bgp_instance: referenced bgp instance does not exist\n"}
 ```
 
-`title` is the HTTP reason phrase; `detail` says what went wrong. The status codes used:
+`title` is the HTTP reason phrase and `detail` says what went wrong. These are the status codes used:
 
-| Status | When |
-|---|---|
-| `400 Bad Request` | Malformed body, CSR or `If-Match` value; a body that does not fit the schema at that path |
-| `401 Unauthorized` | No client certificate, or its user no longer exists; on `/v1/login`, wrong user or password |
-| `404 Not Found` | No such transaction, config path, route, interface, peer, … |
-| `405 Method Not Allowed` | The path exists but not with this method (the `Allow` header lists what does) |
-| `412 Precondition Failed` | `If-Match` did not match the transaction's generation |
-| `422 Unprocessable Entity` | Commit refused by validation; the transaction stays open |
-| `429 Too Many Requests` | Too many failed logins for this user; see `Retry-After` |
-| `502 Bad Gateway` | A daemon answered with something unexpected |
-| `503 Service Unavailable` | A daemon the request needs is not running (or `nos-configd` is unreachable, so the user cannot be checked) |
+- `400 Bad Request`: a malformed body, CSR or `If-Match` value, or a body that does not fit the schema at that path.
+- `401 Unauthorized`: no client certificate, or its user no longer exists. On `/v1/login`: wrong user or password.
+- `404 Not Found`: no such transaction, config path, route, interface, peer, and so on.
+- `405 Method Not Allowed`: the path exists, but not with this method. The `Allow` header lists what does.
+- `412 Precondition Failed`: `If-Match` did not match the transaction's generation.
+- `422 Unprocessable Entity`: validation refused the commit. The transaction stays open.
+- `429 Too Many Requests`: too many failed logins for this user. See `Retry-After`.
+- `502 Bad Gateway`: the router answered with something unexpected.
+- `503 Service Unavailable`: a service the request needs is not running, or users cannot be checked right now.
 
 ## The OpenAPI document
 
@@ -333,6 +317,6 @@ Every route above, and every config-tree path with its JSON schema, is described
 
 - **In this repository**: [`openapi.json`](openapi.json). A test keeps this copy identical to what the code serves; `make docs-fix` regenerates it. You can open it in any OpenAPI viewer, such as editor.swagger.io.
 - **On a running router**: `GET /openapi.json`, for example `$C $B/openapi.json`. It needs a client certificate like every other route.
-- **Browsable**: `https://<address>:<port>/swagger-ui/`, an interactive explorer served by `nos-restd` itself, with no internet access needed. A browser needs your REST client certificate and key installed, and `rest-ca.crt` trusted, before it can open it.
+- **Browsable**: `https://<address>:<port>/swagger-ui/`, an interactive explorer served by the router itself, with no internet access needed. A browser needs your REST client certificate and key installed, and `rest-ca.crt` trusted, before it can open it.
 
 The document has 206 paths: the fixed routes listed on this page and one path per config-tree location (`/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/hold-time`, and so on). Use it as the complete field-level reference for request and response bodies.

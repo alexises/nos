@@ -22,7 +22,7 @@ docker compose run --rm cli          # the shell in its own container, sharing t
 docker exec -it nos-watchdog nos     # or: run it inside the router's own container
 ```
 
-`nos` finds everything through the watchdog's socket (`--watchdog-socket`, default `/run/nos/watchdog.sock`). It trusts the internal CA certificate (`--pki-ca`, default `/run/nos/pki/ca.crt`). Both flags are needed only if you have moved those files.
+`nos` needs no options on a standard router. It has two, `--watchdog-socket` (default `/run/nos/watchdog.sock`) and `--pki-ca` (default `/run/nos/pki/ca.crt`), for the case where those files have been moved.
 
 The shell first asks for a user name and password:
 
@@ -43,18 +43,17 @@ login incorrect
 Error: too many failed login attempts
 ```
 
-If `nos-watchdogd` cannot be reached, the shell refuses to start: nothing works without a login. On a freshly installed router the only user is `admin`, password `admin`. See [Concepts: Users and logging in](concepts.md#users-and-logging-in).
+If the router's login service cannot be reached, the shell refuses to start: nothing works without a login. On a freshly installed router the only user is `admin`, password `admin`. See [Concepts: Users and logging in](concepts.md#users-and-logging-in).
 
 ## The two modes
 
-The shell is in one of two modes, and the prompt shows which:
+The shell is always in one of two modes, and the prompt shows which.
 
-| Mode | Prompt | What you can do |
-|---|---|---|
-| operational | `edge-1>` | `show …` commands, `clear …`, `save`, and `configure` to enter configuration mode |
-| configuration | `edge-1(doc2)>`, `edge-1(doc2/bgp:r1)>` | Everything above except `save` and `configure`, plus `edit`/`set`/`delete`, `show this`, `diff`, `commit`, `discard` |
+In **operational mode** the prompt is just the hostname, such as `edge-1>`. Here you look at the router with `show …`, act on live sessions with `clear …`, write the running config to disk with `save`, and enter configuration mode with `configure`.
 
-`edge-1` is the router's `hostname`, so the prompt changes when a commit changes it. In configuration mode the part in parentheses is the transaction name, followed by where you are in the config tree (see [Navigating](#navigating-edit-up-top)).
+In **configuration mode** the prompt adds the transaction name and your position in the config tree, such as `edge-1(doc2)>` or `edge-1(doc2/bgp:r1)>`. Here you change the transaction with `edit`, `set` and `delete`, inspect it with `show this` and `diff`, and finish with `commit` or `discard`. The `show` commands still work; `save` and `configure` do not.
+
+`edge-1` is the router's `hostname`, so the prompt changes when a commit changes it.
 
 Commands that belong to the other mode are refused:
 
@@ -104,11 +103,9 @@ Step by step:
 
 Three verbs change configuration:
 
-| Verb | Meaning |
-|---|---|
-| `edit <object>` | Create the object if it does not exist, and move into it (see [Navigating](#navigating-edit-up-top)). |
-| `set <object> <field> <value>` | Set a field, or add an element to a list, such as an address or a route. The object must already exist; create it with `edit` first. |
-| `delete <object> [<field>]` | Remove an object, a list element, or a field. A removed field goes back to its default. |
+- `edit <object>` creates the object if it does not exist, and moves into it (see [Navigating](#navigating-edit-up-top)).
+- `set <object> <field> <value>` sets a field, or adds an element to a list such as an address or a route. The object must already exist, so create it with `edit` first.
+- `delete <object> [<field>]` removes an object, a list element or a field. A removed field goes back to its default.
 
 Every `set`/`delete` command has two spellings:
 
@@ -138,33 +135,19 @@ lab-1(doc3/bgp:r1)> up
 lab-1(doc3)>
 ```
 
-| Command | Effect |
-|---|---|
-| `edit <object>` | Create the object if needed, then move into it. |
-| `up` | Go up one level. |
-| `top` | Go straight back to the top of the transaction. |
-| `show this` | Show the object you are in, or the whole transaction when you are at the top. |
-| `delete` (on its own) | Delete the object you are in, and move to its parent. |
+`up` goes back one level and `top` goes straight back to the top of the transaction. `show this` shows the object you are in, or the whole transaction when you are at the top. `delete` on its own deletes the object you are in and moves you to its parent.
 
-Where `edit` can go:
-
-| Object | Nested objects |
-|---|---|
-| `bgp instance <name>` | `peer-group <group>` |
-| `ospf instance <name>`, `ospfv3 instance <name>` | `area <area-id>`, then `profile <name>` |
-| `interface <name>` | `interface <name>.<tag>` (a subinterface) |
-| `routing-table`, `static-routing-instance`, `broadcast domain`, `switching-profile`, `port-aggregate`, `policy-definition`, `community-alias`, `community-group`, `as-path-list`, `prefix-list` | none |
+Most objects are a single level deep. Three have objects nested inside them. A BGP instance contains peer-groups (`edit peer-group <group>`). An OSPF or OSPFv3 instance contains areas (`edit area <area-id>`), and each area contains interface profiles (`edit profile <name>`). A physical interface contains VLAN subinterfaces, which you reach as `edit interface <name>.<tag>`.
 
 ## Transaction commands
 
-| Command | Mode | What it does |
-|---|---|---|
-| `configure <name> [from blank\|current]` | operational | Open transaction `<name>`, or resume it if it already exists (the shell prints `resuming transaction '<name>'`). A new transaction starts from the running config (`current`, the default) or empty (`blank`). |
-| `show this` | configuration | Show the current object, or the whole transaction. A transaction with edits is labelled `(uncommitted changes)`. |
-| `diff` | configuration | Show what committing would change compared with the running config: `-` removed, `+` added, with unchanged enclosing sections shown for context. |
-| `commit` | configuration | Validate and apply. If it succeeds you are back in operational mode. If it fails, the errors are printed and you stay in the transaction. |
-| `discard`, `abort` | configuration | Delete the transaction. The running config is not touched. |
-| `save` | operational | Write the running config to `/var/lib/nos/config.yaml`. |
+`configure <name>` opens the transaction `<name>`, or resumes it if it already exists; the shell then prints `resuming transaction '<name>'`. A new transaction starts as a copy of the running config. Add `from blank` to start it empty instead (`from current` is the default).
+
+In the transaction, `show this` shows your current object or the whole transaction, labelled `(uncommitted changes)` once you have edited it. `diff` shows what a commit would change: `-` for removed lines, `+` for added ones, with the enclosing section names for context.
+
+`commit` validates the transaction and applies it. If it succeeds, you are back in operational mode. If it fails, the errors are printed and you stay in the transaction. `discard` (or `abort`) deletes the transaction without touching the running config.
+
+Back in operational mode, `save` writes the running config to `/var/lib/nos/config.yaml` so it survives a restart.
 
 A failed commit leaves everything as it was, so you can fix the problem and commit again:
 
@@ -227,30 +210,24 @@ hostname: draft
 - **`?`**, pressed at any point while typing, shows the commands that can complete what you have typed so far, with their syntax and summary. It does not submit the line. Press it a second time for the full description. Press Enter to close the list without running anything.
 - **Tab** completes keywords. Where a command expects the name of an existing object (BGP instance, peer-group, routing table, interface, and so on), it also offers the names in your transaction.
 
-The descriptions come from the router itself (`nos-configd`), so they match the version you are running.
+The descriptions come from the router itself, so they always match the version you are running.
 
 Known gap: some commands work but are not yet listed by `help`, `?` or Tab. These are the routing-policy objects (`policy-definition`, `prefix-list`, `community-alias`, `community-group`, `as-path-list`), `import-policy`/`export-policy` on a peer-group, the damping parameters, and `redistribute … policy`. The per-protocol pages document them; issue #109 tracks adding them to the help.
 
 ## Operational commands
 
-These work in both modes and never change anything, except `clear`. The REST equivalent of each is in [CLI ↔ API mapping](cli-api-mapping.md#operational-commands).
+These work in both modes. Only `clear` acts on anything, and it never changes configuration. The REST equivalent of each is in [CLI ↔ API mapping](cli-api-mapping.md#operational-commands).
 
-| Command | Shows |
-|---|---|
-| `show config` | The whole running config. |
-| `show route <table>` | Every prefix in a routing table, with every candidate route best first; `*` marks the selected one. |
-| `show route <table> <address>` | The longest-prefix match for one address. |
-| `show interface [<name>]` | What `nos-interfaced` has actually applied: addresses, routing table, MTU, per subinterface. |
-| `show port-aggregate [<name>]` | Bonds and their members. |
-| `show lacp [<name>]` | LACP state per member port of each `lacp`-mode aggregate. |
-| `show lldp neighbors` | Every LLDP neighbour heard, on every interface. |
-| `show bgp brief` | One line per BGP peer across every instance: state, remote AS, uptime, negotiated hold time. |
-| `show bgp evpn` | EVPN routes received from BGP peers. |
-| `show ospf neigh`, `show ospfv3 neigh` | OSPF/OSPFv3 neighbours and their state. |
-| `show ospf database`, `show ospfv3 database` | The LSA headers in each LSDB. |
-| `show fdb <domain>` | An EVPN broadcast domain's MAC table and flood list. |
-| `show log [<source>] [--follow]` | Collected log entries, all sources or just one (see [Concepts: Logs](concepts.md#logs)). With `--follow` it keeps printing new entries until Ctrl-C. |
-| `clear bgp <instance> <peer> soft-in` | Ask a live BGP session to resend its routes (an RFC 2918 route refresh). Configuration is not changed. |
+- `show config`: the whole running config.
+- `show route <table>`: every prefix in a routing table, with every candidate route best first; `*` marks the one in use. `show route <table> <address>` looks up the longest-prefix match for one address.
+- `show interface [<name>]`: what is actually applied to each interface and subinterface: addresses, routing table, MTU.
+- `show port-aggregate [<name>]` and `show lacp [<name>]`: bonds, their members, and LACP negotiation state.
+- `show lldp neighbors`: every LLDP neighbour heard, on every interface.
+- `show bgp brief`: one line per BGP peer across every instance, with state, remote AS, uptime and hold time. `show bgp evpn` lists received EVPN routes.
+- `show ospf neigh` and `show ospf database`, and their `ospfv3` counterparts: neighbours and their state, and the LSA headers in each LSDB.
+- `show fdb <domain>`: an EVPN broadcast domain's MAC table and flood list.
+- `show log [<source>] [--follow]`: the router's log, all sources or just one (see [Concepts: Logs](concepts.md#logs)). With `--follow` it keeps printing new entries until Ctrl-C.
+- `clear bgp <instance> <peer> soft-in`: ask a live BGP session to resend its routes (an RFC 2918 route refresh).
 
 Examples from a running router:
 
@@ -267,13 +244,11 @@ lab-1> show log nos-configd
 …
 ```
 
-When the process behind a `show` command is not running, for example an instance that was just deleted, the shell says so for that instance and still shows the rest.
+If one instance cannot answer, for example because it was just deleted, the shell says so for that instance and still shows the rest.
 
 ## Errors
 
-| Message | Meaning |
-|---|---|
-| `error: unknown command: '…' (type 'help' for a list)` | No command matches these exact tokens. Check spelling and argument count with `?`. |
-| `error: not in configuration mode — use 'configure <name>' first` | You used a configuration command in operational mode. |
-| `error: nos-configd reported an error: edit failed: bgp instance 'r7' not found` | `set` on an object that does not exist yet. Create it with `edit` first. |
-| `error: nos-configd reported an error: validation failed: …` | The commit was refused. Each line gives the path in the tree and the reason. The transaction is still open. |
+- `error: unknown command: '…' (type 'help' for a list)`: no command matches these exact words. Check spelling and the number of arguments with `?`.
+- `error: not in configuration mode — use 'configure <name>' first`: you used a configuration command in operational mode.
+- `error: nos-configd reported an error: edit failed: bgp instance 'r7' not found`: you used `set` on an object that does not exist yet. Create it with `edit` first.
+- `error: nos-configd reported an error: validation failed: …`: the commit was refused. Each line gives the place in the tree and the reason. The transaction is still open.

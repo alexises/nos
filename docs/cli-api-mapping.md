@@ -1,6 +1,6 @@
 # CLI ↔ API mapping
 
-The shell and the REST API are two clients of the same `nos-configd` and the same daemons (see [Concepts](concepts.md#what-runs-on-a-router)). This page shows the REST equivalent of each CLI operation, and how to turn a CLI configuration command into a URL. It ends with one change made from both front ends at once.
+The shell and the REST API are equivalent ways into the same router. This page shows the REST equivalent of each CLI operation, and how to turn a CLI configuration command into a URL. It ends with one change made from both front ends at once.
 
 The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-complete-session-with-curl).
 
@@ -24,7 +24,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show log [<source>] --follow` | `GET /v1/logs/follow[?source=<source>]` (Server-Sent Events) |
 | `clear bgp <instance> <peer> soft-in` | `POST /v1/bgp/{instance}/peer/{peer}/soft-in` |
 
-The shell formats the data as text; REST returns it as JSON. The data is the same, because both ask the same daemon the same question. For example, `show bgp brief`'s line
+The shell formats the data as text and REST returns it as JSON, but the data is the same. For example, `show bgp brief`'s line
 
 ```
   10.50.0.3 AS 65002 peer-group pg1 Established uptime 00:02:21 hold-time 90
@@ -115,15 +115,15 @@ The `ETag` is `"1"` because the shell's single `set` was the transaction's first
 
 ## Operations with no counterpart
 
-| Only in the CLI | Why, and what to do over REST |
-|---|---|
-| `save` | The REST API has no save endpoint. Commits over REST are live immediately, but they are not written to `/var/lib/nos/config.yaml` until someone runs `save` in the shell. Until then, they are lost if the router restarts. |
-| `help`, `?`, Tab | Use the [OpenAPI document](api.md#the-openapi-document) or `/swagger-ui/`. |
-| `edit`, `up`, `top` | Not needed: every URL is absolute (see above). |
+Only in the CLI:
 
-| Only in the REST API | Why |
-|---|---|
-| `If-Match` / `If-None-Match` | Conditional edits for scripts that must not overwrite each other. The shell always uses last-write-wins. |
-| `PUT /v1/transactions/{tx}` | Replace the whole config in one request, for example from a template. |
-| `POST /v1/renew` | Certificate renewal. The shell renews its own certificate automatically. |
-| JSON diff | `GET …/diff` returns the diff as structured data; the shell renders the same diff as text. |
+- `save`. The REST API has no save endpoint. Commits over REST are live immediately, but they are not written to `/var/lib/nos/config.yaml` until someone runs `save` in the shell; until then, a router restart loses them.
+- `help`, `?` and Tab. Over REST, use the [OpenAPI document](api.md#the-openapi-document) or `/swagger-ui/`.
+- `edit`, `up` and `top`. They are not needed, because every URL is absolute (see above).
+
+Only in the REST API:
+
+- `If-Match` and `If-None-Match`, for conditional edits by scripts that must not overwrite each other. The shell always lets the last write win.
+- `PUT /v1/transactions/{tx}`, which replaces the whole config in one request, for example from a template.
+- `POST /v1/renew`, to renew a certificate. The shell renews its own automatically.
+- `GET …/diff` returns the diff as structured JSON. The shell shows the same diff as text.

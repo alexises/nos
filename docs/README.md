@@ -1,26 +1,22 @@
 # NOS user documentation
 
-This is the operator's documentation for NOS: how to log in, configure the router and read its state back. You can do all of that from the interactive shell (`nos`) or from the REST API (`nos-restd`). The two are different front ends to the same configuration store: whatever you can configure in one, you can configure in the other, and they share the same transactions.
+This is the operator's documentation for NOS: how to log in, configure the router and read its state back. You can do all of that from the interactive shell (`nos`) or from the REST API. The two are equivalent: whatever you can configure in one, you can configure in the other, and they share the same transactions.
 
-It is written for network engineers who know BGP, OSPF, VLANs and VRFs, but not NOS. How NOS is built internally (process design, IPC protocol, RFC implementation notes) is documented in the `CLAUDE.md` files next to the source, not here.
+It is written for network engineers who know BGP, OSPF, VLANs and VRFs, but not NOS. How NOS is built internally is documented in [`CLAUDE.md`](../CLAUDE.md), not here.
 
 ## Start here
 
 Read these in order the first time:
 
-1. **[Concepts](concepts.md)**: what runs on a NOS router, how configuration works (the running config, named transactions, commit, save), what a routing table is, and how users and certificates work. Everything else assumes this page.
+1. **[Concepts](concepts.md)**: how configuration works (the running config, named transactions, commit, save), what a routing table is, users and login, and where the logs are. Everything else assumes this page.
 2. **[The CLI](cli.md)**: logging in to the `nos` shell, operational vs configuration mode, navigating the config tree, the transaction commands, `help` / `?` / Tab, and every `show` command.
 3. **[The REST API](api.md)**: enabling the API, getting a client certificate, the config tree as URLs, transactions with `ETag`/`If-Match`, errors, the live log stream, and the OpenAPI document.
 4. **[CLI ↔ API mapping](cli-api-mapping.md)**: the REST equivalent of every CLI operation, how a `set` command becomes a URL, and one change done both ways.
 
 ## Reference material
 
-| What | Where |
-|---|---|
-| OpenAPI 3 document for the REST API (the checked-in copy) | [`openapi.json`](openapi.json) |
-| The same document, live on a router | `GET https://<address>:<port>/openapi.json` (see [The REST API](api.md#the-openapi-document)) |
-| Browsable API explorer on a router | `https://<address>:<port>/swagger-ui/` |
-| Built-in help for each command | `help` or `?` in the shell (see [The CLI](cli.md#getting-help-help--and-tab)) |
+- The OpenAPI 3 document for the REST API is checked in as [`openapi.json`](openapi.json). A running router serves the same document at `https://<address>:<port>/openapi.json`, and a browsable explorer at `https://<address>:<port>/swagger-ui/` (see [The REST API](api.md#the-openapi-document)).
+- Every shell command has built-in help: type `help`, or press `?` while typing (see [The CLI](cli.md#getting-help-help--and-tab)).
 
 `openapi.json` is regenerated from the code and checked by a test, so it always matches what `nos-restd` serves. After changing the API, run `make docs-fix` to update it.
 
