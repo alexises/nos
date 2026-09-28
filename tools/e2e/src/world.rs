@@ -108,11 +108,29 @@ impl World {
         self.start(B, None, watchdog_args).await
     }
 
+    const CONTAINERS: [&'static str; 7] = [
+        "router-a", "router-b", "router-c", "router-r", "router-g", CE_HOST, H_HOST,
+    ];
+
+    /// On a group failure: the last `n` `docker logs` lines of every container
+    /// that exists (running or not), so a router whose REST API never came up
+    /// still explains itself before `down` removes it.
+    pub async fn dump_docker_logs(&self, n: usize) {
+        for name in Self::CONTAINERS {
+            let Ok(out) = self.dock.logs(name).await else {
+                continue;
+            };
+            println!("=== docker logs {name} ===");
+            let lines: Vec<&str> = out.lines().collect();
+            for line in &lines[lines.len().saturating_sub(n)..] {
+                println!("{line}");
+            }
+        }
+    }
+
     pub async fn down(&mut self) {
         self.routers.clear();
-        for name in [
-            "router-a", "router-b", "router-c", "router-r", "router-g", CE_HOST, H_HOST,
-        ] {
+        for name in Self::CONTAINERS {
             self.dock.container_remove(name).await;
             self.dock.volume_remove(&format!("{name}-run")).await;
             self.dock.volume_remove(&format!("{name}-data")).await;

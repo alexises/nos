@@ -41,6 +41,9 @@ async fn dispatch(cmd: &str, n: usize) -> anyhow::Result<()> {
         "all" => run_all(&mut w, phases::ALL).await,
         group if phases::group(group).is_some() => {
             let result = run_all(&mut w, phases::group(group).unwrap_or_default()).await;
+            if result.is_err() {
+                w.dump_docker_logs(n).await;
+            }
             // Tear down whether it passed or failed; VERIFY_E2E_KEEP=1 keeps
             // the containers for `nos-e2e logs` / manual inspection.
             if std::env::var("VERIFY_E2E_KEEP").as_deref() != Ok("1") {

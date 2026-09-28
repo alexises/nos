@@ -188,14 +188,17 @@ impl Router {
 
     pub async fn wait_ready(&self) -> anyhow::Result<()> {
         log(format!("waiting for {}'s REST API", self.name()));
+        let mut last = String::new();
         for _ in 0..120 {
-            if let Ok((200, _)) = self.rest(Method::GET, "/v1/config", None).await {
-                return Ok(());
-            }
+            last = match self.rest(Method::GET, "/v1/config", None).await {
+                Ok((200, _)) => return Ok(()),
+                Ok((status, body)) => format!("status {status}: {body}"),
+                Err(e) => format!("{e:#}"),
+            };
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         bail!(
-            "{}: REST API never came up on {}",
+            "{}: REST API never came up on {}: last error: {last}",
             self.name(),
             self.rest.base()
         )
