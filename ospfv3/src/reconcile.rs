@@ -1,4 +1,3 @@
-use std::ffi::CString;
 use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -498,16 +497,9 @@ fn subinterface_kernel_interface(interface: &str, tag: u16) -> String {
 /// transient condition, not an error — retried by the caller's periodic
 /// re-apply tick).
 fn kernel_ifindex(name: &str) -> Option<u32> {
-    let cname = CString::new(name).ok()?;
-    #[allow(unsafe_code)]
-    // SAFETY: `cname` is a valid, NUL-terminated C string owned for the
-    // duration of this call, matching `if_nametoindex`'s contract.
-    let idx = unsafe { libc::if_nametoindex(cname.as_ptr()) };
-    if idx == 0 {
-        None
-    } else {
-        Some(idx)
-    }
+    nos_l2_socket::if_index(name)
+        .ok()
+        .and_then(|i| u32::try_from(i).ok())
 }
 
 /// Local copy of `nos-watchdog::supervisor::wait_or_shutdown` — not

@@ -199,7 +199,9 @@ fn payload_of_foreign_frame(frame: &[u8], own: [u8; 6], group: [u8; 6]) -> Optio
     Some(&frame[ETH_HEADER_LEN..])
 }
 
-fn if_index(interface: &str) -> io::Result<i32> {
+/// Resolves a kernel interface name to its ifindex (`if_nametoindex(3)`).
+/// `Err` for a name with an embedded NUL or one the kernel doesn't know.
+pub fn if_index(interface: &str) -> io::Result<i32> {
     let name = std::ffi::CString::new(interface)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "interface name has a NUL"))?;
     // SAFETY: `name` is a valid, NUL-terminated C string for this call.
