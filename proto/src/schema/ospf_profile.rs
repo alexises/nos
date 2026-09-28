@@ -43,15 +43,20 @@ pub enum OspfAuth {
     Crypto { keys: Vec<OspfCryptoKey> },
 }
 
-/// One cryptographic auth key. `key_id` is the wire Key ID (RFC 2328 D.3);
-/// `is_current` marks the key actively signing outgoing packets (exactly
-/// one key must have this set) — every configured key is still accepted on
-/// receive, looked up by the wire's own Key ID (RFC 2328 D.5), which is how
-/// graceful key rollover works without dropping the adjacency.
+/// One cryptographic auth key, shared by `OspfProfile.auth` (RFC 2328 D.3)
+/// and `Ospfv3Profile.auth` (RFC 7166). `key_id` is the wire Key ID — 16
+/// bits, RFC 7166's Security Association ID width; RFC 7474's `AuType` 3 Key
+/// ID is 32 bits, but RFC 2328's classic `AuType` 2 field is one octet, so
+/// `valid_profile_timers` caps a non-extended `OSPFv2` key at 255 (the type
+/// itself doesn't). `is_current` marks the key actively signing outgoing
+/// packets (exactly one key must have this set) — every configured key is
+/// still accepted on receive, looked up by the wire's own Key ID (RFC 2328
+/// D.5), which is how graceful key rollover works without dropping the
+/// adjacency.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OspfCryptoKey {
-    pub key_id: u8,
+    pub key_id: u16,
     pub algorithm: OspfCryptoAlgorithm,
     pub key: String,
     pub is_current: bool,
@@ -74,7 +79,45 @@ pub enum OspfCryptoAlgorithm {
 /// Maximum auth secret length this NOS accepts — mirrors
 /// `bgp_peer_group::MAX_AUTH_KEY_LEN`'s role (no RFC-mandated cap; HMAC
 /// itself accepts any key length).
-const MAX_AUTH_KEY_LEN: usize = 80;
+pub(crate) const MAX_AUTH_KEY_LEN: usize = 80;
+
+/// RFC 2328 Appendix D.3's classic `AuType` 2 Key ID is one octet on the
+/// wire; only RFC 7474's `AuType` 3 (32-bit) and RFC 7166's SA ID (16-bit)
+/// can carry more.
+const CLASSIC_KEY_ID_MAX: u16 = 255;
+
+/// The checks every crypto key list shares between `OspfAuth::Crypto` and
+/// `Ospfv3Profile.auth`: non-empty, unique ids, key length, exactly one
+/// current key.
+pub(crate) fn valid_crypto_keys(keys: &[OspfCryptoKey]) -> garde::Result {
+    if keys.is_empty() {
+        return Err(garde::Error::new(
+            "crypto auth must have at least one key (or be cleared)",
+        ));
+    }
+    let mut seen_key_ids: Vec<u16> = Vec::new();
+    let mut current_count = 0;
+    for key in keys {
+        if key.key.is_empty() || key.key.len() > MAX_AUTH_KEY_LEN {
+            return Err(garde::Error::new("crypto key must be 1 to 80 bytes long"));
+        }
+        if seen_key_ids.contains(&key.key_id) {
+            return Err(garde::Error::new(
+                "crypto key-id must be unique within a profile",
+            ));
+        }
+        seen_key_ids.push(key.key_id);
+        if key.is_current {
+            current_count += 1;
+        }
+    }
+    if current_count != 1 {
+        return Err(garde::Error::new(
+            "crypto auth must have exactly one current key",
+        ));
+    }
+    Ok(())
+}
 
 /// Simple password is a real 8-byte wire field (RFC 2328 D.2), not just a
 /// convention.
@@ -91,35 +134,7 @@ fn valid_auth(auth: Option<&OspfAuth>) -> garde::Result {
             }
             Ok(())
         }
-        Some(OspfAuth::Crypto { keys }) => {
-            if keys.is_empty() {
-                return Err(garde::Error::new(
-                    "crypto auth must have at least one key (or be cleared)",
-                ));
-            }
-            let mut seen_key_ids: Vec<u8> = Vec::new();
-            let mut current_count = 0;
-            for key in keys {
-                if key.key.is_empty() || key.key.len() > MAX_AUTH_KEY_LEN {
-                    return Err(garde::Error::new("crypto key must be 1 to 80 bytes long"));
-                }
-                if seen_key_ids.contains(&key.key_id) {
-                    return Err(garde::Error::new(
-                        "crypto key-id must be unique within a profile",
-                    ));
-                }
-                seen_key_ids.push(key.key_id);
-                if key.is_current {
-                    current_count += 1;
-                }
-            }
-            if current_count != 1 {
-                return Err(garde::Error::new(
-                    "crypto auth must have exactly one current key",
-                ));
-            }
-            Ok(())
-        }
+        Some(OspfAuth::Crypto { keys }) => valid_crypto_keys(keys),
     }
 }
 
@@ -236,6 +251,12 @@ pub(crate) fn valid_profile_timers(profiles: &[OspfProfile]) -> garde::Result {
             if !ok {
                 return Err(garde::Error::new(
                     "extended-sequence-numbers requires crypto auth with hmac-sha keys only",
+                ));
+            }
+        } else if let Some(OspfAuth::Crypto { keys }) = &p.auth {
+            if keys.iter().any(|k| k.key_id > CLASSIC_KEY_ID_MAX) {
+                return Err(garde::Error::new(
+                    "crypto key-id must be 0-255 unless extended-sequence-numbers is enabled",
                 ));
             }
         }
@@ -465,7 +486,25 @@ mod tests {
         }
     }
 
-    fn crypto_key(key_id: u8, is_current: bool) -> OspfCryptoKey {
+    #[test]
+    fn key_id_above_255_needs_extended_sequence_numbers() {
+        let check = |key_id: u16, extended: bool| {
+            let mut p = profile("p1");
+            p.extended_sequence_numbers = extended;
+            p.auth = Some(OspfAuth::Crypto {
+                keys: vec![crypto_key(key_id, true)],
+            });
+            let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+            cfg.validate_with(&cfg)
+        };
+        assert!(check(255, false).is_ok());
+        assert!(check(255, true).is_ok());
+        assert!(check(256, false).is_err());
+        assert!(check(256, true).is_ok());
+        assert!(check(u16::MAX, true).is_ok());
+    }
+
+    fn crypto_key(key_id: u16, is_current: bool) -> OspfCryptoKey {
         OspfCryptoKey {
             key_id,
             algorithm: OspfCryptoAlgorithm::HmacSha256,

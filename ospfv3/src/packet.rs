@@ -5,15 +5,16 @@
 //! I/O — `socket.rs` sends/receives the bytes this module produces/consumes.
 //!
 //! Two real, deliberate differences from `ospf::packet` (RFC 2328's
-//! counterpart), both scope decisions for Phase 1, not oversights:
+//! counterpart):
 //!
-//! - **No authentication at all.** RFC 5340's 16-byte header (vs. v2's
-//!   24-byte one) has no `AuType`/Authentication field — auth moved
-//!   conceptually out-of-band (originally `IPsec`; RFC 6506 later added an
-//!   in-packet HMAC trailer). Phase 1 runs unauthenticated; a future phase
-//!   can add RFC 6506-shaped auth the same way `ospf`'s auth was a later
-//!   phase, but it needs a new design, not a port of `ospf::packet`'s
-//!   fixed-byte-offset auth mechanics (which have nowhere to attach here).
+//! - **Authentication is a trailer, not a header field.** RFC 5340's 16-byte
+//!   header (vs. v2's 24-byte one) has no `AuType`/Authentication field;
+//!   RFC 7166 instead appends an Authentication Trailer *after* the packet
+//!   (outside its own `Length`) and announces it with the AT-bit in
+//!   Hello/DBD Options (`lsa::OPTION_AT`). `TrailerAuth::sign`/
+//!   `verify_trailer` are the counterpart of `ospf::packet`'s
+//!   `OutgoingAuth`/`verify_auth`, kept separate from the per-type
+//!   `encode_*`/`decode_*` since the trailer wraps an already-encoded packet.
 //! - **No checksum computed or verified in software.** RFC 5340's checksum
 //!   (§A.3.1) is the standard IPv6 upper-layer checksum — ones'-complement
 //!   over an IPv6 pseudo-header (source/dest address, upper-layer length,
@@ -28,10 +29,15 @@
 //!   `ICMPv6`), so the kernel fills the checksum in on send and verifies (and
 //!   silently drops bad packets before delivery) on receive — this module
 //!   never sees a checksum mismatch, and doesn't need to. `header.checksum`
-//!   is always written as `0` on encode and left unvalidated on decode.
+//!   is always written as `0` on encode and left unvalidated on decode. On an
+//!   authenticated link the kernel option is *not* set (RFC 7166 §2.2/§4.2:
+//!   checksum omitted, field 0) and the digest covers the packet instead.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
+use hmac::digest::KeyInit;
+use hmac::{Hmac, Mac};
+use sha2::Digest;
 use thiserror::Error;
 
 use crate::lsa::{self, Lsa, LsaHeader, LsaKey};
@@ -80,6 +86,226 @@ pub enum PacketError {
     /// exactly like `ospf::packet::PacketError::BadChecksum`.
     #[error("lsa checksum mismatch")]
     BadChecksum,
+    #[error("packet's AT-bit/trailer doesn't match this link's configured auth")]
+    AuthTypeMismatch,
+    #[error("authentication failed (unknown key-id or bad digest)")]
+    AuthFailed,
+}
+
+/// RFC 7166 §4.3's HMAC-SHA family — no MD5 exists for `OSPFv3`. This
+/// module's own mirror of `nos_proto::OspfCryptoAlgorithm` (converted in
+/// `reconcile.rs`), like `ospf::packet::CryptoAlgorithm`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CryptoAlgorithm {
+    HmacSha1,
+    HmacSha256,
+    HmacSha384,
+    HmacSha512,
+}
+
+fn hmac<M: Mac + KeyInit>(ko: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut mac = <M as KeyInit>::new_from_slice(ko).expect("hmac accepts a key of any length");
+    mac.update(data);
+    mac.finalize().into_bytes().to_vec()
+}
+
+fn hmac_verify<M: Mac + KeyInit>(ko: &[u8], data: &[u8], tag: &[u8]) -> bool {
+    let mut mac = <M as KeyInit>::new_from_slice(ko).expect("hmac accepts a key of any length");
+    mac.update(data);
+    mac.verify_slice(tag).is_ok()
+}
+
+impl CryptoAlgorithm {
+    /// `L` in RFC 7166 §4.5 — the digest length.
+    fn digest_len(self) -> usize {
+        match self {
+            CryptoAlgorithm::HmacSha1 => 20,
+            CryptoAlgorithm::HmacSha256 => 32,
+            CryptoAlgorithm::HmacSha384 => 48,
+            CryptoAlgorithm::HmacSha512 => 64,
+        }
+    }
+
+    /// RFC 7166 §4.4/§4.5 step 1: `Ks = key || Cryptographic Protocol ID`
+    /// (the cross-protocol-attack mitigation `ospf::packet` has no
+    /// counterpart of), then `Ko = H(Ks)` if longer than `L`, else `Ks`
+    /// zero-padded to `L`.
+    fn prepared_key(self, key: &[u8]) -> Vec<u8> {
+        let mut ks = key.to_vec();
+        ks.extend_from_slice(&CRYPTO_PROTOCOL_ID);
+        let l = self.digest_len();
+        if ks.len() > l {
+            return match self {
+                CryptoAlgorithm::HmacSha1 => sha1::Sha1::digest(&ks).to_vec(),
+                CryptoAlgorithm::HmacSha256 => sha2::Sha256::digest(&ks).to_vec(),
+                CryptoAlgorithm::HmacSha384 => sha2::Sha384::digest(&ks).to_vec(),
+                CryptoAlgorithm::HmacSha512 => sha2::Sha512::digest(&ks).to_vec(),
+            };
+        }
+        ks.resize(l, 0);
+        ks
+    }
+
+    fn digest(self, ko: &[u8], data: &[u8]) -> Vec<u8> {
+        match self {
+            CryptoAlgorithm::HmacSha1 => hmac::<Hmac<sha1::Sha1>>(ko, data),
+            CryptoAlgorithm::HmacSha256 => hmac::<Hmac<sha2::Sha256>>(ko, data),
+            CryptoAlgorithm::HmacSha384 => hmac::<Hmac<sha2::Sha384>>(ko, data),
+            CryptoAlgorithm::HmacSha512 => hmac::<Hmac<sha2::Sha512>>(ko, data),
+        }
+    }
+
+    /// Constant-time check of `tag` against the digest of `data`.
+    fn verify(self, ko: &[u8], data: &[u8], tag: &[u8]) -> bool {
+        match self {
+            CryptoAlgorithm::HmacSha1 => hmac_verify::<Hmac<sha1::Sha1>>(ko, data, tag),
+            CryptoAlgorithm::HmacSha256 => hmac_verify::<Hmac<sha2::Sha256>>(ko, data, tag),
+            CryptoAlgorithm::HmacSha384 => hmac_verify::<Hmac<sha2::Sha384>>(ko, data, tag),
+            CryptoAlgorithm::HmacSha512 => hmac_verify::<Hmac<sha2::Sha512>>(ko, data, tag),
+        }
+    }
+}
+
+/// RFC 7166 §4.1's fixed trailer header: Authentication Type(2) + Auth Data
+/// Len(2) + Reserved(2) + Security Association ID(2) + Cryptographic
+/// Sequence Number(8); the digest follows.
+const TRAILER_HEADER_LEN: usize = 16;
+/// §4.1: the only defined Authentication Type, "HMAC Cryptographic
+/// Authentication".
+const AUTH_TYPE_HMAC: u16 = 1;
+/// §7: `OSPFv3`'s Cryptographic Protocol ID, two octets.
+const CRYPTO_PROTOCOL_ID: [u8; 2] = [0x00, 0x01];
+
+/// One link's RFC 7166 keys — `Ospfv3Profile.auth` in this module's own
+/// shape (`(sa_id, algorithm, secret)`; the SA ID is `key_id`). Every key
+/// verifies, only `current_key_id` signs — the same rollover model as
+/// `ospf::link::LinkAuthConfig::Crypto`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrailerAuth {
+    pub keys: Vec<(u16, CryptoAlgorithm, Vec<u8>)>,
+    pub current_key_id: u16,
+}
+
+impl TrailerAuth {
+    /// Appends the trailer to `packet` (an `encode_*` result, checksum 0),
+    /// signing with the current key. `sequence` is this send's own strictly
+    /// increasing number; `source` is the IPv6 address the packet leaves
+    /// from, which `apad` binds into the digest (§4.5).
+    pub fn sign(&self, packet: &mut Vec<u8>, sequence: u64, source: Ipv6Addr) {
+        let (key_id, algorithm, key) = self
+            .keys
+            .iter()
+            .find(|(id, _, _)| *id == self.current_key_id)
+            .expect("valid_auth guarantees current_key_id names a real key");
+        let l = u16::try_from(TRAILER_HEADER_LEN + algorithm.digest_len()).unwrap_or(u16::MAX);
+        packet.extend_from_slice(&AUTH_TYPE_HMAC.to_be_bytes());
+        packet.extend_from_slice(&l.to_be_bytes());
+        packet.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        packet.extend_from_slice(&key_id.to_be_bytes());
+        packet.extend_from_slice(&sequence.to_be_bytes());
+        let ko = algorithm.prepared_key(key);
+        let digest = algorithm.digest(&ko, &digest_input(packet, *algorithm, source));
+        packet.extend_from_slice(&digest);
+    }
+}
+
+/// RFC 7166 §4.5's `Apad`: the 16-octet IPv6 source address followed by
+/// `0x878FE1F3` repeated to the digest length — `ospf::packet::apad` with
+/// RFC 7474's 4-byte IPv4 source replaced by the 16-byte IPv6 one.
+fn apad(algorithm: CryptoAlgorithm, source: Ipv6Addr) -> Vec<u8> {
+    let mut pad = Vec::with_capacity(algorithm.digest_len());
+    pad.extend_from_slice(&source.octets());
+    for _ in 0..(algorithm.digest_len() - 16) / 4 {
+        pad.extend_from_slice(&0x878F_E1F3u32.to_be_bytes());
+    }
+    pad
+}
+
+/// §4.5: the packet and the trailer header, with `Apad` standing in the
+/// Authentication Data field.
+fn digest_input(
+    packet_and_trailer_header: &[u8],
+    algorithm: CryptoAlgorithm,
+    source: Ipv6Addr,
+) -> Vec<u8> {
+    [packet_and_trailer_header, &apad(algorithm, source)].concat()
+}
+
+/// The AT-bit of a Hello/DBD's Options field; `None` for the other types
+/// (no Options field — §2.1: they inherit the link's setting) or a body too
+/// short to hold one (left for the body decoder to reject).
+fn at_bit(data: &[u8]) -> Option<bool> {
+    let options_at = match data[1] {
+        TYPE_HELLO => HEADER_LEN + 5,
+        TYPE_DBD => HEADER_LEN + 1,
+        _ => return None,
+    };
+    let b = data.get(options_at..options_at + 3)?;
+    let options = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+    Some(options & lsa::OPTION_AT != 0)
+}
+
+/// The counterpart of `TrailerAuth::sign` on receive, and of
+/// `ospf::packet::verify_auth`: checks the AT-bit against the link's
+/// configured `auth`, then (if authenticated) locates the trailer after the
+/// header's `Length`, verifies the digest under the key the SA ID names, and
+/// returns the packet proper (for `decode`) plus the trailer's sequence
+/// number for `link.rs`'s anti-replay check. `source` is the received
+/// packet's IPv6 source. Unauthenticated: the packet as-is and `None`.
+pub fn verify_trailer<'a>(
+    data: &'a [u8],
+    auth: Option<&TrailerAuth>,
+    source: Ipv6Addr,
+) -> Result<(&'a [u8], Option<u64>), PacketError> {
+    let at = if data.len() < HEADER_LEN {
+        None // too short for anything; `decode` reports it
+    } else {
+        at_bit(data)
+    };
+    let Some(auth) = auth else {
+        return if at == Some(true) {
+            Err(PacketError::AuthTypeMismatch)
+        } else {
+            Ok((data, None))
+        };
+    };
+    if data.len() < HEADER_LEN {
+        return Err(PacketError::Truncated);
+    }
+    if at == Some(false) {
+        return Err(PacketError::AuthTypeMismatch);
+    }
+    let length = usize::from(u16::from_be_bytes([data[2], data[3]]));
+    if length < HEADER_LEN || data.len() < length {
+        return Err(PacketError::TruncatedBody);
+    }
+    let trailer = &data[length..];
+    if trailer.len() < TRAILER_HEADER_LEN
+        || u16::from_be_bytes([trailer[0], trailer[1]]) != AUTH_TYPE_HMAC
+    {
+        return Err(PacketError::AuthTypeMismatch);
+    }
+    let auth_data_len = usize::from(u16::from_be_bytes([trailer[2], trailer[3]]));
+    let sa_id = u16::from_be_bytes([trailer[6], trailer[7]]);
+    let sequence = u64::from_be_bytes(
+        trailer[8..16]
+            .try_into()
+            .expect("trailer header is 16 bytes"),
+    );
+    let Some((_, algorithm, key)) = auth.keys.iter().find(|(id, _, _)| *id == sa_id) else {
+        return Err(PacketError::AuthFailed);
+    };
+    let digest_len = algorithm.digest_len();
+    if auth_data_len != TRAILER_HEADER_LEN + digest_len || trailer.len() < auth_data_len {
+        return Err(PacketError::TruncatedBody);
+    }
+    let signed_end = length + TRAILER_HEADER_LEN;
+    let ko = algorithm.prepared_key(key);
+    let input = digest_input(&data[..signed_end], *algorithm, source);
+    if !algorithm.verify(&ko, &input, &data[signed_end..signed_end + digest_len]) {
+        return Err(PacketError::AuthFailed);
+    }
+    Ok((&data[..length], Some(sequence)))
 }
 
 /// One Hello packet's contents (§A.3.2). `designated_router`/
@@ -171,11 +397,10 @@ pub fn encode_hello(pkt: &HelloPacket) -> Vec<u8> {
 
 /// Decodes a Hello packet, validating the common header first.
 pub fn decode_hello(data: &[u8]) -> Result<HelloPacket, PacketError> {
-    let (packet_type, router_id, area_id) = decode_header(data)?;
+    let (packet_type, router_id, area_id, body) = decode_header(data)?;
     if packet_type != TYPE_HELLO {
         return Err(PacketError::UnknownType(packet_type));
     }
-    let body = &data[HEADER_LEN..];
     if body.len() < HELLO_BODY_FIXED_LEN {
         return Err(PacketError::TruncatedBody);
     }
@@ -240,11 +465,10 @@ pub fn encode_dbd(pkt: &DbdPacket) -> Vec<u8> {
 
 /// Decodes a DBD packet, validating the common header first.
 pub fn decode_dbd(data: &[u8]) -> Result<DbdPacket, PacketError> {
-    let (packet_type, router_id, area_id) = decode_header(data)?;
+    let (packet_type, router_id, area_id, body) = decode_header(data)?;
     if packet_type != TYPE_DBD {
         return Err(PacketError::UnknownType(packet_type));
     }
-    let body = &data[HEADER_LEN..];
     if body.len() < DBD_BODY_FIXED_LEN {
         return Err(PacketError::TruncatedBody);
     }
@@ -288,11 +512,10 @@ pub fn encode_lsr(pkt: &LsrPacket) -> Vec<u8> {
 
 /// Decodes an LSR packet, validating the common header first.
 pub fn decode_lsr(data: &[u8]) -> Result<LsrPacket, PacketError> {
-    let (packet_type, router_id, area_id) = decode_header(data)?;
+    let (packet_type, router_id, area_id, body) = decode_header(data)?;
     if packet_type != TYPE_LSR {
         return Err(PacketError::UnknownType(packet_type));
     }
-    let body = &data[HEADER_LEN..];
     if !body.len().is_multiple_of(lsa::KEY_LEN) {
         return Err(PacketError::TruncatedBody);
     }
@@ -325,11 +548,10 @@ pub fn encode_lsu(pkt: &LsuPacket) -> Vec<u8> {
 
 /// Decodes an LSU packet, validating the common header first.
 pub fn decode_lsu(data: &[u8]) -> Result<LsuPacket, PacketError> {
-    let (packet_type, router_id, area_id) = decode_header(data)?;
+    let (packet_type, router_id, area_id, body) = decode_header(data)?;
     if packet_type != TYPE_LSU {
         return Err(PacketError::UnknownType(packet_type));
     }
-    let body = &data[HEADER_LEN..];
     if body.len() < 4 {
         return Err(PacketError::TruncatedBody);
     }
@@ -364,11 +586,10 @@ pub fn encode_lsack(pkt: &LsAckPacket) -> Vec<u8> {
 
 /// Decodes an `LSAck` packet, validating the common header first.
 pub fn decode_lsack(data: &[u8]) -> Result<LsAckPacket, PacketError> {
-    let (packet_type, router_id, area_id) = decode_header(data)?;
+    let (packet_type, router_id, area_id, body) = decode_header(data)?;
     if packet_type != TYPE_LSACK {
         return Err(PacketError::UnknownType(packet_type));
     }
-    let body = &data[HEADER_LEN..];
     if !body.len().is_multiple_of(lsa::LSA_HEADER_LEN) {
         return Err(PacketError::TruncatedBody);
     }
@@ -445,9 +666,11 @@ fn encode_packet(packet_type: u8, router_id: Ipv4Addr, area_id: Ipv4Addr, body: 
     buf
 }
 
-/// Validates the common header's version and returns `(packet_type,
-/// router_id, area_id)`.
-fn decode_header(data: &[u8]) -> Result<(u8, Ipv4Addr, Ipv4Addr), PacketError> {
+/// Validates the common header's version and `Length`, returning
+/// `(packet_type, router_id, area_id, body)` — the body bounded by `Length`,
+/// so bytes after it (an RFC 7166 trailer, already verified by
+/// `verify_trailer`) never reach a body decoder.
+fn decode_header(data: &[u8]) -> Result<(u8, Ipv4Addr, Ipv4Addr, &[u8]), PacketError> {
     if data.len() < HEADER_LEN {
         return Err(PacketError::Truncated);
     }
@@ -455,9 +678,13 @@ fn decode_header(data: &[u8]) -> Result<(u8, Ipv4Addr, Ipv4Addr), PacketError> {
     if version != VERSION {
         return Err(PacketError::BadVersion(version));
     }
+    let length = usize::from(u16::from_be_bytes([data[2], data[3]]));
+    if length < HEADER_LEN || data.len() < length {
+        return Err(PacketError::TruncatedBody);
+    }
     let router_id = read_ipv4(data, 4);
     let area_id = read_ipv4(data, 8);
-    Ok((data[1], router_id, area_id))
+    Ok((data[1], router_id, area_id, &data[HEADER_LEN..length]))
 }
 
 pub(crate) fn read_ipv4(data: &[u8], offset: usize) -> Ipv4Addr {
@@ -473,6 +700,7 @@ pub(crate) fn read_ipv4(data: &[u8], offset: usize) -> Ipv4Addr {
 mod tests {
     use super::*;
     use crate::lsa::{LsaBody, RouterLsaBody, LSA_TYPE_ROUTER};
+    use crate::packet;
 
     fn sample() -> HelloPacket {
         HelloPacket {
@@ -703,5 +931,178 @@ mod tests {
     fn instance_id_is_always_zero() {
         let encoded = encode_hello(&sample());
         assert_eq!(encoded[12], 0);
+    }
+
+    const SRC: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+
+    fn auth() -> TrailerAuth {
+        TrailerAuth {
+            keys: vec![
+                (300, CryptoAlgorithm::HmacSha256, b"secret".to_vec()),
+                (2, CryptoAlgorithm::HmacSha1, b"other".to_vec()),
+            ],
+            current_key_id: 300,
+        }
+    }
+
+    fn signed(pkt: &OspfPacket, sequence: u64) -> Vec<u8> {
+        let mut buf = encode(pkt);
+        auth().sign(&mut buf, sequence, SRC);
+        buf
+    }
+
+    fn with_at(mut hello: HelloPacket) -> HelloPacket {
+        hello.options |= lsa::OPTION_AT;
+        hello
+    }
+
+    #[test]
+    fn trailer_round_trips_every_packet_type_with_16_bit_sa_id() {
+        let mut dbd = sample_dbd();
+        dbd.options |= lsa::OPTION_AT;
+        for pkt in [
+            OspfPacket::Hello(with_at(sample())),
+            OspfPacket::Dbd(dbd),
+            OspfPacket::Lsr(sample_lsr()),
+            OspfPacket::Lsu(sample_lsu()),
+            OspfPacket::LsAck(sample_lsack()),
+        ] {
+            let wire = signed(&pkt, 42);
+            let (inner, seq) = verify_trailer(&wire, Some(&auth()), SRC).unwrap();
+            assert_eq!(seq, Some(42));
+            assert_eq!(inner.len(), encode(&pkt).len());
+            let decoded = decode(inner).unwrap();
+            assert_eq!(packet::router_id(&decoded), packet::router_id(&pkt));
+            if !matches!(pkt, OspfPacket::Lsu(_)) {
+                assert_eq!(decoded, pkt);
+            }
+        }
+    }
+
+    #[test]
+    fn trailer_layout_matches_rfc_7166_figure_3() {
+        let pkt = OspfPacket::Hello(with_at(sample()));
+        let wire = signed(&pkt, (7u64 << 32) | 9);
+        let length = usize::from(u16::from_be_bytes([wire[2], wire[3]]));
+        let t = &wire[length..];
+        assert_eq!(u16::from_be_bytes([t[0], t[1]]), AUTH_TYPE_HMAC);
+        assert_eq!(u16::from_be_bytes([t[2], t[3]]), 16 + 32);
+        assert_eq!(&t[4..6], &[0, 0]);
+        assert_eq!(u16::from_be_bytes([t[6], t[7]]), 300);
+        assert_eq!(&t[8..16], &[0, 0, 0, 7, 0, 0, 0, 9]);
+        assert_eq!(t.len(), 16 + 32);
+        // The checksum field stays zero (RFC 7166 §4.2).
+        assert_eq!(&wire[12..14], &[0, 0]);
+    }
+
+    #[test]
+    fn digest_is_hmac_of_packet_and_trailer_header_with_apad_under_protocol_id_key() {
+        let pkt = OspfPacket::Hello(with_at(sample()));
+        let wire = signed(&pkt, 1);
+        let (signed_part, digest) = wire.split_at(wire.len() - 32);
+        // §4.5 step 1: Ks = key || 0x0001, zero-padded to L = 32.
+        let mut ko = b"secret".to_vec();
+        ko.extend_from_slice(&[0x00, 0x01]);
+        ko.resize(32, 0);
+        let mut mac = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(&ko).unwrap();
+        mac.update(signed_part);
+        mac.update(&SRC.octets());
+        mac.update(&[0x87, 0x8F, 0xE1, 0xF3].repeat(4));
+        assert_eq!(digest, &mac.finalize().into_bytes()[..]);
+    }
+
+    #[test]
+    fn long_key_is_hashed_down_to_digest_length() {
+        let long = vec![b'k'; 40];
+        let ko = CryptoAlgorithm::HmacSha256.prepared_key(&long);
+        let mut ks = long;
+        ks.extend_from_slice(&[0, 1]);
+        assert_eq!(ko, sha2::Sha256::digest(&ks).to_vec());
+        assert_eq!(CryptoAlgorithm::HmacSha1.prepared_key(b"abc"), {
+            let mut k = b"abc\x00\x01".to_vec();
+            k.resize(20, 0);
+            k
+        });
+    }
+
+    #[test]
+    fn bad_key_digest_sequence_source_or_sa_id_fail() {
+        let pkt = OspfPacket::Hello(with_at(sample()));
+        let wire = signed(&pkt, 5);
+        let wrong_key = TrailerAuth {
+            keys: vec![(300, CryptoAlgorithm::HmacSha256, b"nope".to_vec())],
+            current_key_id: 300,
+        };
+        assert_eq!(
+            verify_trailer(&wire, Some(&wrong_key), SRC),
+            Err(PacketError::AuthFailed)
+        );
+        let unknown_id = TrailerAuth {
+            keys: vec![(1, CryptoAlgorithm::HmacSha256, b"secret".to_vec())],
+            current_key_id: 1,
+        };
+        assert_eq!(
+            verify_trailer(&wire, Some(&unknown_id), SRC),
+            Err(PacketError::AuthFailed)
+        );
+        let other_src = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2);
+        assert_eq!(
+            verify_trailer(&wire, Some(&auth()), other_src),
+            Err(PacketError::AuthFailed)
+        );
+        let n = wire.len();
+        let mut tampered = wire.clone();
+        tampered[n - 1] ^= 1; // digest
+        assert_eq!(
+            verify_trailer(&tampered, Some(&auth()), SRC),
+            Err(PacketError::AuthFailed)
+        );
+        let mut tampered = wire.clone();
+        tampered[n - 33] ^= 1; // sequence low bit
+        assert_eq!(
+            verify_trailer(&tampered, Some(&auth()), SRC),
+            Err(PacketError::AuthFailed)
+        );
+        let mut tampered = wire;
+        tampered[HEADER_LEN] ^= 1; // packet body
+        assert_eq!(
+            verify_trailer(&tampered, Some(&auth()), SRC),
+            Err(PacketError::AuthFailed)
+        );
+    }
+
+    #[test]
+    fn at_bit_and_configured_auth_must_agree() {
+        // AT set, link unauthenticated.
+        let wire = signed(&OspfPacket::Hello(with_at(sample())), 1);
+        assert_eq!(
+            verify_trailer(&wire, None, SRC),
+            Err(PacketError::AuthTypeMismatch)
+        );
+        // Link authenticated, Hello without the AT-bit.
+        let wire = signed(&OspfPacket::Hello(sample()), 1);
+        assert_eq!(
+            verify_trailer(&wire, Some(&auth()), SRC),
+            Err(PacketError::AuthTypeMismatch)
+        );
+        // Link authenticated, an LSR (no Options field) with no trailer.
+        let wire = encode_lsr(&sample_lsr());
+        assert_eq!(
+            verify_trailer(&wire, Some(&auth()), SRC),
+            Err(PacketError::AuthTypeMismatch)
+        );
+        // Unauthenticated both sides: passes through untouched.
+        let wire = encode_hello(&sample());
+        assert_eq!(verify_trailer(&wire, None, SRC), Ok((&wire[..], None)));
+    }
+
+    #[test]
+    fn decode_ignores_bytes_after_length() {
+        let mut wire = encode_hello(&sample());
+        wire.extend_from_slice(&[0xAA; 7]);
+        assert_eq!(decode_hello(&wire).unwrap(), sample());
+        let mut short = encode_hello(&sample());
+        short.pop();
+        assert_eq!(decode_hello(&short), Err(PacketError::TruncatedBody));
     }
 }

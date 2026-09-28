@@ -165,7 +165,7 @@ pub enum OutgoingAuth<'a> {
         password: &'a [u8],
     },
     Crypto {
-        key_id: u8,
+        key_id: u16,
         algorithm: CryptoAlgorithm,
         key: &'a [u8],
         /// `AuType` 2's 32-bit number (widened), or, with `extended`, RFC
@@ -189,7 +189,7 @@ pub enum AuthPolicy<'a> {
     /// from its own owned key list (e.g. `link::LinkAuthConfig`) with no
     /// intermediate allocation.
     Crypto {
-        keys: &'a [(u8, CryptoAlgorithm, Vec<u8>)],
+        keys: &'a [(u16, CryptoAlgorithm, Vec<u8>)],
         /// `Some(source)` requires RFC 7474 (`AuType` 3, digest bound to
         /// `source` — the received packet's IP source); `None` requires
         /// RFC 2328's `AuType` 2. A wire/config mismatch is an
@@ -678,7 +678,9 @@ fn encode_packet(
             buf.extend_from_slice(&AUTH_TYPE_CRYPTO.to_be_bytes());
             buf.push(0); // reserved
             buf.push(0); // reserved
-            buf.push(*key_id);
+                         // One octet on the wire — `valid_profile_timers` caps a classic
+                         // (non-extended) key-id at 255 at commit time.
+            buf.push(u8::try_from(*key_id).expect("classic AuType key-id fits in one octet"));
             // Auth Data Length — the trailing digest's length, appended below.
             buf.push(u8::try_from(algorithm.digest_len()).unwrap_or(0));
             // Crypto sequence number — filled in properly below, once the
@@ -784,7 +786,7 @@ fn verify_auth<'a>(data: &'a [u8], auth: &AuthPolicy<'_>) -> Result<&'a [u8], Pa
             if length < HEADER_LEN || data.len() < length {
                 return Err(PacketError::TruncatedBody);
             }
-            let key_id = data[18];
+            let key_id = u16::from(data[18]);
             let auth_data_len = usize::from(data[19]);
             let Some((_, algorithm, key)) = keys.iter().find(|(id, _, _)| *id == key_id) else {
                 return Err(PacketError::AuthFailed);
@@ -1335,7 +1337,7 @@ mod tests {
         let encoded = encode_hello(&sample(), &auth);
         assert_eq!(u16::from_be_bytes([encoded[12], encoded[13]]), 0);
         assert_eq!(encoded.len(), HEADER_LEN + HELLO_BODY_FIXED_LEN + 4 + 16);
-        let keys: &[(u8, CryptoAlgorithm, Vec<u8>)] =
+        let keys: &[(u16, CryptoAlgorithm, Vec<u8>)] =
             &[(1, CryptoAlgorithm::Md5, b"secret".to_vec())];
         let policy = AuthPolicy::Crypto {
             keys,
@@ -1359,7 +1361,7 @@ mod tests {
             encoded.len(),
             HEADER_LEN + DBD_BODY_FIXED_LEN + lsa::LSA_HEADER_LEN + 32
         );
-        let keys: &[(u8, CryptoAlgorithm, Vec<u8>)] =
+        let keys: &[(u16, CryptoAlgorithm, Vec<u8>)] =
             &[(1, CryptoAlgorithm::HmacSha256, b"secret".to_vec())];
         let policy = AuthPolicy::Crypto {
             keys,
@@ -1379,7 +1381,7 @@ mod tests {
             extended: None,
         };
         let encoded = encode_hello(&sample(), &auth);
-        let keys: &[(u8, CryptoAlgorithm, Vec<u8>)] =
+        let keys: &[(u16, CryptoAlgorithm, Vec<u8>)] =
             &[(2, CryptoAlgorithm::Md5, b"secret".to_vec())];
         let policy = AuthPolicy::Crypto {
             keys,
@@ -1401,7 +1403,7 @@ mod tests {
             extended: None,
         };
         let encoded = encode_hello(&sample(), &auth);
-        let keys: &[(u8, CryptoAlgorithm, Vec<u8>)] =
+        let keys: &[(u16, CryptoAlgorithm, Vec<u8>)] =
             &[(1, CryptoAlgorithm::Md5, b"wrongkey".to_vec())];
         let policy = AuthPolicy::Crypto {
             keys,
@@ -1443,7 +1445,7 @@ mod tests {
 
     const SRC: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
-    fn ext_keys() -> Vec<(u8, CryptoAlgorithm, Vec<u8>)> {
+    fn ext_keys() -> Vec<(u16, CryptoAlgorithm, Vec<u8>)> {
         vec![(1, CryptoAlgorithm::HmacSha256, b"secret".to_vec())]
     }
 
@@ -1533,6 +1535,26 @@ mod tests {
             decode_hello(&plain, &policy),
             Err(PacketError::AuthTypeMismatch)
         );
+    }
+
+    #[test]
+    fn classic_key_id_255_round_trips() {
+        let keys: Vec<(u16, CryptoAlgorithm, Vec<u8>)> =
+            vec![(255, CryptoAlgorithm::HmacSha256, b"secret".to_vec())];
+        let auth = OutgoingAuth::Crypto {
+            key_id: 255,
+            algorithm: CryptoAlgorithm::HmacSha256,
+            key: b"secret",
+            sequence: 1,
+            extended: None,
+        };
+        let encoded = encode_hello(&sample(), &auth);
+        assert_eq!(encoded[18], 255);
+        let policy = AuthPolicy::Crypto {
+            keys: &keys,
+            extended: None,
+        };
+        assert_eq!(decode_hello(&encoded, &policy).unwrap(), sample());
     }
 
     #[test]

@@ -1,14 +1,15 @@
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
-use super::{Config, NetworkType};
+use super::ospf_profile::valid_crypto_keys;
+use super::{Config, NetworkType, OspfCryptoAlgorithm, OspfCryptoKey};
 
 /// A named `OSPFv3` profile, declared inside an area (`Ospfv3Area.profiles`)
 /// but referenced by bare name from any L3 attach point's `ospfv3_profile`
 /// field (`Interface`/`Subinterface`/`BroadcastDomain`) — mirrors
-/// `OspfProfile` exactly, minus its `auth` field: RFC 5340's 16-byte header
-/// has no authentication field at all (auth moved conceptually out-of-band —
-/// see the `OSPFv3` Phase 1 plan), so Phase 1 runs unauthenticated. Reuses
+/// `OspfProfile` exactly, except that `auth` is RFC 7166's authentication
+/// trailer (crypto only, no simple-password mechanism exists for `OSPFv3`),
+/// so it's a bare key list rather than an `OspfAuth` enum. Reuses
 /// `OspfProfile`'s `HELLO_INTERVAL_DEFAULT`/`DEAD_INTERVAL_DEFAULT`/
 /// `PRIORITY_DEFAULT`/`NetworkType` directly — those defaults and the
 /// point-to-point/broadcast distinction are unchanged by RFC 5340.
@@ -50,6 +51,25 @@ pub struct Ospfv3Profile {
     /// `None` resolves per attach point, exactly like `OspfProfile.network_type`.
     #[garde(skip)]
     pub network_type: Option<NetworkType>,
+
+    /// RFC 7166 authentication trailer keys; `None` means unauthenticated.
+    /// `key_id` is the 16-bit Security Association ID. HMAC-SHA only — RFC
+    /// 7166 §4.3 defines no MD5 option. Same rotation model as
+    /// `OspfAuth::Crypto` (`is_current` signs, every key verifies).
+    #[garde(custom(|a: &Option<Vec<OspfCryptoKey>>, _ctx: &Config| valid_auth(a.as_deref())))]
+    #[serde(default)]
+    pub auth: Option<Vec<OspfCryptoKey>>,
+}
+
+fn valid_auth(keys: Option<&[OspfCryptoKey]>) -> garde::Result {
+    let Some(keys) = keys else { return Ok(()) };
+    valid_crypto_keys(keys)?;
+    if keys.iter().any(|k| k.algorithm == OspfCryptoAlgorithm::Md5) {
+        return Err(garde::Error::new(
+            "ospfv3 authentication supports hmac-sha keys only (RFC 7166 has no md5)",
+        ));
+    }
+    Ok(())
 }
 
 fn valid_cost(cost: Option<u16>) -> garde::Result {
@@ -97,7 +117,7 @@ mod tests {
 
     use crate::schema::{Config, Ospfv3Area, Ospfv3Instance};
 
-    use super::{NetworkType, Ospfv3Profile};
+    use super::{NetworkType, OspfCryptoAlgorithm, OspfCryptoKey, Ospfv3Profile};
 
     fn profile(name: &str) -> Ospfv3Profile {
         Ospfv3Profile {
@@ -108,7 +128,48 @@ mod tests {
             priority: None,
             mtu: None,
             network_type: None,
+            auth: None,
         }
+    }
+
+    fn crypto_key(key_id: u16, algorithm: OspfCryptoAlgorithm, is_current: bool) -> OspfCryptoKey {
+        OspfCryptoKey {
+            key_id,
+            algorithm,
+            key: "secret".to_string(),
+            is_current,
+        }
+    }
+
+    fn validate_auth(keys: Vec<OspfCryptoKey>) -> garde::Result {
+        let mut p = profile("p1");
+        p.auth = Some(keys);
+        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+        cfg.validate_with(&cfg)
+            .map_err(|_| garde::Error::new("invalid"))
+    }
+
+    #[test]
+    fn valid_crypto_keys_pass_including_key_id_above_255() {
+        let sha = OspfCryptoAlgorithm::HmacSha256;
+        validate_auth(vec![crypto_key(1, sha, true), crypto_key(2, sha, false)]).unwrap();
+        validate_auth(vec![crypto_key(300, OspfCryptoAlgorithm::HmacSha1, true)]).unwrap();
+        validate_auth(vec![crypto_key(
+            u16::MAX,
+            OspfCryptoAlgorithm::HmacSha512,
+            true,
+        )])
+        .unwrap();
+    }
+
+    #[test]
+    fn invalid_crypto_keys_fail() {
+        let sha = OspfCryptoAlgorithm::HmacSha256;
+        assert!(validate_auth(Vec::new()).is_err());
+        assert!(validate_auth(vec![crypto_key(1, sha, true), crypto_key(1, sha, false)]).is_err());
+        assert!(validate_auth(vec![crypto_key(1, sha, false)]).is_err());
+        assert!(validate_auth(vec![crypto_key(1, sha, true), crypto_key(2, sha, true)]).is_err());
+        assert!(validate_auth(vec![crypto_key(1, OspfCryptoAlgorithm::Md5, true)]).is_err());
     }
 
     fn area(area_id: &str, profiles: Vec<Ospfv3Profile>) -> Ospfv3Area {
@@ -184,6 +245,7 @@ mod tests {
             priority: None,
             mtu: None,
             network_type: None,
+            auth: None,
         }
     }
 

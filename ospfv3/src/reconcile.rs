@@ -6,13 +6,14 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use ipnet::{IpNet, Ipv6Net};
-use nos_proto::{DiffScope, Event, NetworkType, ServiceRef};
+use nos_proto::{DiffScope, Event, NetworkType, OspfCryptoAlgorithm, ServiceRef};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::config_client;
 use crate::interface_client;
 use crate::link::{LinkConfig, LinkManager};
+use crate::packet;
 use crate::watchdog_client;
 
 /// Fixed reconnect delay — same cadence as every other config-subscribing
@@ -195,6 +196,7 @@ async fn resync(
                     network_type: profile.network_type.unwrap_or(NetworkType::PointToPoint),
                     priority,
                     mtu: resolve_effective_mtu(profile, Some(resolved.mtu)),
+                    auth: resolve_auth(profile),
                 });
             }
 
@@ -251,6 +253,7 @@ async fn resync(
                     network_type: profile.network_type.unwrap_or(NetworkType::Broadcast),
                     priority,
                     mtu: resolve_effective_mtu(profile, None),
+                    auth: resolve_auth(profile),
                 });
             }
         }
@@ -401,6 +404,30 @@ async fn resolve_local_address(
 }
 
 const DEFAULT_OSPF_MTU: u16 = 1500;
+
+/// Translates `Ospfv3Profile.auth` into `packet::TrailerAuth` — mirrors
+/// `ospf::reconcile::resolve_auth`. `current_key_id` needs no fallback:
+/// commit-time validation guarantees exactly one `is_current` key, and no
+/// MD5 key (`packet::CryptoAlgorithm` has no such arm).
+fn resolve_auth(profile: &nos_proto::Ospfv3Profile) -> Option<packet::TrailerAuth> {
+    let keys = profile.auth.as_ref()?;
+    Some(packet::TrailerAuth {
+        keys: keys
+            .iter()
+            .filter_map(|k| {
+                let algorithm = match k.algorithm {
+                    OspfCryptoAlgorithm::Md5 => return None,
+                    OspfCryptoAlgorithm::HmacSha1 => packet::CryptoAlgorithm::HmacSha1,
+                    OspfCryptoAlgorithm::HmacSha256 => packet::CryptoAlgorithm::HmacSha256,
+                    OspfCryptoAlgorithm::HmacSha384 => packet::CryptoAlgorithm::HmacSha384,
+                    OspfCryptoAlgorithm::HmacSha512 => packet::CryptoAlgorithm::HmacSha512,
+                };
+                Some((k.key_id, algorithm, k.key.clone().into_bytes()))
+            })
+            .collect(),
+        current_key_id: keys.iter().find(|k| k.is_current).map_or(0, |k| k.key_id),
+    })
+}
 
 /// Mirrors `ospf::reconcile::resolve_effective_mtu` exactly.
 fn resolve_effective_mtu(profile: &nos_proto::Ospfv3Profile, resolved_mtu: Option<u32>) -> u16 {

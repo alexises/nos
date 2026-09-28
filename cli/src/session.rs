@@ -1133,8 +1133,8 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
         },
         // Shared, path-disambiguated token with `Ospfv3Profile`'s own
         // relative fields — mirrors `OspfAreaRelative`'s precedent.
-        // `OspfProfileField::SimplePassword`/`CryptoKey`/`CryptoCurrentKey`
-        // have no `Ospfv3Profile` equivalent (no auth in this NOS build).
+        // `OspfProfileField::SimplePassword`/`ExtendedSequenceNumbers` have
+        // no `Ospfv3Profile` equivalent (RFC 7166 is crypto-key only).
         Command::Set(SetTarget::OspfProfileRelative { field }) => match path {
             Path::OspfProfile {
                 instance,
@@ -2377,6 +2377,13 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                     name,
                 })?
             }
+            Path::Ospfv3Profile { .. } => {
+                ospfv3_profile_clear(path, |instance, area_id, name| Ospfv3ProfileOp::ClearAuth {
+                    instance,
+                    area_id,
+                    name,
+                })?
+            }
             _ => peer_group_clear(path, |instance, name| BgpPeerGroupOp::ClearAuth {
                 instance,
                 name,
@@ -2389,16 +2396,24 @@ fn resolve_table(path: &Path, cmd: Command) -> Result<Resolved, &'static str> {
                 send_id,
             })?
         }
-        Command::Delete(DeleteTarget::CryptoKey(key_id)) => {
-            ospf_profile_clear(path, |instance, area_id, name| {
+        Command::Delete(DeleteTarget::CryptoKey(key_id)) => match path {
+            Path::Ospfv3Profile { .. } => ospfv3_profile_clear(path, |instance, area_id, name| {
+                Ospfv3ProfileOp::RemoveCryptoKey {
+                    instance,
+                    area_id,
+                    name,
+                    key_id,
+                }
+            })?,
+            _ => ospf_profile_clear(path, |instance, area_id, name| {
                 OspfProfileOp::RemoveCryptoKey {
                     instance,
                     area_id,
                     name,
                     key_id,
                 }
-            })?
-        }
+            })?,
+        },
         Command::Delete(DeleteTarget::NextHop) => peer_group_clear(path, |instance, name| {
             BgpPeerGroupOp::ClearNextHop { instance, name }
         })?,
@@ -2732,10 +2747,9 @@ fn ospfv3_profile_clear(
     })
 }
 
-/// Mirrors `ospf_profile_set_op`, minus the auth fields — an `Ospfv3Profile`
-/// has no `SimplePassword`/`CryptoKey`/`CryptoCurrentKey` equivalent (no
-/// authentication in this NOS build's `OSPFv3` support), so those return an
-/// error instead of a `ConfigOp`.
+/// Mirrors `ospf_profile_set_op`. An `Ospfv3Profile`'s auth is RFC 7166's
+/// trailer — crypto keys only — so `SimplePassword` and RFC 7474's
+/// `ExtendedSequenceNumbers` return an error instead of a `ConfigOp`.
 fn ospfv3_profile_set_op(
     instance: String,
     area_id: Ipv4Addr,
@@ -2779,11 +2793,33 @@ fn ospfv3_profile_set_op(
             name,
             network_type,
         },
-        OspfProfileField::SimplePassword(_)
-        | OspfProfileField::CryptoKey { .. }
-        | OspfProfileField::CryptoCurrentKey(_)
-        | OspfProfileField::ExtendedSequenceNumbers(_) => {
-            return Err("ospfv3 profiles support no authentication in this NOS build".to_string());
+        OspfProfileField::CryptoKey {
+            key_id,
+            ref algorithm,
+            ref key,
+        } => Ospfv3ProfileOp::SetCryptoKey {
+            instance,
+            area_id,
+            name,
+            key: OspfCryptoKey {
+                key_id,
+                algorithm: *algorithm,
+                key: key.clone(),
+                is_current: false,
+            },
+        },
+        OspfProfileField::CryptoCurrentKey(key_id) => Ospfv3ProfileOp::SetCryptoCurrentKey {
+            instance,
+            area_id,
+            name,
+            key_id,
+        },
+        OspfProfileField::SimplePassword(_) | OspfProfileField::ExtendedSequenceNumbers(_) => {
+            return Err(
+                "ospfv3 authentication is rfc 7166 crypto-key only (no simple-password or \
+                 extended-sequence-numbers)"
+                    .to_string(),
+            );
         }
     }))
 }
@@ -3891,6 +3927,74 @@ mod tests {
     }
 
     /// `delete auth` shares its token sequence with the peer-group one
+    #[test]
+    fn ospfv3_profile_crypto_key_ops_resolve_by_path() {
+        let path = Path::Ospfv3Profile {
+            instance: "o1".to_string(),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            name: "p1".to_string(),
+        };
+        let mode = config_mode("t1", path, false);
+        assert_eq!(
+            resolve(
+                &mode,
+                Command::Set(SetTarget::OspfProfileRelative {
+                    field: OspfProfileField::CryptoKey {
+                        key_id: 300,
+                        algorithm: nos_proto::OspfCryptoAlgorithm::HmacSha256,
+                        key: "secret".to_string(),
+                    },
+                })
+            ),
+            Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetCryptoKey {
+                    instance: "o1".to_string(),
+                    area_id: Ipv4Addr::UNSPECIFIED,
+                    name: "p1".to_string(),
+                    key: OspfCryptoKey {
+                        key_id: 300,
+                        algorithm: nos_proto::OspfCryptoAlgorithm::HmacSha256,
+                        key: "secret".to_string(),
+                        is_current: false,
+                    },
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(&mode, Command::Delete(DeleteTarget::CryptoKey(300))),
+            Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::RemoveCryptoKey {
+                    instance: "o1".to_string(),
+                    area_id: Ipv4Addr::UNSPECIFIED,
+                    name: "p1".to_string(),
+                    key_id: 300,
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert_eq!(
+            resolve(&mode, Command::Delete(DeleteTarget::Auth)),
+            Resolved::ApplyOp {
+                op: ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::ClearAuth {
+                    instance: "o1".to_string(),
+                    area_id: Ipv4Addr::UNSPECIFIED,
+                    name: "p1".to_string(),
+                }),
+                after: PathAfter::Stay,
+            }
+        );
+        assert!(matches!(
+            resolve(
+                &mode,
+                Command::Set(SetTarget::OspfProfileRelative {
+                    field: OspfProfileField::SimplePassword("x".to_string()),
+                })
+            ),
+            Resolved::Error(_)
+        ));
+    }
+
     /// above — confirms it's routed to `OspfProfileOp::ClearAuth` when the
     /// path is navigated into an OSPF profile instead.
     #[test]

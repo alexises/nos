@@ -262,7 +262,15 @@ pub fn render_ospfv3_area(area: &Ospfv3Area) -> String {
 /// render (no authentication in this NOS build's `OSPFv3` support), unlike
 /// `render_ospf_profile`.
 pub fn render_ospfv3_profile(profile: &Ospfv3Profile) -> String {
-    format!("profile {}", profile.name)
+    let auth = profile
+        .auth
+        .as_ref()
+        .map(|keys| OspfAuth::Crypto { keys: keys.clone() });
+    format!(
+        "profile {}: auth {}",
+        profile.name,
+        render_ospf_auth(auth.as_ref())
+    )
 }
 
 /// Render one routing table as human-readable text.

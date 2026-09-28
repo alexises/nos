@@ -645,6 +645,24 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "delete crypto-key <key-id>",
         Doc::FromConfig(Topic::RemoveOspfProfileCryptoKey),
         ConfigurationOspfProfile),
+    spec!(["delete" "auth"],
+        "delete auth",
+        Doc::Local {
+            summary: "Clear the current OSPFv3 profile's RFC 7166 authentication.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     profile or peer-group; which one applies is resolved by the current \
+                     navigation position.",
+        },
+        ConfigurationOspfv3Profile),
+    spec!(["delete" "crypto-key" (Plain)],
+        "delete crypto-key <key-id>",
+        Doc::Local {
+            summary: "Remove one RFC 7166 key from the current OSPFv3 profile.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     profile; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Profile),
     spec!(
         ["up"],
         "up",
@@ -1025,6 +1043,42 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             detail: "Mirrors the OSPF equivalent for OSPFv3.",
         },
         Configuration),
+    spec!(["set" "ospfv3" "instance" (Ospfv3InstanceName) "area" (Plain) "profile" (Ospfv3ProfileName)
+           "crypto-key" (Plain) (Plain) (Plain)],
+        "set ospfv3 instance <name> area <area-id> profile <profile-name> crypto-key <key-id> <hmac-sha1|hmac-sha256|hmac-sha384|hmac-sha512> <key>",
+        Doc::Local {
+            summary: "Add or replace an RFC 7166 authentication-trailer key on an OSPFv3 profile.",
+            detail: "<key-id> is the 16-bit Security Association ID (0-65535). Every configured \
+                     key is accepted on receive; mark the one that signs with 'crypto-key \
+                     <key-id> current'. HMAC-SHA only: RFC 7166 has no MD5.",
+        },
+        Configuration),
+    spec!(["set" "ospfv3" "instance" (Ospfv3InstanceName) "area" (Plain) "profile" (Ospfv3ProfileName)
+           "crypto-key" (Plain) "current"],
+        "set ospfv3 instance <name> area <area-id> profile <profile-name> crypto-key <key-id> current",
+        Doc::Local {
+            summary: "Mark one RFC 7166 key as the one signing outgoing OSPFv3 packets.",
+            detail: "Mirrors the OSPF equivalent for OSPFv3.",
+        },
+        Configuration),
+    spec!(["set" "crypto-key" (Plain) (Plain) (Plain)],
+        "set crypto-key <key-id> <hmac-sha1|hmac-sha256|hmac-sha384|hmac-sha512> <key>",
+        Doc::Local {
+            summary: "Add or replace an RFC 7166 key on the current OSPFv3 profile.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     profile; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Profile),
+    spec!(["set" "crypto-key" (Plain) "current"],
+        "set crypto-key <key-id> current",
+        Doc::Local {
+            summary: "Mark one RFC 7166 key as current on the current OSPFv3 profile.",
+            detail: "Shares its token sequence with the same relative command on an OSPF \
+                     profile; which one applies is resolved by the current navigation \
+                     position.",
+        },
+        ConfigurationOspfv3Profile),
     spec!(["set" "hello-interval" (Plain)],
         "set hello-interval <n>",
         Doc::Local {
