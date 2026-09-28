@@ -1,5 +1,6 @@
 [package]
 name    = "nos-l2-socket"
+publish = false
 version = "0.1.0"
 edition = "2021"
 

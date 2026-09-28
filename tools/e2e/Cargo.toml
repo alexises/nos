@@ -1,5 +1,6 @@
 [package]
 name    = "nos-e2e"
+publish = false
 version = "0.1.0"
 edition = "2021"
 
@@ -8,7 +9,7 @@ workspace = true
 
 [dependencies]
 nos-proto     = { workspace = true }
-nos-provision = { path = "../nos-provision" }
+nos-provision = { path = "../nos-provision", version = "0.1.0" }
 tokio         = { workspace = true }
 futures       = { workspace = true }
 clap          = { workspace = true }

@@ -22,14 +22,14 @@ reqwest     = { version = "0.13", default-features = false, features = ["json", 
 regex       = "1"
 bollard     = "0.21"
 tar         = "0.4"
-nos-proto          = { path = "proto" }
-nos-tcp-auth       = { path = "tcp-auth" }
-nos-password       = { path = "password" }
-nos-pki            = { path = "pki" }
-nos-l2-socket      = { path = "l2-socket" }
-nos-rpl            = { path = "rpl" }
-nos-log-client     = { path = "log-client" }
-nos-ospf-common    = { path = "ospf-common" }
+nos-proto          = { path = "proto", version = "0.1.0" }
+nos-tcp-auth       = { path = "tcp-auth", version = "0.1.0" }
+nos-password       = { path = "password", version = "0.1.0" }
+nos-pki            = { path = "pki", version = "0.1.0" }
+nos-l2-socket      = { path = "l2-socket", version = "0.1.0" }
+nos-rpl            = { path = "rpl", version = "0.1.0" }
+nos-log-client     = { path = "log-client", version = "0.1.0" }
+nos-ospf-common    = { path = "ospf-common", version = "0.1.0" }
 clap               = { version = "4", features = ["derive"] }
 anyhow             = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
