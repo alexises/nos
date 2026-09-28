@@ -7,10 +7,11 @@ IMAGE ?= nos:local
 CARGO_FEATURES ?=
 
 .PHONY: help build fmt fmt-fix clippy clippy-fix fix test test-plain \
-        deny audit sast miri coverage mutants check ci tools docker-lint docker-build
+        deny audit sast miri coverage mutants check ci tools docker-lint docker-build \
+        e2e-preflight
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
+	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
 		awk 'BEGIN{FS=":.*## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build the whole workspace
@@ -74,3 +75,6 @@ docker-lint: ## Lint the Dockerfile with hadolint
 
 docker-build: docker-lint ## Lint, then build the nos Docker image (nos-watchdogd + nos-configd + nos-bgpd + nos-ribd + nos-interfaced + nos-logd + nos-ospfd + nos)
 	docker build --build-arg CARGO_FEATURES=$(CARGO_FEATURES) -t $(IMAGE) .
+
+e2e-preflight: ## Kernel-module + image-capability checks nos-e2e needs (same script CI runs)
+	IMAGE=$(IMAGE) tools/ci/e2e-preflight.sh

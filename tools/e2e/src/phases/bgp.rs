@@ -79,6 +79,13 @@ pub async fn reconnect(w: &mut World) -> anyhow::Result<()> {
 }
 
 pub async fn collision(w: &mut World) -> anyhow::Result<()> {
+    // Baselines first: the sessions killed below already logged "established",
+    // so the next phase must wait for a *new* one on each side or it provisions
+    // a router whose restarted nos-bgpd has no session yet.
+    let (base_a, base_b) = (
+        w.a()?.count("bgp session established"),
+        w.b()?.count("bgp session established"),
+    );
     log("restarting both nos-bgpd processes at once to try to trigger a real collision");
     w.dock.kill_process("router-a", "nos-bgpd").await?;
     w.dock.kill_process("router-b", "nos-bgpd").await?;
@@ -91,7 +98,8 @@ pub async fn collision(w: &mut World) -> anyhow::Result<()> {
     } else {
         log("no collision observed this cycle (timing-dependent, not a failure by itself)");
     }
-    established(w).await
+    reestablished(w.a()?, base_a).await?;
+    reestablished(w.b()?, base_b).await
 }
 
 pub async fn redistribute_phase(w: &mut World) -> anyhow::Result<()> {
