@@ -11,6 +11,11 @@ IMAGE=${IMAGE:-nos:local}
 SUDO=
 [ "$(id -u)" -eq 0 ] || SUDO=sudo
 
+# On ubuntu-24.04 azure runners vrf.ko ships in linux-modules-extra, which
+# the runner image doesn't install.
+if ! $SUDO modprobe vrf 2>/dev/null; then
+    $SUDO apt-get install -y "linux-modules-extra-$(uname -r)" || true
+fi
 $SUDO modprobe vrf dummy bonding vxlan 8021q bridge || true
 lsmod | grep -E 'vrf|dummy|bonding|vxlan|8021q|bridge' || true
 uname -r
