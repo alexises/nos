@@ -1681,6 +1681,17 @@ async fn apply_policy_source(mode: Mode, socket: &Path, name: String, source: St
     .await
 }
 
+/// Creates the scratch file `edit_in_external_editor` hands the editor —
+/// factored out so its security property (unpredictable name, `O_EXCL`
+/// creation, mode `0600`, since `/tmp` is shared between users — see #100)
+/// is directly unit-testable without spawning a real editor.
+fn new_policy_tempfile() -> std::io::Result<tempfile::NamedTempFile> {
+    tempfile::Builder::new()
+        .prefix("nos-policy-")
+        .suffix(".rpl")
+        .tempfile()
+}
+
 /// Opens `$EDITOR`/`$VISUAL`/`nano` on a temp file pre-filled with `source`
 /// — see root `CLAUDE.md`'s "nos-cli editing UX". `None` means no editor
 /// could be spawned at all (already reported to stderr); the caller should
@@ -1689,13 +1700,19 @@ fn edit_in_external_editor(source: &str) -> Option<String> {
     let editor = std::env::var("EDITOR")
         .or_else(|_| std::env::var("VISUAL"))
         .unwrap_or_else(|_| "nano".to_string());
-    let path = std::env::temp_dir().join(format!("nos-policy-{}.rpl", std::process::id()));
-    if std::fs::write(&path, source).is_err() {
+    let Ok(mut file) = new_policy_tempfile() else {
+        eprintln!("error: could not create a temp file for editing");
+        return None;
+    };
+    if file.write_all(source.as_bytes()).is_err() {
         eprintln!("error: could not create a temp file for editing");
         return None;
     }
-    let result = match std::process::Command::new(&editor).arg(&path).status() {
-        Ok(status) if status.success() => std::fs::read_to_string(&path).ok(),
+    let path = file.path();
+    // `file` (a `NamedTempFile`) is deleted on drop, on every return path
+    // below — no manual `remove_file` needed.
+    match std::process::Command::new(&editor).arg(path).status() {
+        Ok(status) if status.success() => std::fs::read_to_string(path).ok(),
         Ok(_) => {
             eprintln!("editor '{editor}' exited with an error; edit discarded");
             None
@@ -1706,9 +1723,7 @@ fn edit_in_external_editor(source: &str) -> Option<String> {
             );
             None
         }
-    };
-    let _ = std::fs::remove_file(&path);
-    result
+    }
 }
 
 /// Compiles `source` against the current transaction's `community_aliases`/
@@ -1923,5 +1938,43 @@ async fn print_help(mode: &Mode, socket: &Path, cache: &DocCache) {
             Doc::FromConfig(topic) => doc_for(socket, cache, *topic).await.summary,
         };
         println!("  {:<45} {}", command.usage, summary);
+    }
+}
+
+#[cfg(test)]
+mod tempfile_tests {
+    use super::new_policy_tempfile;
+
+    /// The security property #100 fixed: an unpredictable name (not a
+    /// pid-based `/tmp/nos-policy-<pid>.rpl`) created with mode 0600, so a
+    /// symlink or a pre-created file at a guessed path can't be used to
+    /// hijack the edit.
+    #[test]
+    fn new_policy_tempfile_is_unpredictable_and_owner_only() {
+        let a = new_policy_tempfile().expect("create temp file a");
+        let b = new_policy_tempfile().expect("create temp file b");
+        assert_ne!(
+            a.path(),
+            b.path(),
+            "two calls must not reuse the same predictable path"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for f in [&a, &b] {
+                let mode = f
+                    .as_file()
+                    .metadata()
+                    .expect("stat temp file")
+                    .permissions()
+                    .mode();
+                assert_eq!(
+                    mode & 0o777,
+                    0o600,
+                    "temp file must be created owner-read/write only"
+                );
+            }
+        }
     }
 }
