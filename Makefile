@@ -48,7 +48,7 @@ audit: ## Check for known security advisories (matches CI)
 	cargo audit
 
 sast: ## Static analysis with semgrep's p/rust ruleset (matches CI; needs docker)
-	docker run --rm -v "$(CURDIR):/src" semgrep/semgrep semgrep scan --config p/rust --exclude target /src
+	docker run --rm -v "$(CURDIR):/src" semgrep/semgrep semgrep scan --config p/rust --exclude target --error --metrics=off /src
 
 miri: ## Run miri UB checks on the pure-logic crates (needs a nightly toolchain + miri component; slow, matches CI)
 	@command -v cargo-miri >/dev/null 2>&1 || { echo "cargo-miri not found — needs rustup + 'rustup +nightly component add miri'"; exit 1; }

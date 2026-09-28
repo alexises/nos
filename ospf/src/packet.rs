@@ -122,6 +122,7 @@ impl CryptoAlgorithm {
                 let mut md5_key = [0u8; 16];
                 let n = key.len().min(16);
                 md5_key[..n].copy_from_slice(&key[..n]);
+                // nosemgrep: rust.lang.security.insecure-hashes.insecure-hashes -- RFC 2328 Appendix D.3 cryptographic authentication is keyed MD5 by definition, a wire-compatibility requirement not a choice (RFC 5709 HMAC-SHA is the recommended alternative and already implemented above).
                 let mut hasher = Md5::new();
                 hasher.update(data);
                 hasher.update(md5_key);
@@ -1604,6 +1605,7 @@ mod tests {
             );
             e[..e.len() - 16].to_vec()
         };
+        // nosemgrep: rust.lang.security.insecure-hashes.insecure-hashes -- test verifies the RFC 2328 D.4.3 keyed-MD5 wire format itself, same wire-compatibility requirement as the production site above.
         let mut hasher = Md5::new();
         hasher.update(&packet);
         hasher.update(b"secret\0\0\0\0\0\0\0\0\0\0");

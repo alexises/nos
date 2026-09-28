@@ -21,6 +21,7 @@ mod tempdir {
     pub struct Guard(pub PathBuf);
     impl Guard {
         pub fn new() -> Self {
+            // nosemgrep: rust.lang.security.temp-dir.temp-dir -- test scratch dir, not a security boundary.
             let p = std::env::temp_dir().join(format!(
                 "nos-pki-{}-{:?}",
                 std::process::id(),
