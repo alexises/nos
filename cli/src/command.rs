@@ -83,11 +83,11 @@ pub enum OspfProfileField {
     /// A new (or replacement) crypto key — `current` is set via the
     /// separate `CryptoCurrentKey` variant, not here.
     CryptoKey {
-        key_id: u8,
+        key_id: u16,
         algorithm: OspfCryptoAlgorithm,
         key: String,
     },
-    CryptoCurrentKey(u8),
+    CryptoCurrentKey(u16),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,10 +312,11 @@ pub enum SetTarget {
     /// Fully-qualified — works from anywhere in configuration mode. No
     /// context-relative form of its own — the relative
     /// `hello-interval`/`dead-interval`/`cost`/`priority`/`network-type`/
-    /// `mtu` tokens are shared with `OspfProfileRelative`/`MtuRelative`
-    /// above, disambiguated by `path` at resolve time (an `Ospfv3Profile`
-    /// has no `auth`, so `SimplePassword`/`CryptoKey`/`CryptoCurrentKey`
-    /// resolve to an error there).
+    /// `mtu`/`crypto-key` tokens are shared with `OspfProfileRelative`/
+    /// `MtuRelative` above, disambiguated by `path` at resolve time (an
+    /// `Ospfv3Profile` has RFC 7166 crypto keys but no simple password or
+    /// RFC 7474 extended sequence numbers, so those resolve to an error
+    /// there).
     Ospfv3Instance { name: String, router_id: Ipv4Addr },
     /// `set ospfv3 instance <name> extended-lsa` — RFC 8362 Full mode on.
     Ospfv3InstanceExtendedLsa { name: String },
@@ -551,7 +552,7 @@ pub enum DeleteTarget {
     AoKey(u8),
     /// `delete crypto-key <key-id>` — only valid while navigated into an
     /// `OspfProfile`.
-    CryptoKey(u8),
+    CryptoKey(u16),
     /// `delete next-hop` — only valid while navigated into a peer-group.
     NextHop,
     /// `delete route-reflector-client` — only valid while navigated into a
@@ -1928,7 +1929,7 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 area_id: area_id.parse().ok()?,
                 name: (*name).to_string(),
                 field: OspfProfileField::CryptoKey {
-                    key_id: key_id.parse::<u8>().ok()?,
+                    key_id: key_id.parse::<u16>().ok()?,
                     algorithm: parse_ospf_crypto_algorithm(algorithm)?,
                     key: (*key).to_string(),
                 },
@@ -1939,7 +1940,7 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 instance: (*instance).to_string(),
                 area_id: area_id.parse().ok()?,
                 name: (*name).to_string(),
-                field: OspfProfileField::CryptoCurrentKey(key_id.parse::<u8>().ok()?),
+                field: OspfProfileField::CryptoCurrentKey(key_id.parse::<u16>().ok()?),
             })
         }
         ["ospfv3", "instance", instance, "area", area_id, "profile", name, "hello-interval", n] => {
@@ -1998,6 +1999,26 @@ fn parse_set(t: &[&str]) -> Option<Command> {
                 field: OspfProfileField::NetworkType(NetworkType::Broadcast),
             })
         }
+        ["ospfv3", "instance", instance, "area", area_id, "profile", name, "crypto-key", key_id, algorithm, key] => {
+            Command::Set(SetTarget::Ospfv3Profile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::CryptoKey {
+                    key_id: key_id.parse::<u16>().ok()?,
+                    algorithm: parse_ospf_crypto_algorithm(algorithm)?,
+                    key: (*key).to_string(),
+                },
+            })
+        }
+        ["ospfv3", "instance", instance, "area", area_id, "profile", name, "crypto-key", key_id, "current"] => {
+            Command::Set(SetTarget::Ospfv3Profile {
+                instance: (*instance).to_string(),
+                area_id: area_id.parse().ok()?,
+                name: (*name).to_string(),
+                field: OspfProfileField::CryptoCurrentKey(key_id.parse::<u16>().ok()?),
+            })
+        }
         ["hello-interval", n] => Command::Set(SetTarget::OspfProfileRelative {
             field: OspfProfileField::HelloInterval(n.parse::<u16>().ok()?),
         }),
@@ -2026,13 +2047,13 @@ fn parse_set(t: &[&str]) -> Option<Command> {
         }),
         ["crypto-key", key_id, algorithm, key] => Command::Set(SetTarget::OspfProfileRelative {
             field: OspfProfileField::CryptoKey {
-                key_id: key_id.parse::<u8>().ok()?,
+                key_id: key_id.parse::<u16>().ok()?,
                 algorithm: parse_ospf_crypto_algorithm(algorithm)?,
                 key: (*key).to_string(),
             },
         }),
         ["crypto-key", key_id, "current"] => Command::Set(SetTarget::OspfProfileRelative {
-            field: OspfProfileField::CryptoCurrentKey(key_id.parse::<u8>().ok()?),
+            field: OspfProfileField::CryptoCurrentKey(key_id.parse::<u16>().ok()?),
         }),
         ["broadcast", "domain", name, "address", addr] => {
             Command::Set(SetTarget::BroadcastDomainAddress {
@@ -2370,7 +2391,7 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
         ["priority"] => Command::Delete(DeleteTarget::Priority),
         ["network-type"] => Command::Delete(DeleteTarget::NetworkType),
         ["crypto-key", key_id] => {
-            Command::Delete(DeleteTarget::CryptoKey(key_id.parse::<u8>().ok()?))
+            Command::Delete(DeleteTarget::CryptoKey(key_id.parse::<u16>().ok()?))
         }
         ["routing-table", name, "redistribute"] => {
             Command::Delete(DeleteTarget::RoutingTableRedistribute {
@@ -4809,6 +4830,40 @@ mod tests {
                 cidr: "10.0.0.0/8".parse().unwrap(),
                 range: None,
             })
+        );
+    }
+
+    #[test]
+    fn ospfv3_crypto_key_qualified_and_key_id_above_255() {
+        assert_eq!(
+            Command::parse(
+                "set ospfv3 instance o1 area 0.0.0.0 profile p1 crypto-key 300 hmac-sha256 secret"
+            ),
+            Command::Set(SetTarget::Ospfv3Profile {
+                instance: "o1".to_string(),
+                area_id: Ipv4Addr::UNSPECIFIED,
+                name: "p1".to_string(),
+                field: OspfProfileField::CryptoKey {
+                    key_id: 300,
+                    algorithm: OspfCryptoAlgorithm::HmacSha256,
+                    key: "secret".to_string(),
+                },
+            })
+        );
+        assert_eq!(
+            Command::parse(
+                "set ospfv3 instance o1 area 0.0.0.0 profile p1 crypto-key 65535 current"
+            ),
+            Command::Set(SetTarget::Ospfv3Profile {
+                instance: "o1".to_string(),
+                area_id: Ipv4Addr::UNSPECIFIED,
+                name: "p1".to_string(),
+                field: OspfProfileField::CryptoCurrentKey(65535),
+            })
+        );
+        assert_eq!(
+            Command::parse("delete crypto-key 65536"),
+            Command::Unknown("delete crypto-key 65536".to_string())
         );
     }
 

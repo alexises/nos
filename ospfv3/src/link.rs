@@ -4,9 +4,11 @@
 //! DR/BDR election from `nos_ospf_common::election`, then `crate::exchange`'s
 //! DBD/LSR/LSU/LSAck adjacency-forming exchange), but every self-origination
 //! function is structurally new (RFC 5340 restructures where addresses and
-//! prefixes live — see `crate::spf`'s module doc comment), and there is no
-//! authentication plumbing at all (RFC 5340 Phase 1 is unauthenticated — see
-//! `crate::packet`'s doc comment).
+//! prefixes live — see `crate::spf`'s module doc comment). Authentication is
+//! RFC 7166's trailer: `LinkConfig.auth` sets the AT-bit in Hello/DBD and
+//! makes the socket sign every send (`socket.rs`); `run` verifies every
+//! receive (`packet::verify_trailer`) and keeps the per-neighbor anti-replay
+//! sequence (`accept_crypto_sequence`), like `ospf::link`.
 
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -77,6 +79,44 @@ pub struct LinkConfig {
     pub network_type: NetworkType,
     pub priority: u8,
     pub mtu: u16,
+    /// RFC 7166 keys resolved from `Ospfv3Profile.auth` (`reconcile.rs`);
+    /// `None` runs unauthenticated. Part of the wholesale-diffed struct, so
+    /// a key change restarts the link like any other field.
+    pub auth: Option<packet::TrailerAuth>,
+}
+
+/// Hello/DBD Options for this link — `V6`/`R` always, plus RFC 7166 §2.1's
+/// AT-bit when the link is authenticated.
+fn link_options(cfg: &LinkConfig) -> u32 {
+    let at = if cfg.auth.is_some() {
+        lsa::OPTION_AT
+    } else {
+        0
+    };
+    lsa::OPTION_V6 | lsa::OPTION_R | at
+}
+
+/// RFC 7166 §4.1's anti-replay check, mirroring
+/// `ospf::link::accept_crypto_sequence`: `true` to dispatch, `false` to
+/// drop. Always `true` unauthenticated (`seq` is `None`) or for a neighbor
+/// not yet known (`handle_hello` creates the entry).
+fn accept_crypto_sequence(status: &StatusHandle, seq: Option<u64>, pkt: &OspfPacket) -> bool {
+    let Some(seq) = seq else { return true };
+    let router_id = packet::router_id(pkt);
+    let last = status
+        .borrow()
+        .neighbors
+        .get(&router_id)
+        .and_then(|n| n.last_crypto_seq);
+    if last.is_some_and(|last| seq <= last) {
+        return false;
+    }
+    status.send_modify(|s| {
+        if let Some(n) = s.neighbors.get_mut(&router_id) {
+            n.last_crypto_seq = Some(seq);
+        }
+    });
+    true
 }
 
 /// RFC 5340 §4.5.1's interface states — mirrors `ospf::link::InterfaceState`
@@ -106,6 +146,9 @@ pub struct NeighborInfo {
     /// sent — DBD/LSR/LSU/LSAck reply unicast to this.
     pub address: Ipv6Addr,
     pub adjacency: Option<AdjacencyData>,
+    /// The last accepted RFC 7166 sequence number from this neighbor
+    /// (`None` until one is seen, or on an unauthenticated link).
+    pub last_crypto_seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,7 +203,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
     let dbd = DbdPacket {
         router_id: local_router_id,
         area_id: cfg.area_id,
-        options: 0,
+        options: link_options(cfg),
         interface_mtu: cfg.mtu,
         init: true,
         more: true,
@@ -195,7 +238,8 @@ pub async fn run(
 ) {
     let dbd_max_headers =
         dbd_max_headers.unwrap_or_else(|| exchange::mtu_based_max_headers(cfg.mtu));
-    let socket = match OspfSocket::open(&cfg.kernel_interface, cfg.interface_id) {
+    let auth = cfg.auth.clone().map(|a| (a, cfg.link_local_address));
+    let socket = match OspfSocket::open(&cfg.kernel_interface, cfg.interface_id, auth) {
         Ok(s) => s,
         Err(e) => {
             warn!(link = %cfg.attach_point, error = %e, "failed to open ospfv3 raw socket");
@@ -220,7 +264,7 @@ pub async fn run(
     let mut rxmt_sweep = tokio::time::interval(RXMT_INTERVAL);
     rxmt_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    info!(link = %cfg.attach_point, vrf = %cfg.vrf, "ospfv3 link driver started");
+    info!(link = %cfg.attach_point, vrf = %cfg.vrf, authenticated = cfg.auth.is_some(), "ospfv3 link driver started");
     if is_broadcast {
         info!(link = %cfg.attach_point, "ospfv3 interface reached waiting");
     }
@@ -233,7 +277,20 @@ pub async fn run(
             result = socket.recv_packet() => {
                 match result {
                     Ok((source, data)) => {
-                        match packet::decode(&data) {
+                        let (data, seq) = match packet::verify_trailer(&data, cfg.auth.as_ref(), source) {
+                            Ok(verified) => verified,
+                            Err(e) => {
+                                warn!(link = %cfg.attach_point, source = %source, error = %e, "ospfv3 packet authentication failed");
+                                continue;
+                            }
+                        };
+                        match packet::decode(data) {
+                            Ok(pkt) if !accept_crypto_sequence(&status, seq, &pkt) => {
+                                warn!(
+                                    link = %cfg.attach_point, neighbor = %packet::router_id(&pkt),
+                                    "ospfv3 packet crypto sequence number not increasing, dropping"
+                                );
+                            }
                             Ok(OspfPacket::Hello(hello)) => {
                                 let left_waiting = handle_hello(
                                     &cfg, local_router_id, &status, source, &hello,
@@ -329,7 +386,7 @@ fn send_hello(
         area_id: cfg.area_id,
         interface_id: cfg.interface_id,
         router_priority: cfg.priority,
-        options: lsa::OPTION_V6 | lsa::OPTION_R,
+        options: link_options(cfg),
         hello_interval: cfg.hello_interval,
         dead_interval: cfg.dead_interval,
         designated_router,
@@ -395,6 +452,7 @@ fn handle_hello(
                 last_hello_received: Instant::now(),
                 address: source,
                 adjacency: None,
+                last_crypto_seq: None,
             });
         entry.state = new_state;
         entry.priority = hello.router_priority;
@@ -672,7 +730,8 @@ fn execute_actions(
     };
     for action in actions {
         let (kind, payload) = match action {
-            exchange::Action::SendDbd(pkt) => {
+            exchange::Action::SendDbd(mut pkt) => {
+                pkt.options = link_options(cfg);
                 if !pkt.init && pkt.more {
                     info!(
                         link = %cfg.attach_point, neighbor = %neighbor_id,
@@ -724,8 +783,10 @@ fn retransmit_pending(
     for (neighbor_id, info) in &snapshot.neighbors {
         let Some(adj) = &info.adjacency else { continue };
         if let Some(dbd) = &adj.last_dbd_sent {
+            let mut dbd = dbd.clone();
+            dbd.options = link_options(cfg);
             if let Err(e) =
-                socket.send_unicast(info.address, cfg.interface_id, &packet::encode_dbd(dbd))
+                socket.send_unicast(info.address, cfg.interface_id, &packet::encode_dbd(&dbd))
             {
                 warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospfv3 dbd");
             }
@@ -1681,6 +1742,7 @@ mod tests {
             network_type: NetworkType::PointToPoint,
             priority: 1,
             mtu: 1500,
+            auth: None,
         }
     }
 
@@ -1726,6 +1788,55 @@ mod tests {
     }
 
     #[test]
+    fn at_bit_follows_auth_config() {
+        let mut cfg = link("eth0.0", 10);
+        assert_eq!(link_options(&cfg) & lsa::OPTION_AT, 0);
+        cfg.auth = Some(packet::TrailerAuth {
+            keys: vec![(1, packet::CryptoAlgorithm::HmacSha256, b"k".to_vec())],
+            current_key_id: 1,
+        });
+        assert_ne!(link_options(&cfg) & lsa::OPTION_AT, 0);
+        assert_ne!(link_options(&cfg) & lsa::OPTION_V6, 0);
+    }
+
+    #[test]
+    fn crypto_sequence_must_strictly_increase_per_neighbor() {
+        let neighbor = Ipv4Addr::new(9, 9, 9, 10);
+        let mut status = LinkStatus::new(NetworkType::PointToPoint);
+        status.neighbors.insert(
+            neighbor,
+            neighbor_info(NeighborState::Init, "fe80::2".parse().unwrap(), 4),
+        );
+        let (tx, _rx) = watch::channel(status);
+        let mut hello = packet::HelloPacket {
+            router_id: neighbor,
+            area_id: Ipv4Addr::UNSPECIFIED,
+            interface_id: 4,
+            router_priority: 1,
+            options: 0,
+            hello_interval: 10,
+            dead_interval: 40,
+            designated_router: Ipv4Addr::UNSPECIFIED,
+            backup_designated_router: Ipv4Addr::UNSPECIFIED,
+            neighbors: Vec::new(),
+        };
+        let pkt = OspfPacket::Hello(hello.clone());
+        assert!(accept_crypto_sequence(&tx, None, &pkt));
+        assert!(accept_crypto_sequence(&tx, Some(5), &pkt));
+        assert!(!accept_crypto_sequence(&tx, Some(5), &pkt));
+        assert!(!accept_crypto_sequence(&tx, Some(4), &pkt));
+        assert!(accept_crypto_sequence(&tx, Some(6), &pkt));
+        assert_eq!(tx.borrow().neighbors[&neighbor].last_crypto_seq, Some(6));
+        // An unknown neighbor is never dropped (no state yet).
+        hello.router_id = Ipv4Addr::new(9, 9, 9, 11);
+        assert!(accept_crypto_sequence(
+            &tx,
+            Some(1),
+            &OspfPacket::Hello(hello)
+        ));
+    }
+
+    #[test]
     fn point_to_point_neighbor_is_always_adjacency_eligible() {
         assert!(should_form_adjacency(
             InterfaceState::PointToPoint,
@@ -1755,6 +1866,7 @@ mod tests {
             last_hello_received: Instant::now(),
             address,
             adjacency: None,
+            last_crypto_seq: None,
         }
     }
 

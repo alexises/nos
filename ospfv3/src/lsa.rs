@@ -36,6 +36,10 @@ use crate::packet::{read_ipv4, PacketError};
 pub const OPTION_V6: u32 = 0x01;
 pub const OPTION_E: u32 = 0x02;
 pub const OPTION_R: u32 = 0x10;
+/// RFC 7166 §2.1/§7 (IANA "`OSPFv3` Options (24 bits)"): every packet on this
+/// link carries an authentication trailer. Set only in Hello/DBD; LSR/LSU/
+/// `LSAck` have no Options field and inherit it from the link's config.
+pub const OPTION_AT: u32 = 0x00_0400;
 
 /// S2/S1 scope bits (bits 14-13): `01` = area scope. The U-bit (bit 15,
 /// "flood even if unrecognized") is left clear on the RFC 5340 `LSA_TYPE_*`

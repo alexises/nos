@@ -1,9 +1,9 @@
-use crate::schema::{NetworkType, Ospfv3Profile};
+use crate::schema::{NetworkType, OspfCryptoAlgorithm, Ospfv3Profile};
 
 use super::{DiffStatus, FieldDiff, SectionDiff};
 
 /// Diffs two lists of `Ospfv3Profile`s, matched by `name` — mirrors
-/// `diff_ospf_profiles` exactly, minus the `auth` field (Phase 1 has none).
+/// `diff_ospf_profiles` exactly.
 pub fn diff_ospfv3_profiles(
     base: &[Ospfv3Profile],
     candidate: &[Ospfv3Profile],
@@ -88,6 +88,31 @@ fn network_type_str(p: &Ospfv3Profile) -> String {
     }
 }
 
+/// Clear text, like `diff::ospf_profile::auth_str`.
+fn auth_str(p: &Ospfv3Profile) -> String {
+    match &p.auth {
+        None => "none".to_string(),
+        Some(keys) => {
+            let rendered = keys
+                .iter()
+                .map(|k| {
+                    let algorithm = match k.algorithm {
+                        OspfCryptoAlgorithm::Md5 => "md5",
+                        OspfCryptoAlgorithm::HmacSha1 => "hmac-sha1",
+                        OspfCryptoAlgorithm::HmacSha256 => "hmac-sha256",
+                        OspfCryptoAlgorithm::HmacSha384 => "hmac-sha384",
+                        OspfCryptoAlgorithm::HmacSha512 => "hmac-sha512",
+                    };
+                    let flags = if k.is_current { " (current)" } else { "" };
+                    format!("key-id {} {algorithm} {}{flags}", k.key_id, k.key)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("crypto-keys [{rendered}]")
+        }
+    }
+}
+
 fn changed_fields(base: &Ospfv3Profile, candidate: &Ospfv3Profile) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     if base.hello_interval != candidate.hello_interval {
@@ -132,6 +157,13 @@ fn changed_fields(base: &Ospfv3Profile, candidate: &Ospfv3Profile) -> Vec<FieldD
             new: Some(network_type_str(candidate)),
         });
     }
+    if base.auth != candidate.auth {
+        fields.push(FieldDiff {
+            label: "auth".to_string(),
+            old: Some(auth_str(base)),
+            new: Some(auth_str(candidate)),
+        });
+    }
     fields
 }
 
@@ -148,6 +180,7 @@ mod tests {
             priority: None,
             mtu: None,
             network_type: None,
+            auth: None,
         }
     }
 

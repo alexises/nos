@@ -710,6 +710,76 @@ pub async fn ospfv3_mtu_pagination(w: &mut World) -> anyhow::Result<()> {
     .await
 }
 
+/// RFC 7166: matching HMAC-SHA-256 trailer keys on both routers' eth0.0
+/// profile reach/stay Full with real per-packet digest checks; a mismatched
+/// key on router-a logs a real verification failure on router-b and blocks a
+/// new Full; restoring it lets Full form again. `ospf_auth` minus its RFC
+/// 7474 half (no OSPFv3 equivalent). Requires `ospfv3` to have run.
+pub async fn ospfv3_auth(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let full =
+        |neighbor: &str| format!("ospfv3 neighbor reached full link=eth0.0 neighbor={neighbor}");
+    let with_key = |k: &str, addr: &str, rid: &str| {
+        let mut f = ospfv3(addr, rid);
+        f.extend([
+            "--ospfv3-crypto-key".to_string(),
+            format!("300:hmac-sha256:{k}"),
+        ]);
+        f
+    };
+    let (a_full, b_full) = (
+        a.count(&full(OSPFV3_ROUTER_ID_B)),
+        b.count(&full(OSPFV3_ROUTER_ID)),
+    );
+    log("configuring a matching rfc 7166 key (sa id 300, hmac-sha256) on both routers");
+    a.provision_flags(&with_base(
+        A,
+        with_key("topsecretkey", OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+    ))
+    .await?;
+    b.provision_flags(&with_base(
+        B,
+        with_key("topsecretkey", OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B),
+    ))
+    .await?;
+    a.wait("ospfv3 link driver started link=eth0.0.*authenticated=true")
+        .await?;
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 60).await?;
+    b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await?;
+
+    let before = a.count(&full(OSPFV3_ROUTER_ID_B));
+    let failures = b.count("ospfv3 packet authentication failed link=eth0.0");
+    log("reconfiguring router-a with a mismatched key");
+    a.provision_flags(&with_base(
+        A,
+        with_key("wrong-key", OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+    ))
+    .await?;
+    b.wait_new(
+        "ospfv3 packet authentication failed link=eth0.0",
+        failures,
+        30,
+    )
+    .await?;
+    log("waiting 8s to confirm no new ospfv3 full adjacency forms with mismatched keys");
+    a.assert_quiet(&full(OSPFV3_ROUTER_ID_B), before, 8).await?;
+
+    log("restoring the matching key on router-a");
+    a.provision_flags(&with_base(
+        A,
+        with_key("topsecretkey", OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+    ))
+    .await?;
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), before, 60).await?;
+    let replays = a.count("ospfv3 packet crypto sequence number not increasing");
+    a.assert_quiet(
+        "ospfv3 packet crypto sequence number not increasing",
+        replays,
+        5,
+    )
+    .await
+}
+
 pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     a.provision_flags(&with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)))

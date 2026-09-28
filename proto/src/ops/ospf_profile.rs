@@ -124,7 +124,7 @@ pub enum OspfProfileOp {
         instance: String,
         area_id: Ipv4Addr,
         name: String,
-        key_id: u8,
+        key_id: u16,
     },
     /// Marks one existing crypto key as the current key, clearing the flag
     /// on every other key in the list.
@@ -132,7 +132,7 @@ pub enum OspfProfileOp {
         instance: String,
         area_id: Ipv4Addr,
         name: String,
-        key_id: u8,
+        key_id: u16,
     },
     /// Unsets `auth` entirely, regardless of which mechanism was set.
     ClearAuth {
@@ -371,7 +371,7 @@ fn set_crypto_key_flag(
     instance: &str,
     area_id: Ipv4Addr,
     name: &str,
-    key_id: u8,
+    key_id: u16,
 ) -> Result<(), OpError> {
     let profile = find_profile_mut(config, instance, area_id, name)?;
     let Some(OspfAuth::Crypto { keys }) = &mut profile.auth else {
@@ -453,7 +453,7 @@ mod tests {
         }
     }
 
-    fn crypto_key(key_id: u8, is_current: bool) -> OspfCryptoKey {
+    fn crypto_key(key_id: u16, is_current: bool) -> OspfCryptoKey {
         OspfCryptoKey {
             key_id,
             algorithm: crate::schema::OspfCryptoAlgorithm::HmacSha256,

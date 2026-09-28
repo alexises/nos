@@ -712,6 +712,13 @@ pub struct Args {
     /// believes the profile's links have (`Ospfv3ProfileOp::SetMtu`).
     #[arg(long)]
     pub ospfv3_profile_mtu: Option<u16>,
+    /// If set (requires `--ospfv3-profile`), configures a single RFC 7166
+    /// authentication-trailer key on it (`Ospfv3ProfileOp::SetCryptoKey`,
+    /// marked current) — `<key-id>:<algorithm>:<key>`, key-id 0-65535 (the
+    /// 16-bit Security Association ID), algorithm one of `hmac-sha1`/
+    /// `hmac-sha256`/`hmac-sha384`/`hmac-sha512` (no md5 in RFC 7166).
+    #[arg(long)]
+    pub ospfv3_crypto_key: Option<String>,
     /// Same shape as `--ospf-interface-profile`, joining `OSPFv3` instead
     /// (`SubinterfaceOp::SetOspfv3Profile`).
     #[arg(long)]
@@ -1734,14 +1741,28 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             }));
             if let Some(mtu) = args.ospfv3_profile_mtu {
                 ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetMtu {
-                    instance,
+                    instance: instance.clone(),
                     area_id,
-                    name,
+                    name: name.clone(),
                     mtu,
                 }));
             }
-        } else if args.ospfv3_profile_mtu.is_some() {
-            bail!("--ospfv3-profile-mtu requires --ospfv3-profile to also be set");
+            if let Some(spec) = args.ospfv3_crypto_key.clone() {
+                let key = parse_ospf_crypto_key(&spec)?;
+                if key.algorithm == OspfCryptoAlgorithm::Md5 {
+                    bail!("--ospfv3-crypto-key: RFC 7166 has no md5, use an hmac-sha algorithm");
+                }
+                ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetCryptoKey {
+                    instance,
+                    area_id,
+                    name,
+                    key,
+                }));
+            }
+        } else if args.ospfv3_profile_mtu.is_some() || args.ospfv3_crypto_key.is_some() {
+            bail!(
+                "--ospfv3-profile-mtu/--ospfv3-crypto-key require --ospfv3-profile to also be set"
+            );
         }
     } else if args.ospfv3_profile.is_some() {
         bail!("--ospfv3-profile requires --ospfv3-area to also be set");
@@ -1766,10 +1787,11 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     Ok(ops)
 }
 
-/// Parses `--ospf-crypto-key`'s `<key-id>:<algorithm>:<key>` shape into a
-/// single `OspfCryptoKey`, always marked current — this tool only ever
-/// provisions one active key at a time (rotation isn't part of the e2e
-/// scenario this flag exists for).
+/// Parses `--ospf-crypto-key`/`--ospfv3-crypto-key`'s `<key-id>:<algorithm>:
+/// <key>` shape into a single `OspfCryptoKey`, always marked current — this
+/// tool only ever provisions one active key at a time (rotation isn't part
+/// of the e2e scenario these flags exist for). `<key-id>` is 0-65535; a
+/// classic `OSPFv2` key above 255 is refused at commit, not here.
 fn parse_ospf_crypto_key(spec: &str) -> anyhow::Result<OspfCryptoKey> {
     let mut parts = spec.splitn(3, ':');
     let (Some(key_id), Some(algorithm), Some(key)) = (parts.next(), parts.next(), parts.next())
@@ -1777,7 +1799,7 @@ fn parse_ospf_crypto_key(spec: &str) -> anyhow::Result<OspfCryptoKey> {
         bail!("--ospf-crypto-key must be <key-id>:<algorithm>:<key>, got '{spec}'");
     };
     let key_id = key_id
-        .parse::<u8>()
+        .parse::<u16>()
         .with_context(|| format!("invalid --ospf-crypto-key key-id in '{spec}'"))?;
     let algorithm = match algorithm {
         "md5" => OspfCryptoAlgorithm::Md5,

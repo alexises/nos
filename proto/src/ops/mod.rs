@@ -219,7 +219,7 @@ pub enum OpError {
         instance: String,
         area_id: Ipv4Addr,
         name: String,
-        key_id: u8,
+        key_id: u16,
     },
     #[error("ospfv3 instance '{0}' not found")]
     Ospfv3InstanceNotFound(String),
@@ -232,6 +232,13 @@ pub enum OpError {
         instance: String,
         area_id: Ipv4Addr,
         name: String,
+    },
+    #[error("crypto key with key-id '{key_id}' not found in ospfv3 profile '{name}' (area '{area_id}' of ospfv3 instance '{instance}')")]
+    Ospfv3CryptoKeyNotFound {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        key_id: u16,
     },
     #[error("port aggregate '{0}' not found")]
     PortAggregateNotFound(String),

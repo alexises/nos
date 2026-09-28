@@ -23,7 +23,20 @@
 //! send and verify it (silently dropping bad packets) on receive — the same
 //! mechanism Linux already uses for `ICMPv6` raw sockets. `socket2` doesn't
 //! wrap this option directly, so it's set via a raw `libc::setsockopt` call
-//! on the socket's own fd.
+//! on the socket's own fd. **Not set on an authenticated link**: RFC 7166
+//! §2.2/§4.2 omit the checksum entirely when the authentication trailer is
+//! in use (the field stays 0 and the digest covers the packet instead), so
+//! the kernel must neither fill it in on send nor verify it on receive.
+//!
+//! # Signing (RFC 7166)
+//! An authenticated socket appends the trailer to every packet it sends
+//! (`packet::TrailerAuth::sign`) — the trailer wraps an already-encoded
+//! packet, so this is the one place every send path already funnels
+//! through, and the strictly increasing sequence number lives here with it
+//! (seeded from wall-clock unix-seconds and floored there on every bump, so
+//! it never regresses across a link restart — `ospf::link`'s classic
+//! `AuType` 2 scheme). Verification stays in `link.rs`, next to the
+//! per-neighbor anti-replay state it feeds.
 //!
 //! # No manual header strip (the other real difference)
 //! `ospf::socket::recv_packet` manually strips the IPv4 header raw IPv4
@@ -31,13 +44,18 @@
 //! `recv_from` already returns just the upper-layer payload — so there's
 //! nothing to strip here at all.
 
+use std::borrow::Cow;
 use std::io;
 use std::mem::MaybeUninit;
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::io::unix::AsyncFd;
+
+use crate::packet::TrailerAuth;
 
 pub const OSPF_IP_PROTO: i32 = 89;
 pub const ALL_SPF_ROUTERS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 5);
@@ -55,12 +73,31 @@ const RECV_BUF_LEN: usize = 4096;
 /// joined to `FF02::5` on it — one per `OSPFv3` link.
 pub struct OspfSocket {
     inner: AsyncFd<Socket>,
+    /// RFC 7166 signing state: the link's keys, the link-local address the
+    /// packets leave from (bound into the digest via `Apad`), and the
+    /// outgoing sequence number.
+    auth: Option<(TrailerAuth, Ipv6Addr, AtomicU64)>,
+}
+
+/// Wall-clock floor for the outgoing sequence number — mirrors
+/// `ospf::link::crypto_seq_floor`.
+fn unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 impl OspfSocket {
     /// Opens the socket, scopes it to `interface` (this link's own kernel
-    /// device), and joins `FF02::5` on it.
-    pub fn open(interface: &str, ifindex: u32) -> io::Result<Self> {
+    /// device), and joins `FF02::5` on it. `auth` (keys plus the link's own
+    /// link-local source address) makes it sign every packet it sends — and
+    /// skips the kernel checksum, per RFC 7166 §2.2/§4.2 (see the module
+    /// doc comment).
+    pub fn open(
+        interface: &str,
+        ifindex: u32,
+        auth: Option<(TrailerAuth, Ipv6Addr)>,
+    ) -> io::Result<Self> {
         let socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::from(OSPF_IP_PROTO)))?;
         socket.bind_device(Some(interface.as_bytes()))?;
         socket.join_multicast_v6(&ALL_SPF_ROUTERS, ifindex)?;
@@ -68,14 +105,34 @@ impl OspfSocket {
         // router would receive its own Hello back and treat itself as a
         // neighbor (identical reasoning to `ospf::socket`'s own note).
         socket.set_multicast_loop_v6(false)?;
-        set_checksum_offset(&socket)?;
+        if auth.is_none() {
+            set_checksum_offset(&socket)?;
+        }
         // Link-local scope only (conventional; no virtual links here).
         socket.set_unicast_hops_v6(1)?;
         socket.set_multicast_hops_v6(1)?;
         socket.set_nonblocking(true)?;
         Ok(Self {
             inner: AsyncFd::new(socket)?,
+            auth: auth.map(|(keys, source)| (keys, source, AtomicU64::new(unix_secs()))),
         })
+    }
+
+    /// `payload` with the RFC 7166 trailer appended when authenticated — the
+    /// sequence number is one past the previous send or the current
+    /// wall-clock second, whichever is larger.
+    fn signed<'a>(&self, payload: &'a [u8]) -> Cow<'a, [u8]> {
+        let Some((keys, source, seq)) = &self.auth else {
+            return Cow::Borrowed(payload);
+        };
+        let floor = unix_secs();
+        let next = |prev: u64| prev.saturating_add(1).max(floor);
+        let prev = seq
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |p| Some(next(p)))
+            .unwrap_or(0);
+        let mut packet = payload.to_vec();
+        keys.sign(&mut packet, next(prev), *source);
+        Cow::Owned(packet)
     }
 
     /// Sends `payload` (an already-encoded `OSPFv3` packet, see
@@ -83,7 +140,7 @@ impl OspfSocket {
     /// on point-to-point links.
     pub fn send_multicast(&self, ifindex: u32, payload: &[u8]) -> io::Result<()> {
         let dest = SockAddr::from(SocketAddrV6::new(ALL_SPF_ROUTERS, 0, 0, ifindex));
-        self.inner.get_ref().send_to(payload, &dest)?;
+        self.inner.get_ref().send_to(&self.signed(payload), &dest)?;
         Ok(())
     }
 
@@ -91,7 +148,7 @@ impl OspfSocket {
     /// one specific neighbor's link-local address, unlike Hello.
     pub fn send_unicast(&self, dest: Ipv6Addr, ifindex: u32, payload: &[u8]) -> io::Result<()> {
         let dest = SockAddr::from(SocketAddrV6::new(dest, 0, 0, ifindex));
-        self.inner.get_ref().send_to(payload, &dest)?;
+        self.inner.get_ref().send_to(&self.signed(payload), &dest)?;
         Ok(())
     }
 

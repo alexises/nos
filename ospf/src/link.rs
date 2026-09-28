@@ -134,8 +134,8 @@ pub enum LinkAuthConfig {
     /// validation (`valid_auth`: exactly one `is_current` key) by the time
     /// this is built in `reconcile.rs`.
     Crypto {
-        keys: Vec<(u8, packet::CryptoAlgorithm, Vec<u8>)>,
-        current_key_id: u8,
+        keys: Vec<(u16, packet::CryptoAlgorithm, Vec<u8>)>,
+        current_key_id: u16,
         /// RFC 7474 (`OspfProfile.extended_sequence_numbers`): `AuType` 3
         /// with a persisted-boot-count 64-bit sequence number.
         extended: bool,
