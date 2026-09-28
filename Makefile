@@ -8,7 +8,7 @@ CARGO_FEATURES ?=
 
 .PHONY: help build fmt fmt-fix clippy clippy-fix fix test test-plain \
         deny audit sast miri coverage mutants check ci tools docker-lint docker-build \
-        e2e-preflight
+        e2e-preflight docs-fix
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -61,6 +61,9 @@ coverage: ## Collect test coverage as lcov.info (matches CI)
 mutants: ## Run mutation testing (needs a nightly toolchain; slow — CI only runs this on schedule)
 	@command -v cargo-mutants >/dev/null 2>&1 || { echo "cargo-mutants not found — run 'make tools'"; exit 1; }
 	cargo +nightly mutants --workspace
+
+docs-fix: ## Regenerate docs/openapi.json from nos-restd's OpenAPI document
+	UPDATE_OPENAPI_SNAPSHOT=1 cargo test -p nos-rest --test openapi_snapshot
 
 check: build fmt clippy test ## Fast local check: build + fmt + clippy + test (run before pushing)
 
