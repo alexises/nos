@@ -7,7 +7,7 @@ IMAGE ?= nos:local
 CARGO_FEATURES ?=
 
 .PHONY: help build fmt fmt-fix clippy clippy-fix fix test test-plain \
-        deny audit miri coverage mutants check ci tools docker-lint docker-build
+        deny audit sast miri coverage mutants check ci tools docker-lint docker-build
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -45,6 +45,9 @@ deny: ## Check license/ban/source policy (matches CI)
 audit: ## Check for known security advisories (matches CI)
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "cargo-audit not found — run 'make tools'"; exit 1; }
 	cargo audit
+
+sast: ## Static analysis with semgrep's p/rust ruleset (matches CI; needs docker)
+	docker run --rm -v "$(CURDIR):/src" semgrep/semgrep semgrep scan --config p/rust --exclude target /src
 
 miri: ## Run miri UB checks on the pure-logic crates (needs a nightly toolchain + miri component; slow, matches CI)
 	@command -v cargo-miri >/dev/null 2>&1 || { echo "cargo-miri not found — needs rustup + 'rustup +nightly component add miri'"; exit 1; }
