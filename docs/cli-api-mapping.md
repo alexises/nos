@@ -117,7 +117,7 @@ The `ETag` is `"1"` because the shell's single `set` was the transaction's first
 
 Only in the CLI:
 
-- `save`. The REST API has no save endpoint. Commits over REST are live immediately, but they are not written to `/var/lib/nos/config.yaml` until someone runs `save` in the shell; until then, a router restart loses them.
+- `save`. The REST API has no save endpoint. Commits over REST are live immediately, but they are not written to `/var/lib/nos/config.yaml` until someone runs `save` in the shell; until then, a router restart loses them. Adding a REST save is tracked in [#112](https://github.com/alexises/nos/issues/112).
 - `help`, `?` and Tab. Over REST, use the [OpenAPI document](api.md#the-openapi-document) or `/swagger-ui/`.
 - `edit`, `up` and `top`. They are not needed, because every URL is absolute (see above).
 

@@ -203,7 +203,7 @@ $ $C -X POST $B/v1/transactions/doc1/commit
 
 The diff lists every section. Each changed object carries a `status` (`Added`, `Removed`, `Modified`), its changed `fields` (each with `label`, `old`, `new`) and its changed `subsections`. This is the same diff the shell's `diff` command renders.
 
-Committed changes are live, but not yet saved to disk. The REST API has no save operation; see [CLI ↔ API mapping](cli-api-mapping.md#operations-with-no-counterpart).
+Committed changes are live, but not yet saved to disk. The REST API has no save operation yet (tracked in [#112](https://github.com/alexises/nos/issues/112)); see [CLI ↔ API mapping](cli-api-mapping.md#operations-with-no-counterpart).
 
 ## The config tree as URLs
 
