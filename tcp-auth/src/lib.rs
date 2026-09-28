@@ -216,6 +216,17 @@ pub fn set_max_hops(fd: RawFd, v6: bool, hops: u8) -> io::Result<()> {
     setsockopt_int(fd, level, minttl, min)
 }
 
+/// Sets `IPV6_CHECKSUM` at `IPPROTO_IPV6` level to `offset` — the byte
+/// offset within the payload of a field the kernel should fill with the
+/// ICMPv6-style pseudo-header checksum on send and verify on receive.
+/// Passing a negative `offset` disables kernel checksumming (used when a
+/// caller computes its own, e.g. inside an authenticated payload). Not
+/// exposed by `socket2`, so it goes through the same raw-`setsockopt`
+/// helper as [`set_max_hops`].
+pub fn set_ipv6_checksum(fd: RawFd, offset: libc::c_int) -> io::Result<()> {
+    setsockopt_int(fd, libc::IPPROTO_IPV6, libc::IPV6_CHECKSUM, offset)
+}
+
 fn setsockopt_int(
     fd: RawFd,
     level: libc::c_int,

@@ -22,8 +22,9 @@
 //! byte offset in the `OSPFv3` header (12), makes the kernel fill it in on
 //! send and verify it (silently dropping bad packets) on receive — the same
 //! mechanism Linux already uses for `ICMPv6` raw sockets. `socket2` doesn't
-//! wrap this option directly, so it's set via a raw `libc::setsockopt` call
-//! on the socket's own fd. **Not set on an authenticated link**: RFC 7166
+//! wrap this option directly, so it's set via `nos_tcp_auth::set_ipv6_checksum`
+//! (the same raw-`setsockopt` helper `set_max_hops` uses, not reimplemented
+//! here). **Not set on an authenticated link**: RFC 7166
 //! §2.2/§4.2 omit the checksum entirely when the authentication trailer is
 //! in use (the field stays 0 and the digest covers the packet instead), so
 //! the kernel must neither fill it in on send nor verify it on receive.
@@ -46,12 +47,12 @@
 
 use std::borrow::Cow;
 use std::io;
-use std::mem::MaybeUninit;
 use std::net::{Ipv6Addr, SocketAddrV6};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use nix::sys::socket::{recvfrom, SockaddrIn6};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::io::unix::AsyncFd;
 
@@ -106,7 +107,7 @@ impl OspfSocket {
         // neighbor (identical reasoning to `ospf::socket`'s own note).
         socket.set_multicast_loop_v6(false)?;
         if auth.is_none() {
-            set_checksum_offset(&socket)?;
+            nos_tcp_auth::set_ipv6_checksum(socket.as_raw_fd(), CHECKSUM_OFFSET)?;
         }
         // Link-local scope only (conventional; no virtual links here).
         socket.set_unicast_hops_v6(1)?;
@@ -161,56 +162,26 @@ impl OspfSocket {
     pub async fn recv_packet(&self) -> io::Result<(Ipv6Addr, Vec<u8>)> {
         loop {
             let mut guard = self.inner.readable().await?;
-            let mut buf = [MaybeUninit::<u8>::uninit(); RECV_BUF_LEN];
-            match guard.try_io(|inner| inner.get_ref().recv_from(&mut buf)) {
+            let mut buf = [0u8; RECV_BUF_LEN];
+            let io_result = guard.try_io(|inner| {
+                recvfrom::<SockaddrIn6>(inner.get_ref().as_raw_fd(), &mut buf)
+                    .map_err(io::Error::from)
+            });
+            match io_result {
                 Ok(Ok((n, addr))) => {
                     if n == 0 {
                         continue;
                     }
-                    let Some(source) = addr.as_socket_ipv6().map(|a| *a.ip()) else {
+                    let Some(source) = addr.map(|a| a.ip()) else {
                         continue;
                     };
-                    // SAFETY: `recv_from` guarantees the kernel initialized
-                    // the first `n` bytes of `buf`.
-                    #[allow(unsafe_code)]
-                    let data: Vec<u8> = buf[..n]
-                        .iter()
-                        .map(|b| unsafe { b.assume_init() })
-                        .collect();
-                    return Ok((source, data));
+                    return Ok((source, buf[..n].to_vec()));
                 }
                 Ok(Err(e)) => return Err(e),
                 Err(_would_block) => {}
             }
         }
     }
-}
-
-/// Sets `IPV6_CHECKSUM` at `IPPROTO_IPV6` level — see the module doc
-/// comment. Not exposed by `socket2`, so done via a raw `setsockopt` call.
-#[allow(unsafe_code)]
-fn set_checksum_offset(socket: &Socket) -> io::Result<()> {
-    let fd = socket.as_raw_fd();
-    let offset = CHECKSUM_OFFSET;
-    let len = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>())
-        .expect("size_of::<c_int>() always fits in a socklen_t");
-    // SAFETY: `fd` is a valid, open socket owned by `socket` for the
-    // duration of this call; `offset` is a plain `c_int` passed by
-    // reference with its own correct size, matching `setsockopt`'s
-    // contract for an integer-valued option.
-    let ret = unsafe {
-        libc::setsockopt(
-            fd,
-            libc::IPPROTO_IPV6,
-            libc::IPV6_CHECKSUM,
-            std::ptr::from_ref(&offset).cast::<libc::c_void>(),
-            len,
-        )
-    };
-    if ret != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 impl AsRawFd for OspfSocket {
