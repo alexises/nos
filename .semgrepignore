@@ -1,0 +1,19 @@
+# Build output — never worth scanning.
+target/
+
+# Test harness, not shipped: drives containers over REST for verification,
+# not part of any daemon's attack surface (rust.lang.security.args.args,
+# rust.lang.security.temp-dir.temp-dir).
+tools/e2e/
+
+# The two designated unsafe-FFI leaf crates (see root CLAUDE.md's component
+# table): every `unsafe` block in these two files is raw setsockopt/sockaddr
+# FFI, already reviewed and covered by their own SAFETY comments and tests.
+# Whole-file, not just rust.lang.security.unsafe-usage.unsafe-usage: semgrep
+# has no per-path, single-rule exclusion (`--exclude-rule` is global; a
+# registry ruleset's own `paths:` isn't overridable from here), so excluding
+# just the one rule for just these two files isn't possible without forking
+# p/rust. Accepted trade for two small, single-purpose, already-carved-out
+# files.
+l2-socket/src/lib.rs
+tcp-auth/src/lib.rs

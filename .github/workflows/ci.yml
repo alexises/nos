@@ -92,15 +92,14 @@ jobs:
     name: SAST (semgrep)
     runs-on: ubuntu-latest
     if: github.event_name != 'schedule'
+    container:
+      image: semgrep/semgrep
     permissions:
       contents: read
       security-events: write
     steps:
       - uses: actions/checkout@v4
-      - uses: returntocorp/semgrep-action@v1
-        with:
-          config: p/rust
-          generateSarif: "1"
+      - run: semgrep scan --config p/rust --exclude target --error --metrics=off --sarif --output semgrep.sarif .
       - uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif

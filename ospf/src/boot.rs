@@ -88,6 +88,7 @@ mod tests {
 
     #[test]
     fn increments_and_survives_restart() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- test scratch dir, not a security boundary.
         let dir = std::env::temp_dir().join(format!("nos-boot-{}", std::process::id()));
         let path = dir.join("i.boot");
         let _ = std::fs::remove_dir_all(&dir);
