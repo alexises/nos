@@ -46,6 +46,7 @@ impl utoipa::Modify for MutualTlsScheme {
                     description: Some(
                         "A client certificate issued by POST /v1/login (or /v1/renew)".to_string(),
                     ),
+                    deprecated: None,
                     extensions: None,
                 },
             );

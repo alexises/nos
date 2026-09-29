@@ -226,11 +226,11 @@
           "shutdown": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/BgpShutdown",
                 "description": "Overrides the peer-group's own `shutdown` — see `BgpShutdown`."
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -252,11 +252,11 @@
           "auth": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/BgpAuth",
                 "description": "`None` opens sessions with no transport authentication at all.\nSecrets are stored clear-text, like every other field in this config\n— see `BgpAuth`."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -272,11 +272,11 @@
           "damping": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/BgpDamping",
                 "description": "RFC 2439 flap damping of routes received from this group; `None`\ndisables it. See `BgpDamping`."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -336,11 +336,11 @@
           "next_hop": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/NextHopMode",
                 "description": "`None` defaults to `SelfAddress` for an eBGP peer-group and\n`Unchanged` for an iBGP one — see `NextHopMode`."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -360,21 +360,21 @@
           "shutdown": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/BgpShutdown",
                 "description": "See `BgpShutdown`. Appended last, like every later-added field."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "source_address": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/SourceAddress"
               },
               {
-                "$ref": "#/components/schemas/SourceAddress"
+                "type": "null"
               }
             ]
           }
@@ -496,11 +496,11 @@
           "vtep_source": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/SourceAddress",
                 "description": "The VTEP address (VXLAN local endpoint), resolved at runtime by\n`nos-fdbd` over IPC to `nos-interfaced` — never here, like\n`BgpPeerGroup.source_address`. `Loopback` means the loopback of the\nrouting table owning `mac_redistribute`'s BGP instance."
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -731,10 +731,10 @@
           "hostname": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/FieldDiff"
               },
               {
-                "$ref": "#/components/schemas/FieldDiff"
+                "type": "null"
               }
             ]
           },
@@ -1714,11 +1714,11 @@
           "auth": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/OspfAuth",
                 "description": "`None` is RFC 2328 `AuType` 0 (Null) — no authentication."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -1768,11 +1768,11 @@
           "network_type": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/NetworkType",
                 "description": "`None` resolves per attach point: a `Subinterface`/loopback\n`Interface` attach point defaults to `PointToPoint`, a\n`BroadcastDomain` one defaults to `Broadcast` — resolved by\n`ospf::reconcile`, not here, since one profile may be referenced by\nattach points of different kinds at once. Setting this explicitly\noverrides that default per attach point (e.g. forcing\npoint-to-point behavior on a `BroadcastDomain` attach point, or\nvice versa) — never validated against the attach point's own kind,\nmatching real OSPF's own allowance for this."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -1909,11 +1909,11 @@
           "network_type": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/NetworkType",
                 "description": "`None` resolves per attach point, exactly like `OspfProfile.network_type`."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -2303,22 +2303,22 @@
           "redistribute": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Redistribute",
                 "description": "`#[garde(skip)]`: the cross-field constraint (the referenced\n`bgp_instance`/`static_routing_instance` must actually be set on this\nsame table) can't live in a per-field closure — garde's per-field\n`custom` closures can't see a sibling field — so it's wired one level\nup, on `Config.routing_tables` (`valid_redistribute_rules`), the same\nreason `BgpPeerGroup`'s timer check is wired on `BgpInstance.peer_groups`."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "rest_api": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/RestApi",
                 "description": "Pins a `nos-restd` to this table: it listens on `rest_api.address`\ninside this table's VRF. `serde(default)` so on-disk config saved\nbefore this field existed still loads."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -2655,10 +2655,10 @@
             "result": {
               "oneOf": [
                 {
-                  "type": "null"
+                  "$ref": "#/components/schemas/Vec"
                 },
                 {
-                  "$ref": "#/components/schemas/Vec"
+                  "type": "null"
                 }
               ]
             }
