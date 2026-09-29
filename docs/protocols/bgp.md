@@ -36,17 +36,17 @@ This session sets up an eBGP session from router-a (AS 65001, 10.50.0.2) to rout
 ```
 edge-1> configure bgp1
 edge-1(bgp1)> edit bgp instance r1
-edge-1(bgp1/bgp:r1)> set asn 65001
-edge-1(bgp1/bgp:r1)> set router-id 1.1.1.1
-edge-1(bgp1/bgp:r1)> edit peer-group pg1
-edge-1(bgp1/bgp:r1/peer-group:pg1)> set remote-as 65002
-edge-1(bgp1/bgp:r1/peer-group:pg1)> set address-family ipv4
-edge-1(bgp1/bgp:r1/peer-group:pg1)> set import-policy accept-all
-edge-1(bgp1/bgp:r1/peer-group:pg1)> set export-policy accept-all
-edge-1(bgp1/bgp:r1/peer-group:pg1)> set connect-retry-time 5
-edge-1(bgp1/bgp:r1/peer-group:pg1)> up
-edge-1(bgp1/bgp:r1)> set peer 10.50.0.3 peer-group pg1
-edge-1(bgp1/bgp:r1)> top
+edge-1(bgp1/bgp-instance:r1)> set asn 65001
+edge-1(bgp1/bgp-instance:r1)> set router-id 1.1.1.1
+edge-1(bgp1/bgp-instance:r1)> edit peer-group pg1
+edge-1(bgp1/bgp-instance:r1/peer-group:pg1)> set remote-as 65002
+edge-1(bgp1/bgp-instance:r1/peer-group:pg1)> set address-family ipv4
+edge-1(bgp1/bgp-instance:r1/peer-group:pg1)> set import-policy accept-all
+edge-1(bgp1/bgp-instance:r1/peer-group:pg1)> set export-policy accept-all
+edge-1(bgp1/bgp-instance:r1/peer-group:pg1)> set connect-retry-time 5
+edge-1(bgp1/bgp-instance:r1/peer-group:pg1)> up
+edge-1(bgp1/bgp-instance:r1)> set peer 10.50.0.3 peer-group pg1
+edge-1(bgp1/bgp-instance:r1)> top
 edge-1(bgp1)> set routing-table rt1 bgp-instance r1
 edge-1(bgp1)> commit
 transaction 'bgp1' committed
@@ -168,9 +168,9 @@ Three timers are set per peer-group:
 - `connect-retry-time` (default 120 seconds) is how long NOS waits between two attempts to connect to a peer.
 
 ```
-edge-1(t1/bgp:r1/peer-group:pg1)> set hold-time 30
-edge-1(t1/bgp:r1/peer-group:pg1)> set keepalive-interval 10
-edge-1(t1/bgp:r1/peer-group:pg1)> set connect-retry-time 5
+edge-1(t1/bgp-instance:r1/peer-group:pg1)> set hold-time 30
+edge-1(t1/bgp-instance:r1/peer-group:pg1)> set keepalive-interval 10
+edge-1(t1/bgp-instance:r1/peer-group:pg1)> set connect-retry-time 5
 ```
 
 The absolute form works from anywhere in the transaction: `set bgp instance r1 peer-group pg1 hold-time 30`. To go back to a default, use `delete hold-time` (or `keepalive-interval`, `connect-retry-time`) inside the peer-group; the `delete` forms exist only relative to the peer-group.
@@ -188,8 +188,8 @@ $C -X DELETE $B/v1/transactions/t1/bgp-instance/r1/peer-group/pg1/hold-time     
 `shutdown` closes a session and keeps it closed without removing its configuration (RFC 4486). You can shut a whole peer-group or one peer, with an optional message of up to 255 bytes that the peer receives in its Cease NOTIFICATION (RFC 9003) and can log:
 
 ```
-edge-1(t2/bgp:r1/peer-group:pg1)> set shutdown maintenance until 18:00, ticket 4711
-edge-1(t2/bgp:r1/peer-group:pg1)> commit
+edge-1(t2/bgp-instance:r1/peer-group:pg1)> set shutdown maintenance until 18:00, ticket 4711
+edge-1(t2/bgp-instance:r1/peer-group:pg1)> commit
 transaction 't2' committed
 edge-1> show bgp brief
 bgp instance r1:
@@ -305,7 +305,7 @@ Standard (RFC 1997), extended (RFC 4360) and large (RFC 8092) communities are pa
 `set md5-password <password>` signs every TCP segment of the peer-group's sessions with a shared password. Both sides must use the same password; with a wrong or missing one, the kernel drops the segments and the session never comes up. The password is 1 to 80 bytes.
 
 ```
-edge-1(t4/bgp:r1/peer-group:pg1)> set md5-password s3cr3t-md5
+edge-1(t4/bgp-instance:r1/peer-group:pg1)> set md5-password s3cr3t-md5
 ```
 
 ```sh
@@ -328,9 +328,9 @@ Each key has:
 Exactly one key must be marked `current`: it signs the segments this router sends. At most one may be marked `rnext`: it asks the peer to switch to that key.
 
 ```
-edge-1(t5/bgp:r1/peer-group:pg1)> set ao-key 1 1 hmac-sha1 first-key
-edge-1(t5/bgp:r1/peer-group:pg1)> set ao-key 1 current
-edge-1(t5/bgp:r1/peer-group:pg1)> commit
+edge-1(t5/bgp-instance:r1/peer-group:pg1)> set ao-key 1 1 hmac-sha1 first-key
+edge-1(t5/bgp-instance:r1/peer-group:pg1)> set ao-key 1 current
+edge-1(t5/bgp-instance:r1/peer-group:pg1)> commit
 ```
 
 `set ao-key <send-id> <recv-id> <algorithm> <secret>` adds a key, or replaces the key with that send ID. `set ao-key <send-id> current` and `set ao-key <send-id> rnext` move the flags, and `delete ao-key <send-id>` removes one key.
@@ -378,7 +378,7 @@ When a peer asks for a route refresh, NOS resends its routes for that address fa
 `set mrai <seconds>` sets the MinRouteAdvertisementInterval: the minimum time between two advertisements of the same prefix to the same peer. The first advertisement of a prefix is sent at once, and so is every withdrawal. A change within the interval is held back until the interval ends, and several changes collapse into the last one. Unset or `0` sends every change at once. EVPN routes are not paced.
 
 ```
-edge-1(t6/bgp:r1/peer-group:pg1)> set mrai 30
+edge-1(t6/bgp-instance:r1/peer-group:pg1)> set mrai 30
 ```
 
 ```sh
@@ -398,7 +398,7 @@ When the penalty reaches `suppress`, the route is set aside: the router keeps it
 `set damping` alone uses the RFC 7196 defaults: half-life 900, reuse 750, suppress 6000, max-suppress 3600. Give any of the four parameters, in any order, to change them; the others keep their defaults:
 
 ```
-edge-1(t7/bgp:r1/peer-group:pg1)> set damping half-life 20 reuse 750 suppress 2000
+edge-1(t7/bgp-instance:r1/peer-group:pg1)> set damping half-life 20 reuse 750 suppress 2000
 ```
 
 ```sh
@@ -418,12 +418,12 @@ Normally a route learned from one iBGP peer is not advertised to another iBGP pe
 On the reflector, mark the peer-group of its clients with `set route-reflector-client`. The peer-group must be iBGP (`remote-as` equal to the instance's `asn`). The clients need no special configuration.
 
 ```
-edge-1(t8/bgp:r1)> edit peer-group clients
-edge-1(t8/bgp:r1/peer-group:clients)> set remote-as 65001
-edge-1(t8/bgp:r1/peer-group:clients)> set address-family ipv4
-edge-1(t8/bgp:r1/peer-group:clients)> set import-policy accept-all
-edge-1(t8/bgp:r1/peer-group:clients)> set export-policy accept-all
-edge-1(t8/bgp:r1/peer-group:clients)> set route-reflector-client
+edge-1(t8/bgp-instance:r1)> edit peer-group clients
+edge-1(t8/bgp-instance:r1/peer-group:clients)> set remote-as 65001
+edge-1(t8/bgp-instance:r1/peer-group:clients)> set address-family ipv4
+edge-1(t8/bgp-instance:r1/peer-group:clients)> set import-policy accept-all
+edge-1(t8/bgp-instance:r1/peer-group:clients)> set export-policy accept-all
+edge-1(t8/bgp-instance:r1/peer-group:clients)> set route-reflector-client
 ```
 
 On an eBGP peer-group the commit is refused:

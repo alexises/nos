@@ -32,9 +32,9 @@ The examples use router-a from the lab described in the [README](../README.md#co
 ```
 router-a> configure vlan300
 router-a(vlan300)> edit interface eth0.300
-router-a(vlan300/interface:eth0.300)> set address 192.0.2.1/24
-router-a(vlan300/interface:eth0.300)> set routing-table rt1
-router-a(vlan300/interface:eth0.300)> top
+router-a(vlan300/interface:eth0/subinterface:300)> set address 192.0.2.1/24
+router-a(vlan300/interface:eth0/subinterface:300)> set routing-table rt1
+router-a(vlan300/interface:eth0/subinterface:300)> top
 router-a(vlan300)> diff
   interface eth0:
 +   subinterface 300:
@@ -127,7 +127,7 @@ interface eth0: address [none], routing-table unset, switching-profile unset, mt
 
 REST: `PUT $B/v1/transactions/jumbo/interface/eth0/mtu` with body `9000`, then commit.
 
-The MTU belongs to the link, so it is set on `eth0`, never on `eth0.300`; every subinterface uses the link's MTU. `set interface eth0.300 mtu …` is refused (`interface 'eth0.300' not found`), and so is `set mtu` while in `edit interface eth0.300`.
+The MTU belongs to the link, so it is set on `eth0`, never on `eth0.300`; every subinterface uses the link's MTU. `set interface eth0.300 mtu …` is refused (`is not a valid edit here`: a subinterface has no `mtu`), and so is `set mtu` while in `edit interface eth0.300`.
 
 `delete interface eth0 mtu` (REST: `DELETE …/interface/eth0/mtu`) stops NOS from managing the MTU, but it does **not** put the old value back: the link keeps 9000 until something changes it, even though `show interface` then prints `mtu 1500` (see below). To return to 1500, set 1500.
 

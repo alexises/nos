@@ -182,6 +182,11 @@ pub fn enum_word(kind: &Kind, word: &str) -> Option<Value> {
         .map(|v| Value::String(v.name.to_string()))
 }
 
+/// `area_id` → `area-id`, a field name as a usage placeholder.
+pub fn kebab_field(name: &str) -> String {
+    name.replace('_', "-")
+}
+
 /// Every spelling of a variant, canonical first.
 pub fn variant_spellings(v: &Variant) -> Vec<String> {
     let mut out: Vec<String> = v.words.map(str::to_string).into_iter().collect();

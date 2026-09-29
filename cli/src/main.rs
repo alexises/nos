@@ -11,7 +11,7 @@ use futures::StreamExt;
 use nos_cli::command::Command;
 use nos_cli::completer::NosCompleter;
 use nos_cli::help_menu::HelpMenu;
-use nos_cli::session::{self, Mode, PathAfter, Resolved};
+use nos_cli::session::{self, Mode, Resolved};
 use nos_cli::spec::{self, Doc};
 use nos_cli::{
     bgp_client, client, fdb_client, format, interface_client, lacp_client, lldp_client, log_client,
@@ -61,120 +61,11 @@ impl NosPrompt {
         let suffix = match mode {
             Mode::Operational => String::new(),
             Mode::Configuration {
-                transaction,
-                path: session::Path::Root,
-                ..
-            } => format!("({transaction})"),
+                transaction, path, ..
+            } if path.is_root() => format!("({transaction})"),
             Mode::Configuration {
-                transaction,
-                path: session::Path::BgpInstance(name),
-                ..
-            } => format!("({transaction}/bgp:{name})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::BgpPeerGroup { instance, group },
-                ..
-            } => format!("({transaction}/bgp:{instance}/peer-group:{group})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::RoutingTable(name),
-                ..
-            } => format!("({transaction}/routing-table:{name})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::OspfInstance(name),
-                ..
-            } => format!("({transaction}/ospf:{name})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::OspfArea { instance, area_id },
-                ..
-            } => format!("({transaction}/ospf:{instance}/area:{area_id})"),
-            Mode::Configuration {
-                transaction,
-                path:
-                    session::Path::OspfProfile {
-                        instance,
-                        area_id,
-                        name,
-                    },
-                ..
-            } => format!("({transaction}/ospf:{instance}/area:{area_id}/profile:{name})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::Ospfv3Instance(name),
-                ..
-            } => format!("({transaction}/ospfv3:{name})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::Ospfv3Area { instance, area_id },
-                ..
-            } => format!("({transaction}/ospfv3:{instance}/area:{area_id})"),
-            Mode::Configuration {
-                transaction,
-                path:
-                    session::Path::Ospfv3Profile {
-                        instance,
-                        area_id,
-                        name,
-                    },
-                ..
-            } => format!("({transaction}/ospfv3:{instance}/area:{area_id}/profile:{name})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::StaticRoutingInstance(name),
-                ..
-            } => format!("({transaction}/static-routing-instance:{name})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::Interface(name),
-                ..
-            } => format!("({transaction}/interface:{name})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::Subinterface { interface, tag },
-                ..
-            } => format!("({transaction}/interface:{interface}.{tag})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::PolicyDefinition(name),
-                ..
-            } => format!("({transaction}/policy-definition:{name})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::CommunityAlias(name),
-                ..
-            } => format!("({transaction}/community-alias:{name})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::CommunityGroup(name),
-                ..
-            } => format!("({transaction}/community-group:{name})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::AsPathList(name),
-                ..
-            } => format!("({transaction}/as-path-list:{name})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::PrefixList(name),
-                ..
-            } => format!("({transaction}/prefix-list:{name})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::BroadcastDomain(name),
-                ..
-            } => format!("({transaction}/broadcast-domain:{name})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::SwitchingProfile(name),
-                ..
-            } => format!("({transaction}/switching-profile:{name})"),
-            Mode::Configuration {
-                transaction,
-                path: session::Path::PortAggregate(name),
-                ..
-            } => format!("({transaction}/port-aggregate:{name})"),
+                transaction, path, ..
+            } => format!("({transaction}/{path})"),
         };
         Self { hostname, suffix }
     }
@@ -266,323 +157,27 @@ fn completer_for(socket: &Path, cache: DocCache, mode: &Mode) -> Box<dyn Complet
     let doc_socket = socket.to_path_buf();
     let doc_source: Box<dyn FnMut(Topic) -> CommandDoc + Send> =
         Box::new(move |topic| doc_for_blocking(&doc_socket, &cache, topic));
-
-    let instance_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
-        Mode::Configuration { transaction, .. } => {
-            let transaction = transaction.clone();
-            let socket = socket.to_path_buf();
-            Box::new(move || {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(client::get_transaction(&socket, &transaction))
-                })
-                .map(|snap| {
-                    snap.config
-                        .bgp_instances
-                        .into_iter()
-                        .map(|i| i.name)
-                        .collect()
-                })
-                .unwrap_or_default()
-            })
-        }
-        Mode::Operational => Box::new(Vec::new),
+    // The open transaction's config (what `edit`/`set`/`delete` act on),
+    // else the running one (`show route <table>` in operational mode).
+    let socket = socket.to_path_buf();
+    let transaction = match mode {
+        Mode::Configuration { transaction, .. } => Some(transaction.clone()),
+        Mode::Operational => None,
     };
-
-    // Deliberately flat/global — not scoped to whichever instance name is
-    // already typed on the line — consistent with peer-group names being
-    // unique across the whole config, not just within one instance (see
-    // `nos_proto::schema::bgp_peer_group`).
-    let peer_group_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
-        Mode::Configuration { transaction, .. } => {
-            let transaction = transaction.clone();
-            let socket = socket.to_path_buf();
-            Box::new(move || {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(client::get_transaction(&socket, &transaction))
-                })
-                .map(|snap| {
-                    snap.config
-                        .bgp_instances
-                        .into_iter()
-                        .flat_map(|i| i.peer_groups)
-                        .map(|g| g.name)
-                        .collect()
-                })
-                .unwrap_or_default()
+    let config_source: Box<dyn FnMut() -> Option<serde_json::Value> + Send> = Box::new(move || {
+        let config = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                match &transaction {
+                    Some(t) => client::get_transaction(&socket, t)
+                        .await
+                        .map(|snap| snap.config),
+                    None => client::fetch_running_config(&socket).await,
+                }
             })
-        }
-        Mode::Operational => Box::new(Vec::new),
-    };
-
-    let routing_table_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
-        Mode::Configuration { transaction, .. } => {
-            let transaction = transaction.clone();
-            let socket = socket.to_path_buf();
-            Box::new(move || {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(client::get_transaction(&socket, &transaction))
-                })
-                .map(|snap| {
-                    snap.config
-                        .routing_tables
-                        .into_iter()
-                        .map(|t| t.name)
-                        .collect()
-                })
-                .unwrap_or_default()
-            })
-        }
-        // `show route <table>` needs table-name completion in operational
-        // mode too, where there's no open transaction to read from — fall
-        // back to the running config instead.
-        Mode::Operational => {
-            let socket = socket.to_path_buf();
-            Box::new(move || {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(client::fetch_running_config(&socket))
-                })
-                .map(|cfg| cfg.routing_tables.into_iter().map(|t| t.name).collect())
-                .unwrap_or_default()
-            })
-        }
-    };
-
-    let ospf_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
-        Mode::Configuration { transaction, .. } => {
-            let transaction = transaction.clone();
-            let socket = socket.to_path_buf();
-            Box::new(move || {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(client::get_transaction(&socket, &transaction))
-                })
-                .map(|snap| {
-                    snap.config
-                        .ospf_instances
-                        .into_iter()
-                        .map(|i| i.name)
-                        .collect()
-                })
-                .unwrap_or_default()
-            })
-        }
-        Mode::Operational => Box::new(Vec::new),
-    };
-
-    let static_routing_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
-        Mode::Configuration { transaction, .. } => {
-            let transaction = transaction.clone();
-            let socket = socket.to_path_buf();
-            Box::new(move || {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(client::get_transaction(&socket, &transaction))
-                })
-                .map(|snap| {
-                    snap.config
-                        .static_routing_instances
-                        .into_iter()
-                        .map(|i| i.name)
-                        .collect()
-                })
-                .unwrap_or_default()
-            })
-        }
-        Mode::Operational => Box::new(Vec::new),
-    };
-
-    let interface_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
-        Mode::Configuration { transaction, .. } => {
-            let transaction = transaction.clone();
-            let socket = socket.to_path_buf();
-            Box::new(move || {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(client::get_transaction(&socket, &transaction))
-                })
-                .map(|snap| snap.config.interfaces.into_iter().map(|i| i.name).collect())
-                .unwrap_or_default()
-            })
-        }
-        // `show interface <name>` needs name completion in operational mode
-        // too, where there's no open transaction to read from — fall back
-        // to the running config instead, mirroring `routing_table_name_source`.
-        Mode::Operational => {
-            let socket = socket.to_path_buf();
-            Box::new(move || {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(client::fetch_running_config(&socket))
-                })
-                .map(|cfg| cfg.interfaces.into_iter().map(|i| i.name).collect())
-                .unwrap_or_default()
-            })
-        }
-    };
-
-    let broadcast_domain_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
-        Mode::Configuration { transaction, .. } => {
-            let transaction = transaction.clone();
-            let socket = socket.to_path_buf();
-            Box::new(move || {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(client::get_transaction(&socket, &transaction))
-                })
-                .map(|snap| {
-                    snap.config
-                        .broadcast_domains
-                        .into_iter()
-                        .map(|d| d.name)
-                        .collect()
-                })
-                .unwrap_or_default()
-            })
-        }
-        Mode::Operational => Box::new(Vec::new),
-    };
-
-    let switching_profile_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
-        Mode::Configuration { transaction, .. } => {
-            let transaction = transaction.clone();
-            let socket = socket.to_path_buf();
-            Box::new(move || {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(client::get_transaction(&socket, &transaction))
-                })
-                .map(|snap| {
-                    snap.config
-                        .switching_profiles
-                        .into_iter()
-                        .map(|p| p.name)
-                        .collect()
-                })
-                .unwrap_or_default()
-            })
-        }
-        Mode::Operational => Box::new(Vec::new),
-    };
-
-    let port_aggregate_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
-        Mode::Configuration { transaction, .. } => {
-            let transaction = transaction.clone();
-            let socket = socket.to_path_buf();
-            Box::new(move || {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(client::get_transaction(&socket, &transaction))
-                })
-                .map(|snap| {
-                    snap.config
-                        .port_aggregates
-                        .into_iter()
-                        .map(|a| a.name)
-                        .collect()
-                })
-                .unwrap_or_default()
-            })
-        }
-        Mode::Operational => Box::new(Vec::new),
-    };
-
-    // Deliberately flat/global, flattened across every instance's areas —
-    // not scoped to whichever instance/area is already typed on the line —
-    // mirrors `peer_group_name_source`'s own reasoning, since profile names
-    // are unique across the whole config (see
-    // `nos_proto::schema::ospf_profile`).
-    let ospf_profile_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
-        Mode::Configuration { transaction, .. } => {
-            let transaction = transaction.clone();
-            let socket = socket.to_path_buf();
-            Box::new(move || {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(client::get_transaction(&socket, &transaction))
-                })
-                .map(|snap| {
-                    snap.config
-                        .ospf_instances
-                        .into_iter()
-                        .flat_map(|i| i.areas)
-                        .flat_map(|a| a.profiles)
-                        .map(|p| p.name)
-                        .collect()
-                })
-                .unwrap_or_default()
-            })
-        }
-        Mode::Operational => Box::new(Vec::new),
-    };
-
-    let ospfv3_instance_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
-        Mode::Configuration { transaction, .. } => {
-            let transaction = transaction.clone();
-            let socket = socket.to_path_buf();
-            Box::new(move || {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(client::get_transaction(&socket, &transaction))
-                })
-                .map(|snap| {
-                    snap.config
-                        .ospfv3_instances
-                        .into_iter()
-                        .map(|i| i.name)
-                        .collect()
-                })
-                .unwrap_or_default()
-            })
-        }
-        Mode::Operational => Box::new(Vec::new),
-    };
-
-    // Deliberately flat/global, mirroring `ospf_profile_name_source`'s own
-    // reasoning.
-    let ospfv3_profile_name_source: Box<dyn FnMut() -> Vec<String> + Send> = match mode {
-        Mode::Configuration { transaction, .. } => {
-            let transaction = transaction.clone();
-            let socket = socket.to_path_buf();
-            Box::new(move || {
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(client::get_transaction(&socket, &transaction))
-                })
-                .map(|snap| {
-                    snap.config
-                        .ospfv3_instances
-                        .into_iter()
-                        .flat_map(|i| i.areas)
-                        .flat_map(|a| a.profiles)
-                        .map(|p| p.name)
-                        .collect()
-                })
-                .unwrap_or_default()
-            })
-        }
-        Mode::Operational => Box::new(Vec::new),
-    };
-
-    Box::new(NosCompleter::new(
-        mode.clone(),
-        doc_source,
-        instance_name_source,
-        peer_group_name_source,
-        routing_table_name_source,
-        ospf_instance_name_source,
-        static_routing_instance_name_source,
-        interface_name_source,
-        broadcast_domain_name_source,
-        switching_profile_name_source,
-        ospf_profile_name_source,
-        ospfv3_instance_name_source,
-        ospfv3_profile_name_source,
-        port_aggregate_name_source,
-    ))
+        });
+        serde_json::to_value(config.ok()?).ok()
+    });
+    Box::new(NosCompleter::new(mode.clone(), doc_source, config_source))
 }
 
 /// Cache-first lookup for a topic's documentation, from a synchronous
@@ -926,9 +521,7 @@ async fn handle_action(
             base,
             explicit_base,
         } => Outcome::Continue(open_transaction(socket, name, base, explicit_base).await),
-        Resolved::ApplyOp { op, after } => {
-            Outcome::Continue(apply_op(mode, socket, op, after).await)
-        }
+        Resolved::ConfigEdit(line) => Outcome::Continue(config_edit(mode, socket, &line).await),
         Resolved::Commit => Outcome::Continue(commit(mode, socket).await),
         Resolved::Discard => Outcome::Continue(discard(mode, socket).await),
         Resolved::EditPolicySource { name } => {
@@ -1051,7 +644,7 @@ fn navigate_top(mode: &Mode) -> Mode {
     let dirty = matches!(mode, Mode::Configuration { dirty: true, .. });
     Mode::Configuration {
         transaction,
-        path: session::Path::Root,
+        path: session::Path::root(),
         dirty,
     }
 }
@@ -1613,7 +1206,7 @@ async fn open_transaction(
             }
             Mode::Configuration {
                 transaction: name,
-                path: session::Path::Root,
+                path: session::Path::root(),
                 dirty: snap.dirty,
             }
         }
@@ -1624,26 +1217,67 @@ async fn open_transaction(
     }
 }
 
-async fn apply_op(mode: Mode, socket: &Path, op: ConfigOp, after: PathAfter) -> Mode {
+async fn apply_op(mode: Mode, socket: &Path, op: ConfigOp) -> Mode {
     let transaction = current_transaction(&mode);
     let path = current_path(&mode);
     match client::apply_op(socket, &transaction, op).await {
-        Ok(snap) => {
-            let new_path = match after {
-                PathAfter::Stay => path,
-                PathAfter::ToRoot => session::Path::Root,
-                PathAfter::To(p) => p,
-            };
-            Mode::Configuration {
-                transaction,
-                path: new_path,
-                dirty: snap.dirty,
-            }
-        }
+        Ok(snap) => Mode::Configuration {
+            transaction,
+            path,
+            dirty: snap.dirty,
+        },
         Err(e) => {
             eprintln!("error: {e}");
             mode
         }
+    }
+}
+
+/// An `edit`/`set`/`delete` line: resolved by `config_grammar` against the
+/// transaction's config at the current position, then sent as
+/// `SetTransactionPath` writes. Lands where the grammar navigates (`edit`,
+/// bare `delete`), else stays — moving up if the position was just deleted.
+async fn config_edit(mode: Mode, socket: &Path, line: &str) -> Mode {
+    let transaction = current_transaction(&mode);
+    let path = current_path(&mode);
+    let snap = match client::get_transaction(socket, &transaction).await {
+        Ok(snap) => snap,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return mode;
+        }
+    };
+    let doc = serde_json::to_value(&snap.config).expect("a config serializes");
+    let Some(edit) = nos_cli::config_grammar::parse(line, path.segments(), &doc) else {
+        eprintln!("error: '{line}' is not a valid edit here (press ? to see what fits)");
+        return mode;
+    };
+    let mut snap = snap;
+    for (write_path, value) in edit.writes {
+        match client::set_transaction_path(
+            socket,
+            &transaction,
+            write_path,
+            Some(value.to_string()),
+        )
+        .await
+        {
+            Ok(s) => snap = s,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return mode;
+            }
+        }
+    }
+    let mut path = edit.navigate.map_or(path, session::Path::from);
+    let doc = serde_json::to_value(&snap.config).expect("a config serializes");
+    while nos_proto::config_path::get(&doc, path.segments()).is_err() {
+        path = path.up();
+    }
+    Mode::Configuration {
+        transaction,
+        path,
+        dirty: snap.dirty,
     }
 }
 
@@ -1676,7 +1310,6 @@ async fn apply_policy_source(mode: Mode, socket: &Path, name: String, source: St
         mode,
         socket,
         ConfigOp::PolicyDefinition(PolicyDefinitionOp::SetSource { name, source }),
-        PathAfter::Stay,
     )
     .await
 }
@@ -1938,6 +1571,28 @@ async fn print_help(mode: &Mode, socket: &Path, cache: &DocCache) {
             Doc::FromConfig(topic) => doc_for(socket, cache, *topic).await.summary,
         };
         println!("  {:<45} {}", command.usage, summary);
+    }
+    // Config edits, from the schema's tree: relative to where you are, in
+    // the tree's order (grouped by object).
+    let Mode::Configuration {
+        transaction, path, ..
+    } = mode
+    else {
+        return;
+    };
+    let doc = match client::get_transaction(socket, transaction).await {
+        Ok(snap) => serde_json::to_value(&snap.config).expect("a config serializes"),
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+    for (usage, topic) in nos_cli::config_grammar::usages(path.segments(), &doc) {
+        let summary = match topic {
+            Some(topic) => doc_for(socket, cache, topic).await.summary,
+            None => String::new(),
+        };
+        println!("  {usage:<45} {summary}");
     }
 }
 

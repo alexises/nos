@@ -242,8 +242,8 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             ),
         ),
         Topic::BgpPeerGroupAuth => (
-            "Clear a peer-group's BGP session authentication.",
-            "Unsets the auth field on a peer-group entirely, regardless of which mechanism \
+            "A peer-group's BGP session authentication: an MD5 password or TCP-AO keys.",
+            "Usually set with `md5-password` or `ao-key`. `delete auth` unsets the auth field on a peer-group entirely, regardless of which mechanism \
              (MD5 password or TCP-AO keys) was set, reverting sessions to no transport \
              authentication.",
         ),
@@ -845,8 +845,8 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              accepted by each other.",
         ),
         Topic::OspfProfileAuth => (
-            "Clear an OSPF profile's authentication.",
-            "Unsets the auth field on a profile entirely, regardless of which mechanism \
+            "An OSPF profile's authentication: a simple password or crypto keys.",
+            "Usually set with `simple-password` or `crypto-key`. `delete auth` unsets the auth field on a profile entirely, regardless of which mechanism \
              (simple password or crypto keys) was set, reverting to RFC 2328 AuType 0 (no \
              authentication).",
         ),
@@ -895,8 +895,8 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "A named set of OSPFv3 link settings (timers, cost, priority, network-type, mtu, authentication) that interfaces join with `ospfv3 <profile>`. Profile names are unique across every instance and area.",
         ),
         Topic::Ospfv3ProfileAuth => (
-            "Clear an OSPFv3 profile's authentication.",
-            "`delete` removes every RFC 7166 authentication-trailer key from the profile, so its packets are sent and accepted without a trailer.",
+            "An OSPFv3 profile's RFC 7166 authentication-trailer keys.",
+            "Set with `crypto-key`. `delete auth` removes every RFC 7166 authentication-trailer key from the profile, so its packets are sent and accepted without a trailer.",
         ),
         Topic::Ospfv3ProfileCryptoKey => (
             "Add, remove or select an RFC 7166 authentication-trailer key.",
