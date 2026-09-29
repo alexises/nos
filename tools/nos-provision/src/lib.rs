@@ -701,6 +701,10 @@ pub struct Args {
     /// RFC 8362 Full mode for that instance (requires `--ospfv3-instance`).
     #[arg(long)]
     pub ospfv3_extended_lsa: bool,
+    /// RFC 5187 graceful-restart grace period (seconds) for that instance
+    /// (requires `--ospfv3-instance`).
+    #[arg(long)]
+    pub ospfv3_graceful_restart_grace_period: Option<u16>,
 
     /// Same shape as `--ospf-area` (requires `--ospfv3-instance`).
     #[arg(long)]
@@ -1715,6 +1719,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 name: name.clone(),
                 enabled: true,
             }));
+        }
+        if let Some(grace_period) = args.ospfv3_graceful_restart_grace_period {
+            ops.push(ConfigOp::Ospfv3Instance(
+                Ospfv3InstanceOp::SetGracefulRestartGracePeriod {
+                    name: name.clone(),
+                    grace_period: Some(grace_period),
+                },
+            ));
         }
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetOspfv3Instance {
             name: args.routing_table.clone(),

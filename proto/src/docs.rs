@@ -211,6 +211,8 @@ topics! {
     Ospfv3InstanceRouterId,
     /// `Ospfv3Instance.extended_lsa`
     Ospfv3InstanceExtendedLsa,
+    /// `Ospfv3Instance.graceful_restart_grace_period`
+    Ospfv3InstanceGracefulRestart,
     /// `Ospfv3Instance.areas`
     Ospfv3Area,
     /// `Ospfv3Area.profiles`

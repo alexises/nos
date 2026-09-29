@@ -889,6 +889,64 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// RFC 5187 graceful restart (requires `ospfv3`): router-a, with a grace
+/// period configured, is restarted with SIGTERM. It must send a Grace-LSA
+/// before exiting, and router-b must help: hold the adjacency and keep
+/// router-a's loopback route (learned in `ospfv3`) installed through the whole
+/// restart, then resynchronize with the restarted process.
+pub async fn ospfv3_graceful_restart(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let full_on_b = format!("ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID}");
+    let full_on_a =
+        format!("ospfv3 neighbor reached full link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B}");
+    a.provision_flags(&with_base(
+        A,
+        [
+            ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+            strings(&["--ospfv3-graceful-restart-grace-period", "120"]),
+        ]
+        .concat(),
+    ))
+    .await?;
+    // No link config changed, so the adjacency from `ospfv3` stays up.
+    a.wait("ospfv3 instance config resolved.*graceful_restart_grace_period=Some(120)")
+        .await?;
+
+    let torn = "ospfv3 neighbor adjacency torn down\\|ospfv3 neighbor state changed to down";
+    let removed = format!("removed route prefix={OSPFV3_LOOPBACK_ADDRESS}");
+    let (torn_before, removed_before, full_b_before, full_a_before) = (
+        b.count(torn),
+        b.count(&removed),
+        b.count(&full_on_b),
+        a.count(&full_on_a),
+    );
+    log("sending SIGTERM to router-a's nos-ospfv3d; it must announce a grace period first");
+    w.dock
+        .signal_process("router-a", "nos-ospfv3d", "-TERM")
+        .await?;
+    a.wait("ospfv3 graceful restart: announcing grace period before shutdown grace_period=120")
+        .await?;
+    a.wait(&format!(
+        "ospfv3 graceful restart: grace-lsa sent link=eth0.0 neighbor={OSPFV3_ROUTER_ID_B} grace_period=120"
+    ))
+    .await?;
+    b.wait(&format!(
+        "ospfv3 helper: grace period entered link=eth0.0 neighbor={OSPFV3_ROUTER_ID} grace_period=120 restart_reason=1"
+    ))
+    .await?;
+
+    // The watchdog respawns router-a; the fresh process resynchronizes with
+    // the neighbor that held it Full the whole time.
+    b.wait_new(&full_on_b, full_b_before, 90).await?;
+    a.wait_new(&full_on_a, full_a_before, 90).await?;
+    b.wait(&format!(
+        "ospfv3 helper: neighbor reformed, exiting grace early link=eth0.0 neighbor={OSPFV3_ROUTER_ID}"
+    ))
+    .await?;
+    b.assert_quiet(torn, torn_before, 0).await?;
+    b.assert_quiet(&removed, removed_before, 5).await
+}
+
 /// RFC 5340 §4.5.1 (#46): every Link-LSA (legacy 8 or RFC 8362 E-Link
 /// 0x8028 — both may coexist after `ospfv3` toggled extended-lsa) router-c
 /// holds from `router_id` must belong to the bridge link, the only link it

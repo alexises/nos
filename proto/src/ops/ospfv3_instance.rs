@@ -25,6 +25,11 @@ pub enum Ospfv3InstanceOp {
         name: String,
         enabled: bool,
     },
+    /// Sets (`Some`) or clears (`None`) the RFC 5187 grace period.
+    SetGracefulRestartGracePeriod {
+        name: String,
+        grace_period: Option<u16>,
+    },
     Delete {
         name: String,
     },
@@ -41,6 +46,7 @@ impl Ospfv3InstanceOp {
                         areas: Vec::new(),
                         routing_table: None,
                         extended_lsa: false,
+                        graceful_restart_grace_period: None,
                     });
                 }
                 Ok(())
@@ -51,6 +57,10 @@ impl Ospfv3InstanceOp {
             }
             Ospfv3InstanceOp::SetExtendedLsa { name, enabled } => {
                 find_instance_mut(config, name)?.extended_lsa = *enabled;
+                Ok(())
+            }
+            Ospfv3InstanceOp::SetGracefulRestartGracePeriod { name, grace_period } => {
+                find_instance_mut(config, name)?.graceful_restart_grace_period = *grace_period;
                 Ok(())
             }
             Ospfv3InstanceOp::Delete { name } => {
@@ -87,6 +97,7 @@ mod tests {
             areas: Vec::new(),
             routing_table: None,
             extended_lsa: false,
+            graceful_restart_grace_period: None,
         }
     }
 

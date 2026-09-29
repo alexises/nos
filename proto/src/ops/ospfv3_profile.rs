@@ -359,6 +359,7 @@ mod tests {
             areas,
             routing_table: None,
             extended_lsa: false,
+            graceful_restart_grace_period: None,
         }
     }
 

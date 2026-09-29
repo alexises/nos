@@ -8,6 +8,7 @@ One `nos-ospfv3d --instance <name>` process per `Ospfv3Instance`, spawned by `no
 - RFC 8362 Full mode (`extended-lsa`, `--ospfv3-extended-lsa`): E-Router/E-Link/E-Intra-Area-Prefix LSAs instead of the legacy set. No Sparse mode.
 - RFC 5286 basic loop-free alternates (`spf::alternates`/`pick_backup`, same inequality and `ponytail:` ceiling as `nos-ospfd`: link protection only, one distance-only Dijkstra per neighbor — `run_dijkstra(.., links: None)` skips next-hop derivation, which would otherwise drop vertices from a non-root viewpoint). Differs from v2: the backup is link-local too, so it carries its own `backup_interface_id` (`OspfRoute`/`RibEntry`) and can leave over a different link than the primary; and `nos-ribd` installs an IPv6 backup at 2000, not 1000 (an IPv6 primary is 1024). Verified by `nos-e2e ospfv3-lfa`.
 - RFC 7166 authentication trailer (`Ospfv3Profile.auth`) — see "Authentication" below. Verified by `nos-e2e ospfv3-auth`.
+- RFC 5187 graceful restart — see "Graceful restart" below. Verified by `nos-e2e ospfv3-graceful-restart`.
 - **Not yet** (OSPFv2-only for now): ABR, ASBR/redistribution, RFC 5838 multi-instance.
 
 ## Authentication (RFC 7166)
@@ -22,6 +23,13 @@ Wire mechanics, all in `packet.rs` (`TrailerAuth::sign`/`verify_trailer`, pinned
 - **Where it runs**: the socket signs every send (`socket::OspfSocket::open(.., auth)`, owning the sequence counter — wall-clock-seconds floor, `ospf::link`'s classic `AuType` 2 scheme, not RFC 7474's persisted boot count); `link::run` verifies every receive before `packet::decode` and keeps one `NeighborInfo.last_crypto_seq` per neighbor (`accept_crypto_sequence`, a non-increasing number is dropped and logged `"ospfv3 packet crypto sequence number not increasing, dropping"`). Failures log `"ospfv3 packet authentication failed"` with `link`/`source`, and a key change restarts the link like any other `LinkConfig` field.
 - No LLS (RFC 5613) in either OSPF version, so the L-bit/LLS part of the digest scope never applies.
 
+## Graceful restart (RFC 5187)
+
+- **Grace-LSA** is a native type (`lsa::LSA_TYPE_GRACE` `0x000B`, link-local, `LsaBody::Grace`): RFC 3623's Grace Period and Restart Reason TLVs, no IP-address TLV (OSPFv3 identifies neighbors by router ID). SPF ignores it.
+- **Restarting side**: `Ospfv3Instance.graceful_restart_grace_period` (`LinkManager::set_graceful_restart`). Only SIGTERM (`main::wait_for_shutdown_signal`) announces it — the watchdog's SIGINT means stop/removal, with no restart to wait for. `main` calls `LinkManager::announce_graceful_restart` before signalling shutdown (the log forwarder stops on that signal), which asks every link task (`LinkEntry.grace_tx`) to unicast one Grace-LSA to each `Full` neighbor, twice, 500ms apart (`GRACE_SEND_WINDOW`), then exits. Nothing is prematurely aged (v3 never did); the restarted process resyncs cold.
+- **Helper side**, always on: `handle_lsu` acts on a newly installed Grace-LSA from a `Full` neighbor (`on_grace_lsa` sets `NeighborInfo.grace_deadline`) and removes it from the link store at once — held, it would be offered back to the restarted router and flooded to us again. While in grace: `apply_dead_timer`/`sweep_dead_neighbors` skip the neighbor, a Hello that doesn't list us keeps its state, `Lsdb::age_and_evict` holds its LSAs below `MaxAge`, and an Init DBD while still `Full` is a SeqNumberMismatch (`exchange` otherwise ignores DBDs in `Full`, which would deadlock the resync). Grace ends on reaching `Full` again, on a `MaxAge` Grace-LSA, or at the deadline (`expire_grace`, 1s tick).
+- Routes need nothing: `nos-ribd` keeps OSPF routes of a disconnected push client, and the helper's SPF still sees the held LSAs.
+
 ## Layout
 `socket` (raw socket) · `packet` (wire codec) · `lsa`/`lsdb` (LSAs, per-area database, aging) · `exchange` (DBD/LSR/LSU state, pure) · `link` (per-link driver task + `LinkManager`) · `reconcile` (config → `LinkConfig`) · `server` (IPC queries) · `rib_push_client`.
 
@@ -35,4 +43,4 @@ Wire mechanics, all in `packet.rs` (`TrailerAuth::sign`/`verify_trailer`, pinned
 - Timers (`--lsa-age-multiplier`) are test-only, like in `nos-ospfd`.
 
 ## Verification
-`nos-e2e ospfv3`, `ospfv3-auth`, `ospfv3-dr`, `ospfv3-lfa`, `ospfv3-mtu-pagination` (see root `CLAUDE.md`).
+`nos-e2e ospfv3`, `ospfv3-graceful-restart`, `ospfv3-auth`, `ospfv3-dr`, `ospfv3-lfa`, `ospfv3-mtu-pagination` (see root `CLAUDE.md`).
