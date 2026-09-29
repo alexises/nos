@@ -66,6 +66,15 @@ pub const LSA_TYPE_NETWORK: u16 = SCOPE_AREA | 2;
 pub const LSA_TYPE_LINK: u16 = SCOPE_LINK_LOCAL | 8;
 /// RFC 5340 §A.4.10 Intra-Area-Prefix-LSA — area-scoped, function code 9.
 pub const LSA_TYPE_INTRA_AREA_PREFIX: u16 = SCOPE_AREA | 9;
+/// RFC 5187 §2 Grace-LSA — link-local scoped, function code 11. Link State
+/// ID is the originating interface's Interface ID.
+pub const LSA_TYPE_GRACE: u16 = SCOPE_LINK_LOCAL | 0x0B;
+/// RFC 3623 Appendix A's Grace-LSA TLVs (reused unchanged by RFC 5187; the
+/// IP-interface-address TLV is not used in `OSPFv3`).
+const TLV_GRACE_PERIOD: u16 = 1;
+const TLV_RESTART_REASON: u16 = 2;
+/// RFC 3623 Appendix A: restart reason 1, "software restart".
+pub const RESTART_REASON_SOFTWARE: u8 = 1;
 
 /// RFC 8362 §3.1's extended LSAs (TLV bodies) — same information as the four
 /// legacy types above, so they decode into the very same `LsaBody` variants
@@ -226,12 +235,21 @@ pub struct IntraAreaPrefixLsaBody {
     pub prefixes: Vec<IntraAreaPrefixEntry>,
 }
 
+/// RFC 5187 Grace-LSA body: how long the restarting router asks its
+/// neighbors to keep helping, and why it restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraceLsaBody {
+    pub grace_period: u32,
+    pub restart_reason: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LsaBody {
     Router(RouterLsaBody),
     Network(NetworkLsaBody),
     Link(LinkLsaBody),
     IntraAreaPrefix(IntraAreaPrefixLsaBody),
+    Grace(GraceLsaBody),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -424,8 +442,33 @@ fn encode_ext_body(body: &LsaBody) -> Vec<u8> {
                 );
             }
         }
+        LsaBody::Grace(g) => encode_grace(&mut buf, *g),
     }
     buf
+}
+
+fn encode_grace(buf: &mut Vec<u8>, g: GraceLsaBody) {
+    put_tlv(buf, TLV_GRACE_PERIOD, &g.grace_period.to_be_bytes());
+    put_tlv(buf, TLV_RESTART_REASON, &[g.restart_reason]);
+}
+
+fn decode_grace(data: &[u8]) -> Result<LsaBody, PacketError> {
+    let mut grace_period = None;
+    let mut restart_reason = 0;
+    for (t, v) in split_tlvs(data)? {
+        match t {
+            TLV_GRACE_PERIOD if v.len() == 4 => {
+                grace_period = Some(u32::from_be_bytes([v[0], v[1], v[2], v[3]]));
+            }
+            TLV_RESTART_REASON if v.len() == 1 => restart_reason = v[0],
+            TLV_GRACE_PERIOD | TLV_RESTART_REASON => return Err(PacketError::TruncatedBody),
+            _ => {}
+        }
+    }
+    Ok(LsaBody::Grace(GraceLsaBody {
+        grace_period: grace_period.ok_or(PacketError::TruncatedBody)?,
+        restart_reason,
+    }))
 }
 
 fn decode_ext_body(lsa_type: u16, data: &[u8]) -> Result<LsaBody, PacketError> {
@@ -591,6 +634,11 @@ fn encode_body(lsa_type: u16, body: &LsaBody) -> Vec<u8> {
             }
             buf
         }
+        LsaBody::Grace(g) => {
+            let mut buf = Vec::new();
+            encode_grace(&mut buf, *g);
+            buf
+        }
     }
 }
 
@@ -704,6 +752,7 @@ fn decode_body(lsa_type: u16, data: &[u8]) -> Result<LsaBody, PacketError> {
                 prefixes,
             }))
         }
+        LSA_TYPE_GRACE => decode_grace(data),
         other => Err(PacketError::UnknownLsaType(other)),
     }
 }
@@ -954,6 +1003,25 @@ mod tests {
         wire[18..20].copy_from_slice(&len);
         let checksum = lsa_checksum(&wire[2..]);
         wire[16..18].copy_from_slice(&checksum.to_be_bytes());
+        assert_eq!(decode_lsa(&wire).unwrap().body, lsa.body);
+    }
+
+    #[test]
+    fn grace_lsa_round_trips_as_link_local_tlvs() {
+        assert!(is_link_local_scope(LSA_TYPE_GRACE));
+        let mut lsa = router_lsa();
+        lsa.header.lsa_type = LSA_TYPE_GRACE;
+        lsa.body = LsaBody::Grace(GraceLsaBody {
+            grace_period: 120,
+            restart_reason: RESTART_REASON_SOFTWARE,
+        });
+        let wire = encode_lsa(&lsa);
+        // Two padded TLVs: Grace Period (4+4) and Restart Reason (4+1 → 8).
+        assert_eq!(wire.len(), LSA_HEADER_LEN + 16);
+        assert_eq!(
+            &wire[LSA_HEADER_LEN..LSA_HEADER_LEN + 8],
+            &[0, 1, 0, 4, 0, 0, 0, 120]
+        );
         assert_eq!(decode_lsa(&wire).unwrap().body, lsa.body);
     }
 

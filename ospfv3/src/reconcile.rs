@@ -120,9 +120,11 @@ async fn resync(
         routing_table = ?own.routing_table,
         area_count = own.areas.len(),
         extended_lsa = own.extended_lsa,
+        graceful_restart_grace_period = ?own.graceful_restart_grace_period,
         "ospfv3 instance config resolved"
     );
     links.set_extended_lsa(own.extended_lsa);
+    links.set_graceful_restart(own.graceful_restart_grace_period);
 
     let mut desired_links = Vec::new();
     let mut desired_loopback_prefixes: std::collections::HashMap<

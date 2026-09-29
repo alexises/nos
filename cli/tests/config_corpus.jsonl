@@ -242,11 +242,13 @@
 {"at":[],"fixture":"populated","line":"set ospfv3 instance o1 area 0.0.0.0 profile p1 crypto-key 300 hmac-sha256 secret","navigate":null,"writes":[[["ospfv3-instance","o1","area","0.0.0.0","profile","p1","auth"],[{"algorithm":"HmacSha256","is_current":false,"key":"secret","key_id":300}]]]}
 {"line":"delete crypto-key 65536","rejected":true}
 {"at":[],"fixture":"populated","line":"edit ospfv3 instance o1","navigate":["ospfv3-instance","o1"],"writes":[]}
-{"at":[],"fixture":"empty","line":"edit ospfv3 instance o1","navigate":["ospfv3-instance","o1"],"writes":[[["ospfv3-instance"],[{"areas":[],"extended_lsa":false,"name":"o1","router_id":"0.0.0.0","routing_table":null}]]]}
+{"at":[],"fixture":"empty","line":"edit ospfv3 instance o1","navigate":["ospfv3-instance","o1"],"writes":[[["ospfv3-instance"],[{"areas":[],"extended_lsa":false,"graceful_restart_grace_period":null,"name":"o1","router_id":"0.0.0.0","routing_table":null}]]]}
 {"at":[],"fixture":"populated","line":"edit ospfv3 instance o1 area 0.0.0.0","navigate":["ospfv3-instance","o1","area","0.0.0.0"],"writes":[]}
 {"at":[],"fixture":"populated","line":"edit ospfv3 instance o1 area 0.0.0.0 profile p1","navigate":["ospfv3-instance","o1","area","0.0.0.0","profile","p1"],"writes":[]}
 {"at":[],"fixture":"populated","line":"set ospfv3 instance o1 extended-lsa","navigate":null,"writes":[[["ospfv3-instance","o1","extended-lsa"],true]]}
 {"at":[],"fixture":"populated","line":"delete ospfv3 instance o1 extended-lsa","navigate":null,"writes":[[["ospfv3-instance","o1","extended-lsa"],false]]}
+{"at":[],"fixture":"populated","line":"set ospfv3 instance o1 graceful-restart grace-period 120","navigate":null,"writes":[[["ospfv3-instance","o1","graceful-restart-grace-period"],120]]}
+{"at":[],"fixture":"populated","line":"delete ospfv3 instance o1 graceful-restart grace-period","navigate":null,"writes":[[["ospfv3-instance","o1","graceful-restart-grace-period"],null]]}
 {"at":[],"fixture":"populated","line":"set ospfv3 instance o1 router-id 2.2.2.2","navigate":null,"writes":[[["ospfv3-instance","o1","router-id"],"2.2.2.2"]]}
 {"at":[],"fixture":"populated","line":"set ospfv3 instance o1 area 0.0.0.0 profile p1 hello-interval 5","navigate":null,"writes":[[["ospfv3-instance","o1","area","0.0.0.0","profile","p1","hello-interval"],5]]}
 {"at":[],"fixture":"populated","line":"set ospfv3 instance o1 area 0.0.0.0 profile p1 network-type point-to-point","navigate":null,"writes":[[["ospfv3-instance","o1","area","0.0.0.0","profile","p1","network-type"],"PointToPoint"]]}

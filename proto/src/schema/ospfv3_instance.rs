@@ -55,6 +55,17 @@ pub struct Ospfv3Instance {
     #[garde(skip)]
     #[cli(topic = Ospfv3InstanceExtendedLsa)]
     pub extended_lsa: bool,
+
+    /// RFC 5187 graceful restart: on a planned shutdown, send a Grace-LSA
+    /// asking every `Full` neighbor to keep the adjacency (and this router's
+    /// routes) for this many seconds while the daemon restarts. `None`
+    /// (default) disables it. Helper mode needs no config — every instance
+    /// always helps a restarting neighbor.
+    // ponytail: capped at 1800s; RFC 5187 sets no ceiling, raise if asked.
+    #[serde(default)]
+    #[garde(range(min = 1, max = 1800))]
+    #[cli(topic = Ospfv3InstanceGracefulRestart, words = "graceful-restart grace-period")]
+    pub graceful_restart_grace_period: Option<u16>,
 }
 
 /// The placeholder a new `Ospfv3Instance` starts from (`edit` on a missing one).
@@ -66,6 +77,7 @@ impl Default for Ospfv3Instance {
             areas: Vec::new(),
             routing_table: None,
             extended_lsa: false,
+            graceful_restart_grace_period: None,
         }
     }
 }
@@ -102,6 +114,7 @@ mod tests {
             areas: Vec::new(),
             routing_table: None,
             extended_lsa: false,
+            graceful_restart_grace_period: None,
         }
     }
 

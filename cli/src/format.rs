@@ -231,14 +231,19 @@ fn render_ospf_auth(auth: Option<&OspfAuth>) -> String {
 /// `render_ospf_instance` exactly.
 pub fn render_ospfv3_instance(instance: &Ospfv3Instance) -> String {
     let mut lines = vec![format!(
-        "ospfv3 instance {}: router-id {}{}",
+        "ospfv3 instance {}: router-id {}{}{}",
         instance.name,
         instance.router_id,
         if instance.extended_lsa {
             ", extended-lsa"
         } else {
             ""
-        }
+        },
+        instance
+            .graceful_restart_grace_period
+            .map_or(String::new(), |p| format!(
+                ", graceful-restart grace-period {p}"
+            ))
     )];
     for area in &instance.areas {
         for line in render_ospfv3_area(area).lines() {

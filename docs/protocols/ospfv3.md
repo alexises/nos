@@ -9,6 +9,7 @@ OSPFv3 (RFC 5340) is OSPF for IPv6. It works like [OSPFv2](ospf.md) and is confi
   - [Advertise a loopback](#advertise-a-loopback)
   - [Authenticate a link (RFC 7166)](#authenticate-a-link-rfc-7166)
   - [Use extended LSAs (RFC 8362)](#use-extended-lsas-rfc-8362)
+  - [Restart without dropping routes (RFC 5187)](#restart-without-dropping-routes-rfc-5187)
 - [Features and behaviour](#features-and-behaviour)
 - [Not supported yet](#not-supported-yet)
 - [Configuration reference](#configuration-reference)
@@ -144,6 +145,29 @@ $C -X POST $B/v1/transactions/v3ext/commit
 
 RFC 8362 intends full mode to be enabled on every router of an area at once, and that is how it has been tested in NOS; running an area with some routers in each mode is not tested.
 
+### Restart without dropping routes (RFC 5187)
+
+Set a grace period on the instance so that its neighbours keep the adjacency and this router's routes while its OSPFv3 daemon restarts:
+
+```
+configure v3gr
+set ospfv3 instance v3 graceful-restart grace-period 120
+commit
+```
+
+```sh
+$C -X POST $B/v1/transactions/v3gr
+$C -X PUT -H 'Content-Type: application/json' -d '120' $B/v1/transactions/v3gr/ospfv3-instance/v3/graceful-restart-grace-period
+$C -X POST $B/v1/transactions/v3gr/commit
+```
+
+How it behaves:
+
+- **Restarting router.** Only a planned restart announces a grace period: `nos-ospfv3d` receiving SIGTERM sends a Grace-LSA to every Full neighbour (log `ospfv3 graceful restart: grace-lsa sent`), then exits and is restarted by the watchdog. Stopping the router or removing the instance (SIGINT) announces nothing, since nothing comes back. A crash announces nothing either.
+- **Helping neighbour.** Every OSPFv3 instance helps; there is nothing to enable. On a Grace-LSA from a Full neighbour it logs `ospfv3 helper: grace period entered`, keeps that neighbour Full through missing Hellos and through Hellos that don't list it yet, and keeps the neighbour's LSAs, so its routes stay installed.
+- **End of the grace period.** When the restarted router's adjacency is Full again, the helper logs `ospfv3 helper: neighbor reformed, exiting grace early`. If it never comes back, the helper logs `ospfv3 helper: grace period expired` and the ordinary dead interval applies from then on.
+- `delete ospfv3 instance v3 graceful-restart grace-period` turns it off.
+
 ## Features and behaviour
 
 Neighbour discovery, DR/BDR election, timers, costs, network types, the MTU override and database exchange, LSA ageing and withdrawal, and loop-free alternates behave as in [OSPF](ospf.md#features-and-behaviour). The differences:
@@ -161,7 +185,7 @@ These work in OSPFv2 but not yet in OSPFv3:
 - **Redistribution.** `redistribute from static to ospf` targets OSPFv2 only; nothing can be redistributed into OSPFv3, and a router cannot be an OSPFv3 ASBR.
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
-Also not supported: several OSPFv3 instances on one link (RFC 5838 instance IDs), RFC 8362's sparse mode, NSSA and stub areas, virtual links, graceful restart, BFD, and the non-broadcast network types.
+Also not supported: several OSPFv3 instances on one link (RFC 5838 instance IDs), RFC 8362's sparse mode, NSSA and stub areas, virtual links, graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and the non-broadcast network types.
 
 ## Configuration reference
 
@@ -172,6 +196,7 @@ Fields, types, defaults and validation are those of [OSPF](ospf.md#configuration
 | instance | `edit ospfv3 instance <name>`; `delete ospfv3 instance <name>` | `ospfv3-instance/<name>` | string, 1 to 64 characters | unique among OSPFv3 instances | names the instance | `show config` |
 | router ID | `set ospfv3 instance <name> router-id <ip>`; relative `set router-id <ip>` | `ospfv3-instance/<name>/router-id` | dotted quad | | router ID in Hellos and LSAs | `show ospfv3 neigh` on the neighbour |
 | extended LSAs | `set ospfv3 instance <name> extended-lsa`; `delete ospfv3 instance <name> extended-lsa` (absolute only) | `ospfv3-instance/<name>/extended-lsa` | boolean; default `false` | | originate RFC 8362 extended LSAs | `show ospfv3 database` |
+| graceful restart | `set ospfv3 instance <name> graceful-restart grace-period <seconds>`; `delete ospfv3 instance <name> graceful-restart grace-period` | `ospfv3-instance/<name>/graceful-restart-grace-period` | seconds, 1 to 1800; unset by default | | on SIGTERM, ask Full neighbours to keep the adjacency and routes this long (RFC 5187) | `ospfv3 helper: grace period entered` in the neighbour's log |
 | routing table | `set routing-table <table> ospfv3-instance <name>`; `delete routing-table <table> ospfv3-instance` | `routing-table/<table>/ospfv3-instance` | instance name | the instance must exist; one table per instance | runs the instance in that table | `show ospfv3 neigh` |
 | area | `edit ospfv3 instance <name> area <area-id>`; `delete ospfv3 instance <name> area <area-id>` | `ospfv3-instance/<name>/area/<area-id>` | dotted quad | unique within the instance; use one area only (see above) | | |
 | profile | `edit ospfv3 instance <name> area <area-id> profile <p>`; `delete ospfv3 instance <name> area <area-id> profile <p>` | `…/area/<area-id>/profile/<p>` | string, 1 to 64 characters | unique among OSPFv3 profiles | | |

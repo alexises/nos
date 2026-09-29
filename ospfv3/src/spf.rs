@@ -143,7 +143,7 @@ fn routers_networks_links(
                     link.link_local_address,
                 );
             }
-            LsaBody::IntraAreaPrefix(_) => {}
+            LsaBody::IntraAreaPrefix(_) | LsaBody::Grace(_) => {}
         }
     }
     (routers, networks, links)
@@ -158,7 +158,7 @@ pub fn compute(root: Ipv4Addr, lsas: &[std::sync::Arc<Lsa>]) -> Vec<RouteEntry> 
         .iter()
         .filter_map(|l| match &l.body {
             LsaBody::IntraAreaPrefix(p) => Some(p),
-            LsaBody::Router(_) | LsaBody::Network(_) | LsaBody::Link(_) => None,
+            LsaBody::Router(_) | LsaBody::Network(_) | LsaBody::Link(_) | LsaBody::Grace(_) => None,
         })
         .collect();
 
