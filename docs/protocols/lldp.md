@@ -143,7 +143,7 @@ An interface sends and listens on one group only, so both ends must be configure
 
 ### Verification notes
 
-The examples were run on the lab of the [README](README.md#conventions-used-in-these-pages), with `eth1` added as a veth pair directly between router-a and router-b. LLDP frames are never forwarded by a bridge, including a Docker network, so two containers can only hear each other over a direct link.
+The examples were run on the lab of the [README](../README.md#conventions-used-in-these-pages), with `eth1` added as a veth pair directly between router-a and router-b. LLDP frames are never forwarded by a bridge, including a Docker network, so two containers can only hear each other over a direct link.
 
 ## Configuration reference
 
@@ -160,4 +160,4 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI forms are
 
 `tx-interval`, `tx-hold` and `management-address` are system-wide: they are typed the same way from anywhere in configuration mode.
 
-Implementation notes for developers are in [`lldp/CLAUDE.md`](../lldp/CLAUDE.md).
+Implementation notes for developers are in [`lldp/CLAUDE.md`](../../lldp/CLAUDE.md).

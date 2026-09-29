@@ -21,7 +21,7 @@ A broadcast domain can also have its own addresses and routing table. This makes
 
 ## Common operations
 
-The examples use router-a from the lab described in the [README](README.md#conventions-used-in-these-pages). Its `eth0.0` (untagged) is already routed in `rt1`, so `eth0` can still trunk tagged VLANs.
+The examples use router-a from the lab described in the [README](../README.md#conventions-used-in-these-pages). Its `eth0.0` (untagged) is already routed in `rt1`, so `eth0` can still trunk tagged VLANs.
 
 ### Trunk two VLANs into two domains
 
@@ -164,4 +164,4 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 |---|---|---|---|---|---|---|
 | switching-profile | `set interface <if> switching-profile <sp>` / `set switching-profile <sp>`; `delete interface <if> switching-profile` | `interface/<if>/switching-profile`; `port-aggregate/<pa>/switching-profile` (REST only, see [Port aggregation](port-aggregation-lacp.md#configuration-reference)) | name; default unset | profile exists; its tags don't collide with the interface's subinterfaces; not on a port aggregate member | joins the profile's domains | `show interface <if>`, `show port-aggregate <pa>` |
 
-Implementation notes for developers are in [`interface/CLAUDE.md`](../interface/CLAUDE.md).
+Implementation notes for developers are in [`interface/CLAUDE.md`](../../interface/CLAUDE.md).

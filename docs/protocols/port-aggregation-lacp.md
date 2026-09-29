@@ -133,7 +133,7 @@ REST: `DELETE …/interface/eth1/port-aggregate`, the same for `eth2`, then `DEL
 
 ### Verification notes
 
-The examples on this page were run on the lab of the [README](README.md#conventions-used-in-these-pages), with two extra links: `eth1` and `eth2` are veth pairs directly between router-a and router-b. A direct link matters: LACP (and LLDP) frames use reserved multicast addresses that a bridge, including a Docker network, never forwards, so the two ends would never hear each other through one.
+The examples on this page were run on the lab of the [README](../README.md#conventions-used-in-these-pages), with two extra links: `eth1` and `eth2` are veth pairs directly between router-a and router-b. A direct link matters: LACP (and LLDP) frames use reserved multicast addresses that a bridge, including a Docker network, never forwards, so the two ends would never hear each other through one.
 
 ## Configuration reference
 
@@ -161,4 +161,4 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 |---|---|---|---|---|---|---|
 | port-aggregate | `set interface <if> port-aggregate <pa>` / `set port-aggregate <pa>`; `delete interface <if> port-aggregate` / `delete port-aggregate` | `interface/<if>/port-aggregate` | name; default unset | aggregate exists; the interface has no subinterfaces and no switching profile | makes the interface a member | `show lacp` |
 
-Implementation notes for developers are in [`lacp/CLAUDE.md`](../lacp/CLAUDE.md) and [`interface/CLAUDE.md`](../interface/CLAUDE.md).
+Implementation notes for developers are in [`lacp/CLAUDE.md`](../../lacp/CLAUDE.md) and [`interface/CLAUDE.md`](../../interface/CLAUDE.md).

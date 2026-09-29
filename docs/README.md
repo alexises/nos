@@ -30,10 +30,10 @@ These pages are being written as part of issue #107. The planned set:
 - Routing policy: the RPL language, prefix lists, community aliases and groups, AS-path lists
 - OSPFv2 and OSPFv3
 - Routing tables, static routes and redistribution
-- [Interfaces, subinterfaces and loopbacks](interfaces.md)
-- [L2 switching: broadcast domains, switching profiles and SVIs](l2-switching.md)
-- [Port aggregation and LACP](port-aggregation-lacp.md)
-- [LLDP](lldp.md)
+- [Interfaces, subinterfaces and loopbacks](protocols/interfaces.md)
+- [L2 switching: broadcast domains, switching profiles and SVIs](protocols/l2-switching.md)
+- [Port aggregation and LACP](protocols/port-aggregation-lacp.md)
+- [LLDP](protocols/lldp.md)
 - EVPN/VXLAN, including multi-homing
 - System: hostname, users, the REST API and logs
 

@@ -21,11 +21,11 @@ A physical interface carries its layer-3 configuration on **subinterfaces**, one
 
 Each subinterface has its own addresses and its own routing table, independently of the others. A loopback has no subinterfaces: its addresses and routing table sit directly on it.
 
-Putting a subinterface or loopback in a routing table makes it a member of that table's VRF (see [Concepts: Routing tables are VRFs](concepts.md#routing-tables-are-vrfs)). Its addresses then appear in the table as connected routes. An address without a routing table is applied to the interface, but belongs to no routing table.
+Putting a subinterface or loopback in a routing table makes it a member of that table's VRF (see [Concepts: Routing tables are VRFs](../concepts.md#routing-tables-are-vrfs)). Its addresses then appear in the table as connected routes. An address without a routing table is applied to the interface, but belongs to no routing table.
 
 ## Common operations
 
-The examples use router-a from the lab described in the [README](README.md#conventions-used-in-these-pages), where `eth0.0` already has `10.50.0.2/24` in routing table `rt1`.
+The examples use router-a from the lab described in the [README](../README.md#conventions-used-in-these-pages), where `eth0.0` already has `10.50.0.2/24` in routing table `rt1`.
 
 ### Address a VLAN subinterface and put it in a routing table
 
@@ -186,4 +186,4 @@ In the tables, `<if>` is a physical interface name, `<if>.<tag>` a subinterface,
 
 A loopback cannot have subinterfaces, a switching profile, a port aggregate or LLDP.
 
-Implementation notes for developers are in [`interface/CLAUDE.md`](../interface/CLAUDE.md).
+Implementation notes for developers are in [`interface/CLAUDE.md`](../../interface/CLAUDE.md).
