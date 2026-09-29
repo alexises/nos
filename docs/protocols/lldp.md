@@ -127,7 +127,7 @@ REST: `PUT …/interface/eth1/lldp-destination` with body `"CustomerBridge"`. Bo
 
 **Shutdown.** When transmit stops on an interface (you delete `lldp transmit`, remove the interface, or the router shuts down), NOS sends a last frame with a time to live of zero, so the neighbour removes this router at once instead of waiting for the entry to expire. Turning receive off forgets the neighbours heard on that interface.
 
-**New neighbours are answered at once.** When NOS hears a neighbour it did not know, it sends its own frame straight away instead of waiting for the next interval, so two routers learn each other within seconds of the link coming up.
+**Fast start.** When LLDP starts on an interface (including any restart after a settings change) and whenever NOS hears a neighbour it did not know, it sends 4 frames one second apart before going back to `tx-interval`. Two routers learn each other within seconds of the link coming up, even if the first frame is lost. At most 5 frames go out back to back, with one more allowed per second, so a flapping neighbour cannot make NOS flood the link. These numbers are the IEEE 802.1AB defaults and cannot be changed.
 
 **Timers.** `tx-interval` is the time between frames (1-3600 seconds, default 30). `tx-hold` is how many intervals a neighbour keeps our information (1-100, default 4); the time to live we advertise is `tx-interval × tx-hold`, which must not exceed 65535 seconds. Changing either, or the management address, restarts LLDP on every enabled interface: a shutdown frame, then a fresh one, so neighbours briefly drop and relearn this router.
 

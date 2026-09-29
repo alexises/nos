@@ -266,6 +266,9 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
     };
     let (base_a, base_b) = (a.count(&learned_a("")), b.count(&learned_b("")));
     let started_a = a.count("lldp link started interface=eth1 transmit=true receive=false");
+    // The last frame of an 802.1AB fast-start burst (txFastInit = 4 at 1s).
+    let burst_done = "lldp fast-start tx interface=eth1 remaining=0";
+    let (burst_a, burst_b) = (a.count(burst_done), b.count(burst_done));
 
     w.link_veths().await?;
     let on = [
@@ -291,6 +294,10 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
         60,
     )
     .await?;
+    // Link start and the new neighbor each open a fast-start burst: all four
+    // frames go out within seconds (at 1s spacing), not one per 30s interval.
+    a.wait_new(burst_done, burst_a, 15).await?;
+    b.wait_new(burst_done, burst_b, 15).await?;
 
     // Tunable timers + Management Address TLV: tx-interval 5 x tx-hold 3 must
     // show up as the TTL the neighbor learned (15), and each router's own
@@ -359,7 +366,7 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
 
     // Transmit comes back: router-a learns router-b again, and router-b (which
     // restarted with an empty table) learns router-a quickly, because learning
-    // a *new* neighbor triggers an immediate reply.
+    // a *new* neighbor triggers a fast-start burst.
     let (base_a, base_b) = (a.count(&learned_a("")), b.count(&learned_b("")));
     b.provision(&host("router-b", &["--lldp-transmit-interface", "eth1"]))
         .await?;
