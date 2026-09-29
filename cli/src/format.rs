@@ -49,6 +49,7 @@ pub fn render_bgp_peer_group(group: &BgpPeerGroup, local_asn: u32) -> String {
         Some(NextHopMode::SelfAddress) => "self".to_string(),
         Some(NextHopMode::Unchanged) => "unchanged".to_string(),
         None if group.remote_as == local_asn => "default (unchanged, iBGP)".to_string(),
+        None if group.route_server_client => "default (unchanged, route-server)".to_string(),
         None => "default (self, eBGP)".to_string(),
     };
     let mut line = format!(
@@ -2023,6 +2024,14 @@ mod tests {
 
         pg.next_hop = Some(NextHopMode::Unchanged);
         assert!(render_bgp_peer_group(&pg, 65000).contains("next-hop unchanged"));
+    }
+
+    #[test]
+    fn render_bgp_peer_group_next_hop_route_server_default() {
+        let mut pg = peer_group("pg1");
+        pg.route_server_client = true;
+        assert!(render_bgp_peer_group(&pg, 65000)
+            .contains("next-hop default (unchanged, route-server)"));
     }
 
     fn ospf_profile(name: &str) -> OspfProfile {

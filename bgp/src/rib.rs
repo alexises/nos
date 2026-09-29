@@ -1232,7 +1232,7 @@ impl BgpRib {
             return;
         }
         if let Some(route) = &best {
-            info!(origin = ?route.origin, as_path = ?route.as_path, communities = ?route.communities, "bgp: loc-rib best path for {prefix} updated");
+            info!(origin = ?route.origin, as_path = ?route.as_path, communities = ?route.communities, med = ?route.med, next_hop = ?route.next_hop, "bgp: loc-rib best path for {prefix} updated");
             self.loc_rib.insert(prefix, route.clone());
         } else {
             info!("bgp: loc-rib route for {prefix} withdrawn");
@@ -1579,20 +1579,31 @@ fn build_advertisement(
     // `best` is shadowed with a possibly policy-adjusted owned copy so every
     // rewrite below (`AS_PATH`, `LOCAL_PREF`, `MED`, reflection) sees the
     // policy's `local_pref`/`med`, not the pre-policy values.
+    let mut adjusted = best.clone();
+    // RFC 4271 §5.1.4: a MED received from a neighbouring AS is never
+    // passed on to another AS. It is cleared before the export policy runs,
+    // so a MED the policy sets (or a locally originated one) is still sent.
+    if !outbox.is_ibgp && matches!(best.origin, RouteOrigin::Peer(_)) {
+        adjusted.med = None;
+    }
     let verdict = nos_rpl::vm::run(
         &outbox.export_policy,
-        &to_policy_input(prefix, best, Some((peer, outbox.remote_asn))),
+        &to_policy_input(prefix, &adjusted, Some((peer, outbox.remote_asn))),
     );
-    let mut adjusted = best.clone();
     let nh_edit = apply_verdict(&mut adjusted, verdict)?;
     let best = adjusted;
     let best = &best;
 
-    let mode = outbox.next_hop_mode.unwrap_or(if outbox.is_ibgp {
-        NextHopMode::Unchanged
-    } else {
-        NextHopMode::SelfAddress
-    });
+    // RFC 7947 §2.2.1: a route server passes NEXT_HOP through unchanged, so
+    // a route-server client defaults to `Unchanged` like an iBGP peer. An
+    // explicit `next-hop self` still wins.
+    let mode = outbox
+        .next_hop_mode
+        .unwrap_or(if outbox.is_ibgp || outbox.is_rs_client {
+            NextHopMode::Unchanged
+        } else {
+            NextHopMode::SelfAddress
+        });
     let next_hop = match (nh_edit, mode) {
         (nos_rpl::NextHopSet::Addr(a), _) => a,
         (nos_rpl::NextHopSet::SelfAddress, _) | (_, NextHopMode::SelfAddress) => {
@@ -1620,9 +1631,7 @@ fn build_advertisement(
     }
     let as_path: Vec<u32> = Arc::try_unwrap(as_path).unwrap_or_else(|arc| (*arc).clone());
     let local_pref = outbox.is_ibgp.then_some(best.local_pref);
-    // MED is meant for use between adjacent ASes, so it's never forwarded
-    // on to a further eBGP peer, only preserved toward iBGP peers.
-    let med = if outbox.is_ibgp { best.med } else { None };
+    let med = best.med;
 
     let (originator_id, cluster_list) = if reflecting {
         let mut clusters = (*best.cluster_list).clone();
@@ -2561,6 +2570,99 @@ mod tests {
 
         assert!(!recv_all(&mut allowed_rx).is_empty());
         assert!(recv_all(&mut blocked_rx).is_empty());
+    }
+
+    /// Sends one route with MED 999 from eBGP `source` and returns what
+    /// `dest` (eBGP or iBGP, with `export`) is sent for it.
+    fn med_toward(dest_is_ibgp: bool, export: &str) -> Option<u32> {
+        let mut rib = new_rib(65000);
+        let source = addr("10.0.0.1");
+        let dest = addr("10.0.0.2");
+        let _src_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        rib.peer_established(
+            dest,
+            dest_is_ibgp,
+            Some(addr("10.0.0.253")),
+            all_afs(),
+            false,
+            None,
+            false,
+            false,
+            HashSet::new(),
+            Arc::new(nos_rpl::compile(export, &nos_rpl::Symbols::EMPTY).unwrap()),
+            tx,
+        );
+        rib.handle_update(
+            source,
+            false,
+            v4("192.0.2.1"),
+            &update_with(
+                "9.9.9.0/24",
+                vec![65001],
+                "10.0.0.1",
+                message::Origin::Igp,
+                Some(999),
+            ),
+            &nos_rpl::ACCEPT_ALL,
+        );
+        recv_all(&mut rx)
+            .into_iter()
+            .find_map(|u| match u {
+                OutboundUpdate::Announce(a) => Some(a.med),
+                _ => None,
+            })
+            .expect("expected an announcement")
+    }
+
+    #[test]
+    fn received_med_is_not_sent_to_ebgp_but_kept_toward_ibgp() {
+        assert_eq!(med_toward(false, "accept\n"), None);
+        assert_eq!(med_toward(true, "accept\n"), Some(999));
+    }
+
+    #[test]
+    fn export_policy_med_is_sent_to_ebgp() {
+        assert_eq!(
+            med_toward(false, "set this.bgp.med = 42\naccept\n"),
+            Some(42)
+        );
+        // `+=` on an eBGP export starts from 0: the received MED is gone.
+        assert_eq!(
+            med_toward(false, "set this.bgp.med += 5\naccept\n"),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn route_server_client_defaults_to_unchanged_next_hop() {
+        let mut rib = new_rib(65000);
+        let source = addr("10.0.0.1");
+        let _src_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
+        let mut rs_rx = register_peer_full(
+            &mut rib,
+            addr("10.0.0.2"),
+            false,
+            addr("10.0.0.253"),
+            false,
+            true,
+            HashSet::new(),
+        );
+        rib.handle_update(
+            source,
+            false,
+            v4("192.0.2.1"),
+            &ebgp_update(vec!["9.9.9.0/24"], vec![65001], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
+        );
+        let next_hops: Vec<IpAddr> = recv_all(&mut rs_rx)
+            .into_iter()
+            .filter_map(|u| match u {
+                OutboundUpdate::Announce(a) => Some(a.next_hop),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(next_hops, vec![addr("10.0.0.1")]);
     }
 
     #[test]

@@ -337,7 +337,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/NextHopMode",
-                "description": "`None` defaults to `SelfAddress` for an eBGP peer-group and\n`Unchanged` for an iBGP one — see `NextHopMode`."
+                "description": "`None` defaults to `SelfAddress` for an eBGP peer-group and\n`Unchanged` for an iBGP or `route_server_client` one (RFC 7947\n§2.2.1) — see `NextHopMode`."
               },
               {
                 "type": "null"
@@ -1544,7 +1544,7 @@
         "type": "string"
       },
       "NextHopMode": {
-        "description": "Controls the `NEXT_HOP` path attribute this instance writes into every\nUPDATE it advertises to a peer-group's sessions. `SelfAddress` rewrites it\nto the session's own local address (\"next-hop-self\"); `Unchanged`\npreserves the next-hop the route already carries (the address it was\nreceived with, for a peer-learned route). `BgpPeerGroup.next_hop: None`\nresolves to `SelfAddress` for an eBGP peer-group and `Unchanged` for an\niBGP one — standard BGP practice, since an iBGP speaker must not silently\nmask a route's real eBGP-learned next-hop unless explicitly told to.",
+        "description": "Controls the `NEXT_HOP` path attribute this instance writes into every\nUPDATE it advertises to a peer-group's sessions. `SelfAddress` rewrites it\nto the session's own local address (\"next-hop-self\"); `Unchanged`\npreserves the next-hop the route already carries (the address it was\nreceived with, for a peer-learned route). `BgpPeerGroup.next_hop: None`\nresolves to `SelfAddress` for an eBGP peer-group and `Unchanged` for an\niBGP or route-server-client one — standard BGP practice, since an iBGP speaker must not silently\nmask a route's real eBGP-learned next-hop unless explicitly told to.",
         "enum": [
           "SelfAddress",
           "Unchanged"
@@ -7214,7 +7214,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NextHopMode",
-                  "description": "`None` defaults to `SelfAddress` for an eBGP peer-group and\n`Unchanged` for an iBGP one — see `NextHopMode`."
+                  "description": "`None` defaults to `SelfAddress` for an eBGP peer-group and\n`Unchanged` for an iBGP or `route_server_client` one (RFC 7947\n§2.2.1) — see `NextHopMode`."
                 }
               }
             },
@@ -7272,7 +7272,7 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/NextHopMode",
-                "description": "`None` defaults to `SelfAddress` for an eBGP peer-group and\n`Unchanged` for an iBGP one — see `NextHopMode`."
+                "description": "`None` defaults to `SelfAddress` for an eBGP peer-group and\n`Unchanged` for an iBGP or `route_server_client` one (RFC 7947\n§2.2.1) — see `NextHopMode`."
               }
             }
           },
@@ -7284,7 +7284,7 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NextHopMode",
-                  "description": "`None` defaults to `SelfAddress` for an eBGP peer-group and\n`Unchanged` for an iBGP one — see `NextHopMode`."
+                  "description": "`None` defaults to `SelfAddress` for an eBGP peer-group and\n`Unchanged` for an iBGP or `route_server_client` one (RFC 7947\n§2.2.1) — see `NextHopMode`."
                 }
               }
             },
