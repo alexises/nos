@@ -77,7 +77,8 @@ fn edit_keys(
 }
 
 /// `ao-key <send-id> <recv-id> <algorithm> <key>` / `ao-key <send-id>
-/// current|rnext` / `delete ao-key <send-id>` (RFC 5925).
+/// current|rnext` / `[delete] ao-key <send-id> exclude-options` / `delete
+/// ao-key <send-id>` (RFC 5925).
 pub fn ao_key(verb: Verb, args: &[&str], obj: &Value) -> Option<SugarOut> {
     ao_key_value(verb, args, obj).map(SugarOut::Value)
 }
@@ -90,6 +91,14 @@ fn ao_key_value(verb: Verb, args: &[&str], group: &Value) -> Option<Value> {
         None if verb == Verb::Delete => return (args.len() == 1).then(|| auth.clone()),
         None => Vec::new(),
     };
+    // A per-key flag, not exclusive like current/rnext.
+    if args[1..] == ["exclude-options"] {
+        let key = keys
+            .iter_mut()
+            .find(|k| k["send_id"].as_u64() == Some(send_id.into()))?;
+        key["exclude_options"] = Value::Bool(verb == Verb::Set);
+        return Some(json!({ "Ao": { "keys": keys } }));
+    }
     let (new, flag) = match (verb, &args[1..]) {
         (Verb::Set, [recv_id, algorithm, key]) => (
             Some(json!({

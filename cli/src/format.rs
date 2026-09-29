@@ -52,11 +52,15 @@ pub fn render_bgp_peer_group(group: &BgpPeerGroup, local_asn: u32) -> String {
         None if group.route_server_client => "default (unchanged, route-server)".to_string(),
         None => "default (self, eBGP)".to_string(),
     };
+    let policy = |p: &Option<String>| p.clone().unwrap_or_else(|| "default (deny-all)".into());
     let mut line = format!(
         "peer-group {}: remote-as {}, source-address {source_address}, address-family [{address_families}], \
          hold-time {hold_time}, keepalive-interval {keepalive_interval}, connect-retry-time {connect_retry_time}, \
-         auth {auth}, next-hop {next_hop}",
-        group.name, group.remote_as
+         auth {auth}, next-hop {next_hop}, import-policy {}, export-policy {}",
+        group.name,
+        group.remote_as,
+        policy(&group.import_policy),
+        policy(&group.export_policy),
     );
     line.push_str(
         &group
@@ -993,6 +997,16 @@ pub fn render_config(config: &Config) -> String {
     } else {
         lines.extend(config.interfaces.iter().map(render_interface));
     }
+    if config.policy_definitions.is_empty() {
+        lines.push("no policy definitions configured".to_string());
+    } else {
+        lines.extend(
+            config
+                .policy_definitions
+                .iter()
+                .map(render_policy_definition),
+        );
+    }
     if config.community_aliases.is_empty() {
         lines.push("no community aliases configured".to_string());
     } else {
@@ -1589,7 +1603,7 @@ mod tests {
         assert_eq!(
             render_config(&cfg),
             "hostname: nos\nno BGP instances configured\nno routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\nno interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
+             no policy definitions configured\nno community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured\n\
              no port aggregates configured"
         );
@@ -1606,7 +1620,7 @@ mod tests {
             "hostname: nos\nbgp instance default: router-id 1.1.1.1, asn 65000, cluster-id default (= router-id)\n\
              no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
+             no policy definitions configured\nno community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured\n\
              no port aggregates configured"
         );
@@ -1624,7 +1638,7 @@ mod tests {
              bgp instance vrf-b: router-id 1.1.1.1, asn 65002, cluster-id default (= router-id)\n\
              no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
+             no policy definitions configured\nno community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured\n\
              no port aggregates configured"
         );
@@ -1721,7 +1735,7 @@ mod tests {
             "transaction 'demo':\nhostname: nos\nbgp instance r1: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)\n\
              no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
              no interfaces configured\n\
-             no community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
+             no policy definitions configured\nno community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
              no broadcast domains configured\nno switching profiles configured\n\
              no port aggregates configured"
         );
@@ -1942,7 +1956,8 @@ mod tests {
             render_bgp_peer_group(&peer_group("pg1"), 65000),
             "peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), auth none, next-hop default (self, eBGP)"
+             connect-retry-time default (120s), auth none, next-hop default (self, eBGP), \
+             import-policy default (deny-all), export-policy default (deny-all)"
         );
     }
 
@@ -1954,7 +1969,8 @@ mod tests {
             render_bgp_peer_group(&pg, 65000),
             "peer-group pg1: remote-as 65001, source-address unset, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), auth none, next-hop default (self, eBGP)"
+             connect-retry-time default (120s), auth none, next-hop default (self, eBGP), \
+             import-policy default (deny-all), export-policy default (deny-all)"
         );
     }
 
@@ -1968,7 +1984,8 @@ mod tests {
             render_bgp_peer_group(&pg, 65000),
             "peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
              hold-time 30, keepalive-interval 10, connect-retry-time 45, auth none, \
-             next-hop default (self, eBGP)"
+             next-hop default (self, eBGP), \
+             import-policy default (deny-all), export-policy default (deny-all)"
         );
     }
 
@@ -1983,7 +2000,8 @@ mod tests {
             "peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
              connect-retry-time default (120s), auth md5-password secret, \
-             next-hop default (self, eBGP)"
+             next-hop default (self, eBGP), \
+             import-policy default (deny-all), export-policy default (deny-all)"
         );
     }
 
@@ -2009,7 +2027,8 @@ mod tests {
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
              connect-retry-time default (120s), \
              auth ao-keys [send-id 1 hmac-sha1 secret (current, exclude-options)], \
-             next-hop default (self, eBGP)"
+             next-hop default (self, eBGP), \
+             import-policy default (deny-all), export-policy default (deny-all)"
         );
     }
 
@@ -2024,6 +2043,14 @@ mod tests {
 
         pg.next_hop = Some(NextHopMode::Unchanged);
         assert!(render_bgp_peer_group(&pg, 65000).contains("next-hop unchanged"));
+    }
+
+    #[test]
+    fn render_bgp_peer_group_policies() {
+        let mut pg = peer_group("pg1");
+        pg.import_policy = Some("in".to_string());
+        pg.export_policy = Some("out".to_string());
+        assert!(render_bgp_peer_group(&pg, 65000).ends_with("import-policy in, export-policy out"));
     }
 
     #[test]
@@ -2101,7 +2128,8 @@ mod tests {
             "bgp instance r1: router-id 1.1.1.1, asn 65000, cluster-id default (= router-id)\n  \
              peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), auth none, next-hop default (self, eBGP)\n  \
+             connect-retry-time default (120s), auth none, next-hop default (self, eBGP), \
+             import-policy default (deny-all), export-policy default (deny-all)\n  \
              peer 192.0.2.1: peer-group pg1"
         );
     }
@@ -2123,7 +2151,8 @@ mod tests {
             rendered,
             "peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
              hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), auth none, next-hop default (unchanged, iBGP)"
+             connect-retry-time default (120s), auth none, next-hop default (unchanged, iBGP), \
+             import-policy default (deny-all), export-policy default (deny-all)"
         );
     }
 
@@ -2450,6 +2479,18 @@ mod tests {
         assert!(!render_interface(&iface).contains("lldp-destination"));
         iface.lldp_destination = nos_proto::LldpDestination::NonTpmr;
         assert!(render_interface(&iface).ends_with("lldp-receive on, lldp-destination non-tpmr"));
+    }
+
+    #[test]
+    fn render_config_shows_policy_definitions() {
+        let cfg = Config {
+            policy_definitions: vec![PolicyDefinition {
+                name: "p1".to_string(),
+                source: "accept\n".to_string(),
+            }],
+            ..Default::default()
+        };
+        assert!(render_config(&cfg).contains("policy-definition p1:\n   1  accept\n"));
     }
 
     #[test]

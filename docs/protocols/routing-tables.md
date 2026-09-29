@@ -155,7 +155,7 @@ if this.prefix in 198.51.100.0/24:
 accept
 ```
 
-In the shell, `edit policy-definition no-lab`, then `edit source` opens the policy in a text editor. (The line-by-line `set source line <n> <text>` checks the policy after each line, so it cannot build an `if` block line by line.) Over REST, `PUT` it whole:
+In the shell, `edit policy-definition no-lab`, then `edit source` opens the policy in a text editor, or `set source line <n> <text>` adds it one line at a time (the policy is checked at commit). Over REST, `PUT` it whole:
 
 ```sh
 $C -X PUT -H 'Content-Type: application/json' \

@@ -1496,8 +1496,8 @@ async fn show_policy_source(mode: &Mode, socket: &Path, name: &str) {
 
 /// Shared by `set source line <n> <text>`/`delete source line <n>`: applies
 /// `edit` to the current source's lines (1-indexed, matching `show
-/// source`'s display), then runs the same client-side compile check `edit
-/// source` does before staging it. `edit` reports an out-of-range line
+/// source`'s display), stages it, and warns if it doesn't compile (unlike
+/// `edit source`, which discards a script that doesn't). `edit` reports an out-of-range line
 /// itself, so both callers can just describe their own bounds rule.
 async fn edit_policy_source_line(
     mode: Mode,
@@ -1518,11 +1518,15 @@ async fn edit_policy_source_line(
     if !new_source.is_empty() {
         new_source.push('\n');
     }
+    // Staged even when it doesn't compile, so a multi-line script can be
+    // built a line at a time (#120); commit still refuses it until fixed.
     match compile_against_transaction(socket, &transaction, &new_source).await {
         Some(Ok(())) => apply_policy_source(mode, socket, name, new_source).await,
         Some(Err(e)) => {
-            eprintln!("policy did not compile, edit discarded: {e}");
-            mode
+            eprintln!(
+                "warning: policy does not compile yet: {e} (commit will refuse it until fixed)"
+            );
+            apply_policy_source(mode, socket, name, new_source).await
         }
         None => mode,
     }

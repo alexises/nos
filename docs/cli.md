@@ -131,7 +131,7 @@ lab-1(doc3)> edit bgp instance r1
 lab-1(doc3/bgp-instance:r1)> edit peer-group pg1
 lab-1(doc3/bgp-instance:r1/peer-group:pg1)> set keepalive-interval 10
 lab-1(doc3/bgp-instance:r1/peer-group:pg1)> show this
-peer-group pg1: remote-as 65002, source-address unset, address-family [ipv4], hold-time 30, keepalive-interval 10, connect-retry-time 3, auth none, next-hop default (self, eBGP)
+peer-group pg1: remote-as 65002, source-address unset, address-family [ipv4], hold-time 30, keepalive-interval 10, connect-retry-time 3, auth none, next-hop default (self, eBGP), import-policy default (deny-all), export-policy default (deny-all)
 lab-1(doc3/bgp-instance:r1/peer-group:pg1)> up
 lab-1(doc3/bgp-instance:r1)> up
 lab-1(doc3)>
