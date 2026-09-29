@@ -52,11 +52,11 @@ sha1                = "0.10"
 sha2                = "0.10"
 hmac                = "0.12"
 axum                = "0.8"
-utoipa              = { version = "5", features = ["axum_extras"] }
-utoipa-axum         = "0.2"
+utoipa              = { version = "6", features = ["axum_extras"] }
+utoipa-axum         = "0.3"
 # `vendored`: the UI assets ship inside the crate — no CDN at runtime (the API
 # lives in a management VRF) and no GitHub download at build time.
-utoipa-swagger-ui   = { version = "9", features = ["axum", "vendored"] }
+utoipa-swagger-ui   = { version = "10", features = ["axum", "vendored"] }
 percent-encoding    = "2"
 rpassword           = "7"
 base64              = "0.22"

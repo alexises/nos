@@ -24,7 +24,28 @@ pub fn document(base: &OpenApi) -> Value {
         target.entry(path).or_insert(item);
     }
     problem_media_type(&mut doc["paths"]);
+    response_descriptions(&mut doc["paths"]);
     doc
+}
+
+/// A Response Object's `description` is required (`OpenAPI` 3.1), but
+/// utoipa 6 omits it when an annotation gives none, where 5 wrote `""`.
+fn response_descriptions(paths: &mut Value) {
+    let Some(paths) = paths.as_object_mut() else {
+        return;
+    };
+    for op in paths.values_mut().filter_map(Value::as_object_mut) {
+        for op in op.values_mut() {
+            let Some(responses) = op.get_mut("responses").and_then(Value::as_object_mut) else {
+                continue;
+            };
+            for r in responses.values_mut().filter_map(Value::as_object_mut) {
+                if !r.contains_key("$ref") {
+                    r.entry("description").or_insert_with(|| Value::from(""));
+                }
+            }
+        }
+    }
 }
 
 /// Errors are `application/problem+json`, but the annotations (and `emit`)
