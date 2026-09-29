@@ -28,7 +28,7 @@ OSPFv2 and OSPFv3 are independent. One routing table can have both an `ospf-inst
 
 A link needs an IPv6 address to be advertised. Neighbours talk over IPv6 link-local addresses, which the kernel creates for every interface, so the next hops of OSPFv3 routes are link-local addresses.
 
-How the OSPFv3 implementation works internally is described in [`ospfv3/CLAUDE.md`](../ospfv3/CLAUDE.md).
+How the OSPFv3 implementation works internally is described in [`ospfv3/CLAUDE.md`](../../ospfv3/CLAUDE.md).
 
 ## Common operations
 

@@ -15,9 +15,9 @@ OSPF is the link-state interior gateway protocol for IPv4 (RFC 2328). NOS runs i
 - [Features and behaviour](#features-and-behaviour)
 - [Configuration reference](#configuration-reference)
 
-The examples use the two-router lab described in the [README](README.md#conventions-used-in-these-pages): router-a (10.50.0.2) and router-b (10.50.0.3) share `10.50.0.0/24` on `eth0`, which is in routing table `rt1`. The CLI sessions run on router-a. The REST calls make the same change on router-b, so that together the two blocks configure both ends of a link; for those calls `$B` points at router-b (`B=https://10.50.0.3:8080`) and `$C` uses a client certificate obtained from router-b, as shown in [The REST API](api.md#getting-a-client-certificate).
+The examples use the two-router lab described in the [README](../README.md#conventions-used-in-these-pages): router-a (10.50.0.2) and router-b (10.50.0.3) share `10.50.0.0/24` on `eth0`, which is in routing table `rt1`. The CLI sessions run on router-a. The REST calls make the same change on router-b, so that together the two blocks configure both ends of a link; for those calls `$B` points at router-b (`B=https://10.50.0.3:8080`) and `$C` uses a client certificate obtained from router-b, as shown in [The REST API](../api.md#getting-a-client-certificate).
 
-Every CLI command and REST path on this page matches what the shell and the API accept, and each configuration follows one that the end-to-end test suite runs against real routers. The sample outputs are not reproduced here yet; see [The CLI](cli.md#operational-commands) for the general shape of `show` output.
+Every CLI command and REST path on this page matches what the shell and the API accept, and each configuration follows one that the end-to-end test suite runs against real routers. The sample outputs are not reproduced here yet; see [The CLI](../cli.md#operational-commands) for the general shape of `show` output.
 
 ## How OSPF is configured in NOS
 
@@ -35,7 +35,7 @@ The configuration has three levels, plus the places you attach it:
 
 OSPF routes appear in `show route` with the source `ospf`. When the same prefix is also known from another source, the other source wins: connected, then static, then BGP, then OSPF.
 
-How the OSPF implementation works internally is described in [`ospf/CLAUDE.md`](../ospf/CLAUDE.md).
+How the OSPF implementation works internally is described in [`ospf/CLAUDE.md`](../../ospf/CLAUDE.md).
 
 ## Common operations
 
@@ -126,7 +126,7 @@ $C $B/v1/routes/rt1/192.0.2.1       (on router-b)
 
 ### Run OSPF on a LAN segment
 
-On a multi-access segment, OSPF elects a designated router (DR) and a backup (BDR), and every router forms a full adjacency only with those two. In NOS a LAN segment is a broadcast domain, and OSPF runs on the broadcast domain's own address (its SVI; see [L2 switching](README.md#per-protocol-guides)). Here `eth0` carries broadcast domain `bd1` tagged with VLAN 400, the domain's SVI gets an address in `rt1`, and profile `p-lan` gives router-a priority 10 so it becomes the DR:
+On a multi-access segment, OSPF elects a designated router (DR) and a backup (BDR), and every router forms a full adjacency only with those two. In NOS a LAN segment is a broadcast domain, and OSPF runs on the broadcast domain's own address (its SVI; see [L2 switching](../README.md#per-protocol-guides)). Here `eth0` carries broadcast domain `bd1` tagged with VLAN 400, the domain's SVI gets an address in `rt1`, and profile `p-lan` gives router-a priority 10 so it becomes the DR:
 
 ```
 configure lan
@@ -247,14 +247,14 @@ show ospf database          (look for type 5, advertising-router 1.1.1.1)
 show route rt1 198.51.100.1
 ```
 
-The REST equivalent of the redistribute rule, in a transaction `asbr` opened and committed as in the earlier examples (the static routing instance is created the same way as in [The REST API](api.md#changing-configuration-transactions)):
+The REST equivalent of the redistribute rule, in a transaction `asbr` opened and committed as in the earlier examples (the static routing instance is created the same way as in [The REST API](../api.md#changing-configuration-transactions)):
 
 ```sh
 $C -X PUT -H 'Content-Type: application/json' -d '{"from":"Static","to":"Ospf","policy":null}' \
   $B/v1/transactions/asbr/routing-table/rt1/redistribute
 ```
 
-Add `policy <name>` to the command (`"policy": "<name>"` in the JSON) to filter what is redistributed through a routing policy; without it, every static route is redistributed. See [Routing policy](README.md#per-protocol-guides). Deleting the rule (`delete routing-table rt1 redistribute`) withdraws the routes from the other routers within about 15 seconds.
+Add `policy <name>` to the command (`"policy": "<name>"` in the JSON) to filter what is redistributed through a routing policy; without it, every static route is redistributed. See [Routing policy](../README.md#per-protocol-guides). Deleting the rule (`delete routing-table rt1 redistribute`) withdraws the routes from the other routers within about 15 seconds.
 
 A routing table has only one `redistribute` rule, so it redistributes static routes into BGP or into OSPF, not both.
 
