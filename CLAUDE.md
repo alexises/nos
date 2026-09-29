@@ -9,6 +9,13 @@ Every agent working in this repo — the main session and any subagent spawned v
 - **`rtk`** for shell command output, per the "Command output" conventions at the bottom of this file. Subagents don't inherit the user's global CLAUDE.md, so this rule is restated here.
 - **CodeGraph** (`codegraph_explore` MCP tool, or `codegraph explore "<query>"` from the shell) before grep/find or reading files, to locate or understand code — this repo has a `.codegraph/` index at its root.
 
+The project's Claude tooling is tracked in `.claude/`, so every worktree (incl. `isolation: "worktree"` agents) gets it:
+
+- `.claude/settings.json` wires the `PreToolUse` hook via `"$CLAUDE_PROJECT_DIR"`, never a relative path (a relative one exits 127 inside a worktree, #128).
+- `.claude/hooks/codegraph-first.sh` denies `Grep` and `grep`/`rg` over the tree; append `# cg-ok` to a Bash command for a raw text scan (logs, non-code files).
+- `.claude/commands/issue.md` is the `/issue` workflow.
+- Machine-local files stay untracked: `.claude/settings.local.json`, `.claude/worktrees/`.
+
 ## Components
 
 | Directory | Crate | Purpose |
