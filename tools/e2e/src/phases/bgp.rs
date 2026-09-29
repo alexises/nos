@@ -372,11 +372,15 @@ pub async fn route_server(w: &mut World) -> anyhow::Result<()> {
 
     log("confirming router-c sees router-b's asn but not router-a's — rfc 7947 transparency");
     let line = c.logs.last(&loc_rib()).unwrap_or_default();
-    if line.contains(&format!("as_path=[{ASN_B}]")) && !line.contains(&ASN_A.to_string()) {
-        Ok(())
-    } else {
+    if !line.contains(&format!("as_path=[{ASN_B}]")) || line.contains(&ASN_A.to_string()) {
         bail!("expected as_path [{ASN_B}] with no route-server asn prepended, got: {line}")
     }
+    // No `next-hop` is provisioned: the route-server default is `unchanged`
+    // (RFC 7947 §2.2.1), so router-c sees router-b's address, not the hub's.
+    if !line.contains(&format!("next_hop=Some({IP_B})")) {
+        bail!("expected next_hop {IP_B} passed through unchanged, got: {line}")
+    }
+    Ok(())
 }
 
 /// An import policy on router-b rejecting the redistributed prefix, then reverted.
@@ -747,7 +751,7 @@ pub async fn communities(w: &mut World) -> anyhow::Result<()> {
         "tag-redistribute-with-community",
         // The prepend lands behind router-a's own ASN (added on export).
         &format!(
-            "this.bgp.communities.add({COMMUNITY_AA}:{COMMUNITY_NN})\nthis.bgp.as_path.prepend({PREPEND_ASN}, 2)\naccept\n"
+            "this.bgp.communities.add({COMMUNITY_AA}:{COMMUNITY_NN})\nthis.bgp.as_path.prepend({PREPEND_ASN}, 2)\nset this.bgp.med = {MED}\naccept\n"
         ),
     )?;
     let mut flags = redistribute();
@@ -791,6 +795,8 @@ pub async fn communities(w: &mut World) -> anyhow::Result<()> {
         loc_rib()
     ))
     .await?;
+    // An export-policy MED reaches an eBGP peer (RFC 4271 §5.1.4, #120).
+    b.wait(&format!("{} .*med=Some({MED})", loc_rib())).await?;
     Ok(())
 }
 

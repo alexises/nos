@@ -105,7 +105,7 @@ pub const CONNECT_RETRY_TIME_DEFAULT_SECS: u16 = 120;
 /// preserves the next-hop the route already carries (the address it was
 /// received with, for a peer-learned route). `BgpPeerGroup.next_hop: None`
 /// resolves to `SelfAddress` for an eBGP peer-group and `Unchanged` for an
-/// iBGP one — standard BGP practice, since an iBGP speaker must not silently
+/// iBGP or route-server-client one — standard BGP practice, since an iBGP speaker must not silently
 /// mask a route's real eBGP-learned next-hop unless explicitly told to.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
@@ -255,7 +255,8 @@ pub struct BgpPeerGroup {
     pub auth: Option<BgpAuth>,
 
     /// `None` defaults to `SelfAddress` for an eBGP peer-group and
-    /// `Unchanged` for an iBGP one — see `NextHopMode`.
+    /// `Unchanged` for an iBGP or `route_server_client` one (RFC 7947
+    /// §2.2.1) — see `NextHopMode`.
     #[garde(skip)]
     #[cli(topic = BgpPeerGroupNextHop)]
     pub next_hop: Option<NextHopMode>,

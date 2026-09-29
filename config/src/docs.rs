@@ -280,7 +280,8 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              eBGP default) or 'unchanged' (preserve the next-hop the route already carries \
              — the standard iBGP default, avoiding the third-party-next-hop problem). \
              Overrides the mode this peer-group would otherwise default to based on whether \
-             it's eBGP or iBGP (remote-as compared to the instance's own asn).",
+             it's eBGP or iBGP (remote-as compared to the instance's own asn); a \
+             route-server-client peer-group defaults to 'unchanged' (RFC 7947).",
                 " ",
                 "Clear a peer-group's advertised BGP next-hop mode override.",
             ),

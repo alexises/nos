@@ -286,7 +286,7 @@ $C -X PUT -H 'Content-Type: application/json' -d '{"Interface":{"interface":"eth
 `next-hop` controls the `NEXT_HOP` of routes advertised to a peer-group:
 
 - `self` replaces it with this router's own address on the session. This is the default for eBGP peer-groups (`remote-as` different from the instance's `asn`).
-- `unchanged` keeps the next hop the route already has. This is the default for iBGP peer-groups.
+- `unchanged` keeps the next hop the route already has. This is the default for iBGP peer-groups and for route-server peer-groups (`route-server-client`).
 
 `set next-hop self|unchanged` overrides the default, and `delete next-hop` restores it. An export policy can also set the next hop of individual routes (see [Routing policy](routing-policy.md#statements)). Over REST the values are `"SelfAddress"` and `"Unchanged"`.
 
@@ -451,7 +451,9 @@ At an exchange point, a route server passes routes between its clients without a
 - never adds its own AS to the AS path;
 - if the client supports ADD-PATH (RFC 7911), sends it every other client's path for a prefix, not only the single best one. A client without ADD-PATH receives the best path only.
 
-The next hop still follows the peer-group's `next-hop` setting, whose eBGP default is `self`. Set `next-hop unchanged` on a route-server peer-group so that clients forward to each other directly.
+- leaves the next hop unchanged by default (RFC 7947 §2.2.1), so clients forward to each other directly. An explicit `set next-hop self` still overrides it.
+
+A received `MED` is not passed on to route-server clients (they are eBGP peers); a `MED` set by the export policy is.
 
 `route-reflector-client` and `route-server-client` cannot both be set on one peer-group.
 
@@ -460,7 +462,6 @@ The next hop still follows the peer-group's `next-hop` setting, whose eBGP defau
 These are known gaps, so plan around them:
 
 - A route's attributes cannot be displayed. `show route` shows the chosen next hop, and the log records each learned route.
-- MED is sent only to iBGP peers, including a MED set by an export policy. A MED is never advertised to an eBGP peer.
 - There is no route aggregation (`aggregate-address`), no maximum-prefix limit, and no soft reconfiguration: changing a peer-group or its policies resets its sessions.
 - The well-known communities have no built-in effect (see [Communities](#communities)).
 
@@ -503,7 +504,7 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 | ao-key current | `… ao-key <send-id> current` / `set ao-key <send-id> current` | `is_current` in the key | flag | exactly one key | Key used to sign outgoing segments | `show bgp brief` (`ao-current`) |
 | ao-key rnext | `… ao-key <send-id> rnext` / `set ao-key <send-id> rnext` | `is_rnext` in the key | flag | at most one key | Key the peer is asked to switch to | `show bgp brief` (`ao-rnext`) on the peer |
 | exclude-options | REST only | `exclude_options` in the key | boolean; default `false` | none | Leaves TCP options out of the MAC; both sides must agree | `show bgp brief` (session up) |
-| next-hop | `… next-hop self\|unchanged` / `set next-hop self\|unchanged`; `delete next-hop` | `…/next-hop`, `"SelfAddress"`, `"Unchanged"` or `null` | default: `self` for eBGP, `unchanged` for iBGP | none | `NEXT_HOP` of advertised routes | `show config`; `show route` on the peer |
+| next-hop | `… next-hop self\|unchanged` / `set next-hop self\|unchanged`; `delete next-hop` | `…/next-hop`, `"SelfAddress"`, `"Unchanged"` or `null` | default: `self` for eBGP, `unchanged` for iBGP and route-server peer-groups | none | `NEXT_HOP` of advertised routes | `show config`; `show route` on the peer |
 | route-reflector-client | `… route-reflector-client` / `set route-reflector-client`; `delete route-reflector-client` | `…/route-reflector-client`, boolean | default `false`; required in a whole-object `PUT` | iBGP peer-group only; not with route-server-client | Reflects iBGP routes to and from these peers | `show config` |
 | route-server-client | `… route-server-client` / `set route-server-client`; `delete route-server-client` | `…/route-server-client`, boolean | default `false`; required in a whole-object `PUT` | eBGP peer-group only; not with route-reflector-client | Transparent AS path; ADD-PATH views | `show config` |
 | import-policy | `… import-policy <policy>` / `set import-policy <policy>`; `delete import-policy` | `…/import-policy`, `"accept-all"` or `null` | policy name; default `deny-all` | `accept-all`, `deny-all` or an existing policy-definition | Filters and modifies received routes | `GET …/import-policy`; `show route` |
