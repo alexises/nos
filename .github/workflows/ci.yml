@@ -60,7 +60,7 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - run: make coverage
       - uses: codecov/codecov-action@v4
         with:
           files: lcov.info

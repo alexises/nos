@@ -81,3 +81,19 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("shutting down");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn args_parse() {
+        Args::command().debug_assert();
+        let args = Args::try_parse_from(["nos-configd"]).unwrap();
+        assert_eq!(
+            args.config_file,
+            std::path::PathBuf::from("/var/lib/nos/config.yaml")
+        );
+    }
+}

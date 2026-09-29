@@ -1597,6 +1597,72 @@ async fn print_help(mode: &Mode, socket: &Path, cache: &DocCache) {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(path: &[&str], dirty: bool) -> Mode {
+        Mode::Configuration {
+            transaction: "t1".to_string(),
+            path: session::Path::from(path.iter().map(ToString::to_string).collect::<Vec<_>>()),
+            dirty,
+        }
+    }
+
+    #[test]
+    fn prompt_shows_transaction_and_position() {
+        let host = Arc::new(Mutex::new("r1".to_string()));
+        let render = |mode: &Mode| {
+            NosPrompt::for_mode(host.clone(), mode)
+                .render_prompt_left()
+                .into_owned()
+        };
+        assert_eq!(render(&Mode::Operational), "r1");
+        assert_eq!(render(&config(&[], false)), "r1(t1)");
+        assert_eq!(
+            render(&config(&["bgp-instance", "i"], false)),
+            "r1(t1/bgp-instance:i)"
+        );
+        let p = NosPrompt::for_mode(host, &Mode::Operational);
+        assert_eq!(p.render_prompt_right(), "");
+        assert_eq!(p.render_prompt_indicator(PromptEditMode::Default), "> ");
+        assert_eq!(p.render_prompt_multiline_indicator(), ":::  ");
+        let search =
+            PromptHistorySearch::new(reedline::PromptHistorySearchStatus::Passing, String::new());
+        assert_eq!(
+            p.render_prompt_history_search_indicator(search),
+            "(search)> "
+        );
+    }
+
+    #[test]
+    fn navigation_keeps_transaction_and_dirtiness() {
+        let deep = config(&["bgp-instance", "i"], true);
+        assert_eq!(current_transaction(&deep), "t1");
+        assert_eq!(current_path(&deep).segments(), ["bgp-instance", "i"]);
+        assert_eq!(navigate_top(&deep), config(&[], true));
+        let to = session::Path::from(vec!["user".to_string(), "u".to_string()]);
+        assert_eq!(navigate_to(&deep, to), config(&["user", "u"], true));
+    }
+
+    #[test]
+    fn unavailable_doc_says_so() {
+        let doc = unavailable_doc(Topic::Save);
+        assert_eq!(doc.topic, Topic::Save);
+        assert!(doc.summary.contains("could not reach nos-configd"));
+    }
+
+    #[test]
+    fn args_parse_with_defaults() {
+        let args = Args::try_parse_from(["nos"]).unwrap();
+        assert_eq!(
+            args.watchdog_socket,
+            PathBuf::from(nos_proto::DEFAULT_WATCHDOG_SOCKET)
+        );
+        let _ = keybindings();
+    }
+}
+
+#[cfg(test)]
 mod tempfile_tests {
     use super::new_policy_tempfile;
 

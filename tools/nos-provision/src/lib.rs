@@ -1828,3 +1828,632 @@ fn parse_ospf_crypto_key(spec: &str) -> anyhow::Result<OspfCryptoKey> {
         is_current: true,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `build_ops` over the required base flags plus `extra`.
+    fn ops(extra: &[&str]) -> anyhow::Result<Vec<ConfigOp>> {
+        let base = [
+            "nos-provision",
+            "--address",
+            "10.0.0.1/24",
+            "--asn",
+            "65001",
+            "--router-id",
+            "1.1.1.1",
+            "--remote-as",
+            "65002",
+            "--peer",
+            "10.0.0.2",
+        ];
+        build_ops(&Args::try_parse_from(base.iter().chain(extra))?)
+    }
+
+    fn err(extra: &[&str]) -> String {
+        format!("{:#}", ops(extra).unwrap_err())
+    }
+
+    fn has(ops: &[ConfigOp], op: &ConfigOp) {
+        assert!(ops.contains(op), "{op:?} missing from {ops:#?}");
+    }
+
+    #[test]
+    fn base_router() {
+        let ops = ops(&[]).unwrap();
+        assert_eq!(ops.len(), 14);
+        has(
+            &ops,
+            &ConfigOp::BgpPeer(BgpPeerOp::Set {
+                instance: "r1".into(),
+                remote_address: "10.0.0.2".parse().unwrap(),
+                peer_group: "pg1".into(),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetImportPolicy {
+                instance: "r1".into(),
+                name: "pg1".into(),
+                import_policy: "accept-all".into(),
+            }),
+        );
+    }
+
+    #[test]
+    fn every_bgp_flag() {
+        let ops = ops(&[
+            "--mtu",
+            "9000",
+            "--ospfv3-address",
+            "2001:db8::1/64",
+            "--static-route",
+            "192.0.2.0/24",
+            "--static-gateway",
+            "10.0.0.254",
+            "--redistribute",
+            "--redistribute-policy",
+            "p",
+            "--md5-password",
+            "s",
+            "--ao-send-id",
+            "1",
+            "--ao-key-secret",
+            "k",
+            "--ao-algorithm",
+            "aes-cmac",
+            "--ao-current",
+            "--ao-rnext",
+            "--ao-exclude-options",
+            "--ao-promote-current",
+            "2",
+            "--ao-remove-key",
+            "3",
+            "--evpn",
+            "--route-reflector-client",
+            "--route-server-client",
+            "--cluster-id",
+            "9.9.9.9",
+            "--connect-retry-time",
+            "3",
+            "--mrai",
+            "30",
+            "--max-hops",
+            "1",
+            "--shutdown-peer-group",
+            "",
+            "--unshutdown-peer-group",
+            "--shutdown-peer",
+            "bye",
+            "--unshutdown-peer",
+            "--damping-half-life",
+            "20",
+            "--clear-damping",
+            "--source-address-interface",
+            "eth1",
+            "--source-address-label",
+            "l",
+            "--rest-api-address",
+            "10.0.0.1",
+            "--hostname",
+            "h",
+            "--user",
+            "e2e=a=b",
+        ])
+        .unwrap();
+        let pg = ConfigOp::BgpPeerGroup;
+        has(
+            &ops,
+            &pg(BgpPeerGroupOp::SetAoKey {
+                instance: "r1".into(),
+                name: "pg1".into(),
+                key: BgpAoKey {
+                    send_id: 1,
+                    recv_id: 1,
+                    algorithm: BgpAoAlgorithm::AesCmac96,
+                    key: "k".into(),
+                    is_current: true,
+                    is_rnext: true,
+                    exclude_options: true,
+                },
+            }),
+        );
+        has(
+            &ops,
+            &pg(BgpPeerGroupOp::SetShutdown {
+                instance: "r1".into(),
+                name: "pg1".into(),
+                message: None,
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::BgpPeer(BgpPeerOp::SetShutdown {
+                instance: "r1".into(),
+                remote_address: "10.0.0.2".parse().unwrap(),
+                message: Some("bye".into()),
+            }),
+        );
+        has(
+            &ops,
+            &pg(BgpPeerGroupOp::SetDamping {
+                instance: "r1".into(),
+                name: "pg1".into(),
+                damping: nos_proto::BgpDamping {
+                    half_life: 20,
+                    ..Default::default()
+                },
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::User(UserOp::SetPassword {
+                name: "e2e".into(),
+                password: "a=b".into(),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::RoutingTable(RoutingTableOp::SetRestApi {
+                name: "rt1".into(),
+                address: "10.0.0.1".parse().unwrap(),
+                port: nos_proto::REST_API_PORT_DEFAULT,
+            }),
+        );
+    }
+
+    #[test]
+    fn every_interface_and_l2_flag() {
+        let ops = ops(&[
+            "--loopback-address",
+            "192.0.2.1/32",
+            "--loopback-remove-address",
+            "192.0.2.2/32",
+            "--ospf-loopback-profile",
+            "p",
+            "--ospfv3-loopback-address",
+            "2001:db8::1/128",
+            "--ospfv3-loopback-profile",
+            "p6",
+            "--broadcast-domain-svi-address",
+            "10.1.0.1/24",
+            "--ospfv3-broadcast-domain-svi-address",
+            "2001:db8:1::1/64",
+            "--evpn-vni",
+            "100",
+            "--evpn-rd",
+            "65001:1",
+            "--evpn-rt-import",
+            "65001:1",
+            "--evpn-rt-export",
+            "65001:2",
+            "--evpn-vtep-source-interface",
+            "lo",
+            "--evpn-redistribute-bgp",
+            "r1",
+            "--evpn-redistribute-arp-bgp",
+            "r1",
+            "--evpn-redistribute-connected-bgp",
+            "r1",
+            "--switching-profile",
+            "sp",
+            "--switching-profile-member",
+            "bd1:untagged",
+            "--switching-profile-member",
+            "bd2:20",
+            "--port-aggregate",
+            "bond0",
+            "--port-aggregate-mode",
+            "lacp",
+            "--lacp-rate",
+            "fast",
+            "--port-aggregate-mtu",
+            "9000",
+            "--port-aggregate-esi",
+            "00:11:22:33:44:55:66:77:88:99",
+            "--delete-port-aggregate-esi",
+            "--port-aggregate-redundancy-mode",
+            "single-active",
+            "--lacp-system-id",
+            "02:00:00:00:00:01",
+            "--port-aggregate-untagged-domain",
+            "bd1",
+            "--enslave-interface-into-port-aggregate",
+            "eth1",
+            "--clear-port-aggregate-member",
+            "eth3",
+            "--lldp-transmit-interface",
+            "eth1",
+            "--lldp-receive-interface",
+            "eth1",
+            "--no-lldp-transmit-interface",
+            "eth2",
+            "--no-lldp-receive-interface",
+            "eth2",
+            "--lldp-tx-interval",
+            "5",
+            "--lldp-tx-hold",
+            "3",
+            "--lldp-management-address",
+            "10.0.0.1",
+            "--lldp-destination-interface",
+            "eth1=customer-bridge",
+        ])
+        .unwrap();
+        has(
+            &ops,
+            &ConfigOp::SwitchingProfile(SwitchingProfileOp::AddMember {
+                name: "sp".into(),
+                broadcast_domain: "bd2".into(),
+                tag: VlanTag::Dot1q(20),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::PortAggregate(PortAggregateOp::SetSwitchingProfile {
+                name: "bond0".into(),
+                switching_profile: "bond0-sp".into(),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Interface(InterfaceOp::SetLldpReceive {
+                name: "eth2".into(),
+                enabled: false,
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Interface(InterfaceOp::SetLldpDestination {
+                name: "eth1".into(),
+                destination: LldpDestination::CustomerBridge,
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::BroadcastDomain(BroadcastDomainOp::AddRouteTarget {
+                name: "bd-svi".into(),
+                import: false,
+                route_target: "65001:2".into(),
+            }),
+        );
+    }
+
+    #[test]
+    fn every_ospf_flag() {
+        let ops = ops(&[
+            "--static-route",
+            "192.0.2.0/24",
+            "--static-gateway",
+            "10.0.0.254",
+            "--redistribute-to-ospf",
+            "--ospf-instance",
+            "o1",
+            "--ospf-router-id",
+            "1.1.1.1",
+            "--ospf-area",
+            "0.0.0.0",
+            "--ospf-profile",
+            "p",
+            "--ospf-profile-mtu",
+            "68",
+            "--ospf-profile-hello-interval",
+            "2",
+            "--ospf-simple-password",
+            "pw",
+            "--ospf-extended-seq",
+            "true",
+            "--ospf-crypto-key",
+            "1:hmac-sha256:k",
+            "--ospf-interface-profile",
+            "p",
+            "--ospf-broadcast-domain-profile",
+            "p",
+            "--ospfv3-instance",
+            "o3",
+            "--ospfv3-router-id",
+            "1.1.1.1",
+            "--ospfv3-extended-lsa",
+            "--ospfv3-graceful-restart-grace-period",
+            "120",
+            "--ospfv3-area",
+            "0.0.0.0",
+            "--ospfv3-profile",
+            "p6",
+            "--ospfv3-profile-mtu",
+            "1280",
+            "--ospfv3-crypto-key",
+            "300:hmac-sha512:k",
+            "--ospfv3-interface-profile",
+            "p6",
+            "--ospfv3-broadcast-domain-profile",
+            "p6",
+        ])
+        .unwrap();
+        has(
+            &ops,
+            &ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetCryptoKey {
+                instance: "o3".into(),
+                area_id: Ipv4Addr::UNSPECIFIED,
+                name: "p6".into(),
+                key: OspfCryptoKey {
+                    key_id: 300,
+                    algorithm: OspfCryptoAlgorithm::HmacSha512,
+                    key: "k".into(),
+                    is_current: true,
+                },
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
+                name: "rt1".into(),
+                redistribute: Redistribute {
+                    from: RedistributeSource::Static,
+                    to: RedistributeTarget::Ospf,
+                    policy: None,
+                },
+            }),
+        );
+    }
+
+    #[test]
+    fn clearing_and_deleting_flags() {
+        let all = ops(&[
+            "--delete-subinterface",
+            "--clear-redistribute-to-ospf",
+            "--delete-loopback",
+            "--clear-ospf-loopback-profile",
+            "--clear-ospfv3-loopback-profile",
+            "--delete-broadcast-domain-svi",
+            "--evpn-clear",
+            "--evpn-rt-import",
+            "65001:1",
+            "--source-address-loopback",
+            "--delete-switching-profile",
+            "--port-aggregate",
+            "bond0",
+            "--delete-port-aggregate",
+            "--enslave-interface-into-port-aggregate",
+            "eth1",
+            "--clear-rest-api",
+        ])
+        .unwrap();
+        has(
+            &all,
+            &ConfigOp::Interface(InterfaceOp::ClearPortAggregate {
+                name: "eth1".into(),
+            }),
+        );
+        has(
+            &all,
+            &ConfigOp::BroadcastDomain(BroadcastDomainOp::ClearVni {
+                name: "bd-svi".into(),
+            }),
+        );
+        assert!(!all
+            .iter()
+            .any(|o| matches!(o, ConfigOp::Subinterface(SubinterfaceOp::AddAddress { .. }))));
+        let clear = ops(&["--clear-source-address", "--evpn-vtep-source-loopback"]).unwrap();
+        has(
+            &clear,
+            &ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearSourceAddress {
+                instance: "r1".into(),
+                name: "pg1".into(),
+            }),
+        );
+    }
+
+    #[test]
+    fn policy_file() {
+        let path = std::env::temp_dir().join(format!("nos-provision-{}.rpl", std::process::id()));
+        std::fs::write(&path, "accept\n").unwrap();
+        let result = ops(&[
+            "--policy-name",
+            "p",
+            "--policy-source-file",
+            path.to_str().unwrap(),
+        ]);
+        std::fs::remove_file(&path).unwrap();
+        has(
+            &result.unwrap(),
+            &ConfigOp::PolicyDefinition(PolicyDefinitionOp::SetSource {
+                name: "p".into(),
+                source: "accept\n".into(),
+            }),
+        );
+    }
+
+    #[test]
+    fn inconsistent_flags_are_refused() {
+        let static_route = [
+            "--static-route",
+            "192.0.2.0/24",
+            "--static-gateway",
+            "10.0.0.9",
+        ];
+        for (flags, needle) in [
+            (&["--static-route", "192.0.2.0/24"][..], "--static-gateway"),
+            (&["--redistribute"], "require --static-route"),
+            (
+                &[&static_route[..], &["--redistribute-to-ospf"]].concat(),
+                "requires --ospf-instance",
+            ),
+            (
+                &[
+                    &static_route[..],
+                    &["--redistribute", "--clear-redistribute-to-ospf"],
+                ]
+                .concat(),
+                "mutually exclusive",
+            ),
+            (&["--policy-name", "p"], "--policy-source-file is required"),
+            (&["--policy-source-file", "/x"], "requires --policy-name"),
+            (
+                &[
+                    "--policy-name",
+                    "p",
+                    "--policy-source-file",
+                    "/nonexistent/x",
+                ],
+                "reading",
+            ),
+            (
+                &["--loopback-address", "192.0.2.1/32", "--delete-loopback"],
+                "mutually exclusive",
+            ),
+            (
+                &[
+                    "--ospf-loopback-profile",
+                    "p",
+                    "--clear-ospf-loopback-profile",
+                ],
+                "mutually exclusive",
+            ),
+            (
+                &[
+                    "--ospfv3-loopback-profile",
+                    "p",
+                    "--clear-ospfv3-loopback-profile",
+                ],
+                "mutually exclusive",
+            ),
+            (
+                &[
+                    "--broadcast-domain-svi-address",
+                    "10.1.0.1/24",
+                    "--delete-broadcast-domain-svi",
+                ],
+                "mutually exclusive",
+            ),
+            (&["--evpn-clear", "--evpn-vni", "1"], "mutually exclusive"),
+            (
+                &[
+                    "--evpn-vtep-source-interface",
+                    "lo",
+                    "--evpn-vtep-source-loopback",
+                ],
+                "mutually exclusive",
+            ),
+            (
+                &["--source-address-loopback", "--clear-source-address"],
+                "mutually exclusive",
+            ),
+            (
+                &["--switching-profile", "sp", "--delete-switching-profile"],
+                "mutually exclusive",
+            ),
+            (
+                &[
+                    "--switching-profile",
+                    "sp",
+                    "--switching-profile-member",
+                    "bd1",
+                ],
+                "DOMAIN:TAG",
+            ),
+            (
+                &[
+                    "--switching-profile",
+                    "sp",
+                    "--switching-profile-member",
+                    "bd1:x",
+                ],
+                "invalid vlan tag",
+            ),
+            (
+                &["--switching-profile-member", "bd1:1"],
+                "requires --switching-profile",
+            ),
+            (&["--delete-port-aggregate"], "requires --port-aggregate"),
+            (&["--lacp-rate", "slow"], "require --port-aggregate"),
+            (
+                &["--lldp-destination-interface", "eth1"],
+                "<interface>=<group>",
+            ),
+            (
+                &["--lldp-destination-interface", "eth1=nope"],
+                "unknown lldp destination",
+            ),
+            (
+                &["--rest-api-address", "10.0.0.1", "--clear-rest-api"],
+                "mutually exclusive",
+            ),
+            (&["--ospf-instance", "o"], "--ospf-router-id is required"),
+            (&["--ospf-router-id", "1.1.1.1"], "requires --ospf-instance"),
+            (&["--ospf-area", "0.0.0.0"], "requires --ospf-instance"),
+            (&["--ospf-profile", "p"], "requires --ospf-area"),
+            (&["--ospf-simple-password", "x"], "require --ospf-profile"),
+            (&["--ospf-profile-mtu", "68"], "require --ospf-profile"),
+            (
+                &["--ospfv3-instance", "o"],
+                "--ospfv3-router-id is required",
+            ),
+            (
+                &["--ospfv3-router-id", "1.1.1.1"],
+                "requires --ospfv3-instance",
+            ),
+            (&["--ospfv3-area", "0.0.0.0"], "requires --ospfv3-instance"),
+            (&["--ospfv3-profile", "p"], "requires --ospfv3-area"),
+        ] {
+            let e = err(flags);
+            assert!(e.contains(needle), "{flags:?}: {e}");
+        }
+        let ospf = [
+            "--ospf-instance",
+            "o",
+            "--ospf-router-id",
+            "1.1.1.1",
+            "--ospf-area",
+            "0.0.0.0",
+        ];
+        for flag in [
+            ["--ospf-simple-password", "x"],
+            ["--ospf-crypto-key", "1:md5:k"],
+            ["--ospf-profile-mtu", "68"],
+            ["--ospf-profile-hello-interval", "2"],
+            ["--ospf-extended-seq", "true"],
+        ] {
+            let e = err(&[&ospf[..], &flag].concat());
+            assert!(e.contains("requires --ospf-profile"), "{flag:?}: {e}");
+        }
+        let ospfv3 = [
+            "--ospfv3-instance",
+            "o",
+            "--ospfv3-router-id",
+            "1.1.1.1",
+            "--ospfv3-area",
+            "0.0.0.0",
+        ];
+        let e = err(&[&ospfv3[..], &["--ospfv3-profile-mtu", "1280"]].concat());
+        assert!(e.contains("require --ospfv3-profile"), "{e}");
+        let e = err(&[
+            &ospfv3[..],
+            &["--ospfv3-profile", "p", "--ospfv3-crypto-key", "1:md5:k"],
+        ]
+        .concat());
+        assert!(e.contains("no md5"), "{e}");
+    }
+
+    #[test]
+    fn crypto_key_parsing() {
+        for (alg, want) in [
+            ("md5", OspfCryptoAlgorithm::Md5),
+            ("hmac-sha1", OspfCryptoAlgorithm::HmacSha1),
+            ("hmac-sha256", OspfCryptoAlgorithm::HmacSha256),
+            ("hmac-sha384", OspfCryptoAlgorithm::HmacSha384),
+            ("hmac-sha512", OspfCryptoAlgorithm::HmacSha512),
+        ] {
+            let key = parse_ospf_crypto_key(&format!("7:{alg}:a:b")).unwrap();
+            assert_eq!(
+                (key.key_id, key.algorithm, key.key.as_str()),
+                (7, want, "a:b")
+            );
+        }
+        for bad in ["1:md5", "x:md5:k", "1:sha3:k"] {
+            assert!(parse_ospf_crypto_key(bad).is_err(), "{bad}");
+        }
+        assert!(parse_user("nopassword").is_err());
+    }
+}

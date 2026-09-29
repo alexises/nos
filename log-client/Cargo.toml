@@ -16,3 +16,7 @@ tokio              = { workspace = true }
 tokio-util         = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+nos-pki  = { workspace = true, features = ["testing"] }
+tempfile = { workspace = true }

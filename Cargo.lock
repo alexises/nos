@@ -1933,6 +1933,7 @@ dependencies = [
  "futures",
  "nos-pki",
  "nos-proto",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
