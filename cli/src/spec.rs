@@ -8,8 +8,9 @@
 //! nothing about caching or IPC; resolving a `Doc::FromConfig(topic)` into
 //! actual text is the caller's job (see `main.rs`'s `doc_for`/`doc_for_blocking`).
 
-use nos_proto::Topic;
+use nos_proto::{Topic, TransactionBase};
 
+use crate::command::Command;
 use crate::session::{Mode, Path};
 
 /// One piece of a command's token sequence.
@@ -37,6 +38,13 @@ pub enum ArgKind {
     BroadcastDomainName,
     SwitchingProfileName,
     PortAggregateName,
+    /// An IPv4 or IPv6 address.
+    IpAddr,
+    /// A non-negative integer.
+    Number,
+    /// The rest of the line, verbatim (leading whitespace kept) — only ever
+    /// a row's last token.
+    Rest,
 }
 
 /// Where a command's summary/detail text comes from.
@@ -81,6 +89,7 @@ pub enum Availability {
     ConfigurationInterfaceOrOspfProfile,
     ConfigurationSwitchingProfile,
     ConfigurationPortAggregate,
+    ConfigurationPolicyDefinition,
     /// Any non-root navigation position — `BgpInstance`, `BgpPeerGroup`,
     /// `RoutingTable`, `StaticRoutingInstance`, `Interface`, or
     /// `Subinterface`.
@@ -121,6 +130,7 @@ pub fn availability_matches(availability: Availability, mode: &Mode) -> bool {
         }
         Availability::ConfigurationSwitchingProfile => path.switching_profile().is_ok(),
         Availability::ConfigurationPortAggregate => path.port_aggregate().is_ok(),
+        Availability::ConfigurationPolicyDefinition => path.policy_definition().is_ok(),
         Availability::ConfigurationNested => matches!(
             path,
             Path::BgpInstance(_)
@@ -146,7 +156,15 @@ pub struct CommandSpec {
     pub usage: &'static str,
     pub doc: Doc,
     pub availability: Availability,
+    /// Builds the `Command` from the row's argument words, in token order.
+    /// `Some` makes the row part of the grammar [`parse`] walks, so a command
+    /// can't be accepted without the `doc` it is declared with. `None` only
+    /// for the config rows `command.rs` still parses by hand (#109).
+    pub build: Option<Build>,
 }
+
+/// A `cmd!` row's constructor: its argument words in, the `Command` out.
+pub type Build = fn(&[&str]) -> Option<Command>;
 
 const EXIT_DOC: Doc = Doc::Local {
     summary: "Exit the shell (or leave configuration mode).",
@@ -157,13 +175,64 @@ const EXIT_DOC: Doc = Doc::Local {
 };
 
 /// One token of a command's syntax: a bare string literal is a keyword, a
-/// parenthesised identifier is an argument slot naming its `ArgKind`.
+/// parenthesised identifier is an argument slot naming its `ArgKind` —
+/// optionally named, `(table: RoutingTableName)`, which `cmd!` needs for the
+/// usage string.
 macro_rules! tok {
     ($l:literal) => {
         Token::Literal($l)
     };
     (($k:ident)) => {
         Token::Arg(ArgKind::$k)
+    };
+    (($n:ident : $k:ident)) => {
+        Token::Arg(ArgKind::$k)
+    };
+}
+
+/// A token's text in a generated usage string: the keyword, or `<name>`.
+macro_rules! usage_tok {
+    ($l:literal) => {
+        $l
+    };
+    (($n:ident : $k:ident)) => {
+        concat!("<", stringify!($n), ">")
+    };
+}
+
+/// One row of the command grammar: its token syntax (every argument named),
+/// where its prose comes from, where it's valid, and the `Command` it
+/// parses to — built from the argument words, bound in token order. The
+/// usage string is generated from the tokens. A body that fails (`?`) makes
+/// the whole line `Command::Unknown`; it never falls through to a later row.
+///
+/// ```ignore
+/// cmd!(["show" "route" (table: RoutingTableName) (address: IpAddr)],
+///     Doc::Local { summary: "…", detail: "…" },
+///     Always,
+///     |table, address| Command::ShowRoute {
+///         table: table.to_string(),
+///         address: Some(address.parse().ok()?),
+///     }),
+/// ```
+macro_rules! cmd {
+    ([$first:tt $($rest:tt)*], $doc:expr, $avail:ident, |$($arg:ident),+| $body:expr) => {
+        cmd!(@row [$first $($rest)*], $doc, $avail, |args: &[&str]| {
+            let &[$($arg),+] = args else { return None };
+            Some($body)
+        })
+    };
+    ([$first:tt $($rest:tt)*], $doc:expr, $avail:ident, $body:expr) => {
+        cmd!(@row [$first $($rest)*], $doc, $avail, |_: &[&str]| Some($body))
+    };
+    (@row [$first:tt $($rest:tt)*], $doc:expr, $avail:ident, $build:expr) => {
+        CommandSpec {
+            tokens: &[tok!($first) $(, tok!($rest))*],
+            usage: concat!(usage_tok!($first) $(, " ", usage_tok!($rest))*),
+            doc: $doc,
+            availability: Availability::$avail,
+            build: Some($build),
+        }
     };
 }
 
@@ -183,21 +252,22 @@ macro_rules! spec {
             usage: $usage,
             doc: $doc,
             availability: Availability::$avail,
+            build: None,
         }
     };
 }
 
+#[rustfmt::skip]
 pub const COMMAND_SPECS: &[CommandSpec] = &[
-    spec!(["show" "config"],
-        "show config",
+    cmd!(["show" "config"],
         Doc::FromConfig(Topic::ShowRunningConfig),
-        Always),
-    spec!(["show" "this"],
-        "show this",
+        Always,
+        Command::ShowConfig),
+    cmd!(["show" "this"],
         Doc::FromConfig(Topic::GetTransaction),
-        Configuration),
-    spec!(["show" "route" (RoutingTableName)],
-        "show route <table>",
+        Configuration,
+        Command::Show),
+    cmd!(["show" "route" (table: RoutingTableName)],
         Doc::Local {
             summary: "Show every route in a routing table, best to worst per prefix.",
             detail: "Queries the table's nos-ribd instance (resolved via nos-watchdogd) for \
@@ -206,18 +276,24 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      than one source (e.g. static and BGP) can target the same prefix. \
                      Prefixes are listed in ascending CIDR order.",
         },
-        Always),
-    spec!(["show" "route" (RoutingTableName) (Plain)],
-        "show route <table> <address>",
+        Always,
+        |table| Command::ShowRoute {
+            table: table.to_string(),
+            address: None,
+        }),
+    cmd!(["show" "route" (table: RoutingTableName) (address: IpAddr)],
         Doc::Local {
             summary: "Look up the best route(s) for one destination address.",
             detail: "Performs a longest-prefix-match lookup against the table's nos-ribd \
                      instance for the given address, and shows every candidate route for the \
                      matched prefix, ordered from the winning route to the losing ones.",
         },
-        Always),
-    spec!(["show" "fdb" (BroadcastDomainName)],
-        "show fdb <domain>",
+        Always,
+        |table, address| Command::ShowRoute {
+            table: table.to_string(),
+            address: Some(address.parse().ok()?),
+        }),
+    cmd!(["show" "fdb" (domain: BroadcastDomainName)],
         Doc::Local {
             summary: "Show a broadcast domain's forwarding database.",
             detail: "Queries the domain's nos-fdbd instance (resolved via nos-watchdogd) for \
@@ -225,11 +301,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      from EVPN Type-2 routes with the VTEP they sit behind — and the remote \
                      VTEPs its flood list replicates broadcast/unknown/multicast traffic to.",
         },
-        Always),
-    spec!(["save"], "save", Doc::FromConfig(Topic::Save), Operational),
-    spec!(
+        Always,
+        |domain| Command::ShowFdb {
+            domain: domain.to_string(),
+        }),
+    cmd!(
+        ["save"],
+        Doc::FromConfig(Topic::Save),
+        Operational,
+        Command::Save
+    ),
+    cmd!(
         ["help"],
-        "help",
         Doc::Local {
             summary: "Show available commands for the current mode.",
             detail: "Lists every command valid right now, given whether the shell is in \
@@ -237,17 +320,33 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      mode, the current navigation position). Equivalent to pressing `?` on \
                      an empty line.",
         },
-        Always
+        Always,
+        Command::Help
     ),
-    spec!(["exit"], "exit", EXIT_DOC, Always),
-    spec!(["quit"], "quit", EXIT_DOC, Always),
-    spec!(["end"], "end", EXIT_DOC, Always),
-    spec!(
-        ["configure"(Plain)],
-        "configure <name> [from blank|current]",
+    cmd!(["exit"], EXIT_DOC, Always, Command::Exit),
+    cmd!(["quit"], EXIT_DOC, Always, Command::Exit),
+    cmd!(["end"], EXIT_DOC, Always, Command::Exit),
+    cmd!(["configure" (name: Plain)],
         Doc::FromConfig(Topic::OpenTransaction),
-        Operational
-    ),
+        Operational,
+        |name| Command::Configure {
+            name: name.to_string(),
+            base: None,
+        }),
+    cmd!(["configure" (name: Plain) "from" "blank"],
+        Doc::FromConfig(Topic::OpenTransaction),
+        Operational,
+        |name| Command::Configure {
+            name: name.to_string(),
+            base: Some(TransactionBase::Blank),
+        }),
+    cmd!(["configure" (name: Plain) "from" "current"],
+        Doc::FromConfig(Topic::OpenTransaction),
+        Operational,
+        |name| Command::Configure {
+            name: name.to_string(),
+            base: Some(TransactionBase::Current),
+        }),
     spec!(["edit" "bgp" "instance" (BgpInstanceName)],
         "edit bgp instance <name>",
         Doc::FromConfig(Topic::EnsureBgpInstance),
@@ -663,51 +762,92 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      position.",
         },
         ConfigurationOspfv3Profile),
-    spec!(
+    cmd!(
         ["up"],
-        "up",
         Doc::Local {
             summary: "Navigate up one level.",
             detail: "Moves the current navigation position up one level: from a peer-group, \
                      to its owning BGP instance; from a BGP instance, to the transaction \
                      root (same as `top`).",
         },
-        ConfigurationNested
+        ConfigurationNested,
+        Command::Up
     ),
-    spec!(
+    cmd!(
         ["top"],
-        "top",
         Doc::Local {
             summary: "Navigate back to the transaction root.",
             detail: "Moves the current navigation position directly to the transaction \
                      root, regardless of how deep it is.",
         },
-        ConfigurationNested
+        ConfigurationNested,
+        Command::Top
     ),
-    spec!(
+    cmd!(
         ["commit"],
-        "commit",
         Doc::FromConfig(Topic::CommitTransaction),
-        Configuration
+        Configuration,
+        Command::Commit
     ),
-    spec!(
+    cmd!(
         ["discard"],
-        "discard",
         Doc::FromConfig(Topic::DiscardTransaction),
-        Configuration
+        Configuration,
+        Command::Discard
     ),
-    spec!(
+    cmd!(
         ["abort"],
-        "abort",
         Doc::FromConfig(Topic::DiscardTransaction),
-        Configuration
+        Configuration,
+        Command::Discard
     ),
-    spec!(
+    cmd!(
         ["diff"],
-        "diff",
         Doc::FromConfig(Topic::DiffTransaction),
-        Configuration
+        Configuration,
+        Command::Diff
     ),
+    cmd!(["edit" "source"],
+        Doc::Local {
+            summary: "Edit the current policy's RPL source in $EDITOR.",
+            detail: "Opens $EDITOR (else $VISUAL, else nano) on the current \
+                     policy-definition's source. On save, the edited source is compiled against \
+                     the transaction and applied only if it compiles; otherwise it is \
+                     discarded.",
+        },
+        ConfigurationPolicyDefinition,
+        Command::EditSource),
+    cmd!(["show" "source"],
+        Doc::Local {
+            summary: "Show the current policy's RPL source with line numbers.",
+            detail: "Prints the current policy-definition's source as held by the \
+                     transaction, one numbered line at a time — the numbers `set source line` \
+                     and `delete source line` take.",
+        },
+        ConfigurationPolicyDefinition,
+        Command::ShowSource),
+    cmd!(["set" "source" "line" (line: Number) (text: Rest)],
+        Doc::Local {
+            summary: "Replace (or append) one line of the current policy's RPL source.",
+            detail: "Sets line <line> of the current policy-definition's source to <text>, \
+                     taken verbatim — leading whitespace is kept, since RPL's indentation is \
+                     meaningful. A line number one past the end appends.",
+        },
+        ConfigurationPolicyDefinition,
+        |line, text| Command::SetSourceLine {
+            line: line.parse().ok()?,
+            text: text.to_string(),
+        }),
+    cmd!(["delete" "source" "line" (line: Number)],
+        Doc::Local {
+            summary: "Delete one line of the current policy's RPL source.",
+            detail: "Removes line <line> from the current policy-definition's source; the \
+                     lines after it move up by one.",
+        },
+        ConfigurationPolicyDefinition,
+        |line| Command::DeleteSourceLine {
+            line: line.parse().ok()?,
+        }),
     spec!(["edit" "routing-table" (RoutingTableName)],
         "edit routing-table <name>",
         Doc::FromConfig(Topic::EnsureRoutingTable),
@@ -1504,24 +1644,25 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "delete port-aggregate",
         Doc::FromConfig(Topic::ClearInterfacePortAggregate),
         ConfigurationInterface),
-    spec!(["show" "port-aggregate"],
-        "show port-aggregate",
+    cmd!(["show" "port-aggregate"],
         Doc::Local {
             summary: "Show every port aggregate's reconciled status.",
             detail: "Queries nos-interfaced (resolved via nos-watchdogd) for every configured \
                      port aggregate's mode, switching-profile, mtu, and subinterfaces.",
         },
-        Always),
-    spec!(["show" "port-aggregate" (PortAggregateName)],
-        "show port-aggregate <name>",
+        Always,
+        Command::ShowPortAggregate { name: None }),
+    cmd!(["show" "port-aggregate" (name: PortAggregateName)],
         Doc::Local {
             summary: "Show one port aggregate's reconciled status.",
             detail: "Queries nos-interfaced (resolved via nos-watchdogd) for the named port \
                      aggregate's mode, switching-profile, mtu, and subinterfaces.",
         },
-        Always),
-    spec!(["show" "lldp" "neighbors"],
-        "show lldp neighbors",
+        Always,
+        |name| Command::ShowPortAggregate {
+            name: Some(name.to_string()),
+        }),
+    cmd!(["show" "lldp" "neighbors"],
         Doc::Local {
             summary: "Show every LLDP neighbor heard on any interface.",
             detail: "Queries nos-lldpd (resolved via nos-watchdogd) for every neighbor learned \
@@ -1529,9 +1670,9 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      its chassis id, port id, system name and enabled capabilities, and how long \
                      until its entry ages out.",
         },
-        Always),
-    spec!(["show" "lacp"],
-        "show lacp",
+        Always,
+        Command::ShowLldpNeighbors),
+    cmd!(["show" "lacp"],
         Doc::Local {
             summary: "Show every LACP port aggregate's negotiation state.",
             detail: "Queries nos-lacpd (resolved via nos-watchdogd) for every lacp-mode port \
@@ -1539,66 +1680,82 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      receive/mux machine state, partner identity, and whether it is selected \
                      and synchronized.",
         },
-        Always),
-    spec!(["show" "lacp" (PortAggregateName)],
-        "show lacp <name>",
+        Always,
+        Command::ShowLacp { name: None }),
+    cmd!(["show" "lacp" (name: PortAggregateName)],
         Doc::Local {
             summary: "Show one LACP port aggregate's negotiation state.",
             detail: "Queries nos-lacpd (resolved via nos-watchdogd) for the named lacp-mode \
                      port aggregate's actor identity and rate, and each member port's \
                      receive/mux machine state and partner identity.",
         },
-        Always),
-    spec!(["show" "interface"],
-        "show interface",
+        Always,
+        |name| Command::ShowLacp {
+            name: Some(name.to_string()),
+        }),
+    cmd!(["show" "interface"],
         Doc::Local {
             summary: "Show every interface's reconciled status.",
             detail: "Queries nos-interfaced (resolved via nos-watchdogd) for every configured \
                      interface's addresses and routing-table assignment.",
         },
-        Always),
-    spec!(["show" "interface" (InterfaceName)],
-        "show interface <name>",
+        Always,
+        Command::ShowInterface { name: None }),
+    cmd!(["show" "interface" (name: InterfaceName)],
         Doc::Local {
             summary: "Show one interface's reconciled status.",
             detail: "Queries nos-interfaced (resolved via nos-watchdogd) for the named \
                      interface's addresses and routing-table assignment.",
         },
-        Always),
-    spec!(["show" "log"],
-        "show log",
+        Always,
+        |name| Command::ShowInterface {
+            name: Some(name.to_string()),
+        }),
+    cmd!(["show" "log"],
         Doc::Local {
             summary: "Show the most recent collected log entries from every daemon.",
             detail: "Queries nos-logd (resolved via nos-watchdogd) for its current buffer of \
                      log entries pushed by every other component process.",
         },
-        Always),
-    spec!(["show" "log" "--follow"],
-        "show log --follow",
+        Always,
+        Command::ShowLog {
+            source: None,
+            follow: false,
+        }),
+    cmd!(["show" "log" "--follow"],
         Doc::Local {
             summary: "Live-tail collected log entries from every daemon.",
             detail: "Prints the current buffer, then streams new entries as they're pushed to \
                      nos-logd until Ctrl-C is pressed or the connection is lost.",
         },
-        Always),
-    spec!(["show" "log" (Plain)],
-        "show log <source>",
+        Always,
+        Command::ShowLog {
+            source: None,
+            follow: true,
+        }),
+    cmd!(["show" "log" (source: Plain)],
         Doc::Local {
             summary: "Show the most recent collected log entries from one source.",
             detail: "Same as `show log`, filtered to entries whose source exactly matches \
                      <source> (e.g. `nos-ribd[rt1]`, `nos-interfaced`, `nos-configd`).",
         },
-        Always),
-    spec!(["show" "log" (Plain) "--follow"],
-        "show log <source> --follow",
+        Always,
+        |source| Command::ShowLog {
+            source: Some(source.to_string()),
+            follow: false,
+        }),
+    cmd!(["show" "log" (source: Plain) "--follow"],
         Doc::Local {
             summary: "Live-tail collected log entries from one source.",
             detail: "Same as `show log --follow`, filtered to entries whose source exactly \
                      matches <source>.",
         },
-        Always),
-    spec!(["show" "bgp" "brief"],
-        "show bgp brief",
+        Always,
+        |source| Command::ShowLog {
+            source: Some(source.to_string()),
+            follow: true,
+        }),
+    cmd!(["show" "bgp" "brief"],
         Doc::Local {
             summary: "Show a one-line-per-peer BGP session summary across every instance.",
             detail: "Queries every configured BGP instance's nos-bgpd (each resolved via \
@@ -1606,9 +1763,9 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      and negotiated hold-time. An instance whose nos-bgpd isn't running is \
                      reported individually rather than aborting the whole command.",
         },
-        Always),
-    spec!(["show" "bgp" "evpn"],
-        "show bgp evpn",
+        Always,
+        Command::ShowBgpBrief),
+    cmd!(["show" "bgp" "evpn"],
         Doc::Local {
             summary: "Show every EVPN route received from BGP peers, across every instance.",
             detail: "Queries every configured BGP instance's nos-bgpd (each resolved via \
@@ -1618,9 +1775,9 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      l2vpn-evpn` exchange them. An instance whose nos-bgpd isn't running is \
                      reported individually rather than aborting the whole command.",
         },
-        Always),
-    spec!(["show" "ospf" "neigh"],
-        "show ospf neigh",
+        Always,
+        Command::ShowBgpEvpn),
+    cmd!(["show" "ospf" "neigh"],
         Doc::Local {
             summary: "Show a one-line-per-neighbor OSPF adjacency summary across every instance.",
             detail: "Queries every configured OSPF instance's nos-ospfd (each resolved via \
@@ -1628,9 +1785,9 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      last-hello age, and elected DR/BDR. An instance whose nos-ospfd isn't \
                      running is reported individually rather than aborting the whole command.",
         },
-        Always),
-    spec!(["show" "ospf" "database"],
-        "show ospf database",
+        Always,
+        Command::ShowOspfNeigh),
+    cmd!(["show" "ospf" "database"],
         Doc::Local {
             summary: "Show every installed LSA's header across every OSPF instance.",
             detail: "Queries every configured OSPF instance's nos-ospfd (each resolved via \
@@ -1639,9 +1796,9 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      instance whose nos-ospfd isn't running is reported individually rather \
                      than aborting the whole command.",
         },
-        Always),
-    spec!(["show" "ospfv3" "neigh"],
-        "show ospfv3 neigh",
+        Always,
+        Command::ShowOspfDatabase),
+    cmd!(["show" "ospfv3" "neigh"],
         Doc::Local {
             summary: "Show a one-line-per-neighbor OSPFv3 adjacency summary across every instance.",
             detail: "Mirrors 'show ospf neigh' for OSPFv3 (RFC 5340): queries every configured \
@@ -1649,16 +1806,16 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      links' current neighbor state, interface state, last-hello age, and \
                      elected DR/BDR.",
         },
-        Always),
-    spec!(["show" "ospfv3" "database"],
-        "show ospfv3 database",
+        Always,
+        Command::ShowOspfv3Neigh),
+    cmd!(["show" "ospfv3" "database"],
         Doc::Local {
             summary: "Show every installed LSA's header across every OSPFv3 instance.",
             detail: "Mirrors 'show ospf database' for OSPFv3 (RFC 5340).",
         },
-        Always),
-    spec!(["clear" "bgp" (BgpInstanceName) (Plain) "soft-in"],
-        "clear bgp <instance> <peer> soft-in",
+        Always,
+        Command::ShowOspfv3Database),
+    cmd!(["clear" "bgp" (instance: BgpInstanceName) (peer: IpAddr) "soft-in"],
         Doc::Local {
             summary: "Ask a peer to resend its routes (RFC 2918 route refresh).",
             detail: "Sends a BGP ROUTE_REFRESH message to <peer> over its current session on \
@@ -1666,7 +1823,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      every address family this session negotiated. Reported as an error if \
                      <instance> has no established session with <peer> right now.",
         },
-        Always),
+        Always,
+        |instance, peer| Command::ClearBgpSoftIn {
+            instance: instance.to_string(),
+            peer: peer.parse().ok()?,
+        }),
     spec!(["edit" "interface" (InterfaceName)],
         "edit interface <name>",
         Doc::FromConfig(Topic::EnsureInterface),
@@ -1985,6 +2146,55 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Configuration),
 ];
 
+/// One whitespace-delimited token of `line`, with its start byte offset.
+pub(crate) fn tokenize_with_offsets(line: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut start = None;
+    for (i, ch) in line.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(s) = start.take() {
+                out.push((s, &line[s..i]));
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(s) = start {
+        out.push((s, &line[s..]));
+    }
+    out
+}
+
+/// Parses `line` against the `cmd!` rows: the index of the first row whose
+/// token shape fits, and what its `build` made of the argument words
+/// (`None` — an argument that doesn't parse — is final, never a reason to
+/// try a later row). `None` when no row fits.
+pub fn parse(line: &str) -> Option<(usize, Option<Command>)> {
+    let words = tokenize_with_offsets(line);
+    COMMAND_SPECS.iter().enumerate().find_map(|(i, spec)| {
+        let build = spec.build?;
+        let mut args = Vec::new();
+        for (j, token) in spec.tokens.iter().enumerate() {
+            let &(_, word) = words.get(j)?;
+            match token {
+                Token::Literal(lit) if *lit == word => {}
+                Token::Literal(_) => return None,
+                // Everything after the one separator that follows the
+                // previous word, so leading whitespace survives.
+                Token::Arg(ArgKind::Rest) => {
+                    let (prev_start, prev) = words[j - 1];
+                    let mut rest = line[prev_start + prev.len()..].chars();
+                    rest.next();
+                    args.push(rest.as_str());
+                    return Some((i, build(&args)));
+                }
+                Token::Arg(_) => args.push(word),
+            }
+        }
+        (words.len() == spec.tokens.len()).then(|| (i, build(&args)))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2152,6 +2362,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every `cmd!` row, filled with a sample word per argument, parses back
+    /// through `parse` to a command built by that same row — so no row is
+    /// shadowed by an earlier one, and each `build` binds as many words as
+    /// the row has argument slots.
+    #[test]
+    fn every_cmd_row_round_trips() {
+        for (i, spec) in COMMAND_SPECS.iter().enumerate() {
+            if spec.build.is_none() {
+                continue;
+            }
+            let line = spec
+                .tokens
+                .iter()
+                .map(|t| match t {
+                    Token::Literal(lit) => *lit,
+                    Token::Arg(ArgKind::IpAddr) => "192.0.2.1",
+                    Token::Arg(ArgKind::Number) => "1",
+                    Token::Arg(ArgKind::Rest) => "  some text",
+                    Token::Arg(_) => "sample",
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            match parse(&line) {
+                Some((j, Some(_))) if j == i => {}
+                other => panic!("{:?} ({line:?}) parsed to {other:?}", spec.usage),
+            }
+        }
+    }
+
+    #[test]
+    fn cmd_usage_is_generated_from_tokens() {
+        let usages: Vec<_> = COMMAND_SPECS.iter().map(|s| s.usage).collect();
+        assert!(usages.contains(&"show route <table> <address>"));
+        assert!(usages.contains(&"clear bgp <instance> <peer> soft-in"));
+        assert!(usages.contains(&"set source line <line> <text>"));
+    }
+
+    #[test]
+    fn rest_keeps_leading_whitespace() {
+        assert_eq!(
+            Command::parse("set source line 2     accept"),
+            Command::SetSourceLine {
+                line: 2,
+                text: "    accept".to_string(),
+            }
+        );
     }
 
     /// Drift guard: every literal-only spec's usage string must actually

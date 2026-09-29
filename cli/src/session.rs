@@ -708,7 +708,7 @@ impl Path {
         }
     }
 
-    fn policy_definition(&self) -> Result<&str, &'static str> {
+    pub(crate) fn policy_definition(&self) -> Result<&str, &'static str> {
         match self {
             Path::PolicyDefinition(name) => Ok(name),
             _ => Err(NO_CURRENT_POLICY_DEFINITION),

@@ -15,9 +15,9 @@ The main user-facing entry point of NOS. A small REPL (binary name `nos`) built 
 | Module | Role |
 |--------|------|
 | `main.rs` | Arg parsing (`--watchdog-socket`), resolves `nos-configd`'s address via the watchdog broker at startup (falling back to the conventional default and warning if unreachable), the reedline REPL loop (completer + menus + keybindings), mode-aware prompt, `DocCache`/`doc_for`/`doc_for_blocking`, dispatch of `session::Resolved` actions |
-| `command.rs` | `Command::parse(&str) -> Command` — pure parsing, no I/O, no mode awareness |
+| `command.rs` | `Command::parse(&str) -> Command` — pure parsing, no I/O, no mode awareness. Show/shell commands are parsed by `spec::parse` over the `cmd!` rows; only config edits (`edit`/`set`/`delete`) are still hand-parsed here (#109) |
 | `session.rs` | `Mode` (`Operational` / `Configuration { transaction, path, dirty }`), `Path` (navigation position), and `resolve(&Mode, Command) -> Resolved` — the pure semantic layer mapping a command plus current mode to a concrete action |
-| `spec.rs` | `COMMAND_SPECS` — the CLI's own grammar table (token syntax + which `Mode`/`Path` each command is valid in). Owns *syntax* only; see "Help, `?`, and Tab-completion" for where the descriptive text comes from |
+| `spec.rs` | `COMMAND_SPECS` — the CLI's own grammar table (token syntax + which `Mode`/`Path` each command is valid in). Show/shell rows are `cmd!` rows that also carry the `Command` they build, so `spec::parse` *is* the parser for them and a command can't be accepted without its doc; their usage string is generated from the tokens. Config rows are still `spec!` rows (help/completion only) until the generic config grammar (#109, PRs 2-3). Owns *syntax* only; see "Help, `?`, and Tab-completion" for where the descriptive text comes from |
 | `completer.rs` | `NosCompleter` — a `reedline::Completer` driven by `spec::COMMAND_SPECS`, shared by Tab-completion and the live `?` key |
 | `help_menu.rs` | `HelpMenu` — the `reedline::Menu` backing the live `?` key (brief vs. detailed views) |
 | `client.rs` | One-shot IPC calls to `nos-configd`: `fetch_running_config`, `save_running_config`, `open_transaction`, `apply_op`, `get_transaction`, `commit_transaction`, `discard_transaction`, `diff_transaction`, `describe` — plus `subscribe`, the one long-lived exception (see "Connection behavior") |

@@ -1,6 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use ipnet::IpNet;
+
+use crate::spec;
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BroadcastDomainOp, EsRedundancy, LacpRate, LldpDestination,
     NetworkType, NextHopMode, OspfCryptoAlgorithm, PortAggregateMode, PortAggregateOp,
@@ -970,91 +972,31 @@ fn parse_lacp_rate(token: &str) -> LacpRate {
 }
 
 impl Command {
+    /// Show and shell commands come from `spec::COMMAND_SPECS`' `cmd!` rows
+    /// (#109); config edits are still parsed by hand below until they move
+    /// to the generic config grammar.
     pub fn parse(line: &str) -> Self {
         let trimmed = line.trim();
-        parse_inner(trimmed).unwrap_or_else(|| Command::Unknown(trimmed.to_string()))
+        match spec::parse(trimmed) {
+            Some((_, command)) => command,
+            None => parse_inner(trimmed),
+        }
+        .unwrap_or_else(|| Command::Unknown(trimmed.to_string()))
     }
 }
 
-/// The command table. Anything that doesn't match a row — an unknown token
-/// sequence, or an argument that fails to parse — returns `None`, which
-/// `Command::parse` turns into the one `Command::Unknown`. That is why no row
-/// here spells out its own failure case.
+/// The config-edit table. Anything that doesn't match a row — an unknown
+/// token sequence, or an argument that fails to parse — returns `None`,
+/// which `Command::parse` turns into the one `Command::Unknown`. That is why
+/// no row here spells out its own failure case.
 fn parse_inner(trimmed: &str) -> Option<Command> {
-    // `set source line <n> <text>` is the one command whose value must
-    // preserve leading whitespace verbatim — RPL's indentation is
-    // semantically meaningful — so it's parsed here, before the generic
-    // `split_whitespace()` matcher below would otherwise collapse it.
-    if let Some(rest) = trimmed.strip_prefix("set source line ") {
-        let space_idx = rest.find(' ')?;
-        return Some(Command::SetSourceLine {
-            line: rest[..space_idx].parse::<usize>().ok()?,
-            text: rest[space_idx + 1..].to_string(),
-        });
-    }
     match trimmed.split_whitespace().collect::<Vec<_>>().as_slice() {
-        ["show", rest @ ..] => parse_show(rest),
+        [] => Some(Command::Empty),
         ["edit", rest @ ..] => parse_edit(rest),
         ["set", rest @ ..] => parse_set(rest),
         ["delete", rest @ ..] => parse_delete(rest),
-        rest => parse_bare(rest),
+        _ => None,
     }
-}
-
-/// Read-only `show` commands. Valid in any mode; none of them touch a transaction.
-fn parse_show(t: &[&str]) -> Option<Command> {
-    Some(match t {
-        ["config"] => Command::ShowConfig,
-        ["this"] => Command::Show,
-        ["route", table] => Command::ShowRoute {
-            table: (*table).to_string(),
-            address: None,
-        },
-        ["route", table, addr] => Command::ShowRoute {
-            table: (*table).to_string(),
-            address: Some(addr.parse::<IpAddr>().ok()?),
-        },
-        ["fdb", domain] => Command::ShowFdb {
-            domain: (*domain).to_string(),
-        },
-        ["interface"] => Command::ShowInterface { name: None },
-        ["interface", name] => Command::ShowInterface {
-            name: Some((*name).to_string()),
-        },
-        ["port-aggregate"] => Command::ShowPortAggregate { name: None },
-        ["port-aggregate", name] => Command::ShowPortAggregate {
-            name: Some((*name).to_string()),
-        },
-        ["lldp", "neighbors"] => Command::ShowLldpNeighbors,
-        ["lacp"] => Command::ShowLacp { name: None },
-        ["lacp", name] => Command::ShowLacp {
-            name: Some((*name).to_string()),
-        },
-        ["log"] => Command::ShowLog {
-            source: None,
-            follow: false,
-        },
-        ["log", "--follow"] => Command::ShowLog {
-            source: None,
-            follow: true,
-        },
-        ["log", source] => Command::ShowLog {
-            source: Some((*source).to_string()),
-            follow: false,
-        },
-        ["log", source, "--follow"] => Command::ShowLog {
-            source: Some((*source).to_string()),
-            follow: true,
-        },
-        ["bgp", "brief"] => Command::ShowBgpBrief,
-        ["bgp", "evpn"] => Command::ShowBgpEvpn,
-        ["ospf", "neigh"] => Command::ShowOspfNeigh,
-        ["ospf", "database"] => Command::ShowOspfDatabase,
-        ["ospfv3", "neigh"] => Command::ShowOspfv3Neigh,
-        ["ospfv3", "database"] => Command::ShowOspfv3Database,
-        ["source"] => Command::ShowSource,
-        _ => return None,
-    })
 }
 
 /// `edit` — create-if-missing, then navigate into the object.
@@ -1141,7 +1083,6 @@ fn parse_edit(t: &[&str]) -> Option<Command> {
         ["port-aggregate", name] => Command::Edit(EditTarget::PortAggregate {
             name: (*name).to_string(),
         }),
-        ["source"] => Command::EditSource,
         _ => return None,
     })
 }
@@ -2244,9 +2185,6 @@ fn parse_set(t: &[&str]) -> Option<Command> {
 /// `delete` — the mirror of [`parse_set`], plus whole-object deletion.
 fn parse_delete(t: &[&str]) -> Option<Command> {
     Some(match t {
-        ["source", "line", n] => Command::DeleteSourceLine {
-            line: n.parse::<usize>().ok()?,
-        },
         [] => Command::Delete(DeleteTarget::Current),
         ["user", name] => Command::Delete(DeleteTarget::User {
             name: (*name).to_string(),
@@ -2602,39 +2540,6 @@ fn parse_delete(t: &[&str]) -> Option<Command> {
             })
         }
         ["port-aggregate"] => Command::Delete(DeleteTarget::InterfacePortAggregateRelative),
-        _ => return None,
-    })
-}
-
-/// Everything with no object verb in front of it: shell mechanics
-/// (`help`, `exit`, `up`), transaction control, and `clear`.
-fn parse_bare(t: &[&str]) -> Option<Command> {
-    Some(match t {
-        [] => Command::Empty,
-        ["clear", "bgp", instance, peer, "soft-in"] => Command::ClearBgpSoftIn {
-            instance: (*instance).to_string(),
-            peer: peer.parse::<IpAddr>().ok()?,
-        },
-        ["save"] => Command::Save,
-        ["help"] => Command::Help,
-        ["exit" | "quit" | "end"] => Command::Exit,
-        ["commit"] => Command::Commit,
-        ["discard" | "abort"] => Command::Discard,
-        ["diff"] => Command::Diff,
-        ["up"] => Command::Up,
-        ["top"] => Command::Top,
-        ["configure", name] => Command::Configure {
-            name: (*name).to_string(),
-            base: None,
-        },
-        ["configure", name, "from", "blank"] => Command::Configure {
-            name: (*name).to_string(),
-            base: Some(TransactionBase::Blank),
-        },
-        ["configure", name, "from", "current"] => Command::Configure {
-            name: (*name).to_string(),
-            base: Some(TransactionBase::Current),
-        },
         _ => return None,
     })
 }
