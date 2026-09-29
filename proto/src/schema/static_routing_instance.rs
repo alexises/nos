@@ -4,21 +4,24 @@ use serde::{Deserialize, Serialize};
 use crate::validators::unique_in;
 
 use super::{Config, StaticRoute};
+use nos_proto_derive::Cli;
 
 /// A named container of static routes. Carries no reference to any routing
 /// table — only `RoutingTable.static_routing_instance` names it, never the
 /// other way around.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct StaticRoutingInstance {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| unique_in(n, &ctx.static_routing_instances, |i| &i.name))
     )]
+    #[cli(key)]
     pub name: String,
 
     #[garde(dive, custom(|routes, _ctx: &Config| unique_subnets(routes)))]
+    #[cli(topic = StaticRoute)]
     pub routes: Vec<StaticRoute>,
 }
 

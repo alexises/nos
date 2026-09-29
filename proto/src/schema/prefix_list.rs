@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::validators::unique_in;
 
 use super::Config;
+use nos_proto_derive::Cli;
+
+use super::sugar;
 
 /// One `prefix-list` entry. `range: None` means exact match — this exact
 /// prefix+length only; `Some((min, max))` means "contained within `cidr`,
@@ -13,26 +16,30 @@ use super::Config;
 /// containment/orlonger-based for a bare CIDR — see root `CLAUDE.md`'s RPL
 /// section.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct PrefixListEntry {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(topic = PrefixListEntry)]
     pub cidr: IpNet,
+    #[cli(topic = PrefixListEntry, sugar(word = "orlonger", with = sugar::orlonger, topic = PrefixListEntry), sugar(word = "upto", with = sugar::upto, topic = PrefixListEntry))]
     pub range: Option<(u8, u8)>,
 }
 
 /// A named set of prefix-match entries, referenced by bare name from an RPL
 /// script's `this.prefix in NAME`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct PrefixList {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| unique_in(n, &ctx.prefix_lists, |p| &p.name))
     )]
+    #[cli(key)]
     pub name: String,
 
     #[garde(custom(|e: &Vec<PrefixListEntry>, _ctx: &Config| valid_entries(e)))]
+    #[cli(topic = PrefixListEntry)]
     pub entries: Vec<PrefixListEntry>,
 }
 

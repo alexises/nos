@@ -5,24 +5,41 @@ use serde::{Deserialize, Serialize};
 
 use super::bgp_peer_group::{valid_shutdown, BgpShutdown};
 use super::Config;
+use nos_proto_derive::Cli;
+
+use super::sugar;
 
 /// Associates a remote address with a peer-group, by name — the bulk of
 /// session config (remote-as, source-address, address-families) lives on
 /// the referenced `BgpPeerGroup`, not here.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct BgpPeer {
     #[garde(custom(|addr, ctx: &Config| unique_remote_address(addr, ctx)))]
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(key)]
     pub remote_address: IpAddr,
 
     #[garde(custom(|name, ctx: &Config| peer_group_exists(name, ctx)))]
+    #[cli(topic = BgpPeer)]
     pub peer_group: String,
 
     /// Overrides the peer-group's own `shutdown` — see `BgpShutdown`.
     #[garde(custom(|s: &Option<BgpShutdown>, _ctx: &Config| valid_shutdown(s.as_ref())))]
+    #[cli(topic = BgpPeerShutdown, sugar(word = "shutdown", with = sugar::shutdown, topic = BgpPeerShutdown))]
     pub shutdown: Option<BgpShutdown>,
+}
+
+/// The placeholder a new `BgpPeer` starts from (`edit` on a missing one).
+impl Default for BgpPeer {
+    fn default() -> Self {
+        BgpPeer {
+            remote_address: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            peer_group: String::new(),
+            shutdown: None,
+        }
+    }
 }
 
 /// Peer remote-addresses are unique across the whole config — see

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::validators::unique_in;
 
 use super::{Config, Ospfv3Area};
+use nos_proto_derive::Cli;
 
 /// A named `OSPFv3` (RFC 5340) instance — the IPv6 counterpart of
 /// `OspfInstance`, kept as a fully parallel type rather than widened onto
@@ -15,22 +16,25 @@ use super::{Config, Ospfv3Area};
 /// (on `Ospfv3Area`) stay `Ipv4Addr`: RFC 5340 keeps these as opaque 32-bit
 /// identifiers, not real addresses, exactly like RFC 2328.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct Ospfv3Instance {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| unique_in(n, &ctx.ospfv3_instances, |i| &i.name))
     )]
+    #[cli(key)]
     pub name: String,
 
     // Ipv4Addr is structurally valid by construction; no additional garde rule needed.
     #[garde(skip)]
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(topic = Ospfv3InstanceRouterId)]
     pub router_id: Ipv4Addr,
 
     /// This instance's `OSPFv3` areas, keyed by `area_id` — see `Ospfv3Area`.
     #[garde(dive, custom(|areas, _ctx: &Config| unique_area_ids(areas)))]
+    #[cli(topic = Ospfv3Area)]
     pub areas: Vec<Ospfv3Area>,
 
     /// The name of the `RoutingTable` that claims this instance (i.e. the
@@ -40,6 +44,7 @@ pub struct Ospfv3Instance {
     /// counterpart: Phase 1 has no ASBR support, so there's nothing to
     /// redistribute into an `OSPFv3` instance yet.
     #[garde(skip)]
+    #[cli(hidden)]
     pub routing_table: Option<String>,
 
     /// RFC 8362 Full mode: originate/consume the TLV-based extended LSAs
@@ -48,7 +53,21 @@ pub struct Ospfv3Instance {
     /// saved before this field existed still load.
     #[serde(default)]
     #[garde(skip)]
+    #[cli(topic = Ospfv3InstanceExtendedLsa)]
     pub extended_lsa: bool,
+}
+
+/// The placeholder a new `Ospfv3Instance` starts from (`edit` on a missing one).
+impl Default for Ospfv3Instance {
+    fn default() -> Self {
+        Ospfv3Instance {
+            name: String::new(),
+            router_id: Ipv4Addr::UNSPECIFIED,
+            areas: Vec::new(),
+            routing_table: None,
+            extended_lsa: false,
+        }
+    }
 }
 
 /// No two areas within the same instance may share an `area_id` — mirrors

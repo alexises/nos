@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ospf_profile;
 use super::{Config, OspfProfile};
+use nos_proto_derive::Cli;
 
 /// One OSPF area within an `OspfInstance`, keyed by its dotted-quad area id
 /// (e.g. `0.0.0.0` for the backbone). Unique only within its owning
@@ -12,20 +13,32 @@ use super::{Config, OspfProfile};
 /// `OspfProfile.name` — so uniqueness is enforced on the parent's `areas`
 /// field (`ospf_instance::unique_area_ids`), not here.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct OspfArea {
     // Ipv4Addr is structurally valid by construction; uniqueness lives on
     // the owning OspfInstance.areas field instead.
     #[garde(skip)]
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(key)]
     pub area_id: Ipv4Addr,
 
     #[garde(
         dive,
         custom(|profiles, _ctx: &Config| ospf_profile::valid_profile_timers(profiles))
     )]
+    #[cli(topic = OspfProfile)]
     pub profiles: Vec<OspfProfile>,
+}
+
+/// The placeholder a new `OspfArea` starts from (`edit` on a missing one).
+impl Default for OspfArea {
+    fn default() -> Self {
+        OspfArea {
+            area_id: Ipv4Addr::UNSPECIFIED,
+            profiles: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

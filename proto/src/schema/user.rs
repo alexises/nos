@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::validators::unique_in;
 
 use super::Config;
+use nos_proto_derive::Cli;
 
 /// Prefix of every stored password hash (argon2id PHC string, see
 /// `nos-password`). Anything else in `User.password` is clear text that
@@ -17,13 +18,14 @@ pub const PASSWORD_HASH_PREFIX: &str = "$argon2id$";
 /// A local user who may log in to `nos-cli` and call the REST API (HTTP
 /// Basic). Every user is a full administrator — there are no roles.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct User {
     #[garde(
         length(min = 1, max = 64),
         custom(|n: &String, ctx: &Config| valid_username(n).and_then(|()| unique_in(n, &ctx.users, |u| &u.name)))
     )]
+    #[cli(key)]
     pub name: String,
 
     /// An argon2id hash at rest. Setting a clear-text value is allowed — the
@@ -31,6 +33,7 @@ pub struct User {
     /// clear text still matches it, so re-setting the same password is not a
     /// change).
     #[garde(custom(|p: &String, _ctx: &Config| valid_password_hash(p)))]
+    #[cli(topic = UserPassword)]
     pub password: String,
 }
 

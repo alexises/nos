@@ -7,6 +7,7 @@ use crate::validators::{
 };
 
 use super::{Config, InterfaceAddress, SourceAddress};
+use nos_proto_derive::Cli;
 
 /// A named L2 broadcast domain. `SwitchingProfile` references it for L2
 /// membership; `addresses`/`routing_table` independently make the domain's
@@ -18,52 +19,61 @@ use super::{Config, InterfaceAddress, SourceAddress};
 /// members are separate Linux links, so there is no conflict between this
 /// and any member's own VRF assignment.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct BroadcastDomain {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| unique_in(n, &ctx.broadcast_domains, |d| &d.name))
     )]
+    #[cli(key)]
     pub name: String,
 
     #[garde(custom(|addrs, _ctx: &Config| unique_addresses(addrs)))]
+    #[cli(topic = BroadcastDomainAddress)]
     pub addresses: Vec<InterfaceAddress>,
 
     #[garde(custom(|rt: &Option<String>, ctx: &Config| routing_table_reference_valid(rt.as_ref(), ctx)))]
+    #[cli(topic = BroadcastDomainRoutingTable)]
     pub routing_table: Option<String>,
 
     /// If set, names an `OspfProfile` this domain's own SVI joins OSPF
     /// under. Requires `routing_table` also set on this same domain — see
     /// `valid_broadcast_domains`.
     #[garde(custom(|p: &Option<String>, ctx: &Config| ospf_profile_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = InterfaceOspfProfile, words = "ospf")]
     pub ospf_profile: Option<String>,
 
     /// Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see
     /// `Subinterface.ospfv3_profile`'s doc comment for why this is a
     /// separate field rather than a widened `ospf_profile`.
     #[garde(custom(|p: &Option<String>, ctx: &Config| ospfv3_profile_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = InterfaceOspfv3Profile, words = "ospfv3")]
     pub ospfv3_profile: Option<String>,
 
     /// EVPN/VXLAN: the domain's VXLAN Network Identifier. Setting it makes
     /// `nos-watchdogd` run a `nos-fdbd` for this domain. Everything below
     /// requires it — see `valid_broadcast_domains`.
     #[garde(custom(|v: &Option<u32>, _ctx: &Config| valid_vni(*v)))]
+    #[cli(topic = BroadcastDomainVni)]
     pub vni: Option<u32>,
 
     /// EVPN Route Distinguisher, `asn:nn` or `a.b.c.d:nn`.
     #[garde(custom(|v: &Option<String>, _ctx: &Config| valid_rd(v.as_deref())))]
+    #[cli(topic = BroadcastDomainRd)]
     pub rd: Option<String>,
 
     /// Route Targets a received EVPN route must carry (any one) to be
     /// installed into this domain's FDB.
     #[serde(default)]
     #[garde(custom(|v: &Vec<String>, _ctx: &Config| valid_rts(v)))]
+    #[cli(topic = BroadcastDomainRouteTarget, words = "route-target import")]
     pub route_targets_import: Vec<String>,
 
     /// Route Targets attached to every EVPN route this domain originates.
     #[serde(default)]
     #[garde(custom(|v: &Vec<String>, _ctx: &Config| valid_rts(v)))]
+    #[cli(topic = BroadcastDomainRouteTarget, words = "route-target export")]
     pub route_targets_export: Vec<String>,
 
     /// The VTEP address (VXLAN local endpoint), resolved at runtime by
@@ -71,24 +81,28 @@ pub struct BroadcastDomain {
     /// `BgpPeerGroup.source_address`. `Loopback` means the loopback of the
     /// routing table owning `mac_redistribute`'s BGP instance.
     #[garde(skip)]
+    #[cli(topic = BroadcastDomainVtepSource)]
     pub vtep_source: Option<SourceAddress>,
 
     /// `redistribute from mac to bgp <instance>`: the BGP instance this
     /// domain's local MACs are originated into as EVPN Type-2 routes (and
     /// whose received EVPN routes are installed into the domain's FDB).
     #[garde(custom(|v: &Option<String>, ctx: &Config| bgp_instance_exists(v.as_ref(), ctx)))]
+    #[cli(topic = BroadcastDomainMacRedistribute, words = "redistribute from mac to bgp", alias = "redistribute from mac", alias = "redistribute")]
     pub mac_redistribute: Option<String>,
 
     /// `redistribute from arp to bgp <instance>`: local ARP/ND neighbours on
     /// the domain's bridge are also originated as Type-2 routes carrying the
     /// IP. Must name the same instance as `mac_redistribute`.
     #[garde(custom(|v: &Option<String>, ctx: &Config| bgp_instance_exists(v.as_ref(), ctx)))]
+    #[cli(topic = BroadcastDomainArpRedistribute, words = "redistribute from arp to bgp", alias = "redistribute from arp")]
     pub arp_redistribute: Option<String>,
 
     /// `redistribute from connected to bgp <instance>`: the domain's own
     /// (SVI) `addresses` are originated as Type-2 routes carrying the
     /// bridge's MAC. Must name the same instance as `mac_redistribute`.
     #[garde(custom(|v: &Option<String>, ctx: &Config| bgp_instance_exists(v.as_ref(), ctx)))]
+    #[cli(topic = BroadcastDomainConnectedRedistribute, words = "redistribute from connected to bgp", alias = "redistribute from connected")]
     pub connected_redistribute: Option<String>,
 }
 

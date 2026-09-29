@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::validators::unique_in;
 
 use super::Config;
+use nos_proto_derive::Cli;
 
 /// A named RPL script (see root `CLAUDE.md`'s "Routing policy language
 /// (RPL)"), referenced by name from a `BgpPeerGroup`'s `import_policy`/
@@ -12,16 +13,18 @@ use super::Config;
 /// matching the existing "each daemon re-resolves its own state from config
 /// diffs" idiom, rather than `nos-proto` carrying a bytecode wire format.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct PolicyDefinition {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| valid_name(n, ctx))
     )]
+    #[cli(key)]
     pub name: String,
 
     #[garde(custom(|src: &String, ctx: &Config| valid_source(src, ctx)))]
+    #[cli(topic = PolicyDefinitionSource)]
     pub source: String,
 }
 

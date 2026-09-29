@@ -1121,7 +1121,7 @@ async fn describe_returns_the_requested_topics_doc() {
     let (mut reader, mut writer) = connect(&path).await;
     writer
         .send(Request::Describe {
-            topic: Topic::SetHostname,
+            topic: Topic::Hostname,
         })
         .await
         .unwrap();
@@ -1129,7 +1129,7 @@ async fn describe_returns_the_requested_topics_doc() {
     let event = reader.next().await.unwrap().unwrap();
     match event {
         Event::Description(doc) => {
-            assert_eq!(doc.topic, Topic::SetHostname);
+            assert_eq!(doc.topic, Topic::Hostname);
             assert!(!doc.summary.is_empty());
             assert!(!doc.detail.is_empty());
         }

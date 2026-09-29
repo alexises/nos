@@ -14,6 +14,7 @@ Every agent working in this repo — the main session and any subagent spawned v
 | Directory | Crate | Purpose |
 |-----------|-------|---------|
 | `proto/` | `nos-proto` | Shared wire types, IPC codec — single source of truth for all inter-process contracts |
+| `proto-derive/` | `nos-proto-derive` | `#[derive(Cli)]` for `nos-proto`'s schema: every field's mandatory `#[cli(...)]` (help `Topic`, CLI words, aliases, sugar) becomes the CLI's config tree (`nos_proto::cli`) — the one proc-macro crate, syn/quote only (#109) |
 | `tcp-auth/` | `nos-tcp-auth` | Raw Linux `setsockopt` bindings for TCP session authentication (`TCP_MD5SIG`, TCP-AO) — no NOS dependencies, like `nos-proto` |
 | `rpl/` | `nos-rpl` | Routing Policy Language — compiler and VM for BGP import/export policy scripts, no NOS dependencies, like `nos-proto` |
 | `l2-socket/` | `nos-l2-socket` | Raw `AF_PACKET` L2 socket (one interface, one ethertype, one link-local multicast group) shared by `nos-lacp` and `nos-lldp` — the crate whose whole purpose is `unsafe` `sockaddr_ll`/`PACKET_ADD_MEMBERSHIP` FFI, no NOS dependencies, like `nos-tcp-auth` |

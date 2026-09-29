@@ -1,5 +1,5 @@
 [workspace]
-members = ["proto", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tools/e2e", "tcp-auth", "rpl", "log-client", "l2-socket", "lacp", "lldp", "fdb", "rest", "password", "pki"]
+members = ["proto", "proto-derive", "config", "bgp", "rib", "interface", "log", "ospf", "ospf-common", "ospfv3", "cli", "watchdog", "tools/nos-provision", "tools/e2e", "tcp-auth", "rpl", "log-client", "l2-socket", "lacp", "lldp", "fdb", "rest", "password", "pki"]
 resolver = "2"
 
 [workspace.package]
@@ -26,6 +26,7 @@ regex       = "1"
 bollard     = "0.21"
 tar         = "0.4"
 nos-proto          = { path = "proto", version = "0.1.0" }
+nos-proto-derive   = { path = "proto-derive", version = "0.1.0" }
 nos-tcp-auth       = { path = "tcp-auth", version = "0.1.0" }
 nos-password       = { path = "password", version = "0.1.0" }
 nos-pki            = { path = "pki", version = "0.1.0" }

@@ -2,6 +2,9 @@ use garde::Validate;
 use serde::{Deserialize, Serialize};
 
 use super::Config;
+use nos_proto_derive::Cli;
+
+use super::sugar;
 
 /// Which NLRI (AFI/SAFI) is exchanged over a peer-group's session —
 /// independent of whatever address family `source_address` resolves to at
@@ -10,9 +13,11 @@ use super::Config;
 /// this must never be derived from, or cross-validated against, either
 /// address's IP version.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Cli)]
 pub enum AddressFamily {
+    #[cli(words = "ipv4")]
     Ipv4Unicast,
+    #[cli(words = "ipv6")]
     Ipv6Unicast,
     /// RFC 7432 EVPN (AFI 25 / SAFI 70). Appended last: postcard indexes
     /// enum variants by position.
@@ -43,7 +48,7 @@ impl std::fmt::Display for AddressFamily {
 /// addresses to use when it carries more than one; `None` requires the
 /// interface to carry exactly one address.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum SourceAddress {
     /// An explicitly named interface.
     Interface {
@@ -103,8 +108,9 @@ pub const CONNECT_RETRY_TIME_DEFAULT_SECS: u16 = 120;
 /// iBGP one — standard BGP practice, since an iBGP speaker must not silently
 /// mask a route's real eBGP-learned next-hop unless explicitly told to.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum NextHopMode {
+    #[cli(words = "self")]
     SelfAddress,
     Unchanged,
 }
@@ -114,8 +120,9 @@ pub enum NextHopMode {
 /// no session is opened or accepted; an established one is closed with a
 /// NOTIFICATION carrying `message` as an RFC 9003 shutdown communication.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct BgpShutdown {
+    #[cli(topic = BgpPeerGroupShutdown)]
     pub message: Option<String>,
 }
 
@@ -125,11 +132,15 @@ pub struct BgpShutdown {
 /// never exceeds the ceiling implied by `max_suppress`. `Default` is RFC 7196's
 /// conservative recommendation. eBGP peer-groups only (`bgp_instance`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct BgpDamping {
+    #[cli(topic = BgpPeerGroupDamping)]
     pub half_life: u32,
+    #[cli(topic = BgpPeerGroupDamping)]
     pub reuse: u32,
+    #[cli(topic = BgpPeerGroupDamping)]
     pub suppress: u32,
+    #[cli(topic = BgpPeerGroupDamping)]
     pub max_suppress: u32,
 }
 
@@ -167,14 +178,16 @@ pub(super) fn valid_shutdown(s: Option<&BgpShutdown>) -> garde::Result {
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct BgpPeerGroup {
     #[garde(length(min = 1, max = 64), custom(|n, ctx: &Config| unique_name(n, ctx)))]
+    #[cli(key)]
     pub name: String,
 
     // RFC 6793: ASN 0 and 4_294_967_295 are reserved.
     #[garde(range(min = 1, max = 4_294_967_294u32))]
+    #[cli(topic = BgpPeerGroupRemoteAs)]
     pub remote_as: u32,
 
     // Transport source address. Deliberately `#[garde(skip)]` and never
@@ -185,9 +198,11 @@ pub struct BgpPeerGroup {
     // resolved by `nos-bgpd` itself and may not exist yet in this
     // transaction.
     #[garde(skip)]
+    #[cli(topic = BgpPeerGroupSourceAddress)]
     pub source_address: Option<SourceAddress>,
 
     #[garde(custom(|afs, _ctx: &Config| non_empty_no_duplicate_afs(afs)))]
+    #[cli(topic = BgpPeerGroupAddressFamily)]
     pub address_families: Vec<AddressFamily>,
 
     /// `None` defaults to `HOLD_TIME_DEFAULT` (90s). `Some(0)` disables both
@@ -195,6 +210,7 @@ pub struct BgpPeerGroup {
     /// HOLD_TIME_FLOOR` (RFC 4271 §6.2). The value actually used by a
     /// session is `min(this, the peer's own proposed hold time)`.
     #[garde(custom(|h: &Option<u16>, _ctx: &Config| valid_hold_time(*h)))]
+    #[cli(topic = BgpPeerGroupHoldTime)]
     pub hold_time: Option<u16>,
 
     /// `None` defaults to `negotiated_hold / 3`, computed after negotiation
@@ -203,38 +219,45 @@ pub struct BgpPeerGroup {
     /// on `BgpInstance.peer_groups`, since garde's per-field `custom`
     /// closures can't see a sibling field (see `bgp_instance.rs`).
     #[garde(skip)]
+    #[cli(topic = BgpPeerGroupKeepaliveInterval)]
     pub keepalive_interval: Option<u16>,
 
     /// `None` defaults to `CONNECT_RETRY_TIME_DEFAULT_SECS` (120s).
     #[garde(custom(|c: &Option<u16>, _ctx: &Config| valid_connect_retry_time(*c)))]
+    #[cli(topic = BgpPeerGroupConnectRetryTime)]
     pub connect_retry_time: Option<u16>,
 
     /// RFC 4271 §9.2.1.1 `MinRouteAdvertisementInterval`, in seconds: at most
     /// one batch of advertisements per this interval to each peer (withdrawals
     /// are exempt). `None` (or 0) disables pacing — every change is sent at once.
     #[garde(skip)]
+    #[cli(topic = BgpPeerGroupMrai)]
     pub mrai: Option<u16>,
 
     /// RFC 2439 flap damping of routes received from this group; `None`
     /// disables it. See `BgpDamping`.
     #[garde(custom(|d: &Option<BgpDamping>, _ctx: &Config| valid_damping(d.as_ref())))]
+    #[cli(topic = BgpPeerGroupDamping)]
     pub damping: Option<BgpDamping>,
 
     /// RFC 5082 GTSM: the most router hops away the peer may be (1 =
     /// directly connected, 1..=254). Sends with TTL/hop-limit 255 and drops
     /// received packets below `256 - max_hops`. `None` disables it.
     #[garde(custom(|h: &Option<u8>, _ctx: &Config| valid_max_hops(*h)))]
+    #[cli(topic = BgpPeerGroupMaxHops)]
     pub max_hops: Option<u8>,
 
     /// `None` opens sessions with no transport authentication at all.
     /// Secrets are stored clear-text, like every other field in this config
     /// — see `BgpAuth`.
     #[garde(custom(|a: &Option<BgpAuth>, _ctx: &Config| valid_auth(a.as_ref())))]
+    #[cli(topic = BgpPeerGroupAuth, sugar(word = "md5-password", with = sugar::md5_password, topic = BgpPeerGroupMd5Password), sugar(word = "ao-key", with = sugar::ao_key, topic = BgpPeerGroupAoKey))]
     pub auth: Option<BgpAuth>,
 
     /// `None` defaults to `SelfAddress` for an eBGP peer-group and
     /// `Unchanged` for an iBGP one — see `NextHopMode`.
     #[garde(skip)]
+    #[cli(topic = BgpPeerGroupNextHop)]
     pub next_hop: Option<NextHopMode>,
 
     /// RFC 4456 route-reflector client: routes learned from other iBGP
@@ -245,6 +268,7 @@ pub struct BgpPeerGroup {
     /// `bgp_instance::valid_route_reflection_and_server`. Mutually exclusive
     /// with `route_server_client`.
     #[garde(skip)]
+    #[cli(topic = BgpPeerGroupRouteReflectorClient)]
     pub route_reflector_client: bool,
 
     /// RFC 7947 route-server client: this peer-group's own ASN is never
@@ -255,6 +279,7 @@ pub struct BgpPeerGroup {
     /// `asn` (an eBGP peer-group). Mutually exclusive with
     /// `route_reflector_client`.
     #[garde(skip)]
+    #[cli(topic = BgpPeerGroupRouteServerClient)]
     pub route_server_client: bool,
 
     /// `None` defaults to `deny-all` — this NOS never leaves a direction
@@ -262,15 +287,18 @@ pub struct BgpPeerGroup {
     /// defaults to some permissive/derived behavior. See root `CLAUDE.md`'s
     /// "Default-deny rollout impact".
     #[garde(custom(|p: &Option<String>, ctx: &Config| policy_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = BgpPeerGroupImportPolicy)]
     pub import_policy: Option<String>,
 
     /// Same default-deny semantics as `import_policy`, applied on
     /// advertisement instead of receipt.
     #[garde(custom(|p: &Option<String>, ctx: &Config| policy_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = BgpPeerGroupExportPolicy)]
     pub export_policy: Option<String>,
 
     /// See `BgpShutdown`. Appended last, like every later-added field.
     #[garde(custom(|s: &Option<BgpShutdown>, _ctx: &Config| valid_shutdown(s.as_ref())))]
+    #[cli(topic = BgpPeerGroupShutdown, sugar(word = "shutdown", with = sugar::shutdown, topic = BgpPeerGroupShutdown))]
     pub shutdown: Option<BgpShutdown>,
 }
 
@@ -296,7 +324,7 @@ fn policy_reference_valid(name: Option<&String>, ctx: &Config) -> garde::Result 
 /// `TCP_MD5SIG` or TCP-AO keys, never both at once). Stored clear-text, like
 /// every field in this config.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum BgpAuth {
     /// RFC 2385 TCP MD5 signature — a single shared password.
     Md5 { password: String },
@@ -315,23 +343,33 @@ pub enum BgpAuth {
 /// behavior) excludes TCP options from this key's MAC coverage — both peers
 /// must agree, or authentication fails.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
+#[cli(no_default)]
 pub struct BgpAoKey {
+    #[cli(key)]
     pub send_id: u8,
+    #[cli(topic = BgpPeerGroupAoKey)]
     pub recv_id: u8,
+    #[cli(topic = BgpPeerGroupAoKey)]
     pub algorithm: BgpAoAlgorithm,
+    #[cli(topic = BgpPeerGroupAoKey)]
     pub key: String,
+    #[cli(topic = BgpPeerGroupAoKey)]
     pub is_current: bool,
+    #[cli(topic = BgpPeerGroupAoKey)]
     pub is_rnext: bool,
     #[serde(default)]
+    #[cli(topic = BgpPeerGroupAoKey)]
     pub exclude_options: bool,
 }
 
 /// RFC 5925's two mandatory-to-implement algorithms.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum BgpAoAlgorithm {
+    #[cli(words = "hmac-sha1")]
     HmacSha1_96,
+    #[cli(words = "aes-cmac")]
     AesCmac96,
 }
 

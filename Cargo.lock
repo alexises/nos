@@ -1828,6 +1828,7 @@ dependencies = [
  "nos-rpl",
  "reedline",
  "rpassword",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -2102,6 +2103,7 @@ dependencies = [
  "futures",
  "garde",
  "ipnet",
+ "nos-proto-derive",
  "nos-rpl",
  "postcard",
  "precis-core",
@@ -2111,6 +2113,15 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio-util",
  "utoipa",
+]
+
+[[package]]
+name = "nos-proto-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

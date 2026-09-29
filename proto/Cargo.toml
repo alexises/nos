@@ -19,6 +19,7 @@ tokio-util = { workspace = true }
 bytes      = { workspace = true }
 futures    = { workspace = true }
 nos-rpl    = { workspace = true }
+nos-proto-derive = { workspace = true }
 utoipa     = { workspace = true, optional = true }
 precis-core     = { workspace = true }
 precis-profiles = { workspace = true }

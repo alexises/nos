@@ -53,19 +53,62 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              config and returns only what differs: fields added, removed, or changed. \
              Runs no validation — an invalid in-progress config can still be diffed.",
         ),
-        Topic::EnsureBgpInstance => (
+        Topic::Hostname => (
+            "Set the configuration's hostname.",
+            "Sets the top-level hostname field in the transaction's in-progress config. \
+             Unlike BGP instance fields, hostname has no navigation context — it's a single \
+             top-level scalar.",
+        ),
+        Topic::User => (
+            "Create or delete a local user.",
+            "A local user may log in to the shell and to the REST API; every user is a full administrator. `delete` removes the user, and any certificate already issued to them is refused on its next use. A commit that would leave no user at all is refused.",
+        ),
+        Topic::UserPassword => (
+            "Set a local user's password.",
+            "Given in clear text; nos-configd stores only its argon2id hash, and setting the same password again keeps the existing hash, so it is not a change.",
+        ),
+        Topic::Lldp => (
+            "System-wide LLDP settings.",
+            "The LLDP timers and management address every LLDP-enabled interface advertises with; per-interface transmit/receive and destination are set on the interface itself.",
+        ),
+        Topic::LldpTxInterval => (
+            "Set the system-wide LLDP transmit interval.",
+            "Sets msgTxInterval — seconds between periodic LLDPDUs (1-3600, default 30). \
+             The TTL advertised to neighbors is tx-hold × tx-interval and must fit in 16 bits \
+             (65535 seconds). Applies to every LLDP-enabled interface; changing it restarts \
+             each link (a shutdown LLDPDU, then a fresh advertisement). `delete` restores the \
+             default.",
+        ),
+        Topic::LldpTxHold => (
+            "Set the system-wide LLDP transmit hold multiplier.",
+            "Sets msgTxHold (1-100, default 4): the TTL advertised to neighbors is this × \
+             tx-interval, so a neighbor tolerates that many missed advertisements. Applies to \
+             every LLDP-enabled interface. `delete` restores the default.",
+        ),
+        Topic::LldpManagementAddress => (
+            "Set the LLDP management address.",
+            "Sets the IPv4 or IPv6 unicast address advertised in the Management Address TLV \
+             of every LLDPDU this system sends, so neighbors can show how to reach it. It is \
+             advertised as configured — it is not checked against any interface's addresses. \
+             `delete` stops advertising one.",
+        ),
+        Topic::BgpInstance => (
             "Create a BGP instance in the transaction if it doesn't already exist.",
-            "Adds a new BGP instance with the given name to the transaction's in-progress \
+            concat!(
+                "Adds a new BGP instance with the given name to the transaction's in-progress \
              config if none exists with that name yet; if one already exists, this is a \
              no-op. Does not itself set any fields on the instance.",
+                " ",
+                "Delete a BGP instance from the transaction.",
+            ),
         ),
-        Topic::SetBgpInstanceAsn => (
+        Topic::BgpInstanceAsn => (
             "Set a BGP instance's autonomous system number.",
             "Sets the ASN field on a BGP instance in the transaction's in-progress config. \
              Must be a valid, non-reserved 32-bit ASN; validity is checked at commit time, \
              not when the edit is applied.",
         ),
-        Topic::SetBgpInstanceRouterId => (
+        Topic::BgpInstanceRouterId => (
             "Set a BGP instance's router ID.",
             "Sets the router-id field on a BGP instance in the transaction's in-progress \
              config. A router ID is a 32-bit identifier written in dotted-quad notation — \
@@ -73,33 +116,37 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              address and need not correspond to one. Validity is checked at commit time, \
              not when the edit is applied.",
         ),
-        Topic::DeleteBgpInstance => (
-            "Delete a BGP instance from the transaction.",
-            "Removes a BGP instance and all of its fields from the transaction's \
-             in-progress config. Only affects that transaction — the running config is \
-             untouched until commit.",
+        Topic::BgpInstanceClusterId => (
+            "Set a BGP instance's RFC 4456 route-reflector cluster ID.",
+            concat!(
+                "Sets the cluster-id field on a BGP instance, written into the CLUSTER_LIST \
+             attribute of every route this instance reflects. Only meaningful when at least \
+             one peer-group has route-reflector-client set; multiple route reflectors serving \
+             the same cluster should share the same cluster-id for correct loop detection.",
+                " ",
+                "Clear a BGP instance's route-reflector cluster ID override.",
+            ),
         ),
-        Topic::SetHostname => (
-            "Set the configuration's hostname.",
-            "Sets the top-level hostname field in the transaction's in-progress config. \
-             Unlike BGP instance fields, hostname has no navigation context — it's a single \
-             top-level scalar.",
-        ),
-        Topic::EnsureBgpPeerGroup => (
+        Topic::BgpPeerGroup => (
             "Create a peer-group in a BGP instance if it doesn't already exist.",
-            "Adds a new peer-group with the given name to the named BGP instance's \
+            concat!(
+                "Adds a new peer-group with the given name to the named BGP instance's \
              peer-groups in the transaction's in-progress config, if none exists with that \
              name yet; if one already exists, this is a no-op. Does not itself set any \
              fields on the peer-group.",
+                " ",
+                "Delete a peer-group from a BGP instance.",
+            ),
         ),
-        Topic::SetBgpPeerGroupRemoteAs => (
+        Topic::BgpPeerGroupRemoteAs => (
             "Set a peer-group's remote autonomous system number.",
             "Sets the remote-as field on a peer-group. Must be a valid, non-reserved 32-bit \
              ASN; validity is checked at commit time, not when the edit is applied.",
         ),
-        Topic::SetBgpPeerGroupSourceAddress => (
+        Topic::BgpPeerGroupSourceAddress => (
             "Set a peer-group's transport source address.",
-            "Sets the source-address field on a peer-group — referenced by interface name \
+            concat!(
+                "Sets the source-address field on a peer-group — referenced by interface name \
              (plus an optional label, for an interface with more than one address) rather \
              than a literal address, resolved by nos-bgpd at runtime. `source-address \
              loopback` refers to this instance's own loopback interface \
@@ -108,75 +155,252 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              source address's family may still differ from an advertised address family \
              (RFC 8950 extended next-hop encoding), so source-address and address-family \
              are never cross-validated against each other.",
+                " ",
+                "Clear a peer-group's transport source address.",
+            ),
         ),
-        Topic::ClearBgpPeerGroupSourceAddress => (
-            "Clear a peer-group's transport source address.",
-            "Unsets the source-address field on a peer-group, reverting to no explicit \
-             transport source override.",
-        ),
-        Topic::AddBgpPeerGroupAddressFamily => (
+        Topic::BgpPeerGroupAddressFamily => (
             "Add an address family to a peer-group.",
-            "Adds one AFI/SAFI (ipv4 or ipv6 unicast, or l2vpn-evpn — RFC 7432 EVPN, which \
+            concat!(
+                "Adds one AFI/SAFI (ipv4 or ipv6 unicast, or l2vpn-evpn — RFC 7432 EVPN, which \
              is received and shown only for now) to the set exchanged over this \
              peer-group's session. A no-op if it's already present. At least one address \
              family is required for the peer-group to be valid; checked at commit time.",
+                " ",
+                "Remove an address family from a peer-group.",
+            ),
         ),
-        Topic::RemoveBgpPeerGroupAddressFamily => (
-            "Remove an address family from a peer-group.",
-            "Removes one AFI/SAFI from the set exchanged over this peer-group's session. A \
-             no-op if it's already absent. Removing the last remaining address family \
-             leaves the peer-group invalid until another is added; checked at commit time.",
+        Topic::BgpPeerGroupHoldTime => (
+            "Set a peer-group's BGP hold-time.",
+            concat!(
+                "Sets the hold-time field on a peer-group — the value this router proposes in its \
+             OPEN message. A value of 0 disables both the hold timer and keepalives entirely; \
+             otherwise it must be at least 3 seconds (RFC 4271 §6.2). The value actually used \
+             by a session is the lower of this and the peer's own proposed hold time. When \
+             both hold-time and keepalive-interval are set, keepalive-interval must be less \
+             than hold-time — checked at commit time, not when the edit is applied.",
+                " ",
+                "Clear a peer-group's BGP hold-time.",
+            ),
         ),
-        Topic::DeleteBgpPeerGroup => (
-            "Delete a peer-group from a BGP instance.",
-            "Removes a peer-group and all of its fields from the named BGP instance in the \
-             transaction's in-progress config. Any peer still referencing this peer-group \
-             becomes invalid — checked at commit time, not when the peer-group is deleted.",
+        Topic::BgpPeerGroupKeepaliveInterval => (
+            "Set a peer-group's BGP keepalive interval.",
+            concat!(
+                "Sets the keepalive-interval field on a peer-group — how often this router sends \
+             KEEPALIVE messages on an established session. Must be strictly less than \
+             hold-time whenever both are explicitly set (a hold-time of 0 disables keepalives \
+             entirely, so no explicit keepalive-interval is valid alongside it); checked at \
+             commit time, not when the edit is applied.",
+                " ",
+                "Clear a peer-group's BGP keepalive interval.",
+            ),
         ),
-        Topic::SetBgpPeer => (
+        Topic::BgpPeerGroupConnectRetryTime => (
+            "Set a peer-group's BGP connect-retry time.",
+            concat!(
+                "Sets the connect-retry-time field on a peer-group — how long this router waits \
+             between outbound connection attempts to a peer in this group. Must be at least 1 \
+             second; checked at commit time, not when the edit is applied.",
+                " ",
+                "Clear a peer-group's BGP connect-retry time.",
+            ),
+        ),
+        Topic::BgpPeerGroupMrai => (
+            "Set a peer-group's BGP MinRouteAdvertisementInterval.",
+            concat!(
+                "Sets the mrai field on a peer-group (RFC 4271 §9.2.1.1) — advertisements to a peer \
+             in this group are batched and sent at most once per this many seconds, and repeated \
+             changes to one prefix within the interval collapse into the latest. Withdrawals are \
+             never delayed. Unset or 0 sends every change immediately.",
+                " ",
+                "Clear a peer-group's BGP MinRouteAdvertisementInterval.",
+            ),
+        ),
+        Topic::BgpPeerGroupMaxHops => (
+            "Set how many router hops away a peer-group's peers may be.",
+            concat!(
+                "Sets max-hops on a peer-group and enables the RFC 5082 Generalized TTL Security \
+             Mechanism: sessions are sent with TTL/hop-limit 255 and packets arriving with a \
+             lower value than 256 minus this number are dropped by the kernel. 1 means \
+             directly connected; up to 254. Both ends must enable it. Unset disables it.",
+                " ",
+                "Clear a peer-group's max-hops.",
+            ),
+        ),
+        Topic::BgpPeerGroupDamping => (
+            "Enable route flap damping on a peer-group.",
+            concat!(
+                "Sets the damping block on an eBGP peer-group (RFC 2439; optional arguments `half-life <s>`, `reuse <n>`, `suppress <n>`, `max-suppress <s>` in any order): each withdrawal of a route \
+             received from a peer in this group adds 1000 to that prefix's penalty (500 for an \
+             attribute change), the penalty halves every half-life seconds, the route is \
+             suppressed while it is at or above suppress and released once it decays below \
+             reuse, and max-suppress caps how long a route can stay suppressed. Unset values \
+             default to RFC 7196's recommendation (half-life 900, reuse 750, suppress 6000, \
+             max-suppress 3600).",
+                " ",
+                "Disable route flap damping on a peer-group.",
+            ),
+        ),
+        Topic::BgpPeerGroupAuth => (
+            "Clear a peer-group's BGP session authentication.",
+            "Unsets the auth field on a peer-group entirely, regardless of which mechanism \
+             (MD5 password or TCP-AO keys) was set, reverting sessions to no transport \
+             authentication.",
+        ),
+        Topic::BgpPeerGroupMd5Password => (
+            "Set a peer-group's BGP MD5 password.",
+            "Sets a single RFC 2385 TCP MD5 signature password on a peer-group's sessions, \
+             replacing any TCP-AO keys that were set — the two mechanisms are mutually \
+             exclusive, since the kernel accepts only one per socket. Stored clear-text, like \
+             every other field in this config.",
+        ),
+        Topic::BgpPeerGroupAoKey => (
+            "Set (or replace) one of a peer-group's TCP-AO keys.",
+            concat!(
+                "Adds one RFC 5925 TCP-AO key to a peer-group, identified by its send-id — adding a \
+             key with a send-id that already exists replaces it in place. If the peer-group's \
+             auth wasn't already TCP-AO (unset, or an MD5 password), this starts a fresh key \
+             list containing just this key. Exactly one key across the whole list must be \
+             marked current, and at most one may be marked rnext, for the peer-group to \
+             validate at commit time — see set-bgp-peer-group-ao-current-key/rnext-key. Stored \
+             clear-text, like every other field in this config.",
+                " ",
+                "Remove one of a peer-group's TCP-AO keys by send-id.",
+                " ",
+                "Mark one of a peer-group's TCP-AO keys as current.",
+                " ",
+                "Mark one of a peer-group's TCP-AO keys as rnext.",
+            ),
+        ),
+        Topic::BgpPeerGroupNextHop => (
+            "Set a peer-group's advertised BGP next-hop mode.",
+            concat!(
+                "Sets the next-hop field on a peer-group to either 'self' (rewrite the NEXT_HOP \
+             attribute to this router's own address on every advertisement — the standard \
+             eBGP default) or 'unchanged' (preserve the next-hop the route already carries \
+             — the standard iBGP default, avoiding the third-party-next-hop problem). \
+             Overrides the mode this peer-group would otherwise default to based on whether \
+             it's eBGP or iBGP (remote-as compared to the instance's own asn).",
+                " ",
+                "Clear a peer-group's advertised BGP next-hop mode override.",
+            ),
+        ),
+        Topic::BgpPeerGroupRouteReflectorClient => (
+            "Mark a peer-group as an RFC 4456 route-reflector client.",
+            concat!(
+                "Routes learned from any iBGP peer are reflected to this peer-group's sessions \
+             (and routes learned from this peer-group are reflected to every other iBGP \
+             peer), instead of being withheld by the usual iBGP split-horizon rule. Requires \
+             an iBGP peer-group (remote-as equal to the instance's own asn) and is mutually \
+             exclusive with route-server-client; both are checked at commit time.",
+                " ",
+                "Unmark a peer-group as a route-reflector client.",
+            ),
+        ),
+        Topic::BgpPeerGroupRouteServerClient => (
+            "Mark a peer-group as an RFC 7947 route-server client.",
+            concat!(
+                "This peer-group's own ASN is never prepended to AS_PATH when advertising to it, \
+             and — via RFC 7911 ADD-PATH, if the peer negotiates it — it receives every other \
+             route-server-client's path for a prefix, not just the one instance-wide elected \
+             best path. Requires an eBGP peer-group (remote-as different from the instance's \
+             own asn) and is mutually exclusive with route-reflector-client; both are checked \
+             at commit time.",
+                " ",
+                "Unmark a peer-group as a route-server client.",
+            ),
+        ),
+        Topic::BgpPeerGroupImportPolicy => (
+            "Filter the routes this peer-group's peers send us through a routing policy.",
+            "Names a policy-definition applied to every route received from this peer-group's peers before it enters the Loc-RIB. Unset, the direction defaults to the built-in deny-all: nothing is accepted. `accept-all` and `deny-all` are always available.",
+        ),
+        Topic::BgpPeerGroupExportPolicy => (
+            "Filter the routes we advertise to this peer-group's peers through a routing policy.",
+            "Names a policy-definition applied to every route before it is advertised to this peer-group's peers. Unset, the direction defaults to the built-in deny-all: nothing is advertised. `accept-all` and `deny-all` are always available.",
+        ),
+        Topic::BgpPeerGroupShutdown => (
+            "Administratively shut every peer in a peer-group.",
+            concat!(
+                "Sets shutdown on a peer-group (RFC 4486): no session is opened or accepted for \
+             any peer in it, and an established session is closed with a Cease / \
+             Administrative Shutdown NOTIFICATION. An optional message (at most 255 bytes) is \
+             sent to the peer as an RFC 9003 shutdown communication. A peer with its own \
+             shutdown setting is unaffected by this one.",
+                " ",
+                "Bring a shut peer-group back up.",
+            ),
+        ),
+        Topic::BgpPeer => (
             "Associate a remote address with a peer-group.",
-            "Creates the association between a remote address and a peer-group within a \
+            concat!(
+                "Creates the association between a remote address and a peer-group within a \
              BGP instance if it doesn't exist yet, or repoints it to a different peer-group \
              if it does. The referenced peer-group must exist for the config to be valid; \
              checked at commit time.",
+                " ",
+                "Remove a peer's association to its peer-group.",
+            ),
         ),
-        Topic::DeleteBgpPeer => (
-            "Remove a peer's association to its peer-group.",
-            "Deletes the remote-address-to-peer-group association from the named BGP \
-             instance in the transaction's in-progress config.",
+        Topic::BgpPeerShutdown => (
+            "Administratively shut one BGP peer.",
+            concat!(
+                "Sets shutdown on a single peer (RFC 4486), overriding its peer-group: no session \
+             is opened or accepted, and an established one is closed with a Cease / \
+             Administrative Shutdown NOTIFICATION carrying the optional message (at most 255 \
+             bytes, RFC 9003). The peer must already exist.",
+                " ",
+                "Bring a shut BGP peer back up.",
+            ),
         ),
-        Topic::EnsureRoutingTable => (
+        Topic::RoutingTable => (
             "Create a routing table in the transaction if it doesn't already exist.",
-            "Adds a new routing table with the given name to the transaction's in-progress \
+            concat!(
+                "Adds a new routing table with the given name to the transaction's in-progress \
              config if none exists with that name yet; if one already exists, this is a \
              no-op. Does not itself associate a BGP instance or a static routing instance.",
+                " ",
+                "Delete a routing table from the transaction.",
+            ),
         ),
-        Topic::SetRoutingTableBgpInstance => (
+        Topic::RoutingTableBgpInstance => (
             "Associate a BGP instance with a routing table.",
-            "Points a routing table at a BGP instance by name. The instance must exist, and \
+            concat!(
+                "Points a routing table at a BGP instance by name. The instance must exist, and \
              a given instance may be associated with at most one routing table at a time; \
              both are checked at commit time, not when the edit is applied.",
+                " ",
+                "Remove a routing table's BGP instance association.",
+            ),
         ),
-        Topic::ClearRoutingTableBgpInstance => (
-            "Remove a routing table's BGP instance association.",
-            "Unsets the bgp-instance field on a routing table, reverting to no explicit \
-             association.",
-        ),
-        Topic::SetRoutingTableStaticRoutingInstance => (
+        Topic::RoutingTableStaticRoutingInstance => (
             "Associate a static routing instance with a routing table.",
-            "Points a routing table at a static routing instance by name. The instance must \
+            concat!(
+                "Points a routing table at a static routing instance by name. The instance must \
              exist, and a given static routing instance may be associated with at most one \
              routing table at a time; both are checked at commit time, not when the edit is \
              applied.",
+                " ",
+                "Remove a routing table's static routing instance association.",
+            ),
         ),
-        Topic::ClearRoutingTableStaticRoutingInstance => (
-            "Remove a routing table's static routing instance association.",
-            "Unsets the static-routing-instance field on a routing table, reverting to no \
-             explicit association.",
+        Topic::RoutingTableOspfInstance => (
+            "Associate an OSPF instance with a routing table.",
+            concat!(
+                "Points a routing table at an OSPF instance by name (the VRF that instance \
+             belongs to). The OSPF instance must exist, and at most one routing table may \
+             claim a given instance at a time — both checked at commit time.",
+                " ",
+                "Remove a routing table's OSPF instance association.",
+            ),
         ),
-        Topic::SetRoutingTableRedistribute => (
+        Topic::RoutingTableOspfv3Instance => (
+            "Associate an OSPFv3 instance with a routing table.",
+            "The OSPFv3 instance's routes are installed into this routing table (its VRF). An instance can be claimed by at most one routing table. `delete` removes the association.",
+        ),
+        Topic::RoutingTableRedistribute => (
             "Redistribute this table's static routes into its associated BGP or OSPF instance.",
-            "Sets the redistribute field on a routing table ('from static to bgp' or 'from \
+            concat!(
+                "Sets the redistribute field on a routing table ('from static to bgp' or 'from \
              static to ospf' — redistributing into OSPF makes this router a real RFC 2328 ASBR, \
              originating an AS-external-LSA per redistributed prefix). Both bgp-instance/\
              ospf-instance (matching the chosen target) and static-routing-instance must already \
@@ -185,97 +409,132 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              accept-all/deny-all) to filter redistributed routes through before they reach BGP/ \
              OSPF; omitted, redistribution stays unfiltered (accept-all), unlike a peer-group's \
              import-policy/export-policy, which default to deny-all.",
+                " ",
+                "Clear this table's redistribution rule.",
+            ),
         ),
-        Topic::ClearRoutingTableRedistribute => (
-            "Clear this table's redistribution rule.",
-            "Unsets the redistribute field on a routing table, reverting to no redistribution.",
+        Topic::RoutingTableRestApi => (
+            "Serve the REST API on an address inside this routing table.",
+            "Makes nos-watchdogd run nos-restd for this routing table, listening on the given address (and port, default 8080) inside the table's VRF over mutual TLS. `delete` stops it.",
         ),
-        Topic::DeleteRoutingTable => (
-            "Delete a routing table from the transaction.",
-            "Removes a routing table from the transaction's in-progress config. This only \
-             clears the table's own associations — it does not delete the BGP instance or \
-             static routing instance it referenced.",
-        ),
-        Topic::EnsureStaticRoutingInstance => (
+        Topic::StaticRoutingInstance => (
             "Create a static routing instance in the transaction if it doesn't already exist.",
-            "Adds a new static routing instance with the given name to the transaction's \
+            concat!(
+                "Adds a new static routing instance with the given name to the transaction's \
              in-progress config if none exists with that name yet; if one already exists, \
              this is a no-op. A static routing instance carries no reference to any routing \
              table — only a routing table's static-routing-instance field names it.",
+                " ",
+                "Delete a static routing instance from the transaction.",
+            ),
         ),
-        Topic::DeleteStaticRoutingInstance => (
-            "Delete a static routing instance from the transaction.",
-            "Removes a static routing instance and all of its routes from the transaction's \
-             in-progress config. Any routing table still referencing it by name becomes \
-             invalid — checked at commit time, not when the static routing instance is \
-             deleted.",
-        ),
-        Topic::SetStaticRoute => (
+        Topic::StaticRoute => (
             "Add or repoint a static route.",
-            "Creates a route for the given subnet within a static routing instance if it \
+            concat!(
+                "Creates a route for the given subnet within a static routing instance if it \
              doesn't exist, or repoints its gateway if it does. The gateway's address family \
              must match the subnet's, and a subnet must not repeat within the same instance; \
              both are checked at commit time. Only one gateway per subnet is supported — \
              ECMP is not modeled in this iteration.",
+                " ",
+                "Remove a static route.",
+            ),
         ),
-        Topic::DeleteStaticRoute => (
-            "Remove a static route.",
-            "Deletes the route for the given subnet from the named static routing instance \
-             in the transaction's in-progress config.",
-        ),
-        Topic::EnsureInterface => (
+        Topic::Interface => (
             "Create an interface in the transaction if it doesn't already exist.",
-            "Adds a new interface with the given name to the transaction's in-progress config \
+            concat!(
+                "Adds a new interface with the given name to the transaction's in-progress config \
              if none exists with that name yet; if one already exists, this is a no-op. Does \
              not itself set any addresses or a routing table. For a physical (non-loopback) \
              interface, L3 config lives on a subinterface addressed as '<name>.<tag>' — '.0' \
              for the untagged/native case, '.1'-'.4094' for a real 802.1q VLAN — rather than \
              directly on the interface; a loopback interface (name 'loopback-<table>') is the \
              one exception and keeps its addresses/routing-table flat, unchanged.",
+                " ",
+                "Delete an interface from the transaction.",
+            ),
         ),
-        Topic::AddInterfaceAddress => (
+        Topic::InterfaceAddress => (
             "Add an IP address to an interface.",
-            "Adds an address to an interface's (or, for a physical interface, a subinterface's \
+            concat!(
+                "Adds an address to an interface's (or, for a physical interface, a subinterface's \
              — see 'edit interface') address list if it isn't already present — a no-op if it \
              is. Any number of addresses may be carried, including a mix of IPv4 and IPv6; a \
              given address must not repeat on the same interface/subinterface, checked at \
              commit time. Addressing a bare non-loopback interface name (no '.tag' suffix) \
              implicitly targets its tag-0 (untagged/native) subinterface.",
+                " ",
+                "Remove an IP address from an interface.",
+            ),
         ),
-        Topic::RemoveInterfaceAddress => (
-            "Remove an IP address from an interface.",
-            "Removes an address from an interface's (or subinterface's) address list in the \
-             transaction's in-progress config.",
-        ),
-        Topic::SetInterfaceRoutingTable => (
+        Topic::InterfaceRoutingTable => (
             "Associate a routing table with an interface.",
-            "Points an interface — or, for a physical interface, one of its subinterfaces — at \
+            concat!(
+                "Points an interface — or, for a physical interface, one of its subinterfaces — at \
              a routing table by name, which doubles as its VRF assignment. The routing table \
              must exist, checked at commit time; unlike a routing table's own \
              bgp-instance/static-routing-instance associations, more than one \
              interface/subinterface may be associated with the same routing table. Addressing \
              a bare non-loopback interface name (no '.tag' suffix) implicitly targets its \
              tag-0 (untagged/native) subinterface.",
+                " ",
+                "Remove an interface's routing table association.",
+            ),
         ),
-        Topic::ClearInterfaceRoutingTable => (
-            "Remove an interface's routing table association.",
-            "Unsets the routing-table field on an interface (or subinterface), reverting to no \
-             explicit association.",
+        Topic::InterfaceOspfProfile => (
+            "Associate an OSPF profile with an interface, subinterface, or broadcast domain.",
+            concat!(
+                "Points a loopback interface, a physical interface's subinterface, or a broadcast \
+             domain's own SVI at an OSPF profile by name. The profile must exist, and the \
+             same attach point must also have a routing-table set — OSPF has no meaning \
+             without an L3/VRF context — both checked at commit time.",
+                " ",
+                "Remove an OSPF profile association.",
+            ),
         ),
-        Topic::SetInterfaceMtu => (
+        Topic::InterfaceOspfv3Profile => (
+            "Run OSPFv3 on this attach point under a profile.",
+            "Joins OSPFv3 (RFC 5340) on this interface, subinterface or broadcast domain with the named OSPFv3 profile's timers, cost and authentication. Needs a routing-table on the same attach point. `delete` leaves OSPFv3 there.",
+        ),
+        Topic::InterfaceSwitchingProfile => (
+            "Associate a switching profile with an interface.",
+            concat!(
+                "Points an interface at a switching profile by name, trunking it into one or more \
+             broadcast domains. The switching profile must exist, checked at commit time. A \
+             tag claimed by one of the interface's own subinterfaces (an untagged/'.0' one \
+             claims tag 0, a '.<n>' one claims tag n) and a tag claimed by a switching-profile \
+             member (an untagged member claims tag 0, a dot1q member claims its tag) are \
+             mutually exclusive on the same interface — each tag's link has only one master \
+             device — checked at commit time.",
+                " ",
+                "Remove an interface's switching-profile association.",
+            ),
+        ),
+        Topic::InterfacePortAggregate => (
+            "Associate an interface with a port aggregate as a bonded member.",
+            concat!(
+                "Points an interface at a port aggregate by name, making it a bonded member. The \
+             port aggregate must exist, checked at commit time. A member interface must not \
+             also carry a switching-profile association or any subinterfaces — like VRF/bridge \
+             enslavement, bond enslavement claims the link's one Linux master device — checked \
+             at commit time.",
+                " ",
+                "Remove an interface's port-aggregate association.",
+            ),
+        ),
+        Topic::InterfaceMtu => (
             "Set an interface's MTU.",
-            "Sets the MTU (in bytes, 68-65535) on a physical or loopback interface — a \
+            concat!(
+                "Sets the MTU (in bytes, 68-65535) on a physical or loopback interface — a \
              link-layer property of the interface itself, applying uniformly to every one of \
              its subinterfaces (a VLAN sub-link has no MTU of its own, unlike addresses/\
              routing-table). Always targets the physical interface even when navigated into one \
              of its subinterfaces.",
+                " ",
+                "Clear an interface's MTU.",
+            ),
         ),
-        Topic::ClearInterfaceMtu => (
-            "Clear an interface's MTU.",
-            "Unsets the mtu field on an interface, so `nos-interfaced` leaves whatever MTU the \
-             kernel link already has untouched rather than forcing a default.",
-        ),
-        Topic::SetInterfaceLldpTransmit => (
+        Topic::InterfaceLldpTransmit => (
             "Enable or disable LLDP transmit on an interface.",
             "`set` makes nos-lldpd periodically send IEEE 802.1AB LLDPDUs (chassis/port \
              identity, system name/description, capabilities) out this physical interface so \
@@ -284,7 +543,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              Independent of lldp receive. Physical interfaces only — rejected on a loopback \
              at commit time.",
         ),
-        Topic::SetInterfaceLldpReceive => (
+        Topic::InterfaceLldpReceive => (
             "Enable or disable LLDP receive on an interface.",
             "`set` makes nos-lldpd listen for neighbors' LLDPDUs on this physical interface \
              and record them, visible via `show lldp neighbors`; entries age out when their \
@@ -292,7 +551,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              neighbors. Independent of lldp transmit. Physical interfaces only — rejected on \
              a loopback at commit time.",
         ),
-        Topic::SetInterfaceLldpDestination => (
+        Topic::InterfaceLldpDestination => (
             "Set the LLDP destination group an interface uses.",
             "Chooses which IEEE 802.1AB multicast group this interface's LLDPDUs are sent to \
              and accepted from: nearest-bridge (01:80:C2:00:00:0E, the default — never \
@@ -301,291 +560,66 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              will ever see the other. `delete` restores nearest-bridge. Physical interfaces \
              only — rejected on a loopback at commit time.",
         ),
-        Topic::SetLldpTxInterval => (
-            "Set the system-wide LLDP transmit interval.",
-            "Sets msgTxInterval — seconds between periodic LLDPDUs (1-3600, default 30). \
-             The TTL advertised to neighbors is tx-hold × tx-interval and must fit in 16 bits \
-             (65535 seconds). Applies to every LLDP-enabled interface; changing it restarts \
-             each link (a shutdown LLDPDU, then a fresh advertisement). `delete` restores the \
-             default.",
+        Topic::Subinterface => (
+            "Create or delete a subinterface: one 802.1q tag's L3 attach point.",
+            "A physical interface or port aggregate carries its L3 config per tag: tag 0 is the untagged link, 1-4094 an 802.1q VLAN sub-interface. Each has its own addresses, routing-table and OSPF profiles. `delete` removes the subinterface and its config.",
         ),
-        Topic::SetLldpTxHold => (
-            "Set the system-wide LLDP transmit hold multiplier.",
-            "Sets msgTxHold (1-100, default 4): the TTL advertised to neighbors is this × \
-             tx-interval, so a neighbor tolerates that many missed advertisements. Applies to \
-             every LLDP-enabled interface. `delete` restores the default.",
-        ),
-        Topic::SetLldpManagementAddress => (
-            "Set the LLDP management address.",
-            "Sets the IPv4 or IPv6 unicast address advertised in the Management Address TLV \
-             of every LLDPDU this system sends, so neighbors can show how to reach it. It is \
-             advertised as configured — it is not checked against any interface's addresses. \
-             `delete` stops advertising one.",
-        ),
-        Topic::DeleteInterface => (
-            "Delete an interface from the transaction.",
-            "Removes an interface and all of its addresses/subinterfaces from the \
-             transaction's in-progress config, or — when the name carries a '.tag' suffix — \
-             just that one subinterface. This only clears the interface's own configuration — \
-             it does not delete the routing table it referenced.",
-        ),
-        Topic::SetBgpPeerGroupHoldTime => (
-            "Set a peer-group's BGP hold-time.",
-            "Sets the hold-time field on a peer-group — the value this router proposes in its \
-             OPEN message. A value of 0 disables both the hold timer and keepalives entirely; \
-             otherwise it must be at least 3 seconds (RFC 4271 §6.2). The value actually used \
-             by a session is the lower of this and the peer's own proposed hold time. When \
-             both hold-time and keepalive-interval are set, keepalive-interval must be less \
-             than hold-time — checked at commit time, not when the edit is applied.",
-        ),
-        Topic::ClearBgpPeerGroupHoldTime => (
-            "Clear a peer-group's BGP hold-time.",
-            "Unsets the hold-time field on a peer-group, reverting to the default of 90 \
-             seconds.",
-        ),
-        Topic::SetBgpPeerGroupKeepaliveInterval => (
-            "Set a peer-group's BGP keepalive interval.",
-            "Sets the keepalive-interval field on a peer-group — how often this router sends \
-             KEEPALIVE messages on an established session. Must be strictly less than \
-             hold-time whenever both are explicitly set (a hold-time of 0 disables keepalives \
-             entirely, so no explicit keepalive-interval is valid alongside it); checked at \
-             commit time, not when the edit is applied.",
-        ),
-        Topic::ClearBgpPeerGroupKeepaliveInterval => (
-            "Clear a peer-group's BGP keepalive interval.",
-            "Unsets the keepalive-interval field on a peer-group, reverting to the default of \
-             one third of the negotiated hold time.",
-        ),
-        Topic::SetBgpPeerGroupConnectRetryTime => (
-            "Set a peer-group's BGP connect-retry time.",
-            "Sets the connect-retry-time field on a peer-group — how long this router waits \
-             between outbound connection attempts to a peer in this group. Must be at least 1 \
-             second; checked at commit time, not when the edit is applied.",
-        ),
-        Topic::ClearBgpPeerGroupConnectRetryTime => (
-            "Clear a peer-group's BGP connect-retry time.",
-            "Unsets the connect-retry-time field on a peer-group, reverting to the default of \
-             120 seconds.",
-        ),
-        Topic::SetBgpPeerGroupMrai => (
-            "Set a peer-group's BGP MinRouteAdvertisementInterval.",
-            "Sets the mrai field on a peer-group (RFC 4271 §9.2.1.1) — advertisements to a peer \
-             in this group are batched and sent at most once per this many seconds, and repeated \
-             changes to one prefix within the interval collapse into the latest. Withdrawals are \
-             never delayed. Unset or 0 sends every change immediately.",
-        ),
-        Topic::SetBgpPeerGroupMaxHops => (
-            "Set how many router hops away a peer-group's peers may be.",
-            "Sets max-hops on a peer-group and enables the RFC 5082 Generalized TTL Security \
-             Mechanism: sessions are sent with TTL/hop-limit 255 and packets arriving with a \
-             lower value than 256 minus this number are dropped by the kernel. 1 means \
-             directly connected; up to 254. Both ends must enable it. Unset disables it.",
-        ),
-        Topic::ClearBgpPeerGroupMaxHops => (
-            "Clear a peer-group's max-hops.",
-            "Unsets max-hops on a peer-group, disabling the RFC 5082 TTL check.",
-        ),
-        Topic::SetBgpPeerGroupShutdown => (
-            "Administratively shut every peer in a peer-group.",
-            "Sets shutdown on a peer-group (RFC 4486): no session is opened or accepted for \
-             any peer in it, and an established session is closed with a Cease / \
-             Administrative Shutdown NOTIFICATION. An optional message (at most 255 bytes) is \
-             sent to the peer as an RFC 9003 shutdown communication. A peer with its own \
-             shutdown setting is unaffected by this one.",
-        ),
-        Topic::ClearBgpPeerGroupShutdown => (
-            "Bring a shut peer-group back up.",
-            "Unsets shutdown on a peer-group; its peers connect again.",
-        ),
-        Topic::SetBgpPeerShutdown => (
-            "Administratively shut one BGP peer.",
-            "Sets shutdown on a single peer (RFC 4486), overriding its peer-group: no session \
-             is opened or accepted, and an established one is closed with a Cease / \
-             Administrative Shutdown NOTIFICATION carrying the optional message (at most 255 \
-             bytes, RFC 9003). The peer must already exist.",
-        ),
-        Topic::ClearBgpPeerShutdown => (
-            "Bring a shut BGP peer back up.",
-            "Unsets shutdown on a peer; it follows its peer-group again.",
-        ),
-        Topic::ClearBgpPeerGroupMrai => (
-            "Clear a peer-group's BGP MinRouteAdvertisementInterval.",
-            "Unsets the mrai field on a peer-group, reverting to unpaced advertisements.",
-        ),
-        Topic::SetBgpPeerGroupDamping => (
-            "Enable route flap damping on a peer-group.",
-            "Sets the damping block on an eBGP peer-group (RFC 2439; optional arguments `half-life <s>`, `reuse <n>`, `suppress <n>`, `max-suppress <s>` in any order): each withdrawal of a route \
-             received from a peer in this group adds 1000 to that prefix's penalty (500 for an \
-             attribute change), the penalty halves every half-life seconds, the route is \
-             suppressed while it is at or above suppress and released once it decays below \
-             reuse, and max-suppress caps how long a route can stay suppressed. Unset values \
-             default to RFC 7196's recommendation (half-life 900, reuse 750, suppress 6000, \
-             max-suppress 3600).",
-        ),
-        Topic::ClearBgpPeerGroupDamping => (
-            "Disable route flap damping on a peer-group.",
-            "Unsets the damping block on a peer-group; every route it receives is used as soon \
-             as it arrives.",
-        ),
-        Topic::SetBgpPeerGroupMd5Auth => (
-            "Set a peer-group's BGP MD5 password.",
-            "Sets a single RFC 2385 TCP MD5 signature password on a peer-group's sessions, \
-             replacing any TCP-AO keys that were set — the two mechanisms are mutually \
-             exclusive, since the kernel accepts only one per socket. Stored clear-text, like \
-             every other field in this config.",
-        ),
-        Topic::SetBgpPeerGroupAoKey => (
-            "Set (or replace) one of a peer-group's TCP-AO keys.",
-            "Adds one RFC 5925 TCP-AO key to a peer-group, identified by its send-id — adding a \
-             key with a send-id that already exists replaces it in place. If the peer-group's \
-             auth wasn't already TCP-AO (unset, or an MD5 password), this starts a fresh key \
-             list containing just this key. Exactly one key across the whole list must be \
-             marked current, and at most one may be marked rnext, for the peer-group to \
-             validate at commit time — see set-bgp-peer-group-ao-current-key/rnext-key. Stored \
-             clear-text, like every other field in this config.",
-        ),
-        Topic::RemoveBgpPeerGroupAoKey => (
-            "Remove one of a peer-group's TCP-AO keys by send-id.",
-            "Removes one TCP-AO key from a peer-group's key list by send-id; a no-op if the \
-             peer-group's auth isn't TCP-AO or no key has that send-id. Does not clear the \
-             peer-group's auth back to unset even if the list becomes empty — an empty TCP-AO \
-             key list fails commit-time validation, so clear the auth explicitly instead if \
-             that's the intent.",
-        ),
-        Topic::SetBgpPeerGroupAoCurrentKey => (
-            "Mark one of a peer-group's TCP-AO keys as current.",
-            "Marks the TCP-AO key with the given send-id as the current key — the one actively \
-             signing outgoing segments — clearing that flag on every other key in the same \
-             peer-group. Fails if the peer-group's auth isn't TCP-AO or no key has that \
-             send-id.",
-        ),
-        Topic::SetBgpPeerGroupAoRnextKey => (
-            "Mark one of a peer-group's TCP-AO keys as rnext.",
-            "Marks the TCP-AO key with the given send-id as the rnext key — a hint requesting \
-             the peer switch to it next, for key rotation without dropping the session — \
-             clearing that flag on every other key in the same peer-group. Fails if the \
-             peer-group's auth isn't TCP-AO or no key has that send-id.",
-        ),
-        Topic::ClearBgpPeerGroupAuth => (
-            "Clear a peer-group's BGP session authentication.",
-            "Unsets the auth field on a peer-group entirely, regardless of which mechanism \
-             (MD5 password or TCP-AO keys) was set, reverting sessions to no transport \
-             authentication.",
-        ),
-        Topic::SetBgpPeerGroupNextHop => (
-            "Set a peer-group's advertised BGP next-hop mode.",
-            "Sets the next-hop field on a peer-group to either 'self' (rewrite the NEXT_HOP \
-             attribute to this router's own address on every advertisement — the standard \
-             eBGP default) or 'unchanged' (preserve the next-hop the route already carries \
-             — the standard iBGP default, avoiding the third-party-next-hop problem). \
-             Overrides the mode this peer-group would otherwise default to based on whether \
-             it's eBGP or iBGP (remote-as compared to the instance's own asn).",
-        ),
-        Topic::ClearBgpPeerGroupNextHop => (
-            "Clear a peer-group's advertised BGP next-hop mode override.",
-            "Unsets the next-hop field on a peer-group, reverting to the default: 'self' for \
-             an eBGP peer-group, 'unchanged' for an iBGP one.",
-        ),
-        Topic::SetBgpPeerGroupRouteReflectorClient => (
-            "Mark a peer-group as an RFC 4456 route-reflector client.",
-            "Routes learned from any iBGP peer are reflected to this peer-group's sessions \
-             (and routes learned from this peer-group are reflected to every other iBGP \
-             peer), instead of being withheld by the usual iBGP split-horizon rule. Requires \
-             an iBGP peer-group (remote-as equal to the instance's own asn) and is mutually \
-             exclusive with route-server-client; both are checked at commit time.",
-        ),
-        Topic::ClearBgpPeerGroupRouteReflectorClient => (
-            "Unmark a peer-group as a route-reflector client.",
-            "Reverts this peer-group to the standard iBGP split-horizon rule: routes learned \
-             from one iBGP peer are never re-advertised to another.",
-        ),
-        Topic::SetBgpPeerGroupRouteServerClient => (
-            "Mark a peer-group as an RFC 7947 route-server client.",
-            "This peer-group's own ASN is never prepended to AS_PATH when advertising to it, \
-             and — via RFC 7911 ADD-PATH, if the peer negotiates it — it receives every other \
-             route-server-client's path for a prefix, not just the one instance-wide elected \
-             best path. Requires an eBGP peer-group (remote-as different from the instance's \
-             own asn) and is mutually exclusive with route-reflector-client; both are checked \
-             at commit time.",
-        ),
-        Topic::ClearBgpPeerGroupRouteServerClient => (
-            "Unmark a peer-group as a route-server client.",
-            "Reverts this peer-group to ordinary eBGP advertisement: the instance's own ASN \
-             is prepended to AS_PATH as usual, and only the single elected best path is sent.",
-        ),
-        Topic::SetBgpInstanceClusterId => (
-            "Set a BGP instance's RFC 4456 route-reflector cluster ID.",
-            "Sets the cluster-id field on a BGP instance, written into the CLUSTER_LIST \
-             attribute of every route this instance reflects. Only meaningful when at least \
-             one peer-group has route-reflector-client set; multiple route reflectors serving \
-             the same cluster should share the same cluster-id for correct loop detection.",
-        ),
-        Topic::ClearBgpInstanceClusterId => (
-            "Clear a BGP instance's route-reflector cluster ID override.",
-            "Unsets the cluster-id field, reverting to the default: this instance's own \
-             router-id.",
-        ),
-        Topic::EnsureBroadcastDomain => (
+        Topic::BroadcastDomain => (
             "Create a broadcast domain in the transaction if it doesn't already exist.",
-            "Adds a new broadcast domain with the given name to the transaction's in-progress \
+            concat!(
+                "Adds a new broadcast domain with the given name to the transaction's in-progress \
              config if none exists with that name yet; if one already exists, this is a \
              no-op. Does not itself set any addresses or a routing table — a switching \
              profile's members reference the domain for L2 membership, while its own \
              addresses/routing-table (set separately) make its bridge device an SVI (switch \
              virtual interface), a routed L3 attachment point for the domain as a whole.",
+                " ",
+                "Delete a broadcast domain from the transaction.",
+            ),
         ),
-        Topic::DeleteBroadcastDomain => (
-            "Delete a broadcast domain from the transaction.",
-            "Removes a broadcast domain, along with any addresses/routing-table association it \
-             carries, from the transaction's in-progress config. Any switching profile still \
-             referencing it becomes invalid — checked at commit time, not when the broadcast \
-             domain is deleted.",
-        ),
-        Topic::AddBroadcastDomainAddress => (
+        Topic::BroadcastDomainAddress => (
             "Add an IP address to a broadcast domain's SVI.",
-            "Adds an address to a broadcast domain's own address list if it isn't already \
+            concat!(
+                "Adds an address to a broadcast domain's own address list if it isn't already \
              present — a no-op if it is. Any number of addresses may be carried, including a \
              mix of IPv4 and IPv6; a given address must not repeat on the same domain, checked \
              at commit time. This addresses the domain's own bridge device (its SVI), not any \
              interface enslaved into it as an L2 member.",
+                " ",
+                "Remove an IP address from a broadcast domain's SVI.",
+            ),
         ),
-        Topic::RemoveBroadcastDomainAddress => (
-            "Remove an IP address from a broadcast domain's SVI.",
-            "Removes an address from a broadcast domain's address list in the transaction's \
-             in-progress config.",
-        ),
-        Topic::SetBroadcastDomainRoutingTable => (
+        Topic::BroadcastDomainRoutingTable => (
             "Associate a routing table with a broadcast domain's SVI.",
-            "Points a broadcast domain's own bridge device at a routing table by name, which \
+            concat!(
+                "Points a broadcast domain's own bridge device at a routing table by name, which \
              doubles as its VRF assignment. The routing table must exist, checked at commit \
              time; as with an interface, more than one broadcast domain (or interface) may be \
              associated with the same routing table.",
+                " ",
+                "Remove a broadcast domain's routing table association.",
+            ),
         ),
-        Topic::ClearBroadcastDomainRoutingTable => (
-            "Remove a broadcast domain's routing table association.",
-            "Unsets the routing-table field on a broadcast domain, reverting to no explicit \
-             association.",
-        ),
-        Topic::SetBroadcastDomainVni => (
+        Topic::BroadcastDomainVni => (
             "Give a broadcast domain a VXLAN Network Identifier (EVPN).",
             "Setting a VNI (1-16777215) makes nos-watchdogd run a nos-fdbd for the domain, \
              which creates a VXLAN device enslaved into the domain's bridge and programs its \
              forwarding database. rd, route-target, vtep-source and redistribute all require \
              it. `delete` clears it, which stops nos-fdbd and removes the VXLAN device.",
         ),
-        Topic::SetBroadcastDomainRd => (
+        Topic::BroadcastDomainRd => (
             "Set a broadcast domain's EVPN Route Distinguisher.",
             "Written asn:nn or a.b.c.d:nn (with a 4-byte asn or an address, nn must fit 16 \
              bits). Carried on every EVPN route the domain originates. Requires a vni.",
         ),
-        Topic::AddBroadcastDomainRouteTarget => (
+        Topic::BroadcastDomainRouteTarget => (
             "Add an EVPN Route Target to a broadcast domain's import or export list.",
             "`import`: a received EVPN route is installed into the domain's forwarding \
              database only if it carries at least one of these. `export`: attached to every \
              EVPN route the domain originates. Written asn:nn or a.b.c.d:nn; adding one \
              already present is a no-op, and `delete` removes one. Requires a vni.",
         ),
-        Topic::SetBroadcastDomainVtepSource => (
+        Topic::BroadcastDomainVtepSource => (
             "Set the address a broadcast domain's VXLAN tunnels are sourced from.",
             "Names an interface (and, when it carries several addresses, the label of the one \
              to use) or `loopback` — the loopback of the routing table owning the BGP \
@@ -593,7 +627,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              address is retried rather than rejected at commit. It is also the next-hop of \
              every EVPN route the domain originates. Requires a vni.",
         ),
-        Topic::SetBroadcastDomainMacRedistribute => (
+        Topic::BroadcastDomainMacRedistribute => (
             "Redistribute a broadcast domain's MAC addresses into a BGP instance (EVPN).",
             "`redistribute from mac to bgp <instance>`: nos-fdbd originates an EVPN Type-2 \
              (MAC advertisement) route per MAC learned locally on the domain's bridge and a \
@@ -602,7 +636,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              installed into the domain's forwarding database. Requires a vni, an rd and a \
              vtep-source; the peer-group must have `address-family l2vpn-evpn`.",
         ),
-        Topic::SetBroadcastDomainArpRedistribute => (
+        Topic::BroadcastDomainArpRedistribute => (
             "Also originate a broadcast domain's ARP/ND neighbours as EVPN MAC+IP routes.",
             "`redistribute from arp to bgp <instance>`: every IPv4 ARP / IPv6 ND neighbour \
              (link-local addresses excluded) on the domain's bridge is originated as an EVPN \
@@ -610,67 +644,48 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              `redistribute from mac`. Received Type-2 routes with an IP are programmed as \
              kernel neighbours on the bridge.",
         ),
-        Topic::SetBroadcastDomainConnectedRedistribute => (
+        Topic::BroadcastDomainConnectedRedistribute => (
             "Originate a broadcast domain's own (SVI) addresses as EVPN MAC+IP routes.",
             "`redistribute from connected to bgp <instance>`: each of the domain's own \
              `address`es (its SVI, link-local excluded) is originated as an EVPN Type-2 route \
              carrying the bridge's MAC and that IP. The instance must be the one named by \
              `redistribute from mac`.",
         ),
-        Topic::EnsureSwitchingProfile => (
+        Topic::SwitchingProfile => (
             "Create a switching profile in the transaction if it doesn't already exist.",
-            "Adds a new switching profile with the given name to the transaction's \
+            concat!(
+                "Adds a new switching profile with the given name to the transaction's \
              in-progress config if none exists with that name yet; if one already exists, \
              this is a no-op. A switching profile is a trunk-style container — it maps \
              multiple broadcast domains to their dot1q tagging, added via a separate op.",
+                " ",
+                "Delete a switching profile from the transaction.",
+            ),
         ),
-        Topic::AddSwitchingProfileMember => (
+        Topic::SwitchingProfileMember => (
             "Add or retag a broadcast domain within a switching profile.",
-            "Associates a broadcast domain with the given tag (a dot1q VLAN, or untagged) \
+            concat!(
+                "Associates a broadcast domain with the given tag (a dot1q VLAN, or untagged) \
              within a switching profile — if the domain is already a member, its tag is \
              replaced. The referenced broadcast domain must exist, and no broadcast domain \
              may appear twice within the same profile; both are checked at commit time.",
+                " ",
+                "Remove a broadcast domain from a switching profile.",
+            ),
         ),
-        Topic::RemoveSwitchingProfileMember => (
-            "Remove a broadcast domain from a switching profile.",
-            "Removes the named broadcast domain's membership from the switching profile in \
-             the transaction's in-progress config.",
-        ),
-        Topic::DeleteSwitchingProfile => (
-            "Delete a switching profile from the transaction.",
-            "Removes a switching profile and all of its broadcast-domain memberships from the \
-             transaction's in-progress config.",
-        ),
-        Topic::SetInterfaceSwitchingProfile => (
-            "Associate a switching profile with an interface.",
-            "Points an interface at a switching profile by name, trunking it into one or more \
-             broadcast domains. The switching profile must exist, checked at commit time. A \
-             tag claimed by one of the interface's own subinterfaces (an untagged/'.0' one \
-             claims tag 0, a '.<n>' one claims tag n) and a tag claimed by a switching-profile \
-             member (an untagged member claims tag 0, a dot1q member claims its tag) are \
-             mutually exclusive on the same interface — each tag's link has only one master \
-             device — checked at commit time.",
-        ),
-        Topic::ClearInterfaceSwitchingProfile => (
-            "Remove an interface's switching-profile association.",
-            "Unsets the switching-profile field on an interface, reverting to no explicit \
-             association.",
-        ),
-        Topic::EnsurePortAggregate => (
+        Topic::PortAggregate => (
             "Create a port aggregate in the transaction if it doesn't already exist.",
-            "Adds a new Linux bonding device with the given name and mode to the transaction's \
+            concat!(
+                "Adds a new Linux bonding device with the given name and mode to the transaction's \
              in-progress config if none exists with that name yet; if one already exists, this \
              is a no-op. An interface becomes a bonded member by pointing its own \
              port-aggregate field at this aggregate's name, the same way it points at a \
              switching profile for L2 trunking.",
+                " ",
+                "Delete a port aggregate from the transaction.",
+            ),
         ),
-        Topic::DeletePortAggregate => (
-            "Delete a port aggregate from the transaction.",
-            "Removes a port aggregate from the transaction's in-progress config. Any interface \
-             still pointing at it as its port-aggregate becomes invalid — checked at commit \
-             time, not when the aggregate is deleted.",
-        ),
-        Topic::SetPortAggregateMode => (
+        Topic::PortAggregateMode => (
             "Set a port aggregate's bonding mode.",
             "Updates the mode field on the named port aggregate in the transaction's \
              in-progress config. The aggregate must already exist. `xor` enslaves every member \
@@ -679,7 +694,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              once negotiation with the partner confirms it, and is released again if the \
              negotiation lapses.",
         ),
-        Topic::SetPortAggregateLacpRate => (
+        Topic::PortAggregateLacpRate => (
             "Set how fast a port aggregate's LACP partner is asked to send LACPDUs.",
             "Updates the lacp-rate field on the named port aggregate in the transaction's \
              in-progress config. The aggregate must already exist. `slow` asks the partner for \
@@ -688,7 +703,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              end transmits at the rate the *other* end asks for, so both ends need `fast` for \
              fast detection in both directions.",
         ),
-        Topic::SetPortAggregateEsi => (
+        Topic::PortAggregateEsi => (
             "Set the EVPN Ethernet Segment Identifier of a port aggregate.",
             "Sets the esi field on the named port aggregate: ten colon-separated hex bytes, not \
              all zero. Give the same value to the aggregate on every PE the customer device is \
@@ -698,7 +713,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              stop flooding to the aggregate). `delete` removes it. Two aggregates on one router \
              cannot share an ESI.",
         ),
-        Topic::SetPortAggregateLacpSystemId => (
+        Topic::PortAggregateLacpSystemId => (
             "Override a port aggregate's LACP Actor System ID.",
             "Sets the MAC address nos-lacpd advertises as the Actor System ID for the named \
              `lacp`-mode aggregate, instead of the one derived from this machine's identity. Use \
@@ -706,7 +721,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              sees one partner and bundles its links across them. Must be a unicast MAC. `delete` \
              goes back to the derived id.",
         ),
-        Topic::SetPortAggregateRedundancyMode => (
+        Topic::PortAggregateRedundancyMode => (
             "Set how the PEs sharing a port aggregate's Ethernet Segment divide the traffic.",
             "Sets the redundancy-mode of the named port aggregate: `all-active` (the default) lets \
              every PE forward unicast to the segment and only the Designated Forwarder flood BUM; \
@@ -716,124 +731,110 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              blocked port keeps its carrier, so a single-active customer device needs end-to-end \
              failure detection (for example an ARP-monitored active-backup bond) to move over.",
         ),
-        Topic::SetInterfacePortAggregate => (
-            "Associate an interface with a port aggregate as a bonded member.",
-            "Points an interface at a port aggregate by name, making it a bonded member. The \
-             port aggregate must exist, checked at commit time. A member interface must not \
-             also carry a switching-profile association or any subinterfaces — like VRF/bridge \
-             enslavement, bond enslavement claims the link's one Linux master device — checked \
-             at commit time.",
-        ),
-        Topic::ClearInterfacePortAggregate => (
-            "Remove an interface's port-aggregate association.",
-            "Unsets the port-aggregate field on an interface, reverting to no explicit bonded \
-             membership.",
-        ),
-        Topic::EnsureOspfInstance => (
+        Topic::OspfInstance => (
             "Create an OSPF instance in the transaction if it doesn't already exist.",
-            "Adds a new OSPF instance with the given name to the transaction's in-progress \
+            concat!(
+                "Adds a new OSPF instance with the given name to the transaction's in-progress \
              config if none exists with that name yet; if one already exists, this is a \
              no-op. Does not itself set any fields on the instance.",
+                " ",
+                "Delete an OSPF instance from the transaction.",
+            ),
         ),
-        Topic::SetOspfInstanceRouterId => (
+        Topic::OspfInstanceRouterId => (
             "Set an OSPF instance's router id.",
             "Updates the router-id field on the named OSPF instance in the transaction's \
              in-progress config. The instance must already exist.",
         ),
-        Topic::DeleteOspfInstance => (
-            "Delete an OSPF instance from the transaction.",
-            "Removes the named OSPF instance from the transaction's in-progress config.",
-        ),
-        Topic::SetRoutingTableOspfInstance => (
-            "Associate an OSPF instance with a routing table.",
-            "Points a routing table at an OSPF instance by name (the VRF that instance \
-             belongs to). The OSPF instance must exist, and at most one routing table may \
-             claim a given instance at a time — both checked at commit time.",
-        ),
-        Topic::ClearRoutingTableOspfInstance => (
-            "Remove a routing table's OSPF instance association.",
-            "Unsets the ospf-instance field on a routing table, reverting to no explicit \
-             association.",
-        ),
-        Topic::EnsureOspfArea => (
+        Topic::OspfArea => (
             "Create an OSPF area in the transaction if it doesn't already exist.",
-            "Adds a new area with the given dotted-quad area id to the named OSPF instance's \
+            concat!(
+                "Adds a new area with the given dotted-quad area id to the named OSPF instance's \
              area list if none exists with that id yet; if one already exists, this is a \
              no-op. Does not itself set any fields on the area.",
+                " ",
+                "Delete an OSPF area from an instance.",
+            ),
         ),
-        Topic::DeleteOspfArea => (
-            "Delete an OSPF area from an instance.",
-            "Removes the named area (and every profile nested under it) from the OSPF \
-             instance's area list.",
-        ),
-        Topic::EnsureOspfProfile => (
+        Topic::OspfProfile => (
             "Create an OSPF profile in the transaction if it doesn't already exist.",
-            "Adds a new profile with the given name to the named area's profile list if none \
+            concat!(
+                "Adds a new profile with the given name to the named area's profile list if none \
              exists with that name yet; if one already exists, this is a no-op. Profile names \
              are unique across the whole config, not just within their owning area, checked \
              at commit time.",
+                " ",
+                "Delete an OSPF profile from an area.",
+            ),
         ),
-        Topic::DeleteOspfProfile => (
-            "Delete an OSPF profile from an area.",
-            "Removes the named profile from the area's profile list. Any interface, \
-             subinterface, or broadcast domain still referencing it by name will fail \
-             commit-time validation until repointed or cleared.",
-        ),
-        Topic::SetOspfProfileHelloInterval => (
+        Topic::OspfProfileHelloInterval => (
             "Set an OSPF profile's Hello interval.",
-            "Sets the hello-interval field on a profile — how often nos-ospfd sends Hello \
+            concat!(
+                "Sets the hello-interval field on a profile — how often nos-ospfd sends Hello \
              packets on any link using it. When both hello-interval and dead-interval are set, \
              dead-interval must be strictly greater than hello-interval — checked at commit \
              time, not when the edit is applied.",
+                " ",
+                "Clear an OSPF profile's Hello interval.",
+            ),
         ),
-        Topic::ClearOspfProfileHelloInterval => (
-            "Clear an OSPF profile's Hello interval.",
-            "Unsets the hello-interval field on a profile, reverting to the default of 10 \
-             seconds.",
-        ),
-        Topic::SetOspfProfileDeadInterval => (
+        Topic::OspfProfileDeadInterval => (
             "Set an OSPF profile's router dead interval.",
-            "Sets the dead-interval field on a profile — how long nos-ospfd waits without a \
+            concat!(
+                "Sets the dead-interval field on a profile — how long nos-ospfd waits without a \
              Hello from a neighbor before declaring it down. Must be strictly greater than \
              hello-interval whenever both are explicitly set — checked at commit time, not \
              when the edit is applied.",
+                " ",
+                "Clear an OSPF profile's router dead interval.",
+            ),
         ),
-        Topic::ClearOspfProfileDeadInterval => (
-            "Clear an OSPF profile's router dead interval.",
-            "Unsets the dead-interval field on a profile, reverting to the default of 40 \
-             seconds.",
-        ),
-        Topic::SetOspfProfileCost => (
+        Topic::OspfProfileCost => (
             "Set an OSPF profile's interface cost.",
-            "Sets the cost field on a profile. This NOS has no SPF/LSDB yet, so this value has \
+            concat!(
+                "Sets the cost field on a profile. This NOS has no SPF/LSDB yet, so this value has \
              no behavioral effect today — it's stored and validated (1-65535) as a \
              forward-declared placeholder for a future SPF phase.",
+                " ",
+                "Clear an OSPF profile's interface cost.",
+            ),
         ),
-        Topic::ClearOspfProfileCost => (
-            "Clear an OSPF profile's interface cost.",
-            "Unsets the cost field on a profile. There is no default to revert to — the field \
-             simply becomes unset again.",
-        ),
-        Topic::SetOspfProfilePriority => (
+        Topic::OspfProfilePriority => (
             "Set an OSPF profile's Router Priority.",
-            "Sets the priority field on a profile — used by RFC 2328 §9.4 DR/BDR election on \
+            concat!(
+                "Sets the priority field on a profile — used by RFC 2328 §9.4 DR/BDR election on \
              a broadcast link (a priority of 0 makes a router ineligible to become DR/BDR); \
              sent on the wire, but functionally inert, on a point-to-point link.",
+                " ",
+                "Clear an OSPF profile's Router Priority.",
+            ),
         ),
-        Topic::ClearOspfProfilePriority => (
-            "Clear an OSPF profile's Router Priority.",
-            "Unsets the priority field on a profile, reverting to the default of 1.",
-        ),
-        Topic::SetOspfProfileMtu => (
+        Topic::OspfProfileMtu => (
             "Override the MTU OSPF believes this link has.",
-            "Sets the mtu field on a profile — what this NOS advertises in the DBD packet's own \
+            concat!(
+                "Sets the mtu field on a profile — what this NOS advertises in the DBD packet's own \
              interface_mtu field and uses to size DBD pagination for every attach point using \
              this profile, independent of the interface's real kernel MTU (mirrors real OSPF \
              implementations' mtu-bytes-style override). Left unset, the attach point's real \
              interface MTU (queried from nos-interfaced) is used instead, falling back to 1500 \
              if unavailable.",
+                " ",
+                "Clear an OSPF profile's MTU override.",
+            ),
         ),
-        Topic::SetOspfProfileExtendedSequenceNumbers => (
+        Topic::OspfProfileNetworkType => (
+            "Set an OSPF profile's network type.",
+            concat!(
+                "Sets the network-type field on a profile to point-to-point or broadcast, \
+             overriding the default that would otherwise be derived from each attach point's \
+             own kind (a subinterface defaults to point-to-point, a broadcast domain defaults \
+             to broadcast). Never validated against the attach point's actual kind — this NOS \
+             allows forcing either behavior on either kind of attach point, matching real OSPF.",
+                " ",
+                "Clear an OSPF profile's network type override.",
+            ),
+        ),
+        Topic::OspfProfileExtendedSequenceNumbers => (
             "Enable or disable RFC 7474 extended cryptographic sequence numbers.",
             "Sets extended-sequence-numbers on a profile. When enabled, every attach point using \
              this profile signs with authentication type 3: a 64-bit sequence number (a boot \
@@ -843,34 +844,23 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              md5), and both ends of a link must enable it — type 3 and type 2 packets are not \
              accepted by each other.",
         ),
-        Topic::ClearOspfProfileMtu => (
-            "Clear an OSPF profile's MTU override.",
-            "Unsets the mtu field on a profile, reverting to using the attach point's real \
-             interface MTU.",
+        Topic::OspfProfileAuth => (
+            "Clear an OSPF profile's authentication.",
+            "Unsets the auth field on a profile entirely, regardless of which mechanism \
+             (simple password or crypto keys) was set, reverting to RFC 2328 AuType 0 (no \
+             authentication).",
         ),
-        Topic::SetOspfProfileNetworkType => (
-            "Set an OSPF profile's network type.",
-            "Sets the network-type field on a profile to point-to-point or broadcast, \
-             overriding the default that would otherwise be derived from each attach point's \
-             own kind (a subinterface defaults to point-to-point, a broadcast domain defaults \
-             to broadcast). Never validated against the attach point's actual kind — this NOS \
-             allows forcing either behavior on either kind of attach point, matching real OSPF.",
-        ),
-        Topic::ClearOspfProfileNetworkType => (
-            "Clear an OSPF profile's network type override.",
-            "Unsets the network-type field on a profile, reverting to the default derived \
-             from each attach point's own kind.",
-        ),
-        Topic::SetOspfProfileSimpleAuth => (
+        Topic::OspfProfileSimplePassword => (
             "Set an OSPF profile's simple password.",
             "Sets a single RFC 2328 Appendix D.2 plaintext password (up to 8 bytes) on a \
              profile's Hello/DBD/LSR/LSU/LSAck packets, replacing any crypto keys that were set \
              — the two mechanisms are mutually exclusive. Stored clear-text, like every other \
              field in this config.",
         ),
-        Topic::SetOspfProfileCryptoKey => (
+        Topic::OspfProfileCryptoKey => (
             "Set (or replace) one of an OSPF profile's cryptographic auth keys.",
-            "Adds one RFC 2328 Appendix D.3 / RFC 5709 cryptographic auth key to a profile, \
+            concat!(
+                "Adds one RFC 2328 Appendix D.3 / RFC 5709 cryptographic auth key to a profile, \
              identified by its key-id and algorithm (md5, hmac-sha1, hmac-sha256, hmac-sha384, \
              or hmac-sha512) — adding a key with a key-id that already exists replaces it in \
              place. If the profile's auth wasn't already crypto (unset, or a simple password), \
@@ -878,40 +868,79 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              whole list must be marked current, for the profile to validate at commit time — \
              see set-ospf-profile-crypto-current-key. Stored clear-text, like every other field \
              in this config.",
+                " ",
+                "Remove one of an OSPF profile's cryptographic auth keys by key-id.",
+                " ",
+                "Mark one of an OSPF profile's cryptographic auth keys as current.",
+            ),
         ),
-        Topic::RemoveOspfProfileCryptoKey => (
-            "Remove one of an OSPF profile's cryptographic auth keys by key-id.",
-            "Removes one crypto key from a profile's key list by key-id; a no-op if the \
-             profile's auth isn't crypto or no key has that key-id. Does not clear the \
-             profile's auth back to unset even if the list becomes empty — an empty crypto key \
-             list fails commit-time validation, so clear the auth explicitly instead if that's \
-             the intent.",
+        Topic::Ospfv3Instance => (
+            "Create or delete an OSPFv3 instance.",
+            "An OSPFv3 (RFC 5340) routing process; nos-watchdogd runs one nos-ospfv3d per instance. `edit` creates it if missing and navigates into it; `delete` removes it with its areas and profiles.",
         ),
-        Topic::SetOspfProfileCryptoCurrentKey => (
-            "Mark one of an OSPF profile's cryptographic auth keys as current.",
-            "Marks the crypto key with the given key-id as the current key — the one actively \
-             signing outgoing packets — clearing that flag on every other key in the same \
-             profile. Every configured key, current or not, is still accepted on receive, \
-             looked up by the wire's own key-id — this is what allows graceful key rotation. \
-             Fails if the profile's auth isn't crypto or no key has that key-id.",
+        Topic::Ospfv3InstanceRouterId => (
+            "Set an OSPFv3 instance's router-id.",
+            "The dotted-quad identifier this OSPFv3 instance uses in its Hellos and LSAs; it must be unique across the OSPFv3 domain.",
         ),
-        Topic::ClearOspfProfileAuth => (
-            "Clear an OSPF profile's authentication.",
-            "Unsets the auth field on a profile entirely, regardless of which mechanism \
-             (simple password or crypto keys) was set, reverting to RFC 2328 AuType 0 (no \
-             authentication).",
+        Topic::Ospfv3InstanceExtendedLsa => (
+            "Originate RFC 8362 extended LSAs (Full mode).",
+            "Makes the instance originate and use the RFC 8362 E-Router/E-Link/E-Intra-Area-Prefix LSAs instead of the legacy formats. Every router in the area must agree. `delete` returns to legacy LSAs.",
         ),
-        Topic::SetInterfaceOspfProfile => (
-            "Associate an OSPF profile with an interface, subinterface, or broadcast domain.",
-            "Points a loopback interface, a physical interface's subinterface, or a broadcast \
-             domain's own SVI at an OSPF profile by name. The profile must exist, and the \
-             same attach point must also have a routing-table set — OSPF has no meaning \
-             without an L3/VRF context — both checked at commit time.",
+        Topic::Ospfv3Area => (
+            "Create or delete an OSPFv3 area.",
+            "An area of an OSPFv3 instance, identified by a dotted-quad area-id. `edit` creates it if missing and navigates into it; `delete` removes it with its profiles.",
         ),
-        Topic::ClearInterfaceOspfProfile => (
-            "Remove an OSPF profile association.",
-            "Unsets the ospf field on an interface, subinterface, or broadcast domain, \
-             reverting to no explicit association.",
+        Topic::Ospfv3Profile => (
+            "Create or delete an OSPFv3 profile.",
+            "A named set of OSPFv3 link settings (timers, cost, priority, network-type, mtu, authentication) that interfaces join with `ospfv3 <profile>`. Profile names are unique across every instance and area.",
+        ),
+        Topic::Ospfv3ProfileAuth => (
+            "Clear an OSPFv3 profile's authentication.",
+            "`delete` removes every RFC 7166 authentication-trailer key from the profile, so its packets are sent and accepted without a trailer.",
+        ),
+        Topic::Ospfv3ProfileCryptoKey => (
+            "Add, remove or select an RFC 7166 authentication-trailer key.",
+            "`crypto-key <sa-id> <algorithm> <key>` adds or replaces a key (SA ID 1-65535, an HMAC-SHA algorithm; md5 is not allowed); `crypto-key <sa-id> current` makes it the key that signs outgoing packets; `delete crypto-key <sa-id>` removes it.",
+        ),
+        Topic::PolicyDefinition => (
+            "Create or delete a routing policy.",
+            "A named RPL script that BGP peer-groups and redistribution rules reference as their import, export or redistribution policy. `edit` creates it (empty) if missing and navigates into it, where its source is edited; `delete` removes it.",
+        ),
+        Topic::PolicyDefinitionSource => (
+            "Set a routing policy's RPL source.",
+            "The whole RPL script, compiled at commit time: a script that doesn't compile, or doesn't end every path with accept or reject, is refused.",
+        ),
+        Topic::CommunityAlias => (
+            "Create or delete a community alias.",
+            "A name for one BGP community literal that routing policies can use in place of the literal. `edit` creates it if missing; `delete` removes it.",
+        ),
+        Topic::CommunityAliasValue => (
+            "Set the community a community alias stands for.",
+            "A standard (AA:NN), extended (type:subtype:value) or large (ga:ld1:ld2) community literal.",
+        ),
+        Topic::CommunityGroup => (
+            "Create or delete a community group.",
+            "A named set of community aliases and/or literals: a policy's `.contains(group)` matches if any member matches, and `.add`/`.remove` apply to every member. `edit` creates it if missing; `delete` removes it.",
+        ),
+        Topic::CommunityGroupMember => (
+            "Add or remove a member of a community group.",
+            "A member is a community alias name or a community literal.",
+        ),
+        Topic::PrefixList => (
+            "Create or delete a prefix list.",
+            "A named set of prefix entries a policy matches with `this.prefix in <name>`. `edit` creates it if missing; `delete` removes it.",
+        ),
+        Topic::PrefixListEntry => (
+            "Add or remove a prefix-list entry.",
+            "A bare CIDR matches that exact prefix only. `range <min> <max>` matches any prefix inside the CIDR whose length is within [min, max]; `orlonger` is the CIDR's own length up to the maximum, and `upto <max>` its own length up to <max>.",
+        ),
+        Topic::AsPathList => (
+            "Create or delete an AS-path list.",
+            "A named set of AS-path regular expressions a policy matches with `this.bgp.as_path in <name>`: the route matches if any pattern does. `edit` creates it if missing; `delete` removes it.",
+        ),
+        Topic::AsPathListPattern => (
+            "Add or remove an AS-path list pattern.",
+            "A regular expression matched against the AS path rendered as space-separated ASNs, where `_` matches the start, the end, or a space.",
         ),
     };
     CommandDoc {
@@ -929,146 +958,10 @@ mod tests {
     /// `nos-proto`) purely so this test can enumerate them — no client
     /// needs the full list, since `Request::Describe` is scoped to one
     /// topic at a time.
-    const ALL_TOPICS: &[Topic] = &[
-        Topic::ShowRunningConfig,
-        Topic::Save,
-        Topic::OpenTransaction,
-        Topic::GetTransaction,
-        Topic::CommitTransaction,
-        Topic::DiscardTransaction,
-        Topic::DiffTransaction,
-        Topic::EnsureBgpInstance,
-        Topic::SetBgpInstanceAsn,
-        Topic::SetBgpInstanceRouterId,
-        Topic::DeleteBgpInstance,
-        Topic::SetHostname,
-        Topic::EnsureBgpPeerGroup,
-        Topic::SetBgpPeerGroupRemoteAs,
-        Topic::SetBgpPeerGroupSourceAddress,
-        Topic::ClearBgpPeerGroupSourceAddress,
-        Topic::AddBgpPeerGroupAddressFamily,
-        Topic::RemoveBgpPeerGroupAddressFamily,
-        Topic::DeleteBgpPeerGroup,
-        Topic::SetBgpPeer,
-        Topic::DeleteBgpPeer,
-        Topic::EnsureRoutingTable,
-        Topic::SetRoutingTableBgpInstance,
-        Topic::ClearRoutingTableBgpInstance,
-        Topic::SetRoutingTableStaticRoutingInstance,
-        Topic::ClearRoutingTableStaticRoutingInstance,
-        Topic::SetRoutingTableRedistribute,
-        Topic::ClearRoutingTableRedistribute,
-        Topic::DeleteRoutingTable,
-        Topic::EnsureStaticRoutingInstance,
-        Topic::DeleteStaticRoutingInstance,
-        Topic::SetStaticRoute,
-        Topic::DeleteStaticRoute,
-        Topic::EnsureInterface,
-        Topic::AddInterfaceAddress,
-        Topic::RemoveInterfaceAddress,
-        Topic::SetInterfaceRoutingTable,
-        Topic::ClearInterfaceRoutingTable,
-        Topic::SetInterfaceMtu,
-        Topic::ClearInterfaceMtu,
-        Topic::SetInterfaceLldpTransmit,
-        Topic::SetInterfaceLldpReceive,
-        Topic::SetInterfaceLldpDestination,
-        Topic::SetLldpTxInterval,
-        Topic::SetLldpTxHold,
-        Topic::SetLldpManagementAddress,
-        Topic::DeleteInterface,
-        Topic::SetBgpPeerGroupHoldTime,
-        Topic::ClearBgpPeerGroupHoldTime,
-        Topic::SetBgpPeerGroupKeepaliveInterval,
-        Topic::ClearBgpPeerGroupKeepaliveInterval,
-        Topic::SetBgpPeerGroupConnectRetryTime,
-        Topic::ClearBgpPeerGroupConnectRetryTime,
-        Topic::SetBgpPeerGroupMrai,
-        Topic::ClearBgpPeerGroupMrai,
-        Topic::SetBgpPeerGroupMaxHops,
-        Topic::ClearBgpPeerGroupMaxHops,
-        Topic::SetBgpPeerGroupShutdown,
-        Topic::ClearBgpPeerGroupShutdown,
-        Topic::SetBgpPeerShutdown,
-        Topic::ClearBgpPeerShutdown,
-        Topic::SetBgpPeerGroupDamping,
-        Topic::ClearBgpPeerGroupDamping,
-        Topic::SetBgpPeerGroupMd5Auth,
-        Topic::SetBgpPeerGroupAoKey,
-        Topic::RemoveBgpPeerGroupAoKey,
-        Topic::SetBgpPeerGroupAoCurrentKey,
-        Topic::SetBgpPeerGroupAoRnextKey,
-        Topic::ClearBgpPeerGroupAuth,
-        Topic::SetBgpPeerGroupNextHop,
-        Topic::ClearBgpPeerGroupNextHop,
-        Topic::SetBgpPeerGroupRouteReflectorClient,
-        Topic::ClearBgpPeerGroupRouteReflectorClient,
-        Topic::SetBgpPeerGroupRouteServerClient,
-        Topic::ClearBgpPeerGroupRouteServerClient,
-        Topic::SetBgpInstanceClusterId,
-        Topic::ClearBgpInstanceClusterId,
-        Topic::EnsureBroadcastDomain,
-        Topic::SetBroadcastDomainVni,
-        Topic::SetBroadcastDomainRd,
-        Topic::AddBroadcastDomainRouteTarget,
-        Topic::SetBroadcastDomainVtepSource,
-        Topic::SetBroadcastDomainMacRedistribute,
-        Topic::SetBroadcastDomainArpRedistribute,
-        Topic::SetBroadcastDomainConnectedRedistribute,
-        Topic::DeleteBroadcastDomain,
-        Topic::AddBroadcastDomainAddress,
-        Topic::RemoveBroadcastDomainAddress,
-        Topic::SetBroadcastDomainRoutingTable,
-        Topic::ClearBroadcastDomainRoutingTable,
-        Topic::EnsureSwitchingProfile,
-        Topic::AddSwitchingProfileMember,
-        Topic::RemoveSwitchingProfileMember,
-        Topic::DeleteSwitchingProfile,
-        Topic::SetInterfaceSwitchingProfile,
-        Topic::ClearInterfaceSwitchingProfile,
-        Topic::EnsurePortAggregate,
-        Topic::DeletePortAggregate,
-        Topic::SetPortAggregateMode,
-        Topic::SetPortAggregateLacpRate,
-        Topic::SetPortAggregateEsi,
-        Topic::SetPortAggregateLacpSystemId,
-        Topic::SetPortAggregateRedundancyMode,
-        Topic::SetInterfacePortAggregate,
-        Topic::ClearInterfacePortAggregate,
-        Topic::EnsureOspfInstance,
-        Topic::SetOspfInstanceRouterId,
-        Topic::DeleteOspfInstance,
-        Topic::SetRoutingTableOspfInstance,
-        Topic::ClearRoutingTableOspfInstance,
-        Topic::EnsureOspfArea,
-        Topic::DeleteOspfArea,
-        Topic::EnsureOspfProfile,
-        Topic::DeleteOspfProfile,
-        Topic::SetInterfaceOspfProfile,
-        Topic::ClearInterfaceOspfProfile,
-        Topic::SetOspfProfileHelloInterval,
-        Topic::ClearOspfProfileHelloInterval,
-        Topic::SetOspfProfileDeadInterval,
-        Topic::ClearOspfProfileDeadInterval,
-        Topic::SetOspfProfileCost,
-        Topic::ClearOspfProfileCost,
-        Topic::SetOspfProfilePriority,
-        Topic::ClearOspfProfilePriority,
-        Topic::SetOspfProfileMtu,
-        Topic::ClearOspfProfileMtu,
-        Topic::SetOspfProfileExtendedSequenceNumbers,
-        Topic::SetOspfProfileNetworkType,
-        Topic::ClearOspfProfileNetworkType,
-        Topic::SetOspfProfileSimpleAuth,
-        Topic::SetOspfProfileCryptoKey,
-        Topic::RemoveOspfProfileCryptoKey,
-        Topic::SetOspfProfileCryptoCurrentKey,
-        Topic::ClearOspfProfileAuth,
-    ];
 
     #[test]
     fn every_topic_has_non_empty_doc() {
-        for &topic in ALL_TOPICS {
+        for &topic in Topic::ALL {
             let doc = command_doc(topic);
             assert_eq!(doc.topic, topic);
             assert!(!doc.summary.is_empty(), "{topic:?} has empty summary");

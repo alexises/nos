@@ -8,6 +8,9 @@ use crate::validators::{
 };
 
 use super::{Config, LldpDestination, VlanTag};
+use nos_proto_derive::Cli;
+
+use super::sugar;
 
 /// Any `Interface.name` starting with this prefix is a loopback interface
 /// for the routing table named by the rest of the string (e.g.
@@ -31,10 +34,12 @@ pub fn loopback_table_name(name: &str) -> Option<&str> {
 /// stored from commit time onward but not yet applied to the kernel by any
 /// driver (no `ip addr ... label` call) — schema/plumbing only for now.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Cli, Default)]
 pub struct InterfaceAddress {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(key)]
     pub address: IpNet,
+    #[cli(topic = InterfaceAddress)]
     pub label: Option<String>,
 }
 
@@ -50,16 +55,19 @@ pub struct InterfaceAddress {
 /// `valid_subinterface_and_switching_profile_tags`. Loopback interfaces
 /// never have any `Subinterface`s — see `valid_addressing_split`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct Subinterface {
     #[garde(custom(|t: &u16, _ctx: &Config| valid_subinterface_tag(*t)))]
+    #[cli(key)]
     pub tag: u16,
 
     #[garde(custom(|addrs, _ctx: &Config| unique_addresses(addrs)))]
+    #[cli(topic = InterfaceAddress)]
     pub addresses: Vec<InterfaceAddress>,
 
     #[garde(custom(|rt: &Option<String>, ctx: &Config| routing_table_reference_valid(rt.as_ref(), ctx)))]
+    #[cli(topic = InterfaceRoutingTable)]
     pub routing_table: Option<String>,
 
     /// If set, names an `OspfProfile` this subinterface joins OSPF under.
@@ -67,6 +75,7 @@ pub struct Subinterface {
     /// has no meaning without an L3/VRF context, see
     /// `valid_subinterface_ospf_profile_requires_routing_table`.
     #[garde(custom(|p: &Option<String>, ctx: &Config| ospf_profile_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = InterfaceOspfProfile, words = "ospf")]
     pub ospf_profile: Option<String>,
 
     /// Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — a
@@ -75,6 +84,7 @@ pub struct Subinterface {
     /// routinely). Also requires `routing_table` set on this same
     /// subinterface — see `valid_subinterface_ospf_profile_requires_routing_table`.
     #[garde(custom(|p: &Option<String>, ctx: &Config| ospfv3_profile_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = InterfaceOspfv3Profile, words = "ospfv3")]
     pub ospfv3_profile: Option<String>,
 }
 
@@ -157,19 +167,22 @@ pub(crate) fn valid_subinterface_list(subinterfaces: &[Subinterface]) -> garde::
 /// fields — the same reason `RoutingTable`'s redistribute rule is wired on
 /// `Config.routing_tables`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct Interface {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| interface_name_valid(n, ctx))
     )]
+    #[cli(key)]
     pub name: String,
 
     #[garde(custom(|addrs, _ctx: &Config| unique_addresses(addrs)))]
+    #[cli(topic = InterfaceAddress)]
     pub addresses: Vec<InterfaceAddress>,
 
     #[garde(custom(|rt: &Option<String>, ctx: &Config| routing_table_reference_valid(rt.as_ref(), ctx)))]
+    #[cli(topic = InterfaceRoutingTable)]
     pub routing_table: Option<String>,
 
     /// If set, names an `OspfProfile` this loopback interface joins OSPF
@@ -178,15 +191,18 @@ pub struct Interface {
     /// interface — its OSPF attachment lives on a `Subinterface` instead,
     /// like `routing_table`.
     #[garde(custom(|p: &Option<String>, ctx: &Config| ospf_profile_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = InterfaceOspfProfile, words = "ospf")]
     pub ospf_profile: Option<String>,
 
     /// Same shape as `ospf_profile`, joining `OSPFv3` (RFC 5340) instead — see
     /// `Subinterface.ospfv3_profile`'s doc comment for why this is a
     /// separate field rather than a widened `ospf_profile`.
     #[garde(custom(|p: &Option<String>, ctx: &Config| ospfv3_profile_reference_valid(p.as_ref(), ctx)))]
+    #[cli(topic = InterfaceOspfv3Profile, words = "ospfv3")]
     pub ospfv3_profile: Option<String>,
 
     #[garde(custom(|sp: &Option<String>, ctx: &Config| switching_profile_reference_valid(sp.as_ref(), ctx)))]
+    #[cli(topic = InterfaceSwitchingProfile)]
     pub switching_profile: Option<String>,
 
     /// If set, names a `PortAggregate` this interface is a static bonded
@@ -195,6 +211,7 @@ pub struct Interface {
     /// can only have one Linux master device. See
     /// `valid_port_aggregate_membership`.
     #[garde(custom(|pa: &Option<String>, ctx: &Config| port_aggregate_reference_valid(pa.as_ref(), ctx)))]
+    #[cli(topic = InterfacePortAggregate)]
     pub port_aggregate: Option<String>,
 
     /// The link's MTU, in bytes. A link-layer property of the physical (or
@@ -205,6 +222,7 @@ pub struct Interface {
     /// kernel link already has untouched (`nos-interfaced`'s Linux driver
     /// never resets it to a default) rather than forcing 1500.
     #[garde(custom(|m: &Option<u32>, _ctx: &Config| valid_mtu(*m)))]
+    #[cli(topic = InterfaceMtu)]
     pub mtu: Option<u32>,
 
     /// Whether `nos-lldpd` transmits LLDPDUs (IEEE 802.1AB) on this link.
@@ -212,21 +230,31 @@ pub struct Interface {
     /// so on-disk config saved before this field existed still loads.
     #[serde(default)]
     #[garde(skip)]
+    #[cli(topic = InterfaceLldpTransmit, words = "lldp transmit")]
     pub lldp_transmit: bool,
 
     /// Whether `nos-lldpd` receives and records neighbors' LLDPDUs on this
     /// link. Independent of `lldp_transmit`.
     #[serde(default)]
     #[garde(skip)]
+    #[cli(topic = InterfaceLldpReceive, words = "lldp receive")]
     pub lldp_receive: bool,
 
     /// Which 802.1AB destination group this link's LLDPDUs use. Both ends
     /// must agree. Physical interfaces only — see `valid_lldp_physical_only`.
     #[serde(default)]
     #[garde(skip)]
+    #[cli(topic = InterfaceLldpDestination, words = "lldp destination")]
     pub lldp_destination: LldpDestination,
 
     #[garde(dive, custom(|subs, _ctx: &Config| valid_subinterface_list(subs)))]
+    #[cli(
+        topic = Subinterface,
+        sugar(word = "address", with = sugar::untagged_address, topic = InterfaceAddress),
+        sugar(word = "routing-table", with = sugar::untagged_routing_table, topic = InterfaceRoutingTable),
+        sugar(word = "ospf", with = sugar::untagged_ospf, topic = InterfaceOspfProfile),
+        sugar(word = "ospfv3", with = sugar::untagged_ospfv3, topic = InterfaceOspfv3Profile)
+    )]
     pub subinterfaces: Vec<Subinterface>,
 }
 

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::validators::unique_in;
 
 use super::Config;
+use nos_proto_derive::Cli;
 
 /// A named set of AS-path regexes, referenced by bare name from an RPL
 /// script's `this.bgp.as_path in NAME`. Each pattern is matched against the
@@ -11,16 +12,18 @@ use super::Config;
 /// boundary (see `nos_rpl::AsPathRegexes`); the list matches if ANY pattern
 /// does.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct AsPathList {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| unique_in(n, &ctx.as_path_lists, |l| &l.name))
     )]
+    #[cli(key)]
     pub name: String,
 
     #[garde(custom(|p: &Vec<String>, _ctx: &Config| valid_patterns(p)))]
+    #[cli(topic = AsPathListPattern)]
     pub patterns: Vec<String>,
 }
 

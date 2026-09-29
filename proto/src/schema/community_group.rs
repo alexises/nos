@@ -5,6 +5,7 @@ use crate::validators::unique_in;
 
 use super::community_alias::valid_community_value;
 use super::Config;
+use nos_proto_derive::Cli;
 
 /// A named, flat set of `community-alias` names and/or inline literals,
 /// referenced by bare name from an RPL script the same way a
@@ -14,16 +15,18 @@ use super::Config;
 /// literal, never another group's name (not requested, see root
 /// `CLAUDE.md`'s RPL section).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct CommunityGroup {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| unique_in(n, &ctx.community_groups, |g| &g.name))
     )]
+    #[cli(key)]
     pub name: String,
 
     #[garde(custom(|m: &Vec<String>, ctx: &Config| valid_members(m, ctx)))]
+    #[cli(topic = CommunityGroupMember)]
     pub members: Vec<String>,
 }
 

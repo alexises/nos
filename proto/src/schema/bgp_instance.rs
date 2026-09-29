@@ -7,33 +7,39 @@ use crate::validators::unique_in;
 
 use super::bgp_peer_group;
 use super::{BgpPeer, BgpPeerGroup, Config};
+use nos_proto_derive::Cli;
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct BgpInstance {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| unique_in(n, &ctx.bgp_instances, |i| &i.name))
     )]
+    #[cli(key)]
     pub name: String,
 
     // Ipv4Addr is structurally valid by construction; no additional garde rule needed.
     #[garde(skip)]
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(topic = BgpInstanceRouterId)]
     pub router_id: Ipv4Addr,
 
     // RFC 6793: ASN 0 and 4_294_967_295 are reserved.
     #[garde(range(min = 1, max = 4_294_967_294u32))]
+    #[cli(topic = BgpInstanceAsn)]
     pub asn: u32,
 
     #[garde(
         dive,
         custom(|groups, _ctx: &Config| bgp_peer_group::valid_peer_group_timers(groups))
     )]
+    #[cli(topic = BgpPeerGroup)]
     pub peer_groups: Vec<BgpPeerGroup>,
 
     #[garde(dive)]
+    #[cli(topic = BgpPeer)]
     pub peers: Vec<BgpPeer>,
 
     /// RFC 4456 route reflector cluster id. `None` resolves to this
@@ -42,6 +48,7 @@ pub struct BgpInstance {
     /// `route_reflector_client` set; harmless (unused) otherwise.
     #[garde(skip)]
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[cli(topic = BgpInstanceClusterId)]
     pub cluster_id: Option<Ipv4Addr>,
 
     /// The name of the `RoutingTable` that claims this instance (i.e. the
@@ -53,6 +60,7 @@ pub struct BgpInstance {
     /// reads this directly to resolve its own VRF without scanning every
     /// routing table. Deliberately not rendered by `nos-cli`.
     #[garde(skip)]
+    #[cli(hidden)]
     pub routing_table: Option<String>,
 
     /// The name of the RPL policy filtering routes redistributed into this
@@ -64,7 +72,24 @@ pub struct BgpInstance {
     /// resolve its own redistribution policy without scanning every routing
     /// table. Deliberately not rendered by `nos-cli`.
     #[garde(skip)]
+    #[cli(hidden)]
     pub redistribute_policy: Option<String>,
+}
+
+/// The placeholder a new `BgpInstance` starts from (`edit` on a missing one).
+impl Default for BgpInstance {
+    fn default() -> Self {
+        BgpInstance {
+            name: String::new(),
+            router_id: Ipv4Addr::UNSPECIFIED,
+            asn: 0,
+            peer_groups: Vec::new(),
+            peers: Vec::new(),
+            cluster_id: None,
+            routing_table: None,
+            redistribute_policy: None,
+        }
+    }
 }
 
 /// Cross-instance check needing both `BgpInstance.asn` and a sibling

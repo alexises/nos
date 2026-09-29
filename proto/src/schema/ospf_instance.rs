@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::validators::unique_in;
 
 use super::{Config, OspfArea};
+use nos_proto_derive::Cli;
 
 /// A named OSPF instance. Basic configuration only today — `router_id`, the
 /// routing-table (VRF) association mirroring `BgpInstance`'s own minimal
@@ -13,22 +14,25 @@ use super::{Config, OspfArea};
 /// beyond what a nested area's profiles can be attached to yet, and no wire
 /// protocol — this is a config-only skeleton, see `ospf/CLAUDE.md`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct OspfInstance {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| unique_in(n, &ctx.ospf_instances, |i| &i.name))
     )]
+    #[cli(key)]
     pub name: String,
 
     // Ipv4Addr is structurally valid by construction; no additional garde rule needed.
     #[garde(skip)]
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(topic = OspfInstanceRouterId)]
     pub router_id: Ipv4Addr,
 
     /// This instance's OSPF areas, keyed by `area_id` — see `OspfArea`.
     #[garde(dive, custom(|areas, _ctx: &Config| unique_area_ids(areas)))]
+    #[cli(topic = OspfArea)]
     pub areas: Vec<OspfArea>,
 
     /// The name of the `RoutingTable` that claims this instance (i.e. the
@@ -40,6 +44,7 @@ pub struct OspfInstance {
     /// reads this directly to resolve its own VRF without scanning every
     /// routing table. Deliberately not rendered by `nos-cli`.
     #[garde(skip)]
+    #[cli(hidden)]
     pub routing_table: Option<String>,
 
     /// The name of the RPL policy filtering routes redistributed into this
@@ -51,7 +56,21 @@ pub struct OspfInstance {
     /// resolve its own redistribution policy without scanning every routing
     /// table. Deliberately not rendered by `nos-cli`.
     #[garde(skip)]
+    #[cli(hidden)]
     pub redistribute_policy: Option<String>,
+}
+
+/// The placeholder a new `OspfInstance` starts from (`edit` on a missing one).
+impl Default for OspfInstance {
+    fn default() -> Self {
+        OspfInstance {
+            name: String::new(),
+            router_id: Ipv4Addr::UNSPECIFIED,
+            areas: Vec::new(),
+            routing_table: None,
+            redistribute_policy: None,
+        }
+    }
 }
 
 /// No two areas within the same instance may share an `area_id` — mirrors

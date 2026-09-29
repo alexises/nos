@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::validators::unique_in;
 
 use super::Config;
+use nos_proto_derive::Cli;
 
 /// A named community value (standard/extended/large — inferred from
 /// `value`'s own colon-literal shape, same as an inline literal in a
@@ -11,16 +12,18 @@ use super::Config;
 /// `.contains(..)`/`.add(..)`/`.remove(..)` — see root `CLAUDE.md`'s RPL
 /// section.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct CommunityAlias {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| unique_in(n, &ctx.community_aliases, |a| &a.name))
     )]
+    #[cli(key)]
     pub name: String,
 
     #[garde(custom(|v: &String, _ctx: &Config| valid_community_value(v)))]
+    #[cli(topic = CommunityAliasValue)]
     pub value: String,
 }
 

@@ -5,6 +5,7 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 use super::Config;
+use nos_proto_derive::Cli;
 
 /// A single static route within a `StaticRoutingInstance`.
 ///
@@ -15,18 +16,30 @@ use super::Config;
 /// `StaticRoute` in isolation has no notion of which instance owns it under
 /// garde's whole-`Config` validation context.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct StaticRoute {
     // Structurally valid by construction; per-instance uniqueness lives on
     // the owning `StaticRoutingInstance.routes` field instead.
     #[garde(skip)]
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(key)]
     pub subnet: IpNet,
 
     #[garde(custom(gateway_matches_subnet_family(self.subnet)))]
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(topic = StaticRoute)]
     pub gateway: IpAddr,
+}
+
+/// The placeholder a new `StaticRoute` starts from (`edit` on a missing one).
+impl Default for StaticRoute {
+    fn default() -> Self {
+        StaticRoute {
+            subnet: IpNet::default(),
+            gateway: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        }
+    }
 }
 
 /// The gateway's address family must match the subnet's — unlike

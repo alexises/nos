@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use super::ospf_profile::valid_crypto_keys;
 use super::{Config, NetworkType, OspfCryptoAlgorithm, OspfCryptoKey};
+use nos_proto_derive::Cli;
+
+use super::sugar;
 
 /// A named `OSPFv3` profile, declared inside an area (`Ospfv3Area.profiles`)
 /// but referenced by bare name from any L3 attach point's `ospfv3_profile`
@@ -14,17 +17,19 @@ use super::{Config, NetworkType, OspfCryptoAlgorithm, OspfCryptoKey};
 /// `PRIORITY_DEFAULT`/`NetworkType` directly — those defaults and the
 /// point-to-point/broadcast distinction are unchanged by RFC 5340.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct Ospfv3Profile {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| unique_name(n, ctx))
     )]
+    #[cli(key)]
     pub name: String,
 
     /// `None` defaults to `OspfProfile::HELLO_INTERVAL_DEFAULT` (10s).
     #[garde(skip)]
+    #[cli(topic = OspfProfileHelloInterval)]
     pub hello_interval: Option<u16>,
 
     /// `None` defaults to `OspfProfile::DEAD_INTERVAL_DEFAULT` (40s). When
@@ -32,24 +37,29 @@ pub struct Ospfv3Profile {
     /// greater — checked one level up on `Ospfv3Area.profiles`, mirroring
     /// `ospf_profile::valid_profile_timers` exactly.
     #[garde(skip)]
+    #[cli(topic = OspfProfileDeadInterval)]
     pub dead_interval: Option<u16>,
 
     /// RFC 5340 §4.8 SPF metric. `None` defaults to `1`; `0` is rejected.
     #[garde(custom(|c: &Option<u16>, _ctx: &Config| valid_cost(*c)))]
+    #[cli(topic = OspfProfileCost)]
     pub cost: Option<u16>,
 
     /// `None` defaults to `1`. Governs RFC 5340 (via RFC 2328 §9.4) DR/BDR
     /// election eligibility on a `Broadcast` attach point.
     #[garde(skip)]
+    #[cli(topic = OspfProfilePriority)]
     pub priority: Option<u8>,
 
     /// `None` resolves to the attach point's own real interface MTU,
     /// falling back to 1500 if unavailable — mirrors `OspfProfile.mtu`.
     #[garde(skip)]
+    #[cli(topic = OspfProfileMtu)]
     pub mtu: Option<u16>,
 
     /// `None` resolves per attach point, exactly like `OspfProfile.network_type`.
     #[garde(skip)]
+    #[cli(topic = OspfProfileNetworkType)]
     pub network_type: Option<NetworkType>,
 
     /// RFC 7166 authentication trailer keys; `None` means unauthenticated.
@@ -58,6 +68,7 @@ pub struct Ospfv3Profile {
     /// `OspfAuth::Crypto` (`is_current` signs, every key verifies).
     #[garde(custom(|a: &Option<Vec<OspfCryptoKey>>, _ctx: &Config| valid_auth(a.as_deref())))]
     #[serde(default)]
+    #[cli(topic = Ospfv3ProfileAuth, sugar(word = "crypto-key", with = sugar::ospfv3_crypto_key, topic = Ospfv3ProfileCryptoKey))]
     pub auth: Option<Vec<OspfCryptoKey>>,
 }
 

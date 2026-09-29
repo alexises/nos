@@ -395,20 +395,20 @@ async fn describe_returns_doc_on_success() {
     let listener = shared().identity("configd", "").listen(&path).unwrap();
 
     let doc = CommandDoc {
-        topic: Topic::SetHostname,
+        topic: Topic::Hostname,
         summary: "Set the configuration's hostname.".to_string(),
         detail: "Sets the top-level hostname field.".to_string(),
     };
     let server = tokio::spawn(serve_once(
         listener,
         Request::Describe {
-            topic: Topic::SetHostname,
+            topic: Topic::Hostname,
         },
         Event::Description(doc.clone()),
     ));
 
-    let got = describe(&path, Topic::SetHostname).await.unwrap();
-    assert_eq!(got.topic, Topic::SetHostname);
+    let got = describe(&path, Topic::Hostname).await.unwrap();
+    assert_eq!(got.topic, Topic::Hostname);
     assert_eq!(got.summary, doc.summary);
 
     server.await.unwrap();

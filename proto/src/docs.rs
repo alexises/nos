@@ -1,13 +1,26 @@
 use serde::{Deserialize, Serialize};
 
-/// Identifies *what an operation does*, independent of any one client's
-/// concrete invocation syntax. One entry per server-meaningful operation —
-/// mirrors `Request` variants and `ConfigOp`/`BgpInstanceOp` variants that
-/// have a client-reachable counterpart. Purely client-local mechanics (e.g.
-/// a shell's own navigation commands) have no `Topic` — they're not
-/// something `nos-config` has any notion of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Topic {
+/// Identifies what one command documents, independent of any one client's
+/// invocation syntax: one per config-tree node or field (its `#[cli(topic)]`,
+/// see `crate::cli`), per sugar word, and per non-edit request. Purely
+/// client-local mechanics (a shell's own navigation commands) have no `Topic`.
+/// The text lives in `nos-config` (`Request::Describe`), for the CLI's
+/// audience — the schema's doc comments are the REST API's.
+macro_rules! topics {
+    ($($(#[$m:meta])* $v:ident,)*) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        pub enum Topic {
+            $($(#[$m])* $v,)*
+        }
+
+        impl Topic {
+            /// Every topic, in declaration order.
+            pub const ALL: &'static [Topic] = &[$(Topic::$v),*];
+        }
+    };
+}
+
+topics! {
     /// `Request::Get`
     ShowRunningConfig,
     /// `Request::Save`
@@ -22,264 +35,210 @@ pub enum Topic {
     DiscardTransaction,
     /// `Request::DiffTransaction`
     DiffTransaction,
-    /// `ConfigOp::BgpInstance(BgpInstanceOp::Ensure)`
-    EnsureBgpInstance,
-    /// `ConfigOp::BgpInstance(BgpInstanceOp::SetAsn)`
-    SetBgpInstanceAsn,
-    /// `ConfigOp::BgpInstance(BgpInstanceOp::SetRouterId)`
-    SetBgpInstanceRouterId,
-    /// `ConfigOp::BgpInstance(BgpInstanceOp::Delete)`
-    DeleteBgpInstance,
-    /// `ConfigOp::SetHostname`
-    SetHostname,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Ensure)`
-    EnsureBgpPeerGroup,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetRemoteAs)`
-    SetBgpPeerGroupRemoteAs,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetSourceAddress)`
-    SetBgpPeerGroupSourceAddress,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearSourceAddress)`
-    ClearBgpPeerGroupSourceAddress,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::AddAddressFamily)`
-    AddBgpPeerGroupAddressFamily,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::RemoveAddressFamily)`
-    RemoveBgpPeerGroupAddressFamily,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::Delete)`
-    DeleteBgpPeerGroup,
-    /// `ConfigOp::BgpPeer(BgpPeerOp::Set)`
-    SetBgpPeer,
-    /// `ConfigOp::BgpPeer(BgpPeerOp::Delete)`
-    DeleteBgpPeer,
-    /// `ConfigOp::RoutingTable(RoutingTableOp::Ensure)`
-    EnsureRoutingTable,
-    /// `ConfigOp::RoutingTable(RoutingTableOp::SetBgpInstance)`
-    SetRoutingTableBgpInstance,
-    /// `ConfigOp::RoutingTable(RoutingTableOp::ClearBgpInstance)`
-    ClearRoutingTableBgpInstance,
-    /// `ConfigOp::RoutingTable(RoutingTableOp::SetStaticRoutingInstance)`
-    SetRoutingTableStaticRoutingInstance,
-    /// `ConfigOp::RoutingTable(RoutingTableOp::ClearStaticRoutingInstance)`
-    ClearRoutingTableStaticRoutingInstance,
-    /// `ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute)`
-    SetRoutingTableRedistribute,
-    /// `ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute)`
-    ClearRoutingTableRedistribute,
-    /// `ConfigOp::RoutingTable(RoutingTableOp::Delete)`
-    DeleteRoutingTable,
-    /// `ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Ensure)`
-    EnsureStaticRoutingInstance,
-    /// `ConfigOp::StaticRoutingInstance(StaticRoutingInstanceOp::Delete)`
-    DeleteStaticRoutingInstance,
-    /// `ConfigOp::StaticRoute(StaticRouteOp::Set)`
-    SetStaticRoute,
-    /// `ConfigOp::StaticRoute(StaticRouteOp::Delete)`
-    DeleteStaticRoute,
-    /// `ConfigOp::Interface(InterfaceOp::Ensure)`
-    EnsureInterface,
-    /// `ConfigOp::Interface(InterfaceOp::AddAddress)`
-    AddInterfaceAddress,
-    /// `ConfigOp::Interface(InterfaceOp::RemoveAddress)`
-    RemoveInterfaceAddress,
-    /// `ConfigOp::Interface(InterfaceOp::SetRoutingTable)`
-    SetInterfaceRoutingTable,
-    /// `ConfigOp::Interface(InterfaceOp::ClearRoutingTable)`
-    ClearInterfaceRoutingTable,
-    /// `ConfigOp::Interface(InterfaceOp::Delete)`
-    DeleteInterface,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetHoldTime)`
-    SetBgpPeerGroupHoldTime,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearHoldTime)`
-    ClearBgpPeerGroupHoldTime,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetKeepaliveInterval)`
-    SetBgpPeerGroupKeepaliveInterval,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearKeepaliveInterval)`
-    ClearBgpPeerGroupKeepaliveInterval,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetConnectRetryTime)`
-    SetBgpPeerGroupConnectRetryTime,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearConnectRetryTime)`
-    ClearBgpPeerGroupConnectRetryTime,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetMrai)`
-    SetBgpPeerGroupMrai,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearMrai)`
-    ClearBgpPeerGroupMrai,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetMaxHops)`
-    SetBgpPeerGroupMaxHops,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearMaxHops)`
-    ClearBgpPeerGroupMaxHops,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetDamping)`
-    SetBgpPeerGroupDamping,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearDamping)`
-    ClearBgpPeerGroupDamping,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetMd5Auth)`
-    SetBgpPeerGroupMd5Auth,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoKey)`
-    SetBgpPeerGroupAoKey,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::RemoveAoKey)`
-    RemoveBgpPeerGroupAoKey,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoCurrentKey)`
-    SetBgpPeerGroupAoCurrentKey,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAoRnextKey)`
-    SetBgpPeerGroupAoRnextKey,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearAuth)`
-    ClearBgpPeerGroupAuth,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetNextHop)`
-    SetBgpPeerGroupNextHop,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearNextHop)`
-    ClearBgpPeerGroupNextHop,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetRouteReflectorClient)`
-    SetBgpPeerGroupRouteReflectorClient,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearRouteReflectorClient)`
-    ClearBgpPeerGroupRouteReflectorClient,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetRouteServerClient)`
-    SetBgpPeerGroupRouteServerClient,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearRouteServerClient)`
-    ClearBgpPeerGroupRouteServerClient,
-    /// `ConfigOp::BgpInstance(BgpInstanceOp::SetClusterId)`
-    SetBgpInstanceClusterId,
-    /// `ConfigOp::BgpInstance(BgpInstanceOp::ClearClusterId)`
-    ClearBgpInstanceClusterId,
-    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::Ensure)`
-    EnsureBroadcastDomain,
-    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::Delete)`
-    DeleteBroadcastDomain,
-    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::AddAddress)`
-    AddBroadcastDomainAddress,
-    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::RemoveAddress)`
-    RemoveBroadcastDomainAddress,
-    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetRoutingTable)`
-    SetBroadcastDomainRoutingTable,
-    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::ClearRoutingTable)`
-    ClearBroadcastDomainRoutingTable,
-    /// `ConfigOp::SwitchingProfile(SwitchingProfileOp::Ensure)`
-    EnsureSwitchingProfile,
-    /// `ConfigOp::SwitchingProfile(SwitchingProfileOp::AddMember)`
-    AddSwitchingProfileMember,
-    /// `ConfigOp::SwitchingProfile(SwitchingProfileOp::RemoveMember)`
-    RemoveSwitchingProfileMember,
-    /// `ConfigOp::SwitchingProfile(SwitchingProfileOp::Delete)`
-    DeleteSwitchingProfile,
-    /// `ConfigOp::Interface(InterfaceOp::SetSwitchingProfile)`
-    SetInterfaceSwitchingProfile,
-    /// `ConfigOp::Interface(InterfaceOp::ClearSwitchingProfile)`
-    ClearInterfaceSwitchingProfile,
-    /// `ConfigOp::Interface(InterfaceOp::SetMtu)`
-    SetInterfaceMtu,
-    /// `ConfigOp::Interface(InterfaceOp::ClearMtu)`
-    ClearInterfaceMtu,
-    /// `ConfigOp::Interface(InterfaceOp::SetLldpTransmit)`
-    SetInterfaceLldpTransmit,
-    /// `ConfigOp::Interface(InterfaceOp::SetLldpReceive)`
-    SetInterfaceLldpReceive,
-    /// `ConfigOp::OspfInstance(OspfInstanceOp::Ensure)`
-    EnsureOspfInstance,
-    /// `ConfigOp::OspfInstance(OspfInstanceOp::SetRouterId)`
-    SetOspfInstanceRouterId,
-    /// `ConfigOp::OspfInstance(OspfInstanceOp::Delete)`
-    DeleteOspfInstance,
-    /// `ConfigOp::RoutingTable(RoutingTableOp::SetOspfInstance)`
-    SetRoutingTableOspfInstance,
-    /// `ConfigOp::RoutingTable(RoutingTableOp::ClearOspfInstance)`
-    ClearRoutingTableOspfInstance,
-    /// `ConfigOp::OspfArea(OspfAreaOp::Ensure)`
-    EnsureOspfArea,
-    /// `ConfigOp::OspfArea(OspfAreaOp::Delete)`
-    DeleteOspfArea,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::Ensure)`
-    EnsureOspfProfile,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::Delete)`
-    DeleteOspfProfile,
-    /// `ConfigOp::Interface(InterfaceOp::SetOspfProfile)` /
-    /// `ConfigOp::Subinterface(SubinterfaceOp::SetOspfProfile)` /
-    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetOspfProfile)`
-    SetInterfaceOspfProfile,
-    /// `ConfigOp::Interface(InterfaceOp::ClearOspfProfile)` /
-    /// `ConfigOp::Subinterface(SubinterfaceOp::ClearOspfProfile)` /
-    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::ClearOspfProfile)`
-    ClearInterfaceOspfProfile,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::SetHelloInterval)`
-    SetOspfProfileHelloInterval,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::ClearHelloInterval)`
-    ClearOspfProfileHelloInterval,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::SetDeadInterval)`
-    SetOspfProfileDeadInterval,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::ClearDeadInterval)`
-    ClearOspfProfileDeadInterval,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::SetCost)`
-    SetOspfProfileCost,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::ClearCost)`
-    ClearOspfProfileCost,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::SetPriority)`
-    SetOspfProfilePriority,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::ClearPriority)`
-    ClearOspfProfilePriority,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::SetMtu)`
-    SetOspfProfileMtu,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::ClearMtu)`
-    ClearOspfProfileMtu,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::SetExtendedSequenceNumbers)`
-    SetOspfProfileExtendedSequenceNumbers,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::SetNetworkType)`
-    SetOspfProfileNetworkType,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::ClearNetworkType)`
-    ClearOspfProfileNetworkType,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::SetSimpleAuth)`
-    SetOspfProfileSimpleAuth,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::SetCryptoKey)`
-    SetOspfProfileCryptoKey,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::RemoveCryptoKey)`
-    RemoveOspfProfileCryptoKey,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::SetCryptoCurrentKey)`
-    SetOspfProfileCryptoCurrentKey,
-    /// `ConfigOp::OspfProfile(OspfProfileOp::ClearAuth)`
-    ClearOspfProfileAuth,
-    /// `ConfigOp::PortAggregate(PortAggregateOp::Ensure)`
-    EnsurePortAggregate,
-    /// `ConfigOp::PortAggregate(PortAggregateOp::Delete)`
-    DeletePortAggregate,
-    /// `ConfigOp::PortAggregate(PortAggregateOp::SetMode)`
-    SetPortAggregateMode,
-    /// `ConfigOp::Interface(InterfaceOp::SetPortAggregate)`
-    SetInterfacePortAggregate,
-    /// `ConfigOp::Interface(InterfaceOp::ClearPortAggregate)`
-    ClearInterfacePortAggregate,
-    /// `ConfigOp::PortAggregate(PortAggregateOp::SetLacpRate)`
-    SetPortAggregateLacpRate,
-    /// `ConfigOp::PortAggregate(PortAggregateOp::SetEsi)` / `ClearEsi`
-    SetPortAggregateEsi,
-    /// `ConfigOp::PortAggregate(PortAggregateOp::SetLacpSystemId)` / `ClearLacpSystemId`
-    SetPortAggregateLacpSystemId,
-    /// `ConfigOp::PortAggregate(PortAggregateOp::SetRedundancyMode)`
-    SetPortAggregateRedundancyMode,
-    /// `ConfigOp::Interface(InterfaceOp::SetLldpDestination)`
-    SetInterfaceLldpDestination,
-    /// `ConfigOp::Lldp(LldpOp::SetTxInterval)`
-    SetLldpTxInterval,
-    /// `ConfigOp::Lldp(LldpOp::SetTxHold)`
-    SetLldpTxHold,
-    /// `ConfigOp::Lldp(LldpOp::SetManagementAddress)`
-    SetLldpManagementAddress,
-    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetVni)` / `ClearVni`
-    SetBroadcastDomainVni,
-    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetRd)` / `ClearRd`
-    SetBroadcastDomainRd,
-    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::AddRouteTarget)` / `RemoveRouteTarget`
-    AddBroadcastDomainRouteTarget,
-    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetVtepSource)` / `ClearVtepSource`
-    SetBroadcastDomainVtepSource,
-    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetMacRedistribute)` / `ClearMacRedistribute`
-    SetBroadcastDomainMacRedistribute,
-    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetArpRedistribute)` / `ClearArpRedistribute`
-    SetBroadcastDomainArpRedistribute,
-    /// `ConfigOp::BroadcastDomain(BroadcastDomainOp::SetConnectedRedistribute)` / `ClearConnectedRedistribute`
-    SetBroadcastDomainConnectedRedistribute,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetShutdown)`
-    SetBgpPeerGroupShutdown,
-    /// `ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearShutdown)`
-    ClearBgpPeerGroupShutdown,
-    /// `ConfigOp::BgpPeer(BgpPeerOp::SetShutdown)`
-    SetBgpPeerShutdown,
-    /// `ConfigOp::BgpPeer(BgpPeerOp::ClearShutdown)`
-    ClearBgpPeerShutdown,
+    /// `Config.hostname`
+    Hostname,
+    /// `Config.users`
+    User,
+    /// `User.password`
+    UserPassword,
+    /// `Config.lldp`
+    Lldp,
+    /// `LldpSettings.tx_interval_secs`
+    LldpTxInterval,
+    /// `LldpSettings.tx_hold`
+    LldpTxHold,
+    /// `LldpSettings.management_address`
+    LldpManagementAddress,
+    /// `Config.bgp_instances`
+    BgpInstance,
+    /// `BgpInstance.asn`
+    BgpInstanceAsn,
+    /// `BgpInstance.router_id`
+    BgpInstanceRouterId,
+    /// `BgpInstance.cluster_id`
+    BgpInstanceClusterId,
+    /// `BgpInstance.peer_groups`
+    BgpPeerGroup,
+    /// `BgpPeerGroup.remote_as`
+    BgpPeerGroupRemoteAs,
+    /// `BgpPeerGroup.source_address`
+    BgpPeerGroupSourceAddress,
+    /// `BgpPeerGroup.address_families`
+    BgpPeerGroupAddressFamily,
+    /// `BgpPeerGroup.hold_time`
+    BgpPeerGroupHoldTime,
+    /// `BgpPeerGroup.keepalive_interval`
+    BgpPeerGroupKeepaliveInterval,
+    /// `BgpPeerGroup.connect_retry_time`
+    BgpPeerGroupConnectRetryTime,
+    /// `BgpPeerGroup.mrai`
+    BgpPeerGroupMrai,
+    /// `BgpPeerGroup.max_hops`
+    BgpPeerGroupMaxHops,
+    /// `BgpPeerGroup.damping`
+    BgpPeerGroupDamping,
+    /// `BgpPeerGroup.auth`
+    BgpPeerGroupAuth,
+    /// `md5-password` sugar on `BgpPeerGroup.auth`
+    BgpPeerGroupMd5Password,
+    /// `ao-key` sugar on `BgpPeerGroup.auth`
+    BgpPeerGroupAoKey,
+    /// `BgpPeerGroup.next_hop`
+    BgpPeerGroupNextHop,
+    /// `BgpPeerGroup.route_reflector_client`
+    BgpPeerGroupRouteReflectorClient,
+    /// `BgpPeerGroup.route_server_client`
+    BgpPeerGroupRouteServerClient,
+    /// `BgpPeerGroup.import_policy`
+    BgpPeerGroupImportPolicy,
+    /// `BgpPeerGroup.export_policy`
+    BgpPeerGroupExportPolicy,
+    /// `BgpPeerGroup.shutdown`
+    BgpPeerGroupShutdown,
+    /// `BgpInstance.peers`
+    BgpPeer,
+    /// `BgpPeer.shutdown`
+    BgpPeerShutdown,
+    /// `Config.routing_tables`
+    RoutingTable,
+    /// `RoutingTable.bgp_instance`
+    RoutingTableBgpInstance,
+    /// `RoutingTable.static_routing_instance`
+    RoutingTableStaticRoutingInstance,
+    /// `RoutingTable.ospf_instance`
+    RoutingTableOspfInstance,
+    /// `RoutingTable.ospfv3_instance`
+    RoutingTableOspfv3Instance,
+    /// `RoutingTable.redistribute`
+    RoutingTableRedistribute,
+    /// `RoutingTable.rest_api`
+    RoutingTableRestApi,
+    /// `Config.static_routing_instances`
+    StaticRoutingInstance,
+    /// `StaticRoutingInstance.routes`
+    StaticRoute,
+    /// `Config.interfaces`
+    Interface,
+    /// `Interface.addresses` (also a subinterface's)
+    InterfaceAddress,
+    /// `Interface.routing_table` (also a subinterface's)
+    InterfaceRoutingTable,
+    /// `Interface.ospf_profile` (also a subinterface's and a broadcast domain's)
+    InterfaceOspfProfile,
+    /// `Interface.ospfv3_profile` (also a subinterface's and a broadcast domain's)
+    InterfaceOspfv3Profile,
+    /// `Interface.switching_profile` (also a port aggregate's)
+    InterfaceSwitchingProfile,
+    /// `Interface.port_aggregate`
+    InterfacePortAggregate,
+    /// `Interface.mtu` (also a port aggregate's)
+    InterfaceMtu,
+    /// `Interface.lldp_transmit`
+    InterfaceLldpTransmit,
+    /// `Interface.lldp_receive`
+    InterfaceLldpReceive,
+    /// `Interface.lldp_destination`
+    InterfaceLldpDestination,
+    /// `Interface.subinterfaces` (also a port aggregate's)
+    Subinterface,
+    /// `Config.broadcast_domains`
+    BroadcastDomain,
+    /// `BroadcastDomain.addresses`
+    BroadcastDomainAddress,
+    /// `BroadcastDomain.routing_table`
+    BroadcastDomainRoutingTable,
+    /// `BroadcastDomain.vni`
+    BroadcastDomainVni,
+    /// `BroadcastDomain.rd`
+    BroadcastDomainRd,
+    /// `BroadcastDomain.route_targets_import`/`route_targets_export`
+    BroadcastDomainRouteTarget,
+    /// `BroadcastDomain.vtep_source`
+    BroadcastDomainVtepSource,
+    /// `BroadcastDomain.mac_redistribute`
+    BroadcastDomainMacRedistribute,
+    /// `BroadcastDomain.arp_redistribute`
+    BroadcastDomainArpRedistribute,
+    /// `BroadcastDomain.connected_redistribute`
+    BroadcastDomainConnectedRedistribute,
+    /// `Config.switching_profiles`
+    SwitchingProfile,
+    /// `SwitchingProfile.members`
+    SwitchingProfileMember,
+    /// `Config.port_aggregates`
+    PortAggregate,
+    /// `PortAggregate.mode`
+    PortAggregateMode,
+    /// `PortAggregate.lacp_rate`
+    PortAggregateLacpRate,
+    /// `PortAggregate.esi`
+    PortAggregateEsi,
+    /// `PortAggregate.lacp_system_id`
+    PortAggregateLacpSystemId,
+    /// `PortAggregate.redundancy_mode`
+    PortAggregateRedundancyMode,
+    /// `Config.ospf_instances`
+    OspfInstance,
+    /// `OspfInstance.router_id`
+    OspfInstanceRouterId,
+    /// `OspfInstance.areas`
+    OspfArea,
+    /// `OspfArea.profiles`
+    OspfProfile,
+    /// `OspfProfile.hello_interval` (also `OSPFv3`'s)
+    OspfProfileHelloInterval,
+    /// `OspfProfile.dead_interval` (also `OSPFv3`'s)
+    OspfProfileDeadInterval,
+    /// `OspfProfile.cost` (also `OSPFv3`'s)
+    OspfProfileCost,
+    /// `OspfProfile.priority` (also `OSPFv3`'s)
+    OspfProfilePriority,
+    /// `OspfProfile.mtu` (also `OSPFv3`'s)
+    OspfProfileMtu,
+    /// `OspfProfile.network_type` (also `OSPFv3`'s)
+    OspfProfileNetworkType,
+    /// `OspfProfile.extended_sequence_numbers`
+    OspfProfileExtendedSequenceNumbers,
+    /// `OspfProfile.auth`
+    OspfProfileAuth,
+    /// `simple-password` sugar on `OspfProfile.auth`
+    OspfProfileSimplePassword,
+    /// `crypto-key` sugar on `OspfProfile.auth`
+    OspfProfileCryptoKey,
+    /// `Config.ospfv3_instances`
+    Ospfv3Instance,
+    /// `Ospfv3Instance.router_id`
+    Ospfv3InstanceRouterId,
+    /// `Ospfv3Instance.extended_lsa`
+    Ospfv3InstanceExtendedLsa,
+    /// `Ospfv3Instance.areas`
+    Ospfv3Area,
+    /// `Ospfv3Area.profiles`
+    Ospfv3Profile,
+    /// `Ospfv3Profile.auth`
+    Ospfv3ProfileAuth,
+    /// `crypto-key` sugar on `Ospfv3Profile.auth`
+    Ospfv3ProfileCryptoKey,
+    /// `Config.policy_definitions`
+    PolicyDefinition,
+    /// `PolicyDefinition.source`
+    PolicyDefinitionSource,
+    /// `Config.community_aliases`
+    CommunityAlias,
+    /// `CommunityAlias.value`
+    CommunityAliasValue,
+    /// `Config.community_groups`
+    CommunityGroup,
+    /// `CommunityGroup.members`
+    CommunityGroupMember,
+    /// `Config.prefix_lists`
+    PrefixList,
+    /// `PrefixList.entries`
+    PrefixListEntry,
+    /// `Config.as_path_lists`
+    AsPathList,
+    /// `AsPathList.patterns`
+    AsPathListPattern,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client
