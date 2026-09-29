@@ -153,7 +153,10 @@ async fn compute_routes(links: &Arc<LinkManager>) -> HashMap<IpNet, Hops> {
             (
                 IpNet::V4(e.prefix),
                 (
-                    IpAddr::V4(e.next_hop),
+                    // ponytail: one next hop on the wire until `OspfRoute`
+                    // carries the set (#33 PR 2) — the lowest address, so
+                    // the pick is deterministic.
+                    IpAddr::V4(e.next_hops[0]),
                     e.backup_next_hop.map(IpAddr::V4),
                     e.metric,
                 ),

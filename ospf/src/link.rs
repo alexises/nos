@@ -1917,9 +1917,10 @@ impl LinkManager {
     /// can now legitimately compute the same destination prefix from more
     /// than one area's own LSDB (e.g. via a summarized inter-area path in
     /// one area and a direct path in another) — keeps whichever is cheaper,
-    /// the same min-metric tie-break `spf::insert_best` already applies
-    /// within one area. Empty if `router_id` hasn't been set yet (before
-    /// this instance's first `reconcile` call).
+    /// and unions the next hops of an equal-cost pair (`spf::merge_equal`),
+    /// the same tie-break `spf::insert_best` already applies within one
+    /// area. Empty if `router_id` hasn't been set yet (before this
+    /// instance's first `reconcile` call).
     pub async fn compute_routes(&self) -> Vec<spf::RouteEntry> {
         let Some(router_id) = *self.router_id.lock().await else {
             return Vec::new();
@@ -1929,14 +1930,16 @@ impl LinkManager {
         for lsdb in areas {
             let lsas = lsdb.lock().await.all();
             for entry in spf::compute(router_id, &lsas) {
-                merged
-                    .entry(entry.prefix)
-                    .and_modify(|existing| {
-                        if entry.metric < existing.metric {
-                            *existing = entry.clone();
-                        }
-                    })
-                    .or_insert(entry);
+                match merged.get_mut(&entry.prefix) {
+                    None => {
+                        merged.insert(entry.prefix, entry);
+                    }
+                    Some(existing) if entry.metric < existing.metric => *existing = entry,
+                    Some(existing) if entry.metric == existing.metric => {
+                        spf::merge_equal(existing, entry);
+                    }
+                    Some(_) => {}
+                }
             }
         }
         merged.into_values().collect()
@@ -3283,6 +3286,49 @@ mod tests {
             .find(|r| r.prefix == Ipv4Net::new(prefix_net, 24).unwrap())
             .unwrap();
         assert_eq!(route.metric, 3);
+        assert_eq!(route.next_hops, vec![Ipv4Addr::new(10, 0, 1, 2)]);
+
+        // Area 1's stub re-costed to 12: 1 + 12 = 13, equal to area 0's —
+        // both areas' next hops are kept.
+        lsdb1.lock().await.install(Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type: lsa::LSA_TYPE_ROUTER,
+                link_state_id: v,
+                advertising_router: v,
+                sequence_number: lsa::INITIAL_SEQUENCE_NUMBER + 1,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Router(RouterLsaBody {
+                flags: 0,
+                links: vec![
+                    RouterLink {
+                        link_id: router_id,
+                        link_data: Ipv4Addr::new(10, 0, 1, 2),
+                        link_type: LINK_TYPE_POINT_TO_POINT,
+                        metric: 1,
+                    },
+                    RouterLink {
+                        link_id: prefix_net,
+                        link_data: mask,
+                        link_type: LINK_TYPE_STUB_NETWORK,
+                        metric: 12,
+                    },
+                ],
+            }),
+        });
+        let routes = manager.compute_routes().await;
+        let route = routes
+            .iter()
+            .find(|r| r.prefix == Ipv4Net::new(prefix_net, 24).unwrap())
+            .unwrap();
+        assert_eq!(route.metric, 13);
+        assert_eq!(
+            route.next_hops,
+            vec![Ipv4Addr::new(10, 0, 0, 2), Ipv4Addr::new(10, 0, 1, 2)]
+        );
     }
 
     #[tokio::test]
