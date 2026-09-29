@@ -6,13 +6,15 @@ use serde::{Deserialize, Serialize};
 use crate::validators::unique_in;
 
 use super::Config;
+use nos_proto_derive::Cli;
 
 /// The source side of a `Redistribute` rule. Only `Static` exists today —
 /// see `Redistribute`'s doc comment for why this is an enum rather than a
 /// bare marker.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub enum RedistributeSource {
+    #[default]
     Static,
 }
 
@@ -33,8 +35,9 @@ impl std::fmt::Display for RedistributeSource {
 /// The target side of a `Redistribute` rule — `Bgp` or `Ospf`. See
 /// `Redistribute`'s doc comment.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub enum RedistributeTarget {
+    #[default]
     Bgp,
     Ospf,
 }
@@ -62,9 +65,11 @@ impl std::fmt::Display for RedistributeTarget {
 /// `Vec<Redistribute>` is the documented follow-up if multiple simultaneous
 /// rules are ever needed.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct Redistribute {
+    #[cli(topic = RoutingTableRedistribute)]
     pub from: RedistributeSource,
+    #[cli(topic = RoutingTableRedistribute)]
     pub to: RedistributeTarget,
     /// Names a `PolicyDefinition` (or the built-in `accept-all`/`deny-all`)
     /// to filter redistributed routes through before they reach BGP.
@@ -72,6 +77,7 @@ pub struct Redistribute {
     /// means **accept-all**, not `deny-all` — redistribution has no
     /// filtering today, and defaulting to deny-all would silently break
     /// every existing `redistribute from static to bgp` config.
+    #[cli(topic = RoutingTableRedistribute)]
     pub policy: Option<String>,
 }
 
@@ -81,11 +87,23 @@ pub struct Redistribute {
 /// Whether the address is actually configured on an interface in the VRF is
 /// operational state, not validated at commit: `nos-restd` retries the bind.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct RestApi {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(topic = RoutingTableRestApi)]
     pub address: IpAddr,
+    #[cli(topic = RoutingTableRestApi)]
     pub port: u16,
+}
+
+/// The placeholder a new `RestApi` starts from (`edit` on a missing one).
+impl Default for RestApi {
+    fn default() -> Self {
+        RestApi {
+            address: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            port: REST_API_PORT_DEFAULT,
+        }
+    }
 }
 
 /// Default `RestApi.port` when `nos-cli` is given none.
@@ -111,22 +129,26 @@ fn rest_api_valid(rest_api: Option<&RestApi>) -> garde::Result {
 /// `BgpInstance`/`StaticRoutingInstance` have no notion of which table(s)
 /// reference them.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct RoutingTable {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| unique_in(n, &ctx.routing_tables, |t| &t.name))
     )]
+    #[cli(key)]
     pub name: String,
 
     #[garde(custom(|bi: &Option<String>, ctx: &Config| bgp_instance_reference_valid(bi.as_ref(), ctx)))]
+    #[cli(topic = RoutingTableBgpInstance)]
     pub bgp_instance: Option<String>,
 
     #[garde(custom(|sri: &Option<String>, ctx: &Config| static_routing_instance_reference_valid(sri.as_ref(), ctx)))]
+    #[cli(topic = RoutingTableStaticRoutingInstance)]
     pub static_routing_instance: Option<String>,
 
     #[garde(custom(|oi: &Option<String>, ctx: &Config| ospf_instance_reference_valid(oi.as_ref(), ctx)))]
+    #[cli(topic = RoutingTableOspfInstance)]
     pub ospf_instance: Option<String>,
 
     /// Same shape as `ospf_instance`, associating this table with an
@@ -135,6 +157,7 @@ pub struct RoutingTable {
     /// independent daemons that can both legitimately claim the same table
     /// (dual-stack OSPF on one VRF).
     #[garde(custom(|oi: &Option<String>, ctx: &Config| ospfv3_instance_reference_valid(oi.as_ref(), ctx)))]
+    #[cli(topic = RoutingTableOspfv3Instance)]
     pub ospfv3_instance: Option<String>,
 
     /// `#[garde(skip)]`: the cross-field constraint (the referenced
@@ -144,6 +167,7 @@ pub struct RoutingTable {
     /// up, on `Config.routing_tables` (`valid_redistribute_rules`), the same
     /// reason `BgpPeerGroup`'s timer check is wired on `BgpInstance.peer_groups`.
     #[garde(skip)]
+    #[cli(topic = RoutingTableRedistribute)]
     pub redistribute: Option<Redistribute>,
 
     /// Pins a `nos-restd` to this table: it listens on `rest_api.address`
@@ -151,6 +175,7 @@ pub struct RoutingTable {
     /// before this field existed still loads.
     #[serde(default)]
     #[garde(custom(|r: &Option<RestApi>, _ctx: &Config| rest_api_valid(r.as_ref())))]
+    #[cli(topic = RoutingTableRestApi)]
     pub rest_api: Option<RestApi>,
 }
 

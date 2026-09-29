@@ -2,6 +2,9 @@ use garde::Validate;
 use serde::{Deserialize, Serialize};
 
 use super::Config;
+use nos_proto_derive::Cli;
+
+use super::sugar;
 
 /// This profile's own proposed Hello interval when left unset. RFC 2328
 /// Appendix C.3's point-to-point/broadcast default — the only network type
@@ -22,7 +25,7 @@ pub const PRIORITY_DEFAULT: u8 = 1;
 /// `OspfProfile.network_type` is `Option` — see its doc comment for how an
 /// unset value is resolved.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum NetworkType {
     PointToPoint,
     Broadcast,
@@ -33,7 +36,7 @@ pub enum NetworkType {
 /// Stored clear-text, like every field in this config. `OspfProfile.auth ==
 /// None` is RFC 2328's `AuType` 0 (Null) — no separate variant needed for it.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum OspfAuth {
     /// RFC 2328 Appendix D.2 — a single up-to-8-byte plaintext password,
     /// carried directly in the OSPF header's 8-byte Authentication field.
@@ -54,11 +57,16 @@ pub enum OspfAuth {
 /// D.5), which is how graceful key rollover works without dropping the
 /// adjacency.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
+#[cli(no_default)]
 pub struct OspfCryptoKey {
+    #[cli(key)]
     pub key_id: u16,
+    #[cli(topic = OspfProfileCryptoKey)]
     pub algorithm: OspfCryptoAlgorithm,
+    #[cli(topic = OspfProfileCryptoKey)]
     pub key: String,
+    #[cli(topic = OspfProfileCryptoKey)]
     pub is_current: bool,
 }
 
@@ -67,7 +75,7 @@ pub struct OspfCryptoKey {
 /// five — there's no separate "algorithm" field on the wire, so `key_id`
 /// alone must unambiguously determine which algorithm a receiver uses.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum OspfCryptoAlgorithm {
     Md5,
     HmacSha1,
@@ -144,17 +152,19 @@ fn valid_auth(auth: Option<&OspfAuth>) -> garde::Result {
 /// qualifier — so, like `BgpPeerGroup.name`, its uniqueness is enforced
 /// globally across the whole config, not just within its owning area.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct OspfProfile {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| unique_name(n, ctx))
     )]
+    #[cli(key)]
     pub name: String,
 
     /// `None` defaults to `HELLO_INTERVAL_DEFAULT` (10s).
     #[garde(skip)]
+    #[cli(topic = OspfProfileHelloInterval)]
     pub hello_interval: Option<u16>,
 
     /// `None` defaults to `DEAD_INTERVAL_DEFAULT` (40s). When both this and
@@ -164,6 +174,7 @@ pub struct OspfProfile {
     /// (see `ospf_area.rs`, mirrors `bgp_peer_group`'s identical
     /// hold-time/keepalive-interval pattern).
     #[garde(skip)]
+    #[cli(topic = OspfProfileDeadInterval)]
     pub dead_interval: Option<u16>,
 
     /// Interface cost, in the usual OSPF sense (lower is preferred by
@@ -172,12 +183,14 @@ pub struct OspfProfile {
     /// this link's RFC 2328 §16 metric, and `ospf::spf::compute` sums it
     /// along the Dijkstra path. `0` is rejected (not a valid OSPF cost).
     #[garde(custom(|c: &Option<u16>, _ctx: &Config| valid_cost(*c)))]
+    #[cli(topic = OspfProfileCost)]
     pub cost: Option<u16>,
 
     /// `None` defaults to `PRIORITY_DEFAULT` (1). Governs RFC 2328 §9.4
     /// DR/BDR election eligibility on a `Broadcast` attach point; sent on
     /// the wire (but functionally inert) on a `PointToPoint` one too.
     #[garde(skip)]
+    #[cli(topic = OspfProfilePriority)]
     pub priority: Option<u8>,
 
     /// `None` resolves to the attach point's own real interface MTU (queried
@@ -187,6 +200,7 @@ pub struct OspfProfile {
     /// of the interface's real kernel MTU (mirrors real OSPF implementations'
     /// `mtu-bytes`-style override). See `ospf/CLAUDE.md`'s "Exchange" section.
     #[garde(skip)]
+    #[cli(topic = OspfProfileMtu)]
     pub mtu: Option<u16>,
 
     /// `None` resolves per attach point: a `Subinterface`/loopback
@@ -199,10 +213,12 @@ pub struct OspfProfile {
     /// vice versa) — never validated against the attach point's own kind,
     /// matching real OSPF's own allowance for this.
     #[garde(skip)]
+    #[cli(topic = OspfProfileNetworkType)]
     pub network_type: Option<NetworkType>,
 
     /// `None` is RFC 2328 `AuType` 0 (Null) — no authentication.
     #[garde(custom(|a: &Option<OspfAuth>, _ctx: &Config| valid_auth(a.as_ref())))]
+    #[cli(topic = OspfProfileAuth, sugar(word = "simple-password", with = sugar::simple_password, topic = OspfProfileSimplePassword), sugar(word = "crypto-key", with = sugar::ospf_crypto_key, topic = OspfProfileCryptoKey))]
     pub auth: Option<OspfAuth>,
 
     /// RFC 7474: sign with `AuType` 3 — a 64-bit (persisted boot count :
@@ -213,6 +229,7 @@ pub struct OspfProfile {
     /// up in `valid_profile_timers`, since it needs the sibling `auth`.
     #[garde(skip)]
     #[serde(default)]
+    #[cli(topic = OspfProfileExtendedSequenceNumbers, words = "extended-sequence-numbers enable", alias = "extended-sequence-numbers")]
     pub extended_sequence_numbers: bool,
 }
 

@@ -4,12 +4,14 @@ use serde::{Deserialize, Serialize};
 use crate::validators::unique_in;
 
 use super::Config;
+use nos_proto_derive::Cli;
 
 /// A dot1q tag, or the absence of one. `Dot1q`'s value is restricted to
 /// `1..=4094` — 802.1Q reserves 0 and 4095.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub enum VlanTag {
+    #[default]
     Untagged,
     Dot1q(u16),
 }
@@ -17,13 +19,15 @@ pub enum VlanTag {
 /// One broadcast domain's membership in a `SwitchingProfile`, tagged as
 /// either a specific dot1q VLAN or untagged.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct SwitchingProfileMember {
     #[garde(custom(|bd: &String, ctx: &Config| broadcast_domain_reference_valid(bd, ctx)))]
+    #[cli(key)]
     pub broadcast_domain: String,
 
     #[garde(custom(|t: &VlanTag, _ctx: &Config| valid_vlan_tag(*t)))]
+    #[cli(topic = SwitchingProfileMember)]
     pub tag: VlanTag,
 }
 
@@ -53,16 +57,18 @@ fn valid_vlan_tag(tag: VlanTag) -> garde::Result {
 /// their dot1q tagging. Will be assigned to a future "switched interface"
 /// config object — not modeled yet.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct SwitchingProfile {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| unique_in(n, &ctx.switching_profiles, |p| &p.name))
     )]
+    #[cli(key)]
     pub name: String,
 
     #[garde(dive, custom(|members, _ctx: &Config| unique_broadcast_domains(members)))]
+    #[cli(topic = SwitchingProfileMember, words = "broadcast-domain")]
     pub members: Vec<SwitchingProfileMember>,
 }
 

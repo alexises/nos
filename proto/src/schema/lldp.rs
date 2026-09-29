@@ -4,6 +4,7 @@
 
 use std::net::IpAddr;
 
+use nos_proto_derive::Cli;
 use serde::{Deserialize, Serialize};
 
 /// 802.1AB `msgTxInterval` default.
@@ -17,15 +18,18 @@ pub const TX_HOLD_MAX: u8 = 100;
 
 /// System-wide LLDP settings. `None` for a timer means the 802.1AB default.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub struct LldpSettings {
     /// `msgTxInterval`: seconds between periodic LLDPDUs.
+    #[cli(topic = LldpTxInterval, words = "tx-interval")]
     pub tx_interval_secs: Option<u16>,
     /// `msgTxHold`: the advertised TTL is this × the interval.
+    #[cli(topic = LldpTxHold)]
     pub tx_hold: Option<u8>,
     /// Advertised in the Management Address TLV on every LLDP-enabled link.
     /// Taken as configured — not checked against any interface's addresses.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[cli(topic = LldpManagementAddress)]
     pub management_address: Option<IpAddr>,
 }
 
@@ -79,7 +83,7 @@ impl LldpSettings {
 /// Which 802.1AB destination group an interface's LLDPDUs use. Both ends of a
 /// link must agree: a frame to a different group is never seen.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum LldpDestination {
     /// `01:80:C2:00:00:0E` — link-local, never forwarded by any bridge.
     #[default]

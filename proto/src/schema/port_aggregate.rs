@@ -5,6 +5,7 @@ use crate::validators::unique_in;
 
 use super::interface::{switching_profile_reference_valid, valid_mtu, valid_subinterface_list};
 use super::{Config, Subinterface, VlanTag};
+use nos_proto_derive::Cli;
 
 /// How a `PortAggregate`'s member set is decided. Both variants create the
 /// *same* underlying kernel bond device (`BondMode::BalanceXor` — see
@@ -13,10 +14,11 @@ use super::{Config, Subinterface, VlanTag};
 /// difference is only which control plane decides which members are
 /// actually enslaved into it.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub enum PortAggregateMode {
     /// Static: every member named by an `Interface.port_aggregate`
     /// reference is enslaved unconditionally, no negotiation.
+    #[default]
     Xor,
     /// Dynamic: membership is negotiated by `nos-lacpd` (real IEEE 802.1AX
     /// LACPDU exchange and Actor/Partner state machines, see `lacp/
@@ -34,7 +36,7 @@ pub enum PortAggregateMode {
 /// Linux bonding's `lacp_rate`, it's a request to the partner — each end
 /// transmits at the rate the *other* end asks for.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum LacpRate {
     #[default]
     Slow,
@@ -48,7 +50,7 @@ pub enum LacpRate {
 /// blocked outright. Announced to the other PEs in the per-ES Ethernet A-D
 /// route's ESI Label community. Only meaningful with an `esi`.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
 pub enum EsRedundancy {
     #[default]
     AllActive,
@@ -70,22 +72,25 @@ pub enum EsRedundancy {
 /// `Interface.switching_profile` already uses for L2 trunk membership —
 /// rather than this type holding a member list itself.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
 pub struct PortAggregate {
     #[garde(
         length(min = 1, max = 64),
         custom(|n, ctx: &Config| port_aggregate_name_valid(n, ctx))
     )]
+    #[cli(key)]
     pub name: String,
 
     #[garde(skip)]
+    #[cli(topic = PortAggregateMode)]
     pub mode: PortAggregateMode,
 
     /// See [`LacpRate`]. `#[serde(default)]` so a config persisted before
     /// this field existed still loads.
     #[serde(default)]
     #[garde(skip)]
+    #[cli(topic = PortAggregateLacpRate)]
     pub lacp_rate: LacpRate,
 
     /// The Ethernet Segment this bond attaches to (EVPN multi-homing, RFC
@@ -95,12 +100,14 @@ pub struct PortAggregate {
     /// among the PEs that share it.
     #[serde(default)]
     #[garde(custom(|v: &Option<String>, _ctx: &Config| valid_esi(v.as_deref())))]
+    #[cli(topic = PortAggregateEsi)]
     pub esi: Option<String>,
 
     /// See [`EsRedundancy`]. `#[serde(default)]` so a config persisted before
     /// this field existed still loads (as all-active, what it always was).
     #[serde(default)]
     #[garde(skip)]
+    #[cli(topic = PortAggregateRedundancyMode)]
     pub redundancy_mode: EsRedundancy,
 
     /// Overrides `nos-lacpd`'s derived LACP Actor System ID for this bond, so
@@ -108,20 +115,24 @@ pub struct PortAggregate {
     /// device. Only meaningful for a `Lacp`-mode aggregate.
     #[serde(default)]
     #[garde(custom(|v: &Option<String>, _ctx: &Config| valid_lacp_system_id(v.as_deref())))]
+    #[cli(topic = PortAggregateLacpSystemId)]
     pub lacp_system_id: Option<String>,
 
     /// Names a `SwitchingProfile` trunking this bond into one or more
     /// `BroadcastDomain`s — same field, same meaning, as
     /// `Interface.switching_profile`.
     #[garde(custom(|sp: &Option<String>, ctx: &Config| switching_profile_reference_valid(sp.as_ref(), ctx)))]
+    #[cli(topic = InterfaceSwitchingProfile)]
     pub switching_profile: Option<String>,
 
     #[garde(custom(|m: &Option<u32>, _ctx: &Config| valid_mtu(*m)))]
+    #[cli(topic = InterfaceMtu)]
     pub mtu: Option<u32>,
 
     /// This bond's own per-tag L3 attachment points — same type and same
     /// tag-0-is-untagged/native convention as `Interface.subinterfaces`.
     #[garde(dive, custom(|subs, _ctx: &Config| valid_subinterface_list(subs)))]
+    #[cli(topic = Subinterface)]
     pub subinterfaces: Vec<Subinterface>,
 }
 

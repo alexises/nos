@@ -1,5 +1,9 @@
+// `#[derive(Cli)]` emits `::nos_proto::…` paths, which must resolve here too.
+extern crate self as nos_proto;
+
 pub mod bgp;
 pub mod broker;
+pub mod cli;
 pub mod codec;
 pub mod config_path;
 pub mod derive;
