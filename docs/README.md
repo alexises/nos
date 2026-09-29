@@ -29,13 +29,13 @@ These pages are being written as part of issue #107. The planned set:
 - **[BGP](protocols/bgp.md)**: instances, peer-groups, timers, MRAI, damping, GTSM, MD5 and TCP-AO authentication, route reflection, route servers
 - **[Routing policy](protocols/routing-policy.md)**: the RPL language, prefix lists, community aliases and groups, AS-path lists
 - OSPFv2 and OSPFv3
-- Routing tables, static routes and redistribution
+- [Routing tables, static routes and redistribution](protocols/routing-tables.md)
 - [Interfaces, subinterfaces and loopbacks](protocols/interfaces.md)
 - [L2 switching: broadcast domains, switching profiles and SVIs](protocols/l2-switching.md)
 - [Port aggregation and LACP](protocols/port-aggregation-lacp.md)
 - [LLDP](protocols/lldp.md)
-- EVPN/VXLAN, including multi-homing
-- System: hostname, users, the REST API and logs
+- [EVPN/VXLAN, including multi-homing](protocols/evpn-vxlan.md)
+- [System: hostname, users, the REST API and logs](protocols/system.md)
 
 Until they are written, the configuration commands for each area are listed by `help` in configuration mode (see [The CLI](cli.md)). The REST paths are in [`openapi.json`](openapi.json).
 
