@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
-use tokio::time::{interval, sleep_until, MissedTickBehavior};
+use tokio::time::sleep_until;
 use tracing::{debug, info, trace, warn};
 
 use crate::neighbor::{NeighborTable, Update};
@@ -23,6 +23,16 @@ use crate::socket::{self, LldpSocket};
 
 /// How soon to retry a periodic transmit that found the link down.
 const LINK_DOWN_RETRY: Duration = Duration::from_secs(1);
+
+/// 802.1AB `txFastInit`: frames sent at `msgFastTx` spacing after the link
+/// starts (which every local change causes, see `reconcile`) or a new
+/// neighbor is learned.
+const TX_FAST_INIT: u8 = 4;
+/// 802.1AB `msgFastTx`: the spacing of those fast-start frames.
+const MSG_FAST_TX: Duration = Duration::from_secs(1);
+/// 802.1AB `txCreditMax`: at most this many frames back to back; one credit
+/// comes back per second.
+const TX_CREDIT_MAX: u8 = 5;
 
 /// Everything a link task needs; also what `reconcile` compares to decide
 /// whether a running link must be restarted.
@@ -116,10 +126,10 @@ fn send(socket: &LldpSocket, interface: &str, pdu: &Lldpdu) -> bool {
 }
 
 /// Decodes and records one received LLDPDU. Returns `true` iff it introduced a
-/// *new* neighbor — the caller answers that with an immediate transmit (a
-/// simplified 802.1AB fast-start) so a peer that came up after us learns us
-/// without waiting out our 30s timer. Only new neighbors trigger it, so two
-/// systems settle after one exchange rather than ping-ponging.
+/// *new* neighbor — the caller answers that with a fast-start burst so a peer
+/// that came up after us learns us without waiting out our 30s timer. Only new
+/// neighbors trigger it, so two systems settle after one burst rather than
+/// ping-ponging.
 fn handle_rx(cfg: &LinkConfig, neighbors: &SharedNeighbors, payload: &[u8], now: Instant) -> bool {
     let pdu = match packet::decode(payload) {
         Ok(pdu) => pdu,
@@ -191,6 +201,29 @@ fn next_expiry(cfg: &LinkConfig, neighbors: &SharedNeighbors) -> Option<Instant>
         .and_then(NeighborTable::next_expiry)
 }
 
+/// 802.1AB §9.2.5.19-21 credit refill: one credit per whole second since
+/// `last`, capped at `TX_CREDIT_MAX`. `last` advances by the seconds counted,
+/// so a fraction carries over.
+fn refill_credit(credit: &mut u8, last: &mut Instant, now: Instant) {
+    let secs = now.saturating_duration_since(*last).as_secs();
+    if secs > 0 {
+        *credit = u8::try_from(secs)
+            .unwrap_or(u8::MAX)
+            .saturating_add(*credit)
+            .min(TX_CREDIT_MAX);
+        *last += Duration::from_secs(secs);
+    }
+}
+
+/// Books one sent frame: spends a credit and a fast-start frame, and returns
+/// when the next one is due — `MSG_FAST_TX` while the burst lasts, then
+/// `tx_interval`. The caller checks the credit is non-zero first.
+fn spend_tx(credit: &mut u8, fast: &mut u8, tx_interval: Duration, now: Instant) -> Instant {
+    *credit = credit.saturating_sub(1);
+    *fast = fast.saturating_sub(1);
+    now + if *fast > 0 { MSG_FAST_TX } else { tx_interval }
+}
+
 /// Runs one interface's LLDP until `stop` fires (or its sender is dropped).
 /// Returns `Err` only when the socket can't be opened or a read fails hard —
 /// `reconcile` respawns a link that ended on its own.
@@ -212,9 +245,11 @@ pub async fn run(
         "lldp link started"
     );
 
-    // The first tick fires immediately, which is the initial transmit.
-    let mut tx = interval(cfg.tx_interval);
-    tx.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // A (re)started link is 802.1AB's "somethingChangedLocal": it opens with
+    // a fast-start burst, the first frame right away.
+    let mut next_tx = Instant::now();
+    let mut tx_fast = TX_FAST_INIT;
+    let (mut tx_credit, mut last_refill) = (TX_CREDIT_MAX, Instant::now());
 
     let result = loop {
         // Never leave an elapsed deadline armed: `expire` moves it forward by
@@ -223,16 +258,24 @@ pub async fn run(
         let deadline = next_expiry(&cfg, &neighbors);
         tokio::select! {
             _ = stop.changed() => break Ok(()),
-            _ = tx.tick(), if cfg.transmit => {
-                if !send(&socket, &cfg.interface, &local_pdu(&cfg)) {
-                    tx.reset_after(LINK_DOWN_RETRY);
+            () = sleep_until(tokio::time::Instant::from_std(next_tx)), if cfg.transmit => {
+                let now = Instant::now();
+                refill_credit(&mut tx_credit, &mut last_refill, now);
+                // Out of credit, or the link is down: nothing spent, retry in
+                // a second (credit comes back at that rate too).
+                next_tx = now + LINK_DOWN_RETRY;
+                if tx_credit > 0 && send(&socket, &cfg.interface, &local_pdu(&cfg)) {
+                    if tx_fast > 0 {
+                        debug!(interface = %cfg.interface, remaining = tx_fast - 1, "lldp fast-start tx");
+                    }
+                    next_tx = spend_tx(&mut tx_credit, &mut tx_fast, cfg.tx_interval, now);
                 }
             }
             frame = socket.recv(), if cfg.receive => match frame {
                 Ok(payload) => {
                     if handle_rx(&cfg, &neighbors, &payload, Instant::now()) && cfg.transmit {
-                        send(&socket, &cfg.interface, &local_pdu(&cfg));
-                        tx.reset();
+                        tx_fast = TX_FAST_INIT;
+                        next_tx = Instant::now();
                     }
                 }
                 Err(e) => break Err(e),
@@ -360,6 +403,43 @@ mod tests {
         assert!(!handle_rx(&me, &n, &frame_from(&me, 120), now));
         assert!(!handle_rx(&me, &n, &[0xff, 0xff, 0x01], now));
         assert!(n.lock().unwrap()["eth1"].snapshot("eth1", now).is_empty());
+    }
+
+    #[test]
+    fn fast_start_bursts_at_one_second_then_falls_back_to_tx_interval() {
+        let (mut credit, mut fast) = (TX_CREDIT_MAX, TX_FAST_INIT);
+        let (now, interval) = (Instant::now(), Duration::from_secs(30));
+        for _ in 1..TX_FAST_INIT {
+            assert_eq!(
+                spend_tx(&mut credit, &mut fast, interval, now),
+                now + MSG_FAST_TX
+            );
+        }
+        // The last fast frame schedules the normal interval.
+        assert_eq!(
+            spend_tx(&mut credit, &mut fast, interval, now),
+            now + interval
+        );
+        assert_eq!((credit, fast), (TX_CREDIT_MAX - TX_FAST_INIT, 0));
+        // Neither counter underflows.
+        spend_tx(&mut credit, &mut fast, interval, now);
+        spend_tx(&mut credit, &mut fast, interval, now);
+        assert_eq!((credit, fast), (0, 0));
+    }
+
+    #[test]
+    fn credit_refills_one_per_whole_second_up_to_the_cap() {
+        let start = Instant::now();
+        let (mut credit, mut last) = (0, start);
+        refill_credit(&mut credit, &mut last, start + Duration::from_millis(900));
+        assert_eq!((credit, last), (0, start));
+        // 2.5s: two credits, the half second carries over.
+        refill_credit(&mut credit, &mut last, start + Duration::from_millis(2500));
+        assert_eq!((credit, last), (2, start + Duration::from_secs(2)));
+        refill_credit(&mut credit, &mut last, start + Duration::from_secs(3));
+        assert_eq!(credit, 3);
+        refill_credit(&mut credit, &mut last, start + Duration::from_secs(3600));
+        assert_eq!(credit, TX_CREDIT_MAX);
     }
 
     #[test]
