@@ -24,20 +24,19 @@ Read these in order the first time:
 
 Each protocol and feature gets its own page with four parts: what it is and what it's for; how to do the common operations, in both the CLI and REST; the features and how they behave; and a complete configuration reference with every field, its CLI command, its REST path, its type, default and validation rules.
 
-These pages are being written as part of issue #107. The planned set:
+Per-protocol guides:
 
-- BGP: instances, peer-groups, timers, MRAI, damping, GTSM, MD5 and TCP-AO authentication, route reflection, route servers
-- Routing policy: the RPL language, prefix lists, community aliases and groups, AS-path lists
-- OSPFv2 and OSPFv3
-- Routing tables, static routes and redistribution
-- Interfaces, subinterfaces and loopbacks
-- L2 switching: broadcast domains, switching profiles and SVIs
-- Port aggregation and LACP
-- LLDP
-- EVPN/VXLAN, including multi-homing
-- System: hostname, users, the REST API and logs
-
-Until they are written, the configuration commands for each area are listed by `help` in configuration mode (see [The CLI](cli.md)). The REST paths are in [`openapi.json`](openapi.json).
+- **[BGP](protocols/bgp.md)**: instances, peer-groups, timers, MRAI, damping, GTSM, MD5 and TCP-AO authentication, route reflection, route servers
+- **[Routing policy](protocols/routing-policy.md)**: the RPL language, prefix lists, community aliases and groups, AS-path lists
+- [OSPF (OSPFv2)](protocols/ospf.md): instances, areas, profiles, point-to-point and LAN links, loopbacks, authentication, ASBR, ABR, loop-free alternates
+- [OSPFv3](protocols/ospfv3.md): the IPv6 differences, RFC 7166 authentication, extended LSAs, and what is not supported yet
+- [Routing tables, static routes and redistribution](protocols/routing-tables.md)
+- [Interfaces, subinterfaces and loopbacks](protocols/interfaces.md)
+- [L2 switching: broadcast domains, switching profiles and SVIs](protocols/l2-switching.md)
+- [Port aggregation and LACP](protocols/port-aggregation-lacp.md)
+- [LLDP](protocols/lldp.md)
+- [EVPN/VXLAN, including multi-homing](protocols/evpn-vxlan.md)
+- [System: hostname, users, the REST API and logs](protocols/system.md)
 
 ## Conventions used in these pages
 
