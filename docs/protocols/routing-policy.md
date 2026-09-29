@@ -105,7 +105,12 @@ no route matches 198.51.100.1
 
 To go back, `set bgp instance r1 peer-group pg1 import-policy accept-all`, or `delete import-policy` inside the peer-group for the `deny-all` default.
 
-`show config` shows neither the policies nor which policies a peer-group uses. Read a script with `show source` inside the policy, or `GET …/policy-definition/<name>` over REST, and a peer-group's policies with `GET …/peer-group/<g>/import-policy` (or `export-policy`). `diff` shows both when you change them.
+To review policies:
+
+- `show config` lists every policy with its numbered script, and each peer-group line ends with `import-policy <name>, export-policy <name>` (`default (deny-all)` when unset).
+- `show source` inside a policy prints just its script.
+- Over REST, `GET …/policy-definition/<name>`, and `GET …/peer-group/<g>/import-policy` (or `export-policy`).
+- `diff` shows both when you change them.
 
 ## Editing a policy in the shell
 
@@ -120,20 +125,21 @@ Inside a policy (after `edit policy-definition <name>`), four commands work on i
 - `set source line <n> <text>` replaces line `<n>`, or appends a line when `<n>` is one past the last line. Everything after the line number is kept as typed, including the leading spaces that indentation needs.
 - `delete source line <n>` removes line `<n>`.
 
-`set source line` and `delete source line` also compile the result and refuse a change that does not compile. Since a script is only valid once complete, they are meant for changing one line of a working script, such as a prefix or a number. Write a new script with `edit source`, or over REST.
+`set source line` and `delete source line` also compile the result. A change that does not compile is still staged, with a warning, so you can build a new script one line at a time. `commit` refuses the policy until it compiles.
 
 ```
-edge-2(t/policy-definition:from-edge-1)> set source line 1 if this.bgp.peer_as == 65001 and this.bgp.as_path.matches("^65001_"):
-edge-2(t/policy-definition:from-edge-1)> show source
-   1  if this.bgp.peer_as == 65001 and this.bgp.as_path.matches("^65001_"):
+edge-2(t/policy-definition:new)> set source line 1 if this.prefix in 10.0.0.0/8:
+warning: policy does not compile yet: … (commit will refuse it until fixed)
+edge-2(t/policy-definition:new)> set source line 2     reject
+warning: policy does not compile yet: … (commit will refuse it until fixed)
+edge-2(t/policy-definition:new)> set source line 3 accept
+edge-2(t/policy-definition:new)> show source
+   1  if this.prefix in 10.0.0.0/8:
    2      reject
-   3  else:
-   4      accept
-edge-2(t/policy-definition:from-edge-1)> set source line 1 if this.prefix in 10.0.0.0/8
-policy did not compile, edit discarded: line 1: expected Colon, found Newline
+   3  accept
 ```
 
-To delete a policy, run `delete` inside it. There is no `delete policy-definition <name>` command. Over REST, `DELETE …/policy-definition/<name>`. A policy that a peer-group or a routing table still uses cannot be deleted: the commit is refused.
+To delete a policy, run `delete` inside it, or `delete policy-definition <name>` from anywhere. Over REST, `DELETE …/policy-definition/<name>`. A policy that a peer-group or a routing table still uses cannot be deleted: the commit is refused.
 
 ```
 edge-2(del/policy-definition:from-edge-1)> delete

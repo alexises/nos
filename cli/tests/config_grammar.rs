@@ -205,3 +205,81 @@ fn every_corpus_line_makes_its_recorded_edit() {
     assert!(edits > 300 && rejected > 10);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// The writes a line typed at the root makes, as JSON, or `None` if it's rejected.
+fn writes(line: &str, doc: &Value) -> Option<Value> {
+    config_grammar::parse(line, &[], doc).map(|e| serde_json::json!(e.writes))
+}
+
+/// #120: absolute forms that #109 made work; pinned so they stay.
+#[test]
+fn absolute_peer_group_field_and_policy_definition_deletes() {
+    let doc = serde_json::to_value(populated()).unwrap();
+    for field in ["hold-time", "import-policy"] {
+        let line = format!("delete bgp instance r1 peer-group PG1 {field}");
+        assert_eq!(
+            writes(&line, &doc),
+            Some(serde_json::json!([[
+                ["bgp-instance", "r1", "peer-group", "PG1", field],
+                null
+            ]])),
+            "{line}"
+        );
+    }
+    assert_eq!(
+        writes("delete policy-definition p1", &doc),
+        // The list is rewritten without it (the fixture's only one).
+        Some(serde_json::json!([[["policy-definition"], []]]))
+    );
+}
+
+/// #120: `ao-key <send-id> exclude-options` sets that one key's flag,
+/// `delete … exclude-options` clears it, and an unknown send-id is refused.
+#[test]
+fn ao_key_exclude_options() {
+    let key = |send_id, exclude_options| BgpAoKey {
+        send_id,
+        recv_id: send_id,
+        algorithm: BgpAoAlgorithm::HmacSha1_96,
+        key: "k".into(),
+        is_current: send_id == 1,
+        is_rnext: false,
+        exclude_options,
+    };
+    let with_keys = |second_excluded| {
+        let mut cfg = populated();
+        cfg.bgp_instances[1].peer_groups[0].auth = Some(BgpAuth::Ao {
+            keys: vec![key(1, false), key(2, second_excluded)],
+        });
+        serde_json::to_value(&cfg).unwrap()
+    };
+    let flags_after = |line: &str, doc: &Value| -> Vec<bool> {
+        let w = writes(line, doc).unwrap_or_else(|| panic!("rejected: {line}"));
+        let BgpAuth::Ao { keys } = serde_json::from_value(w[0][1].clone()).unwrap() else {
+            panic!("not ao: {w}")
+        };
+        keys.iter().map(|k| k.exclude_options).collect()
+    };
+    let pg = "bgp instance r1 peer-group PG1";
+    assert_eq!(
+        flags_after(
+            &format!("set {pg} ao-key 2 exclude-options"),
+            &with_keys(false)
+        ),
+        [false, true]
+    );
+    assert_eq!(
+        flags_after(
+            &format!("delete {pg} ao-key 2 exclude-options"),
+            &with_keys(true)
+        ),
+        [false, false]
+    );
+    assert_eq!(
+        writes(
+            &format!("set {pg} ao-key 9 exclude-options"),
+            &with_keys(false)
+        ),
+        None
+    );
+}

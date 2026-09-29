@@ -270,6 +270,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Mark one of a peer-group's TCP-AO keys as current.",
                 " ",
                 "Mark one of a peer-group's TCP-AO keys as rnext.",
+                " ",
+                "`ao-key <send-id> exclude-options` makes that key's MAC skip TCP options \
+             (RFC 5925 §5.2); `delete ao-key <send-id> exclude-options` clears it. Both \
+             ends must agree.",
             ),
         ),
         Topic::BgpPeerGroupNextHop => (

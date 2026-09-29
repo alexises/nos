@@ -173,7 +173,7 @@ edge-1(t1/bgp-instance:r1/peer-group:pg1)> set keepalive-interval 10
 edge-1(t1/bgp-instance:r1/peer-group:pg1)> set connect-retry-time 5
 ```
 
-The absolute form works from anywhere in the transaction: `set bgp instance r1 peer-group pg1 hold-time 30`. To go back to a default, use `delete hold-time` (or `keepalive-interval`, `connect-retry-time`) inside the peer-group; the `delete` forms exist only relative to the peer-group.
+The absolute form works from anywhere in the transaction: `set bgp instance r1 peer-group pg1 hold-time 30`. To go back to a default, use `delete hold-time` (or `keepalive-interval`, `connect-retry-time`) inside the peer-group, or the absolute `delete bgp instance r1 peer-group pg1 hold-time`.
 
 ```sh
 $C -X PUT -H 'Content-Type: application/json' -d '30' $B/v1/transactions/t1/bgp-instance/r1/peer-group/pg1/hold-time
@@ -359,7 +359,7 @@ $C -X PUT -H 'Content-Type: application/json' -d '{"Ao":{"keys":[
   $B/v1/transactions/t5/bgp-instance/r1/peer-group/pg1/auth
 ```
 
-The algorithm values are `HmacSha1_96` and `AesCmac96`. `exclude_options: true` leaves TCP options out of the MAC (RFC 5925 §5.2); both sides must agree on it. **It can be set only over REST**: the shell has no command for it.
+The algorithm values are `HmacSha1_96` and `AesCmac96`. `exclude_options: true` leaves TCP options out of the MAC (RFC 5925 §5.2); both sides must agree on it. In the shell, `set ao-key <send-id> exclude-options` sets it on an existing key and `delete ao-key <send-id> exclude-options` clears it.
 
 ### GTSM (RFC 5082)
 
@@ -503,15 +503,15 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 | ao-key | `… ao-key <send-id> <recv-id> hmac-sha1\|aes-cmac <secret>` / `set ao-key …`; `delete ao-key <send-id>`; `delete auth` | `…/auth`, `{"Ao":{"keys":[{"send_id":1,"recv_id":1,"algorithm":"HmacSha1_96","key":"…","is_current":true,"is_rnext":false,"exclude_options":false}]}}` | IDs 0 to 255; secret 1 to 80 bytes | at least one key; send IDs unique; exactly one current; at most one rnext | TCP-AO; replaces an MD5 password | `show bgp brief` (`ao-current`, `ao-rnext`, counters) |
 | ao-key current | `… ao-key <send-id> current` / `set ao-key <send-id> current` | `is_current` in the key | flag | exactly one key | Key used to sign outgoing segments | `show bgp brief` (`ao-current`) |
 | ao-key rnext | `… ao-key <send-id> rnext` / `set ao-key <send-id> rnext` | `is_rnext` in the key | flag | at most one key | Key the peer is asked to switch to | `show bgp brief` (`ao-rnext`) on the peer |
-| exclude-options | REST only | `exclude_options` in the key | boolean; default `false` | none | Leaves TCP options out of the MAC; both sides must agree | `show bgp brief` (session up) |
+| exclude-options | `… ao-key <send-id> exclude-options` / `set ao-key <send-id> exclude-options`; `delete ao-key <send-id> exclude-options` | `exclude_options` in the key | boolean; default `false` | the key must exist | Leaves TCP options out of the MAC; both sides must agree | `show bgp brief` (session up) |
 | next-hop | `… next-hop self\|unchanged` / `set next-hop self\|unchanged`; `delete next-hop` | `…/next-hop`, `"SelfAddress"`, `"Unchanged"` or `null` | default: `self` for eBGP, `unchanged` for iBGP and route-server peer-groups | none | `NEXT_HOP` of advertised routes | `show config`; `show route` on the peer |
 | route-reflector-client | `… route-reflector-client` / `set route-reflector-client`; `delete route-reflector-client` | `…/route-reflector-client`, boolean | default `false`; required in a whole-object `PUT` | iBGP peer-group only; not with route-server-client | Reflects iBGP routes to and from these peers | `show config` |
 | route-server-client | `… route-server-client` / `set route-server-client`; `delete route-server-client` | `…/route-server-client`, boolean | default `false`; required in a whole-object `PUT` | eBGP peer-group only; not with route-reflector-client | Transparent AS path; ADD-PATH views | `show config` |
-| import-policy | `… import-policy <policy>` / `set import-policy <policy>`; `delete import-policy` | `…/import-policy`, `"accept-all"` or `null` | policy name; default `deny-all` | `accept-all`, `deny-all` or an existing policy-definition | Filters and modifies received routes | `GET …/import-policy`; `show route` |
-| export-policy | `… export-policy <policy>` / `set export-policy <policy>`; `delete export-policy` | `…/export-policy`, `"accept-all"` or `null` | policy name; default `deny-all` | as import-policy | Filters and modifies advertised routes | `GET …/export-policy`; `show route` on the peer |
+| import-policy | `… import-policy <policy>` / `set import-policy <policy>`; `delete import-policy` | `…/import-policy`, `"accept-all"` or `null` | policy name; default `deny-all` | `accept-all`, `deny-all` or an existing policy-definition | Filters and modifies received routes | `show config`; `show route` |
+| export-policy | `… export-policy <policy>` / `set export-policy <policy>`; `delete export-policy` | `…/export-policy`, `"accept-all"` or `null` | policy name; default `deny-all` | as import-policy | Filters and modifies advertised routes | `show config`; `show route` on the peer |
 | shutdown | `… shutdown [<message>]` / `set shutdown [<message>]`; `delete shutdown` | `…/shutdown`, `{"message":"…"}` or `{"message":null}` or `null` | message up to 255 bytes; default: not shut | message ≤ 255 bytes | Closes and keeps closed every session of the group | `show bgp brief` (`Idle (shutdown)`) |
 
-`show config` and `show this` do not display a peer-group's `import-policy` and `export-policy`. Read them over REST (`GET …/peer-group/<g>/import-policy`), or see them in `diff` when you change them.
+`show config` and `show this` end each peer-group line with its `import-policy` and `export-policy` (`default (deny-all)` when unset). Over REST, `GET …/peer-group/<g>/import-policy`.
 
 ### Peer
 

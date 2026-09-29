@@ -375,7 +375,9 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             summary: "Replace (or append) one line of the current policy's RPL source.",
             detail: "Sets line <line> of the current policy-definition's source to <text>, \
                      taken verbatim — leading whitespace is kept, since RPL's indentation is \
-                     meaningful. A line number one past the end appends.",
+                     meaningful. A line number one past the end appends. The change is \
+                     staged even if the script doesn't compile yet (with a warning), so a \
+                     new script can be built line by line; commit checks it.",
         },
         ConfigurationPolicyDefinition,
         |line, text| Command::SetSourceLine {
@@ -386,7 +388,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         Doc::Local {
             summary: "Delete one line of the current policy's RPL source.",
             detail: "Removes line <line> from the current policy-definition's source; the \
-                     lines after it move up by one.",
+                     lines after it move up by one. Staged even if the result doesn't \
+                     compile (with a warning); commit checks it.",
         },
         ConfigurationPolicyDefinition,
         |line| Command::DeleteSourceLine {
