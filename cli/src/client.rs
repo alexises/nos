@@ -132,6 +132,26 @@ pub async fn apply_op(
     expect_transaction(reader.next().await)
 }
 
+/// Sets (`Some(json)`) or removes (`None`) one subsection of a named
+/// transaction by config path — the config grammar's writes.
+pub async fn set_transaction_path(
+    socket_path: &Path,
+    name: &str,
+    path: Vec<String>,
+    value: Option<String>,
+) -> Result<TransactionSnapshot, ClientError> {
+    let (mut reader, mut writer) = connect(socket_path).await?;
+    writer
+        .send(Request::SetTransactionPath {
+            name: name.to_string(),
+            path,
+            value,
+            if_match: None,
+        })
+        .await?;
+    expect_transaction(reader.next().await)
+}
+
 /// Fetches a named transaction's current in-progress config.
 pub async fn get_transaction(
     socket_path: &Path,

@@ -51,7 +51,7 @@ The shell is always in one of two modes, and the prompt shows which.
 
 In **operational mode** the prompt is just the hostname, such as `edge-1>`. Here you look at the router with `show …`, act on live sessions with `clear …`, write the running config to disk with `save`, and enter configuration mode with `configure`.
 
-In **configuration mode** the prompt adds the transaction name and your position in the config tree, such as `edge-1(doc2)>` or `edge-1(doc2/bgp:r1)>`. Here you change the transaction with `edit`, `set` and `delete`, inspect it with `show this` and `diff`, and finish with `commit` or `discard`. The `show` commands still work; `save` and `configure` do not.
+In **configuration mode** the prompt adds the transaction name and your position in the config tree, such as `edge-1(doc2)>` or `edge-1(doc2/bgp-instance:r1)>`. Here you change the transaction with `edit`, `set` and `delete`, inspect it with `show this` and `diff`, and finish with `commit` or `discard`. The `show` commands still work; `save` and `configure` do not.
 
 `edge-1` is the router's `hostname`, so the prompt changes when a commit changes it.
 
@@ -104,7 +104,7 @@ Step by step:
 Three verbs change configuration:
 
 - `edit <object>` creates the object if it does not exist, and moves into it (see [Navigating](#navigating-edit-up-top)).
-- `set <object> <field> <value>` sets a field, or adds an element to a list such as an address or a route. The object must already exist, so create it with `edit` first.
+- `set <object> <field> <value>` sets a field, or adds an element to a list such as an address or a route. An object on the way that does not exist yet is created with its defaults, like `edit` would.
 - `delete <object> [<field>]` removes an object, a list element or a field. A removed field goes back to its default.
 
 Every `set`/`delete` command has two spellings:
@@ -112,11 +112,13 @@ Every `set`/`delete` command has two spellings:
 - the **absolute** form names the whole path from the top of the tree, and works from anywhere in configuration mode:
   `set bgp instance r1 peer-group pg1 hold-time 30`
 - the **relative** form leaves out the path you have already navigated into:
-  `set hold-time 30` (while at `edge-1(doc3/bgp:r1/peer-group:pg1)>`)
+  `set hold-time 30` (while at `edge-1(doc3/bgp-instance:r1/peer-group:pg1)>`)
 
 The two are exactly equivalent. Use absolute forms in scripts and runbooks, since they don't depend on where the shell is; relative forms are shorter when typing.
 
-Tokens must match exactly. There are no abbreviations and no case folding: `sh conf` or `SHOW CONFIG` is an unknown command. Values are passed through as typed and checked at commit.
+Tokens must match exactly. There are no abbreviations and no case folding: `sh conf` or `SHOW CONFIG` is an unknown command. Values are checked for their type when you type them (a number, an address, one of a field's options); everything else is checked at commit.
+
+Every object and field also accepts its REST API spelling, so `set bgp-instance r1 asn 65001` is the same command as `set bgp instance r1 asn 65001`. `help`, `?` and Tab always show the shell spelling. The prompt shows your position in the REST spelling: `edge-1(doc3/bgp-instance:r1/peer-group:pg1)>`.
 
 Interfaces have one naming rule of their own: `<interface>.<tag>` names a VLAN subinterface, for example `edit interface eth0.100`. A plain `eth0` in an address or routing-table command means its untagged subinterface, `eth0.0`. Interface-level settings such as `mtu` and `switching-profile` apply to `eth0` itself.
 
@@ -126,12 +128,12 @@ Interfaces have one naming rule of their own: `<interface>.<tag>` names a VLAN s
 
 ```
 lab-1(doc3)> edit bgp instance r1
-lab-1(doc3/bgp:r1)> edit peer-group pg1
-lab-1(doc3/bgp:r1/peer-group:pg1)> set keepalive-interval 10
-lab-1(doc3/bgp:r1/peer-group:pg1)> show this
+lab-1(doc3/bgp-instance:r1)> edit peer-group pg1
+lab-1(doc3/bgp-instance:r1/peer-group:pg1)> set keepalive-interval 10
+lab-1(doc3/bgp-instance:r1/peer-group:pg1)> show this
 peer-group pg1: remote-as 65002, source-address unset, address-family [ipv4], hold-time 30, keepalive-interval 10, connect-retry-time 3, auth none, next-hop default (self, eBGP)
-lab-1(doc3/bgp:r1/peer-group:pg1)> up
-lab-1(doc3/bgp:r1)> up
+lab-1(doc3/bgp-instance:r1/peer-group:pg1)> up
+lab-1(doc3/bgp-instance:r1)> up
 lab-1(doc3)>
 ```
 
@@ -205,14 +207,14 @@ hostname: draft
     show route <table>                            Show every route in a routing table, best to worst per prefix.
     show route <table> <address>                  Look up the best route(s) for one destination address.
     …
-    configure <name> [from blank|current]         Open or resume a named, server-held in-progress configuration.
+    configure <name>                              Open or resume a named, server-held in-progress configuration.
+    configure <name> from blank                   Open or resume a named, server-held in-progress configuration.
   ```
-- **`?`**, pressed at any point while typing, shows the commands that can complete what you have typed so far, with their syntax and summary. It does not submit the line. Press it a second time for the full description. Press Enter to close the list without running anything.
-- **Tab** completes keywords. Where a command expects the name of an existing object (BGP instance, peer-group, routing table, interface, and so on), it also offers the names in your transaction.
+  In configuration mode the list goes on with every `edit`, `set` and `delete` you can type from where you are, object by object, in the order of the config tree.
+- **`?`**, pressed at any point while typing, shows what can come next after what you have typed so far, with its syntax and summary. It does not submit the line. Press it a second time for the full description. Press Enter to close the list without running anything.
+- **Tab** completes keywords, a field's options (such as `next-hop self|unchanged`) and, where a command names an existing object (BGP instance, peer-group, routing table, interface, and so on), the names in your transaction.
 
-The descriptions come from the router itself, so they always match the version you are running.
-
-Known gap: some commands work but are not yet listed by `help`, `?` or Tab. These are the routing-policy objects (`policy-definition`, `prefix-list`, `community-alias`, `community-group`, `as-path-list`), `import-policy`/`export-policy` on a peer-group, the damping parameters, and `redistribute … policy`. The per-protocol pages document them; issue #109 tracks adding them to the help.
+The descriptions come from the router itself, so they always match the version you are running. Configuration commands are generated from the router's configuration schema, so every configuration field is always listed, documented and completed.
 
 ## Operational commands
 
@@ -250,5 +252,5 @@ If one instance cannot answer, for example because it was just deleted, the shel
 
 - `error: unknown command: '…' (type 'help' for a list)`: no command matches these exact words. Check spelling and the number of arguments with `?`.
 - `error: not in configuration mode — use 'configure <name>' first`: you used a configuration command in operational mode.
-- `error: nos-configd reported an error: edit failed: bgp instance 'r7' not found`: you used `set` on an object that does not exist yet. Create it with `edit` first.
+- `error: '…' is not a valid edit here (press ? to see what fits)`: no field or object matches these words, or a value has the wrong type, at your position or from the top of the tree. Type the start of the line and press `?`.
 - `error: nos-configd reported an error: validation failed: …`: the commit was refused. Each line gives the place in the tree and the reason. The transaction is still open.

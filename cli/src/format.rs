@@ -1031,227 +1031,135 @@ pub fn render_config(config: &Config) -> String {
 }
 
 /// Render a transaction's in-progress config, scoped to the current
-/// navigation path: the whole config at `Path::Root`, or a single BGP
-/// instance at `Path::BgpInstance(name)`.
+/// navigation position: the whole config at the root, else the object the
+/// position names.
 pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String {
-    match path {
-        Path::Root => {
+    fn show<T>(item: Option<&T>, render: impl Fn(&T) -> String) -> String {
+        item.map_or_else(|| "nothing configured here".to_string(), render)
+    }
+    let cfg = &snapshot.config;
+    let segs: Vec<&str> = path.segments().iter().map(String::as_str).collect();
+    let find = |name: &str, n: &String| n == name;
+    let ospf_area = |i: &str, a: &str| {
+        cfg.ospf_instances
+            .iter()
+            .find(|x| x.name == i)
+            .and_then(|x| x.areas.iter().find(|y| y.area_id.to_string() == a))
+    };
+    let ospfv3_area = |i: &str, a: &str| {
+        cfg.ospfv3_instances
+            .iter()
+            .find(|x| x.name == i)
+            .and_then(|x| x.areas.iter().find(|y| y.area_id.to_string() == a))
+    };
+    match segs.as_slice() {
+        [] => {
             let header = if snapshot.dirty {
                 format!("transaction '{}' (uncommitted changes):", snapshot.name)
             } else {
                 format!("transaction '{}':", snapshot.name)
             };
-            format!("{header}\n{}", render_config(&snapshot.config))
+            format!("{header}\n{}", render_config(cfg))
         }
-        Path::BgpInstance(name) => snapshot
-            .config
-            .bgp_instances
-            .iter()
-            .find(|i| &i.name == name)
-            .map_or_else(
-                || format!("bgp instance '{name}' not found"),
-                render_bgp_instance,
-            ),
-        Path::BgpPeerGroup { instance, group } => {
-            match snapshot
-                .config
-                .bgp_instances
-                .iter()
-                .find(|i| &i.name == instance)
-            {
-                None => format!("bgp instance '{instance}' not found"),
-                Some(inst) => inst
-                    .peer_groups
+        ["bgp-instance", i] => show(
+            cfg.bgp_instances.iter().find(|x| find(i, &x.name)),
+            render_bgp_instance,
+        ),
+        ["bgp-instance", i, "peer-group", g] => {
+            let inst = cfg.bgp_instances.iter().find(|x| find(i, &x.name));
+            inst.and_then(|x| {
+                x.peer_groups
                     .iter()
-                    .find(|g| &g.name == group)
-                    .map_or_else(
-                        || format!("peer-group '{group}' not found in bgp instance '{instance}'"),
-                        |g| render_bgp_peer_group(g, inst.asn),
-                    ),
-            }
+                    .find(|y| find(g, &y.name))
+                    .map(|y| (y, x.asn))
+            })
+            .map_or_else(
+                || "nothing configured here".to_string(),
+                |(y, asn)| render_bgp_peer_group(y, asn),
+            )
         }
-        Path::RoutingTable(name) => snapshot
-            .config
-            .routing_tables
-            .iter()
-            .find(|t| &t.name == name)
-            .map_or_else(
-                || format!("routing-table '{name}' not found"),
-                render_routing_table,
-            ),
-        Path::OspfInstance(name) => snapshot
-            .config
-            .ospf_instances
-            .iter()
-            .find(|i| &i.name == name)
-            .map_or_else(
-                || format!("ospf instance '{name}' not found"),
-                render_ospf_instance,
-            ),
-        Path::OspfArea { instance, area_id } => snapshot
-            .config
-            .ospf_instances
-            .iter()
-            .find(|i| &i.name == instance)
-            .and_then(|i| i.areas.iter().find(|a| a.area_id == *area_id))
-            .map_or_else(
-                || format!("ospf area '{area_id}' not found in ospf instance '{instance}'"),
-                render_ospf_area,
-            ),
-        Path::OspfProfile {
-            instance,
-            area_id,
-            name,
-        } => snapshot
-            .config
-            .ospf_instances
-            .iter()
-            .find(|i| &i.name == instance)
-            .and_then(|i| i.areas.iter().find(|a| a.area_id == *area_id))
-            .and_then(|a| a.profiles.iter().find(|p| &p.name == name))
-            .map_or_else(
-                || {
-                    format!(
-                        "ospf profile '{name}' not found in area '{area_id}' of ospf instance '{instance}'"
-                    )
-                },
-                render_ospf_profile,
-            ),
-        Path::Ospfv3Instance(name) => snapshot
-            .config
-            .ospfv3_instances
-            .iter()
-            .find(|i| &i.name == name)
-            .map_or_else(
-                || format!("ospfv3 instance '{name}' not found"),
-                render_ospfv3_instance,
-            ),
-        Path::Ospfv3Area { instance, area_id } => snapshot
-            .config
-            .ospfv3_instances
-            .iter()
-            .find(|i| &i.name == instance)
-            .and_then(|i| i.areas.iter().find(|a| a.area_id == *area_id))
-            .map_or_else(
-                || format!("ospfv3 area '{area_id}' not found in ospfv3 instance '{instance}'"),
-                render_ospfv3_area,
-            ),
-        Path::Ospfv3Profile {
-            instance,
-            area_id,
-            name,
-        } => snapshot
-            .config
-            .ospfv3_instances
-            .iter()
-            .find(|i| &i.name == instance)
-            .and_then(|i| i.areas.iter().find(|a| a.area_id == *area_id))
-            .and_then(|a| a.profiles.iter().find(|p| &p.name == name))
-            .map_or_else(
-                || {
-                    format!(
-                        "ospfv3 profile '{name}' not found in area '{area_id}' of ospfv3 instance '{instance}'"
-                    )
-                },
-                render_ospfv3_profile,
-            ),
-        Path::StaticRoutingInstance(name) => snapshot
-            .config
-            .static_routing_instances
-            .iter()
-            .find(|i| &i.name == name)
-            .map_or_else(
-                || format!("static routing instance '{name}' not found"),
-                render_static_routing_instance,
-            ),
-        Path::Interface(name) => snapshot
-            .config
-            .interfaces
-            .iter()
-            .find(|i| &i.name == name)
-            .map_or_else(|| format!("interface '{name}' not found"), render_interface),
-        Path::Subinterface { interface, tag } => snapshot
-            .config
-            .interfaces
-            .iter()
-            .find(|i| &i.name == interface)
-            .and_then(|i| i.subinterfaces.iter().find(|s| s.tag == *tag))
-            .map_or_else(
-                || format!("subinterface '{interface}.{tag}' not found"),
-                render_subinterface,
-            ),
-        Path::PolicyDefinition(name) => snapshot
-            .config
-            .policy_definitions
-            .iter()
-            .find(|p| &p.name == name)
-            .map_or_else(
-                || format!("policy-definition '{name}' not found"),
-                render_policy_definition,
-            ),
-        Path::CommunityAlias(name) => snapshot
-            .config
-            .community_aliases
-            .iter()
-            .find(|a| &a.name == name)
-            .map_or_else(
-                || format!("community-alias '{name}' not found"),
-                render_community_alias,
-            ),
-        Path::CommunityGroup(name) => snapshot
-            .config
-            .community_groups
-            .iter()
-            .find(|g| &g.name == name)
-            .map_or_else(
-                || format!("community-group '{name}' not found"),
-                render_community_group,
-            ),
-        Path::AsPathList(name) => snapshot
-            .config
-            .as_path_lists
-            .iter()
-            .find(|l| &l.name == name)
-            .map_or_else(
-                || format!("as-path-list '{name}' not found"),
-                render_as_path_list,
-            ),
-        Path::PrefixList(name) => snapshot
-            .config
-            .prefix_lists
-            .iter()
-            .find(|p| &p.name == name)
-            .map_or_else(
-                || format!("prefix-list '{name}' not found"),
-                render_prefix_list,
-            ),
-        Path::BroadcastDomain(name) => snapshot
-            .config
-            .broadcast_domains
-            .iter()
-            .find(|d| &d.name == name)
-            .map_or_else(
-                || format!("broadcast-domain '{name}' not found"),
-                render_broadcast_domain,
-            ),
-        Path::SwitchingProfile(name) => snapshot
-            .config
-            .switching_profiles
-            .iter()
-            .find(|p| &p.name == name)
-            .map_or_else(
-                || format!("switching-profile '{name}' not found"),
-                render_switching_profile,
-            ),
-        Path::PortAggregate(name) => snapshot
-            .config
-            .port_aggregates
-            .iter()
-            .find(|a| &a.name == name)
-            .map_or_else(
-                || format!("port-aggregate '{name}' not found"),
-                render_port_aggregate,
-            ),
+        ["routing-table", n] => show(
+            cfg.routing_tables.iter().find(|x| find(n, &x.name)),
+            render_routing_table,
+        ),
+        ["ospf-instance", n] => show(
+            cfg.ospf_instances.iter().find(|x| find(n, &x.name)),
+            render_ospf_instance,
+        ),
+        ["ospf-instance", i, "area", a] => show(ospf_area(i, a), render_ospf_area),
+        ["ospf-instance", i, "area", a, "profile", p] => show(
+            ospf_area(i, a).and_then(|x| x.profiles.iter().find(|y| find(p, &y.name))),
+            render_ospf_profile,
+        ),
+        ["ospfv3-instance", n] => show(
+            cfg.ospfv3_instances.iter().find(|x| find(n, &x.name)),
+            render_ospfv3_instance,
+        ),
+        ["ospfv3-instance", i, "area", a] => show(ospfv3_area(i, a), render_ospfv3_area),
+        ["ospfv3-instance", i, "area", a, "profile", p] => show(
+            ospfv3_area(i, a).and_then(|x| x.profiles.iter().find(|y| find(p, &y.name))),
+            render_ospfv3_profile,
+        ),
+        ["static-routing-instance", n] => show(
+            cfg.static_routing_instances
+                .iter()
+                .find(|x| find(n, &x.name)),
+            render_static_routing_instance,
+        ),
+        ["interface", n] => show(
+            cfg.interfaces.iter().find(|x| find(n, &x.name)),
+            render_interface,
+        ),
+        ["interface", n, "subinterface", t] => show(
+            cfg.interfaces
+                .iter()
+                .find(|x| find(n, &x.name))
+                .and_then(|x| x.subinterfaces.iter().find(|y| y.tag.to_string() == *t)),
+            render_subinterface,
+        ),
+        ["policy-definition", n] => show(
+            cfg.policy_definitions.iter().find(|x| find(n, &x.name)),
+            render_policy_definition,
+        ),
+        ["community-alias", n] => show(
+            cfg.community_aliases.iter().find(|x| find(n, &x.name)),
+            render_community_alias,
+        ),
+        ["community-group", n] => show(
+            cfg.community_groups.iter().find(|x| find(n, &x.name)),
+            render_community_group,
+        ),
+        ["as-path-list", n] => show(
+            cfg.as_path_lists.iter().find(|x| find(n, &x.name)),
+            render_as_path_list,
+        ),
+        ["prefix-list", n] => show(
+            cfg.prefix_lists.iter().find(|x| find(n, &x.name)),
+            render_prefix_list,
+        ),
+        ["broadcast-domain", n] => show(
+            cfg.broadcast_domains.iter().find(|x| find(n, &x.name)),
+            render_broadcast_domain,
+        ),
+        ["switching-profile", n] => show(
+            cfg.switching_profiles.iter().find(|x| find(n, &x.name)),
+            render_switching_profile,
+        ),
+        ["port-aggregate", n] => show(
+            cfg.port_aggregates.iter().find(|x| find(n, &x.name)),
+            render_port_aggregate,
+        ),
+        // A position with no dedicated renderer (e.g. a user, a peer): its
+        // own JSON, which is what `set` edits there anyway.
+        _ => serde_json::to_value(cfg)
+            .ok()
+            .and_then(|doc| {
+                nos_proto::config_path::get(&doc, path.segments())
+                    .ok()
+                    .cloned()
+            })
+            .and_then(|v| serde_json::to_string_pretty(&v).ok())
+            .unwrap_or_else(|| "nothing configured here".to_string()),
     }
 }
 
@@ -1801,7 +1709,7 @@ mod tests {
 
     #[test]
     fn render_transaction_at_root_clean() {
-        let rendered = render_transaction(&snapshot(false), &Path::Root);
+        let rendered = render_transaction(&snapshot(false), &Path::root());
         assert_eq!(
             rendered,
             "transaction 'demo':\nhostname: nos\nbgp instance r1: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)\n\
@@ -1815,13 +1723,16 @@ mod tests {
 
     #[test]
     fn render_transaction_at_root_dirty() {
-        let rendered = render_transaction(&snapshot(true), &Path::Root);
+        let rendered = render_transaction(&snapshot(true), &Path::root());
         assert!(rendered.starts_with("transaction 'demo' (uncommitted changes):"));
     }
 
     #[test]
     fn render_transaction_at_bgp_instance_found() {
-        let rendered = render_transaction(&snapshot(false), &Path::BgpInstance("r1".to_string()));
+        let rendered = render_transaction(
+            &snapshot(false),
+            &Path::from(vec!["bgp-instance".to_string(), "r1".to_string()]),
+        );
         assert_eq!(
             rendered,
             "bgp instance r1: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)"
@@ -1830,8 +1741,11 @@ mod tests {
 
     #[test]
     fn render_transaction_at_bgp_instance_not_found() {
-        let rendered = render_transaction(&snapshot(false), &Path::BgpInstance("r2".to_string()));
-        assert_eq!(rendered, "bgp instance 'r2' not found");
+        let rendered = render_transaction(
+            &snapshot(false),
+            &Path::from(vec!["bgp-instance".to_string(), "r2".to_string()]),
+        );
+        assert_eq!(rendered, "nothing configured here");
     }
 
     #[test]
@@ -1859,10 +1773,12 @@ mod tests {
         }];
         let rendered = render_transaction(
             &snap,
-            &Path::Subinterface {
-                interface: "eth0".to_string(),
-                tag: 100,
-            },
+            &Path::from(vec![
+                "interface".to_string(),
+                "eth0".to_string(),
+                "subinterface".to_string(),
+                "100".to_string(),
+            ]),
         );
         assert_eq!(
             rendered,
@@ -1874,12 +1790,14 @@ mod tests {
     fn render_transaction_at_subinterface_not_found() {
         let rendered = render_transaction(
             &snapshot(false),
-            &Path::Subinterface {
-                interface: "eth0".to_string(),
-                tag: 100,
-            },
+            &Path::from(vec![
+                "interface".to_string(),
+                "eth0".to_string(),
+                "subinterface".to_string(),
+                "100".to_string(),
+            ]),
         );
-        assert_eq!(rendered, "subinterface 'eth0.100' not found");
+        assert_eq!(rendered, "nothing configured here");
     }
 
     fn field(label: &str, old: Option<&str>, new: Option<&str>) -> FieldDiff {
@@ -2180,10 +2098,12 @@ mod tests {
         snap.config.bgp_instances[0].peer_groups = vec![peer_group("pg1")];
         let rendered = render_transaction(
             &snap,
-            &Path::BgpPeerGroup {
-                instance: "r1".to_string(),
-                group: "pg1".to_string(),
-            },
+            &Path::from(vec![
+                "bgp-instance".to_string(),
+                "r1".to_string(),
+                "peer-group".to_string(),
+                "pg1".to_string(),
+            ]),
         );
         assert_eq!(
             rendered,
@@ -2197,15 +2117,14 @@ mod tests {
     fn render_transaction_at_peer_group_not_found() {
         let rendered = render_transaction(
             &snapshot(false),
-            &Path::BgpPeerGroup {
-                instance: "r1".to_string(),
-                group: "pg-missing".to_string(),
-            },
+            &Path::from(vec![
+                "bgp-instance".to_string(),
+                "r1".to_string(),
+                "peer-group".to_string(),
+                "pg-missing".to_string(),
+            ]),
         );
-        assert_eq!(
-            rendered,
-            "peer-group 'pg-missing' not found in bgp instance 'r1'"
-        );
+        assert_eq!(rendered, "nothing configured here");
     }
 
     fn log_entry(source: &str, message: &str) -> LogEntry {

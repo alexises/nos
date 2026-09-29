@@ -82,7 +82,7 @@ A body with a required field missing is refused straight away:
 {"type":"about:blank","title":"Bad Request","status":400,"detail":"invalid JSON body for config path: missing field `router_id`"}
 ```
 
-In the shell, `edit` creates an object with its defaults (`edit bgp instance r9` gives `asn 0`, `router-id 0.0.0.0`), and the commit's validation catches any required field you forgot to set. `set` never creates an object: `set bgp instance r7 asn 65007` fails with `edit failed: bgp instance 'r7' not found` until `r7` exists.
+In the shell, `edit` creates an object with its defaults (`edit bgp instance r9` gives `asn 0`, `router-id 0.0.0.0`), and the commit's validation catches any required field you forgot to set. `set` creates a missing object the same way, like REST's `PUT`: `set bgp instance r7 asn 65007` creates `r7` with its defaults and sets its ASN.
 
 **Passwords are hashed the same way on both sides.** `set user alice password s3cret` in the shell, and `PUT …/user/alice` with body `{"name":"alice","password":"s3cret"}` over REST, both store only an argon2id hash.
 

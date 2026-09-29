@@ -378,9 +378,11 @@ impl Walk {
             if keyed(&kind).is_some() {
                 let (word, after) = rest.split_first()?;
                 let expanded = f.templates.iter().find_map(|t| template(t, word));
-                // Re-read the rewritten words; fall back to the literal key.
-                if let Some(done) = expanded.and_then(|exp| self.rewritten(f, &exp, after, verb)) {
-                    return Some(done);
+                // A key shaped like a template is only ever read rewritten
+                // (`eth0.300` is subinterface 300, never an interface named
+                // `eth0.300`, which the schema refuses anyway).
+                if let Some(exp) = expanded {
+                    return self.rewritten(f, &exp, after, verb);
                 }
                 self.enter(f, word, verb != Some(Verb::Delete))?;
                 words = after;
@@ -496,6 +498,222 @@ impl Walk {
     }
 }
 
+/// A word that may come next on a config line, for Tab and `?`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Candidate {
+    pub word: String,
+    /// Its CLI help (`None` for a list key or a value).
+    pub topic: Option<nos_proto::Topic>,
+    /// What the word starts, e.g. `peer-group <name>`.
+    pub usage: String,
+}
+
+/// The placeholder a value of `kind` shows in usage.
+fn placeholder(kind: &Kind) -> String {
+    match kind {
+        Kind::Option(inner) => placeholder(&inner()),
+        Kind::Bool => String::new(),
+        Kind::Uint(_) => "<n>".into(),
+        Kind::Ipv4 => "<a.b.c.d>".into(),
+        Kind::IpAddr => "<address>".into(),
+        Kind::IpNet => "<prefix>".into(),
+        Kind::Str => "<value>".into(),
+        Kind::Tuple(parts) => vec!["<n>"; parts.len()].join(" "),
+        Kind::Enum(vs) => vs
+            .iter()
+            .map(|v| cli::variant_spellings(v).remove(0))
+            .collect::<Vec<_>>()
+            .join("|"),
+        Kind::Struct(node) => node
+            .fields
+            .iter()
+            .map(|f| {
+                format!(
+                    "[{} {}]",
+                    cli::field_spellings(f)[0],
+                    placeholder(&(f.kind)())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        Kind::List(elem) => placeholder(&elem()),
+    }
+}
+
+/// `<spelling> <what follows>` for one field, canonical spelling first.
+fn field_usage(f: &Field) -> String {
+    let kind = (f.kind)();
+    let rest = match keyed(&kind) {
+        Some((_, key)) => format!("<{}>", cli::kebab_field(key.name)),
+        None if matches!(kind, Kind::Struct(_)) => "…".into(),
+        None => placeholder(&kind),
+    };
+    format!("{} {rest}", cli::field_spellings(f)[0])
+        .trim_end()
+        .to_string()
+}
+
+fn field_candidates(fields: &'static [Field], words: &[&str]) -> Vec<Candidate> {
+    let mut out = Vec::new();
+    for f in fields.iter().filter(|f| !f.hidden && !f.key) {
+        let spellings = spellings(f);
+        // The canonical spelling first; the others only when they're the
+        // one being typed.
+        for (i, sp) in spellings.iter().enumerate() {
+            if sp.len() > words.len()
+                && starts_with(words, &sp[..words.len()])
+                && (i == 0 || !words.is_empty())
+            {
+                out.push(Candidate {
+                    word: sp[words.len()].clone(),
+                    topic: f.topic,
+                    usage: field_usage(f),
+                });
+            }
+        }
+        for s in f.sugar {
+            let sp: Vec<String> = s.word.split_whitespace().map(str::to_string).collect();
+            if sp.len() > words.len() && starts_with(words, &sp[..words.len()]) {
+                out.push(Candidate {
+                    word: sp[words.len()].clone(),
+                    topic: Some(s.topic),
+                    usage: format!("{} …", s.word),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn value_candidates(kind: &Kind) -> Vec<Candidate> {
+    match kind {
+        Kind::Option(inner) => value_candidates(&inner()),
+        Kind::Enum(vs) => vs
+            .iter()
+            .map(|v| Candidate {
+                word: cli::variant_spellings(v).remove(0),
+                topic: None,
+                usage: String::new(),
+            })
+            .collect(),
+        Kind::Struct(node) => field_candidates(node.fields, &[]),
+        _ => Vec::new(),
+    }
+}
+
+impl Walk {
+    fn candidates(mut self, mut words: &[&str]) -> Vec<Candidate> {
+        loop {
+            let mut out = field_candidates(self.node.fields, words);
+            let Some((hit, n)) = lookup(self.node.fields, words, true) else {
+                return out;
+            };
+            let rest = &words[n..];
+            let Hit::Field(f) = hit else {
+                return out;
+            };
+            let kind = (f.kind)();
+            if let Some((_, key)) = keyed(&kind) {
+                let Some((word, after)) = rest.split_first() else {
+                    let list = self.obj()[f.name].as_array().cloned().unwrap_or_default();
+                    out.extend(list.iter().map(|e| {
+                        let k = &e[key.name];
+                        Candidate {
+                            word: k.as_str().map_or_else(|| k.to_string(), str::to_string),
+                            topic: None,
+                            usage: String::new(),
+                        }
+                    }));
+                    return out;
+                };
+                if self.enter(f, word, true).is_none() {
+                    return out;
+                }
+                words = after;
+            } else if let Kind::Struct(_) = kind {
+                self.descend(f);
+                words = rest;
+            } else {
+                if rest.is_empty()
+                    || matches!(kind, Kind::Option(ref k) if matches!(k(), Kind::Struct(_)) && rest.len().is_multiple_of(2))
+                {
+                    out.extend(value_candidates(&kind));
+                }
+                return out;
+            }
+        }
+    }
+}
+
+/// What may come next after `words` (a config line's whole words so far,
+/// verb first), at `context` then from the root.
+pub fn complete(words: &[&str], context: &[String], config: &Value) -> Vec<Candidate> {
+    let Some(rest) = words.get(1..) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Candidate> = Vec::new();
+    let starts: &[&[String]] = if context.is_empty() {
+        &[&[]]
+    } else {
+        &[context, &[]]
+    };
+    for start in starts {
+        if let Some(walk) = Walk::at(config, start) {
+            for c in walk.candidates(rest) {
+                if !out.iter().any(|o| o.word == c.word) {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every `set`/`delete`/`edit` usage reachable from `context`, in the
+/// tree's order (grouped by object), with its help topic — `help`'s list.
+pub fn usages(context: &[String], config: &Value) -> Vec<(String, Option<nos_proto::Topic>)> {
+    fn walk(
+        fields: &'static [Field],
+        prefix: &str,
+        out: &mut Vec<(String, Option<nos_proto::Topic>)>,
+    ) {
+        for f in fields.iter().filter(|f| !f.hidden && !f.key) {
+            let kind = (f.kind)();
+            let sp = &cli::field_spellings(f)[0];
+            if let Some((node, key)) = keyed(&kind) {
+                let head = format!("{prefix}{sp} <{}>", cli::kebab_field(key.name));
+                out.push((format!("edit {head}"), f.topic));
+                // A `delete` line needs no summary: the line above has it.
+                out.push((format!("delete {head}"), None));
+                walk(node.fields, &format!("{head} "), out);
+            } else if let Kind::Struct(node) = kind {
+                walk(node.fields, &format!("{prefix}{sp} "), out);
+            } else {
+                // A field whose own word is sugar is listed by its sugar.
+                if !f.sugar.iter().any(|s| s.word == sp) {
+                    out.push((format!("set {prefix}{}", field_usage(f)), f.topic));
+                }
+                let clearable = match &kind {
+                    Kind::Option(_) | Kind::Bool | Kind::List(_) => true,
+                    Kind::Enum(vs) => vs.iter().any(|v| v.default),
+                    _ => false,
+                };
+                if clearable {
+                    out.push((format!("delete {prefix}{sp}"), None));
+                }
+            }
+            for s in f.sugar {
+                out.push((format!("set {prefix}{} …", s.word), Some(s.topic)));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(w) = Walk::at(config, context) {
+        walk(w.node.fields, "", &mut out);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -568,6 +786,14 @@ mod tests {
     }
 
     #[test]
+    fn a_dotted_key_is_never_a_literal_name() {
+        // No `mtu` on a subinterface: refused, not an interface `eth0.300`.
+        assert_eq!(parse("set interface eth0.300 mtu 9000", &[], &doc()), None);
+        let edit = parse("set interface eth0.300 address 10.0.0.1/24", &[], &doc()).unwrap();
+        assert_eq!(edit.writes[0].0, at(&["interface", "eth0", "subinterface"]));
+    }
+
+    #[test]
     fn bare_delete_removes_the_context_and_goes_up() {
         let ctx = at(&["bgp-instance", "r1", "peer-group", "pg"]);
         let edit = parse("delete", &ctx, &doc()).unwrap();
@@ -626,13 +852,54 @@ mod tests {
     fn every_topic_is_used() {
         let mut used = HashSet::new();
         fields(cli::root().fields, &mut used);
-        for spec in COMMAND_SPECS.iter().filter(|s| s.build.is_some()) {
+        for spec in COMMAND_SPECS {
             if let Doc::FromConfig(t) = spec.doc {
                 used.insert(t);
             }
         }
         let unused: Vec<_> = Topic::ALL.iter().filter(|t| !used.contains(t)).collect();
         assert!(unused.is_empty(), "unused topics: {unused:?}");
+    }
+
+    /// Every field accepts its REST segment; where it declares today's CLI
+    /// spelling (`words`), that one is what usage, Tab and `?` show.
+    #[test]
+    fn rest_segment_accepted_words_spelling_shown() {
+        fn walk(fields: &'static [Field], seen: &mut usize) {
+            for f in fields.iter().filter(|f| !f.hidden && !f.key) {
+                let spellings = cli::field_spellings(f);
+                assert!(spellings.contains(&segment(f)), "{}", f.name);
+                if let Some(words) = f.words {
+                    *seen += 1;
+                    assert_eq!(spellings[0], words);
+                    assert!(field_usage(f).starts_with(words), "{}", field_usage(f));
+                    let first = words.split_whitespace().next().unwrap();
+                    let offered = field_candidates(fields, &[]);
+                    assert!(
+                        offered.iter().any(|c| c.word == first),
+                        "{first} not offered"
+                    );
+                    assert!(
+                        !offered
+                            .iter()
+                            .any(|c| c.word == segment(f) && segment(f) != first),
+                        "{} offered alongside {first}",
+                        segment(f)
+                    );
+                }
+                let kind = (f.kind)();
+                let inner = match &kind {
+                    Kind::List(k) | Kind::Option(k) => k(),
+                    _ => kind,
+                };
+                if let Kind::Struct(node) = inner {
+                    walk(node.fields, seen);
+                }
+            }
+        }
+        let mut seen = 0;
+        walk(cli::root().fields, &mut seen);
+        assert!(seen > 10, "only {seen} fields declare words");
     }
 
     /// The CLI's list keys are the ones `config_path` (and so REST) uses.

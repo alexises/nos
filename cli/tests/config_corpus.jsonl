@@ -1,0 +1,411 @@
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set shutdown planned maintenance","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","shutdown"],{"message":"planned maintenance"}]]}
+{"at":["bgp-instance","R1"],"fixture":"populated","line":"set peer 192.0.2.1 shutdown","navigate":null,"writes":[[["bgp-instance","R1","peer","192.0.2.1","shutdown"],{"message":null}]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete shutdown","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","shutdown"],null]]}
+{"at":[],"fixture":"populated","line":"delete bgp instance r1 peer 192.0.2.1 shutdown","navigate":null,"writes":[[["bgp-instance","r1","peer","192.0.2.1","shutdown"],null]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set max-hops 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","max-hops"],1]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete max-hops","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","max-hops"],null]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set damping suppress 2000 half-life 30","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","damping"],{"half_life":30,"max_suppress":3600,"reuse":750,"suppress":2000}]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete damping","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","damping"],null]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set mrai 30","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","mrai"],30]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete mrai","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","mrai"],null]]}
+{"at":[],"fixture":"populated","line":"edit port-aggregate bond1","navigate":["port-aggregate","bond1"],"writes":[]}
+{"at":[],"fixture":"empty","line":"edit port-aggregate bond1","navigate":["port-aggregate","bond1"],"writes":[[["port-aggregate"],[{"esi":null,"lacp_rate":"Slow","lacp_system_id":null,"mode":"Xor","mtu":null,"name":"bond1","redundancy_mode":"AllActive","subinterfaces":[],"switching_profile":null}]]]}
+{"at":[],"fixture":"populated","line":"set port-aggregate bond1 mode xor","navigate":null,"writes":[[["port-aggregate","bond1","mode"],"Xor"]]}
+{"at":["port-aggregate","bond1"],"fixture":"populated","line":"set mode xor","navigate":null,"writes":[[["port-aggregate","bond1","mode"],"Xor"]]}
+{"at":[],"fixture":"populated","line":"set interface eth0 port-aggregate bond1","navigate":null,"writes":[[["interface","eth0","port-aggregate"],"bond1"]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"set port-aggregate bond1","navigate":null,"writes":[[["interface","eth0","port-aggregate"],"bond1"]]}
+{"at":[],"fixture":"populated","line":"delete interface eth0 port-aggregate","navigate":null,"writes":[[["interface","eth0","port-aggregate"],null]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"delete port-aggregate","navigate":null,"writes":[[["interface","eth0","port-aggregate"],null]]}
+{"at":[],"fixture":"populated","line":"delete port-aggregate bond1","navigate":null,"writes":[[["port-aggregate"],[]]]}
+{"at":[],"fixture":"populated","line":"set interface eth1 lldp transmit","navigate":null,"writes":[[["interface","eth1","lldp-transmit"],true]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"set lldp receive","navigate":null,"writes":[[["interface","eth0","lldp-receive"],true]]}
+{"at":[],"fixture":"populated","line":"delete interface eth1 lldp receive","navigate":null,"writes":[[["interface","eth1","lldp-receive"],false]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"delete lldp transmit","navigate":null,"writes":[[["interface","eth0","lldp-transmit"],false]]}
+{"line":"set lldp both","rejected":true}
+{"at":[],"fixture":"populated","line":"set port-aggregate bond1 lacp-rate fast","navigate":null,"writes":[[["port-aggregate","bond1","lacp-rate"],"Fast"]]}
+{"at":["port-aggregate","bond1"],"fixture":"populated","line":"set lacp-rate slow","navigate":null,"writes":[[["port-aggregate","bond1","lacp-rate"],"Slow"]]}
+{"line":"set lacp-rate medium","rejected":true}
+{"at":[],"fixture":"populated","line":"set port-aggregate bond1 redundancy-mode single-active","navigate":null,"writes":[[["port-aggregate","bond1","redundancy-mode"],"SingleActive"]]}
+{"at":["port-aggregate","bond1"],"fixture":"populated","line":"set redundancy-mode all-active","navigate":null,"writes":[[["port-aggregate","bond1","redundancy-mode"],"AllActive"]]}
+{"line":"set redundancy-mode both","rejected":true}
+{"line":"set source line 3","rejected":true}
+{"line":"set source line abc accept","rejected":true}
+{"at":[],"fixture":"populated","line":"edit policy-definition p1","navigate":["policy-definition","p1"],"writes":[]}
+{"at":[],"fixture":"empty","line":"edit policy-definition p1","navigate":["policy-definition","p1"],"writes":[[["policy-definition"],[{"name":"p1","source":""}]]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set import-policy accept-all","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","import-policy"],"accept-all"]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set export-policy deny-all","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","export-policy"],"deny-all"]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete import-policy","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","import-policy"],null]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete export-policy","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","export-policy"],null]]}
+{"at":[],"fixture":"populated","line":"edit bgp instance R1","navigate":["bgp-instance","R1"],"writes":[]}
+{"at":[],"fixture":"empty","line":"edit bgp instance R1","navigate":["bgp-instance","R1"],"writes":[[["bgp-instance"],[{"asn":0,"cluster_id":null,"name":"R1","peer_groups":[],"peers":[],"redistribute_policy":null,"router_id":"0.0.0.0","routing_table":null}]]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 asn 65001","navigate":null,"writes":[[["bgp-instance","R1","asn"],65001]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 router-id 10.0.0.1","navigate":null,"writes":[[["bgp-instance","R1","router-id"],"10.0.0.1"]]}
+{"line":"set bgp instance R1 asn abc","rejected":true}
+{"at":["bgp-instance","R1"],"fixture":"populated","line":"set asn 65001","navigate":null,"writes":[[["bgp-instance","R1","asn"],65001]]}
+{"at":["bgp-instance","R1"],"fixture":"populated","line":"set router-id 10.0.0.1","navigate":null,"writes":[[["bgp-instance","R1","router-id"],"10.0.0.1"]]}
+{"line":"set router-id not-an-ip","rejected":true}
+{"at":[],"fixture":"populated","line":"set interface eth1 lldp destination customer-bridge","navigate":null,"writes":[[["interface","eth1","lldp-destination"],"CustomerBridge"]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"set lldp destination non-tpmr","navigate":null,"writes":[[["interface","eth0","lldp-destination"],"NonTpmr"]]}
+{"line":"set lldp destination bogus","rejected":true}
+{"at":[],"fixture":"populated","line":"set lldp tx-interval 5","navigate":null,"writes":[[["lldp","tx-interval-secs"],5]]}
+{"at":[],"fixture":"empty","line":"set lldp tx-interval 5","navigate":null,"writes":[[["lldp","tx-interval-secs"],5]]}
+{"at":[],"fixture":"populated","line":"set lldp tx-hold 3","navigate":null,"writes":[[["lldp","tx-hold"],3]]}
+{"at":[],"fixture":"empty","line":"set lldp tx-hold 3","navigate":null,"writes":[[["lldp","tx-hold"],3]]}
+{"at":[],"fixture":"populated","line":"set lldp management-address 2001:db8::1","navigate":null,"writes":[[["lldp","management-address"],"2001:db8::1"]]}
+{"at":[],"fixture":"empty","line":"set lldp management-address 2001:db8::1","navigate":null,"writes":[[["lldp","management-address"],"2001:db8::1"]]}
+{"line":"set lldp tx-interval fast","rejected":true}
+{"at":[],"fixture":"populated","line":"delete interface eth1 lldp destination","navigate":null,"writes":[[["interface","eth1","lldp-destination"],"NearestBridge"]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"delete lldp destination","navigate":null,"writes":[[["interface","eth0","lldp-destination"],"NearestBridge"]]}
+{"at":[],"fixture":"populated","line":"delete lldp management-address","navigate":null,"writes":[[["lldp","management-address"],null]]}
+{"at":[],"fixture":"empty","line":"delete lldp management-address","navigate":null,"writes":[[["lldp","management-address"],null]]}
+{"at":[],"fixture":"populated","line":"set hostname router1","navigate":null,"writes":[[["hostname"],"router1"]]}
+{"at":[],"fixture":"empty","line":"set hostname router1","navigate":null,"writes":[[["hostname"],"router1"]]}
+{"at":[],"fixture":"populated","line":"set user alice password s3cret","navigate":null,"writes":[[["user","alice","password"],"s3cret"]]}
+{"at":[],"fixture":"empty","line":"set user alice password s3cret","navigate":null,"writes":[[["user"],[{"name":"alice","password":"s3cret"}]]]}
+{"at":[],"fixture":"populated","line":"delete user alice","navigate":null,"writes":[[["user"],[]]]}
+{"at":["bgp-instance","R1"],"fixture":"populated","line":"delete","navigate":[],"writes":[[["bgp-instance"],[{"asn":65000,"cluster_id":null,"name":"r1","peer_groups":[{"address_families":[],"auth":null,"connect_retry_time":null,"damping":null,"export_policy":null,"hold_time":null,"import_policy":null,"keepalive_interval":null,"max_hops":null,"mrai":null,"name":"PG1","next_hop":null,"remote_as":65001,"route_reflector_client":false,"route_server_client":false,"shutdown":null,"source_address":null}],"peers":[{"peer_group":"PG1","remote_address":"192.0.2.1","shutdown":null}],"redistribute_policy":null,"router_id":"1.1.1.1","routing_table":null}]]]}
+{"at":[],"fixture":"populated","line":"delete bgp instance R1","navigate":null,"writes":[[["bgp-instance"],[{"asn":65000,"cluster_id":null,"name":"r1","peer_groups":[{"address_families":[],"auth":null,"connect_retry_time":null,"damping":null,"export_policy":null,"hold_time":null,"import_policy":null,"keepalive_interval":null,"max_hops":null,"mrai":null,"name":"PG1","next_hop":null,"remote_as":65001,"route_reflector_client":false,"route_server_client":false,"shutdown":null,"source_address":null}],"peers":[{"peer_group":"PG1","remote_address":"192.0.2.1","shutdown":null}],"redistribute_policy":null,"router_id":"1.1.1.1","routing_table":null}]]]}
+{"at":[],"fixture":"populated","line":"edit bgp instance R1 peer-group PG1","navigate":["bgp-instance","R1","peer-group","PG1"],"writes":[]}
+{"at":["bgp-instance","R1"],"fixture":"populated","line":"edit peer-group PG1","navigate":["bgp-instance","R1","peer-group","PG1"],"writes":[]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 remote-as 65001","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","remote-as"],65001]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 source-address interface eth0","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","source-address"],{"Interface":{"interface":"eth0","label":null}}]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 source-address interface eth0 label mgmt","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","source-address"],{"Interface":{"interface":"eth0","label":"mgmt"}}]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 source-address loopback","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","source-address"],{"Loopback":{"label":null}}]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 source-address loopback label mgmt","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","source-address"],{"Loopback":{"label":"mgmt"}}]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set source-address interface eth0","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","source-address"],{"Interface":{"interface":"eth0","label":null}}]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set source-address interface eth0 label mgmt","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","source-address"],{"Interface":{"interface":"eth0","label":"mgmt"}}]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set source-address loopback","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","source-address"],{"Loopback":{"label":null}}]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set source-address loopback label mgmt","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","source-address"],{"Loopback":{"label":"mgmt"}}]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 address-family ipv4","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","address-family"],["Ipv4Unicast"]]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 address-family ipv6","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","address-family"],["Ipv6Unicast"]]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 hold-time 30","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","hold-time"],30]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 keepalive-interval 10","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","keepalive-interval"],10]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 connect-retry-time 45","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","connect-retry-time"],45]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 next-hop self","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","next-hop"],"SelfAddress"]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 next-hop unchanged","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","next-hop"],"Unchanged"]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set next-hop self","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","next-hop"],"SelfAddress"]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set next-hop unchanged","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","next-hop"],"Unchanged"]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete next-hop","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","next-hop"],null]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 route-reflector-client","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","route-reflector-client"],true]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 route-server-client","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","route-server-client"],true]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set route-reflector-client","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","route-reflector-client"],true]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set route-server-client","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","route-server-client"],true]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete route-reflector-client","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","route-reflector-client"],false]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete route-server-client","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","route-server-client"],false]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 cluster-id 1.2.3.4","navigate":null,"writes":[[["bgp-instance","R1","cluster-id"],"1.2.3.4"]]}
+{"at":[],"fixture":"populated","line":"delete bgp instance R1 cluster-id","navigate":null,"writes":[[["bgp-instance","R1","cluster-id"],null]]}
+{"at":["bgp-instance","R1"],"fixture":"populated","line":"set cluster-id 1.2.3.4","navigate":null,"writes":[[["bgp-instance","R1","cluster-id"],"1.2.3.4"]]}
+{"at":["bgp-instance","R1"],"fixture":"populated","line":"delete cluster-id","navigate":null,"writes":[[["bgp-instance","R1","cluster-id"],null]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set hold-time 30","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","hold-time"],30]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set keepalive-interval 10","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","keepalive-interval"],10]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set connect-retry-time 45","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","connect-retry-time"],45]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete hold-time","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","hold-time"],null]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete keepalive-interval","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","keepalive-interval"],null]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete connect-retry-time","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","connect-retry-time"],null]]}
+{"at":[],"fixture":"populated","line":"set ospf instance o1 area 0.0.0.0 profile p1 hello-interval 5","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","hello-interval"],5]]}
+{"at":[],"fixture":"populated","line":"set ospf instance o1 area 0.0.0.0 profile p1 dead-interval 20","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","dead-interval"],20]]}
+{"at":[],"fixture":"populated","line":"set ospf instance o1 area 0.0.0.0 profile p1 cost 15","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","cost"],15]]}
+{"at":[],"fixture":"populated","line":"set ospf instance o1 area 0.0.0.0 profile p1 priority 200","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","priority"],200]]}
+{"at":[],"fixture":"populated","line":"set ospf instance o1 area 0.0.0.0 profile p1 network-type point-to-point","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","network-type"],"PointToPoint"]]}
+{"at":[],"fixture":"populated","line":"set ospf instance o1 area 0.0.0.0 profile p1 network-type broadcast","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","network-type"],"Broadcast"]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set hello-interval 5","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","hello-interval"],5]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set dead-interval 20","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","dead-interval"],20]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set cost 15","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","cost"],15]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set priority 200","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","priority"],200]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set network-type point-to-point","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","network-type"],"PointToPoint"]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set network-type broadcast","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","network-type"],"Broadcast"]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"delete hello-interval","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","hello-interval"],null]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"delete dead-interval","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","dead-interval"],null]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"delete cost","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","cost"],null]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"delete priority","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","priority"],null]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"delete network-type","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","network-type"],null]]}
+{"at":[],"fixture":"populated","line":"set ospf instance o1 area 0.0.0.0 profile p1 simple-password hunter2","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","auth"],{"Simple":{"password":"hunter2"}}]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set simple-password hunter2","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","auth"],{"Simple":{"password":"hunter2"}}]]}
+{"at":[],"fixture":"populated","line":"set ospf instance o1 area 0.0.0.0 profile p1 crypto-key 1 hmac-sha256 secret","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","auth"],{"Crypto":{"keys":[{"algorithm":"HmacSha256","is_current":false,"key":"secret","key_id":1}]}}]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set crypto-key 1 md5 secret","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","auth"],{"Crypto":{"keys":[{"algorithm":"Md5","is_current":false,"key":"secret","key_id":1}]}}]]}
+{"line":"set crypto-key 1 rot13 secret","rejected":true}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"delete crypto-key 1","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","auth"],null]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 md5-password hunter2","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","auth"],{"Md5":{"password":"hunter2"}}]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set md5-password hunter2","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","auth"],{"Md5":{"password":"hunter2"}}]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 ao-key 1 2 hmac-sha1 secret","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","auth"],{"Ao":{"keys":[{"algorithm":"HmacSha1_96","exclude_options":false,"is_current":false,"is_rnext":false,"key":"secret","recv_id":2,"send_id":1}]}}]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set ao-key 1 2 aes-cmac secret","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","auth"],{"Ao":{"keys":[{"algorithm":"AesCmac96","exclude_options":false,"is_current":false,"is_rnext":false,"key":"secret","recv_id":2,"send_id":1}]}}]]}
+{"line":"set ao-key 1 2 rot13 secret","rejected":true}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete auth","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","auth"],null]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete ao-key 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","auth"],null]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set remote-as 65001","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","remote-as"],65001]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer 192.0.2.1 peer-group PG1","navigate":null,"writes":[[["bgp-instance","R1","peer","192.0.2.1","peer-group"],"PG1"]]}
+{"at":["bgp-instance","R1"],"fixture":"populated","line":"set peer 192.0.2.1 peer-group PG1","navigate":null,"writes":[[["bgp-instance","R1","peer","192.0.2.1","peer-group"],"PG1"]]}
+{"at":[],"fixture":"populated","line":"delete bgp instance R1 peer-group PG1","navigate":null,"writes":[[["bgp-instance","R1","peer-group"],[]]]}
+{"at":["bgp-instance","R1"],"fixture":"populated","line":"delete peer-group PG1","navigate":null,"writes":[[["bgp-instance","R1","peer-group"],[]]]}
+{"at":[],"fixture":"populated","line":"delete bgp instance R1 peer 192.0.2.1","navigate":null,"writes":[[["bgp-instance","R1","peer"],[]]]}
+{"at":["bgp-instance","R1"],"fixture":"populated","line":"delete peer 192.0.2.1","navigate":null,"writes":[[["bgp-instance","R1","peer"],[]]]}
+{"at":[],"fixture":"populated","line":"edit routing-table rt1","navigate":["routing-table","rt1"],"writes":[]}
+{"at":[],"fixture":"empty","line":"edit routing-table rt1","navigate":["routing-table","rt1"],"writes":[[["routing-table"],[{"bgp_instance":null,"name":"rt1","ospf_instance":null,"ospfv3_instance":null,"redistribute":null,"rest_api":null,"static_routing_instance":null}]]]}
+{"at":[],"fixture":"populated","line":"edit static-routing-instance sri1","navigate":["static-routing-instance","sri1"],"writes":[]}
+{"at":[],"fixture":"empty","line":"edit static-routing-instance sri1","navigate":["static-routing-instance","sri1"],"writes":[[["static-routing-instance"],[{"name":"sri1","routes":[]}]]]}
+{"at":[],"fixture":"populated","line":"set routing-table rt1 bgp-instance r1","navigate":null,"writes":[[["routing-table","rt1","bgp-instance"],"r1"]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"set bgp-instance r1","navigate":null,"writes":[[["routing-table","rt1","bgp-instance"],"r1"]]}
+{"at":[],"fixture":"populated","line":"set routing-table rt1 static-routing-instance sri1","navigate":null,"writes":[[["routing-table","rt1","static-routing-instance"],"sri1"]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"set static-routing-instance sri1","navigate":null,"writes":[[["routing-table","rt1","static-routing-instance"],"sri1"]]}
+{"at":[],"fixture":"populated","line":"set routing-table rt1 redistribute from static to bgp","navigate":null,"writes":[[["routing-table","rt1","redistribute"],{"from":"Static","policy":null,"to":"Bgp"}]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"set redistribute from static to bgp","navigate":null,"writes":[[["routing-table","rt1","redistribute"],{"from":"Static","policy":null,"to":"Bgp"}]]}
+{"at":[],"fixture":"populated","line":"set routing-table rt1 redistribute from static to bgp policy p1","navigate":null,"writes":[[["routing-table","rt1","redistribute"],{"from":"Static","policy":"p1","to":"Bgp"}]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"set redistribute from static to bgp policy p1","navigate":null,"writes":[[["routing-table","rt1","redistribute"],{"from":"Static","policy":"p1","to":"Bgp"}]]}
+{"at":[],"fixture":"populated","line":"set routing-table rt1 redistribute from static to ospf","navigate":null,"writes":[[["routing-table","rt1","redistribute"],{"from":"Static","policy":null,"to":"Ospf"}]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"set redistribute from static to ospf","navigate":null,"writes":[[["routing-table","rt1","redistribute"],{"from":"Static","policy":null,"to":"Ospf"}]]}
+{"at":[],"fixture":"populated","line":"set routing-table rt1 redistribute from static to ospf policy p1","navigate":null,"writes":[[["routing-table","rt1","redistribute"],{"from":"Static","policy":"p1","to":"Ospf"}]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"set redistribute from static to ospf policy p1","navigate":null,"writes":[[["routing-table","rt1","redistribute"],{"from":"Static","policy":"p1","to":"Ospf"}]]}
+{"at":[],"fixture":"populated","line":"set static-routing-instance sri1 route 10.0.0.0/24 gateway 10.0.0.1","navigate":null,"writes":[[["static-routing-instance","sri1","route","10.0.0.0/24","gateway"],"10.0.0.1"]]}
+{"at":["static-routing-instance","sri1"],"fixture":"populated","line":"set route 10.0.0.0/24 gateway 10.0.0.1","navigate":null,"writes":[[["static-routing-instance","sri1","route","10.0.0.0/24","gateway"],"10.0.0.1"]]}
+{"line":"set route not-a-subnet gateway 10.0.0.1","rejected":true}
+{"at":[],"fixture":"populated","line":"delete routing-table rt1","navigate":null,"writes":[[["routing-table"],[]]]}
+{"at":[],"fixture":"populated","line":"delete routing-table rt1 bgp-instance","navigate":null,"writes":[[["routing-table","rt1","bgp-instance"],null]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"delete bgp-instance","navigate":null,"writes":[[["routing-table","rt1","bgp-instance"],null]]}
+{"at":[],"fixture":"populated","line":"delete routing-table rt1 static-routing-instance","navigate":null,"writes":[[["routing-table","rt1","static-routing-instance"],null]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"delete static-routing-instance","navigate":null,"writes":[[["routing-table","rt1","static-routing-instance"],null]]}
+{"at":[],"fixture":"populated","line":"delete routing-table rt1 redistribute","navigate":null,"writes":[[["routing-table","rt1","redistribute"],null]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"delete redistribute","navigate":null,"writes":[[["routing-table","rt1","redistribute"],null]]}
+{"at":[],"fixture":"populated","line":"delete static-routing-instance sri1","navigate":null,"writes":[[["static-routing-instance"],[]]]}
+{"at":[],"fixture":"populated","line":"delete static-routing-instance sri1 route 10.0.0.0/24","navigate":null,"writes":[[["static-routing-instance","sri1","route"],[]]]}
+{"at":["static-routing-instance","sri1"],"fixture":"populated","line":"delete route 10.0.0.0/24","navigate":null,"writes":[[["static-routing-instance","sri1","route"],[]]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete source-address","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","source-address"],null]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete address-family ipv4","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","address-family"],[]]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete address-family ipv6","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","address-family"],[]]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"delete address-family l2vpn-evpn","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","address-family"],[]]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set address-family l2vpn-evpn","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","address-family"],["L2vpnEvpn"]]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 address-family l2vpn-evpn","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","address-family"],["L2vpnEvpn"]]]}
+{"at":[],"fixture":"populated","line":"edit interface eth0","navigate":["interface","eth0"],"writes":[]}
+{"at":[],"fixture":"empty","line":"edit interface eth0","navigate":["interface","eth0"],"writes":[[["interface"],[{"addresses":[],"lldp_destination":"NearestBridge","lldp_receive":false,"lldp_transmit":false,"mtu":null,"name":"eth0","ospf_profile":null,"ospfv3_profile":null,"port_aggregate":null,"routing_table":null,"subinterfaces":[],"switching_profile":null}]]]}
+{"at":[],"fixture":"populated","line":"set interface eth0 address 10.0.0.1/24","navigate":null,"writes":[[["interface","eth0","subinterface","0","address"],[{"address":"10.0.0.1/24","label":null}]]]}
+{"at":[],"fixture":"empty","line":"set interface eth0 address 10.0.0.1/24","navigate":null,"writes":[[["interface"],[{"addresses":[],"lldp_destination":"NearestBridge","lldp_receive":false,"lldp_transmit":false,"mtu":null,"name":"eth0","ospf_profile":null,"ospfv3_profile":null,"port_aggregate":null,"routing_table":null,"subinterfaces":[{"addresses":[{"address":"10.0.0.1/24","label":null}],"ospf_profile":null,"ospfv3_profile":null,"routing_table":null,"tag":0}],"switching_profile":null}]]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"set address 10.0.0.1/24","navigate":null,"writes":[[["interface","eth0","subinterface","0","address"],[{"address":"10.0.0.1/24","label":null}]]]}
+{"at":[],"fixture":"populated","line":"set interface eth0 address 10.0.0.1/24 label mgmt","navigate":null,"writes":[[["interface","eth0","subinterface","0","address"],[{"address":"10.0.0.1/24","label":"mgmt"}]]]}
+{"at":[],"fixture":"empty","line":"set interface eth0 address 10.0.0.1/24 label mgmt","navigate":null,"writes":[[["interface"],[{"addresses":[],"lldp_destination":"NearestBridge","lldp_receive":false,"lldp_transmit":false,"mtu":null,"name":"eth0","ospf_profile":null,"ospfv3_profile":null,"port_aggregate":null,"routing_table":null,"subinterfaces":[{"addresses":[{"address":"10.0.0.1/24","label":"mgmt"}],"ospf_profile":null,"ospfv3_profile":null,"routing_table":null,"tag":0}],"switching_profile":null}]]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"set address 10.0.0.1/24 label mgmt","navigate":null,"writes":[[["interface","eth0","subinterface","0","address"],[{"address":"10.0.0.1/24","label":"mgmt"}]]]}
+{"line":"set interface eth0 address not-a-cidr","rejected":true}
+{"at":[],"fixture":"populated","line":"set interface eth0 routing-table rt1","navigate":null,"writes":[[["interface","eth0","subinterface","0","routing-table"],"rt1"]]}
+{"at":[],"fixture":"empty","line":"set interface eth0 routing-table rt1","navigate":null,"writes":[[["interface"],[{"addresses":[],"lldp_destination":"NearestBridge","lldp_receive":false,"lldp_transmit":false,"mtu":null,"name":"eth0","ospf_profile":null,"ospfv3_profile":null,"port_aggregate":null,"routing_table":null,"subinterfaces":[{"addresses":[],"ospf_profile":null,"ospfv3_profile":null,"routing_table":"rt1","tag":0}],"switching_profile":null}]]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"set routing-table rt1","navigate":null,"writes":[[["interface","eth0","subinterface","0","routing-table"],"rt1"]]}
+{"at":[],"fixture":"populated","line":"set interface eth0 mtu 9000","navigate":null,"writes":[[["interface","eth0","mtu"],9000]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set mtu 9000","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","mtu"],9000]]}
+{"at":[],"fixture":"populated","line":"set ospf instance o1 area 0.0.0.0 profile p1 mtu 1400","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","mtu"],1400]]}
+{"at":[],"fixture":"populated","line":"set ospf instance o1 area 0.0.0.0 profile p1 extended-sequence-numbers enable","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","extended-sequence-numbers"],true]]}
+{"at":[],"fixture":"populated","line":"set interface eth0 switching-profile sp1","navigate":null,"writes":[[["interface","eth0","switching-profile"],"sp1"]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"set switching-profile sp1","navigate":null,"writes":[[["interface","eth0","switching-profile"],"sp1"]]}
+{"at":[],"fixture":"populated","line":"edit ospf instance o1 area 0.0.0.0","navigate":["ospf-instance","o1","area","0.0.0.0"],"writes":[]}
+{"at":["ospf-instance","o1"],"fixture":"populated","line":"edit area 0.0.0.0","navigate":["ospf-instance","o1","area","0.0.0.0"],"writes":[]}
+{"at":[],"fixture":"populated","line":"edit ospf instance o1 area 0.0.0.0 profile p1","navigate":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"writes":[]}
+{"at":["ospf-instance","o1","area","0.0.0.0"],"fixture":"populated","line":"edit profile p1","navigate":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"writes":[]}
+{"at":[],"fixture":"populated","line":"set interface eth0 ospf p1","navigate":null,"writes":[[["interface","eth0","subinterface","0","ospf-profile"],"p1"]]}
+{"at":[],"fixture":"empty","line":"set interface eth0 ospf p1","navigate":null,"writes":[[["interface"],[{"addresses":[],"lldp_destination":"NearestBridge","lldp_receive":false,"lldp_transmit":false,"mtu":null,"name":"eth0","ospf_profile":null,"ospfv3_profile":null,"port_aggregate":null,"routing_table":null,"subinterfaces":[{"addresses":[],"ospf_profile":"p1","ospfv3_profile":null,"routing_table":null,"tag":0}],"switching_profile":null}]]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"set ospf p1","navigate":null,"writes":[[["interface","eth0","subinterface","0","ospf-profile"],"p1"]]}
+{"at":[],"fixture":"populated","line":"delete ospf instance o1 area 0.0.0.0","navigate":null,"writes":[[["ospf-instance","o1","area"],[]]]}
+{"at":["ospf-instance","o1"],"fixture":"populated","line":"delete area 0.0.0.0","navigate":null,"writes":[[["ospf-instance","o1","area"],[]]]}
+{"at":[],"fixture":"populated","line":"delete ospf instance o1 area 0.0.0.0 profile p1","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile"],[]]]}
+{"at":["ospf-instance","o1","area","0.0.0.0"],"fixture":"populated","line":"delete profile p1","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile"],[]]]}
+{"at":[],"fixture":"populated","line":"delete interface eth0 ospf","navigate":null,"writes":[[["interface","eth0","subinterface","0","ospf-profile"],null]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"delete ospf","navigate":null,"writes":[[["interface","eth0","subinterface","0","ospf-profile"],null]]}
+{"at":[],"fixture":"populated","line":"delete interface eth0","navigate":null,"writes":[[["interface"],[{"addresses":[],"lldp_destination":"NearestBridge","lldp_receive":false,"lldp_transmit":false,"mtu":null,"name":"eth1","ospf_profile":null,"ospfv3_profile":null,"port_aggregate":null,"routing_table":null,"subinterfaces":[{"addresses":[],"ospf_profile":null,"ospfv3_profile":null,"routing_table":null,"tag":0}],"switching_profile":null},{"addresses":[],"lldp_destination":"NearestBridge","lldp_receive":false,"lldp_transmit":false,"mtu":null,"name":"loopback-rt1","ospf_profile":null,"ospfv3_profile":null,"port_aggregate":null,"routing_table":null,"subinterfaces":[],"switching_profile":null}]]]}
+{"at":[],"fixture":"populated","line":"delete interface eth0 routing-table","navigate":null,"writes":[[["interface","eth0","subinterface","0","routing-table"],null]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"delete routing-table","navigate":null,"writes":[[["interface","eth0","subinterface","0","routing-table"],null]]}
+{"at":[],"fixture":"populated","line":"delete interface eth0 mtu","navigate":null,"writes":[[["interface","eth0","mtu"],null]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"delete mtu","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","mtu"],null]]}
+{"at":[],"fixture":"populated","line":"delete interface eth0 switching-profile","navigate":null,"writes":[[["interface","eth0","switching-profile"],null]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"delete switching-profile","navigate":null,"writes":[[["interface","eth0","switching-profile"],null]]}
+{"at":[],"fixture":"populated","line":"edit community-alias CUSTOMER_A","navigate":["community-alias","CUSTOMER_A"],"writes":[]}
+{"at":[],"fixture":"empty","line":"edit community-alias CUSTOMER_A","navigate":["community-alias","CUSTOMER_A"],"writes":[[["community-alias"],[{"name":"CUSTOMER_A","value":""}]]]}
+{"at":[],"fixture":"populated","line":"edit community-group CUSTOMERS","navigate":["community-group","CUSTOMERS"],"writes":[]}
+{"at":[],"fixture":"empty","line":"edit community-group CUSTOMERS","navigate":["community-group","CUSTOMERS"],"writes":[[["community-group"],[{"members":[],"name":"CUSTOMERS"}]]]}
+{"at":[],"fixture":"populated","line":"edit prefix-list BLOCKS","navigate":["prefix-list","BLOCKS"],"writes":[]}
+{"at":[],"fixture":"empty","line":"edit prefix-list BLOCKS","navigate":["prefix-list","BLOCKS"],"writes":[[["prefix-list"],[{"entries":[],"name":"BLOCKS"}]]]}
+{"at":[],"fixture":"populated","line":"set community-alias CUSTOMER_A value 65000:100","navigate":null,"writes":[[["community-alias","CUSTOMER_A","value"],"65000:100"]]}
+{"at":["community-alias","CUSTOMER_A"],"fixture":"populated","line":"set value 65000:100","navigate":null,"writes":[[["community-alias","CUSTOMER_A","value"],"65000:100"]]}
+{"at":[],"fixture":"populated","line":"edit as-path-list TRANSIT","navigate":["as-path-list","TRANSIT"],"writes":[]}
+{"at":[],"fixture":"empty","line":"edit as-path-list TRANSIT","navigate":["as-path-list","TRANSIT"],"writes":[[["as-path-list"],[{"name":"TRANSIT","patterns":[]}]]]}
+{"at":[],"fixture":"populated","line":"set as-path-list TRANSIT pattern ^65001_","navigate":null,"writes":[[["as-path-list","TRANSIT","pattern"],["^65001_"]]]}
+{"at":["as-path-list","TRANSIT"],"fixture":"populated","line":"delete pattern ^65001_","navigate":null,"writes":[[["as-path-list","TRANSIT","pattern"],[]]]}
+{"at":[],"fixture":"populated","line":"set community-group CUSTOMERS member CUSTOMER_A","navigate":null,"writes":[[["community-group","CUSTOMERS","member"],["CUSTOMER_A"]]]}
+{"at":["community-group","CUSTOMERS"],"fixture":"populated","line":"set member 65000:200","navigate":null,"writes":[[["community-group","CUSTOMERS","member"],["CUSTOMER_A","65000:200"]]]}
+{"at":[],"fixture":"populated","line":"set prefix-list BLOCKS entry 10.0.0.0/8 orlonger","navigate":null,"writes":[[["prefix-list","BLOCKS","entry"],[{"cidr":"10.0.0.0/8","range":[24,32]},{"cidr":"10.0.0.0/8","range":[8,32]}]]]}
+{"at":["prefix-list","BLOCKS"],"fixture":"populated","line":"set entry 10.0.0.0/8 upto 24","navigate":null,"writes":[[["prefix-list","BLOCKS","entry"],[{"cidr":"10.0.0.0/8","range":[24,32]},{"cidr":"10.0.0.0/8","range":[8,24]}]]]}
+{"at":[],"fixture":"populated","line":"set prefix-list BLOCKS entry 10.0.0.0/8","navigate":null,"writes":[[["prefix-list","BLOCKS","entry"],[{"cidr":"10.0.0.0/8","range":[24,32]},{"cidr":"10.0.0.0/8","range":null}]]]}
+{"at":[],"fixture":"populated","line":"set prefix-list BLOCKS entry 10.0.0.0/8 range 24 32","navigate":null,"writes":[[["prefix-list","BLOCKS","entry"],[{"cidr":"10.0.0.0/8","range":[24,32]}]]]}
+{"at":["prefix-list","BLOCKS"],"fixture":"populated","line":"set entry 10.0.0.0/8","navigate":null,"writes":[[["prefix-list","BLOCKS","entry"],[{"cidr":"10.0.0.0/8","range":[24,32]},{"cidr":"10.0.0.0/8","range":null}]]]}
+{"at":["prefix-list","BLOCKS"],"fixture":"populated","line":"set entry 10.0.0.0/8 range 24 32","navigate":null,"writes":[[["prefix-list","BLOCKS","entry"],[{"cidr":"10.0.0.0/8","range":[24,32]}]]]}
+{"line":"set prefix-list BLOCKS entry not-a-cidr","rejected":true}
+{"line":"set entry 10.0.0.0/8 range not-a-number 32","rejected":true}
+{"at":[],"fixture":"populated","line":"delete community-alias CUSTOMER_A","navigate":null,"writes":[[["community-alias"],[]]]}
+{"at":[],"fixture":"populated","line":"delete community-group CUSTOMERS member CUSTOMER_A","navigate":null,"writes":[[["community-group","CUSTOMERS","member"],[]]]}
+{"at":["community-group","CUSTOMERS"],"fixture":"populated","line":"delete member CUSTOMER_A","navigate":null,"writes":[[["community-group","CUSTOMERS","member"],[]]]}
+{"at":[],"fixture":"populated","line":"delete prefix-list BLOCKS","navigate":null,"writes":[[["prefix-list"],[]]]}
+{"at":[],"fixture":"populated","line":"delete prefix-list BLOCKS entry 10.0.0.0/8 range 24 32","navigate":null,"writes":[[["prefix-list","BLOCKS","entry"],[]]]}
+{"at":[],"fixture":"populated","line":"set ospfv3 instance o1 area 0.0.0.0 profile p1 crypto-key 300 hmac-sha256 secret","navigate":null,"writes":[[["ospfv3-instance","o1","area","0.0.0.0","profile","p1","auth"],[{"algorithm":"HmacSha256","is_current":false,"key":"secret","key_id":300}]]]}
+{"line":"delete crypto-key 65536","rejected":true}
+{"at":[],"fixture":"populated","line":"edit ospfv3 instance o1","navigate":["ospfv3-instance","o1"],"writes":[]}
+{"at":[],"fixture":"empty","line":"edit ospfv3 instance o1","navigate":["ospfv3-instance","o1"],"writes":[[["ospfv3-instance"],[{"areas":[],"extended_lsa":false,"name":"o1","router_id":"0.0.0.0","routing_table":null}]]]}
+{"at":[],"fixture":"populated","line":"edit ospfv3 instance o1 area 0.0.0.0","navigate":["ospfv3-instance","o1","area","0.0.0.0"],"writes":[]}
+{"at":[],"fixture":"populated","line":"edit ospfv3 instance o1 area 0.0.0.0 profile p1","navigate":["ospfv3-instance","o1","area","0.0.0.0","profile","p1"],"writes":[]}
+{"at":[],"fixture":"populated","line":"set ospfv3 instance o1 extended-lsa","navigate":null,"writes":[[["ospfv3-instance","o1","extended-lsa"],true]]}
+{"at":[],"fixture":"populated","line":"delete ospfv3 instance o1 extended-lsa","navigate":null,"writes":[[["ospfv3-instance","o1","extended-lsa"],false]]}
+{"at":[],"fixture":"populated","line":"set ospfv3 instance o1 router-id 2.2.2.2","navigate":null,"writes":[[["ospfv3-instance","o1","router-id"],"2.2.2.2"]]}
+{"at":[],"fixture":"populated","line":"set ospfv3 instance o1 area 0.0.0.0 profile p1 hello-interval 5","navigate":null,"writes":[[["ospfv3-instance","o1","area","0.0.0.0","profile","p1","hello-interval"],5]]}
+{"at":[],"fixture":"populated","line":"set ospfv3 instance o1 area 0.0.0.0 profile p1 network-type point-to-point","navigate":null,"writes":[[["ospfv3-instance","o1","area","0.0.0.0","profile","p1","network-type"],"PointToPoint"]]}
+{"at":[],"fixture":"populated","line":"delete ospfv3 instance o1","navigate":null,"writes":[[["ospfv3-instance"],[]]]}
+{"at":[],"fixture":"populated","line":"delete ospfv3 instance o1 area 0.0.0.0","navigate":null,"writes":[[["ospfv3-instance","o1","area"],[]]]}
+{"at":[],"fixture":"populated","line":"delete ospfv3 instance o1 area 0.0.0.0 profile p1","navigate":null,"writes":[[["ospfv3-instance","o1","area","0.0.0.0","profile"],[]]]}
+{"at":[],"fixture":"populated","line":"set interface eth0 ospfv3 p1","navigate":null,"writes":[[["interface","eth0","subinterface","0","ospfv3-profile"],"p1"]]}
+{"at":[],"fixture":"empty","line":"set interface eth0 ospfv3 p1","navigate":null,"writes":[[["interface"],[{"addresses":[],"lldp_destination":"NearestBridge","lldp_receive":false,"lldp_transmit":false,"mtu":null,"name":"eth0","ospf_profile":null,"ospfv3_profile":null,"port_aggregate":null,"routing_table":null,"subinterfaces":[{"addresses":[],"ospf_profile":null,"ospfv3_profile":"p1","routing_table":null,"tag":0}],"switching_profile":null}]]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"set ospfv3 p1","navigate":null,"writes":[[["interface","eth0","subinterface","0","ospfv3-profile"],"p1"]]}
+{"at":[],"fixture":"populated","line":"delete interface eth0 ospfv3","navigate":null,"writes":[[["interface","eth0","subinterface","0","ospfv3-profile"],null]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"delete ospfv3","navigate":null,"writes":[[["interface","eth0","subinterface","0","ospfv3-profile"],null]]}
+{"at":[],"fixture":"populated","line":"set routing-table rt1 ospfv3-instance o1","navigate":null,"writes":[[["routing-table","rt1","ospfv3-instance"],"o1"]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"set ospfv3-instance o1","navigate":null,"writes":[[["routing-table","rt1","ospfv3-instance"],"o1"]]}
+{"at":[],"fixture":"populated","line":"delete routing-table rt1 ospfv3-instance","navigate":null,"writes":[[["routing-table","rt1","ospfv3-instance"],null]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"delete ospfv3-instance","navigate":null,"writes":[[["routing-table","rt1","ospfv3-instance"],null]]}
+{"at":[],"fixture":"populated","line":"set routing-table rt1 rest-api address 10.0.0.1","navigate":null,"writes":[[["routing-table","rt1","rest-api"],{"address":"10.0.0.1","port":8080}]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"set rest-api address 10.0.0.1 port 9000","navigate":null,"writes":[[["routing-table","rt1","rest-api"],{"address":"10.0.0.1","port":9000}]]}
+{"line":"set rest-api address not-an-ip","rejected":true}
+{"at":[],"fixture":"populated","line":"delete routing-table rt1 rest-api","navigate":null,"writes":[[["routing-table","rt1","rest-api"],null]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"delete rest-api","navigate":null,"writes":[[["routing-table","rt1","rest-api"],null]]}
+{"at":[],"fixture":"populated","line":"set port-aggregate bond1 esi 00:11:22:33:44:55:66:77:88:99","navigate":null,"writes":[[["port-aggregate","bond1","esi"],"00:11:22:33:44:55:66:77:88:99"]]}
+{"at":[],"fixture":"populated","line":"delete port-aggregate bond1 lacp-system-id","navigate":null,"writes":[[["port-aggregate","bond1","lacp-system-id"],null]]}
+{"at":["port-aggregate","bond1"],"fixture":"populated","line":"set esi 00:11:22:33:44:55:66:77:88:99","navigate":null,"writes":[[["port-aggregate","bond1","esi"],"00:11:22:33:44:55:66:77:88:99"]]}
+{"at":["port-aggregate","bond1"],"fixture":"populated","line":"set lacp-system-id 02:00:00:00:00:01","navigate":null,"writes":[[["port-aggregate","bond1","lacp-system-id"],"02:00:00:00:00:01"]]}
+{"at":["port-aggregate","bond1"],"fixture":"populated","line":"delete esi","navigate":null,"writes":[[["port-aggregate","bond1","esi"],null]]}
+{"at":["port-aggregate","bond1"],"fixture":"populated","line":"delete lacp-system-id","navigate":null,"writes":[[["port-aggregate","bond1","lacp-system-id"],null]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 vni 10100","navigate":null,"writes":[[["broadcast-domain","bd1","vni"],10100]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 route-target import 65000:10100","navigate":null,"writes":[[["broadcast-domain","bd1","route-targets-import"],["65000:10100"]]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 redistribute from mac to bgp r1","navigate":null,"writes":[[["broadcast-domain","bd1","mac-redistribute"],"r1"]]}
+{"at":[],"fixture":"populated","line":"delete broadcast domain bd1 redistribute","navigate":null,"writes":[[["broadcast-domain","bd1","mac-redistribute"],null]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 redistribute from arp to bgp r1","navigate":null,"writes":[[["broadcast-domain","bd1","arp-redistribute"],"r1"]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 redistribute from connected to bgp r1","navigate":null,"writes":[[["broadcast-domain","bd1","connected-redistribute"],"r1"]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 routing-table rt1","navigate":null,"writes":[[["broadcast-domain","bd1","routing-table"],"rt1"]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 asn 1","navigate":null,"writes":[[["bgp-instance","R1","asn"],1]]}
+{"at":["bgp-instance","R1"],"fixture":"populated","line":"set asn 1","navigate":null,"writes":[[["bgp-instance","R1","asn"],1]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 cluster-id 10.0.0.1","navigate":null,"writes":[[["bgp-instance","R1","cluster-id"],"10.0.0.1"]]}
+{"at":["bgp-instance","R1"],"fixture":"populated","line":"set cluster-id 10.0.0.1","navigate":null,"writes":[[["bgp-instance","R1","cluster-id"],"10.0.0.1"]]}
+{"at":[],"fixture":"populated","line":"set user 1 password 1","navigate":null,"writes":[[["user"],[{"name":"alice","password":"x"},{"name":"1","password":"1"}]]]}
+{"at":[],"fixture":"empty","line":"set user 1 password 1","navigate":null,"writes":[[["user"],[{"name":"1","password":"1"}]]]}
+{"at":[],"fixture":"populated","line":"set hostname 1","navigate":null,"writes":[[["hostname"],"1"]]}
+{"at":[],"fixture":"empty","line":"set hostname 1","navigate":null,"writes":[[["hostname"],"1"]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 remote-as 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","remote-as"],1]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 source-address interface eth0 label 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","source-address"],{"Interface":{"interface":"eth0","label":"1"}}]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 source-address loopback label 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","source-address"],{"Loopback":{"label":"1"}}]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 hold-time 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","hold-time"],1]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 keepalive-interval 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","keepalive-interval"],1]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 mrai 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","mrai"],1]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 max-hops 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","max-hops"],1]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 damping","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","damping"],{"half_life":900,"max_suppress":3600,"reuse":750,"suppress":6000}]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 connect-retry-time 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","connect-retry-time"],1]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 md5-password 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","auth"],{"Md5":{"password":"1"}}]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 ao-key 1 1 hmac-sha1 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","auth"],{"Ao":{"keys":[{"algorithm":"HmacSha1_96","exclude_options":false,"is_current":false,"is_rnext":false,"key":"1","recv_id":1,"send_id":1}]}}]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set remote-as 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","remote-as"],1]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set source-address interface eth0 label 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","source-address"],{"Interface":{"interface":"eth0","label":"1"}}]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set source-address loopback label 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","source-address"],{"Loopback":{"label":"1"}}]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set address-family ipv4","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","address-family"],["Ipv4Unicast"]]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set address-family ipv6","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","address-family"],["Ipv6Unicast"]]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set hold-time 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","hold-time"],1]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set keepalive-interval 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","keepalive-interval"],1]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set mrai 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","mrai"],1]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set damping","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","damping"],{"half_life":900,"max_suppress":3600,"reuse":750,"suppress":6000}]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set connect-retry-time 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","connect-retry-time"],1]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set md5-password 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","auth"],{"Md5":{"password":"1"}}]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set ao-key 1 1 hmac-sha1 1","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","auth"],{"Ao":{"keys":[{"algorithm":"HmacSha1_96","exclude_options":false,"is_current":false,"is_rnext":false,"key":"1","recv_id":1,"send_id":1}]}}]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer-group PG1 shutdown","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","shutdown"],{"message":null}]]}
+{"at":["bgp-instance","R1","peer-group","PG1"],"fixture":"populated","line":"set shutdown","navigate":null,"writes":[[["bgp-instance","R1","peer-group","PG1","shutdown"],{"message":null}]]}
+{"at":[],"fixture":"populated","line":"set bgp instance R1 peer 10.0.0.1 peer-group PG1","navigate":null,"writes":[[["bgp-instance","R1","peer"],[{"peer_group":"PG1","remote_address":"192.0.2.1","shutdown":null},{"peer_group":"PG1","remote_address":"10.0.0.1","shutdown":null}]]]}
+{"at":["bgp-instance","R1"],"fixture":"populated","line":"set peer 10.0.0.1 peer-group PG1","navigate":null,"writes":[[["bgp-instance","R1","peer"],[{"peer_group":"PG1","remote_address":"192.0.2.1","shutdown":null},{"peer_group":"PG1","remote_address":"10.0.0.1","shutdown":null}]]]}
+{"at":[],"fixture":"populated","line":"edit ospf instance o1","navigate":["ospf-instance","o1"],"writes":[]}
+{"at":[],"fixture":"empty","line":"edit ospf instance o1","navigate":["ospf-instance","o1"],"writes":[[["ospf-instance"],[{"areas":[],"name":"o1","redistribute_policy":null,"router_id":"0.0.0.0","routing_table":null}]]]}
+{"at":[],"fixture":"populated","line":"set ospf instance o1 router-id 10.0.0.1","navigate":null,"writes":[[["ospf-instance","o1","router-id"],"10.0.0.1"]]}
+{"at":[],"fixture":"populated","line":"delete ospf instance o1","navigate":null,"writes":[[["ospf-instance"],[]]]}
+{"at":[],"fixture":"populated","line":"edit ospf instance o1 area 10.0.0.1","navigate":["ospf-instance","o1","area","10.0.0.1"],"writes":[[["ospf-instance","o1","area"],[{"area_id":"0.0.0.0","profiles":[{"auth":null,"cost":null,"dead_interval":null,"extended_sequence_numbers":false,"hello_interval":null,"mtu":null,"name":"p1","network_type":null,"priority":null}]},{"area_id":"10.0.0.1","profiles":[]}]]]}
+{"at":["ospf-instance","o1"],"fixture":"populated","line":"edit area 10.0.0.1","navigate":["ospf-instance","o1","area","10.0.0.1"],"writes":[[["ospf-instance","o1","area"],[{"area_id":"0.0.0.0","profiles":[{"auth":null,"cost":null,"dead_interval":null,"extended_sequence_numbers":false,"hello_interval":null,"mtu":null,"name":"p1","network_type":null,"priority":null}]},{"area_id":"10.0.0.1","profiles":[]}]]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set hello-interval 1","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","hello-interval"],1]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set dead-interval 1","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","dead-interval"],1]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set cost 1","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","cost"],1]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set priority 1","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","priority"],1]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set simple-password 1","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","auth"],{"Simple":{"password":"1"}}]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set crypto-key 1 hmac-sha256 1","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","auth"],{"Crypto":{"keys":[{"algorithm":"HmacSha256","is_current":false,"key":"1","key_id":1}]}}]]}
+{"at":[],"fixture":"populated","line":"set ospfv3 instance o1 router-id 10.0.0.1","navigate":null,"writes":[[["ospfv3-instance","o1","router-id"],"10.0.0.1"]]}
+{"at":[],"fixture":"populated","line":"edit ospfv3 instance o1 area 10.0.0.1","navigate":["ospfv3-instance","o1","area","10.0.0.1"],"writes":[[["ospfv3-instance","o1","area"],[{"area_id":"0.0.0.0","profiles":[{"auth":null,"cost":null,"dead_interval":null,"hello_interval":null,"mtu":null,"name":"p1","network_type":null,"priority":null}]},{"area_id":"10.0.0.1","profiles":[]}]]]}
+{"at":[],"fixture":"populated","line":"set routing-table rt1 bgp-instance R1","navigate":null,"writes":[[["routing-table","rt1","bgp-instance"],"R1"]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"set bgp-instance R1","navigate":null,"writes":[[["routing-table","rt1","bgp-instance"],"R1"]]}
+{"at":[],"fixture":"populated","line":"set routing-table rt1 ospf-instance o1","navigate":null,"writes":[[["routing-table","rt1","ospf-instance"],"o1"]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"set ospf-instance o1","navigate":null,"writes":[[["routing-table","rt1","ospf-instance"],"o1"]]}
+{"at":[],"fixture":"populated","line":"delete routing-table rt1 ospf-instance","navigate":null,"writes":[[["routing-table","rt1","ospf-instance"],null]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"delete ospf-instance","navigate":null,"writes":[[["routing-table","rt1","ospf-instance"],null]]}
+{"at":[],"fixture":"populated","line":"set routing-table rt1 rest-api address 10.0.0.1 port 1","navigate":null,"writes":[[["routing-table","rt1","rest-api"],{"address":"10.0.0.1","port":1}]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"set rest-api address 10.0.0.1","navigate":null,"writes":[[["routing-table","rt1","rest-api"],{"address":"10.0.0.1","port":8080}]]}
+{"at":["routing-table","rt1"],"fixture":"populated","line":"set rest-api address 10.0.0.1 port 1","navigate":null,"writes":[[["routing-table","rt1","rest-api"],{"address":"10.0.0.1","port":1}]]}
+{"at":[],"fixture":"populated","line":"edit broadcast domain bd1","navigate":["broadcast-domain","bd1"],"writes":[]}
+{"at":[],"fixture":"empty","line":"edit broadcast domain bd1","navigate":["broadcast-domain","bd1"],"writes":[[["broadcast-domain"],[{"addresses":[],"arp_redistribute":null,"connected_redistribute":null,"mac_redistribute":null,"name":"bd1","ospf_profile":null,"ospfv3_profile":null,"rd":null,"route_targets_export":[],"route_targets_import":[],"routing_table":null,"vni":null,"vtep_source":null}]]]}
+{"at":[],"fixture":"populated","line":"delete broadcast domain bd1","navigate":null,"writes":[[["broadcast-domain"],[]]]}
+{"at":[],"fixture":"populated","line":"edit switching-profile sp1","navigate":["switching-profile","sp1"],"writes":[]}
+{"at":[],"fixture":"empty","line":"edit switching-profile sp1","navigate":["switching-profile","sp1"],"writes":[[["switching-profile"],[{"members":[],"name":"sp1"}]]]}
+{"at":[],"fixture":"populated","line":"delete switching-profile sp1","navigate":null,"writes":[[["switching-profile"],[]]]}
+{"at":[],"fixture":"populated","line":"set switching-profile sp1 broadcast-domain bd1 tag dot1q 1","navigate":null,"writes":[[["switching-profile","sp1","member"],[{"broadcast_domain":"bd1","tag":{"Dot1q":1}}]]]}
+{"at":[],"fixture":"populated","line":"set switching-profile sp1 broadcast-domain bd1 tag untagged","navigate":null,"writes":[[["switching-profile","sp1","member"],[{"broadcast_domain":"bd1","tag":"Untagged"}]]]}
+{"at":["switching-profile","sp1"],"fixture":"populated","line":"set broadcast-domain bd1 tag dot1q 1","navigate":null,"writes":[[["switching-profile","sp1","member"],[{"broadcast_domain":"bd1","tag":{"Dot1q":1}}]]]}
+{"at":["switching-profile","sp1"],"fixture":"populated","line":"set broadcast-domain bd1 tag untagged","navigate":null,"writes":[[["switching-profile","sp1","member"],[{"broadcast_domain":"bd1","tag":"Untagged"}]]]}
+{"at":[],"fixture":"populated","line":"set port-aggregate bond1 mode lacp","navigate":null,"writes":[[["port-aggregate","bond1","mode"],"Lacp"]]}
+{"at":[],"fixture":"populated","line":"set port-aggregate bond1 lacp-rate slow","navigate":null,"writes":[[["port-aggregate","bond1","lacp-rate"],"Slow"]]}
+{"at":["port-aggregate","bond1"],"fixture":"populated","line":"set lacp-rate fast","navigate":null,"writes":[[["port-aggregate","bond1","lacp-rate"],"Fast"]]}
+{"at":[],"fixture":"populated","line":"set port-aggregate bond1 redundancy-mode all-active","navigate":null,"writes":[[["port-aggregate","bond1","redundancy-mode"],"AllActive"]]}
+{"at":["port-aggregate","bond1"],"fixture":"populated","line":"set redundancy-mode single-active","navigate":null,"writes":[[["port-aggregate","bond1","redundancy-mode"],"SingleActive"]]}
+{"at":["port-aggregate","bond1"],"fixture":"populated","line":"set mode lacp","navigate":null,"writes":[[["port-aggregate","bond1","mode"],"Lacp"]]}
+{"at":[],"fixture":"populated","line":"set interface eth0 address 10.0.0.0/24","navigate":null,"writes":[[["interface","eth0","subinterface","0","address"],[{"address":"10.0.0.0/24","label":null}]]]}
+{"at":[],"fixture":"empty","line":"set interface eth0 address 10.0.0.0/24","navigate":null,"writes":[[["interface"],[{"addresses":[],"lldp_destination":"NearestBridge","lldp_receive":false,"lldp_transmit":false,"mtu":null,"name":"eth0","ospf_profile":null,"ospfv3_profile":null,"port_aggregate":null,"routing_table":null,"subinterfaces":[{"addresses":[{"address":"10.0.0.0/24","label":null}],"ospf_profile":null,"ospfv3_profile":null,"routing_table":null,"tag":0}],"switching_profile":null}]]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"set address 10.0.0.0/24","navigate":null,"writes":[[["interface","eth0","subinterface","0","address"],[{"address":"10.0.0.0/24","label":null}]]]}
+{"at":[],"fixture":"populated","line":"set interface eth0 address 10.0.0.0/24 label 1","navigate":null,"writes":[[["interface","eth0","subinterface","0","address"],[{"address":"10.0.0.0/24","label":"1"}]]]}
+{"at":[],"fixture":"empty","line":"set interface eth0 address 10.0.0.0/24 label 1","navigate":null,"writes":[[["interface"],[{"addresses":[],"lldp_destination":"NearestBridge","lldp_receive":false,"lldp_transmit":false,"mtu":null,"name":"eth0","ospf_profile":null,"ospfv3_profile":null,"port_aggregate":null,"routing_table":null,"subinterfaces":[{"addresses":[{"address":"10.0.0.0/24","label":"1"}],"ospf_profile":null,"ospfv3_profile":null,"routing_table":null,"tag":0}],"switching_profile":null}]]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"set address 10.0.0.0/24 label 1","navigate":null,"writes":[[["interface","eth0","subinterface","0","address"],[{"address":"10.0.0.0/24","label":"1"}]]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 address 10.0.0.0/24","navigate":null,"writes":[[["broadcast-domain","bd1","address"],[{"address":"10.0.0.0/24","label":null}]]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 address 10.0.0.0/24 label 1","navigate":null,"writes":[[["broadcast-domain","bd1","address"],[{"address":"10.0.0.0/24","label":"1"}]]]}
+{"at":[],"fixture":"populated","line":"delete broadcast domain bd1 routing-table","navigate":null,"writes":[[["broadcast-domain","bd1","routing-table"],null]]}
+{"at":[],"fixture":"populated","line":"set port-aggregate bond1 esi 1","navigate":null,"writes":[[["port-aggregate","bond1","esi"],"1"]]}
+{"at":[],"fixture":"populated","line":"delete port-aggregate bond1 esi","navigate":null,"writes":[[["port-aggregate","bond1","esi"],null]]}
+{"at":[],"fixture":"populated","line":"set port-aggregate bond1 lacp-system-id 1","navigate":null,"writes":[[["port-aggregate","bond1","lacp-system-id"],"1"]]}
+{"at":["port-aggregate","bond1"],"fixture":"populated","line":"set esi 1","navigate":null,"writes":[[["port-aggregate","bond1","esi"],"1"]]}
+{"at":["port-aggregate","bond1"],"fixture":"populated","line":"set lacp-system-id 1","navigate":null,"writes":[[["port-aggregate","bond1","lacp-system-id"],"1"]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 vni 1","navigate":null,"writes":[[["broadcast-domain","bd1","vni"],1]]}
+{"at":[],"fixture":"populated","line":"delete broadcast domain bd1 vni","navigate":null,"writes":[[["broadcast-domain","bd1","vni"],null]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 rd 1","navigate":null,"writes":[[["broadcast-domain","bd1","rd"],"1"]]}
+{"at":[],"fixture":"populated","line":"delete broadcast domain bd1 rd","navigate":null,"writes":[[["broadcast-domain","bd1","rd"],null]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 route-target import 1","navigate":null,"writes":[[["broadcast-domain","bd1","route-targets-import"],["1"]]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 route-target export 1","navigate":null,"writes":[[["broadcast-domain","bd1","route-targets-export"],["1"]]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 vtep-source interface eth0","navigate":null,"writes":[[["broadcast-domain","bd1","vtep-source"],{"Interface":{"interface":"eth0","label":null}}]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 vtep-source interface eth0 label 1","navigate":null,"writes":[[["broadcast-domain","bd1","vtep-source"],{"Interface":{"interface":"eth0","label":"1"}}]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 vtep-source loopback","navigate":null,"writes":[[["broadcast-domain","bd1","vtep-source"],{"Loopback":{"label":null}}]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 vtep-source loopback label 1","navigate":null,"writes":[[["broadcast-domain","bd1","vtep-source"],{"Loopback":{"label":"1"}}]]}
+{"at":[],"fixture":"populated","line":"delete broadcast domain bd1 vtep-source","navigate":null,"writes":[[["broadcast-domain","bd1","vtep-source"],null]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 redistribute from mac to bgp R1","navigate":null,"writes":[[["broadcast-domain","bd1","mac-redistribute"],"R1"]]}
+{"at":[],"fixture":"populated","line":"delete broadcast domain bd1 redistribute from mac","navigate":null,"writes":[[["broadcast-domain","bd1","mac-redistribute"],null]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 redistribute from arp to bgp R1","navigate":null,"writes":[[["broadcast-domain","bd1","arp-redistribute"],"R1"]]}
+{"at":[],"fixture":"populated","line":"delete broadcast domain bd1 redistribute from arp","navigate":null,"writes":[[["broadcast-domain","bd1","arp-redistribute"],null]]}
+{"at":[],"fixture":"populated","line":"set broadcast domain bd1 redistribute from connected to bgp R1","navigate":null,"writes":[[["broadcast-domain","bd1","connected-redistribute"],"R1"]]}
+{"at":[],"fixture":"populated","line":"delete broadcast domain bd1 redistribute from connected","navigate":null,"writes":[[["broadcast-domain","bd1","connected-redistribute"],null]]}
+{"at":[],"fixture":"populated","line":"set interface eth0 mtu 1","navigate":null,"writes":[[["interface","eth0","mtu"],1]]}
+{"at":["ospf-instance","o1","area","0.0.0.0","profile","p1"],"fixture":"populated","line":"set mtu 1","navigate":null,"writes":[[["ospf-instance","o1","area","0.0.0.0","profile","p1","mtu"],1]]}
+{"at":[],"fixture":"populated","line":"set interface eth0 lldp transmit","navigate":null,"writes":[[["interface","eth0","lldp-transmit"],true]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"set lldp transmit","navigate":null,"writes":[[["interface","eth0","lldp-transmit"],true]]}
+{"at":[],"fixture":"populated","line":"set interface eth0 lldp receive","navigate":null,"writes":[[["interface","eth0","lldp-receive"],true]]}
+{"at":[],"fixture":"populated","line":"delete interface eth0 lldp transmit","navigate":null,"writes":[[["interface","eth0","lldp-transmit"],false]]}
+{"at":[],"fixture":"populated","line":"delete interface eth0 lldp receive","navigate":null,"writes":[[["interface","eth0","lldp-receive"],false]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"delete lldp receive","navigate":null,"writes":[[["interface","eth0","lldp-receive"],false]]}
+{"at":[],"fixture":"populated","line":"set interface eth0 lldp destination nearest-bridge","navigate":null,"writes":[[["interface","eth0","lldp-destination"],"NearestBridge"]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"set lldp destination nearest-bridge","navigate":null,"writes":[[["interface","eth0","lldp-destination"],"NearestBridge"]]}
+{"at":[],"fixture":"populated","line":"set interface eth0 lldp destination non-tpmr","navigate":null,"writes":[[["interface","eth0","lldp-destination"],"NonTpmr"]]}
+{"at":[],"fixture":"populated","line":"set interface eth0 lldp destination customer-bridge","navigate":null,"writes":[[["interface","eth0","lldp-destination"],"CustomerBridge"]]}
+{"at":["interface","eth0"],"fixture":"populated","line":"set lldp destination customer-bridge","navigate":null,"writes":[[["interface","eth0","lldp-destination"],"CustomerBridge"]]}
+{"at":[],"fixture":"populated","line":"delete interface eth0 lldp destination","navigate":null,"writes":[[["interface","eth0","lldp-destination"],"NearestBridge"]]}
+{"at":[],"fixture":"populated","line":"set lldp tx-interval 1","navigate":null,"writes":[[["lldp","tx-interval-secs"],1]]}
+{"at":[],"fixture":"empty","line":"set lldp tx-interval 1","navigate":null,"writes":[[["lldp","tx-interval-secs"],1]]}
+{"at":[],"fixture":"populated","line":"delete lldp tx-interval","navigate":null,"writes":[[["lldp","tx-interval-secs"],null]]}
+{"at":[],"fixture":"empty","line":"delete lldp tx-interval","navigate":null,"writes":[[["lldp","tx-interval-secs"],null]]}
+{"at":[],"fixture":"populated","line":"set lldp tx-hold 1","navigate":null,"writes":[[["lldp","tx-hold"],1]]}
+{"at":[],"fixture":"empty","line":"set lldp tx-hold 1","navigate":null,"writes":[[["lldp","tx-hold"],1]]}
+{"at":[],"fixture":"populated","line":"delete lldp tx-hold","navigate":null,"writes":[[["lldp","tx-hold"],null]]}
+{"at":[],"fixture":"empty","line":"delete lldp tx-hold","navigate":null,"writes":[[["lldp","tx-hold"],null]]}
+{"at":[],"fixture":"populated","line":"set lldp management-address 10.0.0.1","navigate":null,"writes":[[["lldp","management-address"],"10.0.0.1"]]}
+{"at":[],"fixture":"empty","line":"set lldp management-address 10.0.0.1","navigate":null,"writes":[[["lldp","management-address"],"10.0.0.1"]]}

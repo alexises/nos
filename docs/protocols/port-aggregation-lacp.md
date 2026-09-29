@@ -50,7 +50,7 @@ router-a> show port-aggregate
 port-aggregate bond-lacp: mode Lacp, switching-profile unset, mtu 1500
 ```
 
-Absolute forms: `edit port-aggregate bond-lacp`, `set port-aggregate bond-lacp mode lacp`, `set port-aggregate bond-lacp lacp-rate fast`, and `set interface eth1 port-aggregate bond-lacp`, which, like every `set`, needs `eth1` to exist in the configuration already: a new member is created with `edit interface eth1` (otherwise: `edit failed: interface 'eth1' not found`). A static aggregate is the same without `mode lacp` and `lacp-rate`.
+Absolute forms: `edit port-aggregate bond-lacp`, `set port-aggregate bond-lacp mode lacp`, `set port-aggregate bond-lacp lacp-rate fast`, and `set interface eth1 port-aggregate bond-lacp`, which creates `eth1` in the configuration if it isn't there yet, like every `set`. A static aggregate is the same without `mode lacp` and `lacp-rate`.
 
 REST:
 
