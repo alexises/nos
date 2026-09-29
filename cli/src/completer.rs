@@ -104,7 +104,7 @@ impl NosCompleter {
     /// slot takes an arbitrary value there is no way to complete.
     fn name_source(&mut self, kind: ArgKind) -> Option<&mut (dyn FnMut() -> Vec<String> + Send)> {
         Some(match kind {
-            ArgKind::Plain => return None,
+            ArgKind::Plain | ArgKind::IpAddr | ArgKind::Number | ArgKind::Rest => return None,
             ArgKind::BgpInstanceName => &mut *self.instance_name_source,
             ArgKind::BgpPeerGroupName => &mut *self.peer_group_name_source,
             ArgKind::RoutingTableName => &mut *self.routing_table_name_source,
@@ -121,30 +121,11 @@ impl NosCompleter {
     }
 }
 
-/// One whitespace-delimited token in the buffer, with its start byte offset.
-fn tokenize_with_offsets(line: &str) -> Vec<(usize, &str)> {
-    let mut out = Vec::new();
-    let mut start = None;
-    for (i, ch) in line.char_indices() {
-        if ch.is_whitespace() {
-            if let Some(s) = start.take() {
-                out.push((s, &line[s..i]));
-            }
-        } else if start.is_none() {
-            start = Some(i);
-        }
-    }
-    if let Some(s) = start {
-        out.push((s, &line[s..]));
-    }
-    out
-}
-
 impl Completer for NosCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> CompletionResult {
         let line = &line[..pos];
         let ends_with_whitespace = line.chars().next_back().is_none_or(char::is_whitespace);
-        let tokens = tokenize_with_offsets(line);
+        let tokens = spec::tokenize_with_offsets(line);
 
         let (typed, partial_start, partial): (&[(usize, &str)], usize, &str) =
             if ends_with_whitespace || tokens.is_empty() {
