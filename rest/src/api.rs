@@ -27,7 +27,11 @@ use crate::{clear, login, openapi, show, tx};
             for a certificate, and every later request presents it in the handshake — no credentials are \
             sent again. The connection is TLS 1.3 with post-quantum key exchange (X25519MLKEM768) only, \
             and speaks HTTP/2 so many requests share one connection. The config tree is the URL tree — `/v1/transactions/{tx}` is the whole in-progress \
-            config and each path below it a subsection; `diff` and `commit` are reserved."
+            config and each path below it a subsection; `diff` and `commit` are reserved.",
+        // Spelled out rather than read from `CARGO_PKG_LICENSE`: utoipa reads that at
+        // macro expansion without telling cargo, so an incremental build can keep a
+        // stale (empty) value and `docs/openapi.json` would depend on the build cache.
+        license(name = "GPL-3.0-only", identifier = "GPL-3.0-only")
     ),
     modifiers(&MutualTlsScheme),
     security(("mtls" = [])),
