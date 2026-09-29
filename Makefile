@@ -5,6 +5,9 @@ IMAGE ?= nos:local
 # e.g. CARGO_FEATURES=nos-bgp/dhat-heap make docker-build — see bgp/CLAUDE.md's
 # "Memory profiling" note. Empty by default: no behavior change.
 CARGO_FEATURES ?=
+# Line-coverage floor for `make coverage` (and CI, which runs it) — a ratchet
+# toward 90%, raised as tests land, never lowered (#104).
+COVERAGE_MIN ?= 78
 
 .PHONY: help build fmt fmt-fix clippy clippy-fix fix test test-plain \
         deny audit sast miri coverage mutants check ci tools docker-lint docker-build \
@@ -54,9 +57,10 @@ miri: ## Run miri UB checks on the pure-logic crates (needs a nightly toolchain 
 	@command -v cargo-miri >/dev/null 2>&1 || { echo "cargo-miri not found — needs rustup + 'rustup +nightly component add miri'"; exit 1; }
 	RUSTFLAGS="-D warnings -A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p nos-rpl -p nos-ospf-common -p nos-proto
 
-coverage: ## Collect test coverage as lcov.info (matches CI)
+coverage: ## Collect test coverage as lcov.info, failing under COVERAGE_MIN% lines (matches CI)
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "cargo-llvm-cov not found — run 'make tools'"; exit 1; }
-	cargo llvm-cov --workspace --lcov --output-path lcov.info
+	cargo llvm-cov --workspace --ignore-filename-regex '/tools/e2e/' \
+		--fail-under-lines $(COVERAGE_MIN) --lcov --output-path lcov.info
 
 mutants: ## Run mutation testing (needs a nightly toolchain; slow — CI only runs this on schedule)
 	@command -v cargo-mutants >/dev/null 2>&1 || { echo "cargo-mutants not found — run 'make tools'"; exit 1; }

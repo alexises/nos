@@ -223,7 +223,10 @@ Every daemon (`nos-configd`, each `nos-bgpd`/`nos-ribd` instance, `nos-interface
 make check   # build + fmt + clippy + test (matches CI's fast jobs)
 make fix     # auto-fix formatting and clippy-fixable lints
 make help    # list all available targets
+make coverage  # line coverage (tools/e2e excluded, it's run, not unit-tested), fails under COVERAGE_MIN (CI runs this)
 ```
+
+`COVERAGE_MIN` in the `Makefile` is a ratchet toward 90% (#104): raise it when a change lifts the total, never lower it.
 
 Containerized test environment:
 

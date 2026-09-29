@@ -91,3 +91,16 @@ async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn args_parse() {
+        Args::command().debug_assert();
+        let args = Args::try_parse_from(["nos-restd", "--table", "rt1"]).unwrap();
+        assert_eq!(args.table, "rt1");
+    }
+}
