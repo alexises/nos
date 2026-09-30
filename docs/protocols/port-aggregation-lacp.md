@@ -73,7 +73,20 @@ For an interface that is already in the configuration, set only the field: `PUT 
 
 ### Use the aggregate
 
-An aggregate's switching profile, MTU and subinterfaces cannot be set from the shell yet; use REST for them. For example, to route `bond-lacp` in `rt1`:
+Route the aggregate like an interface: its subinterface 0 is the bond itself. For example, to route `bond-lacp` in `rt1` with a 9000-byte MTU:
+
+```
+router-a> configure lag2
+router-a(lag2)> edit port-aggregate bond-lacp
+router-a(lag2/port-aggregate:bond-lacp)> set mtu 9000
+router-a(lag2/port-aggregate:bond-lacp)> edit subinterface 0
+router-a(lag2/port-aggregate:bond-lacp/subinterface:0)> set address 192.0.2.33/29
+router-a(lag2/port-aggregate:bond-lacp/subinterface:0)> set routing-table rt1
+router-a(lag2/port-aggregate:bond-lacp/subinterface:0)> commit
+transaction 'lag2' committed
+```
+
+The same over REST:
 
 ```sh
 $ $C -X POST $B/v1/transactions/lag2
@@ -93,7 +106,7 @@ port-aggregate bond-lacp: mode Lacp, switching-profile unset, mtu 9000
   subinterface 0: address [192.0.2.33/29], routing-table rt1
 ```
 
-To trunk the aggregate into broadcast domains instead, `PUT …/port-aggregate/bond-lacp/switching-profile` with body `"sp1"`.
+To trunk the aggregate into broadcast domains instead, `set port-aggregate bond-lacp switching-profile sp1` (REST: `PUT …/port-aggregate/bond-lacp/switching-profile` with body `"sp1"`).
 
 Known gap: addresses on an aggregate's subinterfaces are applied, but they are not listed as `connected` routes in `show route`, unlike those of an interface or an SVI.
 
@@ -149,9 +162,9 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 | lacp-system-id | `set port-aggregate <pa> lacp-system-id <mac>` / `set lacp-system-id <mac>`; `delete … lacp-system-id` | `port-aggregate/<pa>/lacp-system-id` | unicast MAC, `02:00:00:00:00:01`; default derived | a unicast MAC | the LACP system ID advertised to the partner | `show lacp` (`system`) |
 | esi | `set port-aggregate <pa> esi <esi>` / `set esi <esi>`; `delete … esi` | `port-aggregate/<pa>/esi` | 10 hex bytes; default unset | not all zero; unique among aggregates | EVPN Ethernet Segment, see EVPN | `show bgp evpn` |
 | redundancy-mode | `set port-aggregate <pa> redundancy-mode all-active\|single-active` / `set redundancy-mode …` | `port-aggregate/<pa>/redundancy-mode`, body `"AllActive"` or `"SingleActive"` | `all-active` (default) | `single-active` needs an `esi` | EVPN multi-homing mode, see EVPN | `show config` |
-| switching-profile | REST only | `port-aggregate/<pa>/switching-profile` | name; default unset | profile exists; tags don't collide with the aggregate's subinterfaces | trunks the bond into the profile's broadcast domains | `show port-aggregate <pa>` |
-| mtu | REST only | `port-aggregate/<pa>/mtu` | 68-65535; default unset | range | the bond's MTU | `show port-aggregate <pa>` |
-| subinterface | REST only | `port-aggregate/<pa>/subinterface/<tag>`, body `{"tag":<n>,"addresses":[…],"routing_table":…}` | tag 0-4094, as on an interface | as on an interface | routed subinterfaces of the bond (tag 0 is the bond itself) | `show port-aggregate <pa>` |
+| switching-profile | `set port-aggregate <pa> switching-profile <sp>` / `set switching-profile <sp>`; `delete … switching-profile` | `port-aggregate/<pa>/switching-profile` | name; default unset | profile exists; tags don't collide with the aggregate's subinterfaces | trunks the bond into the profile's broadcast domains | `show port-aggregate <pa>` |
+| mtu | `set port-aggregate <pa> mtu <n>` / `set mtu <n>`; `delete … mtu` | `port-aggregate/<pa>/mtu` | 68-65535; default unset | range | the bond's MTU | `show port-aggregate <pa>` |
+| subinterface | `edit port-aggregate <pa> subinterface <tag>`, then `set address <cidr>` / `set routing-table <t>`; `delete port-aggregate <pa> subinterface <tag>` | `port-aggregate/<pa>/subinterface/<tag>`, body `{"tag":<n>,"addresses":[…],"routing_table":…}` | tag 0-4094, as on an interface | as on an interface | routed subinterfaces of the bond (tag 0 is the bond itself) | `show port-aggregate <pa>` |
 
 `mode`, `lacp-rate` and `redundancy-mode` cannot be deleted; set them back to their default instead.
 

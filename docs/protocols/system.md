@@ -93,14 +93,14 @@ The port defaults to 8080. You can enable the API in several routing tables; eac
 **Check that it is listening.** The API logs when it starts and when its address is missing:
 
 ```
-edge-1> show log nos-restd
-2026-09-29T05:40:19.224Z  INFO nos-restd nos_restd: nos-restd starting (table=rt1)
-2026-09-29T05:40:19.274Z  WARN nos-restd nos_rest::listen: rest api not listening yet: bind in vrf vrf100 failed: Cannot assign requested address (os error 99) (table=rt1 address=10.50.0.2 port=8080)
-2026-09-29T05:40:29.300Z  INFO nos-restd nos_rest::listen: rest api listening (table=rt1 vrf=vrf100 address=10.50.0.2 port=8080)
-2026-09-29T05:40:30.474Z DEBUG nos-restd nos_pki::rest: rest tls handshake ok (user=e2e alpn=h2 kx=Some(X25519MLKEM768))
+edge-1> show log nos-restd[rt1]
+2026-09-29T05:40:19.224Z  INFO nos-restd[rt1] nos_restd: nos-restd starting (table=rt1)
+2026-09-29T05:40:19.274Z  WARN nos-restd[rt1] nos_rest::listen: rest api not listening yet: bind in vrf vrf100 failed: Cannot assign requested address (os error 99) (table=rt1 address=10.50.0.2 port=8080)
+2026-09-29T05:40:29.300Z  INFO nos-restd[rt1] nos_rest::listen: rest api listening (table=rt1 vrf=vrf100 address=10.50.0.2 port=8080)
+2026-09-29T05:40:30.474Z DEBUG nos-restd[rt1] nos_pki::rest: rest tls handshake ok (user=e2e alpn=h2 kx=Some(X25519MLKEM768))
 ```
 
-All routing tables' REST APIs log under the one source `nos-restd`; the `table=` field tells them apart.
+Each routing table's REST API logs under its own source, `nos-restd[<table>]`.
 
 If the address is not (yet) on an interface of the routing table, the log says `rest api not listening yet`, as in the second line above, and the API retries every second, so you can enable the API before configuring the address.
 
@@ -137,7 +137,7 @@ The sources are:
 - `nos-bgpd[<instance>]`, `nos-ospfd[<instance>]`, `nos-ospfv3d[<instance>]`: one per routing protocol instance.
 - `nos-ribd[<table>]`: one per routing table.
 - `nos-fdbd[<domain>]`: one per broadcast domain with a VNI (see [EVPN and VXLAN](evpn-vxlan.md)).
-- `nos-restd`: the REST API, for every routing table that has one.
+- `nos-restd[<table>]`: one per routing table with a REST API.
 - `nos-configd` (configuration and commits), `nos-interfaced` (interfaces, bridges, bonds), `nos-lacpd`, `nos-lldpd`, and `nos-watchdogd` (start-up, logins, certificates).
 
 The source must match exactly. A source that does not exist, or has not logged anything, gives `no log entries`.
@@ -207,7 +207,7 @@ REST paths are relative to `/v1/transactions/{tx}/`.
 | hostname | `set hostname <name>` | `hostname`, `"edge-1"` | string, `nos` | 1-253 characters; letters, digits, `-`; no leading or trailing `-` | Shell prompt, LLDP System Name | the prompt, `show config` |
 | user | `set user <name> password <password>` / `delete user <name>` | `user/{name}`, `{"name":"alice","password":"…"}` | list, `admin`/`admin` on a new router | name 1-64 characters, PRECIS, unique; at least one user | Who may log in | `show config` |
 | user password | `set user <name> password <password>` | `user/{name}/password`, `"…"` | clear text in, argon2id hash stored | none | The user's password | a login |
-| routing-table rest-api | `set routing-table <t> rest-api address <ip> [port <n>]` / `delete routing-table <t> rest-api` | `routing-table/{t}/rest-api`, `{"address":"192.0.2.10","port":8443}` | unset; port 8080 | unicast address; port 1-65535 | Runs the REST API on that address | `show log nos-restd` |
+| routing-table rest-api | `set routing-table <t> rest-api address <ip> [port <n>]` / `delete routing-table <t> rest-api` | `routing-table/{t}/rest-api`, `{"address":"192.0.2.10","port":8443}` | unset; port 8080 | unicast address; port 1-65535 | Runs the REST API on that address | `show log nos-restd[<t>]` |
 
 The operational commands on this page have no configuration: `save` (shell only), `show log [<source>] [--follow]` (`GET /v1/logs`, `GET /v1/logs/follow`).
 

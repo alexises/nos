@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .with(tracing_subscriber::fmt::layer())
         .with(ForwardingLayer::install(
-            "nos-restd",
+            format!("nos-restd[{}]", args.table),
             args.log_socket.clone(),
             identity.clone(),
             shutdown_rx.clone(),
