@@ -1583,7 +1583,8 @@ fn build_advertisement(
     // RFC 4271 §5.1.4: a MED received from a neighbouring AS is never
     // passed on to another AS. It is cleared before the export policy runs,
     // so a MED the policy sets (or a locally originated one) is still sent.
-    if !outbox.is_ibgp && matches!(best.origin, RouteOrigin::Peer(_)) {
+    // RFC 7947 §2.2: a route server passes MED through unchanged to its clients.
+    if !outbox.is_ibgp && !outbox.is_rs_client && matches!(best.origin, RouteOrigin::Peer(_)) {
         adjusted.med = None;
     }
     let verdict = nos_rpl::vm::run(
@@ -2619,6 +2620,59 @@ mod tests {
     fn received_med_is_not_sent_to_ebgp_but_kept_toward_ibgp() {
         assert_eq!(med_toward(false, "accept\n"), None);
         assert_eq!(med_toward(true, "accept\n"), Some(999));
+    }
+
+    #[test]
+    fn received_med_is_passed_through_to_route_server_client() {
+        let mut rib = new_rib(65000);
+        let source = addr("10.0.0.1");
+        let _src_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
+        let mut rs_rx = register_peer_full(
+            &mut rib,
+            addr("10.0.0.2"),
+            false,
+            addr("10.0.0.253"),
+            false,
+            true,
+            HashSet::new(),
+        );
+        let mut rs_ap_rx = register_peer_full(
+            &mut rib,
+            addr("10.0.0.3"),
+            false,
+            addr("10.0.0.252"),
+            false,
+            true,
+            HashSet::from([AddressFamily::Ipv4Unicast]),
+        );
+        rib.handle_update(
+            source,
+            false,
+            v4("192.0.2.1"),
+            &update_with(
+                "9.9.9.0/24",
+                vec![65001],
+                "10.0.0.1",
+                message::Origin::Igp,
+                Some(999),
+            ),
+            &nos_rpl::ACCEPT_ALL,
+        );
+        let meds = |updates: Vec<OutboundUpdate>, add_path: bool| -> Vec<Option<u32>> {
+            updates
+                .into_iter()
+                .filter_map(|u| match u {
+                    OutboundUpdate::Announce(a) if a.path_id.is_some() == add_path => Some(a.med),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Single best path.
+        assert_eq!(meds(recv_all(&mut rs_rx), false), vec![Some(999)]);
+        // ADD-PATH per-source fan-out (propagate_rs_view).
+        let ap = meds(recv_all(&mut rs_ap_rx), true);
+        assert!(!ap.is_empty());
+        assert!(ap.iter().all(|m| *m == Some(999)));
     }
 
     #[test]
