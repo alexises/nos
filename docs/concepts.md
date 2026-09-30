@@ -99,7 +99,7 @@ All connections are encrypted with TLS 1.3 and a post-quantum key exchange. For 
 
 ## Logs
 
-The router keeps its most recent 10,000 log entries. Each entry names its source. Instance-specific sources carry the instance name in brackets, such as `nos-bgpd[r1]` for BGP instance `r1` or `nos-ribd[rt1]` for routing table `rt1`. General ones are named `nos-configd`, `nos-restd`, `nos-interfaced` and so on.
+The router keeps its most recent 10,000 log entries. Each entry names its source. Instance-specific sources carry the instance name in brackets, such as `nos-bgpd[r1]` for BGP instance `r1`, or `nos-ribd[rt1]` and `nos-restd[rt1]` for routing table `rt1`. General ones are named `nos-configd`, `nos-interfaced` and so on.
 
 - In the shell, `show log` shows the buffer, `show log <source>` shows one source, and `--follow` keeps printing new entries.
 - Over REST, use `GET /v1/logs` and `GET /v1/logs/follow` (see [The REST API](api.md#following-the-log-server-sent-events)).

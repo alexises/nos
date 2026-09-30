@@ -16,10 +16,6 @@
 //!   required field may come first, bare);
 //! - `delete` on a value clears it (`None`, `false`, or the enum's
 //!   `#[default]`), or — given a value — only if it holds that value.
-//!
-//! Not wired into the shell yet: `command.rs` still parses config edits by
-//! hand, and `tests/config_equivalence.rs` proves this grammar makes the same
-//! edits.
 
 use nos_proto::cli::{self, Field, Kind, Node, Payload, SugarOut, Verb};
 use serde_json::{Map, Value};
@@ -772,6 +768,93 @@ mod tests {
                 &d
             ),
             want
+        );
+    }
+
+    /// #118: a port aggregate's switching profile and a broadcast domain's
+    /// EVPN fields, absolute and relative, each resolve to their field.
+    #[test]
+    fn port_aggregate_and_broadcast_domain_evpn_forms() {
+        let mut c: Config = serde_json::from_value(doc()).unwrap();
+        c.port_aggregates.push(nos_proto::schema::PortAggregate {
+            name: "bond1".into(),
+            subinterfaces: vec![nos_proto::schema::Subinterface::default()],
+            ..Default::default()
+        });
+        c.broadcast_domains
+            .push(nos_proto::schema::BroadcastDomain {
+                name: "d1".into(),
+                ..Default::default()
+            });
+        let d = serde_json::to_value(c).unwrap();
+        let first_path = |line: &str, ctx: &[String]| -> Vec<String> {
+            let edit = parse(line, ctx, &d).unwrap_or_else(|| panic!("refused: {line}"));
+            edit.writes.last().unwrap().0.clone()
+        };
+        let pa = at(&["port-aggregate", "bond1"]);
+        for (line, ctx) in [
+            ("set port-aggregate bond1 switching-profile sp1", &[][..]),
+            ("set switching-profile sp1", &pa[..]),
+            ("delete port-aggregate bond1 switching-profile", &[][..]),
+            ("delete switching-profile", &pa[..]),
+        ] {
+            assert_eq!(
+                first_path(line, ctx),
+                at(&["port-aggregate", "bond1", "switching-profile"]),
+                "{line}"
+            );
+        }
+        let bd = at(&["broadcast-domain", "d1"]);
+        for (field, value, segment) in [
+            ("vni", "100", "vni"),
+            ("rd", "10.0.0.1:100", "rd"),
+            ("route-target", "import 65000:100", "route-targets-import"),
+            ("route-target", "export 65000:100", "route-targets-export"),
+            ("redistribute", "from mac to bgp r1", "mac-redistribute"),
+            ("redistribute", "from arp to bgp r1", "arp-redistribute"),
+            (
+                "redistribute",
+                "from connected to bgp r1",
+                "connected-redistribute",
+            ),
+            ("vtep-source", "loopback", "vtep-source"),
+            ("vtep-source", "interface lo1", "vtep-source"),
+        ] {
+            let want = at(&["broadcast-domain", "d1", segment]);
+            let abs = first_path(&format!("set broadcast domain d1 {field} {value}"), &[]);
+            assert_eq!(abs, want, "{field} {value}");
+            assert_eq!(
+                first_path(&format!("set {field} {value}"), &bd),
+                want,
+                "{field} {value}"
+            );
+        }
+        assert_eq!(
+            first_path("set port-aggregate bond1 mtu 9000", &[]),
+            at(&["port-aggregate", "bond1", "mtu"])
+        );
+        assert_eq!(
+            first_path(
+                "set port-aggregate bond1 subinterface 0 routing-table rt1",
+                &[]
+            ),
+            at(&[
+                "port-aggregate",
+                "bond1",
+                "subinterface",
+                "0",
+                "routing-table"
+            ])
+        );
+        assert_eq!(
+            parse("edit subinterface 0", &pa, &d).unwrap().navigate,
+            Some(at(&["port-aggregate", "bond1", "subinterface", "0"]))
+        );
+        assert!(parse("delete port-aggregate bond1 subinterface 0", &[], &d).is_some());
+        assert!(parse("delete mtu", &pa, &d).is_some());
+        assert_eq!(
+            first_path("delete redistribute from mac", &bd),
+            at(&["broadcast-domain", "d1", "mac-redistribute"])
         );
     }
 

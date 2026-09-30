@@ -302,7 +302,7 @@ A routing table's fields. CLI forms are shown absolute; the relative form, valid
 | static-routing-instance | `set routing-table <t> static-routing-instance <s>` / `delete … static-routing-instance` | `routing-table/{t}/static-routing-instance`, `"s1"` | name, unset | as above | Installs the instance's routes | `show route <t>` |
 | redistribute | `set routing-table <t> redistribute from static to bgp\|ospf [policy <p>]` / `delete … redistribute` | `routing-table/{t}/redistribute`, `{"from":"Static","to":"Bgp","policy":null}` | one rule, unset | source and target instances set on the table; policy exists | Advertises the static routes into BGP, or as OSPF AS-external LSAs | `show route <t>` on the peer, `show ospf database` |
 | redistribute policy | `… redistribute from static to <x> policy <p>` | `routing-table/{t}/redistribute/policy`, `"no-lab"` | name, unset (everything redistributed) | policy definition, `accept-all` or `deny-all` | Filters and rewrites what is redistributed | as above |
-| rest-api | `set routing-table <t> rest-api address <ip> [port <n>]` / `delete … rest-api` | `routing-table/{t}/rest-api`, `{"address":"10.50.0.2","port":8080}` | unset; port 8080 | unicast address; port 1-65535 | Runs the REST API on that address in this VRF | `show log nos-restd` |
+| rest-api | `set routing-table <t> rest-api address <ip> [port <n>]` / `delete … rest-api` | `routing-table/{t}/rest-api`, `{"address":"10.50.0.2","port":8080}` | unset; port 8080 | unicast address; port 1-65535 | Runs the REST API on that address in this VRF | `show log nos-restd[<t>]` |
 
 A static routing instance and its routes. Relative forms, after `edit static-routing-instance <s>`: `set route <prefix> gateway <ip>`, `delete route <prefix>`.
 

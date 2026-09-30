@@ -75,18 +75,17 @@ Give the domain a VNI, a route distinguisher, import and export route targets, a
 ```
 lab-1> configure bd
 lab-1(bd)> edit broadcast domain bd100
-lab-1(bd/broadcast-domain:bd100)> top
-lab-1(bd)> set broadcast domain bd100 vni 10100
-lab-1(bd)> set broadcast domain bd100 rd 65001:100
-lab-1(bd)> set broadcast domain bd100 route-target import 65000:10100
-lab-1(bd)> set broadcast domain bd100 route-target export 65000:10100
-lab-1(bd)> set broadcast domain bd100 vtep-source interface eth0
-lab-1(bd)> set broadcast domain bd100 redistribute from mac to bgp r1
-lab-1(bd)> commit
+lab-1(bd/broadcast-domain:bd100)> set vni 10100
+lab-1(bd/broadcast-domain:bd100)> set rd 65001:100
+lab-1(bd/broadcast-domain:bd100)> set route-target import 65000:10100
+lab-1(bd/broadcast-domain:bd100)> set route-target export 65000:10100
+lab-1(bd/broadcast-domain:bd100)> set vtep-source interface eth0
+lab-1(bd/broadcast-domain:bd100)> set redistribute from mac to bgp r1
+lab-1(bd/broadcast-domain:bd100)> commit
 transaction 'bd' committed
 ```
 
-On router-b, the same with `rd 65002:100`. These commands have no relative form: type them in full, even after `edit broadcast domain bd100`.
+On router-b, the same with `rd 65002:100`. Each command also has an absolute form that works from anywhere in the transaction, for example `set broadcast domain bd100 vni 10100`.
 
 Over REST, the EVPN fields are fields of the broadcast domain. Here the whole domain is written in one `PUT`:
 
@@ -201,18 +200,19 @@ lab-1(es/switching-profile:sp-evpn)> set broadcast-domain bd100 tag untagged
 lab-1(es/switching-profile:sp-evpn)> top
 lab-1(es)> edit port-aggregate bond1
 lab-1(es/port-aggregate:bond1)> set esi 00:11:22:33:44:55:66:77:88:99
+lab-1(es/port-aggregate:bond1)> set switching-profile sp-evpn
 lab-1(es/port-aggregate:bond1)> top
 lab-1(es)> edit interface eth1
 lab-1(es/interface:eth1)> set port-aggregate bond1
 lab-1(es/interface:eth1)> top
+lab-1(es)> commit
 ```
 
-Attaching the port aggregate to the switching profile is not possible from the shell yet; do it over REST, in the same transaction, then commit from either side:
+Over REST, the switching profile is the port aggregate's `switching-profile` field:
 
 ```sh
 $C -X PUT -H 'Content-Type: application/json' -d '"sp-evpn"' \
    $B/v1/transactions/es/port-aggregate/bond1/switching-profile
-$C -X POST $B/v1/transactions/es/commit
 ```
 
 Router-b gets the same configuration with the same ESI. The ESI is ten colon-separated hexadecimal bytes, not all zero, and unique per router: two port aggregates on one router cannot share it. The port aggregate can be static (`xor`) or LACP; with LACP, give both routers the same `lacp-system-id` so the CE sees one partner and bundles its links across them (see the port aggregation guide).
@@ -315,7 +315,7 @@ How NOS programs VXLAN devices, forwarding entries and the DF on Linux is descri
 
 ## Configuration reference
 
-Broadcast domain EVPN fields. Only the absolute CLI form exists. REST paths are relative to `/v1/transactions/{tx}/broadcast-domain/{domain}/`. The domain's other fields (addresses, routing table, OSPF) are in the L2 switching guide.
+Broadcast domain EVPN fields. CLI forms are shown absolute; the relative form, valid after `edit broadcast domain <d>`, drops the `broadcast domain <d>` prefix (`set vni 10100`, `delete redistribute from mac`). REST paths are relative to `/v1/transactions/{tx}/broadcast-domain/{domain}/`. The domain's other fields (addresses, routing table, OSPF) are in the L2 switching guide.
 
 | Field | CLI | REST path and body | Type, default | Validation | Effect | Check with |
 |---|---|---|---|---|---|---|
@@ -328,13 +328,13 @@ Broadcast domain EVPN fields. Only the absolute CLI form exists. REST paths are 
 | redistribute from arp | `set broadcast domain <d> redistribute from arp to bgp <i>` / `delete … redistribute from arp` | `arp-redistribute`, `"r1"` | BGP instance, unset | same instance as `redistribute from mac`; needs `vni` | Adds MAC+IP routes for local neighbour entries | `show fdb <d>` on the peer |
 | redistribute from connected | `set broadcast domain <d> redistribute from connected to bgp <i>` / `delete … redistribute from connected` | `connected-redistribute`, `"r1"` | BGP instance, unset | as above | Adds MAC+IP routes for the domain's own addresses | `show fdb <d>` on the peer |
 
-Port aggregate Ethernet Segment fields. The relative forms (after `edit port-aggregate <name>`) are `set esi <esi>`, `delete esi` and `set redundancy-mode …`. REST paths are relative to `/v1/transactions/{tx}/port-aggregate/{name}/`. The other port aggregate fields are in the port aggregation guide.
+Port aggregate Ethernet Segment fields. The relative forms (after `edit port-aggregate <name>`) drop the `port-aggregate <p>` prefix (`set esi <esi>`, `delete esi`, `set switching-profile <sp>`). REST paths are relative to `/v1/transactions/{tx}/port-aggregate/{name}/`. The other port aggregate fields are in the port aggregation guide.
 
 | Field | CLI | REST path and body | Type, default | Validation | Effect | Check with |
 |---|---|---|---|---|---|---|
 | esi | `set port-aggregate <p> esi <esi>` / `delete port-aggregate <p> esi` | `esi`, `"00:11:22:33:44:55:66:77:88:99"` | ten hex bytes, colon-separated, unset | not all zero; not used by another port aggregate on the router | Makes the bond an Ethernet Segment: ESI on its MAC routes, Type 4 and Type 1 routes, DF election | `show fdb <d>` |
 | redundancy-mode | `set port-aggregate <p> redundancy-mode all-active\|single-active` | `redundancy-mode`, `"AllActive"` or `"SingleActive"` | `all-active` | `single-active` needs an `esi` | Whether non-DF routers block only flooded traffic or the whole port | `show fdb <d>`, `show bgp evpn` on the peer |
-| switching-profile | REST only | `switching-profile`, `"sp-evpn"` | name, unset | profile exists | Trunks the bond into the profile's domains; a segment must be in the EVPN domain | `show port-aggregate <p>`, `show fdb <d>` |
+| switching-profile | `set port-aggregate <p> switching-profile <sp>` / `delete port-aggregate <p> switching-profile` | `switching-profile`, `"sp-evpn"` | name, unset | profile exists | Trunks the bond into the profile's domains; a segment must be in the EVPN domain | `show port-aggregate <p>`, `show fdb <d>` |
 | lacp-system-id | `set port-aggregate <p> lacp-system-id <mac>` / `delete … lacp-system-id` | `lacp-system-id`, `"02:00:00:00:00:01"` | unicast MAC, derived | unicast MAC | LACP actor system id; set it identically on every router of an LACP segment | `show lacp <p>` |
 
 BGP peer-group address family:
