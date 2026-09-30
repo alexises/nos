@@ -31,3 +31,4 @@ path = "src/main.rs"
 
 [dev-dependencies]
 nos-pki  = { workspace = true, features = ["testing"] }
+serde    = { workspace = true }

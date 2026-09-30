@@ -43,4 +43,6 @@ Wire mechanics, all in `packet.rs` (`TrailerAuth::sign`/`verify_trailer`, pinned
 - Timers (`--lsa-age-multiplier`) are test-only, like in `nos-ospfd`.
 
 ## Verification
+`link::LinkSocket`/`LinkManager::with_opener` are the same test seam as `nos-ospfd`'s (see `ospf/CLAUDE.md`'s "Testing without raw sockets"); the in-memory wire signs RFC 7166 trailers like `OspfSocket`, and `link::tests` covers p2p/broadcast adjacency, SPF, extended LSAs, graceful-restart helping and trailer auth.
+
 `nos-e2e ospfv3`, `ospfv3-graceful-restart`, `ospfv3-auth`, `ospfv3-dr`, `ospfv3-lfa`, `ospfv3-mtu-pagination` (see root `CLAUDE.md`).

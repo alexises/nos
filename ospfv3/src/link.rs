@@ -36,6 +36,50 @@ use crate::lsdb::Lsdb;
 use crate::neighbor::{self, NeighborState};
 use crate::packet::{self, DbdPacket, LsAckPacket, LsrPacket, LsuPacket, OspfPacket};
 use crate::socket::OspfSocket;
+
+/// What a link task sends and receives on: the real raw socket, or (in
+/// tests) an in-memory wire — lets `run` and `LinkManager` be exercised
+/// without `CAP_NET_RAW` (#131). Mirrors `ospf::link::LinkSocket`.
+pub enum LinkSocket {
+    Os(OspfSocket),
+    #[cfg(test)]
+    Mem(tests::wire::Port),
+}
+
+impl LinkSocket {
+    fn send_multicast(&self, ifindex: u32, payload: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Os(s) => s.send_multicast(ifindex, payload),
+            #[cfg(test)]
+            Self::Mem(p) => {
+                p.send(None, payload);
+                Ok(())
+            }
+        }
+    }
+
+    fn send_unicast(&self, dest: Ipv6Addr, ifindex: u32, payload: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Os(s) => s.send_unicast(dest, ifindex, payload),
+            #[cfg(test)]
+            Self::Mem(p) => {
+                p.send(Some(dest), payload);
+                Ok(())
+            }
+        }
+    }
+
+    async fn recv_packet(&self) -> std::io::Result<(Ipv6Addr, Vec<u8>)> {
+        match self {
+            Self::Os(s) => s.recv_packet().await,
+            #[cfg(test)]
+            Self::Mem(p) => p.recv().await,
+        }
+    }
+}
+
+/// Opens one link's socket — the real one in production, see `LinkSocket`.
+pub type Opener = Arc<dyn Fn(&LinkConfig) -> std::io::Result<LinkSocket> + Send + Sync>;
 use crate::spf;
 
 /// RFC 2328 Appendix C.3's `RxmtInterval` — same fixed value/ponytail
@@ -238,7 +282,9 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
 /// shared store; `link_local_lsdb` is this link's own (RFC 5340 §4.5.1:
 /// Link-LSAs never leave the link they belong to, so every summary/flood
 /// below draws from both, but only ever *this* link's Link-LSAs).
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
+    socket: std::io::Result<LinkSocket>,
     cfg: LinkConfig,
     local_router_id: Ipv4Addr,
     lsdb: Arc<Mutex<Lsdb>>,
@@ -249,8 +295,7 @@ pub async fn run(
 ) {
     let dbd_max_headers =
         dbd_max_headers.unwrap_or_else(|| exchange::mtu_based_max_headers(cfg.mtu));
-    let auth = cfg.auth.clone().map(|a| (a, cfg.link_local_address));
-    let socket = match OspfSocket::open(&cfg.kernel_interface, cfg.interface_id, auth) {
+    let socket = match socket {
         Ok(s) => s,
         Err(e) => {
             warn!(link = %cfg.attach_point, error = %e, "failed to open ospfv3 raw socket");
@@ -378,7 +423,7 @@ pub async fn run(
 }
 
 fn send_hello(
-    socket: &OspfSocket,
+    socket: &LinkSocket,
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
@@ -510,7 +555,7 @@ fn handle_hello(
 }
 
 fn advance_adjacencies(
-    socket: &OspfSocket,
+    socket: &LinkSocket,
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
@@ -775,7 +820,7 @@ fn finish_neighbor_event(
 }
 
 fn execute_actions(
-    socket: &OspfSocket,
+    socket: &LinkSocket,
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
@@ -836,7 +881,7 @@ fn execute_actions(
 }
 
 fn retransmit_pending(
-    socket: &OspfSocket,
+    socket: &LinkSocket,
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
@@ -893,7 +938,7 @@ fn retransmit_pending(
 /// Mirrors `ospf::link::flood_full_neighbors`'s `ponytail:` periodic-resend
 /// design exactly, same rationale.
 async fn flood_full_neighbors(
-    socket: &OspfSocket,
+    socket: &LinkSocket,
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     lsdb: &Mutex<Lsdb>,
@@ -1062,7 +1107,7 @@ fn expire_grace(cfg: &LinkConfig, status: &StatusHandle) {
 /// RFC 5187 restarting side: one Grace-LSA to every `Full` neighbor on
 /// this link, just before the process exits.
 fn send_grace_lsas(
-    socket: &OspfSocket,
+    socket: &LinkSocket,
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
@@ -1228,6 +1273,7 @@ pub struct LinkManager {
     /// RFC 5187 grace period (seconds) to announce on a planned restart;
     /// `0` = graceful restart off.
     grace_period: AtomicU16,
+    opener: Opener,
 }
 
 /// The four LS types this router originates, per RFC 8362 mode.
@@ -1275,6 +1321,23 @@ impl LinkManager {
     }
 
     pub fn new(age_multiplier: u16, dbd_max_headers: Option<usize>) -> Arc<Self> {
+        Self::with_opener(
+            age_multiplier,
+            dbd_max_headers,
+            Arc::new(|cfg: &LinkConfig| {
+                let auth = cfg.auth.clone().map(|a| (a, cfg.link_local_address));
+                OspfSocket::open(&cfg.kernel_interface, cfg.interface_id, auth).map(LinkSocket::Os)
+            }),
+        )
+    }
+
+    /// `new` with the link sockets opened by `opener` — the in-memory wire in
+    /// tests.
+    pub fn with_opener(
+        age_multiplier: u16,
+        dbd_max_headers: Option<usize>,
+        opener: Opener,
+    ) -> Arc<Self> {
         let manager = Arc::new(Self {
             links: Mutex::new(HashMap::new()),
             lsdbs: Mutex::new(HashMap::new()),
@@ -1285,6 +1348,7 @@ impl LinkManager {
             dbd_max_headers,
             extended_lsa: AtomicBool::new(false),
             grace_period: AtomicU16::new(0),
+            opener,
         });
         let background = Arc::clone(&manager);
         tokio::spawn(async move {
@@ -1645,6 +1709,7 @@ impl LinkManager {
             let (status_tx, status_rx) = watch::channel(LinkStatus::new(cfg.network_type));
             let (grace_tx, grace_rx) = mpsc::unbounded_channel();
             let task = tokio::spawn(run(
+                (self.opener)(&cfg),
                 cfg.clone(),
                 local_router_id,
                 lsdb,
@@ -2547,5 +2612,295 @@ mod tests {
         });
         on_grace_lsa(&cfg, &status, &header, body);
         assert!(!in_grace(&status, header.advertising_router));
+    }
+
+    /// An in-memory multi-access wire, mirroring `ospf::link`'s: every port
+    /// on the same prefix hears every multicast, a unicast reaches only its
+    /// destination, and an authenticated port signs like `OspfSocket` (#131).
+    pub mod wire {
+        use std::collections::HashSet;
+        use std::net::Ipv6Addr;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        use ipnet::Ipv6Net;
+        use tokio::sync::mpsc;
+
+        use super::super::{LinkConfig, LinkSocket, Opener};
+        use crate::packet::TrailerAuth;
+
+        type Tx = mpsc::UnboundedSender<(Ipv6Addr, Vec<u8>)>;
+
+        #[derive(Default)]
+        pub struct Wire {
+            ports: Mutex<Vec<(Ipv6Net, Ipv6Addr, Tx)>>,
+            /// Addresses whose sends are silently dropped (a dead neighbor).
+            pub cut: Mutex<HashSet<Ipv6Addr>>,
+        }
+
+        impl Wire {
+            pub fn opener(self: &Arc<Self>) -> Opener {
+                let wire = Arc::clone(self);
+                Arc::new(move |cfg: &LinkConfig| {
+                    let net = cfg.prefix.trunc();
+                    let (tx, rx) = mpsc::unbounded_channel();
+                    let mut ports = wire.ports.lock().unwrap();
+                    ports.retain(|(_, a, _)| *a != cfg.link_local_address);
+                    ports.push((net, cfg.link_local_address, tx));
+                    Ok(LinkSocket::Mem(Port {
+                        wire: Arc::clone(&wire),
+                        net,
+                        addr: cfg.link_local_address,
+                        auth: cfg.auth.clone(),
+                        seq: AtomicU64::new(1),
+                        rx: tokio::sync::Mutex::new(rx),
+                    }))
+                })
+            }
+        }
+
+        pub struct Port {
+            wire: Arc<Wire>,
+            net: Ipv6Net,
+            addr: Ipv6Addr,
+            auth: Option<TrailerAuth>,
+            seq: AtomicU64,
+            rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<(Ipv6Addr, Vec<u8>)>>,
+        }
+
+        impl Port {
+            pub fn send(&self, dest: Option<Ipv6Addr>, payload: &[u8]) {
+                if self.wire.cut.lock().unwrap().contains(&self.addr) {
+                    return;
+                }
+                let mut packet = payload.to_vec();
+                if let Some(auth) = &self.auth {
+                    auth.sign(
+                        &mut packet,
+                        self.seq.fetch_add(1, Ordering::Relaxed),
+                        self.addr,
+                    );
+                }
+                for (net, addr, tx) in self.wire.ports.lock().unwrap().iter() {
+                    if *net == self.net && *addr != self.addr && dest.is_none_or(|d| d == *addr) {
+                        let _ = tx.send((self.addr, packet.clone()));
+                    }
+                }
+            }
+
+            pub async fn recv(&self) -> std::io::Result<(Ipv6Addr, Vec<u8>)> {
+                match self.rx.lock().await.recv().await {
+                    Some(m) => Ok(m),
+                    None => std::future::pending().await,
+                }
+            }
+        }
+    }
+
+    fn router(wire: &Arc<wire::Wire>) -> Arc<LinkManager> {
+        LinkManager::with_opener(1, None, wire.opener())
+    }
+
+    fn wired_link(n: u8, network_type: NetworkType) -> LinkConfig {
+        LinkConfig {
+            attach_point: format!("link-{n}"),
+            link_local_address: format!("fe80::{n}").parse().unwrap(),
+            prefix: format!("2001:db8::{n}/64").parse().unwrap(),
+            interface_id: u32::from(n),
+            network_type,
+            ..link("unused", 10)
+        }
+    }
+
+    fn id(n: u8) -> Ipv4Addr {
+        Ipv4Addr::new(n, n, n, n)
+    }
+
+    fn loopback(n: u8) -> HashMap<Ipv4Addr, Vec<(Ipv6Net, u16)>> {
+        HashMap::from([(
+            Ipv4Addr::UNSPECIFIED,
+            vec![(format!("2001:db8:ff::{n}/128").parse().unwrap(), 1)],
+        )])
+    }
+
+    async fn settle(secs: u64) {
+        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+    }
+
+    async fn pair(
+        wire: &Arc<wire::Wire>,
+        auth_a: Option<packet::TrailerAuth>,
+        auth_b: Option<packet::TrailerAuth>,
+    ) -> (Arc<LinkManager>, Arc<LinkManager>) {
+        let (a, b) = (router(wire), router(wire));
+        let mut la = wired_link(1, NetworkType::PointToPoint);
+        la.auth = auth_a;
+        let mut lb = wired_link(2, NetworkType::PointToPoint);
+        lb.auth = auth_b;
+        a.reconcile(vec![la], HashMap::new(), id(1)).await;
+        b.reconcile(vec![lb], loopback(2), id(2)).await;
+        settle(60).await;
+        (a, b)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn point_to_point_pair_reaches_full_and_routes_to_the_far_loopback() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b) = pair(&wire, None, None).await;
+        let n = a.neighbor_summaries().await;
+        assert_eq!(n[0].state, OspfNeighborState::Full, "{n:?}");
+        let routes = a.compute_routes().await;
+        let r = routes
+            .iter()
+            .find(|r| r.prefix == "2001:db8:ff::2/128".parse::<Ipv6Net>().unwrap())
+            .unwrap_or_else(|| panic!("{routes:?}"));
+        assert_eq!(r.next_hop, "fe80::2".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(r.interface_id, 1);
+        // Link-LSAs are held per link, tagged with it.
+        assert!(a
+            .database_summaries()
+            .await
+            .iter()
+            .any(|l| l.link.as_deref() == Some("link-1")));
+
+        // RFC 8362 Full mode: both switch to the extended LSA set.
+        a.set_extended_lsa(true);
+        b.set_extended_lsa(true);
+        settle(30).await;
+        assert!(a
+            .database_summaries()
+            .await
+            .iter()
+            .any(|l| l.lsa_type == lsa::LSA_TYPE_E_ROUTER && l.advertising_router == id(2)));
+
+        // Graceful restart: B helps A through a restart without dropping it.
+        a.set_graceful_restart(Some(120));
+        a.announce_graceful_restart().await;
+        wire.cut.lock().unwrap().insert("fe80::1".parse().unwrap());
+        settle(60).await;
+        assert_eq!(
+            b.neighbor_summaries().await[0].state,
+            OspfNeighborState::Full,
+            "helper keeps the restarting neighbor"
+        );
+        // Past the grace period it is finally declared dead.
+        settle(120).await;
+        assert_eq!(
+            b.neighbor_summaries().await[0].state,
+            OspfNeighborState::Down
+        );
+        a.shutdown().await;
+    }
+
+    fn trailer(key: &[u8]) -> packet::TrailerAuth {
+        packet::TrailerAuth {
+            keys: vec![(300, packet::CryptoAlgorithm::HmacSha256, key.to_vec())],
+            current_key_id: 300,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn matching_trailer_auth_reaches_full_and_a_mismatch_never_does() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, _b) = pair(&wire, Some(trailer(b"k")), Some(trailer(b"k"))).await;
+        assert_eq!(
+            a.neighbor_summaries().await[0].state,
+            OspfNeighborState::Full
+        );
+        let wire = Arc::new(wire::Wire::default());
+        let (a, _b) = pair(&wire, Some(trailer(b"k")), Some(trailer(b"other"))).await;
+        assert_eq!(
+            a.neighbor_summaries().await[0].state,
+            OspfNeighborState::Down
+        );
+        let wire = Arc::new(wire::Wire::default());
+        let (a, _b) = pair(&wire, Some(trailer(b"k")), None).await;
+        assert_eq!(
+            a.neighbor_summaries().await[0].state,
+            OspfNeighborState::Down
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn broadcast_segment_elects_dr_and_bdr() {
+        let wire = Arc::new(wire::Wire::default());
+        let segment: Vec<_> = (1..=4).map(|_| router(&wire)).collect();
+        for (i, r) in segment.iter().enumerate() {
+            let n = u8::try_from(i + 1).unwrap();
+            r.reconcile(
+                vec![wired_link(n, NetworkType::Broadcast)],
+                loopback(n),
+                id(n),
+            )
+            .await;
+        }
+        settle(120).await;
+        let one = segment[0].neighbor_summaries().await;
+        assert_eq!(one.len(), 3, "{one:?}");
+        for n in &one {
+            assert_eq!((n.dr, n.bdr), (Some(id(4)), Some(id(3))));
+            let want = if n.neighbor_router_id == Some(id(2)) {
+                OspfNeighborState::TwoWay
+            } else {
+                OspfNeighborState::Full
+            };
+            assert_eq!(n.state, want, "{n:?}");
+        }
+        let routes = segment[0].compute_routes().await;
+        assert!(
+            routes
+                .iter()
+                .any(|r| r.prefix == "2001:db8:ff::4/128".parse::<Ipv6Net>().unwrap()),
+            "{routes:?}"
+        );
+        // A DR-other dying is swept off the segment.
+        wire.cut.lock().unwrap().insert("fe80::2".parse().unwrap());
+        settle(60).await;
+        let one = segment[0].neighbor_summaries().await;
+        assert!(one
+            .iter()
+            .any(|n| n.neighbor_router_id == Some(id(2)) && n.state == OspfNeighborState::Down));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tiny_dbd_budget_still_reaches_full() {
+        let wire = Arc::new(wire::Wire::default());
+        let mk = || LinkManager::with_opener(1, Some(1), wire.opener());
+        let (a, b) = (mk(), mk());
+        let many = |n: u8| {
+            HashMap::from([(
+                Ipv4Addr::UNSPECIFIED,
+                (0..3)
+                    .map(|p| (format!("2001:db8:{n}:{p}::/64").parse().unwrap(), 1))
+                    .collect(),
+            )])
+        };
+        a.reconcile(vec![], many(1), id(1)).await;
+        b.reconcile(vec![], many(2), id(2)).await;
+        settle(3).await;
+        a.reconcile(
+            vec![wired_link(1, NetworkType::PointToPoint)],
+            many(1),
+            id(1),
+        )
+        .await;
+        b.reconcile(
+            vec![wired_link(2, NetworkType::PointToPoint)],
+            many(2),
+            id(2),
+        )
+        .await;
+        settle(90).await;
+        assert_eq!(
+            a.neighbor_summaries().await[0].state,
+            OspfNeighborState::Full
+        );
+        let routes = a.compute_routes().await;
+        assert!(
+            routes
+                .iter()
+                .any(|r| r.prefix == "2001:db8:2:2::/64".parse::<Ipv6Net>().unwrap()),
+            "{routes:?}"
+        );
     }
 }

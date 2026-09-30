@@ -519,4 +519,78 @@ mod max_hops_tests {
         assert_eq!(get(s.as_raw_fd(), libc::IPPROTO_IP, libc::IP_MINTTL), 253);
         assert!(set_max_hops(s.as_raw_fd(), false, 0).is_err());
     }
+
+    #[test]
+    fn sets_v6_hop_limit_and_min_hop_count() {
+        let Ok(s) = std::net::TcpListener::bind("[::1]:0") else {
+            return; // no IPv6 on this host
+        };
+        set_max_hops(s.as_raw_fd(), true, 2).unwrap();
+        let fd = s.as_raw_fd();
+        assert_eq!(get(fd, libc::IPPROTO_IPV6, libc::IPV6_UNICAST_HOPS), 255);
+        assert_eq!(get(fd, libc::IPPROTO_IPV6, libc::IPV6_MINHOPCOUNT), 254);
+    }
+
+    #[test]
+    fn ipv6_checksum_on_a_bad_fd_errors() {
+        assert!(set_ipv6_checksum(-1, 2).is_err());
+    }
+}
+
+/// Real `setsockopt`s on an unprivileged localhost socket (#131).
+#[cfg(test)]
+mod kernel_tests {
+    use super::*;
+    use std::net::Ipv6Addr;
+    use std::os::fd::AsRawFd;
+
+    const PEER: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    #[test]
+    fn md5_key_set_replace_and_remove() {
+        let s = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let fd = s.as_raw_fd();
+        set_md5_key(fd, PEER, b"secret").unwrap();
+        set_md5_key(fd, PEER, b"other").unwrap();
+        set_md5_key(fd, IpAddr::V6(Ipv6Addr::LOCALHOST), b"v6").unwrap_or(());
+        remove_md5_key(fd, PEER).unwrap();
+        assert!(set_md5_key(-1, PEER, b"x").is_err());
+    }
+
+    fn key(send_id: u8, algorithm: AoAlgorithm, exclude_options: bool) -> AoKey {
+        AoKey {
+            send_id,
+            recv_id: send_id,
+            algorithm,
+            key: b"ao-secret".to_vec(),
+            // A listening socket refuses current/rnext (EINVAL).
+            set_current: false,
+            set_rnext: false,
+            exclude_options,
+        }
+    }
+
+    #[test]
+    fn ao_key_add_info_and_delete() {
+        let s = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let fd = s.as_raw_fd();
+        match add_ao_key(fd, PEER, &key(1, AoAlgorithm::HmacSha1_96, false)) {
+            Ok(()) => {}
+            // Kernel without TCP-AO (or its crypto): the error path is all
+            // there is to cover here.
+            Err(e) => {
+                assert!(matches!(
+                    e.raw_os_error(),
+                    Some(libc::ENOPROTOOPT | libc::ENOENT | libc::EOPNOTSUPP)
+                ));
+                return;
+            }
+        }
+        add_ao_key(fd, PEER, &key(2, AoAlgorithm::AesCmac96, true)).unwrap_or(());
+        // A listener has AO info but no established connection to report on;
+        // either answer exercises the getsockopt path.
+        let _ = get_ao_info(fd);
+        delete_ao_key(fd, PEER, 1, 1).unwrap_or(());
+        assert!(get_ao_info(-1).is_err());
+    }
 }

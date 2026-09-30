@@ -67,6 +67,9 @@ pub struct Managed {
     pub config_socket: PathBuf,
     pub log_socket: PathBuf,
     pub watchdog_listen_socket: PathBuf,
+    /// Where per-instance sockets (`<socket_prefix>-<name>.sock`) go —
+    /// `--run-dir`, `/run/nos` unless a test moves it.
+    pub run_dir: PathBuf,
     pub policy: BackoffPolicy,
     pub registry: EndpointRegistry,
     pub pki: Arc<Pki>,
@@ -243,7 +246,9 @@ async fn spawn_instance(instances: &mut HashMap<String, InstanceHandle>, name: &
         m.log_socket.display().to_string(),
     ];
     if let Some(endpoint) = &m.endpoint {
-        let socket = PathBuf::from(format!("/run/nos/{}-{name}.sock", endpoint.socket_prefix));
+        let socket = m
+            .run_dir
+            .join(format!("{}-{name}.sock", endpoint.socket_prefix));
         args.push("--listen-socket".to_string());
         args.push(socket.display().to_string());
         m.registry.set(endpoint.kind, name, socket).await;
@@ -306,6 +311,7 @@ mod tests {
             config_socket: PathBuf::from("/nonexistent"),
             log_socket: PathBuf::from("/nonexistent"),
             watchdog_listen_socket: PathBuf::from("/nonexistent"),
+            run_dir: PathBuf::from("/run/nos"),
             policy: BackoffPolicy::default(),
             registry: EndpointRegistry::default(),
             role: Role::Ribd,

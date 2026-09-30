@@ -169,6 +169,12 @@ struct Args {
     #[arg(long, default_value = DEFAULT_CONFIG_SOCKET)]
     config_socket: PathBuf,
 
+    /// Directory the per-instance daemon sockets (`bgp-<name>.sock`,
+    /// `rib-<name>.sock`, …) are created in. The fixed sockets have their
+    /// own flags.
+    #[arg(long, default_value = "/run/nos")]
+    run_dir: PathBuf,
+
     /// Unix socket the endpoint-resolution broker listens on. Every other
     /// daemon/CLI dials this first to learn where to reach nos-configd or a
     /// specific nos-ribd instance, instead of assuming a hardcoded default.
@@ -296,6 +302,7 @@ async fn main() -> anyhow::Result<()> {
             config_socket: args.config_socket.clone(),
             log_socket: args.log_socket.clone(),
             watchdog_listen_socket: args.listen_socket.clone(),
+            run_dir: args.run_dir.clone(),
             policy,
             registry: registry.clone(),
         },
@@ -317,6 +324,7 @@ async fn main() -> anyhow::Result<()> {
             config_socket: args.config_socket.clone(),
             log_socket: args.log_socket.clone(),
             watchdog_listen_socket: args.listen_socket.clone(),
+            run_dir: args.run_dir.clone(),
             policy,
             registry: registry.clone(),
         },
@@ -338,6 +346,7 @@ async fn main() -> anyhow::Result<()> {
             config_socket: args.config_socket.clone(),
             log_socket: args.log_socket.clone(),
             watchdog_listen_socket: args.listen_socket.clone(),
+            run_dir: args.run_dir.clone(),
             policy,
             registry: registry.clone(),
         },
@@ -359,6 +368,7 @@ async fn main() -> anyhow::Result<()> {
             config_socket: args.config_socket.clone(),
             log_socket: args.log_socket.clone(),
             watchdog_listen_socket: args.listen_socket.clone(),
+            run_dir: args.run_dir.clone(),
             policy,
             registry: registry.clone(),
         },
@@ -383,6 +393,7 @@ async fn main() -> anyhow::Result<()> {
             config_socket: args.config_socket.clone(),
             log_socket: args.log_socket.clone(),
             watchdog_listen_socket: args.listen_socket.clone(),
+            run_dir: args.run_dir.clone(),
             policy,
             registry: registry.clone(),
         },
@@ -404,6 +415,7 @@ async fn main() -> anyhow::Result<()> {
             config_socket: args.config_socket.clone(),
             log_socket: args.log_socket.clone(),
             watchdog_listen_socket: args.listen_socket.clone(),
+            run_dir: args.run_dir.clone(),
             policy,
             registry: registry.clone(),
         },

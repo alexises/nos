@@ -169,10 +169,32 @@ pub struct SessionManager {
     listeners: Mutex<Option<Listeners>>,
     vrf: watch::Sender<VrfRequirement>,
     bgp_rib: Arc<Mutex<BgpRib>>,
+    /// The listener's port and the port peers are dialed on — both 179
+    /// except in `with_listen`'s localhost tests.
+    listen_port: u16,
+    peer_port: u16,
+    /// Scope sockets into the resolved VRF (`SO_BINDTODEVICE`). Always true
+    /// except in `with_listen`'s tests; nothing in config reaches it.
+    bind_vrf: bool,
 }
 
 impl SessionManager {
     pub fn new(instance: String) -> Arc<Self> {
+        Self::with_listen(instance, BGP_PORT, BGP_PORT, true)
+    }
+
+    /// Test seam (#131): listen on `listen_port`, dial peers on `peer_port`,
+    /// and, with `bind_vrf = false`, open every socket unscoped so two
+    /// instances can peer over localhost without privileges. `pub` (not
+    /// `cfg(test)`) only because `bgp/tests/` needs it; `main.rs` and config
+    /// never call it, so `VrfRequirement` keeps its meaning in production.
+    #[doc(hidden)]
+    pub fn with_listen(
+        instance: String,
+        listen_port: u16,
+        peer_port: u16,
+        bind_vrf: bool,
+    ) -> Arc<Self> {
         let (vrf, _) = watch::channel(VrfRequirement::Pending);
         let (local, _) = watch::channel(LocalIdentity {
             asn: 0,
@@ -187,6 +209,9 @@ impl SessionManager {
             listeners: Mutex::new(None),
             vrf,
             bgp_rib: Arc::new(Mutex::new(BgpRib::new())),
+            listen_port,
+            peer_port,
+            bind_vrf,
         })
     }
 
@@ -199,8 +224,12 @@ impl SessionManager {
         redistribute_policy: Arc<nos_rpl::CompiledPolicy>,
         fdb_domains: Vec<String>,
     ) {
+        // `send_replace`, not `send`: `send` leaves the value unchanged when
+        // no receiver exists yet — true on the very first reconcile, before
+        // any peer task subscribed — so peers used to start with the
+        // placeholder identity/`Pending` VRF until the 10s re-apply (#131).
         if *self.local.borrow() != local {
-            let _ = self.local.send(local);
+            self.local.send_replace(local);
         }
         {
             let mut bgp_rib = self.bgp_rib.lock().await;
@@ -210,7 +239,7 @@ impl SessionManager {
             bgp_rib.set_fdb_domains(fdb_domains);
         }
         if *self.vrf.borrow() != vrf {
-            let _ = self.vrf.send(vrf.clone());
+            self.vrf.send_replace(vrf.clone());
         }
         self.rebind_listeners(&vrf, &desired).await;
         self.reconcile_peers(desired).await;
@@ -369,13 +398,14 @@ impl SessionManager {
         vrf: &str,
         desired: &[ResolvedPeer],
     ) -> io::Result<Listeners> {
+        let scope = self.bind_vrf.then_some(vrf);
         let v4_listener = tcp::bind_listener(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), BGP_PORT),
-            Some(vrf),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.listen_port),
+            scope,
         )?;
         let v6_listener = tcp::bind_listener(
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), BGP_PORT),
-            Some(vrf),
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), self.listen_port),
+            scope,
         )?;
         let v4_fd = v4_listener.as_raw_fd();
         let v6_fd = v6_listener.as_raw_fd();
@@ -561,6 +591,7 @@ impl SessionManager {
             let task = peer.shutdown.is_none().then(|| {
                 tokio::spawn(active_connect_loop(
                     self.instance.clone(),
+                    (self.peer_port, self.bind_vrf),
                     slot,
                     self.vrf.subscribe(),
                     self.local.subscribe(),
@@ -750,6 +781,7 @@ fn diff_peers(
 /// (peer removed from config, or process shutdown).
 async fn active_connect_loop(
     instance: String,
+    (peer_port, bind_vrf): (u16, bool),
     slot: Arc<PeerSlot>,
     mut vrf: watch::Receiver<VrfRequirement>,
     local: watch::Receiver<LocalIdentity>,
@@ -764,11 +796,11 @@ async fn active_connect_loop(
                 // would win anyway. Wait for the retry interval (or a VRF
                 // change) and check again, rather than actually connecting.
             } else if slot.begin(Role::Active).await {
-                let remote = SocketAddr::new(slot.peer.remote_address, BGP_PORT);
+                let remote = SocketAddr::new(slot.peer.remote_address, peer_port);
                 match tcp::connect(
                     remote,
                     slot.peer.source_address,
-                    Some(&vrf_name),
+                    bind_vrf.then_some(vrf_name.as_str()),
                     slot.peer.auth.as_ref(),
                     slot.peer.max_hops,
                 )

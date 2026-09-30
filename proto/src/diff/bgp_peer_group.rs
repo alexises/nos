@@ -445,4 +445,107 @@ mod tests {
         assert_eq!(sections[0].fields.len(), 1);
         assert_eq!(sections[0].fields[0].label, "remote-as");
     }
+
+    fn ao_key(
+        send_id: u8,
+        algorithm: BgpAoAlgorithm,
+        current: bool,
+        rnext: bool,
+    ) -> crate::schema::BgpAoKey {
+        crate::schema::BgpAoKey {
+            send_id,
+            recv_id: send_id,
+            algorithm,
+            key: "k".to_string(),
+            is_current: current,
+            is_rnext: rnext,
+            exclude_options: false,
+        }
+    }
+
+    #[test]
+    fn every_changed_field_is_listed_with_old_and_new() {
+        let base = group("pg1", 65000);
+        let candidate = BgpPeerGroup {
+            source_address: Some(SourceAddress::Interface {
+                interface: "eth0".to_string(),
+                label: None,
+            }),
+            address_families: Vec::new(),
+            hold_time: Some(30),
+            keepalive_interval: Some(10),
+            connect_retry_time: Some(3),
+            mrai: Some(5),
+            damping: Some(crate::schema::BgpDamping {
+                half_life: 900,
+                reuse: 750,
+                suppress: 2000,
+                max_suppress: 3600,
+            }),
+            max_hops: Some(1),
+            auth: Some(BgpAuth::Ao {
+                keys: vec![
+                    ao_key(1, BgpAoAlgorithm::HmacSha1_96, true, true),
+                    ao_key(2, BgpAoAlgorithm::AesCmac96, true, false),
+                    ao_key(3, BgpAoAlgorithm::AesCmac96, false, true),
+                    ao_key(4, BgpAoAlgorithm::AesCmac96, false, false),
+                ],
+            }),
+            import_policy: Some("in".to_string()),
+            export_policy: Some("out".to_string()),
+            shutdown: Some(BgpShutdown { message: None }),
+            ..base.clone()
+        };
+        let sections = diff_bgp_peer_groups(std::slice::from_ref(&base), &[candidate]);
+        let fields: Vec<(&str, &str, &str)> = sections[0]
+            .fields
+            .iter()
+            .map(|f| {
+                (
+                    f.label.as_str(),
+                    f.old.as_deref().unwrap(),
+                    f.new.as_deref().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                ("source-address", "unset", "interface eth0"),
+                ("address-family", "ipv4", "none"),
+                ("hold-time", "default (90s)", "30"),
+                ("keepalive-interval", "default (hold-time / 3)", "10"),
+                ("connect-retry-time", "default (120s)", "3"),
+                ("mrai", "default (0s, unpaced)", "5"),
+                ("damping", "unset", "half-life 900 reuse 750 suppress 2000 max-suppress 3600"),
+                ("max-hops", "unset", "1"),
+                (
+                    "auth",
+                    "none",
+                    "ao-keys [send-id 1 hmac-sha1 k (current, rnext), send-id 2 aes-cmac k (current), \
+                     send-id 3 aes-cmac k (rnext), send-id 4 aes-cmac k]"
+                ),
+                ("import-policy", nos_rpl::DENY_ALL_NAME, "in"),
+                ("export-policy", nos_rpl::DENY_ALL_NAME, "out"),
+                ("shutdown", "no", "yes"),
+            ]
+        );
+        // md5 and a shutdown message render too.
+        let md5 = BgpPeerGroup {
+            auth: Some(BgpAuth::Md5 {
+                password: "pw".to_string(),
+            }),
+            shutdown: Some(BgpShutdown {
+                message: Some("bye".to_string()),
+            }),
+            ..base.clone()
+        };
+        let sections = diff_bgp_peer_groups(&[base], &[md5]);
+        let new: Vec<_> = sections[0]
+            .fields
+            .iter()
+            .map(|f| f.new.clone().unwrap())
+            .collect();
+        assert_eq!(new, ["md5-password pw", "yes, message \"bye\""]);
+    }
 }

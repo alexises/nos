@@ -180,3 +180,81 @@ impl Menu for HelpMenu {
         &self.values
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fixed(Vec<Suggestion>);
+
+    impl Completer for Fixed {
+        fn complete(&mut self, _line: &str, _pos: usize) -> CompletionResult {
+            CompletionResult::fresh(self.0.clone())
+        }
+    }
+
+    fn suggestion(value: &str, description: Option<&str>, extra: Option<&[&str]>) -> Suggestion {
+        Suggestion {
+            value: value.to_string(),
+            description: description.map(str::to_string),
+            extra: extra.map(|e| e.iter().map(|s| (*s).to_string()).collect()),
+            ..Suggestion::default()
+        }
+    }
+
+    #[test]
+    fn renders_brief_then_detail_and_truncates() {
+        let mut menu = HelpMenu::new();
+        let with_usage = suggestion("show", Some("brief"), Some(&["show <x>", "detailed"]));
+        assert_eq!(menu.render_line(&with_usage), "show <x>  \u{2014}  brief");
+        assert_eq!(
+            menu.render_line(&suggestion("a", None, Some(&["a <b>"]))),
+            "a <b>"
+        );
+        assert_eq!(
+            menu.render_line(&suggestion("set", Some("sets"), None)),
+            "set  sets"
+        );
+        assert_eq!(menu.render_line(&suggestion("up", None, None)), "up");
+        menu.detail = true;
+        assert_eq!(
+            menu.render_line(&with_usage),
+            "show <x>  \u{2014}  detailed"
+        );
+        menu.screen_width = 6;
+        assert_eq!(menu.render_line(&with_usage), "show\u{2026}");
+    }
+
+    #[test]
+    fn values_come_from_the_completer_and_are_capped() {
+        let mut menu = HelpMenu::new();
+        let mut editor = Editor::default();
+        let many: Vec<_> = (0..10)
+            .map(|i| suggestion(&format!("c{i}"), None, None))
+            .collect();
+        let mut completer = Fixed(many);
+        assert!(!menu.can_quick_complete());
+        assert!(!menu.can_partially_complete(true, &mut editor, &mut completer));
+        menu.update_values(&mut editor, &mut completer);
+        assert_eq!(menu.get_values().len(), 10);
+        assert_eq!(menu.menu_required_lines(80), 8);
+        assert_eq!(menu.menu_string(3, false), "c0\r\nc1\r\nc2\r\n");
+        assert_eq!(menu.menu_string(100, false).lines().count(), 8);
+        menu.replace_in_buffer(&mut editor);
+        assert_eq!(editor.get_buffer(), "");
+
+        assert_eq!(
+            (menu.name(), menu.indicator(), menu.min_rows()),
+            ("nos_help", "? ", 1)
+        );
+        assert!(!menu.is_active());
+        menu.set_active(true);
+        assert!(menu.is_active());
+        menu.menu_event(MenuEvent::NextPage);
+        assert!(menu.pending.is_some());
+        menu.detail = true;
+        menu.reset_position();
+        menu.clear_input();
+        assert!(menu.get_values().is_empty() && !menu.detail);
+    }
+}
