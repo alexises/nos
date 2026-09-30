@@ -173,7 +173,7 @@ async fn resync(
                 trace!(
                     table = %table,
                     %prefix,
-                    gateway = %entry.gateway,
+                    next_hops = ?entry.next_hops,
                     source = ?entry.source,
                     "best route"
                 );
@@ -244,9 +244,8 @@ fn connected_entries(
         }
         entries.push(RibEntry {
             prefix,
-            gateway: address.addr(),
+            next_hops: vec![(address.addr(), None)],
             source: RouteSource::Connected,
-            interface_id: None,
             backup: None,
             backup_interface_id: None,
         });
@@ -286,7 +285,7 @@ fn compute_redistribute_target(
             .filter(|entry| entry.source == RouteSource::Static)
             .map(|entry| RedistributedRoute {
                 prefix: entry.prefix,
-                gateway: entry.gateway,
+                gateway: entry.next_hops[0].0,
             })
             .collect()
     } else {
@@ -330,7 +329,7 @@ fn compute_redistribute_target_ospf(
             .filter(|entry| entry.source == RouteSource::Static)
             .map(|entry| RedistributedRoute {
                 prefix: entry.prefix,
-                gateway: entry.gateway,
+                gateway: entry.next_hops[0].0,
             })
             .collect()
     } else {
@@ -368,9 +367,8 @@ mod tests {
 
     fn static_entry(prefix: &str, gateway: &str) -> RibEntry {
         RibEntry {
-            interface_id: None,
             prefix: prefix.parse().unwrap(),
-            gateway: gateway.parse().unwrap(),
+            next_hops: vec![(gateway.parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
@@ -444,7 +442,7 @@ mod tests {
             .into_iter()
             .map(|e| {
                 assert_eq!(e.source, RouteSource::Connected);
-                (e.prefix.to_string(), e.gateway.to_string())
+                (e.prefix.to_string(), e.next_hops[0].0.to_string())
             })
             .collect();
         got.sort();
@@ -469,7 +467,7 @@ mod tests {
         )];
         let got = connected_entries("rt1", &interfaces, &[]);
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].gateway, "10.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(got[0].next_hops[0].0, "10.0.0.1".parse::<IpAddr>().unwrap());
     }
 
     #[test]
@@ -551,9 +549,8 @@ mod tests {
         routes.insert(
             prefix,
             RibEntry {
-                interface_id: None,
                 prefix,
-                gateway: "10.0.0.9".parse().unwrap(),
+                next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
                 source: RouteSource::Bgp,
                 backup: None,
                 backup_interface_id: None,
@@ -582,9 +579,8 @@ mod tests {
         let cfg = cfg_with_table(table);
         let mut routes = HashMap::new();
         let entry = RibEntry {
-            interface_id: None,
             prefix: "2001:db8::/32".parse().unwrap(),
-            gateway: "2001:db8::1".parse().unwrap(),
+            next_hops: vec![("2001:db8::1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
@@ -676,9 +672,8 @@ mod tests {
         routes.insert(
             prefix,
             RibEntry {
-                interface_id: None,
                 prefix,
-                gateway: "10.0.0.9".parse().unwrap(),
+                next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
                 source: RouteSource::Bgp,
                 backup: None,
                 backup_interface_id: None,

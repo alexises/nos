@@ -299,6 +299,43 @@ impl Router {
         Ok(text)
     }
 
+    /// Waits (up to 90s) until `rt1` has had no OSPF candidate for `prefix`
+    /// for `stable` consecutive seconds, read from nos-ribd over REST. A
+    /// "removed route" log line alone is not enough: an ECMP next-hop set
+    /// change also logs one, and an LSA can briefly bring a withdrawn stub
+    /// back, so a later phase that re-adds the prefix and waits for a *new*
+    /// install needs it really gone first.
+    pub async fn wait_ospf_route_gone(&self, prefix: &str, stable: u64) -> anyhow::Result<()> {
+        let mut gone_for = 0;
+        for _ in 0..90 {
+            let body = self
+                .rest_expect(Method::GET, "/v1/routes/rt1", None, 200)
+                .await?;
+            let table: serde_json::Value = serde_json::from_str(&body)?;
+            let present = table.as_array().into_iter().flatten().any(|p| {
+                p["prefix"] == prefix
+                    && p["candidates"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|c| c["source"] == "Ospf")
+            });
+            gone_for = if present { 0 } else { gone_for + 1 };
+            if gone_for >= stable {
+                log(format!(
+                    "{}: no ospf route to {prefix} for {stable}s",
+                    self.name()
+                ));
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        bail!(
+            "{}: ospf route to {prefix} never went away for {stable}s",
+            self.name()
+        )
+    }
+
     /// Applies one provisioning to the running config: open a transaction from
     /// the current config, edit it locally, `PUT` it back whole, commit.
     pub async fn provision<S: AsRef<str>>(&self, extra: &[S]) -> anyhow::Result<()> {

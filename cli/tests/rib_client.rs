@@ -8,7 +8,7 @@ fn sample_prefix_routes() -> PrefixRoutes {
     PrefixRoutes {
         prefix: "10.0.0.0/24".parse().unwrap(),
         candidates: vec![RouteEntry {
-            gateway: "10.0.0.1".parse().unwrap(),
+            gateways: vec!["10.0.0.1".parse().unwrap()],
             source: RouteSourceKind::Static,
             backup: None,
         }],

@@ -206,11 +206,13 @@ no route matches 203.0.113.1
 
 For a connected route, `via` shows the router's own address on that subnet. A route that has a precomputed backup path (an OSPF loop-free alternate) shows it after the gateway: `* via 10.50.0.3 [ospf] backup 10.50.0.4`.
 
+An OSPF route with several equal-cost paths lists every next hop: `* via 10.50.0.3, 10.60.0.3 [ospf]`. It is one multipath route in the kernel, and the kernel spreads flows across its next hops. Over REST, `gateways` is always a list.
+
 Over REST the same data comes back as JSON:
 
 ```sh
 $ $C $B/v1/routes/rt1/198.51.100.7
-{"prefix":"198.51.100.0/24","candidates":[{"gateway":"10.50.0.3","source":"Static","backup":null}]}
+{"prefix":"198.51.100.0/24","candidates":[{"gateways":["10.50.0.3"],"source":"Static","backup":null}]}
 ```
 
 `GET /v1/routes/{table}` returns every prefix, and `GET /v1/routes/{table}/{address}` answers `404` when no prefix covers the address.

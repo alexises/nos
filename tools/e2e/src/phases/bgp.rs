@@ -551,7 +551,10 @@ pub async fn next_hop_reachability(w: &mut World) -> anyhow::Result<()> {
     let withdrawn = format!("loc-rib route for {NHR_PREFIX} withdrawn");
     let w0 = a.count(&withdrawn);
     b.provision(&withdraw).await?;
-    a.wait_new(&withdrawn, w0, 60).await
+    a.wait_new(&withdrawn, w0, 60).await?;
+    // `ospf-lfa` puts the loopback back next and waits for a *new* install,
+    // which never comes if the route is still up.
+    a.wait_ospf_route_gone(OSPF_SPF_LOOPBACK_ADDRESS, 15).await
 }
 
 /// RFC 4271 §9.2.1.1 pacing: with `mrai 30` on router-a's peer-group, the first

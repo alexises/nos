@@ -383,7 +383,8 @@ pub async fn ospf_dr(w: &mut World) -> anyhow::Result<()> {
 
 /// OSPF on router-b's loopback (a destination with no neighbor of its own):
 /// router-a must compute a route to it via a real SPF over its LSDB and install
-/// it into its kernel table, then withdraw it.
+/// it into its kernel table — over both of its equal-cost links to router-b
+/// (ECMP) — then withdraw it.
 pub async fn ospf_spf(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let before = a.count(&format!(
@@ -402,8 +403,11 @@ pub async fn ospf_spf(w: &mut World) -> anyhow::Result<()> {
         60,
     )
     .await?;
+    // RFC 2328 §16.1 2(d) ECMP (#33): router-b is one hop away over both the
+    // p2p eth0.0 link and the bd-ospf bridge, both at cost 1, so the route
+    // carries both of router-b's addresses as one RTA_MULTIPATH kernel route.
     a.wait(&format!(
-        "added route prefix={OSPF_SPF_LOOPBACK_ADDRESS}.*source=Some(Ospf)"
+        "added route prefix={OSPF_SPF_LOOPBACK_ADDRESS}.*next_hops=2.*source=Some(Ospf)"
     ))
     .await?;
     // Issue #20: router-a's nos-bgpd polls nos-ribd's IGP costs (BGP decision
@@ -415,7 +419,9 @@ pub async fn ospf_spf(w: &mut World) -> anyhow::Result<()> {
 
     b.provision(&["--clear-ospf-loopback-profile"]).await?;
     a.wait(&format!("removed route prefix={OSPF_SPF_LOOPBACK_ADDRESS}"))
-        .await
+        .await?;
+    // `next-hop-reachability` needs the loopback unreachable from its start.
+    a.wait_ospf_route_gone(OSPF_SPF_LOOPBACK_ADDRESS, 15).await
 }
 
 /// RFC 5286 loop-free alternate: with router-c also on the broadcast segment,
