@@ -77,10 +77,11 @@ pub struct InterfaceState {
     /// `Interfaces::set_lacp_active_members`. Meaningless when
     /// `port_aggregate` is `None`.
     pub port_aggregate_active: bool,
-    /// The configured MTU, or `None` to leave whatever the kernel link
-    /// already has untouched — a link-layer property of the physical (or
-    /// loopback) interface itself, applying to every one of `subinterfaces`
-    /// uniformly (a VLAN sub-link has no MTU of its own).
+    /// The configured MTU; `None` means `driver::DEFAULT_MTU` (1500),
+    /// enforced by the driver, except on a bond member, whose MTU its bond
+    /// sets. A link-layer property of the physical (or loopback) interface
+    /// itself, applying to every one of `subinterfaces` uniformly (a VLAN
+    /// sub-link has no MTU of its own).
     pub mtu: Option<u32>,
     /// This (non-loopback) interface's per-tag L3 subinterfaces — see
     /// `SubinterfaceState`. Empty for a loopback interface.
@@ -564,7 +565,11 @@ mod tests {
         )
         .await;
         assert_eq!(
-            interfaces.get("loopback-rt1").unwrap().routing_table.as_deref(),
+            interfaces
+                .get("loopback-rt1")
+                .unwrap()
+                .routing_table
+                .as_deref(),
             Some("rt1")
         );
         assert_eq!(interfaces.get("eth0").unwrap().routing_table, None);

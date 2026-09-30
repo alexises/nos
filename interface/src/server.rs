@@ -182,11 +182,6 @@ async fn apply_lacp_push(ctx: &Context, msg: nos_proto::LacpAggregateMembers) {
     }
 }
 
-/// Linux's own default MTU for a freshly created link — reported here when
-/// `Interface.mtu` is unset, since `nos-interfaced` never resets a link's
-/// MTU to a default (see `InterfaceState.mtu`'s doc comment).
-const DEFAULT_MTU: u32 = 1500;
-
 fn to_status(iface: InterfaceState) -> InterfaceStatus {
     InterfaceStatus {
         name: iface.name,
@@ -194,7 +189,7 @@ fn to_status(iface: InterfaceState) -> InterfaceStatus {
         routing_table: iface.routing_table,
         switching_profile: iface.switching_profile,
         port_aggregate: iface.port_aggregate,
-        mtu: iface.mtu.unwrap_or(DEFAULT_MTU),
+        mtu: iface.mtu.unwrap_or(crate::driver::DEFAULT_MTU),
         subinterfaces: iface
             .subinterfaces
             .into_iter()
@@ -227,7 +222,7 @@ fn to_port_aggregate_status(agg: PortAggregateState) -> PortAggregateStatus {
         name: agg.name,
         mode: agg.mode,
         switching_profile: agg.switching_profile,
-        mtu: agg.mtu.unwrap_or(DEFAULT_MTU),
+        mtu: agg.mtu.unwrap_or(crate::driver::DEFAULT_MTU),
         subinterfaces: agg
             .subinterfaces
             .into_iter()

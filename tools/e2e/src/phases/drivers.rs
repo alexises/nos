@@ -35,13 +35,38 @@ pub async fn loopback(w: &mut World) -> anyhow::Result<()> {
     .await
 }
 
+/// Sets eth0's MTU, then clears it: unset is 1500, enforced (#117), and
+/// REST reports what the link is held at. Leaves eth0 at the docker default
+/// for later phases.
 pub async fn mtu(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
     a.provision(&["--mtu", &MTU_VALUE.to_string()]).await?;
     a.wait(&format!(
         "applied interface mtu interface=eth0 mtu={MTU_VALUE}"
     ))
-    .await
+    .await?;
+    expect_eth0_mtu(a, MTU_VALUE).await?;
+
+    let reset = "applied interface mtu interface=eth0 mtu=1500";
+    let base = a.count(reset);
+    a.provision(&["--clear-mtu"]).await?;
+    a.wait_new(reset, base, 30).await?;
+    expect_eth0_mtu(a, 1500).await
+}
+
+async fn expect_eth0_mtu(a: &Router, want: u32) -> anyhow::Result<()> {
+    let body = a
+        .rest_expect(Method::GET, "/v1/interfaces/eth0", None, 200)
+        .await?;
+    let status: serde_json::Value = serde_json::from_str(&body)?;
+    if status["mtu"] != want {
+        bail!(
+            "router-a: GET /v1/interfaces/eth0 reports mtu {}, want {want}",
+            status["mtu"]
+        );
+    }
+    log(format!("router-a: rest reports eth0 mtu {want}"));
+    Ok(())
 }
 
 pub async fn port_aggregate(w: &mut World) -> anyhow::Result<()> {

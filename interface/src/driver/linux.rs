@@ -11,7 +11,9 @@ use rtnetlink::packet_route::link::{BondMode, LinkAttribute, LinkMessage};
 use rtnetlink::{Handle, LinkBond, LinkBridge, LinkDummy, LinkUnspec, LinkVlan};
 use tracing::{debug, info, trace};
 
-use super::{bridge_registry, port_aggregate_registry, rib_client, DriverError, InterfaceDriver};
+use super::{
+    bridge_registry, port_aggregate_registry, rib_client, DriverError, InterfaceDriver, DEFAULT_MTU,
+};
 use crate::state::{BroadcastDomainState, InterfaceState, PortAggregateState, SubinterfaceState};
 use crate::watchdog_client;
 
@@ -81,6 +83,16 @@ fn link_name(link: &LinkMessage) -> Option<&str> {
         LinkAttribute::IfName(name) => Some(name.as_str()),
         _ => None,
     })
+}
+
+/// The MTU to set on `link` so it has `want`, or `None` if it already does
+/// (so the set, and its log line, happen only on a real change).
+fn mtu_change(link: &LinkMessage, want: u32) -> Option<u32> {
+    let current = link.attributes.iter().find_map(|a| match a {
+        LinkAttribute::Mtu(mtu) => Some(*mtu),
+        _ => None,
+    });
+    (current != Some(want)).then_some(want)
 }
 
 /// Real `rtnetlink`-backed driver. `nos-interfaced` never creates ordinary
@@ -588,7 +600,12 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         }
 
         let mut link_set = LinkUnspec::new_with_index(index).up();
-        if let Some(mtu) = desired.mtu {
+        // Unset means 1500, enforced — except on a bond member, whose MTU the
+        // bonding driver sets from its bond's.
+        let want = desired
+            .mtu
+            .or(desired.port_aggregate.is_none().then_some(DEFAULT_MTU));
+        if let Some(mtu) = want.and_then(|want| mtu_change(&link, want)) {
             link_set = link_set.mtu(mtu);
             info!(interface = %desired.name, mtu, "applied interface mtu");
         }
@@ -735,7 +752,7 @@ impl InterfaceDriver for LinuxInterfaceDriver {
         .await?;
 
         let mut link_set = LinkUnspec::new_with_index(index).up();
-        if let Some(mtu) = desired.mtu {
+        if let Some(mtu) = mtu_change(&link, desired.mtu.unwrap_or(DEFAULT_MTU)) {
             link_set = link_set.mtu(mtu);
             info!(port_aggregate = %desired.name, mtu, "applied port aggregate mtu");
         }
@@ -804,6 +821,14 @@ fn diff_addresses(observed: &[IpNet], desired: &[IpNet]) -> (Vec<IpNet>, Vec<IpN
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mtu_change_only_when_the_link_differs() {
+        let mut link = LinkMessage::default();
+        link.attributes.push(LinkAttribute::Mtu(9000));
+        assert_eq!(mtu_change(&link, 1500), Some(1500));
+        assert_eq!(mtu_change(&link, 9000), None);
+    }
 
     #[test]
     fn loopback_ifname_formats_from_id() {

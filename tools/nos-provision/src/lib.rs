@@ -125,6 +125,11 @@ pub struct Args {
     #[arg(long)]
     pub mtu: Option<u32>,
 
+    /// If set, clears `--interface`'s mtu (`InterfaceOp::ClearMtu`), which
+    /// `nos-interfaced` enforces as 1500.
+    #[arg(long)]
+    pub clear_mtu: bool,
+
     #[arg(long, default_value = "rt1")]
     pub routing_table: String,
 
@@ -876,6 +881,11 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::Interface(InterfaceOp::SetMtu {
             name: args.interface.clone(),
             mtu,
+        }));
+    }
+    if args.clear_mtu {
+        ops.push(ConfigOp::Interface(InterfaceOp::ClearMtu {
+            name: args.interface.clone(),
         }));
     }
     if args.delete_subinterface {

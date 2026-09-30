@@ -22,6 +22,10 @@ pub use noop::NoopInterfaceDriver;
 
 use crate::state::{BroadcastDomainState, InterfaceState, PortAggregateState};
 
+/// The MTU enforced on a link (or bond) whose `mtu` is unset — so `delete
+/// … mtu` really puts the link back, and `show interface` reports the truth.
+pub const DEFAULT_MTU: u32 = 1500;
+
 #[derive(Debug, Error)]
 pub enum DriverError {
     #[error("netlink error: {0}")]
