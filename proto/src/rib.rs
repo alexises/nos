@@ -21,8 +21,10 @@ pub enum RouteSourceKind {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RouteEntry {
-    #[cfg_attr(feature = "openapi", schema(value_type = String))]
-    pub gateway: IpAddr,
+    /// Every next hop of this candidate — two or more is an equal-cost
+    /// multipath (ECMP) route, installed as one kernel route.
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
+    pub gateways: Vec<IpAddr>,
     pub source: RouteSourceKind,
     /// Pre-computed backup next hop, installed in the kernel at a higher
     /// metric so it takes over the instant the primary is withdrawn.
@@ -77,10 +79,9 @@ pub enum BgpRouteUpdate {
 pub struct OspfRoute {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub prefix: IpNet,
-    #[cfg_attr(feature = "openapi", schema(value_type = String))]
-    pub next_hop: IpAddr,
-    /// The local kernel interface (ifindex) `next_hop` is reachable over,
-    /// when the pushing daemon knows it — always `Some` from `nos-ospfv3d`
+    /// Every equal-cost next hop (RFC 2328 §16.1 2(d)), non-empty, each
+    /// with the local kernel interface (ifindex) it is reachable over when
+    /// the pushing daemon knows it — always `Some` from `nos-ospfv3d`
     /// (RFC 5340 next-hops are link-local IPv6 addresses, which Linux's
     /// netlink `RTM_NEWROUTE` rejects with EINVAL unless an outgoing
     /// interface is given alongside the gateway; `OSPFv3`'s own SPF already
@@ -89,11 +90,13 @@ pub struct OspfRoute {
     /// `ospfv3::spf`'s module doc comment), always `None` from `nos-ospfd`
     /// (RFC 2328 next-hops are ordinary routable IPv4 addresses, which the
     /// kernel resolves via its own routing table without needing one).
-    pub interface_id: Option<u32>,
+    /// Two or more become one `RTA_MULTIPATH` kernel route.
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<Object>))]
+    pub next_hops: Vec<(IpAddr, Option<u32>)>,
     /// RFC 5286 loop-free alternate next hop, if one exists.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub backup_next_hop: Option<IpAddr>,
-    /// Like `interface_id`, for `backup_next_hop` (which may leave over a
+    /// The ifindex of `backup_next_hop` (which may leave over a
     /// different link than the primary).
     pub backup_interface_id: Option<u32>,
     /// SPF cost to `prefix` — what BGP's RFC 4271 §9.1.2.2(d) step compares

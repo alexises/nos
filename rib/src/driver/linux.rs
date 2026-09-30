@@ -9,7 +9,7 @@ use nos_proto::IpNet;
 use rtnetlink::packet_route::link::LinkMessage;
 use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage};
 use rtnetlink::packet_route::AddressFamily;
-use rtnetlink::{Handle, LinkUnspec, LinkVrf, RouteMessageBuilder};
+use rtnetlink::{Handle, LinkUnspec, LinkVrf, RouteMessageBuilder, RouteNextHopBuilder};
 use tracing::{debug, info, trace, warn};
 
 use super::route_channel::RouteChannel;
@@ -38,18 +38,37 @@ const BACKUP_METRIC_V6: u32 = 2000;
 /// One kernel route of a prefix: `false` is the primary, `true` its backup.
 type Slot = (IpNet, bool);
 
-/// The kernel routes one winning entry wants: its primary, plus its backup.
-fn slots(prefix: IpNet, entry: &RibEntry) -> Vec<(Slot, GatewayAndInterface)> {
-    let mut out = vec![((prefix, false), (entry.gateway, entry.interface_id))];
+/// The kernel routes one winning entry wants: its primary (every
+/// equal-cost next hop), plus its backup.
+fn slots(prefix: IpNet, entry: &RibEntry) -> Vec<(Slot, Hops)> {
+    let mut out = vec![((prefix, false), entry.next_hops.clone())];
     if let Some(backup) = entry.backup {
-        out.push(((prefix, true), (backup, entry.backup_interface_id)));
+        out.push(((prefix, true), vec![(backup, entry.backup_interface_id)]));
     }
     out
 }
 
-/// A gateway plus (when known) the local kernel interface it's reachable
-/// over — see `RibEntry::interface_id`'s doc comment.
-type GatewayAndInterface = (IpAddr, Option<u32>);
+/// One slot's next hops, each a gateway plus (when known) the local kernel
+/// interface it's reachable over — see `RibEntry::next_hops`. Two or more
+/// are one `RTA_MULTIPATH` route.
+type Hops = Vec<(IpAddr, Option<u32>)>;
+
+/// The sorted gateways of `hops` — what a slot is compared by, since a
+/// dumped route carries no `interface_id` of ours to compare.
+fn gateways(hops: &Hops) -> Vec<IpAddr> {
+    let mut out: Vec<IpAddr> = hops.iter().map(|(gw, _)| *gw).collect();
+    out.sort_unstable();
+    out
+}
+
+/// `gateways`, comma-joined for a log line.
+fn show_gateways(gateways: &[IpAddr]) -> String {
+    gateways
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
 /// Real Linux backend: creates a VRF device + kernel routing table per
 /// routing table name (via `table_registry`'s persisted id allocation) and
@@ -70,10 +89,10 @@ pub struct LinuxRibDriver {
     /// prefixes it just itself installed/removed. A `std::sync::Mutex`,
     /// since every critical section here is a quick synchronous map
     /// read/write, never held across an `.await`. The `Option<u32>`
-    /// alongside each gateway is `RibEntry::interface_id`, needed to
+    /// alongside each gateway is from `RibEntry::next_hops`, needed to
     /// reconstruct a matching `RTM_DELROUTE` for a link-local IPv6 gateway
     /// on the `apply_delta` removal path (see `add_route`'s doc comment).
-    installed: Mutex<HashMap<u32, HashMap<Slot, GatewayAndInterface>>>,
+    installed: Mutex<HashMap<u32, HashMap<Slot, Hops>>>,
 }
 
 impl LinuxRibDriver {
@@ -142,13 +161,13 @@ impl LinuxRibDriver {
 
     /// Dumps every route currently installed in kernel table `table_id`,
     /// across both address families, keeping the raw `RouteMessage`
-    /// alongside its extracted `(prefix, gateway)` so a later deletion can
+    /// alongside its extracted `(prefix, gateways)` so a later deletion can
     /// reuse the exact message the kernel gave us (the safest way to make
     /// sure `RTM_DELROUTE` matches the entry we mean).
     async fn dump_routes(
         &self,
         table_id: u32,
-    ) -> Result<Vec<(Slot, IpAddr, RouteMessage)>, DriverError> {
+    ) -> Result<Vec<(Slot, Vec<IpAddr>, RouteMessage)>, DriverError> {
         let mut out = Vec::new();
         let table_id_u8 =
             u8::try_from(table_id).expect("table ids are always <= MAX_TABLE_ID (252)");
@@ -159,8 +178,8 @@ impl LinuxRibDriver {
         let mut v4 = self.handle.route().get(v4_filter).execute();
         while let Some(route) = v4.try_next().await? {
             if route.header.table == table_id_u8 {
-                if let Some((slot, gateway)) = extract_route(&route) {
-                    out.push((slot, gateway, route));
+                if let Some((slot, gateways)) = extract_route(&route) {
+                    out.push((slot, gateways, route));
                 }
             }
         }
@@ -171,8 +190,8 @@ impl LinuxRibDriver {
         let mut v6 = self.handle.route().get(v6_filter).execute();
         while let Some(route) = v6.try_next().await? {
             if route.header.table == table_id_u8 {
-                if let Some((slot, gateway)) = extract_route(&route) {
-                    out.push((slot, gateway, route));
+                if let Some((slot, gateways)) = extract_route(&route) {
+                    out.push((slot, gateways, route));
                 }
             }
         }
@@ -180,7 +199,7 @@ impl LinuxRibDriver {
         Ok(out)
     }
 
-    /// `interface_id`, when given, becomes `RTA_OIF` on the built route —
+    /// A hop's interface id, when given, becomes its `RTA_OIF` —
     /// **required**, not optional, for an IPv6 gateway that's link-local
     /// (`fe80::/10`): Linux's `RTM_NEWROUTE` rejects such a route with
     /// `EINVAL` unless an outgoing interface is given alongside the
@@ -188,25 +207,26 @@ impl LinuxRibDriver {
     /// a specific link and the kernel has no other way to resolve which
     /// one. `nos-ospfv3d`'s own SPF next-hops are always link-local (RFC
     /// 5340 §4.8) and always carry a `Some` here; every other route source
-    /// passes `None` and needs none. `backup` installs it at
+    /// passes `None` and needs none. Two or more hops are one
+    /// `RTA_MULTIPATH` (ECMP) route. `backup` installs it at
     /// the family's backup metric instead of the default priority.
     async fn add_route(
         &self,
         table_id: u32,
         prefix: IpNet,
-        gateway: IpAddr,
+        hops: &Hops,
         source: Option<RouteSource>,
-        interface_id: Option<u32>,
         backup: bool,
     ) -> Result<(), DriverError> {
-        let Some(route) = build_route(prefix, gateway, table_id, interface_id, backup) else {
+        let gateway = show_gateways(&gateways(hops));
+        let Some(route) = build_route(prefix, hops, table_id, backup) else {
             warn!(%prefix, %gateway, table_id, "route prefix/gateway address family mismatch, skipping");
             return Ok(());
         };
         self.route_channel.add(route).await.inspect_err(|e| {
             warn!(%prefix, %gateway, table_id, backup, error = %e, "failed to add route");
         })?;
-        info!(%prefix, %gateway, table_id, source = ?source, backup, "added route");
+        info!(%prefix, %gateway, next_hops = hops.len(), table_id, source = ?source, backup, "added route");
         Ok(())
     }
 
@@ -216,18 +236,18 @@ impl LinuxRibDriver {
     /// del ... table ... metric ...` uses). Used by `apply_delta`'s
     /// shadow-state-driven fast path; `reconcile_routes`'s full dump-diff
     /// path still reuses the exact dumped `RouteMessage` instead, since it
-    /// already has it on hand. `interface_id` has the same load-bearing role
+    /// already has it on hand. A hop's interface id has the same load-bearing role
     /// for a link-local IPv6 gateway as `add_route`'s own doc comment
     /// describes.
     async fn remove_route(
         &self,
         table_id: u32,
         prefix: IpNet,
-        gateway: IpAddr,
-        interface_id: Option<u32>,
+        hops: &Hops,
         backup: bool,
     ) -> Result<(), DriverError> {
-        let Some(route) = build_route(prefix, gateway, table_id, interface_id, backup) else {
+        let gateway = show_gateways(&gateways(hops));
+        let Some(route) = build_route(prefix, hops, table_id, backup) else {
             warn!(%prefix, %gateway, table_id, "route prefix/gateway address family mismatch, skipping");
             return Ok(());
         };
@@ -247,7 +267,7 @@ impl LinuxRibDriver {
         table_id: u32,
         changes: &HashMap<IpNet, Option<RibEntry>>,
     ) -> Result<(), DriverError> {
-        type Slots = HashMap<Slot, GatewayAndInterface>;
+        type Slots = HashMap<Slot, Hops>;
         let items: Vec<(IpNet, Slots, Slots, Option<RouteSource>)> = {
             let installed = self.installed.lock().unwrap();
             let table_installed = installed.get(&table_id);
@@ -260,7 +280,7 @@ impl LinuxRibDriver {
                             let slot = (*prefix, b);
                             table_installed
                                 .and_then(|m| m.get(&slot))
-                                .map(|gi| (slot, *gi))
+                                .map(|hops| (slot, hops.clone()))
                         })
                         .collect();
                     let source = new.as_ref().map(|e| e.source);
@@ -277,15 +297,16 @@ impl LinuxRibDriver {
             .map(|(prefix, old, new, source)| async move {
                 // Remove before add, per prefix (a changed gateway at the
                 // same priority would otherwise hit EEXIST).
-                for (slot, (gw, ifid)) in &old {
-                    if new.get(slot).map(|(g, _)| g) != Some(gw) {
-                        self.remove_route(table_id, prefix, *gw, *ifid, slot.1)
-                            .await?;
+                // A changed next-hop set is a del+add like a changed gateway.
+                let same = |a: Option<&Hops>, b: &Hops| a.map(gateways) == Some(gateways(b));
+                for (slot, hops) in &old {
+                    if !same(new.get(slot), hops) {
+                        self.remove_route(table_id, prefix, hops, slot.1).await?;
                     }
                 }
-                for (slot, (gw, ifid)) in &new {
-                    if old.get(slot).map(|(g, _)| g) != Some(gw) {
-                        self.add_route(table_id, prefix, *gw, source, *ifid, slot.1)
+                for (slot, hops) in &new {
+                    if !same(old.get(slot), hops) {
+                        self.add_route(table_id, prefix, hops, source, slot.1)
                             .await?;
                     }
                 }
@@ -312,17 +333,17 @@ impl LinuxRibDriver {
         best_routes: &HashMap<IpNet, RibEntry>,
     ) -> Result<(), DriverError> {
         let observed = self.dump_routes(table_id).await?;
-        let observed_map: HashMap<Slot, IpAddr> = observed
+        let observed_map: HashMap<Slot, Vec<IpAddr>> = observed
             .iter()
-            .map(|(slot, gateway, _)| (*slot, *gateway))
+            .map(|(slot, gateways, _)| (*slot, gateways.clone()))
             .collect();
-        let desired_full: HashMap<Slot, GatewayAndInterface> = best_routes
+        let desired_full: HashMap<Slot, Hops> = best_routes
             .iter()
             .flat_map(|(prefix, entry)| slots(*prefix, entry))
             .collect();
-        let desired: HashMap<Slot, IpAddr> = desired_full
+        let desired: HashMap<Slot, Vec<IpAddr>> = desired_full
             .iter()
-            .map(|(slot, (gw, _))| (*slot, *gw))
+            .map(|(slot, hops)| (*slot, gateways(hops)))
             .collect();
 
         let observed_by_slot: HashMap<Slot, RouteMessage> = observed
@@ -349,8 +370,9 @@ impl LinuxRibDriver {
         // plain `rtnetlink::Handle` dispatches one request at a time
         // regardless of client-side concurrency, so it isn't used here.
         stream::iter(to_remove)
-            .map(|((prefix, backup), gateway)| {
+            .map(|((prefix, backup), gateways)| {
                 let message = observed_by_slot.get(&(prefix, backup)).cloned();
+                let gateway = show_gateways(&gateways);
                 async move {
                     if let Some(message) = message {
                         self.route_channel.del(message).await.inspect_err(|e| {
@@ -366,13 +388,14 @@ impl LinuxRibDriver {
             .await?;
 
         stream::iter(to_add)
-            .map(|((prefix, backup), gateway)| {
+            .map(|((prefix, backup), _)| {
                 let source = best_routes.get(&prefix).map(|e| e.source);
-                let interface_id = desired_full
+                let hops = desired_full
                     .get(&(prefix, backup))
-                    .and_then(|(_, ifid)| *ifid);
+                    .cloned()
+                    .unwrap_or_default();
                 async move {
-                    self.add_route(table_id, prefix, gateway, source, interface_id, backup)
+                    self.add_route(table_id, prefix, &hops, source, backup)
                         .await
                 }
             })
@@ -443,16 +466,38 @@ impl RibDriver for LinuxRibDriver {
     }
 }
 
-/// Extracts `((prefix, is_backup), gateway)` from a dumped `RouteMessage`, or `None` for
-/// a route we don't manage (no gateway — e.g. a kernel-internal entry a VRF
-/// device creates on its own, or an unsupported address family like MPLS).
-/// A missing `Destination` attribute means the default route (kernel omits
-/// it for 0/0), so it falls back to the family's unspecified address.
-fn extract_route(route: &RouteMessage) -> Option<(Slot, IpAddr)> {
-    let gateway = route.attributes.iter().find_map(|attr| match attr {
+/// Extracts `((prefix, is_backup), gateways)` (sorted) from a dumped
+/// `RouteMessage`, or `None` for a route we don't manage (no gateway — e.g. a
+/// kernel-internal entry a VRF device creates on its own, or an unsupported
+/// address family like MPLS). An ECMP route has no `RTA_GATEWAY` of its own:
+/// its gateways are inside `RTA_MULTIPATH`, one per next hop — missing that
+/// would make a multipath route look unmanaged, re-added (EEXIST) on every
+/// `apply` and never deleted. A missing `Destination` attribute means the
+/// default route (kernel omits it for 0/0), so it falls back to the family's
+/// unspecified address.
+// ponytail: older kernels dump IPv6 ECMP siblings as separate routes, not
+// one `RTA_MULTIPATH`; nothing pushes IPv6 ECMP yet (ospfv3 is single-path),
+// merge siblings per slot here once it does.
+fn extract_route(route: &RouteMessage) -> Option<(Slot, Vec<IpAddr>)> {
+    let gateway_of = |attr: &RouteAttribute| match attr {
         RouteAttribute::Gateway(addr) => route_address_to_ip(addr),
         _ => None,
-    })?;
+    };
+    let mut gateways: Vec<IpAddr> = route
+        .attributes
+        .iter()
+        .flat_map(|attr| match attr {
+            RouteAttribute::MultiPath(hops) => hops
+                .iter()
+                .flat_map(|hop| hop.attributes.iter().filter_map(gateway_of))
+                .collect(),
+            attr => gateway_of(attr).into_iter().collect::<Vec<_>>(),
+        })
+        .collect();
+    if gateways.is_empty() {
+        return None;
+    }
+    gateways.sort_unstable();
 
     let destination = route
         .attributes
@@ -476,44 +521,56 @@ fn extract_route(route: &RouteMessage) -> Option<(Slot, IpAddr)> {
 
     IpNet::new(destination, route.header.destination_prefix_length)
         .ok()
-        .map(|prefix| ((prefix, backup), gateway))
+        .map(|prefix| ((prefix, backup), gateways))
 }
 
-/// Builds the `RouteMessage` for one kernel route, `None` on a
-/// prefix/gateway address-family mismatch. `backup` sets the family's backup metric.
-fn build_route(
-    prefix: IpNet,
-    gateway: IpAddr,
-    table_id: u32,
-    interface_id: Option<u32>,
-    backup: bool,
-) -> Option<RouteMessage> {
-    match (prefix, gateway) {
-        (IpNet::V4(prefix), IpAddr::V4(gateway)) => {
-            let mut builder = RouteMessageBuilder::<Ipv4Addr>::new()
-                .destination_prefix(prefix.addr(), prefix.prefix_len())
-                .gateway(gateway)
-                .table_id(table_id);
-            if backup {
-                builder = builder.priority(BACKUP_METRIC_V4);
-            }
-            Some(builder.build())
-        }
-        (IpNet::V6(prefix), IpAddr::V6(gateway)) => {
-            let mut builder = RouteMessageBuilder::<Ipv6Addr>::new()
-                .destination_prefix(prefix.addr(), prefix.prefix_len())
-                .gateway(gateway)
-                .table_id(table_id);
-            if let Some(interface_id) = interface_id {
-                builder = builder.output_interface(interface_id);
-            }
-            if backup {
-                builder = builder.priority(BACKUP_METRIC_V6);
-            }
-            Some(builder.build())
-        }
-        _ => None,
+/// Builds the `RouteMessage` for one kernel route, `None` on no hops or a
+/// prefix/gateway address-family mismatch. One hop is `RTA_GATEWAY` (+
+/// `RTA_OIF`), two or more are `RTA_MULTIPATH`. `backup` sets the family's
+/// backup metric.
+fn build_route(prefix: IpNet, hops: &Hops, table_id: u32, backup: bool) -> Option<RouteMessage> {
+    let v4 = prefix.addr().is_ipv4();
+    if hops.is_empty() || hops.iter().any(|(gw, _)| gw.is_ipv4() != v4) {
+        return None;
     }
+    let mut builder = RouteMessageBuilder::<IpAddr>::new()
+        .destination_prefix(prefix.addr(), prefix.prefix_len())
+        .ok()?
+        .table_id(table_id);
+    if let [(gateway, interface_id)] = hops.as_slice() {
+        builder = builder.gateway(*gateway).ok()?;
+        if let Some(interface_id) = interface_id {
+            builder = builder.output_interface(*interface_id);
+        }
+    } else {
+        let family = if v4 {
+            AddressFamily::Inet
+        } else {
+            AddressFamily::Inet6
+        };
+        let next_hops = hops
+            .iter()
+            .map(|(gateway, interface_id)| {
+                let hop = RouteNextHopBuilder::new(family).via(*gateway).ok()?;
+                Some(
+                    match interface_id {
+                        Some(index) => hop.interface(*index),
+                        None => hop,
+                    }
+                    .build(),
+                )
+            })
+            .collect::<Option<Vec<_>>>()?;
+        builder = builder.multipath(next_hops);
+    }
+    if backup {
+        builder = builder.priority(if v4 {
+            BACKUP_METRIC_V4
+        } else {
+            BACKUP_METRIC_V6
+        });
+    }
+    Some(builder.build())
 }
 
 fn route_address_to_ip(addr: &RouteAddress) -> Option<IpAddr> {
@@ -524,28 +581,28 @@ fn route_address_to_ip(addr: &RouteAddress) -> Option<IpAddr> {
     }
 }
 
-/// A route key + the gateway it should have (or currently has).
-type RouteChange<K> = (K, IpAddr);
+/// Route keys + the gateway(s) each should have (or currently has).
+type RouteChanges<K, V> = Vec<(K, V)>;
 
 /// Pure diff, no `rtnetlink` types in its signature: which prefixes need a
 /// route added, and which need one removed, to bring `observed` in line
-/// with `desired`. A prefix present in both with a *different* gateway is
+/// with `desired`. A prefix present in both with *different* gateways is
 /// reported in both lists (remove the stale one, add the correct one).
-fn diff_routes<K: Copy + Eq + std::hash::Hash>(
-    observed: &HashMap<K, IpAddr>,
-    desired: &HashMap<K, IpAddr>,
-) -> (Vec<RouteChange<K>>, Vec<RouteChange<K>>) {
+fn diff_routes<K: Copy + Eq + std::hash::Hash, V: Clone + PartialEq>(
+    observed: &HashMap<K, V>,
+    desired: &HashMap<K, V>,
+) -> (RouteChanges<K, V>, RouteChanges<K, V>) {
     let mut to_add = Vec::new();
     let mut to_remove = Vec::new();
 
     for (prefix, gateway) in desired {
         if observed.get(prefix) != Some(gateway) {
-            to_add.push((*prefix, *gateway));
+            to_add.push((*prefix, gateway.clone()));
         }
     }
     for (prefix, gateway) in observed {
         if desired.get(prefix) != Some(gateway) {
-            to_remove.push((*prefix, *gateway));
+            to_remove.push((*prefix, gateway.clone()));
         }
     }
 
@@ -617,19 +674,54 @@ mod tests {
         let p = net("10.0.0.0/24");
         let entry = RibEntry {
             prefix: p,
-            gateway: addr("10.0.0.1"),
+            next_hops: vec![(addr("10.0.0.1"), None)],
             source: RouteSource::Ospf,
-            interface_id: None,
             backup: Some(addr("10.0.0.2")),
             backup_interface_id: None,
         };
         assert_eq!(
             slots(p, &entry),
             vec![
-                ((p, false), (addr("10.0.0.1"), None)),
-                ((p, true), (addr("10.0.0.2"), None)),
+                ((p, false), vec![(addr("10.0.0.1"), None)]),
+                ((p, true), vec![(addr("10.0.0.2"), None)]),
             ]
         );
+    }
+
+    #[test]
+    fn ecmp_route_round_trips_through_multipath() {
+        let p = net("203.0.113.80/32");
+        let hops = vec![(addr("10.0.0.9"), None), (addr("10.0.0.2"), Some(7))];
+        let route = build_route(p, &hops, 100, false).unwrap();
+        assert!(!route
+            .attributes
+            .iter()
+            .any(|a| matches!(a, RouteAttribute::Gateway(_))));
+        let Some(RouteAttribute::MultiPath(nh)) = route
+            .attributes
+            .iter()
+            .find(|a| matches!(a, RouteAttribute::MultiPath(_)))
+        else {
+            panic!("no RTA_MULTIPATH: {route:?}");
+        };
+        assert_eq!(nh[1].interface_index, 7);
+        // What a dump of it gives back: both gateways, sorted, primary slot.
+        assert_eq!(
+            extract_route(&route),
+            Some(((p, false), vec![addr("10.0.0.2"), addr("10.0.0.9")]))
+        );
+    }
+
+    #[test]
+    fn single_hop_route_uses_rta_gateway() {
+        let p = net("10.0.0.0/24");
+        let route = build_route(p, &vec![(addr("10.0.0.1"), None)], 100, true).unwrap();
+        assert_eq!(
+            extract_route(&route),
+            Some(((p, true), vec![addr("10.0.0.1")]))
+        );
+        assert!(build_route(p, &vec![(addr("2001:db8::1"), None)], 100, false).is_none());
+        assert!(build_route(p, &vec![], 100, false).is_none());
     }
 
     #[test]

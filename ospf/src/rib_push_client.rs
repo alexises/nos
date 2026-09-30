@@ -13,8 +13,9 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-/// A route's next hop, its LFA backup (if any) and its SPF metric.
-type Hops = (IpAddr, Option<IpAddr>, u32);
+/// A route's equal-cost next hops (sorted), its LFA backup (if any) and its
+/// SPF metric.
+type Hops = (Vec<IpAddr>, Option<IpAddr>, u32);
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -153,10 +154,7 @@ async fn compute_routes(links: &Arc<LinkManager>) -> HashMap<IpNet, Hops> {
             (
                 IpNet::V4(e.prefix),
                 (
-                    // ponytail: one next hop on the wire until `OspfRoute`
-                    // carries the set (#33 PR 2) — the lowest address, so
-                    // the pick is deterministic.
-                    IpAddr::V4(e.next_hops[0]),
+                    e.next_hops.into_iter().map(IpAddr::V4).collect(),
                     e.backup_next_hop.map(IpAddr::V4),
                     e.metric,
                 ),
@@ -177,17 +175,19 @@ async fn wait_or_shutdown(delay: Duration, shutdown: &mut watch::Receiver<bool>)
 fn to_routes(routes: &HashMap<IpNet, Hops>) -> Vec<OspfRoute> {
     routes
         .iter()
-        .map(
-            |(&prefix, &(next_hop, backup_next_hop, metric))| OspfRoute {
-                prefix,
-                next_hop,
-                interface_id: None,
-                backup_next_hop,
-                backup_interface_id: None,
-                metric,
-            },
-        )
+        .map(|(&prefix, hops)| to_route(prefix, hops))
         .collect()
+}
+
+/// RFC 2328 next hops are routable IPv4 addresses: no interface id needed.
+fn to_route(prefix: IpNet, (next_hops, backup_next_hop, metric): &Hops) -> OspfRoute {
+    OspfRoute {
+        prefix,
+        next_hops: next_hops.iter().map(|gw| (*gw, None)).collect(),
+        backup_next_hop: *backup_next_hop,
+        backup_interface_id: None,
+        metric: *metric,
+    }
 }
 
 /// Computes the minimal `OspfRouteUpdate`s needed to bring `last_sent` (what
@@ -200,16 +200,9 @@ fn diff_routes(
     new_routes: &HashMap<IpNet, Hops>,
 ) -> Vec<OspfRouteUpdate> {
     let mut updates = Vec::new();
-    for (&prefix, &hops) in new_routes {
-        if last_sent.get(&prefix) != Some(&hops) {
-            updates.push(OspfRouteUpdate::Add(OspfRoute {
-                prefix,
-                next_hop: hops.0,
-                interface_id: None,
-                backup_next_hop: hops.1,
-                backup_interface_id: None,
-                metric: hops.2,
-            }));
+    for (&prefix, hops) in new_routes {
+        if last_sent.get(&prefix) != Some(hops) {
+            updates.push(OspfRouteUpdate::Add(to_route(prefix, hops)));
         }
     }
     for prefix in last_sent.keys() {
@@ -227,7 +220,7 @@ mod tests {
     fn routes(pairs: &[(&str, &str)]) -> HashMap<IpNet, Hops> {
         pairs
             .iter()
-            .map(|(p, gw)| (p.parse().unwrap(), (gw.parse().unwrap(), None, 10)))
+            .map(|(p, gw)| (p.parse().unwrap(), (vec![gw.parse().unwrap()], None, 10)))
             .collect()
     }
 
@@ -249,9 +242,8 @@ mod tests {
         assert_eq!(
             diff_routes(&last_sent, &new_routes),
             vec![OspfRouteUpdate::Add(OspfRoute {
-                interface_id: None,
                 prefix: "10.0.0.0/24".parse().unwrap(),
-                next_hop: "10.0.0.2".parse().unwrap(),
+                next_hops: vec![("10.0.0.2".parse().unwrap(), None)],
                 backup_next_hop: None,
                 backup_interface_id: None,
                 metric: 10,
@@ -276,9 +268,8 @@ mod tests {
         updates.sort_by_key(|u| format!("{u:?}"));
         let mut expected = vec![
             OspfRouteUpdate::Add(OspfRoute {
-                interface_id: None,
                 prefix: "10.0.2.0/24".parse().unwrap(),
-                next_hop: "10.0.2.1".parse().unwrap(),
+                next_hops: vec![("10.0.2.1".parse().unwrap(), None)],
                 backup_next_hop: None,
                 backup_interface_id: None,
                 metric: 10,
@@ -294,15 +285,32 @@ mod tests {
         let gw: IpAddr = "10.0.0.1".parse().unwrap();
         let bk: IpAddr = "10.0.9.9".parse().unwrap();
         let p: IpNet = "10.0.0.0/24".parse().unwrap();
-        let last_sent = HashMap::from([(p, (gw, None, 10))]);
-        let new_routes = HashMap::from([(p, (gw, Some(bk), 10))]);
+        let last_sent = HashMap::from([(p, (vec![gw], None, 10))]);
+        let new_routes = HashMap::from([(p, (vec![gw], Some(bk), 10))]);
         assert_eq!(
             diff_routes(&last_sent, &new_routes),
             vec![OspfRouteUpdate::Add(OspfRoute {
                 prefix: p,
-                next_hop: gw,
-                interface_id: None,
+                next_hops: vec![(gw, None)],
                 backup_next_hop: Some(bk),
+                backup_interface_id: None,
+                metric: 10,
+            })]
+        );
+    }
+
+    #[test]
+    fn diff_ecmp_set_change_is_add_carrying_every_hop() {
+        let p: IpNet = "10.0.0.0/24".parse().unwrap();
+        let (a, b): (IpAddr, IpAddr) = ("10.0.0.1".parse().unwrap(), "10.0.1.1".parse().unwrap());
+        let last_sent = HashMap::from([(p, (vec![a], None, 10))]);
+        let new_routes = HashMap::from([(p, (vec![a, b], None, 10))]);
+        assert_eq!(
+            diff_routes(&last_sent, &new_routes),
+            vec![OspfRouteUpdate::Add(OspfRoute {
+                prefix: p,
+                next_hops: vec![(a, None), (b, None)],
+                backup_next_hop: None,
                 backup_interface_id: None,
                 metric: 10,
             })]

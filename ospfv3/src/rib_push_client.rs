@@ -146,8 +146,9 @@ impl Pushed {
     fn route(self, prefix: IpNet) -> OspfRoute {
         OspfRoute {
             prefix,
-            next_hop: self.next_hop,
-            interface_id: self.interface_id,
+            // ponytail: one next hop — ospfv3's SPF is still single-path;
+            // the wire already carries a set for when it isn't.
+            next_hops: vec![(self.next_hop, self.interface_id)],
             backup_next_hop: self.backup_next_hop,
             backup_interface_id: self.backup_interface_id,
             metric: self.metric,
@@ -261,8 +262,7 @@ mod tests {
             diff_routes(&last_sent, &new_routes),
             vec![OspfRouteUpdate::Add(OspfRoute {
                 prefix: "2001:db8::/64".parse().unwrap(),
-                next_hop: "fe80::2".parse().unwrap(),
-                interface_id: Some(1),
+                next_hops: vec![("fe80::2".parse().unwrap(), Some(1))],
                 backup_next_hop: None,
                 backup_interface_id: None,
                 metric: 10,
@@ -294,8 +294,7 @@ mod tests {
         let mut expected = vec![
             OspfRouteUpdate::Add(OspfRoute {
                 prefix: "2001:db8:3::/64".parse().unwrap(),
-                next_hop: "fe80::1".parse().unwrap(),
-                interface_id: Some(1),
+                next_hops: vec![("fe80::1".parse().unwrap(), Some(1))],
                 backup_next_hop: None,
                 backup_interface_id: None,
                 metric: 10,

@@ -22,7 +22,7 @@ pub enum RouteSource {
     /// `nos-interfaced` applied to an interface/subinterface or a broadcast
     /// domain's SVI in this table (`reconcile::connected_entries`, from
     /// `InterfaceRequest::GetInterfaces`/`GetBroadcastDomain`). Rebuilt
-    /// wholesale on every resync like `Static`. Its `gateway` is the local
+    /// wholesale on every resync like `Static`. Its one next hop is the local
     /// address itself, for display only: the kernel installs a connected
     /// route on its own the moment the address is applied, so this source is
     /// never installed (`Rib::best_routes_for_kernel`). It exists so
@@ -49,15 +49,15 @@ impl RouteSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RibEntry {
     pub prefix: IpNet,
-    pub gateway: IpAddr,
+    /// Every equal-cost next hop, non-empty (one for `Static`/`Bgp`/
+    /// `Connected`; one or more for `Ospf`), each with the local kernel
+    /// interface it is reachable over when known (mirrors
+    /// `nos_proto::OspfRoute::next_hops`: always `Some` from `nos-ospfv3d`,
+    /// `None` otherwise) — required for Linux's netlink route install when
+    /// the gateway is an IPv6 link-local address. Two or more are installed
+    /// as one `RTA_MULTIPATH` kernel route. Part of equality, like `backup`.
+    pub next_hops: Vec<(IpAddr, Option<u32>)>,
     pub source: RouteSource,
-    /// Mirrors `nos_proto::OspfRoute::interface_id` — the local kernel
-    /// interface `gateway` is reachable over, when known (always `Some`
-    /// for an `Ospf`-sourced entry pushed by `nos-ospfv3d`, always `None`
-    /// otherwise). Threaded down to `RibDriver::add_route`/`remove_route`,
-    /// required for Linux's netlink route install when `gateway` is an
-    /// IPv6 link-local address.
-    pub interface_id: Option<u32>,
     /// Pre-computed backup gateway (OSPF LFA / BGP runner-up), installed by
     /// the driver as a second route at a higher metric. Part of equality, so
     /// a backup-only change counts as a change of the winner.
@@ -313,9 +313,8 @@ pub fn build_from_config(cfg: &Config, table_name: &str) -> Option<Rib> {
             for route in &sri.routes {
                 rib.insert(RibEntry {
                     prefix: route.subnet,
-                    gateway: route.gateway,
+                    next_hops: vec![(route.gateway, None)],
                     source: RouteSource::Static,
-                    interface_id: None,
                     backup: None,
                     backup_interface_id: None,
                 });
@@ -350,9 +349,8 @@ mod tests {
         let mut rib = Rib::new();
         let entry = |p: &str, source| RibEntry {
             prefix: p.parse().unwrap(),
-            gateway: "10.0.0.1".parse().unwrap(),
+            next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
             source,
-            interface_id: None,
             backup: None,
             backup_interface_id: None,
         };
@@ -382,15 +380,14 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.1".parse().unwrap(),
+            next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
         });
         assert_eq!(
-            rib.best_route(&prefix).unwrap().gateway,
+            rib.best_route(&prefix).unwrap().next_hops[0].0,
             "10.0.0.1".parse::<IpAddr>().unwrap()
         );
     }
@@ -403,17 +400,15 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.9".parse().unwrap(),
+            next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
         });
         rib.insert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.1".parse().unwrap(),
+            next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
@@ -423,9 +418,8 @@ mod tests {
 
     fn entry(prefix: &str, gateway: &str, source: RouteSource) -> RibEntry {
         RibEntry {
-            interface_id: None,
             prefix: prefix.parse().unwrap(),
-            gateway: gateway.parse().unwrap(),
+            next_hops: vec![(gateway.parse().unwrap(), None)],
             source,
             backup: None,
             backup_interface_id: None,
@@ -474,17 +468,15 @@ mod tests {
         let p1: IpNet = "10.0.0.0/24".parse().unwrap();
         let p2: IpNet = "10.0.1.0/24".parse().unwrap();
         rib.insert(RibEntry {
-            interface_id: None,
             prefix: p1,
-            gateway: "10.0.0.1".parse().unwrap(),
+            next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
         });
         rib.insert(RibEntry {
-            interface_id: None,
             prefix: p2,
-            gateway: "10.0.1.1".parse().unwrap(),
+            next_hops: vec![("10.0.1.1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
@@ -498,25 +490,22 @@ mod tests {
         let p1: IpNet = "10.0.1.0/24".parse().unwrap();
         let p2: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
-            interface_id: None,
             prefix: p1,
-            gateway: "10.0.1.1".parse().unwrap(),
+            next_hops: vec![("10.0.1.1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
         });
         rib.insert(RibEntry {
-            interface_id: None,
             prefix: p2,
-            gateway: "10.0.0.9".parse().unwrap(),
+            next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
         });
         rib.insert(RibEntry {
-            interface_id: None,
             prefix: p2,
-            gateway: "10.0.0.1".parse().unwrap(),
+            next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
@@ -539,17 +528,15 @@ mod tests {
         let broad: IpNet = "10.0.0.0/16".parse().unwrap();
         let narrow: IpNet = "10.0.1.0/24".parse().unwrap();
         rib.insert(RibEntry {
-            interface_id: None,
             prefix: broad,
-            gateway: "10.0.0.1".parse().unwrap(),
+            next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
         });
         rib.insert(RibEntry {
-            interface_id: None,
             prefix: narrow,
-            gateway: "10.0.1.1".parse().unwrap(),
+            next_hops: vec![("10.0.1.1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
@@ -558,7 +545,10 @@ mod tests {
         let (matched, candidates) = rib.lookup("10.0.1.5".parse().unwrap()).unwrap();
         assert_eq!(matched, narrow);
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].gateway, "10.0.1.1".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            candidates[0].next_hops[0].0,
+            "10.0.1.1".parse::<IpAddr>().unwrap()
+        );
 
         let (matched, _) = rib.lookup("10.0.2.5".parse().unwrap()).unwrap();
         assert_eq!(matched, broad);
@@ -591,9 +581,8 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.9".parse().unwrap(),
+            next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
@@ -601,9 +590,8 @@ mod tests {
         rib.replace_source(
             RouteSource::Static,
             vec![RibEntry {
-                interface_id: None,
                 prefix,
-                gateway: "10.0.0.1".parse().unwrap(),
+                next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
                 source: RouteSource::Static,
                 backup: None,
                 backup_interface_id: None,
@@ -625,9 +613,8 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.1".parse().unwrap(),
+            next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
@@ -641,25 +628,22 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.1".parse().unwrap(),
+            next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
         });
         rib.upsert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.9".parse().unwrap(),
+            next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
         });
         rib.upsert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.99".parse().unwrap(),
+            next_hops: vec![("10.0.0.99".parse().unwrap(), None)],
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
@@ -675,7 +659,7 @@ mod tests {
             .iter()
             .find(|e| e.source == RouteSource::Bgp)
             .unwrap();
-        assert_eq!(bgp.gateway, "10.0.0.99".parse::<IpAddr>().unwrap());
+        assert_eq!(bgp.next_hops[0].0, "10.0.0.99".parse::<IpAddr>().unwrap());
     }
 
     #[test]
@@ -683,9 +667,8 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         let entry = RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.9".parse().unwrap(),
+            next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
@@ -702,9 +685,8 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.1".parse().unwrap(),
+            next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
@@ -713,9 +695,8 @@ mod tests {
         // never becomes the winner — no kernel-visible change.
         assert_eq!(
             rib.upsert_and_diff(RibEntry {
-                interface_id: None,
                 prefix,
-                gateway: "10.0.0.9".parse().unwrap(),
+                next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
                 source: RouteSource::Bgp,
                 backup: None,
                 backup_interface_id: None,
@@ -729,9 +710,8 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         let bgp_entry = RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.9".parse().unwrap(),
+            next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
@@ -739,18 +719,16 @@ mod tests {
         assert_eq!(
             rib.upsert_and_diff(bgp_entry),
             BestPathChange::Installed(RibEntry {
-                interface_id: None,
                 prefix,
-                gateway: "10.0.0.9".parse().unwrap(),
+                next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
                 source: RouteSource::Bgp,
                 backup: None,
                 backup_interface_id: None,
             })
         );
         let static_entry = RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.1".parse().unwrap(),
+            next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
@@ -766,9 +744,8 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.9".parse().unwrap(),
+            next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
@@ -784,17 +761,15 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.1".parse().unwrap(),
+            next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
         });
         rib.insert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.9".parse().unwrap(),
+            next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
@@ -811,17 +786,15 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.1".parse().unwrap(),
+            next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
         });
         rib.insert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.9".parse().unwrap(),
+            next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
@@ -829,9 +802,8 @@ mod tests {
         assert_eq!(
             rib.remove_and_diff(&prefix, RouteSource::Static),
             BestPathChange::Installed(RibEntry {
-                interface_id: None,
                 prefix,
-                gateway: "10.0.0.9".parse().unwrap(),
+                next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
                 source: RouteSource::Bgp,
                 backup: None,
                 backup_interface_id: None,
@@ -844,17 +816,15 @@ mod tests {
         let mut rib = Rib::new();
         let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
         rib.insert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.1".parse().unwrap(),
+            next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
             source: RouteSource::Static,
             backup: None,
             backup_interface_id: None,
         });
         rib.insert(RibEntry {
-            interface_id: None,
             prefix,
-            gateway: "10.0.0.9".parse().unwrap(),
+            next_hops: vec![("10.0.0.9".parse().unwrap(), None)],
             source: RouteSource::Bgp,
             backup: None,
             backup_interface_id: None,
@@ -894,6 +864,6 @@ mod tests {
         let rib = build_from_config(&cfg(tables, instances), "rt1").unwrap();
         let best = rib.best_route(&"10.0.0.0/24".parse().unwrap()).unwrap();
         assert_eq!(best.source, RouteSource::Static);
-        assert_eq!(best.gateway, "10.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(best.next_hops[0].0, "10.0.0.1".parse::<IpAddr>().unwrap());
     }
 }

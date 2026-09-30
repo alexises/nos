@@ -155,10 +155,10 @@ The shell command for each is listed in [CLI ↔ API mapping](cli-api-mapping.md
 
 ```sh
 $ $C $B/v1/routes/rt1
-[{"prefix":"10.50.0.0/24","candidates":[{"gateway":"10.50.0.2","source":"Connected","backup":null}]},
- {"prefix":"192.0.2.0/24","candidates":[{"gateway":"10.50.0.3","source":"Static","backup":null}]}]
+[{"prefix":"10.50.0.0/24","candidates":[{"gateways":["10.50.0.2"],"source":"Connected","backup":null}]},
+ {"prefix":"192.0.2.0/24","candidates":[{"gateways":["10.50.0.3"],"source":"Static","backup":null}]}]
 $ $C $B/v1/routes/rt1/192.0.2.7
-{"prefix":"192.0.2.0/24","candidates":[{"gateway":"10.50.0.3","source":"Static","backup":null}]}
+{"prefix":"192.0.2.0/24","candidates":[{"gateways":["10.50.0.3"],"source":"Static","backup":null}]}
 $ $C "$B/v1/logs?source=nos-bgpd%5Br1%5D&limit=1" | jq '.[0].source'
 "nos-bgpd[r1]"
 ```

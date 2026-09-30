@@ -569,7 +569,7 @@ async fn show_routes_via_the_broker_and_missing_daemons_are_503() {
         RibRequest::GetRoutes => RibEvent::Routes(vec![PrefixRoutes {
             prefix: "10.0.0.0/8".parse().unwrap(),
             candidates: vec![RouteEntry {
-                gateway: "192.0.2.1".parse().unwrap(),
+                gateways: vec!["192.0.2.1".parse().unwrap()],
                 source: RouteSourceKind::Static,
                 backup: None,
             }],

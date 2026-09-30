@@ -701,9 +701,14 @@ pub fn render_prefix_routes(entries: &[PrefixRoutes]) -> String {
             let backup = candidate
                 .backup
                 .map_or_else(String::new, |b| format!(" backup {b}"));
+            let via = candidate
+                .gateways
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
             lines.push(format!(
-                "  {marker} via {} [{}]{backup}",
-                candidate.gateway,
+                "  {marker} via {via} [{}]{backup}",
                 render_route_source(candidate.source)
             ));
         }
@@ -1583,6 +1588,22 @@ mod tests {
     use nos_proto::{BgpInstance, SectionDiff};
 
     use super::*;
+
+    #[test]
+    fn ecmp_route_renders_every_gateway_on_one_line() {
+        let routes = [PrefixRoutes {
+            prefix: "203.0.113.80/32".parse().unwrap(),
+            candidates: vec![nos_proto::RouteEntry {
+                gateways: vec!["10.0.0.2".parse().unwrap(), "10.0.1.2".parse().unwrap()],
+                source: nos_proto::RouteSourceKind::Ospf,
+                backup: Some("10.0.1.3".parse().unwrap()),
+            }],
+        }];
+        assert_eq!(
+            render_prefix_routes(&routes),
+            "203.0.113.80/32\n  * via 10.0.0.2, 10.0.1.2 [ospf] backup 10.0.1.3"
+        );
+    }
 
     fn instance(name: &str, asn: u32) -> BgpInstance {
         BgpInstance {

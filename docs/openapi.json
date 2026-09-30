@@ -2252,15 +2252,19 @@
               "null"
             ]
           },
-          "gateway": {
-            "type": "string"
+          "gateways": {
+            "description": "Every next hop of this candidate — two or more is an equal-cost\nmultipath (ECMP) route, installed as one kernel route.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "source": {
             "$ref": "#/components/schemas/RouteSourceKind"
           }
         },
         "required": [
-          "gateway",
+          "gateways",
           "source"
         ],
         "type": "object"

@@ -173,9 +173,8 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
                     RouteSource::Bgp,
                     routes.into_iter().map(|r| RibEntry {
                         prefix: r.prefix,
-                        gateway: r.next_hop,
+                        next_hops: vec![(r.next_hop, None)],
                         source: RouteSource::Bgp,
-                        interface_id: None,
                         backup: r.backup_next_hop,
                         backup_interface_id: None,
                     }),
@@ -185,9 +184,8 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
             BgpRouteUpdate::Add(r) => {
                 let entry = RibEntry {
                     prefix: r.prefix,
-                    gateway: r.next_hop,
+                    next_hops: vec![(r.next_hop, None)],
                     source: RouteSource::Bgp,
-                    interface_id: None,
                     backup: r.backup_next_hop,
                     backup_interface_id: None,
                 };
@@ -251,9 +249,8 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
                     RouteSource::Ospf,
                     routes.into_iter().map(|r| RibEntry {
                         prefix: r.prefix,
-                        gateway: r.next_hop,
+                        next_hops: r.next_hops,
                         source: RouteSource::Ospf,
-                        interface_id: r.interface_id,
                         backup: r.backup_next_hop,
                         backup_interface_id: r.backup_interface_id,
                     }),
@@ -264,9 +261,8 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
                 guard.set_ospf_metric(r.prefix, Some(r.metric));
                 let entry = RibEntry {
                     prefix: r.prefix,
-                    gateway: r.next_hop,
+                    next_hops: r.next_hops,
                     source: RouteSource::Ospf,
-                    interface_id: r.interface_id,
                     backup: r.backup_next_hop,
                     backup_interface_id: r.backup_interface_id,
                 };
@@ -319,7 +315,7 @@ fn to_prefix_routes(prefix: nos_proto::IpNet, candidates: &[RibEntry]) -> Prefix
         candidates: candidates
             .iter()
             .map(|e| RouteEntry {
-                gateway: e.gateway,
+                gateways: e.next_hops.iter().map(|(gw, _)| *gw).collect(),
                 source: to_source_kind(e.source),
                 backup: e.backup,
             })
