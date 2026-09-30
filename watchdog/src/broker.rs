@@ -236,7 +236,9 @@ async fn login(
         return WatchdogEvent::Denied(INVALID_CREDENTIALS.to_string());
     }
     if let (Some(old), Some(new)) = (old, upgraded) {
-        // Best effort: never fail a correct login over an upgrade.
+        // Best effort: never fail a correct login over an upgrade. Noted first,
+        // so the users diff it causes is known not to be a password change.
+        ctx.pki.note_rehash(user, &new);
         match config_client::upgrade_password_hash(
             &ctx.pki.identity,
             &ctx.sockets.config,

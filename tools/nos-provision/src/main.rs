@@ -13,7 +13,7 @@
 use anyhow::{bail, Context};
 use clap::Parser;
 use futures::{SinkExt, StreamExt};
-use nos_pki::Identity;
+use nos_pki::{Bundle, Identity};
 use nos_proto::{
     Event, IpcCodec, Request, Role, TransactionBase, WatchdogEvent, WatchdogRequest,
     DEFAULT_PKI_CA, DEFAULT_WATCHDOG_SOCKET,
@@ -32,8 +32,9 @@ struct Cli {
     args: Args,
 
     /// User to log in as (a local NOS user; a fresh router has `admin`).
-    #[arg(long)]
-    login_user: String,
+    /// Required unless `--pki-cert-in` supplies a certificate instead.
+    #[arg(long, required_unless_present = "pki_cert_in")]
+    login_user: Option<String>,
 
     /// That user's password. Falls back to `NOS_LOGIN_PASSWORD`, which keeps
     /// it out of the process list.
@@ -47,20 +48,37 @@ struct Cli {
     /// The watchdog's published CA certificate.
     #[arg(long, default_value = DEFAULT_PKI_CA)]
     pki_ca: PathBuf,
+
+    /// Test fixture: after logging in, also write the certificate and its
+    /// private key here (`nos-e2e pki` reuses them after a revocation).
+    #[arg(long)]
+    pki_cert_out: Option<PathBuf>,
+
+    /// Test fixture: skip login and present the certificate `--pki-cert-out`
+    /// wrote instead.
+    #[arg(long, conflicts_with = "pki_cert_out")]
+    pki_cert_in: Option<PathBuf>,
 }
 
 /// Trades the password for a certificate and installs it as this process's
 /// identity, so every later `nos_pki::connect` is authenticated.
 async fn log_in(cli: &Cli) -> anyhow::Result<()> {
+    let ca = std::fs::read(&cli.pki_ca)
+        .with_context(|| format!("reading the ipc trust anchor {}", cli.pki_ca.display()))?;
+    let identity = Identity::anonymous_from_pem(&ca).context("the ipc trust anchor is unusable")?;
+    nos_pki::install(identity.clone());
+    if let Some(path) = &cli.pki_cert_in {
+        let saved = Bundle::read_from(&mut std::fs::read(path)?.as_slice())?
+            .context("empty certificate file")?;
+        identity.set_certificate(saved.cert, saved.key)?;
+        return Ok(());
+    }
+    let user = cli.login_user.clone().context("--login-user is required")?;
     let password = cli
         .login_password
         .clone()
         .or_else(|| std::env::var("NOS_LOGIN_PASSWORD").ok())
         .context("--login-password (or NOS_LOGIN_PASSWORD) is required")?;
-    let ca = std::fs::read(&cli.pki_ca)
-        .with_context(|| format!("reading the ipc trust anchor {}", cli.pki_ca.display()))?;
-    let identity = Identity::anonymous_from_pem(&ca).context("the ipc trust anchor is unusable")?;
-    nos_pki::install(identity.clone());
 
     let (csr, key) = nos_pki::generate_csr()?;
     let stream = nos_pki::connect(&cli.watchdog_socket, Role::Watchdog, "")
@@ -71,7 +89,7 @@ async fn log_in(cli: &Cli) -> anyhow::Result<()> {
     let mut writer = FramedWrite::new(w, IpcCodec::<WatchdogRequest>::default());
     writer
         .send(WatchdogRequest::Login {
-            user: cli.login_user.clone(),
+            user,
             password,
             csr_der: csr,
         })
@@ -79,6 +97,15 @@ async fn log_in(cli: &Cli) -> anyhow::Result<()> {
         .context("sending login")?;
     match reader.next().await {
         Some(Ok(WatchdogEvent::Issued { cert_der, .. })) => {
+            if let Some(path) = &cli.pki_cert_out {
+                let saved = Bundle {
+                    ca: Vec::new(),
+                    cert: cert_der.clone(),
+                    key: key.clone(),
+                    crl: Vec::new(),
+                };
+                std::fs::write(path, saved.encode())?;
+            }
             identity.set_certificate(cert_der, key)?;
             Ok(())
         }

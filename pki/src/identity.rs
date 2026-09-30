@@ -13,15 +13,17 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use arc_swap::ArcSwapOption;
-use rustls::client::{ClientConfig, ResolvesClientCert, Resumption};
+use arc_swap::{ArcSwap, ArcSwapOption};
+use rustls::client::{ClientConfig, ResolvesClientCert, Resumption, WebPkiServerVerifier};
 use rustls::crypto::aws_lc_rs::sign::any_supported_type;
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+use rustls::pki_types::{
+    CertificateDer, CertificateRevocationListDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName,
+};
 use rustls::server::{
     ClientHello, NoServerSessionStorage, ResolvesServerCert, ServerConfig, WebPkiClientVerifier,
 };
@@ -31,6 +33,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 use tracing::{debug, info, warn};
+use x509_parser::prelude::FromDer;
 
 use crate::ca::{err, Bundle, SERVER_NAME};
 use crate::policy::{key_alg_name, Policy};
@@ -215,11 +218,20 @@ impl ResolvesServerCert for Resolver {
     }
 }
 
-struct Inner {
-    shared: Arc<Shared>,
+/// The rustls configs of one identity. Rebuilt whenever the CRL changes; the
+/// certificate is not in them (the `Resolver` reads it per handshake).
+struct Configs {
     client: Arc<ClientConfig>,
     server_required: Arc<ServerConfig>,
     server_optional: Arc<ServerConfig>,
+}
+
+struct Inner {
+    shared: Arc<Shared>,
+    roots: Arc<RootCertStore>,
+    /// The CRL `configs` enforce (DER, empty for none yet).
+    crl: Mutex<Vec<u8>>,
+    configs: ArcSwap<Configs>,
 }
 
 #[derive(Clone)]
@@ -229,6 +241,64 @@ impl fmt::Debug for Identity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Identity({:?})", self.peer())
     }
+}
+
+/// Builds the client and both server configs trusting `roots`, refusing any
+/// peer whose leaf `crl` lists (none when `crl` is empty).
+fn configs(roots: &Arc<RootCertStore>, crl: &[u8], shared: &Arc<Shared>) -> io::Result<Configs> {
+    let provider = crate::policy::provider(Policy::Ipc);
+    let crls: Vec<CertificateRevocationListDer<'static>> = if crl.is_empty() {
+        Vec::new()
+    } else {
+        vec![CertificateRevocationListDer::from(crl.to_vec())]
+    };
+    let resolver = Arc::new(Resolver(shared.clone()));
+    let versions = &[&rustls::version::TLS13];
+
+    // Only the leaf is checked: the one CA is the trust anchor, never revoked.
+    // "Unknown status" can't happen with a CRL from that CA; it is allowed so
+    // that no CRL at all (before the first one arrives) means no checking.
+    let server_verifier =
+        WebPkiServerVerifier::builder_with_provider(roots.clone(), provider.clone())
+            .with_crls(crls.clone())
+            .only_check_end_entity_revocation()
+            .allow_unknown_revocation_status()
+            .build()
+            .map_err(err)?;
+    let mut client = ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(versions)
+        .map_err(err)?
+        .with_webpki_verifier(server_verifier)
+        .with_client_cert_resolver(resolver.clone());
+    client.resumption = Resumption::disabled();
+
+    let server = |optional: bool| -> io::Result<Arc<ServerConfig>> {
+        let builder = WebPkiClientVerifier::builder_with_provider(roots.clone(), provider.clone())
+            .with_crls(crls.clone())
+            .only_check_end_entity_revocation()
+            .allow_unknown_revocation_status();
+        let verifier = if optional {
+            builder.allow_unauthenticated()
+        } else {
+            builder
+        }
+        .build()
+        .map_err(err)?;
+        let mut cfg = ServerConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(versions)
+            .map_err(err)?
+            .with_client_cert_verifier(verifier)
+            .with_cert_resolver(resolver.clone());
+        cfg.send_tls13_tickets = 0;
+        cfg.session_storage = Arc::new(NoServerSessionStorage {});
+        Ok(Arc::new(cfg))
+    };
+
+    Ok(Configs {
+        client: Arc::new(client),
+        server_required: server(false)?,
+        server_optional: server(true)?,
+    })
 }
 
 fn certify(b: &Bundle) -> io::Result<Current> {
@@ -257,7 +327,6 @@ impl Identity {
     /// it can verify servers and connect to a socket that allows unauthenticated
     /// clients (the login path), nothing else. `update` gives it a certificate.
     pub fn anonymous(ca_der: &[u8]) -> io::Result<Self> {
-        let provider = crate::policy::provider(Policy::Ipc);
         let mut roots = RootCertStore::empty();
         roots
             .add(CertificateDer::from(ca_der.to_vec()))
@@ -267,41 +336,12 @@ impl Identity {
             ca: ca_der.to_vec(),
             current: ArcSwapOption::empty(),
         });
-        let resolver = Arc::new(Resolver(shared.clone()));
-        let versions = &[&rustls::version::TLS13];
-
-        let mut client = ClientConfig::builder_with_provider(provider.clone())
-            .with_protocol_versions(versions)
-            .map_err(err)?
-            .with_root_certificates(roots.clone())
-            .with_client_cert_resolver(resolver.clone());
-        client.resumption = Resumption::disabled();
-
-        let server = |optional: bool| -> io::Result<Arc<ServerConfig>> {
-            let builder =
-                WebPkiClientVerifier::builder_with_provider(roots.clone(), provider.clone());
-            let verifier = if optional {
-                builder.allow_unauthenticated()
-            } else {
-                builder
-            }
-            .build()
-            .map_err(err)?;
-            let mut cfg = ServerConfig::builder_with_provider(provider.clone())
-                .with_protocol_versions(versions)
-                .map_err(err)?
-                .with_client_cert_verifier(verifier)
-                .with_cert_resolver(resolver.clone());
-            cfg.send_tls13_tickets = 0;
-            cfg.session_storage = Arc::new(NoServerSessionStorage {});
-            Ok(Arc::new(cfg))
-        };
-
+        let configs = configs(&roots, &[], &shared)?;
         Ok(Self(Arc::new(Inner {
             shared,
-            client: Arc::new(client),
-            server_required: server(false)?,
-            server_optional: server(true)?,
+            roots,
+            crl: Mutex::new(Vec::new()),
+            configs: ArcSwap::from_pointee(configs),
         })))
     }
 
@@ -316,14 +356,33 @@ impl Identity {
         Ok(id)
     }
 
-    /// Swaps in a fresh certificate/key. New handshakes use it at once;
-    /// established connections are untouched. The CA must be the same one —
-    /// the trust anchor is fixed for an identity's lifetime.
+    /// Swaps in a fresh certificate/key, and the bundle's CRL if it carries a
+    /// new one. New handshakes use both at once; established connections are
+    /// untouched — revocation stops new handshakes only. The CA must be the
+    /// same one: the trust anchor is fixed for an identity's lifetime.
     pub fn update(&self, b: &Bundle) -> io::Result<()> {
         if b.ca != self.0.shared.ca {
             return Err(err("bundle is from a different CA"));
         }
-        self.0.shared.current.store(Some(Arc::new(certify(b)?)));
+        let current = certify(b)?;
+        self.set_crl(&b.crl)?;
+        self.0.shared.current.store(Some(Arc::new(current)));
+        Ok(())
+    }
+
+    /// Enforces `crl` (DER, signed by this identity's CA) on every handshake
+    /// from now on, on both sides. An empty or unchanged `crl` is a no-op.
+    pub fn set_crl(&self, crl: &[u8]) -> io::Result<()> {
+        let mut held = self.0.crl.lock().unwrap_or_else(PoisonError::into_inner);
+        if crl.is_empty() || *held == crl {
+            return Ok(());
+        }
+        let entries = crl_entries(crl)?;
+        self.0
+            .configs
+            .store(Arc::new(configs(&self.0.roots, crl, &self.0.shared)?));
+        crl.clone_into(&mut held);
+        info!(entries, "ipc crl updated");
         Ok(())
     }
 
@@ -335,6 +394,7 @@ impl Identity {
             ca: self.0.shared.ca.clone(),
             cert: cert_der,
             key: key_der,
+            crl: Vec::new(),
         })
     }
 
@@ -412,7 +472,7 @@ impl Identity {
         let name = ServerName::try_from(SERVER_NAME)
             .expect("valid dns name")
             .to_owned();
-        let connector = TlsConnector::from(self.0.client.clone());
+        let connector = TlsConnector::from(self.0.configs.load().client.clone());
         let tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, connector.connect(name, sock))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tls handshake timed out"))??;
@@ -430,7 +490,7 @@ impl Identity {
     /// Binds `path` (replacing a stale socket file) for peers that must
     /// present a certificate.
     pub fn listen(&self, path: &Path) -> io::Result<Listener> {
-        self.listen_with(path, self.0.server_required.clone())
+        self.listen_with(path, false)
     }
 
     /// As `listen`, but a peer *without* a certificate is let through (its
@@ -438,10 +498,10 @@ impl Identity {
     /// client has a certificate. The caller must refuse everything but login
     /// to an unauthenticated peer.
     pub fn listen_optional_client_auth(&self, path: &Path) -> io::Result<Listener> {
-        self.listen_with(path, self.0.server_optional.clone())
+        self.listen_with(path, true)
     }
 
-    fn listen_with(&self, path: &Path, config: Arc<ServerConfig>) -> io::Result<Listener> {
+    fn listen_with(&self, path: &Path, optional: bool) -> io::Result<Listener> {
         if self.peer().is_none() {
             return Err(err("an anonymous identity cannot serve"));
         }
@@ -450,9 +510,17 @@ impl Identity {
         }
         Ok(Listener {
             inner: UnixListener::bind(path)?,
-            config,
+            identity: self.0.clone(),
+            optional,
         })
     }
+}
+
+/// How many certificates a CRL lists — for the log line only.
+fn crl_entries(crl: &[u8]) -> io::Result<usize> {
+    let (_, parsed) =
+        x509_parser::revocation_list::CertificateRevocationList::from_der(crl).map_err(err)?;
+    Ok(parsed.iter_revoked_certificates().count())
 }
 
 fn peer_of(s: &Stream) -> Option<PeerId> {
@@ -463,9 +531,12 @@ fn peer_of(s: &Stream) -> Option<PeerId> {
     PeerId::from_cert_der(certs?.first()?)
 }
 
+/// Reads the identity's *current* server config on every accept, so a CRL
+/// that arrives after `listen` still applies to the next peer.
 pub struct Listener {
     inner: UnixListener,
-    config: Arc<ServerConfig>,
+    identity: Arc<Inner>,
+    optional: bool,
 }
 
 impl Listener {
@@ -474,9 +545,15 @@ impl Listener {
     /// peer then never stalls the accept loop.
     pub async fn accept(&self) -> io::Result<Incoming> {
         let (stream, _) = self.inner.accept().await?;
+        let configs = self.identity.configs.load();
+        let config = if self.optional {
+            &configs.server_optional
+        } else {
+            &configs.server_required
+        };
         Ok(Incoming {
             stream,
-            config: self.config.clone(),
+            config: config.clone(),
         })
     }
 }

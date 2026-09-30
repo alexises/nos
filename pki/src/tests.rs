@@ -203,6 +203,7 @@ fn csr_signing_takes_the_key_but_never_the_identity() {
         ca: ca.cert_der().to_vec(),
         cert,
         key,
+        crl: Vec::new(),
     })
     .unwrap();
     assert_eq!(id.peer(), Some(PeerId::new("user", "bob")));
@@ -541,4 +542,167 @@ mod rest {
         let (c, s) = handshake(&f, cfg).await;
         assert!(c.is_err() && s.is_err());
     }
+}
+
+/// The gate for revocation (#72): webpki must verify an ML-DSA-65-signed CRL
+/// and refuse a leaf it lists, on both verifier sides, while an unlisted leaf
+/// from the same CA still passes.
+#[test]
+fn an_ml_dsa_crl_is_enforced_by_both_verifiers() {
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::client::WebPkiServerVerifier;
+    use rustls::pki_types::{CertificateDer, CertificateRevocationListDer, ServerName, UnixTime};
+    use rustls::server::WebPkiClientVerifier;
+
+    let ca = Ca::new(KeyAlg::MlDsa65).unwrap();
+    let live = ca
+        .issue(&PeerId::new("bgpd", "r1"), Duration::from_secs(60))
+        .unwrap();
+    let gone = ca
+        .issue(&PeerId::new("bgpd", "r2"), Duration::from_secs(60))
+        .unwrap();
+    let crl = ca
+        .revoke(&[crate::Serial::of(&gone.cert).unwrap()])
+        .unwrap();
+
+    let provider = crate::policy::provider(crate::Policy::Ipc);
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(ca.cert_der().to_vec()))
+        .unwrap();
+    let roots = std::sync::Arc::new(roots);
+    let crls = vec![CertificateRevocationListDer::from(crl)];
+    let client_v = WebPkiClientVerifier::builder_with_provider(roots.clone(), provider.clone())
+        .with_crls(crls.clone())
+        .only_check_end_entity_revocation()
+        .allow_unknown_revocation_status()
+        .build()
+        .unwrap();
+    let server_v = WebPkiServerVerifier::builder_with_provider(roots, provider)
+        .with_crls(crls)
+        .only_check_end_entity_revocation()
+        .allow_unknown_revocation_status()
+        .build()
+        .unwrap();
+    let now = UnixTime::now();
+    let name = ServerName::try_from(crate::ca::SERVER_NAME).unwrap();
+    let check = |b: &Bundle| {
+        let ee = CertificateDer::from(b.cert.clone());
+        (
+            client_v.verify_client_cert(&ee, &[], now).is_ok(),
+            server_v
+                .verify_server_cert(&ee, &[], &name, &[], now)
+                .is_ok(),
+        )
+    };
+    assert_eq!(check(&live), (true, true));
+    assert_eq!(check(&gone), (false, false));
+}
+
+/// Revocation end to end over real handshakes: a listener made *before* the
+/// CRL arrived refuses a revoked client, a client refuses a revoked server,
+/// an unrevoked peer still gets in, and a connection opened before the
+/// revocation keeps working.
+#[tokio::test]
+async fn a_revoked_peer_is_refused_on_both_sides_but_open_streams_survive() {
+    let pki = TestPki::new();
+    let (_g, path) = sock("crl.sock");
+    let server = pki.identity("ribd", "rt1");
+    let l = server.listen(&path).unwrap();
+    let revoked = pki
+        .ca()
+        .issue(&PeerId::new("bgpd", "r1"), Duration::from_secs(60))
+        .unwrap();
+    let client = Identity::from_bundle(&revoked).unwrap();
+    let expect = PeerId::new("ribd", "rt1");
+
+    let (old, srv) = tokio::join!(client.connect(&path, &expect), async {
+        l.accept().await.unwrap().handshake().await.unwrap()
+    });
+    let (mut old, (mut old_srv, _)) = (old.unwrap(), srv);
+
+    let crl = pki
+        .ca()
+        .revoke(&[crate::Serial::of(&revoked.cert).unwrap()])
+        .unwrap();
+    server.set_crl(&crl).unwrap();
+
+    // The revoked client is refused by the listener that predates the CRL.
+    let (c, s) = tokio::join!(
+        async { ping(client.connect(&path, &expect).await?).await },
+        async { l.accept().await.unwrap().handshake().await }
+    );
+    assert!(c.is_err() && s.is_err());
+
+    // Another client from the same CA is let through.
+    let other = pki.identity("bgpd", "r2");
+    let (c, s) = tokio::join!(other.connect(&path, &expect), async {
+        l.accept().await.unwrap().handshake().await
+    });
+    assert!(c.is_ok() && s.is_ok());
+
+    // A client holding the CRL refuses the revoked identity as a *server*.
+    let (_g2, path2) = sock("crl2.sock");
+    let l2 = client.listen(&path2).unwrap();
+    let checker = pki.identity("configd", "");
+    checker.set_crl(&crl).unwrap();
+    let revoked_peer = PeerId::new("bgpd", "r1");
+    let (c, _) = tokio::join!(checker.connect(&path2, &revoked_peer), async {
+        l2.accept().await.unwrap().handshake().await
+    });
+    assert!(c.is_err());
+
+    // Established before the revocation: untouched.
+    old.write_all(b"hello").await.unwrap();
+    let mut buf = [0u8; 5];
+    old_srv.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"hello");
+}
+
+#[test]
+fn the_crl_prunes_expired_entries_and_its_number_grows() {
+    use x509_parser::prelude::FromDer;
+    use x509_parser::revocation_list::CertificateRevocationList;
+    let ca = Ca::new(KeyAlg::MlDsa65).unwrap();
+    let now = OffsetDateTime::now_utc();
+    let expired = ca
+        .issue_between(
+            &PeerId::new("bgpd", "old"),
+            now - time::Duration::hours(3),
+            now - time::Duration::hours(2),
+        )
+        .unwrap();
+    let live = ca
+        .issue(&PeerId::new("bgpd", "r1"), Duration::from_secs(60))
+        .unwrap();
+    let parse = |der: &[u8]| {
+        let (_, crl) = CertificateRevocationList::from_der(der).unwrap();
+        (
+            crl.crl_number().unwrap().clone(),
+            crl.iter_revoked_certificates().count(),
+        )
+    };
+    let (n0, e0) = parse(&ca.crl_der().unwrap());
+    let (n1, e1) = parse(
+        &ca.revoke(&[
+            crate::Serial::of(&expired.cert).unwrap(),
+            crate::Serial::of(&live.cert).unwrap(),
+        ])
+        .unwrap(),
+    );
+    assert_eq!((e0, e1), (0, 1), "the expired leaf is never listed");
+    assert!(n1 > n0);
+}
+
+#[test]
+fn a_bundle_carries_its_crl_through_the_frame() {
+    let ca = Ca::new(KeyAlg::MlDsa65).unwrap();
+    let mut b = ca
+        .issue(&PeerId::new("bgpd", "r1"), Duration::from_secs(60))
+        .unwrap();
+    b.crl = ca.crl_der().unwrap();
+    assert_eq!(
+        Bundle::read_from(&mut b.encode().as_slice()).unwrap(),
+        Some(b)
+    );
 }

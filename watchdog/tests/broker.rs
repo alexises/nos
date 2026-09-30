@@ -328,6 +328,75 @@ async fn a_user_can_renew_until_they_are_deleted_and_daemons_cannot_renew_at_all
     assert!(matches!(gone, WatchdogEvent::Denied(_)), "{gone:?}");
 }
 
+/// `revoke_user` locks out every IPC certificate the user was issued (the
+/// broker enforces the CRL at once), and `revoke` a daemon's, while other
+/// identities are untouched.
+#[tokio::test]
+async fn revoked_user_and_daemon_certificates_no_longer_open_the_broker() {
+    let e = env(vec![user("alice", "s3cret"), user("bob", "s3cret")]).await;
+    let logged_in = |name: &'static str| {
+        let e = &e;
+        async move {
+            let id = e.anonymous();
+            let (csr, key) = generate_csr().unwrap();
+            let WatchdogEvent::Issued { cert_der, .. } =
+                ask(&mut dial(&id, &e.broker).await, login(name, "s3cret", csr)).await
+            else {
+                panic!("login refused");
+            };
+            id.set_certificate(cert_der, key).unwrap();
+            id
+        }
+    };
+    let (alice1, alice2, bob) = (
+        logged_in("alice").await,
+        logged_in("alice").await,
+        logged_in("bob").await,
+    );
+    let bundle = e.pki.mint(Role::Bgpd, "r1").unwrap();
+    let daemon = Identity::from_bundle(&bundle).unwrap();
+    let watchdog = PeerId::new(Role::Watchdog.as_str(), "");
+    let opens = |id: &Identity| {
+        let (id, path, watchdog) = (id.clone(), e.broker.clone(), watchdog.clone());
+        async move {
+            match id.connect(&path, &watchdog).await {
+                // A TLS 1.3 client learns of a refused certificate on its first read.
+                Ok(s) => {
+                    let (r, w) = split(s);
+                    let mut conn = (
+                        FramedRead::new(r, IpcCodec::<WatchdogEvent>::default()),
+                        FramedWrite::new(w, IpcCodec::<WatchdogRequest>::default()),
+                    );
+                    conn.1
+                        .send(WatchdogRequest::ResolveEndpoint {
+                            service: ServiceRef::Config,
+                        })
+                        .await
+                        .is_ok()
+                        && matches!(conn.0.next().await, Some(Ok(WatchdogEvent::Endpoint(_))))
+                }
+                Err(_) => false,
+            }
+        }
+    };
+    assert!(opens(&alice1).await && opens(&alice2).await && opens(&daemon).await);
+
+    e.pki.revoke_user("alice");
+    e.pki.revoke(
+        Role::Bgpd,
+        "r1",
+        vec![nos_pki::Serial::of(&bundle.cert).unwrap()],
+    );
+    assert!(!opens(&alice1).await);
+    assert!(!opens(&alice2).await);
+    assert!(!opens(&daemon).await);
+    assert!(opens(&bob).await, "another user is untouched");
+    assert!(
+        opens(&e.daemon(Role::Bgpd, "r1")).await,
+        "a fresh leaf is fine"
+    );
+}
+
 fn rest_login(user: &str, password: &str, csr: Vec<u8>) -> WatchdogRequest {
     WatchdogRequest::RestLogin {
         user: user.to_string(),

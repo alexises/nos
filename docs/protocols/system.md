@@ -46,7 +46,10 @@ transaction 'users' committed
 ```
 
 - `set user <name> password <password>` creates the user if it does not exist, or changes its password. The password is typed in clear, as one word (the shell splits on spaces), and stored only as an argon2id hash. Setting the same password again changes nothing.
-- `delete user <name>` removes the user. Their shell sessions and REST certificates stop working at their next request, even if the certificate has not expired.
+- `delete user <name>` removes the user, even if their certificates have not expired:
+  - their REST certificates stop working at their next request;
+  - their shell certificates are revoked at once, so their shell can't open a new connection to any service. A connection that is already open is not cut.
+- Changing a user's password also revokes that user's shell certificates: every shell they are logged in to must log in again. Their REST certificates keep working until they expire.
 - A commit that would leave no user is refused, so you cannot lock yourself out:
   ```
   error: nos-configd reported an error: refusing to commit: it would remove every user and lock everyone out
@@ -189,7 +192,7 @@ services:
 ```
 
 - `--pki-user-lifetime=<seconds>` (default 28800, 8 hours): how long a user certificate is valid, for the shell and for REST clients alike. Clients renew at half this time.
-- `--pki-leaf-lifetime=<seconds>` (default 86400) and `--pki-rotate-every=<seconds>` (default 28800): lifetime of the certificates the router's own services use between themselves, and how often they are renewed. The second must be shorter than the first.
+- `--pki-leaf-lifetime=<seconds>` (default 86400) and `--pki-rotate-every=<seconds>` (default 28800): lifetime of the certificates the router's own services use between themselves, and how often they are renewed. The second must be shorter than the first. When a service stops or restarts (a crash, or its object removed from the configuration), its certificates are revoked at once rather than left valid until they expire.
 - `--pki-dir=<dir>` (default `/run/nos/pki`): where `ca.crt` and `rest-ca.crt` are published. If you change it, start the shell with `nos --pki-ca <dir>/ca.crt`.
 - `--fdbd-arg=--df-wait=<seconds>` (default 3): how long a router waits after joining an EVPN Ethernet Segment before applying the designated-forwarder election (see [EVPN and VXLAN](evpn-vxlan.md#the-designated-forwarder)).
 - `--logd-arg=--capacity=<entries>` (default 10000): how many log entries are kept.
