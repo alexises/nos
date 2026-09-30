@@ -42,7 +42,7 @@ The **running config** is what the router is doing right now. The only way to ch
 
 A **transaction** is a named working copy that you edit. Nothing you change in a transaction affects the router until you commit it. A commit is atomic: the whole set of changes goes live together, never half of it.
 
-The **saved config** is the file the router loads when it starts. **Committing does not save.** Your changes are live as soon as you commit, but they are lost at the next restart unless you also run `save` in the shell. The REST API has no save operation (see [CLI ↔ API mapping](cli-api-mapping.md#operations-with-no-counterpart)).
+The **saved config** is the file the router loads when it starts. **Committing does not save.** Your changes are live as soon as you commit, but they are lost at the next restart unless you also save: `save` in the shell, or `POST /v1/config/save` over REST.
 
 ## Working with transactions
 

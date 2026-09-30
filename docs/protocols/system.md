@@ -114,7 +114,7 @@ The router creates a new certificate authority each time it starts. After a rest
 
 **Certificate lifetime.** Client certificates last 8 hours; clients renew them before they expire. The lifetime is a start-up option (`--pki-user-lifetime`, see [below](#start-up-options)).
 
-**What is not available over REST.** `save` has no REST equivalent yet ([#112](https://github.com/alexises/nos/issues/112)): a change committed over REST is live, but only a `save` in the shell writes it to disk.
+**Saving over REST.** A change committed over REST is live but not on disk; `POST /v1/config/save` writes it, like the shell's `save` (see [below](#saving-the-configuration)).
 
 ## Logs
 
@@ -155,7 +155,7 @@ edge-1> save
 configuration saved
 ```
 
-Anything committed but not saved is lost at the next restart. This includes everything committed over REST, since the REST API has no save operation yet ([#112](https://github.com/alexises/nos/issues/112)).
+Over REST, `POST /v1/config/save` does the same and answers `204`. Anything committed but not saved, from either front end, is lost at the next restart.
 
 The saved file is YAML, with the same structure and field names as the JSON of `GET /v1/config`. You can prepare it before a router's first start to provision it, which is how the test lab starts its routers with the REST API already enabled: write the file into the router's `/var/lib/nos` volume before starting it. Passwords may be written in clear in the file; they are hashed when it is loaded. A file that cannot be parsed stops the configuration service from starting, and a file that parses is loaded without being validated, so check a hand-written file first by committing the same content on a running router (`PUT /v1/transactions/{tx}` with the whole config, then commit). If the file has no users, the router creates `admin`/`admin`.
 

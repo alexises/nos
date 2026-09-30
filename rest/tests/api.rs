@@ -83,14 +83,21 @@ const PASSWORD: &str = "secret";
 
 struct Fixture {
     app: Router,
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
 }
 
 /// `services` are the fake daemons the broker knows about. `async` only for the
 /// tokio context the spawned servers need.
-#[allow(clippy::unused_async)]
 async fn fixture(services: Vec<(ServiceRef, PathBuf)>) -> Fixture {
+    fixture_with(services, None).await
+}
+
+/// `fixture`, with `nos-configd` saving to `config_file` (relative to the
+/// fixture's temp dir) — `None` means no `--config-file`, so `Save` fails.
+#[allow(clippy::unused_async)]
+async fn fixture_with(services: Vec<(ServiceRef, PathBuf)>, config_file: Option<&str>) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
+    let config_file = config_file.map(|f| dir.path().join(f));
     let config_socket = dir.path().join("config.sock");
     let config = Config {
         users: vec![User {
@@ -99,7 +106,7 @@ async fn fixture(services: Vec<(ServiceRef, PathBuf)>) -> Fixture {
         }],
         ..Config::default()
     };
-    ConfigStore::new(config, None)
+    ConfigStore::new(config, config_file)
         .start_ipc_server(
             &ListenAddr::Unix(config_socket.clone()),
             &shared().identity("configd", ""),
@@ -136,7 +143,7 @@ async fn fixture(services: Vec<(ServiceRef, PathBuf)>) -> Fixture {
         },
     );
     let app = api::router(Daemons::new(watchdog_socket, config_socket));
-    Fixture { app, _dir: dir }
+    Fixture { app, dir }
 }
 
 async fn send(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -283,6 +290,35 @@ async fn transaction_lifecycle_over_the_config_tree() {
         send(app, Method::GET, "/v1/transactions/t1", None).await.0,
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn save_writes_the_running_config_to_disk() {
+    let f = fixture_with(vec![], Some("config.yaml")).await;
+    let app = &f.app;
+    send(app, Method::POST, "/v1/transactions/s?base=current", None).await;
+    send(
+        app,
+        Method::PUT,
+        "/v1/transactions/s/hostname",
+        Some(json!("saved-host")),
+    )
+    .await;
+    send(app, Method::POST, "/v1/transactions/s/commit", None).await;
+
+    let (s, v) = send(app, Method::POST, "/v1/config/save", None).await;
+    assert_eq!((s, v), (StatusCode::NO_CONTENT, Value::Null));
+    let saved = std::fs::read_to_string(f.dir.path().join("config.yaml")).unwrap();
+    assert!(saved.contains("saved-host"), "{saved}");
+}
+
+#[tokio::test]
+async fn save_failure_is_a_bad_gateway() {
+    // No config file: nos-configd refuses the save, through no fault of the client.
+    let f = fixture(vec![]).await;
+    let (s, v) = send(&f.app, Method::POST, "/v1/config/save", None).await;
+    assert_eq!(s, StatusCode::BAD_GATEWAY);
+    assert_eq!(v["status"], 502);
 }
 
 #[tokio::test]

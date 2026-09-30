@@ -267,6 +267,20 @@ pub async fn commit(
     }
 }
 
+/// `POST /v1/config/save` — persist the running config to disk, like the
+/// CLI's `save`. A commit is live but not persisted until this is called.
+#[utoipa::path(post, path = "/v1/config/save", tag = "transactions", summary = "Save the running config to disk", responses((status = 204, description = "the running config was written to disk"), (status = 502, body = ErrorBody, description = "nos-configd has no config file, or could not write it")))]
+pub async fn save(State(d): State<Daemons>) -> ApiResult<StatusCode> {
+    match d.config(Request::Save).await {
+        Ok(Event::Saved) => Ok(StatusCode::NO_CONTENT),
+        Ok(other) => Err(unexpected("nos-configd", &other)),
+        // A failed save is nos-configd's fault (no --config-file, or a disk
+        // error), not the client's: `from_config` would make it a 400.
+        Err(ApiError::BadRequest(m)) => Err(ApiError::BadGateway(m)),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

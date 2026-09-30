@@ -215,6 +215,7 @@ mod tests {
             "/v1/transactions/{tx}/routing-table/{routing_table}/rest-api",
             "/v1/config",
             "/v1/transactions/{tx}/commit",
+            "/v1/config/save",
         ] {
             assert!(paths.contains_key(p), "missing {p}");
         }
