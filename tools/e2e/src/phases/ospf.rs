@@ -727,7 +727,8 @@ pub async fn ospfv3_mtu_pagination(w: &mut World) -> anyhow::Result<()> {
 /// profile reach/stay Full with real per-packet digest checks; a mismatched
 /// key on router-a logs a real verification failure on router-b and blocks a
 /// new Full; restoring it lets Full form again. `ospf_auth` minus its RFC
-/// 7474 half (no OSPFv3 equivalent). Requires `ospfv3` to have run.
+/// 7474 half (no OSPFv3 equivalent). Requires `ospfv3` to have run. Leaves
+/// the profile unauthenticated again, for `ospfv3-dr`'s keyless router-c.
 pub async fn ospfv3_auth(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let full =
@@ -790,7 +791,30 @@ pub async fn ospfv3_auth(w: &mut World) -> anyhow::Result<()> {
         replays,
         5,
     )
-    .await
+    .await?;
+
+    // `provision_flags` edits on top of the running config, so leaving the
+    // flag out would keep the key: clear it, since `ospfv3-dr` reuses this
+    // profile on the bridge with a keyless router-c (#138).
+    log("clearing the rfc 7166 key on both routers");
+    let (a_full, b_full) = (
+        a.count(&full(OSPFV3_ROUTER_ID_B)),
+        b.count(&full(OSPFV3_ROUTER_ID)),
+    );
+    for r in [a, b] {
+        r.edit(|c| {
+            nos_proto::Ospfv3ProfileOp::ClearAuth {
+                instance: OSPFV3_INSTANCE.into(),
+                area_id: OSPFV3_AREA.parse()?,
+                name: OSPFV3_PROFILE.into(),
+            }
+            .apply(c)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await?;
+    }
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 60).await?;
+    b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await
 }
 
 pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
