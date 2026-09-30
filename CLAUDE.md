@@ -231,10 +231,10 @@ Every daemon (`nos-configd`, each `nos-bgpd`/`nos-ribd` instance, `nos-interface
 make check   # build + fmt + clippy + test (matches CI's fast jobs)
 make fix     # auto-fix formatting and clippy-fixable lints
 make help    # list all available targets
-make coverage  # line coverage (tools/e2e excluded, it's run, not unit-tested), fails under COVERAGE_MIN (CI runs this)
+make coverage  # line coverage, fails under COVERAGE_MIN (CI runs this) — excluded: tools/e2e, the Linux drivers, raw-socket FFI (see below)
 ```
 
-`COVERAGE_MIN` in the `Makefile` is a ratchet toward 90% (#104): raise it when a change lifts the total, never lower it.
+`COVERAGE_MIN` in the `Makefile` is a ratchet toward 90% (#104): raise it when a change lifts the total, never lower it. The metric excludes code that only runs against the real kernel — `*/driver/linux.rs`, `rib/src/driver/route_channel.rs`, `l2-socket/`, `ospf{,v3}/src/socket.rs` (#131): a mock under them would only test the mock, and `nos-e2e` is their real test.
 
 Containerized test environment:
 

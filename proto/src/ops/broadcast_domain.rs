@@ -573,4 +573,71 @@ mod tests {
             OpError::BroadcastDomainRouteTargetNotFound { .. }
         ));
     }
+
+    #[test]
+    fn every_set_has_a_clear() {
+        let mut cfg = Config::default();
+        cfg.broadcast_domains.push(domain("bd1"));
+        let n = || "bd1".to_string();
+        let rt = |import| BroadcastDomainOp::AddRouteTarget {
+            name: n(),
+            import,
+            route_target: "65000:1".to_string(),
+        };
+        for op in [
+            BroadcastDomainOp::SetOspfv3Profile {
+                name: n(),
+                ospfv3_profile: "p3".to_string(),
+            },
+            BroadcastDomainOp::SetVni { name: n(), vni: 1 },
+            BroadcastDomainOp::SetRd {
+                name: n(),
+                rd: "1.1.1.1:1".to_string(),
+            },
+            BroadcastDomainOp::SetVtepSource {
+                name: n(),
+                vtep_source: crate::schema::SourceAddress::Interface {
+                    interface: "lo".to_string(),
+                    label: None,
+                },
+            },
+            rt(true),
+            rt(true),
+            rt(false),
+        ] {
+            op.apply(&mut cfg).unwrap();
+        }
+        let d = &cfg.broadcast_domains[0];
+        assert_eq!(d.ospfv3_profile.as_deref(), Some("p3"));
+        assert_eq!(d.rd.as_deref(), Some("1.1.1.1:1"));
+        assert!(d.vtep_source.is_some());
+        assert_eq!(d.route_targets_import, ["65000:1"], "no duplicate");
+
+        let remove_rt = |import| BroadcastDomainOp::RemoveRouteTarget {
+            name: n(),
+            import,
+            route_target: "65000:1".to_string(),
+        };
+        for op in [
+            BroadcastDomainOp::ClearOspfv3Profile { name: n() },
+            BroadcastDomainOp::ClearVni { name: n() },
+            BroadcastDomainOp::ClearRd { name: n() },
+            BroadcastDomainOp::ClearVtepSource { name: n() },
+            BroadcastDomainOp::ClearMacRedistribute { name: n() },
+            BroadcastDomainOp::ClearArpRedistribute { name: n() },
+            BroadcastDomainOp::ClearConnectedRedistribute { name: n() },
+            remove_rt(true),
+            remove_rt(false),
+        ] {
+            op.apply(&mut cfg).unwrap();
+        }
+        assert_eq!(cfg.broadcast_domains[0], domain("bd1"));
+        assert!(matches!(
+            BroadcastDomainOp::ClearVni {
+                name: "nope".to_string()
+            }
+            .apply(&mut cfg),
+            Err(OpError::BroadcastDomainNotFound(_))
+        ));
+    }
 }

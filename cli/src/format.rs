@@ -2720,4 +2720,548 @@ mod tests {
              (PEs 192.0.2.1, 192.0.2.9)"
         ));
     }
+
+    fn crypto_key(
+        key_id: u16,
+        algorithm: OspfCryptoAlgorithm,
+        current: bool,
+    ) -> nos_proto::OspfCryptoKey {
+        nos_proto::OspfCryptoKey {
+            key_id,
+            algorithm,
+            key: "k".to_string(),
+            is_current: current,
+        }
+    }
+
+    fn addr(a: &str, label: Option<&str>) -> InterfaceAddress {
+        InterfaceAddress {
+            address: a.parse().unwrap(),
+            label: label.map(str::to_string),
+        }
+    }
+
+    /// One of everything `render_config`/`render_transaction` have a line for.
+    fn full_config() -> Config {
+        let area = |id: &str| id.parse::<Ipv4Addr>().unwrap();
+        Config {
+            bgp_instances: vec![BgpInstance {
+                peers: vec![BgpPeer {
+                    remote_address: "192.0.2.2".parse().unwrap(),
+                    peer_group: "pg".to_string(),
+                    shutdown: Some(BgpShutdown { message: None }),
+                }],
+                peer_groups: vec![BgpPeerGroup {
+                    name: "pg".to_string(),
+                    remote_as: 65002,
+                    ..Default::default()
+                }],
+                cluster_id: Some(Ipv4Addr::new(9, 9, 9, 9)),
+                ..instance("r1", 65001)
+            }],
+            routing_tables: vec![RoutingTable {
+                name: "rt1".to_string(),
+                bgp_instance: Some("r1".to_string()),
+                redistribute: Some(nos_proto::Redistribute {
+                    from: nos_proto::RedistributeSource::Static,
+                    to: nos_proto::RedistributeTarget::Bgp,
+                    policy: Some("p1".to_string()),
+                }),
+                rest_api: Some(nos_proto::RestApi {
+                    address: "10.0.0.1".parse().unwrap(),
+                    port: 443,
+                }),
+                ..Default::default()
+            }],
+            ospf_instances: vec![OspfInstance {
+                name: "o1".to_string(),
+                router_id: Ipv4Addr::new(1, 1, 1, 1),
+                areas: vec![OspfArea {
+                    area_id: area("0.0.0.0"),
+                    profiles: vec![OspfProfile {
+                        name: "op".to_string(),
+                        extended_sequence_numbers: true,
+                        auth: Some(OspfAuth::Crypto {
+                            keys: vec![
+                                crypto_key(1, OspfCryptoAlgorithm::Md5, false),
+                                crypto_key(2, OspfCryptoAlgorithm::HmacSha1, false),
+                                crypto_key(3, OspfCryptoAlgorithm::HmacSha384, false),
+                                crypto_key(4, OspfCryptoAlgorithm::HmacSha512, true),
+                            ],
+                        }),
+                        ..Default::default()
+                    }],
+                }],
+                routing_table: None,
+                redistribute_policy: None,
+            }],
+            ospfv3_instances: vec![Ospfv3Instance {
+                name: "v3".to_string(),
+                router_id: Ipv4Addr::new(2, 2, 2, 2),
+                areas: vec![Ospfv3Area {
+                    area_id: area("0.0.0.1"),
+                    profiles: vec![Ospfv3Profile {
+                        name: "p3".to_string(),
+                        auth: Some(vec![crypto_key(300, OspfCryptoAlgorithm::HmacSha256, true)]),
+                        ..Default::default()
+                    }],
+                }],
+                routing_table: None,
+                extended_lsa: true,
+                graceful_restart_grace_period: Some(120),
+            }],
+            static_routing_instances: vec![StaticRoutingInstance {
+                name: "s1".to_string(),
+                routes: vec![StaticRoute {
+                    subnet: "203.0.113.0/24".parse().unwrap(),
+                    gateway: "10.0.0.2".parse().unwrap(),
+                }],
+            }],
+            interfaces: vec![Interface {
+                name: "eth0".to_string(),
+                subinterfaces: vec![Subinterface {
+                    tag: 0,
+                    addresses: vec![addr("10.0.0.1/24", Some("peering"))],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            community_aliases: vec![CommunityAlias {
+                name: "blackhole".to_string(),
+                value: "65535:666".to_string(),
+            }],
+            community_groups: vec![
+                CommunityGroup {
+                    name: "g".to_string(),
+                    members: vec!["blackhole".to_string(), "65000:1".to_string()],
+                },
+                CommunityGroup {
+                    name: "empty".to_string(),
+                    members: Vec::new(),
+                },
+            ],
+            as_path_lists: vec![
+                AsPathList {
+                    name: "a".to_string(),
+                    patterns: vec!["^65001_".to_string()],
+                },
+                AsPathList {
+                    name: "none".to_string(),
+                    patterns: Vec::new(),
+                },
+            ],
+            prefix_lists: vec![
+                PrefixList {
+                    name: "pl".to_string(),
+                    entries: [None, Some((8, 32)), Some((8, 24)), Some((16, 24))]
+                        .into_iter()
+                        .map(|range| PrefixListEntry {
+                            cidr: "10.0.0.0/8".parse().unwrap(),
+                            range,
+                        })
+                        .collect(),
+                },
+                PrefixList {
+                    name: "empty".to_string(),
+                    entries: Vec::new(),
+                },
+            ],
+            broadcast_domains: vec![
+                BroadcastDomain {
+                    name: "bd1".to_string(),
+                    addresses: vec![addr("10.1.0.1/24", None)],
+                    routing_table: Some("rt1".to_string()),
+                    vni: Some(10100),
+                    rd: Some("1.1.1.1:100".to_string()),
+                    route_targets_import: vec!["65000:100".to_string()],
+                    route_targets_export: vec!["65000:100".to_string(), "65000:101".to_string()],
+                    vtep_source: Some(SourceAddress::Interface {
+                        interface: "lo".to_string(),
+                        label: None,
+                    }),
+                    mac_redistribute: Some("r1".to_string()),
+                    ..Default::default()
+                },
+                BroadcastDomain {
+                    name: "bd2".to_string(),
+                    ..Default::default()
+                },
+            ],
+            switching_profiles: vec![
+                SwitchingProfile {
+                    name: "trunk".to_string(),
+                    members: vec![
+                        nos_proto::SwitchingProfileMember {
+                            broadcast_domain: "bd1".to_string(),
+                            tag: VlanTag::Untagged,
+                        },
+                        nos_proto::SwitchingProfileMember {
+                            broadcast_domain: "bd2".to_string(),
+                            tag: VlanTag::Dot1q(200),
+                        },
+                    ],
+                },
+                SwitchingProfile {
+                    name: "empty".to_string(),
+                    members: Vec::new(),
+                },
+            ],
+            port_aggregates: vec![PortAggregate {
+                name: "bond1".to_string(),
+                esi: Some("00:11:22:33:44:55:66:77:88:99".to_string()),
+                redundancy_mode: nos_proto::EsRedundancy::SingleActive,
+                lacp_system_id: Some("02:00:00:00:00:01".to_string()),
+                mtu: Some(9000),
+                subinterfaces: vec![Subinterface {
+                    tag: 10,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn render_config_covers_every_section() {
+        let out = render_config(&full_config());
+        for expected in [
+            "bgp instance r1: router-id 1.1.1.1, asn 65001, cluster-id 9.9.9.9",
+            "  peer 192.0.2.2: peer-group pg, shutdown",
+            "routing-table rt1: bgp-instance r1, ospf-instance unset, static-routing-instance unset, \
+             redistribute from static to bgp, policy p1, rest-api 10.0.0.1:443",
+            "ospf instance o1: router-id 1.1.1.1\n  area 0.0.0.0\n    profile op: auth crypto-keys \
+             [key-id 1 md5 k, key-id 2 hmac-sha1 k, key-id 3 hmac-sha384 k, key-id 4 hmac-sha512 k (current)] \
+             extended-sequence-numbers",
+            "ospfv3 instance v3: router-id 2.2.2.2, extended-lsa, graceful-restart grace-period 120\n  \
+             area 0.0.0.1\n    profile p3: auth crypto-keys [key-id 300 hmac-sha256 k (current)]",
+            "static-routing-instance s1\n  route 203.0.113.0/24: gateway 10.0.0.2",
+            "  subinterface 0: address [10.0.0.1/24 (label peering)], routing-table unset, ospf-profile unset",
+            "community-alias blackhole: value 65535:666",
+            "community-group g: members [blackhole, 65000:1]",
+            "community-group empty: members [none]",
+            "as-path-list a: patterns [^65001_]",
+            "as-path-list none: patterns [none]",
+            "prefix-list pl: entries [10.0.0.0/8, 10.0.0.0/8 orlonger, 10.0.0.0/8 upto 24, 10.0.0.0/8 range(16,24)]",
+            "prefix-list empty: entries [none]",
+            "broadcast-domain bd1: address [10.1.0.1/24], routing-table rt1, ospf-profile unset, vni 10100, \
+             rd 1.1.1.1:100, rt-import [65000:100], rt-export [65000:100,65000:101], vtep-source ",
+            "redistribute-mac r1, redistribute-arp unset, redistribute-connected unset",
+            "broadcast-domain bd2: address [none], routing-table unset, ospf-profile unset\n",
+            "switching-profile trunk: members [bd1: untagged, bd2: dot1q 200]",
+            "switching-profile empty: members [none]",
+            "port-aggregate bond1: mode Xor, switching-profile unset, mtu 9000, \
+             esi 00:11:22:33:44:55:66:77:88:99, redundancy-mode single-active, lacp-system-id 02:00:00:00:00:01\n  \
+             subinterface 10: address [none]",
+        ] {
+            assert!(out.contains(expected), "missing {expected:?} in:\n{out}");
+        }
+    }
+
+    #[test]
+    fn render_transaction_scopes_to_every_position() {
+        let snap = TransactionSnapshot {
+            name: "t".to_string(),
+            config: full_config(),
+            dirty: false,
+            resumed: false,
+            generation: 0,
+        };
+        for (segs, starts) in [
+            (&["routing-table", "rt1"][..], "routing-table rt1:"),
+            (&["ospf-instance", "o1"], "ospf instance o1:"),
+            (&["ospf-instance", "o1", "area", "0.0.0.0"], "area 0.0.0.0"),
+            (
+                &["ospf-instance", "o1", "area", "0.0.0.0", "profile", "op"],
+                "profile op:",
+            ),
+            (&["ospfv3-instance", "v3"], "ospfv3 instance v3:"),
+            (
+                &["ospfv3-instance", "v3", "area", "0.0.0.1"],
+                "area 0.0.0.1",
+            ),
+            (
+                &["ospfv3-instance", "v3", "area", "0.0.0.1", "profile", "p3"],
+                "profile p3:",
+            ),
+            (
+                &["static-routing-instance", "s1"],
+                "static-routing-instance s1",
+            ),
+            (&["interface", "eth0"], "interface eth0:"),
+            (
+                &["community-alias", "blackhole"],
+                "community-alias blackhole:",
+            ),
+            (&["community-group", "g"], "community-group g:"),
+            (&["as-path-list", "a"], "as-path-list a:"),
+            (&["prefix-list", "pl"], "prefix-list pl:"),
+            (&["broadcast-domain", "bd1"], "broadcast-domain bd1:"),
+            (&["switching-profile", "trunk"], "switching-profile trunk:"),
+            (&["port-aggregate", "bond1"], "port-aggregate bond1:"),
+            (&["policy-definition", "nope"], "nothing configured here"),
+            (
+                &["ospf-instance", "o1", "area", "9.9.9.9"],
+                "nothing configured here",
+            ),
+            // No dedicated renderer: the object's own JSON.
+            (&["bgp-instance", "r1", "peer", "192.0.2.2"], "{"),
+            (
+                &["bgp-instance", "r1", "peer", "192.0.2.99"],
+                "nothing configured here",
+            ),
+        ] {
+            let path = Path::from(segs.iter().map(|s| (*s).to_string()).collect::<Vec<_>>());
+            let out = render_transaction(&snap, &path);
+            assert!(out.starts_with(starts), "{segs:?} rendered {out:?}");
+        }
+    }
+
+    fn sub_status(tag: u16, addresses: Vec<InterfaceAddress>) -> SubinterfaceStatus {
+        SubinterfaceStatus {
+            tag,
+            addresses,
+            routing_table: (tag == 0).then(|| "rt1".to_string()),
+            link_local_address: None,
+        }
+    }
+
+    #[test]
+    fn render_interface_and_port_aggregate_statuses() {
+        assert_eq!(render_interface_statuses(&[]), "no interfaces");
+        assert_eq!(render_port_aggregate_statuses(&[]), "no port aggregates");
+        let iface = InterfaceStatus {
+            name: "eth0".to_string(),
+            addresses: vec![addr("10.9.0.1/32", None)],
+            routing_table: None,
+            switching_profile: Some("trunk".to_string()),
+            port_aggregate: None,
+            mtu: 1500,
+            subinterfaces: vec![
+                sub_status(0, vec![addr("10.0.0.1/24", None)]),
+                sub_status(5, Vec::new()),
+            ],
+            link_local_address: None,
+        };
+        let out = render_interface_statuses(&[iface.clone(), iface]);
+        assert_eq!(
+            out.lines().take(3).collect::<Vec<_>>(),
+            [
+                "interface eth0: address [10.9.0.1/32], routing-table unset, switching-profile trunk, mtu 1500",
+                "  subinterface 0: address [10.0.0.1/24], routing-table rt1",
+                "  subinterface 5: address [none], routing-table unset",
+            ]
+        );
+        let agg = PortAggregateStatus {
+            name: "bond1".to_string(),
+            mode: nos_proto::PortAggregateMode::Xor,
+            switching_profile: None,
+            mtu: 9000,
+            subinterfaces: vec![sub_status(0, Vec::new())],
+            link_local_address: None,
+            bond_name: None,
+        };
+        assert_eq!(
+            render_port_aggregate_statuses(&[agg]),
+            "port-aggregate bond1: mode Xor, switching-profile unset, mtu 9000\n  \
+             subinterface 0: address [none], routing-table rt1"
+        );
+    }
+
+    #[test]
+    fn render_lacp_port_names_every_state() {
+        let port = |receive, mux, actor_churn, partner_churn| nos_proto::LacpPortStatus {
+            interface: "eth1".to_string(),
+            actor_port_number: 1,
+            receive_state: receive,
+            mux_state: mux,
+            partner_system_id: Some([2, 0, 0, 0, 0, 1]),
+            partner_key: None,
+            partner_port_number: None,
+            selected: false,
+            synchronized: false,
+            actor_churn,
+            partner_churn,
+        };
+        for (p, want) in [
+            (
+                port(LacpReceiveState::Initialize, LacpMuxState::Waiting, true, false),
+                "receive initialize, mux waiting, partner none, selected no, synchronized no, churn actor",
+            ),
+            (
+                port(LacpReceiveState::PortDisabled, LacpMuxState::Attached, true, true),
+                "receive port-disabled, mux attached, partner none, selected no, synchronized no, churn actor+partner",
+            ),
+            (
+                port(LacpReceiveState::LacpDisabled, LacpMuxState::Collecting, false, false),
+                "receive lacp-disabled, mux collecting,",
+            ),
+            (
+                port(LacpReceiveState::Expired, LacpMuxState::Detached, false, false),
+                "receive expired, mux detached,",
+            ),
+        ] {
+            let out = render_lacp_port(&p);
+            assert!(out.contains(want), "{out}");
+        }
+        let empty = PortAggregateLacpSummary {
+            aggregate: "bond1".to_string(),
+            actor_system_id: [0; 6],
+            actor_key: 1,
+            rate: LacpRate::Slow,
+            ports: Vec::new(),
+        };
+        assert!(render_lacp_summaries(&[empty]).ends_with("rate slow\n  no member ports"));
+    }
+
+    #[test]
+    fn render_ospfv3_neighbors_and_database() {
+        assert_eq!(
+            render_ospfv3_neighbors("v3", &[]),
+            "ospfv3 instance v3: no ospfv3 links configured"
+        );
+        assert_eq!(
+            render_ospfv3_database("v3", &[]),
+            "ospfv3 instance v3: no LSAs installed"
+        );
+        let link = Ospfv3NeighborSummary {
+            link: "eth0.0".to_string(),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            interface_state: LinkInterfaceState::DrOther,
+            neighbor_router_id: Some(Ipv4Addr::new(2, 2, 2, 2)),
+            state: OspfNeighborState::Full,
+            last_hello_secs: Some(1),
+            hello_interval: 10,
+            dead_interval: 40,
+            priority: 1,
+            neighbor_priority: Some(1),
+            dr: Some(Ipv4Addr::new(3, 3, 3, 3)),
+            bdr: None,
+        };
+        assert_eq!(
+            render_ospfv3_neighbors("v3", &[link]),
+            "ospfv3 instance v3:\n  eth0.0 area 0.0.0.0 if-state dr-other neighbor 2.2.2.2 Full \
+             last-hello 1s hello-interval 10 dead-interval 40 priority 1 neighbor-priority 1 \
+             dr 3.3.3.3 bdr -"
+        );
+        let lsa = |link: Option<&str>| Ospfv3LsaSummary {
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsa_type: 0x2001,
+            link_state_id: Ipv4Addr::UNSPECIFIED,
+            advertising_router: Ipv4Addr::new(2, 2, 2, 2),
+            sequence_number: 1,
+            age: 3,
+            checksum: 0x1234,
+            link: link.map(str::to_string),
+        };
+        assert_eq!(
+            render_ospfv3_database("v3", &[lsa(Some("eth0.0")), lsa(None)]),
+            "ospfv3 instance v3:\n  area 0.0.0.0 type 8193 link-state-id 0.0.0.0 advertising-router 2.2.2.2 \
+             sequence 0x00000001 age 3 checksum 0x1234 link eth0.0\n  \
+             area 0.0.0.0 type 8193 link-state-id 0.0.0.0 advertising-router 2.2.2.2 \
+             sequence 0x00000001 age 3 checksum 0x1234 link -"
+        );
+    }
+
+    #[test]
+    fn render_small_enums_and_edge_cases() {
+        for (s, want) in [
+            (OspfNeighborState::Init, "Init"),
+            (OspfNeighborState::ExStart, "ExStart"),
+            (OspfNeighborState::Exchange, "Exchange"),
+            (OspfNeighborState::Loading, "Loading"),
+        ] {
+            assert_eq!(render_ospf_neighbor_state(s), want);
+        }
+        assert_eq!(
+            render_ospf_interface_state(LinkInterfaceState::Waiting),
+            "waiting"
+        );
+        assert_eq!(render_ospf_interface_state(LinkInterfaceState::Dr), "dr");
+        assert_eq!(
+            render_bgp_session_state(BgpSessionState::OpenSent),
+            "OpenSent"
+        );
+        assert_eq!(
+            render_bgp_session_state(BgpSessionState::OpenConfirm),
+            "OpenConfirm"
+        );
+        for (s, want) in [
+            (RouteSourceKind::Static, "static"),
+            (RouteSourceKind::Bgp, "bgp"),
+            (RouteSourceKind::Connected, "connected"),
+        ] {
+            assert_eq!(render_route_source(s), want);
+        }
+        for (l, want) in [
+            (LogLevel::Trace, "TRACE"),
+            (LogLevel::Debug, "DEBUG"),
+            (LogLevel::Warn, "WARN"),
+            (LogLevel::Error, "ERROR"),
+        ] {
+            assert_eq!(render_log_level(l), want);
+        }
+        assert_eq!(render_prefix_routes(&[]), "no routes");
+        assert_eq!(render_policy_source(""), "(empty)");
+        // An out-of-range timestamp falls back to the raw milliseconds.
+        let mut entry = log_entry("configd", "m");
+        entry.timestamp_ms = u64::MAX;
+        entry.fields.clear();
+        assert!(render_log_entry(&entry).starts_with(&u64::MAX.to_string()));
+        // A shutdown with an RFC 9003 message quotes it.
+        assert_eq!(
+            render_bgp_peer(&BgpPeer {
+                remote_address: "192.0.2.2".parse().unwrap(),
+                peer_group: "pg".to_string(),
+                shutdown: Some(BgpShutdown {
+                    message: Some("maintenance".to_string()),
+                }),
+            }),
+            "peer 192.0.2.2: peer-group pg, shutdown \"maintenance\""
+        );
+        // A remote FDB entry with no VTEP, no devices yet, an empty flood list.
+        let mut t = nos_proto::FdbTable {
+            domain: "bd".to_string(),
+            vni: 1,
+            bridge: None,
+            vxlan: None,
+            macs: vec![nos_proto::MacEntry {
+                mac: "02:00:00:00:00:01".to_string(),
+                source: nos_proto::MacSource::Remote,
+                vtep: None,
+                vteps: Vec::new(),
+                esi: None,
+            }],
+            neighbours: vec![nos_proto::NeighEntry {
+                ip: "10.0.0.9".parse().unwrap(),
+                mac: "02:00:00:00:00:01".to_string(),
+                source: nos_proto::MacSource::Remote,
+                vtep: None,
+            }],
+            flood: Vec::new(),
+            segments: Vec::new(),
+        };
+        assert_eq!(
+            render_fdb_table(&t),
+            "broadcast-domain bd: vni 1, bridge not created yet, vxlan not created yet\n  \
+             02:00:00:00:00:01 remote\n  10.0.0.9 is at 02:00:00:00:00:01 remote\n  flood list: none"
+        );
+        t.macs.clear();
+        t.neighbours.clear();
+        t.segments.push(nos_proto::EsEntry {
+            esi: "e".to_string(),
+            port: "bond1".to_string(),
+            designated_forwarder: true,
+            pes: Vec::new(),
+            ad_pes: Vec::new(),
+            up: true,
+            single_active: false,
+        });
+        let out = render_fdb_table(&t);
+        assert!(out.contains("  no MAC addresses\n"), "{out}");
+        assert!(
+            out.ends_with("on bond1: designated forwarder (PEs )"),
+            "{out}"
+        );
+    }
 }
