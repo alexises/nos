@@ -852,6 +852,29 @@ mod tests {
         );
         assert!(parse("delete port-aggregate bond1 subinterface 0", &[], &d).is_some());
         assert!(parse("delete mtu", &pa, &d).is_some());
+        // #117: deleting an enum field writes its `#[default]`.
+        for (field, default) in [
+            (
+                "mode",
+                serde_json::to_value(nos_proto::schema::PortAggregateMode::Xor).unwrap(),
+            ),
+            (
+                "lacp-rate",
+                serde_json::to_value(nos_proto::schema::LacpRate::Slow).unwrap(),
+            ),
+            (
+                "redundancy-mode",
+                serde_json::to_value(nos_proto::schema::EsRedundancy::AllActive).unwrap(),
+            ),
+        ] {
+            let edit = parse(&format!("delete {field}"), &pa, &d)
+                .unwrap_or_else(|| panic!("delete {field} refused"));
+            assert_eq!(
+                edit.writes,
+                vec![(at(&["port-aggregate", "bond1", field]), default)],
+                "{field}"
+            );
+        }
         assert_eq!(
             first_path("delete redistribute from mac", &bd),
             at(&["broadcast-domain", "d1", "mac-redistribute"])

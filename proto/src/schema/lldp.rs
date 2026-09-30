@@ -88,7 +88,8 @@ pub enum LldpDestination {
     /// `01:80:C2:00:00:0E` — link-local, never forwarded by any bridge.
     #[default]
     NearestBridge,
-    /// `01:80:C2:00:00:03` — forwarded by C-VLAN/S-VLAN bridges, not TPMRs.
+    /// `01:80:C2:00:00:03` — nearest non-TPMR bridge: relayed by TPMRs, stopped by
+    /// every other bridge (C-VLAN and S-VLAN included).
     NonTpmr,
     /// `01:80:C2:00:00:00` — not forwarded by customer bridges.
     CustomerBridge,

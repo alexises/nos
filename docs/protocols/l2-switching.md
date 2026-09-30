@@ -40,6 +40,17 @@ router-a(trunk)> diff
   interface eth0:
 -   switching-profile: unset
 +   switching-profile: sp1
++ broadcast-domain bd1:
++   addresses: none
++   routing-table: unset
+…
++ broadcast-domain bd2:
+…
++ switching-profile sp1:
++   broadcast-domain bd1:
++     tag: dot1q 100
++   broadcast-domain bd2:
++     tag: dot1q 200
 router-a(trunk)> commit
 transaction 'trunk' committed
 router-a> show interface eth0
@@ -53,7 +64,7 @@ switching-profile sp1: members [bd1: dot1q 100, bd2: dot1q 200]
 …
 ```
 
-`diff` lists only the change to `eth0`: new broadcast domains and switching profiles are not shown by `diff` yet, but they are in the transaction and they are committed.
+`diff` lists the new broadcast domains and switching profile, and the change to `eth0`.
 
 NOS creates one bridge per domain and the VLAN devices `eth0.100` and `eth0.200`, each attached to its domain's bridge. The absolute forms are `edit broadcast domain bd1`, `set switching-profile sp1 broadcast-domain bd1 tag dot1q 100` and `set interface eth0 switching-profile sp1`.
 
@@ -162,6 +173,6 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 
 | Field | CLI | REST path | Type, range, default | Validation at commit | Effect | Check with |
 |---|---|---|---|---|---|---|
-| switching-profile | `set interface <if> switching-profile <sp>` / `set switching-profile <sp>`; `delete interface <if> switching-profile` | `interface/<if>/switching-profile`; `port-aggregate/<pa>/switching-profile` (REST only, see [Port aggregation](port-aggregation-lacp.md#configuration-reference)) | name; default unset | profile exists; its tags don't collide with the interface's subinterfaces; not on a port aggregate member | joins the profile's domains | `show interface <if>`, `show port-aggregate <pa>` |
+| switching-profile | `set interface <if> switching-profile <sp>` / `set port-aggregate <pa> switching-profile <sp>` / `set switching-profile <sp>`; `delete … switching-profile` | `interface/<if>/switching-profile`; `port-aggregate/<pa>/switching-profile` (see [Port aggregation](port-aggregation-lacp.md#configuration-reference)) | name; default unset | profile exists; its tags don't collide with the interface's subinterfaces; not on a port aggregate member | joins the profile's domains | `show interface <if>`, `show port-aggregate <pa>` |
 
 Implementation notes for developers are in [`interface/CLAUDE.md`](../../interface/CLAUDE.md).

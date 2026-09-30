@@ -166,7 +166,7 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 | mtu | `set port-aggregate <pa> mtu <n>` / `set mtu <n>`; `delete … mtu` | `port-aggregate/<pa>/mtu` | 68-65535; default unset | range | the bond's MTU | `show port-aggregate <pa>` |
 | subinterface | `edit port-aggregate <pa> subinterface <tag>`, then `set address <cidr>` / `set routing-table <t>`; `delete port-aggregate <pa> subinterface <tag>` | `port-aggregate/<pa>/subinterface/<tag>`, body `{"tag":<n>,"addresses":[…],"routing_table":…}` | tag 0-4094, as on an interface | as on an interface | routed subinterfaces of the bond (tag 0 is the bond itself) | `show port-aggregate <pa>` |
 
-`mode`, `lacp-rate` and `redundancy-mode` cannot be deleted; set them back to their default instead.
+`delete mode`, `delete lacp-rate` and `delete redundancy-mode` put them back to their default (`xor`, `slow`, `all-active`).
 
 ### On a member interface
 
