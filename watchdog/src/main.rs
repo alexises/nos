@@ -236,7 +236,13 @@ async fn main() -> anyhow::Result<()> {
     );
     let policy = BackoffPolicy::default();
     let registry = EndpointRegistry::default();
-    let mut tasks = vec![pki.spawn_self_rotation(shutdown_rx.clone())];
+    let mut tasks = vec![
+        pki.spawn_self_rotation(shutdown_rx.clone()),
+        tokio::spawn(
+            pki.clone()
+                .follow_users(args.config_socket.clone(), shutdown_rx.clone()),
+        ),
+    ];
 
     // nos-logd is spawned first (still just one more supervised process,
     // with no ordering guarantee enforced) so the window in which every

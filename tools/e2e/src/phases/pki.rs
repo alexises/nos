@@ -5,11 +5,13 @@
 //! Every other phase is already an implicit test of the happy path — none of
 //! them could pass if a daemon couldn't authenticate to another — so these
 //! only assert what they can't: who each daemon believes it is, that login
-//! accepts the right password and refuses the wrong one, and that hot
-//! rotation really keeps long-lived daemons connectable after their first
-//! certificate has expired.
+//! accepts the right password and refuses the wrong one, that revocation (a
+//! CRL pushed down every daemon's stdin) locks out a deleted user, a changed
+//! password and a restarted daemon at once, and that hot rotation really keeps
+//! long-lived daemons connectable after their first certificate has expired.
 
 use anyhow::{bail, Context};
+use reqwest::Method;
 
 use super::bgp;
 use crate::consts::*;
@@ -25,17 +27,18 @@ fn identity(message: &str, fields: &str, role: &str, name: &str) -> String {
 /// Runs `nos-provision` on router-a as `password`, the way an operator or the
 /// bench would: it must log in before it may touch `nos-configd`.
 async fn provision_as(w: &World, password: &str) -> anyhow::Result<(i64, String)> {
-    // The tool builds its op list from the same flags every provisioning
-    // starts with, so give it router-a's own (an idempotent re-apply).
+    run_provision(w, &["--login-user", E2E_USER, "--login-password", password]).await
+}
+
+/// `nos-provision` on router-a with `auth` (how it gets a certificate) and
+/// router-a's own base flags — an idempotent re-apply of its config.
+async fn run_provision(w: &World, auth: &[&str]) -> anyhow::Result<(i64, String)> {
     let mut cmd = vec![
         "nos-provision".to_string(),
         "--config-socket".to_string(),
         "/run/nos/config.sock".to_string(),
-        "--login-user".to_string(),
-        E2E_USER.to_string(),
-        "--login-password".to_string(),
-        password.to_string(),
     ];
+    cmd.extend(auth.iter().map(ToString::to_string));
     cmd.extend(A.base_flags());
     let cmd: Vec<&str> = cmd.iter().map(String::as_str).collect();
     w.dock.exec("router-a", &cmd).await
@@ -81,7 +84,118 @@ pub async fn pki(w: &mut World) -> anyhow::Result<()> {
         bail!("login with the right password should provision, got exit {code}: {out}");
     }
     a.wait_new(&format!("login accepted user={E2E_USER}"), accepted, 15)
+        .await?;
+
+    revoke_user(w).await?;
+    revoke_restarted_daemon(w).await
+}
+
+/// A throwaway user for the revocation checks (router-a only).
+const REVOKED_USER: &str = "revoked";
+/// Where `nos-provision` keeps that user's certificate between two runs.
+const REVOKED_CERT: &str = "/tmp/revoked-user.identity";
+
+/// Logs `REVOKED_USER` in with `password`, keeping the certificate.
+async fn login_keeping_cert(w: &World, password: &str) -> anyhow::Result<()> {
+    let (code, out) = run_provision(
+        w,
+        &[
+            "--login-user",
+            REVOKED_USER,
+            "--login-password",
+            password,
+            "--pki-cert-out",
+            REVOKED_CERT,
+        ],
+    )
+    .await?;
+    if code != 0 {
+        bail!("{REVOKED_USER} could not log in with {password}: exit {code}: {out}");
+    }
+    Ok(())
+}
+
+/// Whether the certificate `login_keeping_cert` saved still opens `nos-configd`.
+async fn saved_cert_works(w: &World) -> anyhow::Result<bool> {
+    let (code, _) = run_provision(w, &["--pki-cert-in", REVOKED_CERT]).await?;
+    Ok(code == 0)
+}
+
+/// A user's shell certificates are revoked the moment its password changes or
+/// it is deleted — over IPC, where no server re-checks the user per request.
+async fn revoke_user(w: &World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let revoked = format!("certificates revoked role=user name={REVOKED_USER} ");
+    let refused = "IPC tls handshake failed error=.*[Rr]evoked";
+
+    log("a throwaway user logs in; its certificate works for a second connection");
+    a.provision(&["--user", &format!("{REVOKED_USER}=first-password")])
+        .await?;
+    login_keeping_cert(w, "first-password").await?;
+    if !saved_cert_works(w).await? {
+        bail!("a fresh user certificate was refused");
+    }
+
+    log("changing its password revokes that certificate");
+    let (revocations, refusals) = (a.count(&revoked), a.count(refused));
+    a.provision(&["--user", &format!("{REVOKED_USER}=second-password")])
+        .await?;
+    a.wait_new(&revoked, revocations, 30).await?;
+    if saved_cert_works(w).await? {
+        bail!("a certificate issued before the password change still opens nos-configd");
+    }
+    a.wait_new(refused, refusals, 15).await?;
+    login_keeping_cert(w, "second-password").await?;
+    if !saved_cert_works(w).await? {
+        bail!("a certificate issued after the password change was refused");
+    }
+
+    log("deleting the user revokes its certificate");
+    let revocations = a.count(&revoked);
+    a.edit(|config| {
+        config.users.retain(|u| u.name != REVOKED_USER);
+        Ok(())
+    })
+    .await?;
+    a.wait_new(&revoked, revocations, 30).await?;
+    if saved_cert_works(w).await? {
+        bail!("a deleted user's certificate still opens nos-configd");
+    }
+    Ok(())
+}
+
+/// A daemon's certificate dies with its process: the watchdog revokes it on
+/// exit and every other daemon applies the new CRL, while the replacement —
+/// a fresh certificate — is trusted as before.
+async fn revoke_restarted_daemon(w: &World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let revoked = "certificates revoked role=ribd name=rt1 ";
+    let (revocations, updates, ribds) = (
+        a.count(revoked),
+        a.count("ipc crl updated entries="),
+        a.count("nos-ribd starting"),
+    );
+    log("killing router-a's nos-ribd; its certificate must be revoked");
+    w.dock
+        .kill_process("router-a", "nos-ribd")
         .await
+        .context("killing nos-ribd")?;
+    a.wait_new(revoked, revocations, 30).await?;
+    a.wait_new("ipc crl updated entries=", updates, 30).await?;
+    a.wait_new("nos-ribd starting", ribds, 30).await?;
+    // nos-restd (holding the new CRL) dials the new nos-ribd: still trusted.
+    // nos-restd lives in rt1's VRF, which the new nos-ribd recreates: its
+    // listener may take a moment to come back, so a refused connect is retried.
+    for _ in 0..60 {
+        if matches!(
+            a.rest(Method::GET, "/v1/routes/rt1", None).await,
+            Ok((200, _))
+        ) {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    bail!("the restarted nos-ribd never answered a route query")
 }
 
 /// Hot rotation: with certificates that expire in seconds, wait past a whole

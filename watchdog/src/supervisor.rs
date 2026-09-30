@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use nix::sys::signal::{self, Signal};
@@ -11,6 +11,8 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
+
+use nos_pki::Serial;
 
 use crate::pki::Pki;
 
@@ -116,11 +118,12 @@ pub async fn supervise_one(
                 continue;
             }
         };
+        let issued = Arc::new(Mutex::new(Vec::new()));
         let pusher = spec
             .identity
             .clone()
             .zip(child.stdin.take())
-            .map(|(id, stdin)| push_identity(spec.name.clone(), id, stdin));
+            .map(|(id, stdin)| push_identity(spec.name.clone(), id, stdin, issued.clone()));
 
         let child_exited = tokio::select! {
             status = child.wait() => {
@@ -134,16 +137,21 @@ pub async fn supervise_one(
         };
 
         if !child_exited {
-            // Shutdown requested while the child was still running.
+            // Shutdown requested while the child was still running — the
+            // whole watchdog stopping, or this instance removed/unpinned.
             shutdown_child(&spec.name, &mut child).await;
             if let Some(p) = pusher {
                 p.abort();
             }
+            revoke_spawn(&spec, &issued);
             return;
         }
         if let Some(p) = pusher {
             p.abort(); // closes the dead child's pipe
         }
+        // Before the backoff, so the replacement's first frame already
+        // carries a CRL naming its predecessor's certificates.
+        revoke_spawn(&spec, &issued);
         if *shutdown.borrow() {
             return;
         }
@@ -162,23 +170,64 @@ pub async fn supervise_one(
     }
 }
 
-/// Delivers a child's identity — the first frame right away, then a fresh
-/// one every `rotate_every` — down its stdin. The key travels only through
-/// this pipe: never argv, environment or disk. Ends when the child stops
-/// reading (it exited) or the supervisor aborts it.
-fn push_identity(name: String, id: SpawnIdentity, mut stdin: ChildStdin) -> JoinHandle<()> {
+/// Revokes every certificate minted for one spawn of `spec`, now that its
+/// process is gone. A key that outlives its process is only a liability.
+fn revoke_spawn(spec: &ProcessSpec, issued: &Mutex<Vec<Serial>>) {
+    if let Some(id) = &spec.identity {
+        let serials = std::mem::take(&mut *issued.lock().unwrap_or_else(PoisonError::into_inner));
+        id.pki.revoke(id.role, &id.name, serials);
+    }
+}
+
+/// Delivers a child's identity down its stdin: the first frame right away, a
+/// fresh leaf every `rotate_every`, and the current leaf again with the new
+/// CRL whenever the CRL changes. The key travels only through this pipe:
+/// never argv, environment or disk. Every leaf minted is recorded in `issued`
+/// for `revoke_spawn`. Ends when the child stops reading (it exited) or the
+/// supervisor aborts it.
+fn push_identity(
+    name: String,
+    id: SpawnIdentity,
+    mut stdin: ChildStdin,
+    issued: Arc<Mutex<Vec<Serial>>>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut crl = id.pki.crl();
+        let mut current = None;
+        let mut rotate = true;
+        let mut next_rotation = tokio::time::Instant::now();
         loop {
-            match id.pki.mint(id.role, &id.name) {
-                Ok(bundle) => {
-                    if let Err(e) = stdin.write_all(&bundle.encode()).await {
-                        debug!(process = %name, error = %e, "child no longer reads its identity");
-                        return;
+            if rotate {
+                next_rotation += id.pki.rotate_every;
+                match id.pki.mint(id.role, &id.name) {
+                    Ok(bundle) => {
+                        if let Ok(serial) = Serial::of(&bundle.cert) {
+                            issued
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .push(serial);
+                        }
+                        current = Some(bundle);
                     }
+                    Err(e) => warn!(process = %name, error = %e, "failed to mint an identity"),
                 }
-                Err(e) => warn!(process = %name, error = %e, "failed to mint an identity"),
             }
-            tokio::time::sleep(id.pki.rotate_every).await;
+            if let Some(bundle) = &mut current {
+                bundle.crl.clone_from(&crl.borrow_and_update());
+                if let Err(e) = stdin.write_all(&bundle.encode()).await {
+                    debug!(process = %name, error = %e, "child no longer reads its identity");
+                    return;
+                }
+            }
+            tokio::select! {
+                () = tokio::time::sleep_until(next_rotation) => rotate = true,
+                changed = crl.changed() => {
+                    if changed.is_err() {
+                        return; // the Pki is gone: the watchdog is exiting
+                    }
+                    rotate = false;
+                }
+            }
         }
     })
 }

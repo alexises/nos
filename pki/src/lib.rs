@@ -13,7 +13,7 @@ pub mod testing;
 #[cfg(test)]
 mod tests;
 
-pub use ca::{generate_csr, generate_csr_for, Bundle, Ca, KeyAlg};
+pub use ca::{generate_csr, generate_csr_for, Bundle, Ca, KeyAlg, Serial};
 pub use identity::{
     connect, connect_role, global, install, Identity, Incoming, Listener, Negotiated, Stream,
 };

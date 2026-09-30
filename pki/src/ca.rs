@@ -4,11 +4,13 @@
 use std::fmt::Display;
 use std::io::{self, Read};
 use std::net::IpAddr;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-    Issuer, KeyPair, KeyUsagePurpose, PublicKeyData, SanType, SignatureAlgorithm,
+    BasicConstraints, CertificateParams, CertificateRevocationListParams, DistinguishedName,
+    DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyIdMethod, KeyPair, KeyUsagePurpose,
+    PublicKeyData, RevokedCertParams, SanType, SignatureAlgorithm,
 };
 use rustls::pki_types::SignatureVerificationAlgorithm;
 use time::OffsetDateTime;
@@ -64,6 +66,43 @@ pub struct Ca {
     cert: rcgen::Certificate,
     issuer: Issuer<'static, KeyPair>,
     alg: KeyAlg,
+    crl: Mutex<CrlState>,
+}
+
+/// What the CA's CRL lists, and its RFC 5280 §5.2.3 CRL number.
+#[derive(Default)]
+struct CrlState {
+    revoked: Vec<Serial>,
+    number: u64,
+}
+
+/// A certificate as a CRL names it: its serial number, plus its expiry so an
+/// entry can be dropped once the certificate would be refused anyway.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Serial {
+    bytes: Vec<u8>,
+    not_after: OffsetDateTime,
+}
+
+impl Serial {
+    /// The serial and expiry of a certificate (DER).
+    pub fn of(cert_der: &[u8]) -> io::Result<Self> {
+        let (_, cert) = x509_parser::parse_x509_certificate(cert_der).map_err(err)?;
+        Ok(Self {
+            bytes: cert.tbs_certificate.raw_serial().to_vec(),
+            not_after: cert.validity().not_after.to_datetime(),
+        })
+    }
+
+    pub fn expired(&self) -> bool {
+        self.not_after < OffsetDateTime::now_utc() - SKEW
+    }
+}
+
+impl std::fmt::Display for Serial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.bytes.iter().try_for_each(|b| write!(f, "{b:02x}"))
+    }
 }
 
 impl Ca {
@@ -84,7 +123,55 @@ impl Ca {
             cert,
             issuer: Issuer::new(p, key),
             alg,
+            crl: Mutex::default(),
         })
+    }
+
+    /// Adds `serials` to the CRL and returns the re-signed CRL (DER). Entries
+    /// whose certificate has expired are dropped on the way, so the list only
+    /// ever holds certificates that would otherwise still be accepted.
+    pub fn revoke(&self, serials: &[Serial]) -> io::Result<Vec<u8>> {
+        let mut st = self
+            .crl
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        st.revoked.extend(serials.iter().cloned());
+        st.revoked.retain(|s| !s.expired());
+        st.number += 1;
+        self.sign_crl(&st)
+    }
+
+    /// The current CRL (DER) — empty of entries until the first `revoke`.
+    pub fn crl_der(&self) -> io::Result<Vec<u8>> {
+        let st = self
+            .crl
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.sign_crl(&st)
+    }
+
+    fn sign_crl(&self, st: &CrlState) -> io::Result<Vec<u8>> {
+        let now = OffsetDateTime::now_utc();
+        let params = CertificateRevocationListParams {
+            this_update: now - SKEW,
+            // Not enforced by the verifiers (a CRL must never "expire" under a
+            // daemon); a value is still required, and must follow this_update.
+            next_update: now + CA_LIFETIME,
+            crl_number: st.number.into(),
+            issuing_distribution_point: None,
+            revoked_certs: st
+                .revoked
+                .iter()
+                .map(|s| RevokedCertParams {
+                    serial_number: s.bytes.clone().into(),
+                    revocation_time: now - SKEW,
+                    reason_code: None,
+                    invalidity_date: None,
+                })
+                .collect(),
+            key_identifier_method: KeyIdMethod::Sha256,
+        };
+        Ok(params.signed_by(&self.issuer).map_err(err)?.der().to_vec())
     }
 
     pub fn cert_der(&self) -> &[u8] {
@@ -116,6 +203,7 @@ impl Ca {
             ca: self.cert_der().to_vec(),
             cert: cert.der().to_vec(),
             key: key.serialize_der(),
+            crl: Vec::new(),
         })
     }
 
@@ -237,12 +325,14 @@ pub fn generate_csr_for(alg: KeyAlg) -> io::Result<(Vec<u8>, Vec<u8>)> {
 }
 
 /// Everything an identity is made of, as DER: the CA's certificate (trust
-/// anchor), this peer's leaf, and the leaf's PKCS#8 private key.
+/// anchor), this peer's leaf, the leaf's PKCS#8 private key, and the CA's
+/// current CRL (empty: keep whatever CRL the identity already holds).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Bundle {
     pub ca: Vec<u8>,
     pub cert: Vec<u8>,
     pub key: Vec<u8>,
+    pub crl: Vec<u8>,
 }
 
 impl std::fmt::Debug for Bundle {
@@ -262,11 +352,11 @@ fn len_u32(n: usize) -> [u8; 4] {
 }
 
 impl Bundle {
-    /// One frame: `u32le total_len`, then `ca`, `cert`, `key`, each as
-    /// `u32le len` + bytes. The watchdog writes one per child spawn and one
-    /// per rotation down the child's stdin.
+    /// One frame: `u32le total_len`, then `ca`, `cert`, `key`, `crl`, each as
+    /// `u32le len` + bytes. The watchdog writes one per child spawn, one per
+    /// rotation and one per CRL change down the child's stdin.
     pub fn encode(&self) -> Vec<u8> {
-        let parts = [&self.ca, &self.cert, &self.key];
+        let parts = [&self.ca, &self.cert, &self.key, &self.crl];
         let body: usize = parts.iter().map(|p| 4 + p.len()).sum();
         let mut out = Vec::with_capacity(4 + body);
         out.extend_from_slice(&len_u32(body));
@@ -308,6 +398,7 @@ impl Bundle {
             ca: part()?,
             cert: part()?,
             key: part()?,
+            crl: part()?,
         }))
     }
 }
