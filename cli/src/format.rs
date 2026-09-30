@@ -1432,35 +1432,56 @@ const RESET: &str = "\x1b[0m";
 /// enough unmodified context (an unstyled section header) that a changed
 /// field can always be traced back to the section it lives in.
 pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
+    // No `..`: a new `ConfigDiff` section is a compile error here, not a
+    // silently missing part of `diff`.
+    let ConfigDiff {
+        hostname,
+        bgp_instances,
+        routing_tables,
+        ospf_instances,
+        ospfv3_instances,
+        static_routing_instances,
+        interfaces,
+        policy_definitions,
+        community_aliases,
+        community_groups,
+        as_path_lists,
+        prefix_lists,
+        broadcast_domains,
+        switching_profiles,
+        port_aggregates,
+        lldp,
+        users,
+    } = diff;
     let mut lines = Vec::new();
 
-    if let Some(field) = &diff.hostname {
+    if let Some(field) = hostname {
         render_field_diff(&mut lines, field, "", color);
     }
-    for field in &diff.lldp {
+    for field in lldp {
         render_field_diff(&mut lines, field, "", color);
     }
 
-    for section in &diff.users {
-        render_section(&mut lines, section, 0, color);
-    }
-    for section in &diff.bgp_instances {
-        render_section(&mut lines, section, 0, color);
-    }
-    for section in &diff.routing_tables {
-        render_section(&mut lines, section, 0, color);
-    }
-    for section in &diff.ospf_instances {
-        render_section(&mut lines, section, 0, color);
-    }
-    for section in &diff.ospfv3_instances {
-        render_section(&mut lines, section, 0, color);
-    }
-    for section in &diff.static_routing_instances {
-        render_section(&mut lines, section, 0, color);
-    }
-    for section in &diff.interfaces {
-        render_section(&mut lines, section, 0, color);
+    for sections in [
+        users,
+        bgp_instances,
+        routing_tables,
+        ospf_instances,
+        ospfv3_instances,
+        static_routing_instances,
+        interfaces,
+        port_aggregates,
+        broadcast_domains,
+        switching_profiles,
+        policy_definitions,
+        community_aliases,
+        community_groups,
+        as_path_lists,
+        prefix_lists,
+    ] {
+        for section in sections {
+            render_section(&mut lines, section, 0, color);
+        }
     }
 
     lines.join("\n")
@@ -1529,12 +1550,20 @@ fn removed_line(text: &str, color: bool) -> String {
     styled_line('-', RED, text, color)
 }
 
+/// Marks every line of `text`, so a multi-line value (a policy's source)
+/// stays readable as part of the diff.
 fn styled_line(marker: char, code: &str, text: &str, color: bool) -> String {
-    if color {
-        format!("{marker} {code}{text}{RESET}")
-    } else {
-        format!("{marker} {text}")
-    }
+    // Callers always pass at least a label, so `lines()` is never empty.
+    text.lines()
+        .map(|line| {
+            if color {
+                format!("{marker} {code}{line}{RESET}")
+            } else {
+                format!("{marker} {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Highlights only the substring that actually differs between `old` and
@@ -1860,6 +1889,39 @@ mod tests {
             render_diff(&diff, false),
             "- hostname: router-a\n+ hostname: router-b"
         );
+    }
+
+    #[test]
+    fn render_diff_shows_l2_and_policy_sections() {
+        let base = nos_proto::Config::default();
+        let mut candidate = base.clone();
+        candidate
+            .broadcast_domains
+            .push(nos_proto::BroadcastDomain {
+                name: "blue".into(),
+                ..Default::default()
+            });
+        candidate
+            .switching_profiles
+            .push(nos_proto::SwitchingProfile {
+                name: "trunk".into(),
+                ..Default::default()
+            });
+        candidate
+            .policy_definitions
+            .push(nos_proto::PolicyDefinition {
+                name: "p1".into(),
+                source: "if this.prefix in 10.0.0.0/8:\n    reject\naccept\n".into(),
+            });
+        let out = render_diff(&nos_proto::diff_configs(&base, &candidate), false);
+        for want in [
+            "+ broadcast-domain blue:",
+            "+ switching-profile trunk:",
+            "+ policy-definition p1:",
+            "+   source: if this.prefix in 10.0.0.0/8:\n+     reject\n+ accept",
+        ] {
+            assert!(out.contains(want), "{want:?} missing from:\n{out}");
+        }
     }
 
     #[test]

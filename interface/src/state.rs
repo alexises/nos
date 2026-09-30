@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv6Addr;
 
-use nos_proto::{Config, InterfaceAddress, PortAggregateMode, VlanTag};
+use nos_proto::{loopback_table_name, Config, InterfaceAddress, PortAggregateMode, VlanTag};
 use tracing::{debug, trace, warn};
 
 use crate::driver::InterfaceDriver;
@@ -77,10 +77,11 @@ pub struct InterfaceState {
     /// `Interfaces::set_lacp_active_members`. Meaningless when
     /// `port_aggregate` is `None`.
     pub port_aggregate_active: bool,
-    /// The configured MTU, or `None` to leave whatever the kernel link
-    /// already has untouched — a link-layer property of the physical (or
-    /// loopback) interface itself, applying to every one of `subinterfaces`
-    /// uniformly (a VLAN sub-link has no MTU of its own).
+    /// The configured MTU; `None` means `driver::DEFAULT_MTU` (1500),
+    /// enforced by the driver, except on a bond member, whose MTU its bond
+    /// sets. A link-layer property of the physical (or loopback) interface
+    /// itself, applying to every one of `subinterfaces` uniformly (a VLAN
+    /// sub-link has no MTU of its own).
     pub mtu: Option<u32>,
     /// This (non-loopback) interface's per-tag L3 subinterfaces — see
     /// `SubinterfaceState`. Empty for a loopback interface.
@@ -309,7 +310,12 @@ pub async fn build_from_config(
         let state = InterfaceState {
             name: iface.name.clone(),
             addresses: iface.addresses.clone(),
-            routing_table: iface.routing_table.clone(),
+            // A loopback's table is its name (`loopback-<table>`): the VRF the
+            // driver enslaves it into, whatever the field says, so status
+            // consumers (ribd's connected routes, `show interface`) agree.
+            routing_table: loopback_table_name(&iface.name)
+                .map(str::to_string)
+                .or_else(|| iface.routing_table.clone()),
             switching_profile: iface.switching_profile.clone(),
             switching_profile_members,
             port_aggregate: iface.port_aggregate.clone(),
@@ -546,6 +552,27 @@ mod tests {
         let interfaces =
             build_from_config(&cfg(vec![]), &NoopInterfaceDriver, &Interfaces::new()).await;
         assert!(interfaces.is_empty());
+    }
+
+    /// #117: a loopback's routing table is the one its name implies, even
+    /// with the field unset — that's the VRF the driver enslaves it into.
+    #[tokio::test]
+    async fn loopback_routing_table_comes_from_its_name() {
+        let interfaces = build_from_config(
+            &cfg(vec![interface("loopback-rt1"), interface("eth0")]),
+            &NoopInterfaceDriver,
+            &Interfaces::new(),
+        )
+        .await;
+        assert_eq!(
+            interfaces
+                .get("loopback-rt1")
+                .unwrap()
+                .routing_table
+                .as_deref(),
+            Some("rt1")
+        );
+        assert_eq!(interfaces.get("eth0").unwrap().routing_table, None);
     }
 
     #[tokio::test]

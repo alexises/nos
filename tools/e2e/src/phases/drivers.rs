@@ -23,6 +23,9 @@ pub async fn loopback(w: &mut World) -> anyhow::Result<()> {
         "added interface address interface=loopback-rt1 address={LOOPBACK_ADDRESS}"
     ))
     .await?;
+    // #117: `--loopback-address` sets no routing-table; the name alone puts
+    // it in rt1, connected route included.
+    a.wait_connected(LOOPBACK_ADDRESS).await?;
 
     log("removing router-a's loopback interface");
     a.provision(&["--delete-loopback"]).await?;
@@ -32,13 +35,38 @@ pub async fn loopback(w: &mut World) -> anyhow::Result<()> {
     .await
 }
 
+/// Sets eth0's MTU, then clears it: unset is 1500, enforced (#117), and
+/// REST reports what the link is held at. Leaves eth0 at the docker default
+/// for later phases.
 pub async fn mtu(w: &mut World) -> anyhow::Result<()> {
     let a = w.a()?;
     a.provision(&["--mtu", &MTU_VALUE.to_string()]).await?;
     a.wait(&format!(
         "applied interface mtu interface=eth0 mtu={MTU_VALUE}"
     ))
-    .await
+    .await?;
+    expect_eth0_mtu(a, MTU_VALUE).await?;
+
+    let reset = "applied interface mtu interface=eth0 mtu=1500";
+    let base = a.count(reset);
+    a.provision(&["--clear-mtu"]).await?;
+    a.wait_new(reset, base, 30).await?;
+    expect_eth0_mtu(a, 1500).await
+}
+
+async fn expect_eth0_mtu(a: &Router, want: u32) -> anyhow::Result<()> {
+    let body = a
+        .rest_expect(Method::GET, "/v1/interfaces/eth0", None, 200)
+        .await?;
+    let status: serde_json::Value = serde_json::from_str(&body)?;
+    if status["mtu"] != want {
+        bail!(
+            "router-a: GET /v1/interfaces/eth0 reports mtu {}, want {want}",
+            status["mtu"]
+        );
+    }
+    log(format!("router-a: rest reports eth0 mtu {want}"));
+    Ok(())
 }
 
 pub async fn port_aggregate(w: &mut World) -> anyhow::Result<()> {
@@ -59,6 +87,16 @@ pub async fn port_aggregate(w: &mut World) -> anyhow::Result<()> {
         .await?;
     a.wait("enslaved interface to bond interface=eth2 bond=bond1")
         .await?;
+    // #117: a bond subinterface's address is a connected route too.
+    a.provision(
+        &[
+            &members[..],
+            &["--port-aggregate-address", PORT_AGGREGATE_ADDRESS],
+        ]
+        .concat(),
+    )
+    .await?;
+    a.wait_connected(PORT_AGGREGATE_SUBNET).await?;
 
     let mut delete = members.to_vec();
     delete.push("--delete-port-aggregate");

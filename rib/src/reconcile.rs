@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use nos_proto::{
-    BroadcastDomainStatus, Config, DiffScope, Event, InterfaceStatus, IpNet, Redistribute,
-    RedistributeSource, RedistributeTarget, RedistributedRoute, ServiceRef,
+    BroadcastDomainStatus, Config, DiffScope, Event, InterfaceStatus, IpNet, PortAggregateStatus,
+    Redistribute, RedistributeSource, RedistributeTarget, RedistributedRoute, ServiceRef,
 };
 use tokio::sync::{watch, RwLock};
 use tokio::time::sleep;
@@ -203,24 +203,35 @@ async fn fetch_connected(
 ) -> Option<Vec<RibEntry>> {
     let socket = watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
     let interfaces = interface_client::get_interfaces(&socket).await?;
+    let aggregates = if cfg.port_aggregates.iter().any(|a| {
+        a.subinterfaces
+            .iter()
+            .any(|s| s.routing_table.as_deref() == Some(table))
+    }) {
+        interface_client::get_port_aggregates(&socket).await?
+    } else {
+        Vec::new()
+    };
     let mut domains = Vec::new();
     for d in &cfg.broadcast_domains {
         if d.routing_table.as_deref() == Some(table) && !d.addresses.is_empty() {
             domains.push(interface_client::get_broadcast_domain(&socket, &d.name).await?);
         }
     }
-    Some(connected_entries(table, &interfaces, &domains))
+    Some(connected_entries(table, &interfaces, &aggregates, &domains))
 }
 
 /// The `Connected` candidates of `table`: the network of every address on an
 /// interface (a loopback's flat `addresses`, or any `Subinterface`'s per
-/// tag) or broadcast-domain SVI whose `routing_table` is `table`. The entry's
+/// tag), port aggregate subinterface or broadcast-domain SVI whose
+/// `routing_table` is `table`. The entry's
 /// `gateway` is the local address itself — display only, never installed
 /// (see `RouteSource::Connected`). A prefix addressed twice keeps the first
 /// address seen. Pure, so it's unit-tested without IPC.
 fn connected_entries(
     table: &str,
     interfaces: &[InterfaceStatus],
+    aggregates: &[PortAggregateStatus],
     domains: &[BroadcastDomainStatus],
 ) -> Vec<RibEntry> {
     let in_table = |rt: &Option<String>| rt.as_deref() == Some(table);
@@ -234,6 +245,12 @@ fn connected_entries(
                     .map(|s| (&s.routing_table, &s.addresses)),
             )
         })
+        .chain(
+            aggregates
+                .iter()
+                .flat_map(|a| &a.subinterfaces)
+                .map(|s| (&s.routing_table, &s.addresses)),
+        )
         .chain(domains.iter().map(|d| (&d.routing_table, &d.addresses)))
         .filter(|(rt, _)| in_table(rt))
         .flat_map(|(_, addresses)| addresses.iter().map(|a| a.address));
@@ -420,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn connected_entries_cover_loopback_subinterface_and_svi_addresses_of_this_table() {
+    fn connected_entries_cover_loopback_subinterface_bond_and_svi_addresses_of_this_table() {
         let interfaces = vec![
             iface("loopback-rt1", (&["203.0.113.1/32"], Some("rt1")), &[]),
             iface(
@@ -438,19 +455,38 @@ mod tests {
             domain("bd-svi", &["203.0.113.65/28"], Some("rt1")),
             domain("bd-other", &["203.0.113.81/28"], Some("rt2")),
         ];
-        let mut got: Vec<(String, String)> = connected_entries("rt1", &interfaces, &domains)
-            .into_iter()
-            .map(|e| {
-                assert_eq!(e.source, RouteSource::Connected);
-                (e.prefix.to_string(), e.next_hops[0].0.to_string())
-            })
-            .collect();
+        let aggregates = vec![nos_proto::PortAggregateStatus {
+            name: "bond1".into(),
+            mode: nos_proto::PortAggregateMode::Xor,
+            switching_profile: None,
+            mtu: 1500,
+            subinterfaces: iface(
+                "bond1",
+                (&[], None),
+                &[
+                    (0, &["198.51.100.1/29"], Some("rt1")),
+                    (10, &["198.51.100.9/29"], Some("rt2")),
+                ],
+            )
+            .subinterfaces,
+            link_local_address: None,
+            bond_name: None,
+        }];
+        let mut got: Vec<(String, String)> =
+            connected_entries("rt1", &interfaces, &aggregates, &domains)
+                .into_iter()
+                .map(|e| {
+                    assert_eq!(e.source, RouteSource::Connected);
+                    (e.prefix.to_string(), e.next_hops[0].0.to_string())
+                })
+                .collect();
         got.sort();
         assert_eq!(
             got,
             vec![
                 ("10.50.0.0/24".into(), "10.50.0.2".into()),
                 ("192.0.2.0/24".into(), "192.0.2.1".into()),
+                ("198.51.100.0/29".into(), "198.51.100.1".into()),
                 ("2001:db8::/64".into(), "2001:db8::1".into()),
                 ("203.0.113.1/32".into(), "203.0.113.1".into()),
                 ("203.0.113.64/28".into(), "203.0.113.65".into()),
@@ -465,7 +501,7 @@ mod tests {
             (&[], None),
             &[(0, &["10.0.0.1/24", "10.0.0.2/24"], Some("rt1"))],
         )];
-        let got = connected_entries("rt1", &interfaces, &[]);
+        let got = connected_entries("rt1", &interfaces, &[], &[]);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].next_hops[0].0, "10.0.0.1".parse::<IpAddr>().unwrap());
     }

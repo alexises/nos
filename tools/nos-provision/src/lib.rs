@@ -22,8 +22,9 @@ use nos_proto::{
     BroadcastDomainOp, ConfigOp, EsRedundancy, InterfaceOp, LacpRate, LldpDestination, LldpOp,
     OspfAreaOp, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp,
     Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp, PortAggregateMode, PortAggregateOp,
-    Redistribute, RedistributeSource, RedistributeTarget, RoutingTableOp, SourceAddress,
-    StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, UserOp, VlanTag,
+    PortAggregateSubinterfaceOp, Redistribute, RedistributeSource, RedistributeTarget,
+    RoutingTableOp, SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp,
+    SwitchingProfileOp, UserOp, VlanTag,
 };
 
 /// Clap-facing mirror of `nos_proto::PortAggregateMode` — `clap::ValueEnum`
@@ -123,6 +124,11 @@ pub struct Args {
     /// real kernel link.
     #[arg(long)]
     pub mtu: Option<u32>,
+
+    /// If set, clears `--interface`'s mtu (`InterfaceOp::ClearMtu`), which
+    /// `nos-interfaced` enforces as 1500.
+    #[arg(long)]
+    pub clear_mtu: bool,
 
     #[arg(long, default_value = "rt1")]
     pub routing_table: String,
@@ -519,6 +525,12 @@ pub struct Args {
     #[arg(long)]
     pub port_aggregate_mtu: Option<u32>,
 
+    /// If set (requires `--port-aggregate`), adds this address to the
+    /// aggregate's tag-0 subinterface in `--routing-table`
+    /// (`PortAggregateSubinterfaceOp::AddAddress` + `SetRoutingTable`).
+    #[arg(long)]
+    pub port_aggregate_address: Option<IpNet>,
+
     /// If set (requires `--port-aggregate`), sets the aggregate's EVPN
     /// Ethernet Segment Identifier (`PortAggregateOp::SetEsi`).
     #[arg(long)]
@@ -869,6 +881,11 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::Interface(InterfaceOp::SetMtu {
             name: args.interface.clone(),
             mtu,
+        }));
+    }
+    if args.clear_mtu {
+        ops.push(ConfigOp::Interface(InterfaceOp::ClearMtu {
+            name: args.interface.clone(),
         }));
     }
     if args.delete_subinterface {
@@ -1416,6 +1433,23 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 mtu,
             }));
         }
+        if let Some(address) = args.port_aggregate_address {
+            ops.push(ConfigOp::PortAggregateSubinterface(
+                PortAggregateSubinterfaceOp::AddAddress {
+                    port_aggregate: name.clone(),
+                    tag: 0,
+                    address,
+                    label: None,
+                },
+            ));
+            ops.push(ConfigOp::PortAggregateSubinterface(
+                PortAggregateSubinterfaceOp::SetRoutingTable {
+                    port_aggregate: name.clone(),
+                    tag: 0,
+                    routing_table: args.routing_table.clone(),
+                },
+            ));
+        }
         if let Some(esi) = args.port_aggregate_esi.clone() {
             ops.push(ConfigOp::PortAggregate(PortAggregateOp::SetEsi {
                 name: name.clone(),
@@ -1471,6 +1505,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             }));
         }
     } else if args.port_aggregate_mtu.is_some()
+        || args.port_aggregate_address.is_some()
         || args.port_aggregate_esi.is_some()
         || args.delete_port_aggregate_esi
         || args.port_aggregate_redundancy_mode.is_some()
@@ -1480,7 +1515,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || !args.port_aggregate_members.is_empty()
     {
         bail!(
-            "--port-aggregate-mtu/--port-aggregate-esi/--port-aggregate-redundancy-mode/--lacp-system-id/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
+            "--port-aggregate-mtu/--port-aggregate-address/--port-aggregate-esi/--port-aggregate-redundancy-mode/--lacp-system-id/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
         );
     }
 

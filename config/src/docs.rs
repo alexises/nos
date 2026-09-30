@@ -533,10 +533,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Sets the MTU (in bytes, 68-65535) on a physical or loopback interface — a \
              link-layer property of the interface itself, applying uniformly to every one of \
              its subinterfaces (a VLAN sub-link has no MTU of its own, unlike addresses/\
-             routing-table). Always targets the physical interface even when navigated into one \
-             of its subinterfaces.",
+             routing-table), so set it on the parent interface or port aggregate, not \
+             inside a subinterface. Unset means 1500, enforced on the link.",
                 " ",
-                "Clear an interface's MTU.",
+                "Clear an interface's MTU: `delete` puts the link back to 1500.",
             ),
         ),
         Topic::InterfaceLldpTransmit => (
@@ -560,7 +560,8 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Set the LLDP destination group an interface uses.",
             "Chooses which IEEE 802.1AB multicast group this interface's LLDPDUs are sent to \
              and accepted from: nearest-bridge (01:80:C2:00:00:0E, the default — never \
-             forwarded by any bridge), non-tpmr (…:03, forwarded by C-VLAN/S-VLAN bridges) or \
+             forwarded by any bridge), non-tpmr (…:03, the nearest non-TPMR bridge: relayed by TPMRs, stopped by \
+             every other bridge) or \
              customer-bridge (…:00). Both ends of a link must use the same group, or neither \
              will ever see the other. `delete` restores nearest-bridge. Physical interfaces \
              only — rejected on a loopback at commit time.",

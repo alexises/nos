@@ -100,7 +100,7 @@ router-a> show route rt1 203.0.113.1
   * via 203.0.113.1 [connected]
 ```
 
-The name alone puts the loopback in routing table `rt1`, which must exist when you commit. Set `routing-table rt1` as well, to the same table: without it the loopback still works, but its addresses are not listed as connected routes in `show route`, and OSPF refuses to run on it. You can add several addresses, IPv4 and IPv6. The loopback device NOS creates is named after the routing table's kernel table number (`lo100` for the first routing table), not after `loopback-rt1`; you only need that name when looking at the router with Linux tools.
+The name alone puts the loopback in routing table `rt1`, which must exist when you commit, and lists its addresses as connected routes in `show route rt1`; `show interface` reports `routing-table rt1` even when the field is unset. Set `routing-table rt1` as well only to run OSPF or OSPFv3 on it: the commit refuses `ospf`/`ospfv3` without it. You can add several addresses, IPv4 and IPv6. The loopback device NOS creates is named after the routing table's kernel table number (`lo100` for the first routing table), not after `loopback-rt1`; you only need that name when looking at the router with Linux tools.
 
 REST:
 
@@ -129,7 +129,12 @@ REST: `PUT $B/v1/transactions/jumbo/interface/eth0/mtu` with body `9000`, then c
 
 The MTU belongs to the link, so it is set on `eth0`, never on `eth0.300`; every subinterface uses the link's MTU. `set interface eth0.300 mtu …` is refused (`is not a valid edit here`: a subinterface has no `mtu`), and so is `set mtu` while in `edit interface eth0.300`.
 
-`delete interface eth0 mtu` (REST: `DELETE …/interface/eth0/mtu`) stops NOS from managing the MTU, but it does **not** put the old value back: the link keeps 9000 until something changes it, even though `show interface` then prints `mtu 1500` (see below). To return to 1500, set 1500.
+`delete interface eth0 mtu` (REST: `DELETE …/interface/eth0/mtu`) puts the link back to 1500.
+
+An interface with no `mtu` is held at 1500, not left at whatever the link had:
+
+- A link whose platform default is not 1500 (1450 on some VXLAN or overlay underlays, 9001 on some cloud NICs) drops to 1500 as soon as it is added to the configuration. Set `mtu` explicitly on such links.
+- A port aggregate member is the exception: the bond sets its members' MTU, so set `mtu` on the port aggregate instead.
 
 ## How interfaces behave
 
@@ -139,7 +144,7 @@ The MTU belongs to the link, so it is set on `eth0`, never on `eth0.300`; every 
 
 **Addresses.** A subinterface or loopback can carry any number of IPv4 and IPv6 addresses, written as `<address>/<prefix length>`. The same address cannot appear twice on one subinterface; this is checked at commit. `set … address <addr> label <label>` attaches a label to the address. The label is kept in the configuration and shown by `show this`, but it is not applied to the router's network stack yet. Setting the same address again with a different label, or without one, replaces the label.
 
-**Routing tables.** Many interfaces, subinterfaces and loopbacks can be in the same routing table. The addresses of a subinterface or loopback with a `routing-table` show up in that table as `connected` routes (see `show route <table>`), a few seconds after the commit; BGP uses them to decide whether a next hop is reachable.
+**Routing tables.** Many interfaces, subinterfaces and loopbacks can be in the same routing table. The addresses of a subinterface (of an interface or a port aggregate) with a `routing-table`, and those of a loopback, show up in that table as `connected` routes (see `show route <table>`), a few seconds after the commit; BGP uses them to decide whether a next hop is reachable.
 
 **What can share a link.** Linux lets each link, and each VLAN device, have only one master: a VRF, a bridge or a bond. The commit therefore refuses:
 
@@ -147,7 +152,7 @@ The MTU belongs to the link, so it is set on `eth0`, never on `eth0.300`; every 
 - an interface that is a member of a port aggregate and also has subinterfaces or a switching profile (see [Port aggregation and LACP](port-aggregation-lacp.md));
 - `address`, `routing-table` or `ospf` set directly on a physical interface rather than on a subinterface. The CLI never does this (a bare `eth0` means `eth0.0`), but a REST body could.
 
-**`show interface` shows the configuration NOS is applying,** not a live read of the kernel. Right after a commit, or while a routing table's VRF is still being created, the two can differ for a few seconds; NOS retries every 10 seconds until they match. `mtu` is the configured MTU, or `1500` when none is configured, whatever the link really has.
+**`show interface` shows the configuration NOS is applying,** not a live read of the kernel. Right after a commit, or while a routing table's VRF is still being created, the two can differ for a few seconds; NOS retries every 10 seconds until they match. `mtu` is the configured MTU, or `1500` when none is configured: the value NOS holds the link at.
 
 **OSPF and OSPFv3** are enabled per subinterface or loopback with `set interface <name> ospf <profile>` and `set interface <name> ospfv3 <profile>`, which require a routing table on the same subinterface. They are covered with the OSPF configuration they refer to.
 
@@ -160,7 +165,7 @@ In the tables, `<if>` is a physical interface name, `<if>.<tag>` a subinterface,
 | Field | CLI | REST path | Type, range, default | Validation at commit | Effect | Check with |
 |---|---|---|---|---|---|---|
 | name | `edit interface <if>`; `delete interface <if>` | `interface/<if>` | string, 1-64 characters | unique; no `.` | NOS starts or stops managing this link | `show interface` |
-| mtu | `set interface <if> mtu <n>` / `set mtu <n>`; `delete interface <if> mtu` / `delete mtu` | `interface/<if>/mtu` | integer 68-65535; default unset (link left as it is) | range | sets the link's MTU, used by every subinterface | `show interface <if>` |
+| mtu | `set interface <if> mtu <n>` / `set mtu <n>`; `delete interface <if> mtu` / `delete mtu` | `interface/<if>/mtu` | integer 68-65535; default 1500, enforced | range | sets the link's MTU, used by every subinterface; not on a port aggregate member, whose bond sets it | `show interface <if>` |
 | switching-profile | `set interface <if> switching-profile <sp>` / `set switching-profile <sp>`; `delete … switching-profile` | `interface/<if>/switching-profile` | name; default unset | profile exists; tags disjoint from subinterfaces | see [L2 switching](l2-switching.md) | `show interface <if>` |
 | port-aggregate | `set interface <if> port-aggregate <pa>` / `set port-aggregate <pa>`; `delete … port-aggregate` | `interface/<if>/port-aggregate` | name; default unset | aggregate exists; no subinterfaces or switching profile on the same interface | see [Port aggregation](port-aggregation-lacp.md) | `show lacp`, `show config` |
 | lldp transmit, lldp receive, lldp destination | `set interface <if> lldp …` | `interface/<if>/lldp-transmit`, `…/lldp-receive`, `…/lldp-destination` | see [LLDP](lldp.md#configuration-reference) | | | `show lldp neighbors` |
@@ -180,9 +185,9 @@ In the tables, `<if>` is a physical interface name, `<if>.<tag>` a subinterface,
 |---|---|---|---|---|---|---|
 | name | `edit interface loopback-<table>`; `delete interface loopback-<table>` | `interface/loopback-<table>` | `loopback-` + a routing table name | the table exists; one loopback per table | creates or deletes the loopback device, in that table | `show interface <lo>` |
 | address | `set interface <lo> address <cidr> [label <text>]` / `set address …`; `delete … address <cidr>` | `interface/<lo>/address/<cidr>` | as for a subinterface | no repeated address | as for a subinterface | `show interface <lo>`, `show route <table>` |
-| routing-table | `set interface <lo> routing-table <table>` / `set routing-table <table>`; `delete … routing-table` | `interface/<lo>/routing-table` | name; default unset | table exists | set it to the table in the name: lists the addresses as connected routes; required by `ospf`/`ospfv3` | `show route <table>` |
+| routing-table | `set interface <lo> routing-table <table>` / `set routing-table <table>`; `delete … routing-table` | `interface/<lo>/routing-table` | name; default unset (the table in the name) | table exists | set it to the table in the name; only needed by `ospf`/`ospfv3` (the addresses are connected routes either way) | `show route <table>` |
 | ospf, ospfv3 | `set interface <lo> ospf <profile>`, `… ospfv3 <profile>` | `interface/<lo>/ospf-profile`, `…/ospfv3-profile` | name; default unset | profile exists; needs `routing-table` | advertises the loopback in OSPF / OSPFv3 | `show ospf database` |
-| mtu | `set interface <lo> mtu <n>` / `set mtu <n>` | `interface/<lo>/mtu` | as for a physical interface | | | `show interface <lo>` |
+| mtu | `set interface <lo> mtu <n>` / `set mtu <n>`; `delete … mtu` | `interface/<lo>/mtu` | as for a physical interface (default 1500, enforced) | | | `show interface <lo>` |
 
 A loopback cannot have subinterfaces, a switching profile, a port aggregate or LLDP.
 
