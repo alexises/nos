@@ -236,6 +236,8 @@ make coverage  # line coverage, fails under COVERAGE_MIN (CI runs this) — excl
 
 `COVERAGE_MIN` in the `Makefile` is a ratchet toward 90% (#104): raise it when a change lifts the total, never lower it. The metric excludes code that only runs against the real kernel — `*/driver/linux.rs`, `rib/src/driver/route_channel.rs`, `l2-socket/`, `ospf{,v3}/src/socket.rs` (#131): a mock under them would only test the mock, and `nos-e2e` is their real test.
 
+`watchdog/tests/system.rs` is the unprivileged whole-stack smoke test: the real `nos-watchdogd` supervising every real daemon (`--driver noop`, every socket and state file under a temp dir — `--run-dir` moves the per-instance `<prefix>-<name>.sock` sockets off `/run/nos`), provisioned by the real `nos-provision`, reconfigured, then stopped with SIGTERM. It needs every daemon binary built next to `nos-watchdogd`, which is why each daemon crate has at least one integration test (`tests/bin.rs` where nothing else existed); a single-package run without them skips.
+
 Containerized test environment:
 
 ```bash
