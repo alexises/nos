@@ -2861,6 +2861,30 @@
         ]
       }
     },
+    "/v1/config/save": {
+      "post": {
+        "operationId": "save",
+        "responses": {
+          "204": {
+            "description": "the running config was written to disk"
+          },
+          "502": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "nos-configd has no config file, or could not write it"
+          }
+        },
+        "summary": "Save the running config to disk",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
     "/v1/fdb/{domain}": {
       "get": {
         "operationId": "fdb",

@@ -743,6 +743,17 @@ pub async fn rest(w: &mut World) -> anyhow::Result<()> {
     if !running.contains("\"rest-pl\"") || !running.contains("\"hostname\":\"rest-host\"") {
         bail!("committed transaction is not in the running config");
     }
+    // Persisted only once saved: the real nos-configd writes its real
+    // --config-file. Any later phase that restarts nos-configd boots from this
+    // file (with the undo below still unsaved) rather than from the seed.
+    let saved_path = "/var/lib/nos/config.yaml";
+    a.rest_expect(Method::POST, "/v1/config/save", None, 204)
+        .await?;
+    match w.dock.exec("router-a", &["cat", saved_path]).await? {
+        (0, saved) if saved.contains("rest-pl") && saved.contains("rest-host") => {}
+        (code, saved) => bail!("router-a: {saved_path} after save (exit {code}):\n{saved}"),
+    }
+    log("router-a: POST /v1/config/save wrote the running config to disk");
 
     // Undo it the same way, exercising DELETE on a subsection and on the tx.
     a.rest_expect(Method::POST, &format!("{tx}?base=current"), None, 201)

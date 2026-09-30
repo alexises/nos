@@ -43,6 +43,7 @@ comes from the same record that `GET /v1/bgp/summary` returns as `{"remote_addre
 | `diff` | `GET /v1/transactions/{name}/diff` |
 | `commit` | `POST /v1/transactions/{name}/commit` |
 | `discard` / `abort` | `DELETE /v1/transactions/{name}` |
+| `save` | `POST /v1/config/save` |
 | `exit` → `[l]eave open` | nothing to do: a transaction stays open until it is committed or discarded |
 
 ## Configuration commands → URLs
@@ -117,7 +118,6 @@ The `ETag` is `"1"` because the shell's single `set` was the transaction's first
 
 Only in the CLI:
 
-- `save`. The REST API has no save endpoint. Commits over REST are live immediately, but they are not written to `/var/lib/nos/config.yaml` until someone runs `save` in the shell; until then, a router restart loses them. Adding a REST save is tracked in [#112](https://github.com/alexises/nos/issues/112).
 - `help`, `?` and Tab. Over REST, use the [OpenAPI document](api.md#the-openapi-document) or `/swagger-ui/`.
 - `edit`, `up` and `top`. They are not needed, because every URL is absolute (see above).
 
