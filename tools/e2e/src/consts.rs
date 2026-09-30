@@ -142,6 +142,10 @@ pub const REDISTRIBUTE_PREFIX: &str = "198.51.100.0/24";
 pub const REDISTRIBUTE_GATEWAY: &str = "10.50.0.99";
 /// TEST-NET-3 — the loopback scenario's address.
 pub const LOOPBACK_ADDRESS: &str = "203.0.113.1/32";
+/// TEST-NET-3 — `port-aggregate`'s bond address (tag 0, in rt1), and the
+/// connected route nos-ribd derives from it.
+pub const PORT_AGGREGATE_ADDRESS: &str = "203.0.113.33/29";
+pub const PORT_AGGREGATE_SUBNET: &str = "203.0.113.32/29";
 /// TEST-NET-1 — the routed-subinterface scenario. The tag is distinct from
 /// `switching`'s 100/200 and the ospf broadcast tag (400).
 pub const SUBINTERFACE_TAG: u16 = 300;

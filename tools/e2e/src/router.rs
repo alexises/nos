@@ -299,6 +299,36 @@ impl Router {
         Ok(text)
     }
 
+    /// Whether nos-ribd's `rt1` lists a `source` candidate (`"Ospf"`,
+    /// `"Connected"`, …) for `prefix`, read over REST.
+    async fn rt1_has(&self, prefix: &str, source: &str) -> anyhow::Result<bool> {
+        let body = self
+            .rest_expect(Method::GET, "/v1/routes/rt1", None, 200)
+            .await?;
+        let table: serde_json::Value = serde_json::from_str(&body)?;
+        Ok(table.as_array().into_iter().flatten().any(|p| {
+            p["prefix"] == prefix
+                && p["candidates"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|c| c["source"] == source)
+        }))
+    }
+
+    /// Waits (up to 30s: nos-ribd re-reads nos-interfaced every 10s) until
+    /// `rt1` lists `prefix` as a connected route.
+    pub async fn wait_connected(&self, prefix: &str) -> anyhow::Result<()> {
+        for _ in 0..30 {
+            if self.rt1_has(prefix, "Connected").await? {
+                log(format!("{}: rt1 lists {prefix} as connected", self.name()));
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        bail!("{}: rt1 never listed {prefix} as connected", self.name())
+    }
+
     /// Waits (up to 90s) until `rt1` has had no OSPF candidate for `prefix`
     /// for `stable` consecutive seconds, read from nos-ribd over REST. A
     /// "removed route" log line alone is not enough: an ECMP next-hop set
@@ -308,18 +338,7 @@ impl Router {
     pub async fn wait_ospf_route_gone(&self, prefix: &str, stable: u64) -> anyhow::Result<()> {
         let mut gone_for = 0;
         for _ in 0..90 {
-            let body = self
-                .rest_expect(Method::GET, "/v1/routes/rt1", None, 200)
-                .await?;
-            let table: serde_json::Value = serde_json::from_str(&body)?;
-            let present = table.as_array().into_iter().flatten().any(|p| {
-                p["prefix"] == prefix
-                    && p["candidates"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .any(|c| c["source"] == "Ospf")
-            });
+            let present = self.rt1_has(prefix, "Ospf").await?;
             gone_for = if present { 0 } else { gone_for + 1 };
             if gone_for >= stable {
                 log(format!(

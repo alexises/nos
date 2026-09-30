@@ -100,7 +100,7 @@ router-a> show route rt1 203.0.113.1
   * via 203.0.113.1 [connected]
 ```
 
-The name alone puts the loopback in routing table `rt1`, which must exist when you commit. Set `routing-table rt1` as well, to the same table: without it the loopback still works, but its addresses are not listed as connected routes in `show route`, and OSPF refuses to run on it. You can add several addresses, IPv4 and IPv6. The loopback device NOS creates is named after the routing table's kernel table number (`lo100` for the first routing table), not after `loopback-rt1`; you only need that name when looking at the router with Linux tools.
+The name alone puts the loopback in routing table `rt1`, which must exist when you commit, and lists its addresses as connected routes in `show route rt1`; `show interface` reports `routing-table rt1` even when the field is unset. Set `routing-table rt1` as well only to run OSPF or OSPFv3 on it: the commit refuses `ospf`/`ospfv3` without it. You can add several addresses, IPv4 and IPv6. The loopback device NOS creates is named after the routing table's kernel table number (`lo100` for the first routing table), not after `loopback-rt1`; you only need that name when looking at the router with Linux tools.
 
 REST:
 
@@ -180,7 +180,7 @@ In the tables, `<if>` is a physical interface name, `<if>.<tag>` a subinterface,
 |---|---|---|---|---|---|---|
 | name | `edit interface loopback-<table>`; `delete interface loopback-<table>` | `interface/loopback-<table>` | `loopback-` + a routing table name | the table exists; one loopback per table | creates or deletes the loopback device, in that table | `show interface <lo>` |
 | address | `set interface <lo> address <cidr> [label <text>]` / `set address …`; `delete … address <cidr>` | `interface/<lo>/address/<cidr>` | as for a subinterface | no repeated address | as for a subinterface | `show interface <lo>`, `show route <table>` |
-| routing-table | `set interface <lo> routing-table <table>` / `set routing-table <table>`; `delete … routing-table` | `interface/<lo>/routing-table` | name; default unset | table exists | set it to the table in the name: lists the addresses as connected routes; required by `ospf`/`ospfv3` | `show route <table>` |
+| routing-table | `set interface <lo> routing-table <table>` / `set routing-table <table>`; `delete … routing-table` | `interface/<lo>/routing-table` | name; default unset (the table in the name) | table exists | set it to the table in the name; only needed by `ospf`/`ospfv3` (the addresses are connected routes either way) | `show route <table>` |
 | ospf, ospfv3 | `set interface <lo> ospf <profile>`, `… ospfv3 <profile>` | `interface/<lo>/ospf-profile`, `…/ospfv3-profile` | name; default unset | profile exists; needs `routing-table` | advertises the loopback in OSPF / OSPFv3 | `show ospf database` |
 | mtu | `set interface <lo> mtu <n>` / `set mtu <n>` | `interface/<lo>/mtu` | as for a physical interface | | | `show interface <lo>` |
 

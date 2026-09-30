@@ -108,7 +108,7 @@ port-aggregate bond-lacp: mode Lacp, switching-profile unset, mtu 9000
 
 To trunk the aggregate into broadcast domains instead, `set port-aggregate bond-lacp switching-profile sp1` (REST: `PUT …/port-aggregate/bond-lacp/switching-profile` with body `"sp1"`).
 
-Known gap: addresses on an aggregate's subinterfaces are applied, but they are not listed as `connected` routes in `show route`, unlike those of an interface or an SVI.
+Addresses on an aggregate's subinterfaces are listed as `connected` routes in `show route <table>`, like those of an interface or an SVI.
 
 ### Take a member out, or remove the aggregate
 

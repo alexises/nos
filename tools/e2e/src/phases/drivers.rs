@@ -23,6 +23,9 @@ pub async fn loopback(w: &mut World) -> anyhow::Result<()> {
         "added interface address interface=loopback-rt1 address={LOOPBACK_ADDRESS}"
     ))
     .await?;
+    // #117: `--loopback-address` sets no routing-table; the name alone puts
+    // it in rt1, connected route included.
+    a.wait_connected(LOOPBACK_ADDRESS).await?;
 
     log("removing router-a's loopback interface");
     a.provision(&["--delete-loopback"]).await?;
@@ -59,6 +62,16 @@ pub async fn port_aggregate(w: &mut World) -> anyhow::Result<()> {
         .await?;
     a.wait("enslaved interface to bond interface=eth2 bond=bond1")
         .await?;
+    // #117: a bond subinterface's address is a connected route too.
+    a.provision(
+        &[
+            &members[..],
+            &["--port-aggregate-address", PORT_AGGREGATE_ADDRESS],
+        ]
+        .concat(),
+    )
+    .await?;
+    a.wait_connected(PORT_AGGREGATE_SUBNET).await?;
 
     let mut delete = members.to_vec();
     delete.push("--delete-port-aggregate");

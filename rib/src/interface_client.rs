@@ -2,7 +2,8 @@ use std::path::Path;
 
 use futures::{SinkExt, StreamExt};
 use nos_proto::{
-    BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec, Role,
+    BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec,
+    PortAggregateStatus, Role,
 };
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::trace;
@@ -28,6 +29,14 @@ async fn query(interface_socket: &Path, request: InterfaceRequest) -> Option<Int
 pub async fn get_interfaces(interface_socket: &Path) -> Option<Vec<InterfaceStatus>> {
     match query(interface_socket, InterfaceRequest::GetInterfaces).await? {
         InterfaceEvent::Interfaces(list) => Some(list),
+        _ => None,
+    }
+}
+
+/// Every port aggregate, for its subinterfaces' addresses.
+pub async fn get_port_aggregates(interface_socket: &Path) -> Option<Vec<PortAggregateStatus>> {
+    match query(interface_socket, InterfaceRequest::GetPortAggregates).await? {
+        InterfaceEvent::PortAggregates(list) => Some(list),
         _ => None,
     }
 }
@@ -75,6 +84,10 @@ mod tests {
         let path = tmp.path().join("interface.sock");
         serve_once(&path, |_| InterfaceEvent::Interfaces(vec![]));
         assert_eq!(get_interfaces(&path).await, Some(vec![]));
+
+        let path = tmp.path().join("interface-pa.sock");
+        serve_once(&path, |_| InterfaceEvent::PortAggregates(vec![]));
+        assert_eq!(get_port_aggregates(&path).await, Some(vec![]));
 
         let path = tmp.path().join("interface2.sock");
         serve_once(&path, |req| match req {

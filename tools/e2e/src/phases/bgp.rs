@@ -474,24 +474,9 @@ pub async fn redistribute_policy(w: &mut World) -> anyhow::Result<()> {
 pub async fn next_hop_reachability(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
 
-    let body = a
-        .rest_expect(Method::GET, "/v1/routes/rt1", None, 200)
-        .await?;
-    let table: serde_json::Value = serde_json::from_str(&body)?;
     for subnet in [SUBNET, OSPF_BROADCAST_SUBNET] {
-        let connected = table.as_array().into_iter().flatten().any(|p| {
-            p["prefix"] == subnet
-                && p["candidates"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|c| c["source"] == "Connected")
-        });
-        if !connected {
-            bail!("router-a's rt1 lists no connected route for {subnet}: {body}");
-        }
+        a.wait_connected(subnet).await?;
     }
-    log("router-a's rt1 lists its eth0 and svi subnets as connected");
 
     let next_hop = OSPF_SPF_LOOPBACK_ADDRESS
         .split('/')
