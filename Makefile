@@ -5,9 +5,9 @@ IMAGE ?= nos:local
 # e.g. CARGO_FEATURES=nos-bgp/dhat-heap make docker-build — see bgp/CLAUDE.md's
 # "Memory profiling" note. Empty by default: no behavior change.
 CARGO_FEATURES ?=
-# Line-coverage floor for `make coverage` (and CI, which runs it) — a ratchet
-# toward 90%, raised as tests land, never lowered (#104).
-COVERAGE_MIN ?= 81
+# Line-coverage floor for `make coverage` (and CI, which runs it) — 90%
+# since #131 (measured 91.7%); raise it as tests land, never lower it.
+COVERAGE_MIN ?= 90
 
 .PHONY: help build fmt fmt-fix clippy clippy-fix fix test test-plain \
         deny audit sast miri coverage mutants check ci tools docker-lint docker-build \
