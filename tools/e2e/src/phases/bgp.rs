@@ -354,8 +354,24 @@ pub async fn route_server(w: &mut World) -> anyhow::Result<()> {
             "--route-server-client",
         ])
     };
+    // router-b sets a MED on export, so the hub has a received MED to pass
+    // through (RFC 7947 §2.2). Seeded rather than provisioned: a later policy
+    // change would restart the session.
+    let med_file = policy_file(
+        "route-server-med",
+        &format!("set this.bgp.med = {MED}\naccept\n"),
+    )?;
+    let mut b_flags = B.base_flags();
+    b_flags.extend(strings(&[
+        "--policy-name",
+        "route-server-med",
+        "--policy-source-file",
+        &med_file,
+        "--export-policy",
+        "route-server-med",
+    ]));
     w.start(A, Some(hub("pg-b", ASN_B, IP_B)), &[]).await?;
-    w.start(B, None, &[]).await?;
+    w.start(B, Some(b_flags.clone()), &[]).await?;
     w.start(C, None, &[]).await?;
     w.a()?.provision_flags(&hub("pg-c", ASN_C, IP_C)).await?;
 
@@ -363,9 +379,9 @@ pub async fn route_server(w: &mut World) -> anyhow::Result<()> {
     for r in [a, b, c] {
         r.established().await?;
     }
-    let mut flags = B.base_flags();
-    flags.extend(strings(&redistribute()));
-    b.provision_flags(&flags).await?;
+    // The policy flags stay: provision_flags replaces the whole flag list.
+    b_flags.extend(strings(&redistribute()));
+    b.provision_flags(&b_flags).await?;
     log("waiting for router-c to learn the prefix via the route server");
     c.wait(&learned()).await?;
     c.wait(&loc_rib()).await?;
@@ -380,7 +396,8 @@ pub async fn route_server(w: &mut World) -> anyhow::Result<()> {
     if !line.contains(&format!("next_hop=Some({IP_B})")) {
         bail!("expected next_hop {IP_B} passed through unchanged, got: {line}")
     }
-    Ok(())
+    log("confirming router-c sees router-b's med — passed through by the route server");
+    c.wait(&format!("{} .*med=Some({MED})", loc_rib())).await
 }
 
 /// An import policy on router-b rejecting the redistributed prefix, then reverted.

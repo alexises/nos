@@ -30,7 +30,7 @@ The route a policy sees depends on where it runs:
 
 - On **import**, `this.bgp.peer` and `this.bgp.peer_as` are the peer that sent the route, and the attributes are the ones received.
 - On **export**, `this.bgp.peer` and `this.bgp.peer_as` are the peer the route is about to be sent to. The AS path does not yet include this router's own AS, which is added afterwards for eBGP peers. A `LOCAL_PREF` the policy sets is sent only to iBGP peers. A `MED` the policy sets is sent to every peer.
-- Toward an eBGP peer, a route's received `MED` is cleared before the export policy runs (RFC 4271 §5.1.4), so `set this.bgp.med += <n>` starts from 0 there.
+- Toward an eBGP peer that is not a route-server client, a route's received `MED` is cleared before the export policy runs (RFC 4271 §5.1.4), so `set this.bgp.med += <n>` starts from 0 there. Toward a route-server client it is kept (RFC 7947 §2.2), so `+=` starts from it.
 - On **redistribution into BGP**, the route is a local one: empty AS path, origin IGP, local preference 100, no MED, and `this.bgp.peer` unset (`peer_as` is 0). The changes the policy makes (communities, local preference, AS-path prepends and so on) are kept and advertised.
 - On **redistribution into OSPF**, only `this.prefix` is meaningful and only the verdict counts: attribute changes are ignored.
 

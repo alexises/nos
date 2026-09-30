@@ -212,7 +212,7 @@ pub const NETNS_HELPER_IMAGE: &str = "nos-verify-netns-helper:local";
 pub const COMMUNITY_AA: u32 = 65001;
 pub const COMMUNITY_NN: u32 = 100;
 pub const COMMUNITY_PACKED: u32 = (COMMUNITY_AA << 16) | COMMUNITY_NN;
-/// MED router-a's `communities` export policy sets toward eBGP router-b.
+/// MED set by an export policy: router-a's in `communities`, router-b's in `route-server`.
 pub const MED: u32 = 4242;
 
 pub const REST_PORT: u16 = 8080;

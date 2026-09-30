@@ -449,11 +449,9 @@ $C -X PUT -H 'Content-Type: application/json' -d '"10.255.0.1"' \
 At an exchange point, a route server passes routes between its clients without appearing in their paths. Mark the clients' peer-group with `set route-server-client`; it must be eBGP. For such peers NOS:
 
 - never adds its own AS to the AS path;
-- if the client supports ADD-PATH (RFC 7911), sends it every other client's path for a prefix, not only the single best one. A client without ADD-PATH receives the best path only.
-
-- leaves the next hop unchanged by default (RFC 7947 §2.2.1), so clients forward to each other directly. An explicit `set next-hop self` still overrides it.
-
-A received `MED` is not passed on to route-server clients (they are eBGP peers); a `MED` set by the export policy is.
+- if the client supports ADD-PATH (RFC 7911), sends it every other client's path for a prefix, not only the single best one. A client without ADD-PATH receives the best path only;
+- leaves the next hop unchanged by default (RFC 7947 §2.2.1), so clients forward to each other directly. An explicit `set next-hop self` still overrides it;
+- passes a received `MED` through unchanged (RFC 7947 §2.2); a `MED` set by the export policy replaces it.
 
 `route-reflector-client` and `route-server-client` cannot both be set on one peer-group.
 
