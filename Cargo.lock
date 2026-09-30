@@ -1755,6 +1755,7 @@ dependencies = [
  "nos-rpl",
  "reedline",
  "rpassword",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
