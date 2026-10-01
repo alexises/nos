@@ -13,6 +13,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  # The toolchain fmt/clippy/test/coverage run on. Bump it on purpose (see CLAUDE.md
+  # "Rust toolchain"); `clippy-canary` warns when the newest stable would break.
+  RUST_TOOLCHAIN: "1.99.0"
 
 jobs:
   fmt:
@@ -21,8 +24,9 @@ jobs:
     if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
       - run: cargo fmt --all --check
 
@@ -32,11 +36,30 @@ jobs:
     if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets
+
+  clippy-canary:
+    name: Clippy (stable canary)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    steps:
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets
+      # Step-level continue-on-error keeps the check green: a job-level one still
+      # shows a red X on the commit/PR.
+      - id: canary
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets
+      - if: steps.canary.outcome == 'failure'
+        run: echo "::warning::The newest stable rustc breaks clippy -D warnings; bump RUST_TOOLCHAIN in ci.yml (see CLAUDE.md \"Rust toolchain\")."
 
   test:
     name: Test
@@ -44,7 +67,9 @@ jobs:
     if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace
@@ -55,8 +80,9 @@ jobs:
     if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
@@ -96,22 +122,19 @@ jobs:
       image: semgrep/semgrep
     permissions:
       contents: read
-      security-events: write
     steps:
       - uses: actions/checkout@v4
-      - run: semgrep scan --config p/rust --exclude target --error --metrics=off --sarif --output semgrep.sarif .
-      - uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: semgrep.sarif
-        if: always()
+      # Text output, so findings print in the log like `make sast`. No SARIF upload:
+      # code scanning is off on this private repo, so it could never succeed.
+      - run: semgrep scan --config p/rust --exclude target --error --metrics=off .
 
   miri:
     name: Miri (UB check)
     runs-on: ubuntu-latest
     if: github.event_name != 'schedule'
     env:
-      # Nightly deprecates std items stable still accepts (e.g. `AtomicU64::fetch_update`);
-      # that lint noise must not gate CI, `-D warnings` on stable already covers the rest.
+      # Nightly deprecations land ahead of stable; that lint noise must not gate CI,
+      # `-D warnings` on the pinned toolchain already covers the rest.
       RUSTFLAGS: "-D warnings -A deprecated"
       # Tests read the clock and open files/sockets; Miri's sandbox would refuse them.
       MIRIFLAGS: "-Zmiri-disable-isolation"
