@@ -2294,15 +2294,14 @@ mod tests {
 
     #[test]
     fn policy_file() {
-        let path = std::env::temp_dir().join(format!("nos-provision-{}.rpl", std::process::id()));
-        std::fs::write(&path, "accept\n").unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "accept\n").unwrap();
         let result = ops(&[
             "--policy-name",
             "p",
             "--policy-source-file",
-            path.to_str().unwrap(),
+            file.path().to_str().unwrap(),
         ]);
-        std::fs::remove_file(&path).unwrap();
         has(
             &result.unwrap(),
             &ConfigOp::PolicyDefinition(PolicyDefinitionOp::SetSource {

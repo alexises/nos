@@ -18,6 +18,9 @@ clap       = { workspace = true }
 anyhow     = { workspace = true }
 ipnet      = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lib]
 name = "nos_provision"
 path = "src/lib.rs"
