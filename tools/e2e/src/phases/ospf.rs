@@ -378,7 +378,14 @@ pub async fn ospf_dr(w: &mut World) -> anyhow::Result<()> {
     b.wait(&format!(
         "ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID_C}"
     ))
-    .await
+    .await?;
+    // #139: router-c's eth0.0 subnet is connected in rt1 but not in OSPF, so
+    // router-a/b advertise it to c as a stub and c's SPF computes an OSPF
+    // route for it. The connected route wins: nos-ribd must leave the prefix
+    // to the kernel — no add (which used to fail with EEXIST every 10s
+    // reapply), no add-then-remove flap. Over 15s, more than one reapply tick.
+    c.assert_quiet(&format!("route prefix={SUBNET}"), 0, 15)
+        .await
 }
 
 /// OSPF on router-b's loopback (a destination with no neighbor of its own):

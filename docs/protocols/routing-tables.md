@@ -270,7 +270,11 @@ Each source has a fixed preference, and the lowest wins:
 
 These are not configurable. A static route therefore beats a BGP route to the same prefix, and a BGP route beats an OSPF route. The losing candidates stay in the table and appear in `show route` below the winner; if the winner goes away, the next one takes over without any reconfiguration.
 
-Connected routes are listed in `show route` and used by BGP to check next hops, but they are never the route that NOS installs for forwarding: the operating system already routes the subnet of each address it holds. So a static route for a prefix that is also connected is still installed, even though `show route` lists the connected route first.
+Connected routes are listed in `show route` and used by BGP to check next hops, but NOS never installs them for forwarding: the operating system already routes the subnet of each address it holds.
+
+- A connected route wins over every other source, so NOS installs nothing for that prefix and leaves it to the operating system.
+- A static, BGP or OSPF route for a connected prefix is still listed in `show route`, below the connected route, but it is not installed.
+- If the address is removed, the connected route goes away and the next candidate is installed.
 
 ### What a routing table needs
 
