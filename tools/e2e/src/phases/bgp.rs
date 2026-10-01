@@ -623,8 +623,11 @@ pub async fn damping(w: &mut World) -> anyhow::Result<()> {
         "reject-for-damping",
     ]);
 
-    let est = a.count("bgp session established");
-    a.provision(&[
+    // Earlier phases leave router-a redistributing the same prefix, and its own
+    // `Local` copy outranks router-b's in best-path: router-b's flaps would then
+    // never reach router-a's Loc-RIB. Reject it at router-a's source for the phase.
+    let mut a_damped = reject.clone();
+    a_damped.extend([
         "--damping-half-life",
         "20",
         "--damping-reuse",
@@ -633,9 +636,11 @@ pub async fn damping(w: &mut World) -> anyhow::Result<()> {
         "2000",
         "--damping-max-suppress",
         "40",
-    ])
-    .await?;
+    ]);
+    let (est, own_withdrawn) = (a.count("bgp session established"), a.count(&withdrawn));
+    a.provision(&a_damped).await?;
     reestablished(a, est).await?;
+    a.wait_new(&withdrawn, own_withdrawn, 30).await?;
 
     log("flapping router-b's prefix three times: router-a must suppress it");
     let suppressed = format!("route suppressed by flap damping.*{REDISTRIBUTE_PREFIX}");
@@ -665,9 +670,11 @@ pub async fn damping(w: &mut World) -> anyhow::Result<()> {
     .await?;
     a.wait_new(&loc_rib(), loc_before, 10).await?;
 
-    log("removing damping from router-a's peer-group");
+    log("removing damping from router-a's peer-group, redistributing its prefix again");
     let est = a.count("bgp session established");
-    a.provision(&["--clear-damping"]).await?;
+    let mut a_restored = accept.clone();
+    a_restored.push("--clear-damping");
+    a.provision(&a_restored).await?;
     reestablished(a, est).await
 }
 
