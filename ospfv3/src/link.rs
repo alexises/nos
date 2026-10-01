@@ -609,29 +609,11 @@ async fn handle_dbd(
     dbd: &DbdPacket,
     dbd_max_headers: usize,
 ) -> Option<Vec<exchange::Action>> {
-    let (old_state, adj) = {
+    let (old_state, mut adj) = {
         let snapshot = status.borrow();
         let neighbor = snapshot.neighbors.get(&dbd.router_id)?;
         (neighbor.state, neighbor.adjacency.clone()?)
     };
-
-    // A restarting neighbor we're helping starts over from ExStart while we
-    // still hold it `Full` — RFC 2328 §10.6's SeqNumberMismatch lets the
-    // two resynchronize instead of ignoring its negotiation forever.
-    if old_state == NeighborState::Full && dbd.init && in_grace(status, dbd.router_id) {
-        return Some(finish_neighbor_event(
-            cfg,
-            local_router_id,
-            status,
-            dbd.router_id,
-            old_state,
-            adj,
-            vec![exchange::Action::NeighborEvent(
-                neighbor::Event::SeqNumberMismatch,
-            )],
-        ));
-    }
-    let mut adj = adj;
 
     let mut local_lsdb_headers = lsdb.lock().await.headers();
     local_lsdb_headers.extend(link_local_lsdb.lock().await.headers());
@@ -784,7 +766,11 @@ fn finish_neighbor_event(
                 adj.last_dbd_sent = Some(pkt.clone());
             }
         }
-        if matches!(new_state, NeighborState::Loading | NeighborState::Full) {
+        // Past `Exchange`, only the slave's final reply can still be needed:
+        // `exchange` resends it for the master's duplicate (RFC 2328 §10.6).
+        // ponytail: kept until the next `ExStart`, not the RFC's
+        // `RouterDeadInterval`; one packet, no timer.
+        if adj.is_master && matches!(new_state, NeighborState::Loading | NeighborState::Full) {
             adj.last_dbd_sent = None;
         }
         actions
@@ -889,7 +875,11 @@ fn retransmit_pending(
     let snapshot = status.borrow().clone();
     for (neighbor_id, info) in &snapshot.neighbors {
         let Some(adj) = &info.adjacency else { continue };
-        if let Some(dbd) = &adj.last_dbd_sent {
+        // Only while negotiating: a slave's kept final reply goes out only
+        // in answer to the master's duplicate (`exchange`), never on a timer.
+        if let (NeighborState::ExStart | NeighborState::Exchange, Some(dbd)) =
+            (info.state, &adj.last_dbd_sent)
+        {
             let mut dbd = dbd.clone();
             dbd.options = link_options(cfg);
             if let Err(e) =
@@ -2657,6 +2647,16 @@ mod tests {
                     }))
                 })
             }
+
+            /// Delivers `payload` to `to` as if `from` had sent it (a forged,
+            /// unauthenticated packet).
+            pub fn inject(&self, from: Ipv6Addr, to: Ipv6Addr, payload: &[u8]) {
+                for (_, addr, tx) in self.ports.lock().unwrap().iter() {
+                    if *addr == to {
+                        let _ = tx.send((from, payload.to_vec()));
+                    }
+                }
+            }
         }
 
         pub struct Port {
@@ -2902,5 +2902,115 @@ mod tests {
                 .any(|r| r.prefix == "2001:db8:2:2::/64".parse::<Ipv6Net>().unwrap()),
             "{routes:?}"
         );
+    }
+
+    /// #146: A hits `SeqNumberMismatch` on its own side (a `BadLSReq`) while
+    /// Hellos keep both sides listed; B, still `Full`, must answer A's Init
+    /// DBD with `SeqNumberMismatch` too, or A sits in `ExStart` for good.
+    /// Renegotiation on the in-memory wire is near-instant, so only the end
+    /// state is checked.
+    #[tokio::test(start_paused = true)]
+    async fn one_sided_seq_number_mismatch_renegotiates_back_to_full() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b) = pair(&wire, None, None).await;
+        assert_eq!(
+            a.neighbor_summaries().await[0].state,
+            OspfNeighborState::Full
+        );
+
+        // A forged LSR "from B" for an LSA A doesn't hold: BadLSReq on A only.
+        let lsr = LsrPacket {
+            router_id: id(2),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            requests: vec![LsaKey {
+                lsa_type: lsa::LSA_TYPE_ROUTER,
+                link_state_id: id(77),
+                advertising_router: id(77),
+            }],
+        };
+        wire.inject(
+            "fe80::2".parse().unwrap(),
+            "fe80::1".parse().unwrap(),
+            &packet::encode_lsr(&lsr),
+        );
+        settle(30).await;
+        for (m, side) in [(&a, "a"), (&b, "b")] {
+            assert_eq!(
+                m.neighbor_summaries().await[0].state,
+                OspfNeighborState::Full,
+                "{side}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_slave_keeps_its_final_dbd_once_full() {
+        let cfg = link("eth0.0", 10);
+        let neighbor_id = Ipv4Addr::new(9, 9, 9, 10);
+        for is_master in [false, true] {
+            let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+            status.send_modify(|s| {
+                let mut info =
+                    neighbor_info(NeighborState::Exchange, "fe80::2".parse().unwrap(), 2);
+                info.adjacency = Some(AdjacencyData::default());
+                s.neighbors.insert(neighbor_id, info);
+            });
+            let (_, reply) = start_negotiation(&cfg, Ipv4Addr::new(9, 9, 9, 9));
+            let adj = AdjacencyData {
+                is_master,
+                ..Default::default()
+            };
+            finish_neighbor_event(
+                &cfg,
+                Ipv4Addr::new(9, 9, 9, 9),
+                &status,
+                neighbor_id,
+                NeighborState::Exchange,
+                adj,
+                vec![
+                    exchange::Action::SendDbd(reply.clone()),
+                    exchange::Action::NeighborEvent(neighbor::Event::ExchangeDone {
+                        more_to_load: false,
+                    }),
+                ],
+            );
+            let s = status.borrow();
+            let info = &s.neighbors[&neighbor_id];
+            assert_eq!(info.state, NeighborState::Full);
+            let kept = info.adjacency.as_ref().unwrap().last_dbd_sent.clone();
+            assert_eq!(kept, (!is_master).then_some(reply), "is_master={is_master}");
+        }
+    }
+
+    #[tokio::test]
+    async fn retransmit_pending_resends_a_dbd_only_while_negotiating() {
+        let wire = Arc::new(wire::Wire::default());
+        let cfg = wired_link(1, NetworkType::PointToPoint);
+        let socket = (wire.opener())(&cfg).unwrap();
+        let LinkSocket::Mem(peer) =
+            (wire.opener())(&wired_link(2, NetworkType::PointToPoint)).unwrap()
+        else {
+            unreachable!()
+        };
+        let neighbor_id = Ipv4Addr::new(9, 9, 9, 10);
+        let (_, dbd) = start_negotiation(&cfg, Ipv4Addr::new(9, 9, 9, 9));
+        for (state, sent) in [
+            (NeighborState::Full, false),
+            (NeighborState::Loading, false),
+            (NeighborState::Exchange, true),
+        ] {
+            let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+            status.send_modify(|s| {
+                let mut info = neighbor_info(state, "fe80::2".parse().unwrap(), 2);
+                info.adjacency = Some(AdjacencyData {
+                    last_dbd_sent: Some(dbd.clone()),
+                    ..Default::default()
+                });
+                s.neighbors.insert(neighbor_id, info);
+            });
+            retransmit_pending(&socket, &cfg, Ipv4Addr::new(9, 9, 9, 9), &status);
+            let got = tokio::time::timeout(std::time::Duration::from_millis(20), peer.recv()).await;
+            assert_eq!(got.is_ok(), sent, "{state:?}");
+        }
     }
 }
