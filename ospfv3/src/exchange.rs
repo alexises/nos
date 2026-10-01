@@ -404,6 +404,21 @@ pub fn on_lsu_received(
         } else {
             &mut *area_lsdb
         };
+        let key = l.header.key();
+        // RFC 2328 §13 step 4 (`ospf::exchange::on_lsu_received`): a MaxAge
+        // instance of an LSA held nowhere here, and not requested, is acked
+        // and discarded — otherwise two routers each holding a flushed copy
+        // for `lsdb::MAX_AGE_HOLD_TICKS` would reinstall each other's echo
+        // forever. A Grace-LSA is exempt: it is never held (`handle_lsu`
+        // acts on it at once), and its MaxAge copy is what ends a grace.
+        if l.header.age >= lsa::MAX_AGE
+            && l.header.lsa_type != lsa::LSA_TYPE_GRACE
+            && store.get(&key).is_none()
+            && !adj.request_list.contains(&key)
+        {
+            acked.push(l.header);
+            continue;
+        }
         if !matches!(
             store.install(l.clone()),
             crate::lsdb::InstallOutcome::Rejected
@@ -411,7 +426,7 @@ pub fn on_lsu_received(
             newly_installed.push(l.header);
         }
         acked.push(l.header);
-        adj.request_list.retain(|k| *k != l.header.key());
+        adj.request_list.retain(|k| *k != key);
     }
     let mut actions = vec![Action::SendLsAck(acked)];
     if adj.request_list.is_empty() {
@@ -1074,6 +1089,35 @@ mod tests {
             ]
         );
         assert_eq!(newly_installed, vec![l.header]);
+    }
+
+    /// RFC 2328 §13 step 4: an unrequested `MaxAge` LSA with no held copy is
+    /// acked but not installed; with a held copy, it supersedes it.
+    #[test]
+    fn lsu_discards_unheld_max_age_lsa() {
+        let mut adj = AdjacencyData::default();
+        let mut lsdb = Lsdb::new();
+        let live = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
+        let mut flushed = live.clone();
+        flushed.header.age = lsa::MAX_AGE;
+        let lsu = LsuPacket {
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsas: vec![flushed.clone()],
+        };
+        let (actions, newly_installed) =
+            on_lsu_received(&mut adj, &mut lsdb, &mut Lsdb::new(), &lsu);
+        assert!(newly_installed.is_empty());
+        assert!(lsdb.get(&flushed.header.key()).is_none());
+        assert!(actions.contains(&Action::SendLsAck(vec![flushed.header])));
+
+        lsdb.install(live);
+        let (_, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &mut Lsdb::new(), &lsu);
+        assert_eq!(newly_installed, vec![flushed.header]);
+        assert_eq!(
+            lsdb.get(&flushed.header.key()).unwrap().header.age,
+            lsa::MAX_AGE
+        );
     }
 
     #[test]
