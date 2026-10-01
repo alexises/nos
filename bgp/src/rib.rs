@@ -1137,6 +1137,17 @@ impl BgpRib {
         } else {
             None
         };
+        // Keep the existing `received_at`: it is part of `RibRoute`'s
+        // `PartialEq`, and a fresh `Instant::now()` would make every
+        // periodic `set_redistribute_policy` look like a change and
+        // re-announce the prefix to every peer (#134).
+        let new = new.map(|n| match self.redistributed.get(&prefix) {
+            Some(o) => RibRoute {
+                received_at: o.received_at,
+                ..n
+            },
+            None => n,
+        });
         let changed = match (&new, self.redistributed.get(&prefix)) {
             (Some(n), Some(o)) => n != o,
             (None, None) => false,
@@ -2820,6 +2831,23 @@ mod tests {
                 None
             )]
         );
+    }
+
+    /// Re-applying an unchanged redistribute policy (the 10s reconcile tick
+    /// does it on every pass) must not re-announce anything (#134).
+    #[test]
+    fn reapplying_unchanged_redistribute_policy_sends_nothing() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let mut rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        rib.set_redistribute_policy(accept_all_policy());
+        rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
+        assert_eq!(recv_all(&mut rx).len(), 1);
+
+        rib.set_redistribute_policy(accept_all_policy());
+        rib.set_redistribute_policy(accept_all_policy());
+
+        assert_eq!(recv_all(&mut rx), vec![]);
     }
 
     #[test]
