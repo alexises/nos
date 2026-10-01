@@ -244,7 +244,7 @@ mod tests {
         let snap = store.snapshot(None, None).await;
         let total: usize = snap.iter().map(entry_size).sum();
         assert!(total <= RING_BYTES, "ring holds {total} bytes");
-        assert!(!snap.is_empty());
+        assert_ne!(snap, [] as [nos_proto::LogEntry; 0]);
     }
 
     #[tokio::test]

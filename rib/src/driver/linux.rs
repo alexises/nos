@@ -674,8 +674,8 @@ mod tests {
         let mut m = HashMap::new();
         m.insert(net("10.0.0.0/24"), addr("10.0.0.1"));
         let (add, remove) = diff_routes(&m, &m);
-        assert!(add.is_empty());
-        assert!(remove.is_empty());
+        assert_eq!(add, [] as [(ipnet::IpNet, std::net::IpAddr); 0]);
+        assert_eq!(remove, [] as [(ipnet::IpNet, std::net::IpAddr); 0]);
     }
 
     #[test]
@@ -686,7 +686,7 @@ mod tests {
 
         let (add, remove) = diff_routes(&observed, &desired);
         assert_eq!(add, vec![(net("10.0.0.0/24"), addr("10.0.0.1"))]);
-        assert!(remove.is_empty());
+        assert_eq!(remove, [] as [(ipnet::IpNet, std::net::IpAddr); 0]);
     }
 
     #[test]
@@ -696,7 +696,7 @@ mod tests {
         let desired = HashMap::new();
 
         let (add, remove) = diff_routes(&observed, &desired);
-        assert!(add.is_empty());
+        assert_eq!(add, [] as [(ipnet::IpNet, std::net::IpAddr); 0]);
         assert_eq!(remove, vec![(net("10.0.0.0/24"), addr("10.0.0.1"))]);
     }
 
@@ -710,11 +710,11 @@ mod tests {
         ]);
         let (add, remove) = diff_routes(&observed, &desired);
         assert_eq!(add, vec![((p, true), addr("10.0.0.2"))]);
-        assert!(remove.is_empty());
+        assert_eq!(remove, [] as [((ipnet::IpNet, bool), std::net::IpAddr); 0]);
 
         // Backup vanishing removes only the backup.
         let (add, remove) = diff_routes(&desired, &observed);
-        assert!(add.is_empty());
+        assert_eq!(add, [] as [((ipnet::IpNet, bool), std::net::IpAddr); 0]);
         assert_eq!(remove, vec![((p, true), addr("10.0.0.2"))]);
     }
 

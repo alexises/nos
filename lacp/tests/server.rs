@@ -49,7 +49,7 @@ async fn get_summary_lists_every_aggregate_sorted_with_its_rate() {
     assert_eq!(summaries[0].actor_key, 1);
     assert_eq!(summaries[1].aggregate, "bond-b");
     assert_eq!(summaries[1].rate, LacpRate::Fast);
-    assert!(summaries[0].ports.is_empty());
+    assert_eq!(summaries[0].ports, [] as [nos_proto::LacpPortStatus; 0]);
 }
 
 #[tokio::test]
@@ -62,5 +62,5 @@ async fn get_summary_with_no_aggregates_is_empty() {
         &shared().identity("lacpd", ""),
     )
     .unwrap();
-    assert!(query(&path).await.is_empty());
+    assert_eq!(query(&path).await, [] as [nos_proto::PortAggregateLacpSummary; 0]);
 }

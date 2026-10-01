@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn diff_empty_to_empty_is_empty() {
         let last_sent = HashMap::new();
-        assert!(diff_routes(&last_sent, &[]).is_empty());
+        assert_eq!(diff_routes(&last_sent, &[]), [] as [nos_proto::RedistributeUpdate; 0]);
     }
 
     #[test]
@@ -268,7 +268,7 @@ mod tests {
     fn diff_unchanged_prefix_is_noop() {
         let new = vec![route("10.0.0.0/24", "10.0.0.1")];
         let last_sent = build_last_sent(&new);
-        assert!(diff_routes(&last_sent, &new).is_empty());
+        assert_eq!(diff_routes(&last_sent, &new), [] as [nos_proto::RedistributeUpdate; 0]);
     }
 
     #[test]
@@ -317,6 +317,6 @@ mod tests {
     fn default_target_is_idle() {
         let target = RedistributeTarget::default();
         assert_eq!(target.ospf_instance, None);
-        assert!(target.routes.is_empty());
+        assert_eq!(target.routes, [] as [nos_proto::RedistributedRoute; 0]);
     }
 }

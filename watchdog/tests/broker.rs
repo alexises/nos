@@ -536,7 +536,7 @@ async fn rest_renewal_is_refused_for_a_deleted_user_and_server_certs_carry_the_r
     else {
         panic!("server certificate refused");
     };
-    assert!(!ca_der.is_empty());
+    assert_ne!(ca_der, [] as [u8; 0]);
 }
 
 #[tokio::test]

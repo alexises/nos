@@ -700,11 +700,10 @@ mod tests {
             &Interfaces::new(),
         )
         .await;
-        assert!(interfaces
+        assert_eq!(interfaces
             .get("eth0")
             .unwrap()
-            .switching_profile_members
-            .is_empty());
+            .switching_profile_members, [] as [(std::string::String, nos_proto::VlanTag); 0]);
     }
 
     #[tokio::test]
