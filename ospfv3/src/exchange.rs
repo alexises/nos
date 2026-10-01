@@ -119,17 +119,37 @@ pub fn on_dbd_received(
             max_headers,
             mtu,
         ),
-        // `Loading`/`Full`: ignore everything here — a genuine peer restart
-        // is instead caught via Hello (losing 2-way already clears
-        // `adjacency`, see `link::handle_hello`).
+        NeighborState::Loading | NeighborState::Full => on_dbd_in_loading_or_full(adj, dbd),
         // `Down`/`Init`/`TwoWay`: no adjacency exists yet to receive a DBD
         // for in the first place.
-        NeighborState::Loading
-        | NeighborState::Full
-        | NeighborState::Down
-        | NeighborState::Init
-        | NeighborState::TwoWay => Vec::new(),
+        NeighborState::Down | NeighborState::Init | NeighborState::TwoWay => Vec::new(),
     }
+}
+
+/// RFC 2328 §10.6 (RFC 5340 keeps it), a DBD received in `Loading`/`Full`:
+/// - I-bit set: `SeqNumberMismatch`. Hello alone doesn't catch a peer that
+///   hit `SeqNumberMismatch` on its own side (`BadLSReq`, an out-of-sequence
+///   DBD, a packet lost in an auth key-change window) while Hellos still
+///   list both routers: it sits in `ExStart` sending Init DBDs, and
+///   ignoring them would leave it there for good. This also covers a
+///   graceful-restart helper whose neighbor restarted while still `Full`.
+/// - We are the slave and this is the master's duplicate of its last poll:
+///   resend our last DBD. Without it, a lost final reply leaves the master
+///   stuck in `Exchange` while we are already `Full`.
+/// - Anything else (the master's duplicate, other strays): discarded.
+fn on_dbd_in_loading_or_full(adj: &AdjacencyData, dbd: &DbdPacket) -> Vec<Action> {
+    if dbd.init {
+        return vec![Action::NeighborEvent(Event::SeqNumberMismatch)];
+    }
+    if !adj.is_master && dbd.master && dbd.dd_sequence_number == adj.dd_sequence_number {
+        return adj
+            .last_dbd_sent
+            .clone()
+            .map(Action::SendDbd)
+            .into_iter()
+            .collect();
+    }
+    Vec::new()
 }
 
 fn on_dbd_in_exstart(
@@ -855,21 +875,96 @@ mod tests {
         assert_eq!(adj.dd_sequence_number, 5, "must not adopt the stray seq");
     }
 
-    #[test]
-    fn negotiation_shaped_dbd_while_full_is_ignored() {
-        let mut adj = AdjacencyData::default();
-        let dbd = negotiation_dbd(router_id("9.9.9.10"), 1);
-        let actions = on_dbd_received(
-            &mut adj,
-            NeighborState::Full,
+    /// Feeds `dbd` to `adj` in `state` (local 9.9.9.9, neighbor 9.9.9.10).
+    fn dbd_in(adj: &mut AdjacencyData, state: NeighborState, dbd: &DbdPacket) -> Vec<Action> {
+        on_dbd_received(
+            adj,
+            state,
             router_id("9.9.9.9"),
             router_id("9.9.9.10"),
-            &dbd,
+            dbd,
             &[],
             100,
             1500,
-        );
-        assert!(actions.is_empty());
+        )
+    }
+
+    #[test]
+    fn init_dbd_while_full_is_seq_number_mismatch() {
+        // RFC 2328 §10.6: the peer restarted negotiation on its own side
+        // (its Hellos may still list us), so we must restart too (#146).
+        for state in [NeighborState::Loading, NeighborState::Full] {
+            let mut adj = AdjacencyData::default();
+            let dbd = negotiation_dbd(router_id("9.9.9.10"), 1);
+            assert_eq!(
+                dbd_in(&mut adj, state, &dbd),
+                vec![Action::NeighborEvent(Event::SeqNumberMismatch)],
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stray_non_init_dbd_while_full_is_ignored() {
+        for state in [NeighborState::Loading, NeighborState::Full] {
+            let mut adj = AdjacencyData::default();
+            let mut dbd = negotiation_dbd(router_id("9.9.9.10"), 1);
+            dbd.init = false;
+            assert!(dbd_in(&mut adj, state, &dbd).is_empty(), "{state:?}");
+        }
+    }
+
+    /// A slave adjacency that already sent its final reply at seq 42, and
+    /// the master's poll at that seq (its duplicate once we are `Full`).
+    fn slave_after_final_reply() -> (AdjacencyData, DbdPacket, DbdPacket) {
+        let mut reply = negotiation_dbd(router_id("9.9.9.9"), 42);
+        reply.init = false;
+        reply.more = false;
+        reply.master = false;
+        let adj = AdjacencyData {
+            is_master: false,
+            dd_sequence_number: 42,
+            last_dbd_sent: Some(reply.clone()),
+            ..Default::default()
+        };
+        let mut poll = negotiation_dbd(router_id("9.9.9.10"), 42);
+        poll.init = false;
+        poll.more = false;
+        (adj, reply, poll)
+    }
+
+    #[test]
+    fn slave_resends_last_dbd_for_masters_duplicate_in_full() {
+        for state in [NeighborState::Loading, NeighborState::Full] {
+            let (mut adj, reply, poll) = slave_after_final_reply();
+            assert_eq!(
+                dbd_in(&mut adj, state, &poll),
+                vec![Action::SendDbd(reply)],
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn slave_ignores_other_master_dbds_in_full() {
+        // A different sequence number is no duplicate of our last reply.
+        let (mut adj, _, mut poll) = slave_after_final_reply();
+        poll.dd_sequence_number = 43;
+        assert!(dbd_in(&mut adj, NeighborState::Full, &poll).is_empty());
+        // Nothing kept to resend.
+        let (mut adj, _, poll) = slave_after_final_reply();
+        adj.last_dbd_sent = None;
+        assert!(dbd_in(&mut adj, NeighborState::Full, &poll).is_empty());
+    }
+
+    #[test]
+    fn master_discards_duplicate_in_full() {
+        let (mut adj, _, mut dup) = slave_after_final_reply();
+        adj.is_master = true;
+        dup.master = false;
+        assert!(dbd_in(&mut adj, NeighborState::Full, &dup).is_empty());
+        dup.master = true;
+        assert!(dbd_in(&mut adj, NeighborState::Full, &dup).is_empty());
     }
 
     fn full_lsa(link_state_id: &str, seq: i32) -> Lsa {

@@ -976,7 +976,11 @@ fn finish_neighbor_event(
                 adj.last_dbd_sent = Some(pkt.clone());
             }
         }
-        if matches!(new_state, NeighborState::Loading | NeighborState::Full) {
+        // Past `Exchange`, only the slave's final reply can still be needed:
+        // `exchange` resends it for the master's duplicate (RFC 2328 §10.6).
+        // ponytail: kept until the next `ExStart`, not the RFC's
+        // `RouterDeadInterval`; one packet, no timer.
+        if adj.is_master && matches!(new_state, NeighborState::Loading | NeighborState::Full) {
             adj.last_dbd_sent = None;
         }
         actions
@@ -1151,7 +1155,11 @@ fn retransmit_pending(
     let snapshot = status.borrow().clone();
     for (neighbor_id, info) in &snapshot.neighbors {
         let Some(adj) = &info.adjacency else { continue };
-        if let Some(dbd) = &adj.last_dbd_sent {
+        // Only while negotiating: a slave's kept final reply goes out only
+        // in answer to the master's duplicate (`exchange`), never on a timer.
+        if let (NeighborState::ExStart | NeighborState::Exchange, Some(dbd)) =
+            (info.state, &adj.last_dbd_sent)
+        {
             let auth = cfg
                 .auth
                 .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
@@ -3789,6 +3797,16 @@ mod tests {
                     }))
                 })
             }
+
+            /// Delivers `payload` to `to` as if `from` had sent it (a forged
+            /// packet).
+            pub fn inject(&self, from: Ipv4Addr, to: Ipv4Addr, payload: &[u8]) {
+                for (_, addr, tx) in self.ports.lock().unwrap().iter() {
+                    if *addr == to {
+                        let _ = tx.send((from, payload.to_vec()));
+                    }
+                }
+            }
         }
 
         pub struct Port {
@@ -4059,5 +4077,127 @@ mod tests {
             .filter(|l| l.lsa_type == 5 && l.advertising_router == id(2))
             .count();
         assert_eq!(externals, 3);
+    }
+
+    /// #146: A hits `SeqNumberMismatch` on its own side (a `BadLSReq`) while
+    /// Hellos keep both sides listed; B, still `Full`, must answer A's Init
+    /// DBD with `SeqNumberMismatch` too, or A sits in `ExStart` for good.
+    #[tokio::test(start_paused = true)]
+    async fn one_sided_seq_number_mismatch_renegotiates_back_to_full() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b) = (router(&wire), router(&wire));
+        let (a_addr, b_addr) = (Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2));
+        a.reconcile(
+            vec![wired_link([10, 0, 0, 1], 30, NetworkType::PointToPoint)],
+            HashMap::new(),
+            id(1),
+        )
+        .await;
+        b.reconcile(
+            vec![wired_link([10, 0, 0, 2], 30, NetworkType::PointToPoint)],
+            HashMap::new(),
+            id(2),
+        )
+        .await;
+        settle(60).await;
+        assert_eq!(
+            a.neighbor_summaries().await[0].state,
+            OspfNeighborState::Full
+        );
+
+        // A forged LSR "from B" for an LSA A doesn't hold: BadLSReq on A only.
+        let lsr = LsrPacket {
+            router_id: id(2),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            requests: vec![LsaKey {
+                lsa_type: 1,
+                link_state_id: id(77),
+                advertising_router: id(77),
+            }],
+        };
+        let auth = LinkAuthConfig::None.as_outgoing(0, b_addr);
+        wire.inject(b_addr, a_addr, &packet::encode_lsr(&lsr, &auth));
+        // Renegotiation on the in-memory wire is near-instant, so there is no
+        // reliable non-`Full` window to observe; without the fix A ends here
+        // stuck in `ExStart`.
+        settle(30).await;
+        for (m, side) in [(&a, "a"), (&b, "b")] {
+            assert_eq!(
+                m.neighbor_summaries().await[0].state,
+                OspfNeighborState::Full,
+                "{side}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_slave_keeps_its_final_dbd_once_full() {
+        let cfg = link("eth0.0", 10);
+        let neighbor_id = Ipv4Addr::new(9, 9, 9, 10);
+        for is_master in [false, true] {
+            let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+            status.send_modify(|s| {
+                let mut info = neighbor_info(NeighborState::Exchange, Ipv4Addr::new(10, 0, 0, 2));
+                info.adjacency = Some(AdjacencyData::default());
+                s.neighbors.insert(neighbor_id, info);
+            });
+            let (_, reply) = start_negotiation(&cfg, Ipv4Addr::new(9, 9, 9, 9));
+            let adj = AdjacencyData {
+                is_master,
+                ..Default::default()
+            };
+            finish_neighbor_event(
+                &cfg,
+                Ipv4Addr::new(9, 9, 9, 9),
+                &status,
+                neighbor_id,
+                NeighborState::Exchange,
+                adj,
+                vec![
+                    exchange::Action::SendDbd(reply.clone()),
+                    exchange::Action::NeighborEvent(neighbor::Event::ExchangeDone {
+                        more_to_load: false,
+                    }),
+                ],
+            );
+            let s = status.borrow();
+            let info = &s.neighbors[&neighbor_id];
+            assert_eq!(info.state, NeighborState::Full);
+            let kept = info.adjacency.as_ref().unwrap().last_dbd_sent.clone();
+            assert_eq!(kept, (!is_master).then_some(reply), "is_master={is_master}");
+        }
+    }
+
+    #[tokio::test]
+    async fn retransmit_pending_resends_a_dbd_only_while_negotiating() {
+        let wire = Arc::new(wire::Wire::default());
+        let cfg = wired_link([10, 0, 0, 1], 30, NetworkType::PointToPoint);
+        let socket = (wire.opener())(&cfg).unwrap();
+        let LinkSocket::Mem(peer) =
+            (wire.opener())(&wired_link([10, 0, 0, 2], 30, NetworkType::PointToPoint)).unwrap()
+        else {
+            unreachable!()
+        };
+        let neighbor_id = Ipv4Addr::new(9, 9, 9, 10);
+        let (_, dbd) = start_negotiation(&cfg, Ipv4Addr::new(9, 9, 9, 9));
+        for (state, sent) in [
+            (NeighborState::Full, false),
+            (NeighborState::Loading, false),
+            (NeighborState::Exchange, true),
+        ] {
+            let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+            status.send_modify(|s| {
+                let mut info = neighbor_info(state, Ipv4Addr::new(10, 0, 0, 2));
+                info.adjacency = Some(AdjacencyData {
+                    last_dbd_sent: Some(dbd.clone()),
+                    ..Default::default()
+                });
+                s.neighbors.insert(neighbor_id, info);
+            });
+            let mut seq = 0;
+            retransmit_pending(&socket, &cfg, Ipv4Addr::new(9, 9, 9, 9), &status, &mut seq);
+            let got = tokio::time::timeout(Duration::from_millis(20), peer.recv()).await;
+            assert_eq!(got.is_ok(), sent, "{state:?}");
+        }
     }
 }
