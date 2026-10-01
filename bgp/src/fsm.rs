@@ -1659,7 +1659,7 @@ mod tests {
             &ctx(65002),
         );
         assert_eq!(next, Some(State::Established(remote)));
-        assert!(actions.is_empty());
+        assert_eq!(actions, []);
     }
 
     #[test]

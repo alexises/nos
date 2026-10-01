@@ -149,7 +149,7 @@ mod tests {
             .push(route("10.0.0.0/8", 3), t + Duration::from_secs(2))
             .is_none());
         assert_eq!(m.deadline(), Some(t + Duration::from_secs(30)));
-        assert!(m.flush(t + Duration::from_secs(29)).is_empty());
+        assert_eq!(m.flush(t + Duration::from_secs(29)), []);
         assert_eq!(
             m.flush(t + Duration::from_secs(30)),
             vec![route("10.0.0.0/8", 3)]
@@ -166,6 +166,6 @@ mod tests {
         assert!(m.push(route("10.0.0.0/8", 2), t).is_none());
         let w = OutboundUpdate::Withdraw(p, false, None);
         assert_eq!(m.push(w.clone(), t), Some(w));
-        assert!(m.flush(t + Duration::from_secs(30)).is_empty());
+        assert_eq!(m.flush(t + Duration::from_secs(30)), []);
     }
 }
