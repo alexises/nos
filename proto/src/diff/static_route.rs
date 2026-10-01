@@ -84,7 +84,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![route("10.0.0.0/24", "10.0.0.1")];
         let candidate = base.clone();
-        assert!(diff_static_routes(&base, &candidate).is_empty());
+        assert_eq!(diff_static_routes(&base, &candidate), []);
     }
 
     #[test]

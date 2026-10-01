@@ -119,7 +119,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![instance("o1", Ipv4Addr::new(1, 1, 1, 1))];
         let candidate = base.clone();
-        assert!(diff_ospfv3_instances(&base, &candidate).is_empty());
+        assert_eq!(diff_ospfv3_instances(&base, &candidate), []);
     }
 
     #[test]

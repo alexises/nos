@@ -50,7 +50,7 @@ mod tests {
     #[test]
     fn only_changed_fields_are_reported() {
         let base = LldpSettings::default();
-        assert!(diff_lldp(&base, &base).is_empty());
+        assert_eq!(diff_lldp(&base, &base), []);
         let candidate = LldpSettings {
             tx_interval_secs: Some(5),
             ..LldpSettings::default()

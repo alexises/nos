@@ -104,7 +104,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![peer(1, "pg1")];
         let candidate = base.clone();
-        assert!(diff_bgp_peers(&base, &candidate).is_empty());
+        assert_eq!(diff_bgp_peers(&base, &candidate), []);
     }
 
     #[test]

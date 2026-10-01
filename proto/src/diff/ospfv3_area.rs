@@ -79,7 +79,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![area("0.0.0.0")];
         let candidate = base.clone();
-        assert!(diff_ospfv3_areas(&base, &candidate).is_empty());
+        assert_eq!(diff_ospfv3_areas(&base, &candidate), []);
     }
 
     #[test]

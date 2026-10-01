@@ -288,7 +288,7 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.interfaces.len(), 1);
         assert_eq!(cfg.interfaces[0].name, "eth0");
-        assert!(cfg.interfaces[0].addresses.is_empty());
+        assert_eq!(cfg.interfaces[0].addresses, []);
     }
 
     #[test]
@@ -340,7 +340,7 @@ mod tests {
         }
         .apply(&mut cfg)
         .unwrap();
-        assert!(cfg.interfaces[0].addresses.is_empty());
+        assert_eq!(cfg.interfaces[0].addresses, []);
     }
 
     #[test]

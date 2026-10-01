@@ -250,7 +250,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![domain("bd1")];
         let candidate = base.clone();
-        assert!(diff_broadcast_domains(&base, &candidate).is_empty());
+        assert_eq!(diff_broadcast_domains(&base, &candidate), []);
     }
 
     #[test]
@@ -319,6 +319,9 @@ mod tests {
         ];
         let mut candidate_domain = base_domain.clone();
         candidate_domain.addresses.reverse();
-        assert!(diff_broadcast_domains(&[base_domain], &[candidate_domain]).is_empty());
+        assert_eq!(
+            diff_broadcast_domains(&[base_domain], &[candidate_domain]),
+            []
+        );
     }
 }

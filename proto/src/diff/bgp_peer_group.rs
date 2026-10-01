@@ -418,7 +418,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![group("pg1", 65000)];
         let candidate = base.clone();
-        assert!(diff_bgp_peer_groups(&base, &candidate).is_empty());
+        assert_eq!(diff_bgp_peer_groups(&base, &candidate), []);
     }
 
     #[test]

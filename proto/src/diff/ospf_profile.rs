@@ -196,7 +196,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![profile("p1")];
         let candidate = base.clone();
-        assert!(diff_ospf_profiles(&base, &candidate).is_empty());
+        assert_eq!(diff_ospf_profiles(&base, &candidate), []);
     }
 
     #[test]

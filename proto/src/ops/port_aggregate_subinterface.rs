@@ -319,7 +319,7 @@ mod tests {
         }
         .apply(&mut cfg)
         .unwrap();
-        assert!(cfg.port_aggregates[0].subinterfaces.is_empty());
+        assert_eq!(cfg.port_aggregates[0].subinterfaces, []);
     }
 
     #[test]

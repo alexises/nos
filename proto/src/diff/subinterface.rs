@@ -172,7 +172,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![sub(0, &["10.0.0.1/24"], Some("rt1"))];
         let candidate = base.clone();
-        assert!(diff_subinterfaces(&base, &candidate).is_empty());
+        assert_eq!(diff_subinterfaces(&base, &candidate), []);
     }
 
     #[test]
@@ -226,7 +226,7 @@ mod tests {
     fn reordered_addresses_are_not_a_change() {
         let base = vec![sub(0, &["10.0.0.1/24", "10.0.0.2/24"], None)];
         let candidate = vec![sub(0, &["10.0.0.2/24", "10.0.0.1/24"], None)];
-        assert!(diff_subinterfaces(&base, &candidate).is_empty());
+        assert_eq!(diff_subinterfaces(&base, &candidate), []);
     }
 
     #[test]

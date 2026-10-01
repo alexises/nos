@@ -88,7 +88,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![instance("sri1", vec![route("10.0.0.0/24", "10.0.0.1")])];
         let candidate = base.clone();
-        assert!(diff_static_routing_instances(&base, &candidate).is_empty());
+        assert_eq!(diff_static_routing_instances(&base, &candidate), []);
     }
 
     #[test]
@@ -122,7 +122,7 @@ mod tests {
         let sections = diff_static_routing_instances(&base, &candidate);
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].status, DiffStatus::Modified);
-        assert!(sections[0].fields.is_empty());
+        assert_eq!(sections[0].fields, []);
         assert_eq!(sections[0].subsections.len(), 1);
     }
 

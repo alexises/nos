@@ -109,7 +109,7 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.prefix_lists.len(), 1);
-        assert!(cfg.prefix_lists[0].entries.is_empty());
+        assert_eq!(cfg.prefix_lists[0].entries, []);
     }
 
     #[test]
@@ -132,7 +132,7 @@ mod tests {
         }
         .apply(&mut cfg)
         .unwrap();
-        assert!(cfg.prefix_lists[0].entries.is_empty());
+        assert_eq!(cfg.prefix_lists[0].entries, []);
     }
 
     #[test]

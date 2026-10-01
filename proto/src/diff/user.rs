@@ -58,7 +58,10 @@ mod tests {
 
     #[test]
     fn same_hash_is_no_diff() {
-        assert!(diff_users(&[u("a", "$argon2id$1")], &[u("a", "$argon2id$1")]).is_empty());
+        assert_eq!(
+            diff_users(&[u("a", "$argon2id$1")], &[u("a", "$argon2id$1")]),
+            []
+        );
     }
 
     #[test]

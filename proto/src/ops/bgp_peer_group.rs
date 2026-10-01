@@ -592,7 +592,7 @@ mod tests {
         assert_eq!(inst.peer_groups.len(), 1);
         assert_eq!(inst.peer_groups[0].remote_as, 0);
         assert_eq!(inst.peer_groups[0].source_address, None);
-        assert!(inst.peer_groups[0].address_families.is_empty());
+        assert_eq!(inst.peer_groups[0].address_families, []);
         assert_eq!(inst.peer_groups[0].hold_time, None);
         assert_eq!(inst.peer_groups[0].keepalive_interval, None);
         assert_eq!(inst.peer_groups[0].connect_retry_time, None);
@@ -949,9 +949,7 @@ mod tests {
             .apply(&mut cfg)
             .unwrap();
         }
-        assert!(cfg.bgp_instances[0].peer_groups[0]
-            .address_families
-            .is_empty());
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].address_families, []);
     }
 
     #[test]

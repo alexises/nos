@@ -206,7 +206,7 @@ mod tests {
         }
         .apply(&mut cfg)
         .unwrap();
-        assert!(cfg.bgp_instances[0].peers.is_empty());
+        assert_eq!(cfg.bgp_instances[0].peers, []);
     }
 
     #[test]

@@ -157,7 +157,7 @@ mod tests {
         }
         .apply(&mut cfg)
         .unwrap();
-        assert!(cfg.static_routing_instances[0].routes.is_empty());
+        assert_eq!(cfg.static_routing_instances[0].routes, []);
     }
 
     #[test]

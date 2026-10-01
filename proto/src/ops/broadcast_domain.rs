@@ -376,7 +376,7 @@ mod tests {
         }
         .apply(&mut cfg)
         .unwrap();
-        assert!(cfg.broadcast_domains[0].addresses.is_empty());
+        assert_eq!(cfg.broadcast_domains[0].addresses, []);
     }
 
     #[test]
