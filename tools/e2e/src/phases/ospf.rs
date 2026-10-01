@@ -595,6 +595,120 @@ pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
         .await
 }
 
+/// RFC 3623 graceful restart (requires `ospf`, runs after `ospf-auth`):
+/// router-a, with a grace period configured and its loopback in OSPF, is
+/// restarted with SIGTERM. It must send a Grace-LSA and keep its LSAs instead
+/// of flushing them, and router-b must help: hold the eth0.0 adjacency and
+/// keep router-a's loopback route installed through the whole restart, then
+/// resynchronize with the respawned process.
+pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let instance = |extra: &[&str]| {
+        let mut f = strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            OSPF_ROUTER_ID,
+        ]);
+        f.extend(strings(extra));
+        f
+    };
+    a.provision_flags(&with_base(
+        A,
+        instance(&[
+            "--ospf-graceful-restart-grace-period",
+            "120",
+            "--loopback-address",
+            OSPF_GR_LOOPBACK_ADDRESS,
+            "--ospf-loopback-profile",
+            OSPF_PROFILE,
+        ]),
+    ))
+    .await?;
+    a.wait("ospf instance config resolved.*graceful_restart_grace_period=Some(120)")
+        .await?;
+    b.wait(&format!(
+        "added route prefix={OSPF_GR_LOOPBACK_ADDRESS}.*source=Some(Ospf)"
+    ))
+    .await?;
+
+    let torn = "ospf neighbor adjacency torn down, back to init link=eth0.0\\|ospf neighbor state changed to down link=eth0.0";
+    let flushed = format!("ospf lsa maxage flushed.*advertising_router={OSPF_ROUTER_ID}$");
+    let flush_on_a = "ospf flushing self-originated lsas before shutdown";
+    let (full_on_b, full_on_a) = (full_p2p(OSPF_ROUTER_ID), full_p2p(OSPF_ROUTER_ID_B));
+    let (torn0, flushed0, flush_a0, full_b0, full_a0) = (
+        b.count(torn),
+        b.count(&flushed),
+        a.count(flush_on_a),
+        b.count(&full_on_b),
+        a.count(&full_on_a),
+    );
+    log("sending SIGTERM to router-a's nos-ospfd; it must announce a grace period first");
+    w.dock
+        .signal_process("router-a", "nos-ospfd", "-TERM")
+        .await?;
+    let restart = async {
+        a.wait("ospf graceful restart: announcing grace period before shutdown grace_period=120")
+            .await?;
+        a.wait(&format!(
+            "ospf graceful restart: grace-lsa sent link=eth0.0 neighbor={OSPF_ROUTER_ID_B} grace_period=120"
+        ))
+        .await?;
+        b.wait(&format!(
+            "ospf helper: grace period entered link=eth0.0 neighbor={OSPF_ROUTER_ID} grace_period=120 restart_reason=1"
+        ))
+        .await?;
+        // The watchdog respawns router-a; the fresh process resynchronizes
+        // with the neighbor that held it Full the whole time.
+        b.wait_new(&full_on_b, full_b0, 90).await?;
+        a.wait_new(&full_on_a, full_a0, 90).await?;
+        b.wait(&format!(
+            "ospf helper: neighbor reformed, exiting grace early link=eth0.0 neighbor={OSPF_ROUTER_ID}"
+        ))
+        .await?;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        anyhow::Ok(())
+    };
+    // router-b's RIB must hold the OSPF route at every sample of the restart.
+    // (Its next hops may still change — the bridge adjacency, not covered by
+    // this phase, can come up meanwhile — which the kernel driver logs as a
+    // remove + add, so the kernel log alone can't tell a drop from that.)
+    let route_held = async {
+        loop {
+            if !b.rt1_has(OSPF_GR_LOOPBACK_ADDRESS, "Ospf").await? {
+                bail!(
+                    "router-b lost its ospf route to {OSPF_GR_LOOPBACK_ADDRESS} during the restart"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    };
+    tokio::select! {
+        r = restart => r?,
+        r = route_held => r?,
+    }
+    log("router-b held its ospf route to router-a's loopback through the restart");
+    // RFC 3623 §2: the restarter keeps its LSAs; the helper never tears the
+    // adjacency down and never flushes them.
+    a.assert_quiet(flush_on_a, flush_a0, 0).await?;
+    b.assert_quiet(torn, torn0, 0).await?;
+    b.assert_quiet(&flushed, flushed0, 0).await?;
+
+    log("restoring router-a: loopback out of ospf, graceful restart off");
+    a.provision_flags(&with_base(
+        A,
+        instance(&[
+            "--ospf-graceful-restart-grace-period",
+            "0",
+            "--loopback-remove-address",
+            OSPF_GR_LOOPBACK_ADDRESS,
+            "--clear-ospf-loopback-profile",
+        ]),
+    ))
+    .await?;
+    b.wait_ospf_route_gone(OSPF_GR_LOOPBACK_ADDRESS, 5).await
+}
+
 /// RFC 2328 §14 aging. Self-contained: both nos-ospfd processes start with a
 /// real `--lsa-age-multiplier` (1800s/3600s become 10s/20s).
 pub async fn ospf_aging(w: &mut World) -> anyhow::Result<()> {

@@ -429,6 +429,7 @@ mod tests {
             areas,
             routing_table: None,
             redistribute_policy: None,
+            graceful_restart_grace_period: None,
         }
     }
 

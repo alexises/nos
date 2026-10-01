@@ -141,8 +141,10 @@ async fn resync(
         router_id = %own.router_id,
         routing_table = ?own.routing_table,
         area_count = own.areas.len(),
+        graceful_restart_grace_period = ?own.graceful_restart_grace_period,
         "ospf instance config resolved"
     );
+    links.set_graceful_restart(own.graceful_restart_grace_period);
 
     let mut desired_links = Vec::new();
     let mut desired_stubs: HashMap<Ipv4Addr, Vec<(Ipv4Net, u16)>> = HashMap::new();

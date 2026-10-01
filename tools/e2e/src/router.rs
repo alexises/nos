@@ -301,7 +301,7 @@ impl Router {
 
     /// Whether nos-ribd's `rt1` lists a `source` candidate (`"Ospf"`,
     /// `"Connected"`, …) for `prefix`, read over REST.
-    async fn rt1_has(&self, prefix: &str, source: &str) -> anyhow::Result<bool> {
+    pub async fn rt1_has(&self, prefix: &str, source: &str) -> anyhow::Result<bool> {
         let body = self
             .rest_expect(Method::GET, "/v1/routes/rt1", None, 200)
             .await?;

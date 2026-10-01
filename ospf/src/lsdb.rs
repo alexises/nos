@@ -5,7 +5,8 @@
 //! shared by every link in the same area.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -101,6 +102,14 @@ impl Lsdb {
         outcome
     }
 
+    /// Drops `key` outright — a received Grace-LSA, acted on and never held
+    /// (see `link::handle_lsu`).
+    pub fn remove(&mut self, key: &LsaKey) {
+        self.entries.remove(key);
+        self.max_age_ticks.remove(key);
+        self.last_received.remove(key);
+    }
+
     pub fn get(&self, key: &LsaKey) -> Option<Arc<Lsa>> {
         self.entries.get(key).cloned()
     }
@@ -123,7 +132,13 @@ impl Lsdb {
     /// the evicted keys so `link.rs` can log them. The hold is what gives
     /// `link::flood_full_neighbors`' periodic resend a chance to carry the
     /// `MaxAge` copy to every neighbor first.
-    pub fn age_and_evict(&mut self, delta: u16) -> Vec<LsaKey> {
+    ///
+    /// An LSA whose advertising router is in `hold` (a neighbor in its RFC
+    /// 3623 grace period) is aged no further than just below `MaxAge`: the
+    /// helper keeps the restarting router's LSAs until grace ends. A copy
+    /// already at `MaxAge` (one the restarter flushed itself) is evicted as
+    /// usual.
+    pub fn age_and_evict(&mut self, delta: u16, hold: &HashSet<Ipv4Addr>) -> Vec<LsaKey> {
         let mut evicted = Vec::new();
         let max_age_ticks = &mut self.max_age_ticks;
         let last_received = &mut self.last_received;
@@ -139,7 +154,10 @@ impl Lsdb {
                 }
                 return true;
             }
-            let aged = lsa.header.age.saturating_add(delta).min(lsa::MAX_AGE);
+            let mut aged = lsa.header.age.saturating_add(delta).min(lsa::MAX_AGE);
+            if aged >= lsa::MAX_AGE && hold.contains(&key.advertising_router) {
+                aged = lsa::MAX_AGE - 1;
+            }
             if aged != lsa.header.age {
                 let mut updated = (**lsa).clone();
                 updated.header.age = aged;
@@ -224,7 +242,7 @@ mod tests {
     fn age_and_evict_increments_age_without_eviction() {
         let mut db = Lsdb::new();
         db.install(lsa(1));
-        let evicted = db.age_and_evict(100);
+        let evicted = db.age_and_evict(100, &HashSet::new());
         assert!(evicted.is_empty());
         assert_eq!(db.get(&lsa(1).header.key()).unwrap().header.age, 100);
     }
@@ -232,7 +250,7 @@ mod tests {
     /// Ticks until `age_and_evict` reports an eviction, or `None` if it never does
     /// within `MAX_AGE_HOLD_TICKS + 1` ticks.
     fn ticks_until_evicted(db: &mut Lsdb, delta: u16) -> Option<u16> {
-        (1..=MAX_AGE_HOLD_TICKS + 1).find(|_| !db.age_and_evict(delta).is_empty())
+        (1..=MAX_AGE_HOLD_TICKS + 1).find(|_| !db.age_and_evict(delta, &HashSet::new()).is_empty())
     }
 
     #[test]
@@ -241,7 +259,7 @@ mod tests {
         db.install(lsa(1));
         let key = lsa(1).header.key();
         // Saturates at MAX_AGE on the first tick, then is held for the flood window.
-        assert!(db.age_and_evict(lsa::MAX_AGE).is_empty());
+        assert!(db.age_and_evict(lsa::MAX_AGE, &HashSet::new()).is_empty());
         assert_eq!(db.get(&key).unwrap().header.age, lsa::MAX_AGE);
         assert_eq!(ticks_until_evicted(&mut db, 1), Some(MAX_AGE_HOLD_TICKS));
         assert!(db.get(&key).is_none());
@@ -272,11 +290,36 @@ mod tests {
         flushed.header.age = lsa::MAX_AGE;
         db.install(flushed);
         for _ in 0..MAX_AGE_HOLD_TICKS - 1 {
-            assert!(db.age_and_evict(1).is_empty());
+            assert!(db.age_and_evict(1, &HashSet::new()).is_empty());
         }
         assert_eq!(db.install(lsa(2)), InstallOutcome::Superseded);
-        assert!(db.age_and_evict(1).is_empty());
+        assert!(db.age_and_evict(1, &HashSet::new()).is_empty());
         assert_eq!(db.get(&lsa(2).header.key()).unwrap().header.age, 1);
+    }
+
+    #[test]
+    fn age_and_evict_holds_a_router_in_grace() {
+        let mut db = Lsdb::new();
+        db.install(lsa(1));
+        let key = lsa(1).header.key();
+        let in_grace = HashSet::from([key.advertising_router]);
+        assert!(db.age_and_evict(lsa::MAX_AGE, &in_grace).is_empty());
+        assert_eq!(db.get(&key).unwrap().header.age, lsa::MAX_AGE - 1);
+        // Grace over: it reaches MaxAge and is evicted after the usual hold.
+        assert!(db.age_and_evict(1, &HashSet::new()).is_empty());
+        assert_eq!(ticks_until_evicted(&mut db, 1), Some(MAX_AGE_HOLD_TICKS));
+    }
+
+    /// A copy the restarter already flushed (at `MaxAge`) is not held.
+    #[test]
+    fn age_and_evict_does_not_hold_a_flushed_copy() {
+        let mut db = Lsdb::new();
+        let mut flushed = lsa(1);
+        flushed.header.age = lsa::MAX_AGE;
+        db.install(flushed);
+        let in_grace = HashSet::from([lsa(1).header.advertising_router]);
+        let evicted = (0..MAX_AGE_HOLD_TICKS).any(|_| !db.age_and_evict(1, &in_grace).is_empty());
+        assert!(evicted);
     }
 
     /// RFC 2328 §13 step 5a: a newer instance within `MIN_LS_ARRIVAL` of the

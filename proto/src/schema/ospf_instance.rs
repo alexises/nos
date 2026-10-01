@@ -58,6 +58,17 @@ pub struct OspfInstance {
     #[garde(skip)]
     #[cli(hidden)]
     pub redistribute_policy: Option<String>,
+
+    /// RFC 3623 graceful restart: on a planned shutdown, send a Grace-LSA
+    /// asking every `Full` neighbor to keep the adjacency (and this router's
+    /// routes) for this many seconds while the daemon restarts. `None`
+    /// (default) disables it. Helper mode needs no config — every instance
+    /// always helps a restarting neighbor.
+    // ponytail: capped at 1800s; RFC 3623 sets no ceiling, raise if asked.
+    #[serde(default)]
+    #[garde(range(min = 1, max = 1800))]
+    #[cli(topic = OspfInstanceGracefulRestart, words = "graceful-restart grace-period")]
+    pub graceful_restart_grace_period: Option<u16>,
 }
 
 /// The placeholder a new `OspfInstance` starts from (`edit` on a missing one).
@@ -69,6 +80,7 @@ impl Default for OspfInstance {
             areas: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
+            graceful_restart_grace_period: None,
         }
     }
 }
@@ -106,6 +118,7 @@ mod tests {
             areas: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
+            graceful_restart_grace_period: None,
         }
     }
 

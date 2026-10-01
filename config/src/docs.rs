@@ -752,6 +752,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Updates the router-id field on the named OSPF instance in the transaction's \
              in-progress config. The instance must already exist.",
         ),
+        Topic::OspfInstanceGracefulRestart => (
+            "Announce an RFC 3623 graceful restart before a planned shutdown.",
+            "On a planned shutdown the instance sends a Grace-LSA to every Full neighbor, which then keeps the adjacency and this router's routes for this many seconds (1-1800) while it restarts. `delete` turns it off. Helping a restarting neighbor needs no config.",
+        ),
         Topic::OspfArea => (
             "Create an OSPF area in the transaction if it doesn't already exist.",
             concat!(

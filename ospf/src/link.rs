@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,7 +18,7 @@ use nos_proto::{
     RedistributeUpdate,
 };
 use nos_rpl::CompiledPolicy;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{info, warn};
@@ -26,8 +26,8 @@ use tracing::{info, warn};
 use crate::election::{self, Candidate};
 use crate::exchange::{self, AdjacencyData};
 use crate::lsa::{
-    self, AsExternalLsaBody, Lsa, LsaBody, LsaHeader, LsaKey, NetworkLsaBody, RouterLink,
-    RouterLsaBody, SummaryLsaBody, LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK,
+    self, AsExternalLsaBody, GraceLsaBody, Lsa, LsaBody, LsaHeader, LsaKey, NetworkLsaBody,
+    RouterLink, RouterLsaBody, SummaryLsaBody, LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK,
     LINK_TYPE_TRANSIT_NETWORK,
 };
 use crate::lsdb::Lsdb;
@@ -112,6 +112,12 @@ const AGE_TICK_INTERVAL: Duration = Duration::from_secs(1);
 /// Well inside `nos-watchdogd`'s 10s SIGINT-to-SIGKILL budget (root
 /// `CLAUDE.md`, "Process supervision") — recheck if `RXMT_INTERVAL` grows.
 const PREMATURE_AGE_FLOOD_WINDOW: Duration = Duration::from_secs(6);
+
+/// How long `LinkManager::announce_graceful_restart` waits after each
+/// Grace-LSA send before the next one (two sends) and before exiting —
+/// enough for the link tasks to put them on the wire. ponytail: sent twice,
+/// not retransmitted until acked; a lossless local link is the norm here.
+const GRACE_SEND_WINDOW: Duration = Duration::from_millis(500);
 
 /// One link's fully-resolved desired state — diffed wholesale by
 /// `LinkManager::reconcile`, mirroring `bgp::session::ResolvedPeer`: any
@@ -266,6 +272,10 @@ pub struct NeighborInfo {
     /// Keyed by packet type under RFC 7474 (its replay rule is per type), by
     /// a single `0` slot under RFC 2328's classic `AuType` 2.
     pub last_crypto_seq: HashMap<u8, u64>,
+    /// RFC 3623 helper mode: `Some` while this neighbor is restarting under
+    /// a Grace-LSA it sent. Until then its adjacency is held through missing
+    /// Hellos and Hellos that don't list us (see `in_grace`).
+    pub grace_deadline: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -357,6 +367,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
 /// Runs until aborted (link removed from config, or process shutdown — see
 /// `LinkManager`). Owns the raw socket, the Hello send ticker, and every
 /// timer this link's network type needs.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     socket: std::io::Result<LinkSocket>,
     cfg: LinkConfig,
@@ -365,6 +376,7 @@ pub async fn run(
     status: StatusHandle,
     dbd_max_headers: Option<usize>,
     boot_count: u32,
+    mut grace_rx: mpsc::UnboundedReceiver<u32>,
 ) {
     let socket = match socket {
         Ok(s) => s,
@@ -483,7 +495,11 @@ pub async fn run(
                 apply_dead_timer(&cfg, &status);
                 p2p_dead_deadline = Instant::now() + Duration::from_secs(u64::from(cfg.dead_interval));
             }
-            _ = dead_sweep.tick(), if is_broadcast => {
+            _ = dead_sweep.tick() => {
+                expire_grace(&cfg, &status);
+                if !is_broadcast {
+                    continue;
+                }
                 sweep_dead_neighbors(&cfg, &status);
                 if !waiting {
                     run_election(&cfg, local_router_id, &status);
@@ -499,6 +515,9 @@ pub async fn run(
                 flush_pending_acks(&socket, &cfg, local_router_id, &status, &mut next_seq);
                 retransmit_pending(&socket, &cfg, local_router_id, &status, &mut next_seq);
                 flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &status, &mut next_seq).await;
+            }
+            Some(grace_period) = grace_rx.recv() => {
+                send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period, &mut next_seq);
             }
         }
     }
@@ -690,7 +709,13 @@ fn handle_hello(
         .neighbors
         .get(&hello.router_id)
         .map_or(NeighborState::Down, |n| n.state);
-    let new_state = neighbor::step(old_state, neighbor::Event::HelloReceived { saw_self });
+    // RFC 3623 §3.1: a restarting neighbor's fresh Hellos don't list us yet —
+    // that must not tear the adjacency down while we're helping it.
+    let new_state = if !saw_self && in_grace(status, hello.router_id) {
+        old_state
+    } else {
+        neighbor::step(old_state, neighbor::Event::HelloReceived { saw_self })
+    };
     if old_state == NeighborState::Down && new_state == NeighborState::Init {
         info!(link = %cfg.attach_point, neighbor = %hello.router_id, "ospf neighbor state changed to init");
     }
@@ -716,6 +741,7 @@ fn handle_hello(
                 address: source,
                 adjacency: None,
                 last_crypto_seq: HashMap::new(),
+                grace_deadline: None,
             });
         entry.state = new_state;
         entry.priority = hello.router_priority;
@@ -899,7 +925,17 @@ async fn handle_lsu(
 
     let (actions, newly_installed) = {
         let mut lsdb = lsdb.lock().await;
-        exchange::on_lsu_received(&mut adj, &mut lsdb, lsu, std::time::Instant::now())
+        let result = exchange::on_lsu_received(&mut adj, &mut lsdb, lsu, std::time::Instant::now());
+        // A Grace-LSA is link-local (RFC 3623): acted on at once and never
+        // held, so no other link's periodic resend floods it and it is never
+        // offered back to the restarted router. Removed under the same lock
+        // the install took. ponytail: no link-local store; #40 adds one.
+        for l in &lsu.lsas {
+            if matches!(l.body, LsaBody::Grace(_)) && result.1.contains(&l.header) {
+                lsdb.remove(&l.header.key());
+            }
+        }
+        result
     };
     if adj.pending_acks_since.is_none() && !adj.pending_acks.is_empty() {
         adj.pending_acks_since = Some(std::time::Instant::now());
@@ -911,6 +947,15 @@ async fn handle_lsu(
             advertising_router = %header.advertising_router, age = header.age,
             "ospf lsa installed"
         );
+    }
+    for grace in lsu
+        .lsas
+        .iter()
+        .filter(|l| newly_installed.contains(&l.header))
+    {
+        if let LsaBody::Grace(body) = grace.body {
+            on_grace_lsa(cfg, status, &grace.header, body);
+        }
     }
 
     Some(finish_neighbor_event(
@@ -995,6 +1040,9 @@ fn finish_neighbor_event(
         }
         (s, NeighborState::Full) if s != NeighborState::Full => {
             info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf neighbor reached full");
+            if in_grace(status, neighbor_id) {
+                info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf helper: neighbor reformed, exiting grace early");
+            }
         }
         _ => {}
     }
@@ -1003,6 +1051,9 @@ fn finish_neighbor_event(
         if let Some(info) = s.neighbors.get_mut(&neighbor_id) {
             info.state = new_state;
             info.adjacency = Some(adj.clone());
+            if new_state == NeighborState::Full && old_state != NeighborState::Full {
+                info.grace_deadline = None;
+            }
         }
     });
 
@@ -1272,9 +1323,18 @@ async fn flood_full_neighbors(
 /// Point-to-point only — `run()` only arms this branch when
 /// `cfg.network_type` is `PointToPoint`. At most one neighbor entry.
 fn apply_dead_timer(cfg: &LinkConfig, status: &StatusHandle) {
-    let Some(old_state) = status.borrow().neighbors.values().next().map(|n| n.state) else {
+    let Some((old_state, grace)) = status
+        .borrow()
+        .neighbors
+        .values()
+        .next()
+        .map(|n| (n.state, n.grace_deadline))
+    else {
         return;
     };
+    if grace.is_some() {
+        return;
+    }
     if old_state != NeighborState::Down {
         warn!(link = %cfg.attach_point, "ospf neighbor state changed to down");
     }
@@ -1299,6 +1359,7 @@ fn sweep_dead_neighbors(cfg: &LinkConfig, status: &StatusHandle) {
         .iter()
         .filter(|(_, info)| {
             info.state != NeighborState::Down
+                && info.grace_deadline.is_none()
                 && now.duration_since(info.last_hello_received) >= dead_interval
         })
         .map(|(id, _)| *id)
@@ -1317,6 +1378,150 @@ fn sweep_dead_neighbors(cfg: &LinkConfig, status: &StatusHandle) {
             }
         }
     });
+}
+
+fn in_grace(status: &StatusHandle, neighbor_id: Ipv4Addr) -> bool {
+    status
+        .borrow()
+        .neighbors
+        .get(&neighbor_id)
+        .is_some_and(|n| n.grace_deadline.is_some())
+}
+
+/// RFC 3623 helper side: a Grace-LSA from a `Full` neighbor on this link
+/// starts (or, idempotently, refreshes) its grace period; a `MaxAge` one —
+/// the restarting router flushing it — ends it. Matched on the advertising
+/// router id, which is how neighbors are keyed here (the IP Interface
+/// Address TLV only matters where neighbors are keyed by address).
+///
+/// ponytail: no RFC 3623 §3.2 (c) strict LSA checking — helping goes on
+/// through a topology change. Add it if a real topology change during a
+/// restart matters: with periodic full resend, "an LSA flooded to the
+/// restarter changed" means any type 1-5 content change in this area from
+/// anyone but the restarter.
+fn on_grace_lsa(cfg: &LinkConfig, status: &StatusHandle, header: &LsaHeader, body: GraceLsaBody) {
+    let neighbor_id = header.advertising_router;
+    let Some((state, deadline)) = status
+        .borrow()
+        .neighbors
+        .get(&neighbor_id)
+        .map(|n| (n.state, n.grace_deadline))
+    else {
+        return;
+    };
+    if header.age >= lsa::MAX_AGE {
+        if deadline.is_some() {
+            info!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf helper: grace-lsa flushed, exiting grace");
+            status.send_modify(|s| {
+                if let Some(n) = s.neighbors.get_mut(&neighbor_id) {
+                    n.grace_deadline = None;
+                }
+            });
+        }
+        return;
+    }
+    if state != NeighborState::Full {
+        warn!(link = %cfg.attach_point, neighbor = %neighbor_id, "ospf helper: ignoring grace-lsa from a neighbor that is not full");
+        return;
+    }
+    if deadline.is_none() {
+        info!(
+            link = %cfg.attach_point, neighbor = %neighbor_id,
+            grace_period = body.grace_period, restart_reason = body.restart_reason,
+            "ospf helper: grace period entered"
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(u64::from(body.grace_period));
+    status.send_modify(|s| {
+        if let Some(n) = s.neighbors.get_mut(&neighbor_id) {
+            n.grace_deadline = Some(deadline);
+        }
+    });
+}
+
+/// Ends every grace period whose deadline has passed; the neighbor is then
+/// subject to the ordinary inactivity timer again, restarted from now.
+fn expire_grace(cfg: &LinkConfig, status: &StatusHandle) {
+    let now = Instant::now();
+    let expired: Vec<Ipv4Addr> = status
+        .borrow()
+        .neighbors
+        .iter()
+        .filter(|(_, n)| n.grace_deadline.is_some_and(|d| d <= now))
+        .map(|(id, _)| *id)
+        .collect();
+    for id in &expired {
+        warn!(link = %cfg.attach_point, neighbor = %id, "ospf helper: grace period expired");
+    }
+    if !expired.is_empty() {
+        status.send_modify(|s| {
+            for id in &expired {
+                if let Some(n) = s.neighbors.get_mut(id) {
+                    n.grace_deadline = None;
+                    n.last_hello_received = now;
+                }
+            }
+        });
+    }
+}
+
+/// RFC 3623's restarting side: one Grace-LSA (type 9, opaque type 3) unicast
+/// to every `Full` neighbor on this link, just before the process exits.
+/// Never installed locally.
+fn send_grace_lsas(
+    socket: &LinkSocket,
+    cfg: &LinkConfig,
+    local_router_id: Ipv4Addr,
+    status: &StatusHandle,
+    grace_period: u32,
+    next_seq: &mut u64,
+) {
+    let grace = Lsa {
+        header: LsaHeader {
+            age: 0,
+            options: 0,
+            lsa_type: lsa::LSA_TYPE_OPAQUE_LINK,
+            link_state_id: lsa::GRACE_LINK_STATE_ID,
+            advertising_router: local_router_id,
+            sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+            checksum: 0,
+            length: 0,
+        },
+        body: LsaBody::Grace(GraceLsaBody {
+            grace_period,
+            restart_reason: lsa::RESTART_REASON_SOFTWARE,
+            interface_address: Some(cfg.local_addr),
+        }),
+    };
+    let auth = cfg
+        .auth
+        .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
+    let payload = packet::encode_lsu(
+        &LsuPacket {
+            router_id: local_router_id,
+            area_id: cfg.area_id,
+            lsas: vec![grace],
+        },
+        &auth,
+    );
+    let full: Vec<(Ipv4Addr, Ipv4Addr)> = status
+        .borrow()
+        .neighbors
+        .iter()
+        .filter(|(_, n)| n.state == NeighborState::Full)
+        .map(|(id, n)| (*id, n.address))
+        .collect();
+    for (neighbor_id, address) in full {
+        match socket.send_unicast(address, &payload) {
+            Ok(()) => info!(
+                link = %cfg.attach_point, neighbor = %neighbor_id, grace_period,
+                "ospf graceful restart: grace-lsa sent"
+            ),
+            Err(e) => {
+                warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf grace-lsa");
+            }
+        }
+    }
 }
 
 /// Broadcast only. Runs RFC 2328 §9.4 election (`election::elect`) over
@@ -1416,6 +1621,8 @@ struct LinkEntry {
     config: LinkConfig,
     task: JoinHandle<()>,
     status: watch::Receiver<LinkStatus>,
+    /// Asks the link task to send Grace-LSAs (the grace period, seconds).
+    grace_tx: mpsc::UnboundedSender<u32>,
 }
 
 /// Owns every OSPF link's driver task for one `nos-ospfd` process, plus its
@@ -1472,6 +1679,12 @@ pub struct LinkManager {
     /// LSAs it just flushed while their `MaxAge` copies are still being
     /// flooded (`PREMATURE_AGE_FLOOD_WINDOW`). Aging keeps running.
     shutting_down: AtomicBool,
+    /// RFC 3623 grace period (seconds) to announce on a planned restart;
+    /// `0` = graceful restart off.
+    grace_period: AtomicU16,
+    /// Set by `announce_graceful_restart`: `shutdown` then keeps every
+    /// self-originated LSA instead of flushing it (RFC 3623 §2).
+    restarting: AtomicBool,
     opener: Opener,
 }
 
@@ -1510,6 +1723,8 @@ impl LinkManager {
             redistribute_raw: Mutex::new(HashSet::new()),
             redistribute_filtered: Mutex::new(HashSet::new()),
             shutting_down: AtomicBool::new(false),
+            grace_period: AtomicU16::new(0),
+            restarting: AtomicBool::new(false),
             opener,
         });
         let background = Arc::clone(&manager);
@@ -1542,6 +1757,11 @@ impl LinkManager {
         manager
     }
 
+    pub fn set_graceful_restart(&self, grace_period: Option<u16>) {
+        self.grace_period
+            .store(grace_period.unwrap_or(0), Ordering::Relaxed);
+    }
+
     /// Gets or creates the shared LSDB for `area_id`.
     async fn lsdb_for(&self, area_id: Ipv4Addr) -> Arc<Mutex<Lsdb>> {
         Arc::clone(
@@ -1558,6 +1778,23 @@ impl LinkManager {
     /// reaches `MAX_AGE`. Run every `AGE_TICK_INTERVAL`, independent of
     /// `originate_router_lsas` — aging is LSDB-wide, not per-link.
     async fn age_lsdbs(&self) {
+        // RFC 3623 §3.1: a restarting neighbor's LSAs are kept until its grace
+        // period ends.
+        let hold: HashSet<Ipv4Addr> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .flat_map(|e| {
+                e.status
+                    .borrow()
+                    .neighbors
+                    .iter()
+                    .filter(|(_, n)| n.grace_deadline.is_some())
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         let areas: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
             .lsdbs
             .lock()
@@ -1566,7 +1803,7 @@ impl LinkManager {
             .map(|(area_id, lsdb)| (*area_id, Arc::clone(lsdb)))
             .collect();
         for (area_id, lsdb) in areas {
-            let evicted = lsdb.lock().await.age_and_evict(self.age_multiplier);
+            let evicted = lsdb.lock().await.age_and_evict(self.age_multiplier, &hold);
             for key in evicted {
                 info!(
                     area = %area_id, lsa_type = key.lsa_type, link_state_id = %key.link_state_id,
@@ -1665,7 +1902,11 @@ impl LinkManager {
                         status
                             .neighbors
                             .iter()
-                            .filter(|(_, n)| n.state == NeighborState::Full)
+                            // RFC 3623 §3.1: a restarting neighbor we help
+                            // is still advertised as fully adjacent.
+                            .filter(|(_, n)| {
+                                n.state == NeighborState::Full || n.grace_deadline.is_some()
+                            })
                             .map(|(id, _)| *id),
                     )
                     .collect();
@@ -1930,6 +2171,7 @@ impl LinkManager {
             } else {
                 0
             };
+            let (grace_tx, grace_rx) = mpsc::unbounded_channel();
             let task = tokio::spawn(run(
                 (self.opener)(&cfg),
                 cfg.clone(),
@@ -1938,6 +2180,7 @@ impl LinkManager {
                 status_tx,
                 self.dbd_max_headers,
                 boot_count,
+                grace_rx,
             ));
             links.insert(
                 key,
@@ -1945,6 +2188,7 @@ impl LinkManager {
                     config: cfg,
                     task,
                     status: status_rx,
+                    grace_tx,
                 },
             );
         }
@@ -2040,15 +2284,49 @@ impl LinkManager {
         withdrawn
     }
 
+    /// RFC 3623: when graceful restart is configured, has every link send a
+    /// Grace-LSA to its `Full` neighbors (twice) and waits for them to go
+    /// out, then makes `shutdown` keep this router's LSAs. Called on a
+    /// planned restart (SIGTERM) only, before `shutdown`.
+    pub async fn announce_graceful_restart(&self) {
+        let grace_period = self.grace_period.load(Ordering::Relaxed);
+        if grace_period == 0 {
+            return;
+        }
+        info!(
+            grace_period,
+            "ospf graceful restart: announcing grace period before shutdown"
+        );
+        self.restarting.store(true, Ordering::Relaxed);
+        let senders: Vec<mpsc::UnboundedSender<u32>> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .map(|e| e.grace_tx.clone())
+            .collect();
+        for _ in 0..2 {
+            for tx in &senders {
+                let _ = tx.send(u32::from(grace_period));
+            }
+            tokio::time::sleep(GRACE_SEND_WINDOW).await;
+        }
+    }
+
     /// Graceful shutdown: flushes every self-originated LSA (RFC 2328
-    /// §14.1) and keeps the link tasks alive for `PREMATURE_AGE_FLOOD_WINDOW`
+    /// §14.1) — unless a graceful restart was announced, which must keep
+    /// them (RFC 3623 §2) — and keeps the link tasks alive for `PREMATURE_AGE_FLOOD_WINDOW`
     /// so their periodic resend carries the `MaxAge` copies to every neighbor
     /// — which then drops this router's routes at once instead of only when
     /// its LSAs age out an hour later — then aborts every link task. Called
     /// once when `crate::reconcile::run`'s loop exits on shutdown.
     pub async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::Relaxed);
-        let withdrawn = self.withdraw_all_self_originated().await;
+        let withdrawn = if self.restarting.load(Ordering::Relaxed) {
+            0
+        } else {
+            self.withdraw_all_self_originated().await
+        };
         if withdrawn > 0 {
             info!(
                 withdrawn,
@@ -2559,6 +2837,7 @@ mod tests {
             address,
             adjacency: None,
             last_crypto_seq: HashMap::new(),
+            grace_deadline: None,
         }
     }
 
@@ -2743,7 +3022,7 @@ mod tests {
             local_router_id,
             body.clone(),
         );
-        lsdb.age_and_evict(lsa::LS_REFRESH_TIME);
+        lsdb.age_and_evict(lsa::LS_REFRESH_TIME, &HashSet::new());
 
         install_self_originated(
             &mut lsdb,
@@ -2880,7 +3159,7 @@ mod tests {
             router_id,
             router_body(0),
         );
-        lsdb.age_and_evict(lsa::MIN_LS_INTERVAL);
+        lsdb.age_and_evict(lsa::MIN_LS_INTERVAL, &HashSet::new());
         install_self_originated(
             &mut lsdb,
             router_id,
@@ -2960,7 +3239,7 @@ mod tests {
 
         // Deferred while the flushed copy is still held.
         for _ in 0..crate::lsdb::MAX_AGE_HOLD_TICKS - 1 {
-            assert!(lsdb.age_and_evict(1).is_empty());
+            assert!(lsdb.age_and_evict(1, &HashSet::new()).is_empty());
             install_self_originated(
                 &mut lsdb,
                 router_id,
@@ -2973,7 +3252,7 @@ mod tests {
                 lsa::MAX_SEQUENCE_NUMBER
             );
         }
-        assert_eq!(lsdb.age_and_evict(1), vec![key]);
+        assert_eq!(lsdb.age_and_evict(1, &HashSet::new()), vec![key]);
 
         install_self_originated(
             &mut lsdb,
@@ -3458,7 +3737,7 @@ mod tests {
             local_router_id,
             router_body(0),
         );
-        lsdb.age_and_evict(lsa::MIN_LS_INTERVAL - 1);
+        lsdb.age_and_evict(lsa::MIN_LS_INTERVAL - 1, &HashSet::new());
         install_self_originated(
             &mut lsdb,
             local_router_id,
@@ -3470,7 +3749,7 @@ mod tests {
         assert_eq!(held.header.sequence_number, lsa::INITIAL_SEQUENCE_NUMBER);
         assert_eq!(held.body, router_body(0));
 
-        lsdb.age_and_evict(1);
+        lsdb.age_and_evict(1, &HashSet::new());
         install_self_originated(
             &mut lsdb,
             local_router_id,
@@ -4199,5 +4478,195 @@ mod tests {
             let got = tokio::time::timeout(Duration::from_millis(20), peer.recv()).await;
             assert_eq!(got.is_ok(), sent, "{state:?}");
         }
+    }
+
+    // --- RFC 3623 graceful restart ---
+
+    fn grace_status(grace: Option<Instant>) -> StatusHandle {
+        let mut status = LinkStatus::new(NetworkType::PointToPoint);
+        let mut info = neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2));
+        info.adjacency = Some(start_negotiation(&link("eth0.0", 10), Ipv4Addr::new(1, 1, 1, 1)).0);
+        info.grace_deadline = grace;
+        status.neighbors.insert(Ipv4Addr::new(9, 9, 9, 10), info);
+        watch::channel(status).0
+    }
+
+    fn state_of(status: &StatusHandle) -> NeighborState {
+        status.borrow().neighbors[&Ipv4Addr::new(9, 9, 9, 10)].state
+    }
+
+    #[tokio::test]
+    async fn grace_holds_full_through_a_hello_that_does_not_list_us() {
+        let cfg = link("eth0.0", 10);
+        let mut deadline = Instant::now();
+        for (grace, expected) in [
+            (
+                Some(Instant::now() + Duration::from_secs(60)),
+                NeighborState::Full,
+            ),
+            (None, NeighborState::Init),
+        ] {
+            let status = grace_status(grace);
+            handle_hello(
+                &cfg,
+                Ipv4Addr::new(1, 1, 1, 1),
+                &status,
+                Ipv4Addr::new(10, 0, 0, 2),
+                &matching_hello(&cfg, Ipv4Addr::new(9, 9, 9, 10)),
+                &mut deadline,
+                false,
+            );
+            assert_eq!(state_of(&status), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn grace_suppresses_the_inactivity_timer_until_it_expires() {
+        let cfg = link("eth0.0", 10);
+        let status = grace_status(Some(Instant::now() + Duration::from_secs(60)));
+        apply_dead_timer(&cfg, &status);
+        sweep_dead_neighbors(&cfg, &status);
+        assert_eq!(state_of(&status), NeighborState::Full);
+
+        status.send_modify(|s| {
+            for n in s.neighbors.values_mut() {
+                n.grace_deadline = Some(Instant::now());
+            }
+        });
+        expire_grace(&cfg, &status);
+        assert!(!in_grace(&status, Ipv4Addr::new(9, 9, 9, 10)));
+        apply_dead_timer(&cfg, &status);
+        assert_eq!(state_of(&status), NeighborState::Down);
+    }
+
+    #[tokio::test]
+    async fn grace_lsa_starts_helping_only_a_full_neighbor_and_is_idempotent() {
+        let cfg = link("eth0.0", 10);
+        let header = LsaHeader {
+            age: 1,
+            options: 0,
+            lsa_type: lsa::LSA_TYPE_OPAQUE_LINK,
+            link_state_id: lsa::GRACE_LINK_STATE_ID,
+            advertising_router: Ipv4Addr::new(9, 9, 9, 10),
+            sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+            checksum: 0,
+            length: 0,
+        };
+        let body = GraceLsaBody {
+            grace_period: 60,
+            restart_reason: lsa::RESTART_REASON_SOFTWARE,
+            interface_address: None,
+        };
+        let status = grace_status(None);
+        on_grace_lsa(&cfg, &status, &header, body);
+        on_grace_lsa(&cfg, &status, &header, body);
+        assert!(in_grace(&status, header.advertising_router));
+
+        let flushed = LsaHeader {
+            age: lsa::MAX_AGE,
+            ..header
+        };
+        on_grace_lsa(&cfg, &status, &flushed, body);
+        assert!(!in_grace(&status, header.advertising_router));
+
+        status.send_modify(|s| {
+            for n in s.neighbors.values_mut() {
+                n.state = NeighborState::ExStart;
+            }
+        });
+        on_grace_lsa(&cfg, &status, &header, body);
+        assert!(!in_grace(&status, header.advertising_router));
+    }
+
+    async fn helping(m: &LinkManager, neighbor: Ipv4Addr) -> bool {
+        m.links.lock().await.values().any(|e| {
+            e.status
+                .borrow()
+                .neighbors
+                .get(&neighbor)
+                .is_some_and(|n| n.grace_deadline.is_some())
+        })
+    }
+
+    async fn routes_to(m: &LinkManager, prefix: &str) -> bool {
+        let prefix: Ipv4Net = prefix.parse().unwrap();
+        m.compute_routes().await.iter().any(|r| r.prefix == prefix)
+    }
+
+    /// RFC 3623 over the wire: B announces a grace period and stops without
+    /// flushing its LSAs; A helps — keeps B `Full` and B's routes through
+    /// B's absence, past the dead interval, and through the restarted B's
+    /// Hellos and Init DBD — never holds or floods the Grace-LSA, and leaves
+    /// grace once the fresh B is `Full` again.
+    #[tokio::test(start_paused = true)]
+    async fn graceful_restart_is_helped_through_a_real_restart() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b) = (router(&wire), router(&wire));
+        let link_b = wired_link([10, 0, 0, 2], 30, NetworkType::PointToPoint);
+        a.reconcile(
+            vec![wired_link([10, 0, 0, 1], 30, NetworkType::PointToPoint)],
+            HashMap::new(),
+            id(1),
+        )
+        .await;
+        b.reconcile(vec![link_b.clone()], stub("192.0.2.2/32"), id(2))
+            .await;
+        b.set_graceful_restart(Some(120));
+        settle(60).await;
+        assert_eq!(
+            a.neighbor_summaries().await[0].state,
+            OspfNeighborState::Full
+        );
+        assert!(routes_to(&a, "192.0.2.2/32").await);
+
+        b.announce_graceful_restart().await;
+        b.shutdown().await;
+        assert!(helping(&a, id(2)).await);
+        let lsas = a.database_summaries().await;
+        assert!(lsas.iter().all(|l| l.lsa_type != lsa::LSA_TYPE_OPAQUE_LINK));
+        // RFC 3623 §2: the restarter keeps its LSAs, never prematurely aged.
+        assert!(lsas
+            .iter()
+            .filter(|l| l.advertising_router == id(2))
+            .all(|l| l.age < lsa::MAX_AGE));
+
+        // B is gone for longer than the dead interval: A still holds it.
+        settle(60).await;
+        assert_eq!(
+            a.neighbor_summaries().await[0].state,
+            OspfNeighborState::Full
+        );
+        assert!(routes_to(&a, "192.0.2.2/32").await);
+
+        let b2 = router(&wire);
+        b2.reconcile(vec![link_b], stub("192.0.2.2/32"), id(2))
+            .await;
+        settle(60).await;
+        assert_eq!(
+            a.neighbor_summaries().await[0].state,
+            OspfNeighborState::Full
+        );
+        assert!(!helping(&a, id(2)).await);
+        assert!(routes_to(&a, "192.0.2.2/32").await);
+    }
+
+    /// Without a configured grace period, SIGTERM's announce is a no-op and
+    /// shutdown flushes as before.
+    #[tokio::test(start_paused = true)]
+    async fn announce_without_a_grace_period_still_flushes_on_shutdown() {
+        let wire = Arc::new(wire::Wire::default());
+        let b = router(&wire);
+        b.reconcile(Vec::new(), stub("192.0.2.2/32"), id(2)).await;
+        settle(3).await;
+        b.announce_graceful_restart().await;
+        b.shutdown().await;
+        let own: Vec<_> = b
+            .database_summaries()
+            .await
+            .into_iter()
+            .filter(|l| l.advertising_router == id(2))
+            .collect();
+        assert!(!own.is_empty());
+        assert!(own.iter().all(|l| l.age == lsa::MAX_AGE));
     }
 }
