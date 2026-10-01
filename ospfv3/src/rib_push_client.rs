@@ -245,13 +245,13 @@ mod tests {
 
     #[test]
     fn diff_empty_to_empty_is_empty() {
-        assert!(diff_routes(&HashMap::new(), &HashMap::new()).is_empty());
+        assert_eq!(diff_routes(&HashMap::new(), &HashMap::new()), []);
     }
 
     #[test]
     fn diff_unchanged_prefix_is_noop() {
         let r = routes(&[("2001:db8::/64", "fe80::1")]);
-        assert!(diff_routes(&r, &r).is_empty());
+        assert_eq!(diff_routes(&r, &r), []);
     }
 
     #[test]

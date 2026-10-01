@@ -921,7 +921,7 @@ mod tests {
         let routes = compute(root, &[root_lsa, w_lsa, net_lsa, w_link, net_prefix]);
         // root is directly attached to this network, so its own transit
         // prefix is filtered (directly connected) — zero routes expected.
-        assert!(routes.is_empty());
+        assert_eq!(routes, []);
     }
 
     #[test]
@@ -930,7 +930,7 @@ mod tests {
         let stub: Ipv6Net = "2001:db8:5::/64".parse().unwrap();
         let root_lsa = router_lsa(root, vec![]);
         let root_prefix = router_prefix_lsa(root, vec![(stub, 1)]);
-        assert!(compute(root, &[root_lsa, root_prefix]).is_empty());
+        assert_eq!(compute(root, &[root_lsa, root_prefix]), []);
     }
 
     #[test]
@@ -946,7 +946,7 @@ mod tests {
         let w_prefix = router_prefix_lsa(w, vec![(shared, 1)]);
 
         let routes = compute(root, &[root_lsa, w_lsa, w_link, root_prefix, w_prefix]);
-        assert!(routes.is_empty());
+        assert_eq!(routes, []);
     }
 
     #[test]
@@ -958,7 +958,7 @@ mod tests {
         let w_lsa = router_lsa(w, vec![p2p(root, 2, 1, 1)]);
         // No Link-LSA installed for w at all — next-hop can't be derived.
         let w_prefix = router_prefix_lsa(w, vec![(stub, 1)]);
-        assert!(compute(root, &[root_lsa, w_lsa, w_prefix]).is_empty());
+        assert_eq!(compute(root, &[root_lsa, w_lsa, w_prefix]), []);
     }
 
     #[test]

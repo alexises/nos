@@ -594,7 +594,7 @@ mod tests {
             interfaces: vec![interface("loopback-rt1", Some("other"))],
             ..Default::default()
         };
-        assert!(attach_points_for(&cfg, "p1").is_empty());
+        assert_eq!(attach_points_for(&cfg, "p1"), [] as [String; 0]);
     }
 
     #[test]
