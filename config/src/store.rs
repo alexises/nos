@@ -408,7 +408,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(snap.config.bgp_instances, [] as [nos_proto::BgpInstance; 0]);
-        assert_eq!(store.running_snapshot().await.bgp_instances, [] as [nos_proto::BgpInstance; 0]);
+        assert_eq!(
+            store.running_snapshot().await.bgp_instances,
+            [] as [nos_proto::BgpInstance; 0]
+        );
     }
 
     #[tokio::test]
@@ -520,7 +523,10 @@ mod tests {
         store.open_transaction("t1", TransactionBase::Blank).await;
         let snap = store.apply_op("t1", ensure_op("r1")).await.unwrap();
         assert_eq!(snap.config.bgp_instances.len(), 1);
-        assert_eq!(store.running_snapshot().await.bgp_instances, [] as [nos_proto::BgpInstance; 0]);
+        assert_eq!(
+            store.running_snapshot().await.bgp_instances,
+            [] as [nos_proto::BgpInstance; 0]
+        );
     }
 
     #[tokio::test]
@@ -559,7 +565,10 @@ mod tests {
         store.apply_op("t1", ensure_op("bad")).await.unwrap();
 
         assert!(store.commit_transaction("t1", None).await.is_err());
-        assert_eq!(store.running_snapshot().await.bgp_instances, [] as [nos_proto::BgpInstance; 0]);
+        assert_eq!(
+            store.running_snapshot().await.bgp_instances,
+            [] as [nos_proto::BgpInstance; 0]
+        );
 
         // The transaction must still be there, editable, for a retry.
         let snap = store.get_transaction("t1").await.unwrap();
@@ -613,7 +622,10 @@ mod tests {
             store.get_transaction("t1").await,
             Err(ConfigError::TransactionNotFound(_))
         ));
-        assert_eq!(store.running_snapshot().await.bgp_instances, [] as [nos_proto::BgpInstance; 0]);
+        assert_eq!(
+            store.running_snapshot().await.bgp_instances,
+            [] as [nos_proto::BgpInstance; 0]
+        );
     }
 
     #[tokio::test]
@@ -667,7 +679,10 @@ mod tests {
         ));
         let snap = store.get_transaction("t").await.unwrap();
         assert_eq!((snap.generation, snap.config.hostname.as_str()), (3, "h2"));
-        assert_eq!(store.running_snapshot().await.bgp_instances, [] as [nos_proto::BgpInstance; 0]);
+        assert_eq!(
+            store.running_snapshot().await.bgp_instances,
+            [] as [nos_proto::BgpInstance; 0]
+        );
 
         // Current: discard goes through.
         store.discard_transaction("t", Some(3)).await.unwrap();
@@ -709,7 +724,10 @@ mod tests {
         );
 
         assert!(store.commit_transaction("t1", None).await.is_err());
-        assert_eq!(store.running_snapshot().await.bgp_instances, [] as [nos_proto::BgpInstance; 0]);
+        assert_eq!(
+            store.running_snapshot().await.bgp_instances,
+            [] as [nos_proto::BgpInstance; 0]
+        );
     }
 
     #[tokio::test]
@@ -774,7 +792,10 @@ mod tests {
             .unwrap();
 
         assert!(store.commit_transaction("t1", None).await.is_err());
-        assert_eq!(store.running_snapshot().await.routing_tables, [] as [nos_proto::RoutingTable; 0]);
+        assert_eq!(
+            store.running_snapshot().await.routing_tables,
+            [] as [nos_proto::RoutingTable; 0]
+        );
     }
 
     #[tokio::test]
@@ -800,7 +821,10 @@ mod tests {
             .unwrap();
 
         assert!(store.commit_transaction("t1", None).await.is_err());
-        assert_eq!(store.running_snapshot().await.routing_tables, [] as [nos_proto::RoutingTable; 0]);
+        assert_eq!(
+            store.running_snapshot().await.routing_tables,
+            [] as [nos_proto::RoutingTable; 0]
+        );
     }
 
     #[tokio::test]
@@ -835,7 +859,10 @@ mod tests {
             .unwrap();
 
         assert!(store.commit_transaction("t1", None).await.is_err());
-        assert_eq!(store.running_snapshot().await.routing_tables, [] as [nos_proto::RoutingTable; 0]);
+        assert_eq!(
+            store.running_snapshot().await.routing_tables,
+            [] as [nos_proto::RoutingTable; 0]
+        );
     }
 
     #[tokio::test]

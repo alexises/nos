@@ -253,7 +253,10 @@ mod tests {
     #[test]
     fn diff_empty_to_empty_is_empty() {
         let last_sent = HashMap::new();
-        assert_eq!(diff_routes(&last_sent, &[]), [] as [nos_proto::RedistributeUpdate; 0]);
+        assert_eq!(
+            diff_routes(&last_sent, &[]),
+            [] as [nos_proto::RedistributeUpdate; 0]
+        );
     }
 
     #[test]
@@ -270,7 +273,10 @@ mod tests {
     fn diff_unchanged_prefix_is_noop() {
         let new = vec![route("10.0.0.0/24", "10.0.0.1")];
         let last_sent = build_last_sent(&new);
-        assert_eq!(diff_routes(&last_sent, &new), [] as [nos_proto::RedistributeUpdate; 0]);
+        assert_eq!(
+            diff_routes(&last_sent, &new),
+            [] as [nos_proto::RedistributeUpdate; 0]
+        );
     }
 
     #[test]

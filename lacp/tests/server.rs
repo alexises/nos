@@ -62,5 +62,8 @@ async fn get_summary_with_no_aggregates_is_empty() {
         &shared().identity("lacpd", ""),
     )
     .unwrap();
-    assert_eq!(query(&path).await, [] as [nos_proto::PortAggregateLacpSummary; 0]);
+    assert_eq!(
+        query(&path).await,
+        [] as [nos_proto::PortAggregateLacpSummary; 0]
+    );
 }
