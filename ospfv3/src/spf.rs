@@ -153,6 +153,13 @@ fn routers_networks_links(
 /// returning every non-directly-connected destination reachable via
 /// Intra-Area-Prefix-LSAs.
 pub fn compute(root: Ipv4Addr, lsas: &[std::sync::Arc<Lsa>]) -> Vec<RouteEntry> {
+    // RFC 2328 §16: a MaxAge LSA is being flushed, never a vertex or prefix.
+    let live: Vec<std::sync::Arc<Lsa>> = lsas
+        .iter()
+        .filter(|l| l.header.age < crate::lsa::MAX_AGE)
+        .cloned()
+        .collect();
+    let lsas = live.as_slice();
     let (routers, networks, links) = routers_networks_links(lsas);
     let prefix_lsas: Vec<&IntraAreaPrefixLsaBody> = lsas
         .iter()
@@ -806,6 +813,35 @@ mod tests {
         assert_eq!(routes[0].prefix, stub);
         assert_eq!(routes[0].metric, 15);
         assert_eq!(routes[0].next_hop, compute(root, &legacy)[0].next_hop);
+    }
+
+    /// A flushed (`MaxAge`) Router-LSA of w's other flavor — here with no link
+    /// back to root — is ignored, whichever order it comes in (#149).
+    #[test]
+    fn max_age_router_lsa_is_ignored() {
+        let root = router_id(1);
+        let w = router_id(2);
+        let stub: Ipv6Net = "2001:db8:1::/64".parse().unwrap();
+        let mut stale = (*router_lsa(w, Vec::new())).clone();
+        stale.header.lsa_type = lsa::LSA_TYPE_E_ROUTER;
+        stale.header.age = lsa::MAX_AGE;
+        let stale = Arc::new(stale);
+        let live = vec![
+            router_lsa(root, vec![p2p(w, 1, 2, 5)]),
+            router_lsa(w, vec![p2p(root, 2, 1, 5)]),
+            link_lsa(w, 2, "fe80::2".parse().unwrap()),
+            router_prefix_lsa(w, vec![(stub, 10)]),
+        ];
+        let mut before = vec![Arc::clone(&stale)];
+        before.extend(live.iter().cloned());
+        let mut after = live.clone();
+        after.push(stale);
+        for lsas in [before, after] {
+            let routes = compute(root, &lsas);
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes[0].prefix, stub);
+            assert_eq!(routes[0].metric, 15);
+        }
     }
 
     #[test]

@@ -615,8 +615,11 @@ async fn handle_dbd(
         (neighbor.state, neighbor.adjacency.clone()?)
     };
 
+    // A MaxAge entry is only held to be flooded out; summarizing it would
+    // invite an LSR that fails (BadLSReq) once it's evicted.
     let mut local_lsdb_headers = lsdb.lock().await.headers();
     local_lsdb_headers.extend(link_local_lsdb.lock().await.headers());
+    local_lsdb_headers.retain(|h| h.age < lsa::MAX_AGE);
     let actions = exchange::on_dbd_received(
         &mut adj,
         old_state,
@@ -1257,8 +1260,9 @@ pub struct LinkManager {
     /// `Some` only from `--dbd-max-headers` (test/debug); `None` derives it per link from its MTU.
     dbd_max_headers: Option<usize>,
     /// RFC 8362 Full mode: originate the extended (TLV) LSA set instead of
-    /// the legacy one. ponytail: no Sparse mode, and legacy LSAs from before
-    /// a toggle are simply left to age out rather than flushed early.
+    /// the legacy one. ponytail: no Sparse mode. The other flavor's own LSAs
+    /// (from before a toggle, or a previous incarnation) are prematurely aged
+    /// on every origination tick (`withdraw_other_flavor`).
     extended_lsa: AtomicBool,
     /// RFC 5187 grace period (seconds) to announce on a planned restart;
     /// `0` = graceful restart off.
@@ -1353,6 +1357,7 @@ impl LinkManager {
                             background.originate_router_lsas(router_id).await;
                             background.originate_link_lsas(router_id).await;
                             background.originate_intra_area_prefix_lsas(router_id).await;
+                            background.withdraw_other_flavor(router_id).await;
                         }
                     }
                     _ = age_tick.tick() => {
@@ -1660,6 +1665,21 @@ impl LinkManager {
                     }),
                 );
             }
+        }
+    }
+
+    /// RFC 2328 §14.1 for RFC 8362 mode switches: prematurely ages every
+    /// live LSA of this router's whose type belongs to the flavor it is *not*
+    /// originating, in every area and link-local store. Run right after the
+    /// origination passes, so the new flavor is in place before the old one
+    /// is flushed; stateless, so it needs no toggle detection and also
+    /// flushes a previous incarnation's other-flavor LSAs learned over DBD.
+    async fn withdraw_other_flavor(&self, local_router_id: Ipv4Addr) {
+        let other = LsaTypes::new(!self.extended_lsa.load(Ordering::Relaxed));
+        let mut stores: Vec<Arc<Mutex<Lsdb>>> = self.lsdbs.lock().await.values().cloned().collect();
+        stores.extend(self.link_local_lsdbs.lock().await.values().cloned());
+        for lsdb in stores {
+            withdraw_types(&mut *lsdb.lock().await, local_router_id, &other);
         }
     }
 
@@ -1987,7 +2007,7 @@ fn install_self_originated(
         Some(e) => e.header.sequence_number.wrapping_add(1),
         None => lsa::INITIAL_SEQUENCE_NUMBER,
     };
-    lsdb.install(Lsa {
+    let mut lsa = Lsa {
         header: LsaHeader {
             age: 0,
             lsa_type,
@@ -1998,12 +2018,62 @@ fn install_self_originated(
             length: 0,
         },
         body,
-    });
+    };
+    lsa::fill_checksum(&mut lsa);
+    lsdb.install(lsa);
     info!(
         lsa_type, link_state_id = %link_state_id, advertising_router = %local_router_id,
         refreshed = needs_refresh,
         "ospfv3 lsa originated"
     );
+}
+
+/// RFC 2328 §14.1 premature aging — `ospf::link::withdraw_self_originated`:
+/// flushes one of this router's own LSAs by reinstalling it at `MAX_AGE`
+/// with its sequence number unchanged, so `lsa::is_newer`'s `MaxAge`
+/// tie-break makes every neighbor accept it; `Lsdb`'s `MaxAge` hold keeps it
+/// long enough for the periodic resend to carry it out. No-op (`false`) if
+/// `key` isn't held or is already at `MAX_AGE`.
+fn withdraw_self_originated(lsdb: &mut Lsdb, key: &LsaKey) -> bool {
+    let Some(existing) = lsdb.get(key) else {
+        return false;
+    };
+    if existing.header.age >= lsa::MAX_AGE {
+        return false;
+    }
+    let mut flushed = (*existing).clone();
+    flushed.header.age = lsa::MAX_AGE;
+    lsdb.install(flushed);
+    info!(
+        lsa_type = key.lsa_type, link_state_id = %key.link_state_id,
+        advertising_router = %key.advertising_router,
+        "ospfv3 lsa prematurely aged"
+    );
+    true
+}
+
+/// Withdraws every live LSA of `local_router_id`'s in `lsdb` whose type is
+/// one of `types`.
+fn withdraw_types(lsdb: &mut Lsdb, local_router_id: Ipv4Addr, types: &LsaTypes) {
+    let stale: Vec<LsaKey> = lsdb
+        .headers()
+        .into_iter()
+        .filter(|h| {
+            h.advertising_router == local_router_id
+                && h.age < lsa::MAX_AGE
+                && [
+                    types.router,
+                    types.network,
+                    types.link,
+                    types.intra_area_prefix,
+                ]
+                .contains(&h.lsa_type)
+        })
+        .map(|h| h.key())
+        .collect();
+    for key in stale {
+        withdraw_self_originated(lsdb, &key);
+    }
 }
 
 fn diff_links(
@@ -2463,6 +2533,69 @@ mod tests {
         assert!(!types.contains(&lsa::LSA_TYPE_ROUTER));
         assert!(!types.contains(&lsa::LSA_TYPE_LINK));
         assert!(!types.contains(&lsa::LSA_TYPE_INTRA_AREA_PREFIX));
+    }
+
+    /// RFC 8362 mode switch (#149): the old flavor is prematurely aged with
+    /// its sequence number unchanged while the new one is live, and
+    /// switching back re-originates it at seq+1.
+    #[tokio::test]
+    async fn extended_mode_toggle_flushes_the_other_flavor() {
+        const LEGACY: [u16; 3] = [
+            lsa::LSA_TYPE_ROUTER,
+            lsa::LSA_TYPE_LINK,
+            lsa::LSA_TYPE_INTRA_AREA_PREFIX,
+        ];
+        const EXTENDED: [u16; 3] = [
+            lsa::LSA_TYPE_E_ROUTER,
+            lsa::LSA_TYPE_E_LINK,
+            lsa::LSA_TYPE_E_INTRA_AREA_PREFIX,
+        ];
+        let manager = LinkManager::new(1, None);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        manager
+            .reconcile(vec![link("eth0.0", 10)], HashMap::new(), router_id)
+            .await;
+        let tick = || async {
+            manager.originate_router_lsas(router_id).await;
+            manager.originate_link_lsas(router_id).await;
+            manager.originate_intra_area_prefix_lsas(router_id).await;
+            manager.withdraw_other_flavor(router_id).await;
+        };
+        let by_type = || async {
+            manager
+                .database_summaries()
+                .await
+                .into_iter()
+                .map(|s| (s.lsa_type, (s.sequence_number, s.age)))
+                .collect::<HashMap<u16, (i32, u16)>>()
+        };
+
+        tick().await;
+        let legacy = by_type().await;
+        for t in LEGACY {
+            assert!(legacy[&t].1 < lsa::MAX_AGE, "{t:#x} live");
+        }
+
+        manager.set_extended_lsa(true);
+        tick().await;
+        let db = by_type().await;
+        for t in LEGACY {
+            assert_eq!(db[&t], (legacy[&t].0, lsa::MAX_AGE), "{t:#x} flushed");
+        }
+        for t in EXTENDED {
+            assert!(db[&t].1 < lsa::MAX_AGE, "{t:#x} live");
+        }
+
+        manager.set_extended_lsa(false);
+        tick().await;
+        let db = by_type().await;
+        for t in LEGACY {
+            assert_eq!(db[&t].0, legacy[&t].0 + 1, "{t:#x} re-originated");
+            assert!(db[&t].1 < lsa::MAX_AGE, "{t:#x} live");
+        }
+        for t in EXTENDED {
+            assert_eq!(db[&t].1, lsa::MAX_AGE, "{t:#x} flushed");
+        }
     }
 
     #[tokio::test]

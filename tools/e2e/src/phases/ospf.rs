@@ -897,6 +897,13 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     // an interface's first IPv6 address, so no new route can prove it here.
     let e_pat = format!("ospfv3 lsa originated lsa_type={LSA_TYPE_E_ROUTER}");
     let (a_before, b_before) = (a.count(&e_pat), b.count(&e_pat));
+    // The legacy Router-LSA (0x2001) each side flushes on the switch (#149).
+    let flushed =
+        |id: &str| format!("ospfv3 lsa maxage flushed.*lsa_type=8193 .*advertising_router={id}");
+    let (a_flushed, b_flushed) = (
+        a.count(&flushed(OSPFV3_ROUTER_ID_B)),
+        b.count(&flushed(OSPFV3_ROUTER_ID)),
+    );
     a.provision_flags(&with_base(
         A,
         [
@@ -923,7 +930,53 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
         ))
         .await?;
     }
-    Ok(())
+
+    // RFC 2328 §14.1 on the switch (#149): each side prematurely ages its
+    // own legacy set, the peer flushes it, and no legacy LSA from it is left.
+    a.wait(&format!(
+        "ospfv3 lsa prematurely aged lsa_type=8193 .*advertising_router={OSPFV3_ROUTER_ID}"
+    ))
+    .await?;
+    b.wait(&format!(
+        "ospfv3 lsa prematurely aged lsa_type=8193 .*advertising_router={OSPFV3_ROUTER_ID_B}"
+    ))
+    .await?;
+    b.wait_new(&flushed(OSPFV3_ROUTER_ID), b_flushed, 30)
+        .await?;
+    a.wait_new(&flushed(OSPFV3_ROUTER_ID_B), a_flushed, 30)
+        .await?;
+    assert_no_legacy_lsas(b, OSPFV3_ROUTER_ID).await?;
+    assert_no_legacy_lsas(a, OSPFV3_ROUTER_ID_B).await
+}
+
+/// Polls `router`'s `GET /v1/ospfv3/database` (up to 15s: the Link- and
+/// Intra-Area-Prefix-LSAs are evicted around the Router-LSA's flush, not on
+/// the same tick) until it holds no legacy Router (0x2001), Link (0x0008) or
+/// Intra-Area-Prefix (0x2009) LSA from `router_id`.
+async fn assert_no_legacy_lsas(router: &Router, router_id: &str) -> anyhow::Result<()> {
+    let mut left = Vec::new();
+    for _ in 0..15 {
+        let body = router
+            .rest_expect(Method::GET, "/v1/ospfv3/database", None, 200)
+            .await?;
+        let report: serde_json::Value = serde_json::from_str(&body)?;
+        left = report[0]["result"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("ospfv3 database has no result: {body}"))?
+            .iter()
+            .filter(|row| {
+                row["advertising_router"] == router_id
+                    && matches!(row["lsa_type"].as_u64(), Some(0x2001 | 0x0008 | 0x2009))
+            })
+            .cloned()
+            .collect();
+        if left.is_empty() {
+            log(format!("no legacy lsa from {router_id} left"));
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("legacy lsas from {router_id} still held: {left:?}")
 }
 
 /// RFC 5187 graceful restart (requires `ospfv3`): router-a, with a grace

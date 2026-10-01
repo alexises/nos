@@ -775,6 +775,16 @@ pub fn encode_lsa(lsa: &Lsa) -> Vec<u8> {
     buf
 }
 
+/// Sets `lsa`'s `checksum`/`length` to what `encode_lsa` puts on the wire —
+/// `ospf::lsa::fill_checksum`. A self-originated LSA is held this way so a
+/// neighbor's echo of it ties with it (`is_newer`) instead of superseding it,
+/// which would undo a premature aging (`link::withdraw_self_originated`).
+pub fn fill_checksum(lsa: &mut Lsa) {
+    let buf = encode_lsa(lsa);
+    lsa.header.checksum = u16::from_be_bytes([buf[16], buf[17]]);
+    lsa.header.length = u16::from_be_bytes([buf[18], buf[19]]);
+}
+
 /// Decodes one LSA from the start of `data` (which may contain more bytes
 /// after it, e.g. a subsequent LSA in an LSU packet) — trusts the header's
 /// own `length` field to find the end.

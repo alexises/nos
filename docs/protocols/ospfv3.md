@@ -143,6 +143,12 @@ $C -X PUT -H 'Content-Type: application/json' -d 'true' $B/v1/transactions/v3ext
 $C -X POST $B/v1/transactions/v3ext/commit
 ```
 
+What happens when you switch:
+
+- The new LSAs are originated within about 2 seconds.
+- The router then flushes the LSAs of the mode it left (they reach age 3600), so neighbours drop them within about 10 seconds instead of keeping them for an hour.
+- `show ospfv3 database` can show the old LSAs at age 3600 for those few seconds.
+
 RFC 8362 intends full mode to be enabled on every router of an area at once, and that is how it has been tested in NOS; running an area with some routers in each mode is not tested.
 
 ### Restart without dropping routes (RFC 5187)
