@@ -129,7 +129,7 @@ impl OspfSocket {
         let floor = unix_secs();
         let next = |prev: u64| prev.saturating_add(1).max(floor);
         let prev = seq
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |p| Some(next(p)))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |p| Some(next(p)))
             .unwrap_or(0);
         let mut packet = payload.to_vec();
         keys.sign(&mut packet, next(prev), *source);
