@@ -187,6 +187,6 @@ mod tests {
         assert_eq!(d.len(), 2);
         assert!(matches!(&d[0], EvpnUpdate::Add(r) if r.key == route(3).0));
         assert!(matches!(&d[1], EvpnUpdate::Remove(k) if *k == route(1).0));
-        assert!(diff(&new, &new).is_empty());
+        assert_eq!(diff(&new, &new), []);
     }
 }
