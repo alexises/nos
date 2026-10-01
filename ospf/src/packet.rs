@@ -1166,7 +1166,7 @@ mod tests {
         pkt.lsas = Vec::new();
         let decoded =
             decode_lsu(&encode_lsu(&pkt, &OutgoingAuth::None), &AuthPolicy::None).unwrap();
-        assert!(decoded.lsas.is_empty());
+        assert_eq!(decoded.lsas, []);
     }
 
     #[test]
