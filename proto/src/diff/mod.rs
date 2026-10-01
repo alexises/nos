@@ -349,7 +349,7 @@ mod tests {
         let field = diff.hostname.expect("hostname diff expected");
         assert_eq!(field.old.as_deref(), Some("router-a"));
         assert_eq!(field.new.as_deref(), Some("router-b"));
-        assert!(diff.bgp_instances.is_empty());
+        assert_eq!(diff.bgp_instances, []);
     }
 
     #[test]

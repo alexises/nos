@@ -360,7 +360,7 @@ mod tests {
         c.management_address = Some("10.0.0.1".parse().unwrap());
         let pdu = packet::decode(&packet::encode(&shutdown_pdu(&c))).unwrap();
         assert_eq!(pdu.ttl, 0);
-        assert!(pdu.management_addresses.is_empty());
+        assert_eq!(pdu.management_addresses, [] as [std::net::IpAddr; 0]);
         assert_eq!(pdu.system_name, None);
         assert_eq!(pdu.chassis_display(), "02:00:00:00:00:01");
     }
@@ -389,7 +389,7 @@ mod tests {
         let now = Instant::now();
         handle_rx(&me, &n, &frame_from(&peer, 120), now);
         assert!(!handle_rx(&me, &n, &frame_from(&peer, 0), now));
-        assert!(n.lock().unwrap()["eth1"].snapshot("eth1", now).is_empty());
+        assert_eq!(n.lock().unwrap()["eth1"].snapshot("eth1", now), []);
     }
 
     #[test]
@@ -402,7 +402,7 @@ mod tests {
         let now = Instant::now();
         assert!(!handle_rx(&me, &n, &frame_from(&me, 120), now));
         assert!(!handle_rx(&me, &n, &[0xff, 0xff, 0x01], now));
-        assert!(n.lock().unwrap()["eth1"].snapshot("eth1", now).is_empty());
+        assert_eq!(n.lock().unwrap()["eth1"].snapshot("eth1", now), []);
     }
 
     #[test]
@@ -454,7 +454,7 @@ mod tests {
         expire(&me, &n, now + Duration::from_secs(5));
         assert_eq!(n.lock().unwrap()["eth1"].snapshot("eth1", now).len(), 1);
         expire(&me, &n, now + Duration::from_secs(10));
-        assert!(n.lock().unwrap()["eth1"].snapshot("eth1", now).is_empty());
+        assert_eq!(n.lock().unwrap()["eth1"].snapshot("eth1", now), []);
         assert_eq!(next_expiry(&me, &n), None);
     }
 }

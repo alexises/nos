@@ -75,5 +75,5 @@ async fn get_neighbors_with_no_links_is_empty() {
         &shared().identity("lldpd", ""),
     )
     .unwrap();
-    assert!(query(&path).await.is_empty());
+    assert_eq!(query(&path).await, [] as [nos_proto::LldpNeighbor; 0]);
 }

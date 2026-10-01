@@ -105,7 +105,7 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.community_groups.len(), 1);
-        assert!(cfg.community_groups[0].members.is_empty());
+        assert_eq!(cfg.community_groups[0].members, [] as [String; 0]);
     }
 
     #[test]
@@ -128,7 +128,7 @@ mod tests {
         }
         .apply(&mut cfg)
         .unwrap();
-        assert!(cfg.community_groups[0].members.is_empty());
+        assert_eq!(cfg.community_groups[0].members, [] as [String; 0]);
     }
 
     #[test]

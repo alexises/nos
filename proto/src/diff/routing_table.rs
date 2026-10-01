@@ -235,7 +235,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![table("rt1", Some("r1"), None)];
         let candidate = base.clone();
-        assert!(diff_routing_tables(&base, &candidate).is_empty());
+        assert_eq!(diff_routing_tables(&base, &candidate), []);
     }
 
     #[test]

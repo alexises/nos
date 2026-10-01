@@ -148,8 +148,14 @@ async fn two_instances_peer_exchange_a_route_and_follow_config_changes() {
     b.manager
         .set_igp(std::collections::HashMap::default())
         .await;
-    assert!(b.manager.evpn_route_summaries().await.is_empty());
-    assert!(b.manager.fdb_push_snapshot().await.0.is_empty());
+    assert_eq!(
+        b.manager.evpn_route_summaries().await,
+        [] as [nos_proto::EvpnRouteSummary; 0]
+    );
+    assert_eq!(
+        b.manager.fdb_push_snapshot().await.0,
+        [] as [std::string::String; 0]
+    );
 
     // An unconfigured source is turned away by the listener.
     let stranger = tokio::net::TcpSocket::new_v4().unwrap();
@@ -187,7 +193,10 @@ async fn two_instances_peer_exchange_a_route_and_follow_config_changes() {
 
     // Removing the peer (Cease, peer de-configured) leaves nothing behind.
     a.apply(Vec::new()).await;
-    assert!(a.manager.peer_summaries().await.is_empty());
+    assert_eq!(
+        a.manager.peer_summaries().await,
+        [] as [nos_proto::PeerSummary; 0]
+    );
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_ne!(b.state().await, Some(BgpSessionState::Established));
 

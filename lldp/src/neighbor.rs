@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(t.apply(pdu(1, "eth1", 120), now), Update::Refreshed);
         assert_eq!(t.apply(pdu(1, "eth1", 0), now), Update::Removed);
         assert_eq!(t.apply(pdu(1, "eth1", 0), now), Update::Ignored);
-        assert!(t.snapshot("eth0", now).is_empty());
+        assert_eq!(t.snapshot("eth0", now), []);
     }
 
     #[test]
@@ -159,10 +159,10 @@ mod tests {
         t.apply(pdu(2, "eth1", 100), now);
         assert_eq!(t.next_expiry(), Some(now + Duration::from_secs(10)));
 
-        assert!(t.expire(now + Duration::from_secs(9)).is_empty());
+        assert_eq!(t.expire(now + Duration::from_secs(9)), []);
         // Refresh neighbor 1 just before it lapses.
         t.apply(pdu(1, "eth1", 10), now + Duration::from_secs(9));
-        assert!(t.expire(now + Duration::from_secs(10)).is_empty());
+        assert_eq!(t.expire(now + Duration::from_secs(10)), []);
 
         let gone = t.expire(now + Duration::from_secs(19));
         assert_eq!(gone.len(), 1);

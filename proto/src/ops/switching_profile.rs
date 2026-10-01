@@ -126,7 +126,7 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.switching_profiles.len(), 1);
         assert_eq!(cfg.switching_profiles[0].name, "sp1");
-        assert!(cfg.switching_profiles[0].members.is_empty());
+        assert_eq!(cfg.switching_profiles[0].members, []);
     }
 
     #[test]
@@ -217,7 +217,7 @@ mod tests {
         }
         .apply(&mut cfg)
         .unwrap();
-        assert!(cfg.switching_profiles[0].members.is_empty());
+        assert_eq!(cfg.switching_profiles[0].members, []);
     }
 
     #[test]

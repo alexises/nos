@@ -930,7 +930,7 @@ mod tests {
         let current = HashMap::new();
         let desired = HashMap::from([("10.0.0.1".parse().unwrap(), peer("10.0.0.1"))]);
         let (to_stop, to_spawn) = diff_peers(&current, &desired);
-        assert!(to_stop.is_empty());
+        assert_eq!(to_stop, [] as [IpAddr; 0]);
         assert_eq!(to_spawn, vec![peer("10.0.0.1")]);
     }
 
@@ -941,7 +941,7 @@ mod tests {
         let desired = HashMap::new();
         let (to_stop, to_spawn) = diff_peers(&current, &desired);
         assert_eq!(to_stop, vec![addr]);
-        assert!(to_spawn.is_empty());
+        assert_eq!(to_spawn, []);
     }
 
     #[test]
@@ -950,8 +950,8 @@ mod tests {
         let current = HashMap::from([(addr, peer("10.0.0.1"))]);
         let desired = HashMap::from([(addr, peer("10.0.0.1"))]);
         let (to_stop, to_spawn) = diff_peers(&current, &desired);
-        assert!(to_stop.is_empty());
-        assert!(to_spawn.is_empty());
+        assert_eq!(to_stop, [] as [IpAddr; 0]);
+        assert_eq!(to_spawn, []);
     }
 
     #[test]

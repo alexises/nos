@@ -100,7 +100,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![list("g1", &["65000:100"])];
         let candidate = base.clone();
-        assert!(diff_as_path_lists(&base, &candidate).is_empty());
+        assert_eq!(diff_as_path_lists(&base, &candidate), []);
     }
 
     #[test]

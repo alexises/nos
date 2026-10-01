@@ -197,7 +197,7 @@ mod tests {
         let mut db = Lsdb::new();
         db.install(lsa(1));
         let evicted = db.age_and_evict(100, &HashSet::new());
-        assert!(evicted.is_empty());
+        assert_eq!(evicted, []);
         assert_eq!(db.get(&lsa(1).header.key()).unwrap().header.age, 100);
     }
 
@@ -213,7 +213,7 @@ mod tests {
         db.install(lsa(1));
         let key = lsa(1).header.key();
         // Saturates at MAX_AGE on the first tick, then is held for the flood window.
-        assert!(db.age_and_evict(lsa::MAX_AGE, &HashSet::new()).is_empty());
+        assert_eq!(db.age_and_evict(lsa::MAX_AGE, &HashSet::new()), []);
         assert_eq!(db.get(&key).unwrap().header.age, lsa::MAX_AGE);
         assert_eq!(
             ticks_until_evicted(&mut db, &HashSet::new()),
@@ -227,10 +227,10 @@ mod tests {
         let mut db = Lsdb::new();
         db.install(lsa(1));
         let in_grace = HashSet::from([lsa(1).header.advertising_router]);
-        assert!(db.age_and_evict(lsa::MAX_AGE, &in_grace).is_empty());
+        assert_eq!(db.age_and_evict(lsa::MAX_AGE, &in_grace), []);
         let held = db.get(&lsa(1).header.key()).unwrap();
         assert_eq!(held.header.age, lsa::MAX_AGE - 1);
-        assert!(db.age_and_evict(1, &HashSet::new()).is_empty());
+        assert_eq!(db.age_and_evict(1, &HashSet::new()), []);
         assert_eq!(
             db.get(&lsa(1).header.key()).unwrap().header.age,
             lsa::MAX_AGE
@@ -259,10 +259,10 @@ mod tests {
         flushed.header.age = lsa::MAX_AGE;
         db.install(flushed);
         for _ in 0..MAX_AGE_HOLD_TICKS - 1 {
-            assert!(db.age_and_evict(1, &HashSet::new()).is_empty());
+            assert_eq!(db.age_and_evict(1, &HashSet::new()), []);
         }
         assert_eq!(db.install(lsa(2)), InstallOutcome::Superseded);
-        assert!(db.age_and_evict(1, &HashSet::new()).is_empty());
+        assert_eq!(db.age_and_evict(1, &HashSet::new()), []);
         assert_eq!(db.get(&lsa(2).header.key()).unwrap().header.age, 1);
     }
 }

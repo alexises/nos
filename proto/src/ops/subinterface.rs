@@ -370,7 +370,7 @@ mod tests {
         }
         .apply(&mut cfg)
         .unwrap();
-        assert!(cfg.interfaces[0].subinterfaces[0].addresses.is_empty());
+        assert_eq!(cfg.interfaces[0].subinterfaces[0].addresses, []);
     }
 
     #[test]

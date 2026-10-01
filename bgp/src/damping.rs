@@ -134,7 +134,7 @@ mod tests {
         assert!(d.flap(peer, prefix, WITHDRAW_PENALTY, t0)); // 3000 >= 2500
         assert!(d.is_suppressed(peer, &prefix));
         // 3000 -> 750 takes two half-lives; just short of it stays suppressed.
-        assert!(d.tick(t0 + Duration::from_secs(19)).is_empty());
+        assert_eq!(d.tick(t0 + Duration::from_secs(19)), []);
         assert!(d.is_suppressed(peer, &prefix));
         assert_eq!(d.tick(t0 + Duration::from_secs(21)), vec![(peer, prefix)]);
         assert!(!d.is_suppressed(peer, &prefix));

@@ -531,7 +531,7 @@ mod tests {
 
         let target = compute_redistribute_target(&cfg, "rt1", &routes);
         assert_eq!(target.bgp_instance.as_deref(), Some("bgp1"));
-        assert!(target.routes.is_empty());
+        assert_eq!(target.routes, [] as [nos_proto::RedistributedRoute; 0]);
     }
 
     #[test]
@@ -594,7 +594,7 @@ mod tests {
         );
 
         let target = compute_redistribute_target(&cfg, "rt1", &routes);
-        assert!(target.routes.is_empty());
+        assert_eq!(target.routes, [] as [nos_proto::RedistributedRoute; 0]);
     }
 
     #[test]
@@ -658,7 +658,7 @@ mod tests {
 
         let target = compute_redistribute_target_ospf(&cfg, "rt1", &routes);
         assert_eq!(target.ospf_instance.as_deref(), Some("ospf1"));
-        assert!(target.routes.is_empty());
+        assert_eq!(target.routes, [] as [nos_proto::RedistributedRoute; 0]);
     }
 
     #[test]
@@ -717,7 +717,7 @@ mod tests {
         );
 
         let target = compute_redistribute_target_ospf(&cfg, "rt1", &routes);
-        assert!(target.routes.is_empty());
+        assert_eq!(target.routes, [] as [nos_proto::RedistributedRoute; 0]);
     }
 
     #[test]
@@ -741,6 +741,6 @@ mod tests {
         routes.insert(entry.prefix, entry);
 
         let target = compute_redistribute_target_ospf(&cfg, "rt1", &routes);
-        assert!(target.routes.is_empty());
+        assert_eq!(target.routes, [] as [nos_proto::RedistributedRoute; 0]);
     }
 }

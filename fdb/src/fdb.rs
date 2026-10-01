@@ -1201,7 +1201,7 @@ mod tests {
     #[test]
     fn only_matching_foreign_routes_are_wanted() {
         let r = ready();
-        assert!(!want(&r, &mac_route(1, 10100, RT, REMOTE)).is_empty());
+        assert_ne!(want(&r, &mac_route(1, 10100, RT, REMOTE)), []);
         assert!(
             want(&r, &mac_route(1, 10100, 1, REMOTE)).is_empty(),
             "wrong RT"
@@ -1220,7 +1220,7 @@ mod tests {
                 vtep: REMOTE.parse().unwrap()
             }]
         );
-        assert!(want(&r, &imet_route(VTEP, RT)).is_empty());
+        assert_eq!(want(&r, &imet_route(VTEP, RT)), []);
     }
 
     #[test]
@@ -1242,8 +1242,14 @@ mod tests {
             ]
         );
         // The same filters as a MAC-only route, and no link-local neighbour.
-        assert!(want(&r, &macip_route(1, "198.51.100.7", 10100, 1, REMOTE)).is_empty());
-        assert!(want(&r, &macip_route(1, "198.51.100.7", 10100, RT, VTEP)).is_empty());
+        assert_eq!(
+            want(&r, &macip_route(1, "198.51.100.7", 10100, 1, REMOTE)),
+            []
+        );
+        assert_eq!(
+            want(&r, &macip_route(1, "198.51.100.7", 10100, RT, VTEP)),
+            []
+        );
         assert_eq!(
             want(&r, &macip_route(1, "fe80::1", 10100, RT, REMOTE)).len(),
             1
@@ -1401,7 +1407,7 @@ mod tests {
         // An identical re-push is not reprogrammed; a moved MAC is.
         fdb.apply_push(EvpnUpdate::Add(mac_route(1, 10100, RT, REMOTE)))
             .await;
-        assert!(calls(&driver).is_empty());
+        assert_eq!(calls(&driver), [] as [String; 0]);
         fdb.apply_push(EvpnUpdate::Add(mac_route(1, 10100, RT, "192.0.2.10")))
             .await;
         assert_eq!(
@@ -1458,7 +1464,7 @@ mod tests {
         // Withdrawing the MAC-only route keeps the MAC (the other still names it).
         let k = mac_route(1, 10100, RT, REMOTE).key;
         fdb.apply_push(EvpnUpdate::Remove(k)).await;
-        assert!(calls(&driver).is_empty());
+        assert_eq!(calls(&driver), [] as [String; 0]);
         // Withdrawing the last one removes both.
         let k = macip_route(1, "198.51.100.7", 10100, RT, REMOTE).key;
         fdb.apply_push(EvpnUpdate::Remove(k)).await;
@@ -1574,17 +1580,17 @@ mod tests {
         let ads = ads_of(ESI, &[REMOTE]);
         // Not usable until the PE that advertised it has advertised the segment.
         assert!(want(&ready(), &route).is_empty(), "no per-es a-d yet");
-        assert!(!desired(&ready(), &route, &ads).is_empty());
+        assert_ne!(desired(&ready(), &route, &ads), []);
         // A different PE's A-D for the segment doesn't count.
         let other = ads_of(ESI, &["192.0.2.77"]);
-        assert!(desired(&ready(), &route, &other).is_empty());
+        assert_eq!(desired(&ready(), &route, &other), []);
         // ... and on a segment we are attached to it is reachable via our own bond.
-        assert!(desired(&ready_with_segment(), &route, &ads).is_empty());
+        assert_eq!(desired(&ready_with_segment(), &route, &ads), []);
         // A different segment's MAC is just as gated.
         route.esi = [9; 10];
-        assert!(desired(&ready_with_segment(), &route, &ads).is_empty());
+        assert_eq!(desired(&ready_with_segment(), &route, &ads), []);
         let ads9 = ads_of([9; 10], &[REMOTE]);
-        assert!(!desired(&ready_with_segment(), &route, &ads9).is_empty());
+        assert_ne!(desired(&ready_with_segment(), &route, &ads9), []);
     }
 
     #[test]
@@ -1754,7 +1760,7 @@ mod tests {
         // A Type-4 for another segment is none of our business.
         fdb.apply_push(EvpnUpdate::Add(es_route([7; 10], "192.0.1.9")))
             .await;
-        assert!(calls(&driver).is_empty());
+        assert_eq!(calls(&driver), [] as [String; 0]);
 
         // Unconfiguring while blocked restores flooding.
         fdb.apply_push(EvpnUpdate::Add(es_route(ESI, "192.0.1.9")))
@@ -1776,7 +1782,7 @@ mod tests {
         // it is on the segment but never joined this EVI, so we stay DF.
         fdb.apply_push(EvpnUpdate::Add(es_route(ESI, "192.0.1.9")))
             .await;
-        assert!(calls(&driver).is_empty());
+        assert_eq!(calls(&driver), [] as [String; 0]);
         let t = fdb.table().await;
         assert!(t.segments[0].designated_forwarder);
         assert_eq!(t.segments[0].pes, vec![VTEP.parse::<IpAddr>().unwrap()]);
@@ -1958,8 +1964,8 @@ mod tests {
         );
         // ... unless the segment is all-active (mass withdrawal), or the
         // backup never advertised the EVI.
-        assert!(desired(&ready(), &route, &ads(false, &[backup])).is_empty());
-        assert!(desired(&ready(), &route, &ads(true, &[])).is_empty());
+        assert_eq!(desired(&ready(), &route, &ads(false, &[backup])), []);
+        assert_eq!(desired(&ready(), &route, &ads(true, &[])), []);
         // While REMOTE's own per-ES A-D is held the MAC stays where it is.
         let mut held = ads(true, &[backup]);
         held.get_mut(&[9; 10])
@@ -2049,7 +2055,7 @@ mod tests {
         // Its own per-ES A-D going is still a mass withdrawal.
         fdb.apply_push(EvpnUpdate::Remove(es_ad(esi, a).key)).await;
         assert_eq!(calls(&driver), ["del 00:00:00:00:00:01 192.0.2.9"]);
-        assert!(fdb.table().await.macs.is_empty());
+        assert_eq!(fdb.table().await.macs, []);
     }
 
     #[test]

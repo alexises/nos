@@ -2699,7 +2699,7 @@ mod tests {
         let BgpMessage::Update(u) = rt else {
             unreachable!()
         };
-        assert!(u.nlri.is_empty());
+        assert_eq!(u.nlri, []);
         assert_eq!(
             u.mp_reach[0].next_hop,
             "2001:db8::1".parse::<IpAddr>().unwrap()

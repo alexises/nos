@@ -103,7 +103,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![group("g1", &["65000:100"])];
         let candidate = base.clone();
-        assert!(diff_community_groups(&base, &candidate).is_empty());
+        assert_eq!(diff_community_groups(&base, &candidate), []);
     }
 
     #[test]

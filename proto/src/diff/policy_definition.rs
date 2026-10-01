@@ -96,7 +96,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![policy("p1", "accept\n")];
         let candidate = base.clone();
-        assert!(diff_policy_definitions(&base, &candidate).is_empty());
+        assert_eq!(diff_policy_definitions(&base, &candidate), []);
     }
 
     #[test]

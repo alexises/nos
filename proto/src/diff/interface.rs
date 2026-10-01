@@ -313,7 +313,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![interface("eth0", &["10.0.0.1/24"], Some("rt1"))];
         let candidate = base.clone();
-        assert!(diff_interfaces(&base, &candidate).is_empty());
+        assert_eq!(diff_interfaces(&base, &candidate), []);
     }
 
     #[test]
@@ -379,7 +379,7 @@ mod tests {
     fn reordered_addresses_are_not_a_change() {
         let base = vec![interface("eth0", &["10.0.0.1/24", "10.0.0.2/24"], None)];
         let candidate = vec![interface("eth0", &["10.0.0.2/24", "10.0.0.1/24"], None)];
-        assert!(diff_interfaces(&base, &candidate).is_empty());
+        assert_eq!(diff_interfaces(&base, &candidate), []);
     }
 
     #[test]
@@ -446,7 +446,7 @@ mod tests {
         let sections = diff_interfaces(&[base_iface], &[candidate_iface]);
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].status, DiffStatus::Modified);
-        assert!(sections[0].fields.is_empty());
+        assert_eq!(sections[0].fields, []);
         assert_eq!(sections[0].subsections.len(), 1);
         assert_eq!(sections[0].subsections[0].header, "subinterface 100");
     }

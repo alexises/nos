@@ -113,7 +113,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![instance("o1", Ipv4Addr::new(1, 1, 1, 1))];
         let candidate = base.clone();
-        assert!(diff_ospf_instances(&base, &candidate).is_empty());
+        assert_eq!(diff_ospf_instances(&base, &candidate), []);
     }
 
     #[test]
@@ -182,7 +182,7 @@ mod tests {
         let sections = diff_ospf_instances(&base, &candidate);
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].status, DiffStatus::Modified);
-        assert!(sections[0].fields.is_empty());
+        assert_eq!(sections[0].fields, []);
         assert_eq!(sections[0].subsections.len(), 1);
         assert_eq!(sections[0].subsections[0].header, "ospf area 0.0.0.0");
     }

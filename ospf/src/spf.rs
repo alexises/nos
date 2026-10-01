@@ -1076,7 +1076,7 @@ mod tests {
             root,
             vec![stub(addr(10, 0, 0, 0), addr(255, 255, 255, 252), 1)],
         );
-        assert!(compute(root, &[root_lsa]).is_empty());
+        assert_eq!(compute(root, &[root_lsa]), []);
     }
 
     #[test]
@@ -1085,7 +1085,7 @@ mod tests {
         let network_id = addr(10, 0, 0, 1);
         let root_lsa = router_lsa(root, vec![transit(network_id, addr(10, 0, 0, 1), 1)]);
         let net_lsa = network_lsa(network_id, addr(255, 255, 255, 0), vec![root]);
-        assert!(compute(root, &[root_lsa, net_lsa]).is_empty());
+        assert_eq!(compute(root, &[root_lsa, net_lsa]), []);
     }
 
     #[test]
@@ -1099,7 +1099,7 @@ mod tests {
 
         // Without the key-based filter, Dijkstra would happily reach W and
         // produce a spurious second route to root's own subnet via W.
-        assert!(compute(root, &[root_lsa, w_lsa]).is_empty());
+        assert_eq!(compute(root, &[root_lsa, w_lsa]), []);
     }
 
     #[test]
@@ -1115,7 +1115,7 @@ mod tests {
 
         // Must not panic, and W's stub must never appear — no next-hop
         // could be derived for it.
-        assert!(compute(root, &[root_lsa, w_lsa]).is_empty());
+        assert_eq!(compute(root, &[root_lsa, w_lsa]), []);
     }
 
     #[test]
@@ -1124,7 +1124,7 @@ mod tests {
         let w = router_id(2);
         // W's Router-LSA was never flooded/installed at all.
         let root_lsa = router_lsa(root, vec![p2p(w, addr(10, 0, 0, 1), 1)]);
-        assert!(compute(root, &[root_lsa]).is_empty());
+        assert_eq!(compute(root, &[root_lsa]), []);
     }
 
     fn as_external_lsa(prefix: Ipv4Addr, mask: Ipv4Addr, advertising_router: Ipv4Addr) -> Arc<Lsa> {
@@ -1170,7 +1170,7 @@ mod tests {
         // ASBR's own Router-LSA was never flooded/installed at all.
         let root_lsa = router_lsa(root, vec![]);
         let ext_lsa = as_external_lsa(addr(192, 0, 2, 0), addr(255, 255, 255, 0), asbr);
-        assert!(compute(root, &[root_lsa, ext_lsa]).is_empty());
+        assert_eq!(compute(root, &[root_lsa, ext_lsa]), []);
     }
 
     #[test]
@@ -1208,7 +1208,7 @@ mod tests {
         let root = router_id(1);
         let root_lsa = router_lsa(root, vec![]);
         let ext_lsa = as_external_lsa(addr(192, 0, 2, 0), addr(255, 255, 255, 0), root);
-        assert!(compute(root, &[root_lsa, ext_lsa]).is_empty());
+        assert_eq!(compute(root, &[root_lsa, ext_lsa]), []);
     }
 
     fn network_summary_lsa(
@@ -1293,8 +1293,8 @@ mod tests {
         let root_lsa = router_lsa(root, vec![]);
         let ext_lsa = as_external_lsa(addr(192, 0, 2, 0), addr(255, 255, 255, 0), asbr);
         let view = intra_area_routes(root, &[root_lsa, ext_lsa]);
-        assert!(view.routes.is_empty());
-        assert!(view.asbrs.is_empty());
+        assert_eq!(view.routes, []);
+        assert_eq!(view.asbrs, []);
     }
 
     #[test]
@@ -1320,7 +1320,7 @@ mod tests {
         let root_lsa = router_lsa(root, vec![]);
         let summary_lsa_ =
             network_summary_lsa(addr(192, 0, 2, 0), addr(255, 255, 255, 0), root, 10);
-        assert!(compute(root, &[root_lsa, summary_lsa_]).is_empty());
+        assert_eq!(compute(root, &[root_lsa, summary_lsa_]), []);
     }
 
     #[test]

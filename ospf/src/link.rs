@@ -2711,8 +2711,8 @@ mod tests {
         current.insert("eth0.0".to_string(), link("eth0.0", 10));
         let desired = current.clone();
         let (to_stop, to_spawn) = diff_links(&current, &desired);
-        assert!(to_stop.is_empty());
-        assert!(to_spawn.is_empty());
+        assert_eq!(to_stop, [] as [String; 0]);
+        assert_eq!(to_spawn, []);
     }
 
     #[test]
@@ -2721,7 +2721,7 @@ mod tests {
         let mut desired = HashMap::new();
         desired.insert("eth0.0".to_string(), link("eth0.0", 10));
         let (to_stop, to_spawn) = diff_links(&current, &desired);
-        assert!(to_stop.is_empty());
+        assert_eq!(to_stop, [] as [String; 0]);
         assert_eq!(to_spawn, vec![link("eth0.0", 10)]);
     }
 
@@ -2732,7 +2732,7 @@ mod tests {
         let desired = HashMap::new();
         let (to_stop, to_spawn) = diff_links(&current, &desired);
         assert_eq!(to_stop, vec!["eth0.0".to_string()]);
-        assert!(to_spawn.is_empty());
+        assert_eq!(to_spawn, []);
     }
 
     #[test]
@@ -2911,7 +2911,10 @@ mod tests {
         let mut cfg = link("bd1", 10);
         cfg.network_type = NetworkType::Broadcast;
         let status = LinkStatus::new(NetworkType::Broadcast);
-        assert!(router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)]).is_empty());
+        assert_eq!(
+            router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)]),
+            []
+        );
     }
 
     #[test]
@@ -3239,7 +3242,7 @@ mod tests {
 
         // Deferred while the flushed copy is still held.
         for _ in 0..crate::lsdb::MAX_AGE_HOLD_TICKS - 1 {
-            assert!(lsdb.age_and_evict(1, &HashSet::new()).is_empty());
+            assert_eq!(lsdb.age_and_evict(1, &HashSet::new()), []);
             install_self_originated(
                 &mut lsdb,
                 router_id,
@@ -4208,7 +4211,7 @@ mod tests {
 
         // Graceful shutdown flushes A's own LSAs.
         a.shutdown().await;
-        assert!(a.neighbor_summaries().await.is_empty());
+        assert_eq!(a.neighbor_summaries().await, []);
     }
 
     #[tokio::test(start_paused = true)]
@@ -4666,7 +4669,7 @@ mod tests {
             .into_iter()
             .filter(|l| l.advertising_router == id(2))
             .collect();
-        assert!(!own.is_empty());
+        assert_ne!(own, []);
         assert!(own.iter().all(|l| l.age == lsa::MAX_AGE));
     }
 }

@@ -1947,7 +1947,7 @@ mod tests {
 
         // An identical re-push is not re-announced.
         rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Add(mac_route(1)));
-        assert!(recv_all(&mut evpn_rx).is_empty());
+        assert_eq!(recv_all(&mut evpn_rx), []);
 
         // A peer that comes up later gets the current set.
         let mut late_rx = register_mp_peer(
@@ -2172,7 +2172,7 @@ mod tests {
             vec![0x0002_fde8_0000_2710]
         );
         // Nothing is re-advertised: no consumer exists yet.
-        assert!(recv_all(&mut observer_rx).is_empty());
+        assert_eq!(recv_all(&mut observer_rx), []);
 
         // Re-announcing an existing route replaces it rather than duplicating.
         rib.handle_update(
@@ -2198,7 +2198,7 @@ mod tests {
         assert_eq!(routes[0].1, &evpn_nlri(2));
 
         rib.peer_disconnected(peer);
-        assert!(rib.evpn_routes().is_empty());
+        assert_eq!(rib.evpn_routes(), []);
     }
 
     #[test]
@@ -2213,7 +2213,7 @@ mod tests {
             &evpn_reach(vec![evpn_nlri(1)], vec![65001, 65000]),
             &deny_all_policy(),
         );
-        assert!(rib.evpn_routes().is_empty());
+        assert_eq!(rib.evpn_routes(), []);
     }
 
     #[test]
@@ -2232,7 +2232,7 @@ mod tests {
             &deny_all_policy(),
         );
 
-        assert!(recv_all(&mut observer_rx).is_empty());
+        assert_eq!(recv_all(&mut observer_rx), []);
     }
 
     #[test]
@@ -2395,7 +2395,7 @@ mod tests {
             find_adv(&mut allowed_rx).communities,
             vec![(65000 << 16) | 100]
         );
-        assert!(find_adv(&mut stripped_rx).communities.is_empty());
+        assert_eq!(find_adv(&mut stripped_rx).communities, [] as [u32; 0]);
     }
 
     /// The `communities` phase of `tools/verify-bgp.sh`, in miniature: a
@@ -2580,8 +2580,8 @@ mod tests {
             &accept_all_policy(),
         );
 
-        assert!(!recv_all(&mut allowed_rx).is_empty());
-        assert!(recv_all(&mut blocked_rx).is_empty());
+        assert_ne!(recv_all(&mut allowed_rx), []);
+        assert_eq!(recv_all(&mut blocked_rx), []);
     }
 
     /// Sends one route with MED 999 from eBGP `source` and returns what
@@ -2682,7 +2682,7 @@ mod tests {
         assert_eq!(meds(recv_all(&mut rs_rx), false), vec![Some(999)]);
         // ADD-PATH per-source fan-out (propagate_rs_view).
         let ap = meds(recv_all(&mut rs_ap_rx), true);
-        assert!(!ap.is_empty());
+        assert_ne!(ap, []);
         assert!(ap.iter().all(|m| *m == Some(999)));
     }
 
@@ -2897,7 +2897,7 @@ mod tests {
 
         // Requesting the family a peer didn't negotiate is a silent no-op.
         rib.resend_all(v4_peer, AddressFamily::Ipv6Unicast, false);
-        assert!(recv_all(&mut v4_rx).is_empty());
+        assert_eq!(recv_all(&mut v4_rx), []);
     }
 
     #[test]
@@ -2915,7 +2915,7 @@ mod tests {
         );
 
         // Never echoed back to the source peer.
-        assert!(recv_all(&mut source_rx).is_empty());
+        assert_eq!(recv_all(&mut source_rx), []);
     }
 
     #[test]
@@ -2973,7 +2973,7 @@ mod tests {
             &nos_rpl::ACCEPT_ALL,
         );
 
-        assert!(recv_all(&mut other_rx).is_empty());
+        assert_eq!(recv_all(&mut other_rx), []);
     }
 
     #[test]
@@ -3163,7 +3163,7 @@ mod tests {
             &nos_rpl::ACCEPT_ALL,
         );
 
-        assert!(recv_all(&mut other_rx).is_empty());
+        assert_eq!(recv_all(&mut other_rx), []);
     }
 
     #[test]
@@ -3392,7 +3392,7 @@ mod tests {
 
         rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
 
-        assert!(recv_all(&mut rx).is_empty());
+        assert_eq!(recv_all(&mut rx), []);
     }
 
     #[test]
@@ -3407,7 +3407,7 @@ mod tests {
         // A reconnect-triggered Full with the exact same prefix set: no
         // touched prefixes, so no new sends.
         rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
-        assert!(recv_all(&mut rx).is_empty());
+        assert_eq!(recv_all(&mut rx), []);
     }
 
     #[test]
@@ -3417,7 +3417,7 @@ mod tests {
         let mut rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
 
         rib.apply_redistribute_update(RedistributeUpdate::Remove(prefix("10.10.10.0/24")));
-        assert!(recv_all(&mut rx).is_empty());
+        assert_eq!(recv_all(&mut rx), []);
     }
 
     #[test]
@@ -3501,7 +3501,7 @@ mod tests {
 
         rib.apply_redistribute_update(full_update(vec![("2001:db8:1::/48", "2001:db8::9")]));
 
-        assert!(recv_all(&mut rx).is_empty());
+        assert_eq!(recv_all(&mut rx), []);
     }
 
     #[test]
@@ -3837,7 +3837,7 @@ mod tests {
         // The winner is unchanged (still peer_a), so no new announcement is
         // sent at all — if MED had been compared across the differing
         // neighboring ASes, peer_b's much lower MED would have won instead.
-        assert!(recv_all(&mut observer_rx).is_empty());
+        assert_eq!(recv_all(&mut observer_rx), []);
     }
 
     #[test]
@@ -4235,7 +4235,7 @@ mod tests {
         // The winner is unchanged (still peer_a), so no new announcement is
         // sent — if the oldest-route step didn't apply, peer_b's lower
         // router-id and address would have won at steps 9/10 instead.
-        assert!(recv_all(&mut observer_rx).is_empty());
+        assert_eq!(recv_all(&mut observer_rx), []);
     }
 
     // --- RFC 4456 route reflection ---
@@ -4352,7 +4352,7 @@ mod tests {
 
         rib.handle_update(source, true, v4("192.0.2.1"), &update, &nos_rpl::ACCEPT_ALL);
 
-        assert!(recv_all(&mut observer_rx).is_empty());
+        assert_eq!(recv_all(&mut observer_rx), []);
     }
 
     #[test]
@@ -4369,7 +4369,7 @@ mod tests {
 
         rib.handle_update(source, true, v4("192.0.2.1"), &update, &nos_rpl::ACCEPT_ALL);
 
-        assert!(recv_all(&mut observer_rx).is_empty());
+        assert_eq!(recv_all(&mut observer_rx), []);
     }
 
     // --- RFC 7947 route server ---
@@ -4540,7 +4540,7 @@ mod tests {
         );
 
         let updates = recv_all(&mut rs_rx);
-        assert!(!updates.is_empty());
+        assert_ne!(updates, []);
         // No path-id'd traffic at all — propagate_rs_view never runs for a
         // family this peer didn't negotiate ADD-PATH for.
         assert!(updates.iter().all(|u| match u {

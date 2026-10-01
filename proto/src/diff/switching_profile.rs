@@ -149,7 +149,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![profile("sp1", vec![member("bd1", VlanTag::Dot1q(100))])];
         let candidate = base.clone();
-        assert!(diff_switching_profiles(&base, &candidate).is_empty());
+        assert_eq!(diff_switching_profiles(&base, &candidate), []);
     }
 
     #[test]
@@ -180,7 +180,7 @@ mod tests {
         let sections = diff_switching_profiles(&base, &candidate);
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].status, DiffStatus::Modified);
-        assert!(sections[0].fields.is_empty());
+        assert_eq!(sections[0].fields, []);
         assert_eq!(sections[0].subsections.len(), 1);
         assert_eq!(
             sections[0].subsections[0].fields[0].old.as_deref(),

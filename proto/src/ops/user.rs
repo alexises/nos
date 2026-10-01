@@ -86,7 +86,7 @@ mod tests {
         let mut cfg = Config::default();
         set("a", "x").apply(&mut cfg).unwrap();
         UserOp::Delete { name: "a".into() }.apply(&mut cfg).unwrap();
-        assert!(cfg.users.is_empty());
+        assert_eq!(cfg.users, []);
         let err = UserOp::Delete { name: "a".into() }
             .apply(&mut cfg)
             .unwrap_err();

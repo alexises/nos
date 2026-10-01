@@ -649,5 +649,12 @@ async fn evpn_routes_from_a_real_session_are_stored_and_cleared_on_close() {
     // Peer goes away: the session ends and its EVPN routes go with it.
     fake_b.abort();
     let _ = tokio::time::timeout(Duration::from_secs(2), a).await;
-    assert!(rib.lock().await.evpn_routes().is_empty());
+    assert_eq!(
+        rib.lock().await.evpn_routes(),
+        [] as [(
+            std::net::IpAddr,
+            &nos_bgp::evpn::EvpnNlri,
+            &nos_bgp::rib::EvpnRoute
+        ); 0]
+    );
 }

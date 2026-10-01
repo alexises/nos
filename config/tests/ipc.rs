@@ -471,7 +471,10 @@ async fn open_transaction_blank_and_current_over_ipc() {
         .unwrap();
     match reader.next().await.unwrap().unwrap() {
         Event::Transaction(snap) => {
-            assert!(snap.config.bgp_instances.is_empty());
+            assert_eq!(
+                snap.config.bgp_instances,
+                [] as [nos_config::BgpInstance; 0]
+            );
             assert!(!snap.resumed);
         }
         other => panic!("expected Transaction event, got {other:?}"),
@@ -842,7 +845,10 @@ async fn discard_over_ipc_removes_transaction_so_reopen_is_fresh() {
     match reader.next().await.unwrap().unwrap() {
         Event::Transaction(snap) => {
             assert!(!snap.resumed);
-            assert!(snap.config.bgp_instances.is_empty());
+            assert_eq!(
+                snap.config.bgp_instances,
+                [] as [nos_config::BgpInstance; 0]
+            );
         }
         other => panic!("expected Transaction event, got {other:?}"),
     }
@@ -1130,8 +1136,8 @@ async fn describe_returns_the_requested_topics_doc() {
     match event {
         Event::Description(doc) => {
             assert_eq!(doc.topic, Topic::Hostname);
-            assert!(!doc.summary.is_empty());
-            assert!(!doc.detail.is_empty());
+            assert_ne!(doc.summary, "");
+            assert_ne!(doc.detail, "");
         }
         other => panic!("expected Description event, got {other:?}"),
     }

@@ -116,7 +116,7 @@ mod tests {
     fn no_changes_produces_no_sections() {
         let base = vec![list("l1", vec![entry("10.0.0.0/8", None)])];
         let candidate = base.clone();
-        assert!(diff_prefix_lists(&base, &candidate).is_empty());
+        assert_eq!(diff_prefix_lists(&base, &candidate), []);
     }
 
     #[test]

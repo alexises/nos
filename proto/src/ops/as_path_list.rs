@@ -102,7 +102,7 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.as_path_lists.len(), 1);
-        assert!(cfg.as_path_lists[0].patterns.is_empty());
+        assert_eq!(cfg.as_path_lists[0].patterns, [] as [String; 0]);
     }
 
     #[test]
@@ -125,7 +125,7 @@ mod tests {
         }
         .apply(&mut cfg)
         .unwrap();
-        assert!(cfg.as_path_lists[0].patterns.is_empty());
+        assert_eq!(cfg.as_path_lists[0].patterns, [] as [String; 0]);
     }
 
     #[test]

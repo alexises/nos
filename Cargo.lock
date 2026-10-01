@@ -2063,6 +2063,7 @@ dependencies = [
  "ipnet",
  "nos-pki",
  "nos-proto",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]

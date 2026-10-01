@@ -81,7 +81,7 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.static_routing_instances.len(), 1);
         assert_eq!(cfg.static_routing_instances[0].name, "sri1");
-        assert!(cfg.static_routing_instances[0].routes.is_empty());
+        assert_eq!(cfg.static_routing_instances[0].routes, []);
     }
 
     #[test]

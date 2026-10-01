@@ -822,7 +822,7 @@ mod tests {
             100,
             1500,
         );
-        assert!(actions.is_empty());
+        assert_eq!(actions, []);
     }
 
     #[test]
@@ -840,7 +840,7 @@ mod tests {
             100,
             1500,
         );
-        assert!(actions.is_empty());
+        assert_eq!(actions, []);
     }
 
     #[test]
@@ -877,7 +877,7 @@ mod tests {
                 more_to_load: false
             })]
         );
-        assert!(adj.request_list.is_empty());
+        assert_eq!(adj.request_list, []);
     }
 
     #[test]
@@ -1006,7 +1006,7 @@ mod tests {
             100,
             1500,
         );
-        assert!(adj.request_list.is_empty());
+        assert_eq!(adj.request_list, []);
         assert_eq!(
             actions,
             vec![Action::NeighborEvent(Event::ExchangeDone {
@@ -1375,7 +1375,7 @@ mod tests {
             100,
             1500,
         );
-        assert!(actions.is_empty());
+        assert_eq!(actions, []);
         assert_eq!(adj.dd_sequence_number, 5, "must not adopt the stray seq");
     }
 
@@ -1397,7 +1397,7 @@ mod tests {
             100,
             1500,
         );
-        assert!(actions.is_empty());
+        assert_eq!(actions, []);
         assert_eq!(adj.dd_sequence_number, 5, "must not adopt the stray seq");
     }
 
@@ -1476,11 +1476,11 @@ mod tests {
         // A different sequence number is no duplicate of our last reply.
         let (mut adj, _, mut poll) = slave_after_final_reply();
         poll.dd_sequence_number = 43;
-        assert!(dbd_in(&mut adj, NeighborState::Full, &poll).is_empty());
+        assert_eq!(dbd_in(&mut adj, NeighborState::Full, &poll), []);
         // Nothing kept to resend.
         let (mut adj, _, poll) = slave_after_final_reply();
         adj.last_dbd_sent = None;
-        assert!(dbd_in(&mut adj, NeighborState::Full, &poll).is_empty());
+        assert_eq!(dbd_in(&mut adj, NeighborState::Full, &poll), []);
     }
 
     #[test]
@@ -1488,9 +1488,9 @@ mod tests {
         let (mut adj, _, mut dup) = slave_after_final_reply();
         adj.is_master = true;
         dup.master = false;
-        assert!(dbd_in(&mut adj, NeighborState::Full, &dup).is_empty());
+        assert_eq!(dbd_in(&mut adj, NeighborState::Full, &dup), []);
         dup.master = true;
-        assert!(dbd_in(&mut adj, NeighborState::Full, &dup).is_empty());
+        assert_eq!(dbd_in(&mut adj, NeighborState::Full, &dup), []);
     }
 
     fn full_lsa(link_state_id: &str, seq: i32) -> Lsa {
@@ -1550,7 +1550,7 @@ mod tests {
             lsas: vec![l.clone()],
         };
         let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
-        assert!(adj.request_list.is_empty());
+        assert_eq!(adj.request_list, []);
         assert!(lsdb.get(&l.header.key()).is_some());
         assert_eq!(actions, vec![Action::NeighborEvent(Event::LoadingDone)]);
         assert_eq!(adj.pending_acks, vec![l.header]);
@@ -1560,7 +1560,7 @@ mod tests {
             take_pending_acks(&mut adj),
             Some(Action::SendLsAck(vec![l.header]))
         );
-        assert!(adj.pending_acks.is_empty());
+        assert_eq!(adj.pending_acks, []);
         assert_eq!(take_pending_acks(&mut adj), None);
     }
 
@@ -1578,7 +1578,7 @@ mod tests {
         let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
         assert_eq!(actions, vec![Action::NeighborEvent(Event::LoadingDone)]);
         assert_eq!(adj.pending_acks, vec![l.header]);
-        assert!(newly_installed.is_empty());
+        assert_eq!(newly_installed, []);
     }
 
     #[test]
@@ -1596,7 +1596,7 @@ mod tests {
         };
         let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
         assert_eq!(adj.request_list, vec![header("2.2.2.2", 1).key()]);
-        assert!(actions.is_empty());
+        assert_eq!(actions, []);
         assert_eq!(adj.pending_acks, vec![l.header]);
         assert_eq!(newly_installed, vec![l.header]);
     }
@@ -1616,7 +1616,7 @@ mod tests {
         };
         let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
         assert!(lsdb.get(&l.header.key()).is_none());
-        assert!(newly_installed.is_empty());
+        assert_eq!(newly_installed, []);
         assert!(!actions.iter().any(|a| matches!(a, Action::SendLsAck(_))));
         assert_eq!(adj.pending_acks, vec![l.header]);
 
@@ -1626,7 +1626,7 @@ mod tests {
         };
         let (_, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
         assert_eq!(newly_installed, vec![l.header]);
-        assert!(adj.request_list.is_empty());
+        assert_eq!(adj.request_list, []);
     }
 
     /// A flushed copy (same sequence/checksum, age `MaxAge`) of a held LSA
@@ -1696,9 +1696,9 @@ mod tests {
             &lsu,
             t0 + crate::lsdb::MIN_LS_ARRIVAL / 2,
         );
-        assert!(newly_installed.is_empty());
-        assert!(adj.pending_acks.is_empty());
-        assert!(actions.is_empty());
+        assert_eq!(newly_installed, []);
+        assert_eq!(adj.pending_acks, []);
+        assert_eq!(actions, []);
         assert_eq!(adj.request_list, vec![second.header.key()]);
         assert_eq!(
             lsdb.get(&first.header.key())

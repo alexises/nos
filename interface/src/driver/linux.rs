@@ -854,15 +854,15 @@ mod tests {
     fn diff_addresses_no_change_when_equal() {
         let addrs = vec!["10.0.0.1/24".parse().unwrap()];
         let (to_add, to_remove) = diff_addresses(&addrs, &addrs);
-        assert!(to_add.is_empty());
-        assert!(to_remove.is_empty());
+        assert_eq!(to_add, [] as [nos_proto::IpNet; 0]);
+        assert_eq!(to_remove, [] as [nos_proto::IpNet; 0]);
     }
 
     #[test]
     fn diff_addresses_empty_desired_removes_everything() {
         let observed = vec!["10.0.0.1/24".parse().unwrap()];
         let (to_add, to_remove) = diff_addresses(&observed, &[]);
-        assert!(to_add.is_empty());
+        assert_eq!(to_add, [] as [nos_proto::IpNet; 0]);
         assert_eq!(to_remove, observed);
     }
 
@@ -871,6 +871,6 @@ mod tests {
         let desired = vec!["10.0.0.1/24".parse().unwrap()];
         let (to_add, to_remove) = diff_addresses(&[], &desired);
         assert_eq!(to_add, desired);
-        assert!(to_remove.is_empty());
+        assert_eq!(to_remove, [] as [nos_proto::IpNet; 0]);
     }
 }
