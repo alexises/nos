@@ -53,6 +53,14 @@ fn changed_fields(base: &OspfInstance, candidate: &OspfInstance) -> Vec<FieldDif
             new: Some(candidate.router_id.to_string()),
         });
     }
+    if base.graceful_restart_grace_period != candidate.graceful_restart_grace_period {
+        let render = |p: Option<u16>| p.map_or("unset".to_string(), |p| p.to_string());
+        fields.push(FieldDiff {
+            label: "graceful-restart grace-period".to_string(),
+            old: Some(render(base.graceful_restart_grace_period)),
+            new: Some(render(candidate.graceful_restart_grace_period)),
+        });
+    }
     fields
 }
 
@@ -97,6 +105,7 @@ mod tests {
             areas: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
+            graceful_restart_grace_period: None,
         }
     }
 

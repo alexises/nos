@@ -184,6 +184,10 @@ pub const OSPF_BROADCAST_SUBNET: &str = "203.0.113.64/28";
 pub const OSPF_AREA_1: &str = "0.0.0.1";
 pub const OSPF_PROFILE_AREA1: &str = "ospf-profile-area1";
 pub const OSPF_ABR_LOOPBACK_ADDRESS: &str = "203.0.113.96/32";
+/// `ospf-graceful-restart`: router-a's loopback, which router-b must keep a
+/// route to through router-a's `nos-ospfd` restart. A prefix no earlier phase
+/// installs.
+pub const OSPF_GR_LOOPBACK_ADDRESS: &str = "203.0.113.112/32";
 /// Scales nos-ospfd's LSA age clock: 1800/180 = 10s, 3600/180 = 20s.
 pub const OSPF_AGE_MULTIPLIER: u32 = 180;
 pub const ASBR_PREFIX: &str = "192.0.2.128/25";

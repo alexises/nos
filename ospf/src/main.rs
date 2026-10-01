@@ -127,16 +127,27 @@ async fn main() -> anyhow::Result<()> {
         routing_table_rx,
         shutdown_rx,
     );
-    let server_task = server::start(&listen_socket, args.instance.clone(), links, &identity)
-        .inspect_err(|e| {
-            tracing::error!(instance = %args.instance, error = %e, "failed to start OSPF IPC server");
-        })
-        .context("starting OSPF IPC server")?;
+    let server_task = server::start(
+        &listen_socket,
+        args.instance.clone(),
+        links.clone(),
+        &identity,
+    )
+    .inspect_err(|e| {
+        tracing::error!(instance = %args.instance, error = %e, "failed to start OSPF IPC server");
+    })
+    .context("starting OSPF IPC server")?;
 
-    wait_for_shutdown_signal()
+    let planned_restart = wait_for_shutdown_signal()
         .await
         .context("waiting for shutdown signal")?;
-    info!(instance = %args.instance, "shutdown signal received");
+    info!(instance = %args.instance, planned_restart, "shutdown signal received");
+    // RFC 3623: announced before `shutdown_tx`, so the link tasks are still
+    // running to send the Grace-LSAs, and `LinkManager::shutdown` (run when
+    // the reconcile loop exits) then keeps this router's LSAs.
+    if planned_restart {
+        links.announce_graceful_restart().await;
+    }
 
     let _ = shutdown_tx.send(true);
     if let Err(e) = reconcile_task.await {
@@ -151,17 +162,17 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Waits for SIGTERM or SIGINT. SIGINT is what `nos-watchdog` sends
-/// (`supervisor::shutdown_child`); SIGTERM is handled too so a directly-run
-/// or container-stopped `nos-ospfd` still shuts down cleanly instead of
-/// relying on a forced kill.
-async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
+/// (`supervisor::shutdown_child`) to stop or remove an instance; SIGTERM is
+/// handled too so a directly-run or container-stopped `nos-ospfd` still
+/// shuts down cleanly. Returns `true` for SIGTERM — a planned restart, the
+/// only case that announces an RFC 3623 grace period.
+async fn wait_for_shutdown_signal() -> anyhow::Result<bool> {
     let mut sigterm = signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
     let mut sigint = signal(SignalKind::interrupt()).context("installing SIGINT handler")?;
-    tokio::select! {
-        _ = sigterm.recv() => {}
-        _ = sigint.recv() => {}
-    }
-    Ok(())
+    Ok(tokio::select! {
+        _ = sigterm.recv() => true,
+        _ = sigint.recv() => false,
+    })
 }
 
 #[cfg(test)]

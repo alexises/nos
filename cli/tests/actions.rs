@@ -106,6 +106,7 @@ fn fake_configd(path: &Path) {
             areas: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
+            graceful_restart_grace_period: None,
         }],
         ospfv3_instances: vec![nos_proto::Ospfv3Instance {
             name: "v3".to_string(),

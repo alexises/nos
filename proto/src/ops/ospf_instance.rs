@@ -21,6 +21,11 @@ pub enum OspfInstanceOp {
         name: String,
         router_id: Ipv4Addr,
     },
+    /// Sets (`Some`) or clears (`None`) the RFC 3623 grace period.
+    SetGracefulRestartGracePeriod {
+        name: String,
+        grace_period: Option<u16>,
+    },
     Delete {
         name: String,
     },
@@ -37,12 +42,17 @@ impl OspfInstanceOp {
                         areas: Vec::new(),
                         routing_table: None,
                         redistribute_policy: None,
+                        graceful_restart_grace_period: None,
                     });
                 }
                 Ok(())
             }
             OspfInstanceOp::SetRouterId { name, router_id } => {
                 find_instance_mut(config, name)?.router_id = *router_id;
+                Ok(())
+            }
+            OspfInstanceOp::SetGracefulRestartGracePeriod { name, grace_period } => {
+                find_instance_mut(config, name)?.graceful_restart_grace_period = *grace_period;
                 Ok(())
             }
             OspfInstanceOp::Delete { name } => {
@@ -79,6 +89,7 @@ mod tests {
             areas: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
+            graceful_restart_grace_period: None,
         }
     }
 

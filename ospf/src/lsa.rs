@@ -27,6 +27,19 @@ pub const LSA_TYPE_NETWORK: u8 = 2;
 pub const LSA_TYPE_NETWORK_SUMMARY: u8 = 3;
 pub const LSA_TYPE_ASBR_SUMMARY: u8 = 4;
 pub const LSA_TYPE_AS_EXTERNAL: u8 = 5;
+/// RFC 5250 link-local opaque LSA. Only the RFC 3623 Grace-LSA (opaque type
+/// 3) is decoded; any other opaque type stays `UnknownLsaType` until #40.
+pub const LSA_TYPE_OPAQUE_LINK: u8 = 9;
+/// RFC 3623 Appendix A: the Grace-LSA's opaque type — the top octet of its
+/// Link State ID, so the Link State ID is always `3.0.0.0` (opaque ID 0).
+pub const OPAQUE_TYPE_GRACE: u8 = 3;
+pub const GRACE_LINK_STATE_ID: Ipv4Addr = Ipv4Addr::new(OPAQUE_TYPE_GRACE, 0, 0, 0);
+/// RFC 3623 Appendix A's Grace-LSA TLVs.
+const TLV_GRACE_PERIOD: u16 = 1;
+const TLV_RESTART_REASON: u16 = 2;
+const TLV_INTERFACE_ADDRESS: u16 = 3;
+/// RFC 3623 Appendix A: restart reason 1, "software restart".
+pub const RESTART_REASON_SOFTWARE: u8 = 1;
 
 /// RFC 2328 §12.4.1's Router-LSA link types.
 pub const LINK_TYPE_POINT_TO_POINT: u8 = 1;
@@ -169,12 +182,24 @@ pub struct SummaryLsaBody {
     pub metric: u32,
 }
 
+/// RFC 3623 Grace-LSA body: how long the restarting router asks its
+/// neighbors to keep helping, why it restarts, and (optional on decode, always
+/// sent) the interface address it was sent from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraceLsaBody {
+    pub grace_period: u32,
+    pub restart_reason: u8,
+    pub interface_address: Option<Ipv4Addr>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LsaBody {
     Router(RouterLsaBody),
     Network(NetworkLsaBody),
     Summary(SummaryLsaBody),
     AsExternal(AsExternalLsaBody),
+    /// Type 9, opaque type 3 only — see `LSA_TYPE_OPAQUE_LINK`.
+    Grace(GraceLsaBody),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -270,11 +295,59 @@ fn encode_body(body: &LsaBody) -> Vec<u8> {
             buf.extend_from_slice(&(s.metric & EXTERNAL_METRIC_MASK).to_be_bytes());
             buf
         }
+        LsaBody::Grace(g) => {
+            let mut buf = Vec::with_capacity(24);
+            put_tlv(&mut buf, TLV_GRACE_PERIOD, &g.grace_period.to_be_bytes());
+            put_tlv(&mut buf, TLV_RESTART_REASON, &[g.restart_reason]);
+            if let Some(addr) = g.interface_address {
+                put_tlv(&mut buf, TLV_INTERFACE_ADDRESS, &addr.octets());
+            }
+            buf
+        }
     }
 }
 
-fn decode_body(lsa_type: u8, data: &[u8]) -> Result<LsaBody, PacketError> {
-    match lsa_type {
+/// One RFC 3623 Appendix A TLV: type, length, value padded to 4 bytes.
+fn put_tlv(buf: &mut Vec<u8>, tlv_type: u16, value: &[u8]) {
+    buf.extend_from_slice(&tlv_type.to_be_bytes());
+    buf.extend_from_slice(&u16::try_from(value.len()).unwrap_or(u16::MAX).to_be_bytes());
+    buf.extend_from_slice(value);
+    buf.resize(buf.len().next_multiple_of(4), 0);
+}
+
+/// Unknown TLVs are skipped (RFC 3623 Appendix A); a missing Grace Period
+/// or a wrongly-sized known one is malformed.
+fn decode_grace(mut data: &[u8]) -> Result<LsaBody, PacketError> {
+    let mut grace_period = None;
+    let mut restart_reason = 0;
+    let mut interface_address = None;
+    while data.len() >= 4 {
+        let t = u16::from_be_bytes([data[0], data[1]]);
+        let len = usize::from(u16::from_be_bytes([data[2], data[3]]));
+        let padded = 4 + len.next_multiple_of(4);
+        let v = data.get(4..4 + len).ok_or(PacketError::TruncatedBody)?;
+        match (t, len) {
+            (TLV_GRACE_PERIOD, 4) => {
+                grace_period = Some(u32::from_be_bytes([v[0], v[1], v[2], v[3]]));
+            }
+            (TLV_RESTART_REASON, 1) => restart_reason = v[0],
+            (TLV_INTERFACE_ADDRESS, 4) => interface_address = Some(read_ipv4(v, 0)),
+            (TLV_GRACE_PERIOD | TLV_RESTART_REASON | TLV_INTERFACE_ADDRESS, _) => {
+                return Err(PacketError::TruncatedBody);
+            }
+            _ => {}
+        }
+        data = data.get(padded..).unwrap_or_default();
+    }
+    Ok(LsaBody::Grace(GraceLsaBody {
+        grace_period: grace_period.ok_or(PacketError::TruncatedBody)?,
+        restart_reason,
+        interface_address,
+    }))
+}
+
+fn decode_body(header: &LsaHeader, data: &[u8]) -> Result<LsaBody, PacketError> {
+    match header.lsa_type {
         LSA_TYPE_ROUTER => {
             if data.len() < 4 {
                 return Err(PacketError::TruncatedBody);
@@ -342,6 +415,9 @@ fn decode_body(lsa_type: u8, data: &[u8]) -> Result<LsaBody, PacketError> {
                 metric,
             }))
         }
+        LSA_TYPE_OPAQUE_LINK if header.link_state_id.octets()[0] == OPAQUE_TYPE_GRACE => {
+            decode_grace(data)
+        }
         other => Err(PacketError::UnknownLsaType(other)),
     }
 }
@@ -390,7 +466,7 @@ pub fn decode_lsa(data: &[u8]) -> Result<Lsa, PacketError> {
     if computed != header.checksum {
         return Err(PacketError::BadChecksum);
     }
-    let body = decode_body(header.lsa_type, &data[LSA_HEADER_LEN..total_len])?;
+    let body = decode_body(&header, &data[LSA_HEADER_LEN..total_len])?;
     Ok(Lsa { header, body })
 }
 
@@ -678,6 +754,91 @@ mod tests {
             panic!("expected summary lsa")
         };
         assert_eq!(s.metric, 20);
+    }
+
+    fn grace_lsa(body: GraceLsaBody) -> Lsa {
+        Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type: LSA_TYPE_OPAQUE_LINK,
+                link_state_id: GRACE_LINK_STATE_ID,
+                advertising_router: Ipv4Addr::new(9, 9, 9, 9),
+                sequence_number: INITIAL_SEQUENCE_NUMBER,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Grace(body),
+        }
+    }
+
+    #[test]
+    fn grace_lsa_round_trips() {
+        for interface_address in [None, Some(Ipv4Addr::new(10, 0, 0, 1))] {
+            let lsa = grace_lsa(GraceLsaBody {
+                grace_period: 120,
+                restart_reason: RESTART_REASON_SOFTWARE,
+                interface_address,
+            });
+            assert_eq!(decode_lsa(&encode_lsa(&lsa)).unwrap().body, lsa.body);
+        }
+    }
+
+    /// A hand-built RFC 3623 Appendix A body, not our own encoder's output:
+    /// Grace Period 60, Restart Reason 1 (padded), an unknown TLV 99 that
+    /// must be skipped, then IP Interface Address 192.0.2.1.
+    #[test]
+    fn grace_lsa_decodes_rfc_3623_wire_bytes() {
+        let body: [u8; 32] = [
+            0, 1, 0, 4, 0, 0, 0, 60, // grace period
+            0, 2, 0, 1, 1, 0, 0, 0, // restart reason + 3 pad
+            0, 99, 0, 2, 0xaa, 0xbb, 0, 0, // unknown, skipped
+            0, 3, 0, 4, 192, 0, 2, 1, // ip interface address
+        ];
+        let header = LsaHeader {
+            length: u16::try_from(LSA_HEADER_LEN + body.len()).unwrap(),
+            ..grace_lsa(GraceLsaBody {
+                grace_period: 0,
+                restart_reason: 0,
+                interface_address: None,
+            })
+            .header
+        };
+        let mut buf = Vec::new();
+        encode_lsa_header(&mut buf, &header);
+        buf.extend_from_slice(&body);
+        let checksum = lsa_checksum(&buf[2..]);
+        buf[16..18].copy_from_slice(&checksum.to_be_bytes());
+        assert_eq!(
+            decode_lsa(&buf).unwrap().body,
+            LsaBody::Grace(GraceLsaBody {
+                grace_period: 60,
+                restart_reason: 1,
+                interface_address: Some(Ipv4Addr::new(192, 0, 2, 1)),
+            })
+        );
+        // Our encoder produces the very same bytes for the known TLVs.
+        let ours = encode_lsa(&grace_lsa(GraceLsaBody {
+            grace_period: 60,
+            restart_reason: 1,
+            interface_address: Some(Ipv4Addr::new(192, 0, 2, 1)),
+        }));
+        assert_eq!(&ours[LSA_HEADER_LEN..], [&body[..16], &body[24..]].concat());
+    }
+
+    /// Any other link-local opaque type is still unsupported (#40).
+    #[test]
+    fn other_opaque_type_is_rejected() {
+        let mut lsa = grace_lsa(GraceLsaBody {
+            grace_period: 1,
+            restart_reason: 0,
+            interface_address: None,
+        });
+        lsa.header.link_state_id = Ipv4Addr::new(4, 0, 0, 0);
+        assert_eq!(
+            decode_lsa(&encode_lsa(&lsa)),
+            Err(PacketError::UnknownLsaType(LSA_TYPE_OPAQUE_LINK))
+        );
     }
 
     #[test]

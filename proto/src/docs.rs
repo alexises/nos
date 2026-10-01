@@ -181,6 +181,8 @@ topics! {
     OspfInstance,
     /// `OspfInstance.router_id`
     OspfInstanceRouterId,
+    /// `OspfInstance.graceful_restart_grace_period`
+    OspfInstanceGracefulRestart,
     /// `OspfInstance.areas`
     OspfArea,
     /// `OspfArea.profiles`

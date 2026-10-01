@@ -637,6 +637,10 @@ pub struct Args {
     pub ospf_instance: Option<String>,
     #[arg(long)]
     pub ospf_router_id: Option<Ipv4Addr>,
+    /// RFC 3623 graceful-restart grace period (seconds) for that instance
+    /// (requires `--ospf-instance`); `0` clears it.
+    #[arg(long)]
+    pub ospf_graceful_restart_grace_period: Option<u16>,
 
     /// If set (requires `--ospf-instance`), ensures this OSPF area under it
     /// (`OspfAreaOp::Ensure`).
@@ -1624,6 +1628,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             name: name.clone(),
             router_id,
         }));
+        if let Some(grace_period) = args.ospf_graceful_restart_grace_period {
+            ops.push(ConfigOp::OspfInstance(
+                OspfInstanceOp::SetGracefulRestartGracePeriod {
+                    name: name.clone(),
+                    grace_period: (grace_period != 0).then_some(grace_period),
+                },
+            ));
+        }
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetOspfInstance {
             name: args.routing_table.clone(),
             ospf_instance: name,

@@ -170,8 +170,14 @@ pub fn render_bgp_instance(instance: &BgpInstance) -> String {
 /// the instance line — mirrors `render_interface`'s nested subinterfaces.
 pub fn render_ospf_instance(instance: &OspfInstance) -> String {
     let mut lines = vec![format!(
-        "ospf instance {}: router-id {}",
-        instance.name, instance.router_id
+        "ospf instance {}: router-id {}{}",
+        instance.name,
+        instance.router_id,
+        instance
+            .graceful_restart_grace_period
+            .map_or(String::new(), |p| format!(
+                ", graceful-restart grace-period {p}"
+            ))
     )];
     for area in &instance.areas {
         for line in render_ospf_area(area).lines() {
@@ -2794,6 +2800,7 @@ mod tests {
                 }],
                 routing_table: None,
                 redistribute_policy: None,
+                graceful_restart_grace_period: None,
             }],
             ospfv3_instances: vec![Ospfv3Instance {
                 name: "v3".to_string(),

@@ -11,6 +11,7 @@ OSPF is the link-state interior gateway protocol for IPv4 (RFC 2328). NOS runs i
   - [Authenticate a link, and change its key](#authenticate-a-link-and-change-its-key)
   - [Redistribute static routes (ASBR)](#redistribute-static-routes-asbr)
   - [Add a second area (ABR)](#add-a-second-area-abr)
+  - [Restart without dropping routes (RFC 3623)](#restart-without-dropping-routes-rfc-3623)
   - [Stop running OSPF](#stop-running-ospf)
 - [Features and behaviour](#features-and-behaviour)
 - [Configuration reference](#configuration-reference)
@@ -286,13 +287,37 @@ $C -X PUT -H 'Content-Type: application/json' -d '"p-area1"' \
   $B/v1/transactions/abr/interface/loopback-rt1/ospf-profile
 ```
 
+### Restart without dropping routes (RFC 3623)
+
+Set a grace period on the instance so that its neighbours keep the adjacency and this router's routes while its OSPF daemon restarts:
+
+```
+configure gr
+set ospf instance o1 graceful-restart grace-period 120
+commit
+```
+
+```sh
+$C -X POST $B/v1/transactions/gr
+$C -X PUT -H 'Content-Type: application/json' -d '120' $B/v1/transactions/gr/ospf-instance/o1/graceful-restart-grace-period
+$C -X POST $B/v1/transactions/gr/commit
+```
+
+How it behaves:
+
+- **Restarting router.** Only a planned restart announces a grace period: `nos-ospfd` receiving SIGTERM sends a Grace-LSA to every Full neighbour on every link (log `ospf graceful restart: grace-lsa sent`), keeps the LSAs it originated instead of withdrawing them, then exits and is restarted by the watchdog. Stopping the router or removing the instance (SIGINT) announces nothing and withdraws the LSAs as usual. A crash announces nothing either.
+- **Helping neighbour.** Every OSPF instance helps; there is nothing to enable. On a Grace-LSA from a Full neighbour it logs `ospf helper: grace period entered`, keeps that neighbour Full through missing Hellos and through Hellos that don't list it yet, keeps the neighbour's LSAs (and, as DR, keeps it in the network LSA), so its routes stay installed. The Grace-LSA is acknowledged but never stored or passed on.
+- **End of the grace period.** When the restarted router's adjacency is Full again, the helper logs `ospf helper: neighbor reformed, exiting grace early`. If it never comes back, the helper logs `ospf helper: grace period expired` and the ordinary dead interval applies from then on.
+- **Between NOS routers only, for now.** The Grace-LSA is an opaque LSA, and NOS does not yet advertise opaque-LSA support (the O bit), so other vendors' routers do not send or accept it.
+- `delete ospf instance o1 graceful-restart grace-period` turns it off.
+
 ### Stop running OSPF
 
 - On one link: `delete interface eth0 ospf` (or `delete ospf` inside the interface, subinterface or broadcast domain). Over REST, `DELETE …/interface/eth0/subinterface/0/ospf-profile`.
 - For the whole routing table: `delete routing-table rt1 ospf-instance`. The instance stays configured but stops running.
 - Entirely: `delete ospf instance o1`, after removing every reference to it and to its profiles, or the commit is refused.
 
-When OSPF stops cleanly, the router first withdraws the LSAs it originated, so its neighbours remove its routes within seconds instead of waiting for them to age out.
+When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-routes-rfc-3623) was announced), the router first withdraws the LSAs it originated, so its neighbours remove its routes within seconds instead of waiting for them to age out.
 
 ## Features and behaviour
 
@@ -316,7 +341,7 @@ When OSPF stops cleanly, the router first withdraws the LSAs it originated, so i
 
 **MTU and database exchange (RFC 2328 §10.6–10.8).** During the database exchange, the list of LSAs is split over as many packets as the link's MTU requires. The MTU used is the link's real MTU, unless the profile sets `mtu`. The MTU that a neighbour advertises is not checked against the local one, so an MTU mismatch does not block an adjacency.
 
-**Not supported:** NSSA and stub areas, virtual links, area range summarisation, metric-type 2 external routes, redistribution of anything other than static routes, graceful restart, BFD, and the non-broadcast network types (NBMA and point-to-multipoint).
+**Not supported:** NSSA and stub areas, virtual links, area range summarisation, metric-type 2 external routes, redistribution of anything other than static routes, graceful restart with routers other than NOS (opaque LSAs), the restarting router's own RFC 3623 restart mode (it resynchronises from scratch while its neighbours help) and strict LSA checking in the helper, BFD, and the non-broadcast network types (NBMA and point-to-multipoint).
 
 ## Configuration reference
 
@@ -328,6 +353,7 @@ All paths are relative to `/v1/transactions/{tx}/`. `delete` forms marked *relat
 |---|---|---|---|---|---|---|
 | name | `edit ospf instance <name>`; `delete ospf instance <name>` | `ospf-instance/<name>` | string, 1 to 64 characters | unique among OSPF instances | names the instance | `show config` |
 | router ID | `set ospf instance <name> router-id <ip>`; relative `set router-id <ip>` | `ospf-instance/<name>/router-id` | IPv4 address; `0.0.0.0` when created by `edit` | set it: it identifies the router in every LSA | router ID in Hellos and LSAs | `show ospf neigh` on the neighbour |
+| graceful restart | `set ospf instance <name> graceful-restart grace-period <seconds>`; `delete ospf instance <name> graceful-restart grace-period` | `ospf-instance/<name>/graceful-restart-grace-period` | seconds, 1 to 1800; unset by default | | on SIGTERM, ask Full neighbours to keep the adjacency and routes this long (RFC 3623) | `ospf helper: grace period entered` in the neighbour's log |
 | areas | `edit ospf instance <name> area <area-id>`; relative `edit area <area-id>` | `ospf-instance/<name>/area/<area-id>` | list of areas | area IDs unique within the instance | see [Area](#area) | `show config` |
 | routing table | set on the table: `set routing-table <table> ospf-instance <name>`; `delete routing-table <table> ospf-instance` | `routing-table/<table>/ospf-instance` | instance name; unset by default | the instance must exist; one table per instance | runs the instance in that table's VRF and installs its routes there | `show ospf neigh`, `show route <table>` |
 
