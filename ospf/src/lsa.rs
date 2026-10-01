@@ -16,6 +16,9 @@
 //! for a real, 2-area-scoped ABR mechanism (see `ospf/CLAUDE.md`'s "ABR and
 //! Summary-LSA origination") — stub/NSSA areas, virtual links, and area-range
 //! aggregation remain out of scope.
+//!
+//! RFC 5250 opaque LSAs (types 9/10/11) are stored and flooded as raw bytes
+//! (`LsaBody::Opaque`); only the RFC 3623 Grace-LSA is parsed.
 
 use std::cmp::Ordering;
 use std::net::Ipv4Addr;
@@ -27,9 +30,16 @@ pub const LSA_TYPE_NETWORK: u8 = 2;
 pub const LSA_TYPE_NETWORK_SUMMARY: u8 = 3;
 pub const LSA_TYPE_ASBR_SUMMARY: u8 = 4;
 pub const LSA_TYPE_AS_EXTERNAL: u8 = 5;
-/// RFC 5250 link-local opaque LSA. Only the RFC 3623 Grace-LSA (opaque type
-/// 3) is decoded; any other opaque type stays `UnknownLsaType` until #40.
+/// RFC 5250 opaque LSAs, by flooding scope: link-local (9), area (10), AS
+/// (11). Held and flooded as raw bytes (`LsaBody::Opaque`), except the RFC
+/// 3623 Grace-LSA (type 9, opaque type 3), decoded as `LsaBody::Grace`.
 pub const LSA_TYPE_OPAQUE_LINK: u8 = 9;
+pub const LSA_TYPE_OPAQUE_AREA: u8 = 10;
+/// ponytail: held in the area store it arrived in, like a received Type-5 —
+/// an ABR doesn't flood it on into its other areas. Add that with real
+/// Type-5 cross-area flooding. No stub areas, so RFC 5250's "not into stub
+/// areas" rule has nothing to apply to.
+pub const LSA_TYPE_OPAQUE_AS: u8 = 11;
 /// RFC 3623 Appendix A: the Grace-LSA's opaque type — the top octet of its
 /// Link State ID, so the Link State ID is always `3.0.0.0` (opaque ID 0).
 pub const OPAQUE_TYPE_GRACE: u8 = 3;
@@ -40,6 +50,25 @@ const TLV_RESTART_REASON: u16 = 2;
 const TLV_INTERFACE_ADDRESS: u16 = 3;
 /// RFC 3623 Appendix A: restart reason 1, "software restart".
 pub const RESTART_REASON_SOFTWARE: u8 = 1;
+
+/// RFC 5250 §3: types 9-11. Only sent to a neighbor whose DBD set the O-bit.
+pub fn is_opaque(lsa_type: u8) -> bool {
+    matches!(
+        lsa_type,
+        LSA_TYPE_OPAQUE_LINK | LSA_TYPE_OPAQUE_AREA | LSA_TYPE_OPAQUE_AS
+    )
+}
+
+/// Type 9: held per link, never flooded past the link it arrived on.
+pub fn is_link_local_scope(lsa_type: u8) -> bool {
+    lsa_type == LSA_TYPE_OPAQUE_LINK
+}
+
+/// RFC 5250 §3: an opaque LSA's Link State ID is opaque type (top octet)
+/// then a 24-bit opaque ID.
+pub fn opaque_type(link_state_id: Ipv4Addr) -> u8 {
+    link_state_id.octets()[0]
+}
 
 /// RFC 2328 §12.4.1's Router-LSA link types.
 pub const LINK_TYPE_POINT_TO_POINT: u8 = 1;
@@ -200,6 +229,9 @@ pub enum LsaBody {
     AsExternal(AsExternalLsaBody),
     /// Type 9, opaque type 3 only — see `LSA_TYPE_OPAQUE_LINK`.
     Grace(GraceLsaBody),
+    /// Any other type 9/10/11 body, kept byte for byte so it re-encodes with
+    /// the originator's checksum. Never parsed; SPF ignores it.
+    Opaque(Vec<u8>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -304,6 +336,7 @@ fn encode_body(body: &LsaBody) -> Vec<u8> {
             }
             buf
         }
+        LsaBody::Opaque(bytes) => bytes.clone(),
     }
 }
 
@@ -415,9 +448,10 @@ fn decode_body(header: &LsaHeader, data: &[u8]) -> Result<LsaBody, PacketError> 
                 metric,
             }))
         }
-        LSA_TYPE_OPAQUE_LINK if header.link_state_id.octets()[0] == OPAQUE_TYPE_GRACE => {
+        LSA_TYPE_OPAQUE_LINK if opaque_type(header.link_state_id) == OPAQUE_TYPE_GRACE => {
             decode_grace(data)
         }
+        t if is_opaque(t) => Ok(LsaBody::Opaque(data.to_vec())),
         other => Err(PacketError::UnknownLsaType(other)),
     }
 }
@@ -826,19 +860,33 @@ mod tests {
         assert_eq!(&ours[LSA_HEADER_LEN..], [&body[..16], &body[24..]].concat());
     }
 
-    /// Any other link-local opaque type is still unsupported (#40).
+    /// Every other opaque type, at every scope, round-trips byte for byte —
+    /// including a body length that is not a multiple of 4 and a checksum
+    /// nos could not have produced itself.
     #[test]
-    fn other_opaque_type_is_rejected() {
-        let mut lsa = grace_lsa(GraceLsaBody {
-            grace_period: 1,
-            restart_reason: 0,
-            interface_address: None,
-        });
-        lsa.header.link_state_id = Ipv4Addr::new(4, 0, 0, 0);
-        assert_eq!(
-            decode_lsa(&encode_lsa(&lsa)),
-            Err(PacketError::UnknownLsaType(LSA_TYPE_OPAQUE_LINK))
-        );
+    fn opaque_lsas_round_trip_as_raw_bytes() {
+        for lsa_type in [
+            LSA_TYPE_OPAQUE_LINK,
+            LSA_TYPE_OPAQUE_AREA,
+            LSA_TYPE_OPAQUE_AS,
+        ] {
+            let lsa = Lsa {
+                header: LsaHeader {
+                    lsa_type,
+                    link_state_id: Ipv4Addr::new(4, 0, 0, 7),
+                    ..router_lsa().header
+                },
+                body: LsaBody::Opaque(vec![0, 1, 0, 3, 0xde, 0xad, 0xbe]),
+            };
+            let wire = encode_lsa(&lsa);
+            let decoded = decode_lsa(&wire).unwrap();
+            assert_eq!(decoded.body, lsa.body);
+            assert_eq!(opaque_type(decoded.header.link_state_id), 4);
+            assert_eq!(encode_lsa(&decoded), wire);
+        }
+        assert!(is_link_local_scope(LSA_TYPE_OPAQUE_LINK));
+        assert!(!is_link_local_scope(LSA_TYPE_OPAQUE_AREA));
+        assert!(!is_opaque(LSA_TYPE_AS_EXTERNAL));
     }
 
     #[test]

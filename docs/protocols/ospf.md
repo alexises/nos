@@ -84,7 +84,7 @@ show route rt1
 ```
 
 - `show ospf neigh` prints one line per link and neighbour: the link, its area, the link's state (`point-to-point`, or `dr`/`backup`/`dr-other`/`waiting` on a LAN), the neighbour's router ID and state (`Init`, `2-Way`, `ExStart`, `Exchange`, `Loading`, `Full`), when its last Hello arrived, the timers and priorities, and the DR and BDR.
-- `show ospf database` lists the header of every LSA held, per area: its type (1 router, 2 network, 3 summary, 4 ASBR summary, 5 AS-external), link-state ID, advertising router, sequence number, age and checksum.
+- `show ospf database` lists the header of every LSA held, per area: its type (1 router, 2 network, 3 summary, 4 ASBR summary, 5 AS-external, 9/10/11 opaque, see [Opaque LSAs](#features-and-behaviour)), link-state ID, advertising router, sequence number, age and checksum.
 - Both cover every OSPF instance on the router.
 
 Over REST, `GET /v1/ospf/neighbors` and `GET /v1/ospf/database` return the same data as JSON, one entry per instance:
@@ -308,7 +308,7 @@ How it behaves:
 - **Restarting router.** Only a planned restart announces a grace period: `nos-ospfd` receiving SIGTERM sends a Grace-LSA to every Full neighbour on every link (log `ospf graceful restart: grace-lsa sent`), keeps the LSAs it originated instead of withdrawing them, then exits and is restarted by the watchdog. Stopping the router or removing the instance (SIGINT) announces nothing and withdraws the LSAs as usual. A crash announces nothing either.
 - **Helping neighbour.** Every OSPF instance helps; there is nothing to enable. On a Grace-LSA from a Full neighbour it logs `ospf helper: grace period entered`, keeps that neighbour Full through missing Hellos and through Hellos that don't list it yet, keeps the neighbour's LSAs (and, as DR, keeps it in the network LSA), so its routes stay installed. The Grace-LSA is acknowledged but never stored or passed on.
 - **End of the grace period.** When the restarted router's adjacency is Full again, the helper logs `ospf helper: neighbor reformed, exiting grace early`. If it never comes back, the helper logs `ospf helper: grace period expired` and the ordinary dead interval applies from then on.
-- **Between NOS routers only, for now.** The Grace-LSA is an opaque LSA, and NOS does not yet advertise opaque-LSA support (the O bit), so other vendors' routers do not send or accept it.
+- **Other vendors.** NOS advertises opaque-LSA support (the O bit), so a third-party router's Grace-LSA is helped like a NOS one (tested with FRR's `graceful-restart prepare ip ospf`). As the restarting router, NOS has been tested with NOS helpers only.
 - `delete ospf instance o1 graceful-restart grace-period` turns it off.
 
 ### Stop running OSPF
@@ -337,11 +337,13 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **Inter-area routes (ABR).** Each prefix of an area is advertised into the router's other areas as its own type-3 LSA, and each ASBR as a type-4 LSA. There is no range summarisation, no stub or NSSA area, and no virtual link. This is designed and tested for one or more non-backbone areas each behind its own ABR; in topologies where several ABRs connect the same areas, check the result.
 
+**Opaque LSAs (RFC 5250).** NOS sets the O bit in its database description packets and stores and floods opaque LSAs it receives without reading them: type 9 (link-local) only on the link it arrived on, type 10 (area) in its area, type 11 (AS) in the area it arrived in. Opaque LSAs are offered only to neighbours whose database description packets set the O bit. NOS originates none except its own Grace-LSA. `show ospf database` lists a type-9 LSA under its link's area, without naming the link. An ABR does not pass a type-11 LSA on to its other areas. An LSA of a type NOS does not know (6, 7, 8, or above 11) is dropped on its own; the rest of the update is kept.
+
 **LSA ageing and withdrawal (RFC 2328 §14).** Self-originated LSAs are refreshed every 30 minutes and others expire after an hour without refresh. An LSA that is no longer wanted (a removed link, redistribution rule or area) is withdrawn at once by flooding it at maximum age.
 
 **MTU and database exchange (RFC 2328 §10.6–10.8).** During the database exchange, the list of LSAs is split over as many packets as the link's MTU requires. The MTU used is the link's real MTU, unless the profile sets `mtu`. The MTU that a neighbour advertises is not checked against the local one, so an MTU mismatch does not block an adjacency.
 
-**Not supported:** NSSA and stub areas, virtual links, area range summarisation, metric-type 2 external routes, redistribution of anything other than static routes, graceful restart with routers other than NOS (opaque LSAs), the restarting router's own RFC 3623 restart mode (it resynchronises from scratch while its neighbours help) and strict LSA checking in the helper, BFD, and the non-broadcast network types (NBMA and point-to-multipoint).
+**Not supported:** NSSA and stub areas, virtual links, area range summarisation, metric-type 2 external routes, redistribution of anything other than static routes, flooding type-11 opaque LSAs between areas, the restarting router's own RFC 3623 restart mode (it resynchronises from scratch while its neighbours help) and strict LSA checking in the helper, BFD, and the non-broadcast network types (NBMA and point-to-multipoint).
 
 ## Configuration reference
 

@@ -108,8 +108,8 @@ impl World {
         self.start(B, None, watchdog_args).await
     }
 
-    const CONTAINERS: [&'static str; 7] = [
-        "router-a", "router-b", "router-c", "router-r", "router-g", CE_HOST, H_HOST,
+    const CONTAINERS: [&'static str; 8] = [
+        "router-a", "router-b", "router-c", "router-r", "router-g", "router-f", CE_HOST, H_HOST,
     ];
 
     /// On a group failure: the last `n` `docker logs` lines of every container
@@ -135,7 +135,15 @@ impl World {
             self.dock.volume_remove(&format!("{name}-run")).await;
             self.dock.volume_remove(&format!("{name}-data")).await;
         }
-        for net in [NET, NET_BOND1, NET_BOND2, NET_CE_A, NET_CE_B, NET_H] {
+        for net in [
+            NET,
+            NET_BOND1,
+            NET_BOND2,
+            NET_CE_A,
+            NET_CE_B,
+            NET_H,
+            NET_OSPF_FRR,
+        ] {
             self.dock.network_remove(net).await;
         }
     }

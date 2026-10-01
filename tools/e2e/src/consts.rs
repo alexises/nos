@@ -188,6 +188,15 @@ pub const OSPF_ABR_LOOPBACK_ADDRESS: &str = "203.0.113.96/32";
 /// route to through router-a's `nos-ospfd` restart. A prefix no earlier phase
 /// installs.
 pub const OSPF_GR_LOOPBACK_ADDRESS: &str = "203.0.113.112/32";
+/// `ospf-opaque`: an FRR router (`router-f`, pulled, same tag as
+/// `tools/bench-bgp.sh`'s `FRR_IMAGE`) on its own network with router-a's
+/// eth1 only, so router-b can hear FRR's LSAs only through router-a.
+pub const FRR_IMAGE: &str = "quay.io/frrouting/frr:10.7.1";
+pub const NET_OSPF_FRR: &str = "nos-verify-net-ospf-frr";
+pub const OSPF_FRR_SUBNET: &str = "10.51.0.0/24";
+pub const OSPF_FRR_IP_A: &str = "10.51.0.2";
+pub const OSPF_FRR_IP_F: &str = "10.51.0.6";
+pub const OSPF_ROUTER_ID_F: &str = "9.9.9.6";
 /// Scales nos-ospfd's LSA age clock: 1800/180 = 10s, 3600/180 = 20s.
 pub const OSPF_AGE_MULTIPLIER: u32 = 180;
 pub const ASBR_PREFIX: &str = "192.0.2.128/25";

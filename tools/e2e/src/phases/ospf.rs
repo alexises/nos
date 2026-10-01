@@ -800,6 +800,133 @@ pub async fn ospf_mtu_pagination(w: &mut World) -> anyhow::Result<()> {
     both_full_p2p(a, b).await
 }
 
+/// RFC 5250 opaque LSAs against a real third-party router, self-contained.
+/// FRR (`router-f`) peers router-a over router-a's eth1 on its own network
+/// and originates a type 10 (segment routing's Extended Link, opaque type 8)
+/// and a type 11 (Router Information, AS scope) — which FRR only does once a
+/// neighbor's DBD carried the O-bit — then a type 9 (an RFC 3623 Grace-LSA, `graceful-restart
+/// prepare`, which FRR sends without restarting). router-a must install all
+/// three, flood the type 10 and 11 on to router-b over eth0.0, and never the
+/// type 9 (link-local scope).
+pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    if !w.dock.network_exists(NET_OSPF_FRR).await {
+        w.dock
+            .network_create(NET_OSPF_FRR, &[OSPF_FRR_SUBNET], false)
+            .await?;
+    }
+    w.dock
+        .network_connect_ip(NET_OSPF_FRR, "router-a", OSPF_FRR_IP_A)
+        .await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.provision_flags(&with_base(A, ospf(OSPF_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
+        .await?;
+    // eth1 is router-a's second subinterface: its own base flags with eth1's
+    // address instead of eth0's, the same instance/area/profile attached.
+    let mut eth1 = strings(&[
+        "--interface",
+        "eth1",
+        "--address",
+        &format!("{OSPF_FRR_IP_A}/24"),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--remote-as",
+        &ASN_B.to_string(),
+        "--peer",
+        IP_B,
+    ]);
+    eth1.extend(ospf(OSPF_ROUTER_ID));
+    a.provision_flags(&eth1).await?;
+    both_full_p2p(a, b).await?;
+
+    log("starting FRR (router-f) on router-a's eth1");
+    w.dock.ensure_pulled(FRR_IMAGE).await?;
+    // Not `mpls-te` for the type 10: FRR 10.7.1's ospfd segfaults with it
+    // here (in `ospf_read`, and with `router-info as` in type-11 origination).
+    let conf = format!(
+        "frr defaults traditional\nhostname router-f\n!\n\
+         interface eth0\n ip ospf network point-to-point\n ip ospf area {OSPF_AREA}\nexit\n!\n\
+         router ospf\n ospf router-id {OSPF_ROUTER_ID_F}\n capability opaque\n \
+         router-info as\n segment-routing on\n \
+         graceful-restart grace-period 120\nexit\n"
+    );
+    w.dock
+        .start_plain_caps(
+            "router-f",
+            FRR_IMAGE,
+            NET_OSPF_FRR,
+            OSPF_FRR_IP_F,
+            &[
+                "sh",
+                "-c",
+                "sed -i 's/^ospfd=no/ospfd=yes/' /etc/frr/daemons && exec /usr/lib/frr/docker-start",
+            ],
+            ("/etc/frr", "frr.conf", conf.as_bytes()),
+            &["NET_ADMIN", "NET_RAW", "SYS_ADMIN"],
+        )
+        .await?;
+
+    let link = "link=eth1.0";
+    a.wait(&format!(
+        "ospf neighbor reached full {link} neighbor={OSPF_ROUTER_ID_F}"
+    ))
+    .await?;
+    // "installed on `at` (link and neighbor), of type `t`, originated by FRR"
+    let from_frr = |at: &str, t: u8| {
+        format!("ospf lsa installed {at} lsa_type={t} .*advertising_router={OSPF_ROUTER_ID_F} ")
+    };
+    let on_a = format!("{link} neighbor={OSPF_ROUTER_ID_F}");
+    let on_b = format!("link=eth0.0 neighbor={OSPF_ROUTER_ID}");
+    for t in [10, 11] {
+        a.wait(&from_frr(&on_a, t)).await?;
+        // Flooded on by router-a, which set the O-bit in its DBD to router-b.
+        b.wait(&from_frr(&on_b, t)).await?;
+    }
+
+    log("FRR announces a graceful restart: a type-9 grace-lsa, link-local");
+    let b9 = b.count(&from_frr(".*", 9));
+    let (code, out) = w
+        .dock
+        .exec(
+            "router-f",
+            &["vtysh", "-c", "graceful-restart prepare ip ospf"],
+        )
+        .await?;
+    anyhow::ensure!(code == 0, "graceful-restart prepare failed: {out}");
+    a.wait(&from_frr(&on_a, 9)).await?;
+    a.wait(&format!(
+        "ospf helper: grace period entered {link} neighbor={OSPF_ROUTER_ID_F} grace_period=120"
+    ))
+    .await?;
+    // Three RXMT_INTERVALs of periodic resend: never flooded past eth1.
+    b.assert_quiet(&from_frr(".*", 9), b9, 15).await?;
+
+    let body = a
+        .rest_expect(Method::GET, "/v1/ospf/database", None, 200)
+        .await?;
+    let report: serde_json::Value = serde_json::from_str(&body)?;
+    let mut types: Vec<u64> = report[0]["result"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("ospf database has no result: {body}"))?
+        .iter()
+        .filter(|row| row["advertising_router"] == OSPF_ROUTER_ID_F)
+        .filter_map(|row| row["lsa_type"].as_u64())
+        .filter(|t| *t >= 9)
+        .collect();
+    types.sort_unstable();
+    anyhow::ensure!(
+        types == [10, 11],
+        "router-a's database lists FRR opaque types {types:?}, want [10, 11]: {body}"
+    );
+
+    w.dock.container_remove("router-f").await;
+    Ok(())
+}
+
 // --- OSPFv3 (RFC 5340) ---
 
 /// `ospf_mtu_pagination` for `OSPFv3`, self-contained: a real

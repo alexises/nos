@@ -341,7 +341,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
         router_id: local_router_id,
         area_id: cfg.area_id,
         interface_mtu: cfg.mtu,
-        options: 0,
+        options: exchange::DBD_OPTIONS,
         init: true,
         more: true,
         master: true,
@@ -360,6 +360,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
         summary_remaining: std::collections::VecDeque::new(),
         pending_acks: Vec::new(),
         pending_acks_since: None,
+        opaque_capable: false, // learnt from the neighbor's DBD
     };
     (adj, dbd)
 }
@@ -373,6 +374,7 @@ pub async fn run(
     cfg: LinkConfig,
     local_router_id: Ipv4Addr,
     lsdb: Arc<Mutex<Lsdb>>,
+    link_local_lsdb: Arc<Mutex<Lsdb>>,
     status: StatusHandle,
     dbd_max_headers: Option<usize>,
     boot_count: u32,
@@ -454,7 +456,7 @@ pub async fn run(
                             }
                             Ok(OspfPacket::Dbd(dbd)) => {
                                 if let Some(actions) = handle_dbd(
-                                    &cfg, local_router_id, &status, &lsdb, &dbd, dbd_max_headers,
+                                    &cfg, local_router_id, &status, &lsdb, &link_local_lsdb, &dbd, dbd_max_headers,
                                 )
                                 .await
                                 {
@@ -463,14 +465,14 @@ pub async fn run(
                             }
                             Ok(OspfPacket::Lsr(lsr)) => {
                                 if let Some(actions) =
-                                    handle_lsr(&cfg, local_router_id, &status, &lsdb, &lsr).await
+                                    handle_lsr(&cfg, local_router_id, &status, &lsdb, &link_local_lsdb, &lsr).await
                                 {
                                     execute_actions(&socket, &cfg, local_router_id, &status, lsr.router_id, actions, &mut next_seq);
                                 }
                             }
                             Ok(OspfPacket::Lsu(lsu)) => {
                                 if let Some(actions) =
-                                    handle_lsu(&cfg, local_router_id, &status, &lsdb, &lsu).await
+                                    handle_lsu(&cfg, local_router_id, &status, &lsdb, &link_local_lsdb, &lsu).await
                                 {
                                     execute_actions(&socket, &cfg, local_router_id, &status, lsu.router_id, actions, &mut next_seq);
                                 }
@@ -514,7 +516,7 @@ pub async fn run(
             _ = rxmt_sweep.tick() => {
                 flush_pending_acks(&socket, &cfg, local_router_id, &status, &mut next_seq);
                 retransmit_pending(&socket, &cfg, local_router_id, &status, &mut next_seq);
-                flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &status, &mut next_seq).await;
+                flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &link_local_lsdb, &status, &mut next_seq).await;
             }
             Some(grace_period) = grace_rx.recv() => {
                 send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period, &mut next_seq);
@@ -832,6 +834,7 @@ async fn handle_dbd(
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
     lsdb: &Mutex<Lsdb>,
+    link_local_lsdb: &Mutex<Lsdb>,
     dbd: &DbdPacket,
     dbd_max_headers: usize,
 ) -> Option<Vec<exchange::Action>> {
@@ -846,13 +849,9 @@ async fn handle_dbd(
     // which would read as `BadLSReq` and restart the adjacency for nothing.
     // The periodic resend still carries the flush to an already-`Full`
     // neighbor.
-    let local_lsdb_headers: Vec<LsaHeader> = lsdb
-        .lock()
-        .await
-        .headers()
-        .into_iter()
-        .filter(|h| h.age < lsa::MAX_AGE)
-        .collect();
+    let mut local_lsdb_headers = lsdb.lock().await.headers();
+    local_lsdb_headers.extend(link_local_lsdb.lock().await.headers());
+    local_lsdb_headers.retain(|h| h.age < lsa::MAX_AGE);
     let actions = exchange::on_dbd_received(
         &mut adj,
         old_state,
@@ -883,6 +882,7 @@ async fn handle_lsr(
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
     lsdb: &Mutex<Lsdb>,
+    link_local_lsdb: &Mutex<Lsdb>,
     lsr: &LsrPacket,
 ) -> Option<Vec<exchange::Action>> {
     let (old_state, mut adj) = {
@@ -893,7 +893,8 @@ async fn handle_lsr(
 
     let actions = {
         let lsdb = lsdb.lock().await;
-        exchange::on_lsr_received(&mut adj, &lsdb, lsr)
+        let link_local_lsdb = link_local_lsdb.lock().await;
+        exchange::on_lsr_received(&mut adj, &lsdb, &link_local_lsdb, lsr)
     };
 
     Some(finish_neighbor_event(
@@ -915,6 +916,7 @@ async fn handle_lsu(
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
     lsdb: &Mutex<Lsdb>,
+    link_local_lsdb: &Mutex<Lsdb>,
     lsu: &LsuPacket,
 ) -> Option<Vec<exchange::Action>> {
     let (old_state, mut adj) = {
@@ -925,14 +927,20 @@ async fn handle_lsu(
 
     let (actions, newly_installed) = {
         let mut lsdb = lsdb.lock().await;
-        let result = exchange::on_lsu_received(&mut adj, &mut lsdb, lsu, std::time::Instant::now());
-        // A Grace-LSA is link-local (RFC 3623): acted on at once and never
-        // held, so no other link's periodic resend floods it and it is never
-        // offered back to the restarted router. Removed under the same lock
-        // the install took. ponytail: no link-local store; #40 adds one.
+        let mut link_local_lsdb = link_local_lsdb.lock().await;
+        let result = exchange::on_lsu_received(
+            &mut adj,
+            &mut lsdb,
+            &mut link_local_lsdb,
+            lsu,
+            std::time::Instant::now(),
+        );
+        // A Grace-LSA is acted on at once and never held, even in the link
+        // store (RFC 3623), so it is never offered back to the restarted
+        // router. Removed under the same lock the install took.
         for l in &lsu.lsas {
             if matches!(l.body, LsaBody::Grace(_)) && result.1.contains(&l.header) {
-                lsdb.remove(&l.header.key());
+                link_local_lsdb.remove(&l.header.key());
             }
         }
         result
@@ -1257,7 +1265,9 @@ fn retransmit_pending(
     }
 }
 
-/// Resends the entire local LSDB to every `Full` neighbor on this link.
+/// Resends the entire local LSDB — the area's plus this link's own type-9
+/// LSAs — to every `Full` neighbor on this link; opaque LSAs only to a
+/// neighbor whose DBD set the O-bit (RFC 5250 §3).
 ///
 /// # ponytail: periodic full resend, not RFC 2328 §13's event-driven flood
 /// A neighbor's one-shot DBD/LSR/LSU exchange (see `exchange.rs`'s own
@@ -1280,42 +1290,56 @@ async fn flood_full_neighbors(
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     lsdb: &Mutex<Lsdb>,
+    link_local_lsdb: &Mutex<Lsdb>,
     status: &StatusHandle,
     next_seq: &mut u64,
 ) {
-    let full_neighbors: Vec<(Ipv4Addr, Ipv4Addr)> = status
+    let full_neighbors: Vec<(Ipv4Addr, Ipv4Addr, bool)> = status
         .borrow()
         .neighbors
         .iter()
         .filter(|(_, info)| info.state == NeighborState::Full)
-        .map(|(id, info)| (*id, info.address))
+        .map(|(id, info)| {
+            let opaque = info.adjacency.as_ref().is_some_and(|a| a.opaque_capable);
+            (*id, info.address, opaque)
+        })
         .collect();
     if full_neighbors.is_empty() {
         return;
     }
-    let lsas = lsdb.lock().await.all();
-    if lsas.is_empty() {
-        return;
-    }
-    // One signed payload reused for every full neighbor — safe even under
-    // Crypto auth: RFC 2328 D.4.3's anti-replay check is per-neighbor on the
-    // receive side (`accept_crypto_sequence` keys on the sender's own
-    // `router_id`), so two different neighbors each independently accepting
-    // the same sequence number is correct, not a replay.
-    let auth = cfg
-        .auth
-        .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
-    let payload = packet::encode_lsu(
-        &LsuPacket {
-            router_id: local_router_id,
-            area_id: cfg.area_id,
-            lsas: lsas.iter().map(|l| (**l).clone()).collect(),
-        },
-        &auth,
-    );
-    for (neighbor_id, neighbor_addr) in full_neighbors {
-        if let Err(e) = socket.send_unicast(neighbor_addr, &payload) {
-            warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsu");
+    let mut lsas = lsdb.lock().await.all();
+    lsas.extend(link_local_lsdb.lock().await.all());
+    // One signed payload per group (opaque-capable or not), reused for every
+    // neighbor in it — safe even under Crypto auth: RFC 2328 D.4.3's
+    // anti-replay check is per-neighbor on the receive side
+    // (`accept_crypto_sequence` keys on the sender's own `router_id`), so two
+    // different neighbors each independently accepting the same sequence
+    // number is correct, not a replay.
+    for opaque in [true, false] {
+        let group: Vec<_> = full_neighbors.iter().filter(|n| n.2 == opaque).collect();
+        let lsas: Vec<Lsa> = lsas
+            .iter()
+            .filter(|l| opaque || !lsa::is_opaque(l.header.lsa_type))
+            .map(|l| (**l).clone())
+            .collect();
+        if group.is_empty() || lsas.is_empty() {
+            continue;
+        }
+        let auth = cfg
+            .auth
+            .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
+        let payload = packet::encode_lsu(
+            &LsuPacket {
+                router_id: local_router_id,
+                area_id: cfg.area_id,
+                lsas,
+            },
+            &auth,
+        );
+        for (neighbor_id, neighbor_addr, _) in group {
+            if let Err(e) = socket.send_unicast(*neighbor_addr, &payload) {
+                warn!(link = %cfg.attach_point, neighbor = %neighbor_id, error = %e, "failed to send ospf lsu");
+            }
         }
     }
 }
@@ -1623,6 +1647,9 @@ struct LinkEntry {
     status: watch::Receiver<LinkStatus>,
     /// Asks the link task to send Grace-LSAs (the grace period, seconds).
     grace_tx: mpsc::UnboundedSender<u32>,
+    /// RFC 5250 type-9 (link-local) LSAs heard on this link — dropped with
+    /// the entry when the link stops or restarts.
+    link_local_lsdb: Arc<Mutex<Lsdb>>,
 }
 
 /// Owns every OSPF link's driver task for one `nos-ospfd` process, plus its
@@ -1795,14 +1822,15 @@ impl LinkManager {
                     .collect::<Vec<_>>()
             })
             .collect();
-        let areas: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
+        let mut stores: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
             .lsdbs
             .lock()
             .await
             .iter()
             .map(|(area_id, lsdb)| (*area_id, Arc::clone(lsdb)))
             .collect();
-        for (area_id, lsdb) in areas {
+        stores.extend(self.link_local_lsdbs().await);
+        for (area_id, lsdb) in stores {
             let evicted = lsdb.lock().await.age_and_evict(self.age_multiplier, &hold);
             for key in evicted {
                 info!(
@@ -2172,11 +2200,13 @@ impl LinkManager {
                 0
             };
             let (grace_tx, grace_rx) = mpsc::unbounded_channel();
+            let link_local_lsdb = Arc::new(Mutex::new(Lsdb::new()));
             let task = tokio::spawn(run(
                 (self.opener)(&cfg),
                 cfg.clone(),
                 local_router_id,
                 lsdb,
+                Arc::clone(&link_local_lsdb),
                 status_tx,
                 self.dbd_max_headers,
                 boot_count,
@@ -2189,6 +2219,7 @@ impl LinkManager {
                     task,
                     status: status_rx,
                     grace_tx,
+                    link_local_lsdb,
                 },
             );
         }
@@ -2208,12 +2239,31 @@ impl LinkManager {
             .collect()
     }
 
-    /// Every installed LSA's header, across every area, for `server.rs`'s
+    /// Every link's type-9 store, with the link's area.
+    async fn link_local_lsdbs(&self) -> Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> {
+        self.links
+            .lock()
+            .await
+            .values()
+            .map(|e| (e.config.area_id, Arc::clone(&e.link_local_lsdb)))
+            .collect()
+    }
+
+    /// Every installed LSA's header, across every area and every link's
+    /// type-9 store (listed under the link's area), for `server.rs`'s
     /// `OspfRequest::GetDatabase` handler — backs `nos-cli`'s
     /// `show ospf database`.
     pub async fn database_summaries(&self) -> Vec<LsaSummary> {
         let mut result = Vec::new();
-        for (area_id, lsdb) in self.lsdbs.lock().await.iter() {
+        let mut stores: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
+            .lsdbs
+            .lock()
+            .await
+            .iter()
+            .map(|(area_id, lsdb)| (*area_id, Arc::clone(lsdb)))
+            .collect();
+        stores.extend(self.link_local_lsdbs().await);
+        for (area_id, lsdb) in &stores {
             for header in lsdb.lock().await.headers() {
                 result.push(LsaSummary {
                     area_id: *area_id,
@@ -4671,5 +4721,92 @@ mod tests {
             .collect();
         assert_ne!(own, []);
         assert!(own.iter().all(|l| l.age == lsa::MAX_AGE));
+    }
+
+    fn opaque_lsa(lsa_type: u8, advertising_router: Ipv4Addr) -> Lsa {
+        let mut l = Lsa {
+            header: LsaHeader {
+                age: 0,
+                options: 0,
+                lsa_type,
+                link_state_id: Ipv4Addr::new(4, 0, 0, 1),
+                advertising_router,
+                sequence_number: lsa::INITIAL_SEQUENCE_NUMBER,
+                checksum: 0,
+                length: 0,
+            },
+            body: LsaBody::Opaque(vec![0, 1, 0, 4, 1, 2, 3, 4]),
+        };
+        lsa::fill_checksum(&mut l);
+        l
+    }
+
+    fn types_from(lsas: &[LsaSummary], router: Ipv4Addr) -> Vec<u8> {
+        let mut t: Vec<u8> = lsas
+            .iter()
+            .filter(|l| l.advertising_router == router)
+            .map(|l| l.lsa_type)
+            .collect();
+        t.sort_unstable();
+        t
+    }
+
+    /// RFC 5250 scoping over the wire: X floods a type 9, 10 and 11 to A on
+    /// link 1; A keeps the type 9 in link 1's own store and floods only the
+    /// type 10 and 11 on to B over link 2.
+    #[tokio::test(start_paused = true)]
+    async fn opaque_lsas_are_flooded_by_scope() {
+        let wire = Arc::new(wire::Wire::default());
+        let (x, a, b) = (router(&wire), router(&wire), router(&wire));
+        x.reconcile(
+            vec![wired_link([10, 0, 0, 2], 30, NetworkType::PointToPoint)],
+            HashMap::new(),
+            id(3),
+        )
+        .await;
+        a.reconcile(
+            vec![
+                wired_link([10, 0, 0, 1], 30, NetworkType::PointToPoint),
+                wired_link([10, 0, 1, 1], 30, NetworkType::PointToPoint),
+            ],
+            HashMap::new(),
+            id(1),
+        )
+        .await;
+        b.reconcile(
+            vec![wired_link([10, 0, 1, 2], 30, NetworkType::PointToPoint)],
+            HashMap::new(),
+            id(2),
+        )
+        .await;
+        settle(60).await;
+
+        let origin = id(9);
+        {
+            let area = x.lsdb_for(Ipv4Addr::UNSPECIFIED).await;
+            let mut area = area.lock().await;
+            for t in [lsa::LSA_TYPE_OPAQUE_AREA, lsa::LSA_TYPE_OPAQUE_AS] {
+                area.install(opaque_lsa(t, origin));
+            }
+            let links = x.links.lock().await;
+            let link = &links.values().next().unwrap().link_local_lsdb;
+            link.lock()
+                .await
+                .install(opaque_lsa(lsa::LSA_TYPE_OPAQUE_LINK, origin));
+        }
+        settle(30).await;
+
+        assert_eq!(
+            types_from(&a.database_summaries().await, origin),
+            [9, 10, 11]
+        );
+        let a_area = a.lsdb_for(Ipv4Addr::UNSPECIFIED).await;
+        assert!(a_area
+            .lock()
+            .await
+            .headers()
+            .iter()
+            .all(|h| h.lsa_type != lsa::LSA_TYPE_OPAQUE_LINK));
+        assert_eq!(types_from(&b.database_summaries().await, origin), [10, 11]);
     }
 }

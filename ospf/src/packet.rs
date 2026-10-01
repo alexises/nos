@@ -38,6 +38,9 @@ pub const AUTH_TYPE_CRYPTO_EXT: u16 = 3;
 /// has no stub-area concept, so it always sets this bit and always requires
 /// a peer to as well (see `ospf::link::handle_hello`'s doc comment).
 pub const OPTION_E: u8 = 0x02;
+/// RFC 5250 §3's `O` bit: "I store and flood opaque LSAs". Set in DBDs only
+/// (it SHOULD NOT be set in Hellos), read from the peer's DBD.
+pub const OPTION_O: u8 = 0x40;
 
 const HEADER_LEN: usize = 24;
 /// Hello body length excluding the trailing neighbor list: network mask,
@@ -479,13 +482,25 @@ pub fn decode_lsu(data: &[u8], auth: &AuthPolicy<'_>) -> Result<LsuPacket, Packe
         .unwrap_or(usize::MAX);
     let mut rest = &body[4..];
     let mut lsas = Vec::with_capacity(count.min(rest.len() / lsa::LSA_HEADER_LEN + 1));
+    let mut seen = 0;
     while !rest.is_empty() {
-        let l = lsa::decode_lsa(rest)?;
-        let consumed = usize::from(l.header.length);
-        lsas.push(l);
-        rest = &rest[consumed..];
+        seen += 1;
+        match lsa::decode_lsa(rest) {
+            Ok(l) => {
+                let consumed = usize::from(l.header.length);
+                lsas.push(l);
+                rest = &rest[consumed..];
+            }
+            // RFC 2328 §13 step 2: an LSA of an unknown type is discarded on
+            // its own, not with every good LSA sent beside it. `decode_lsa`
+            // checked its length and checksum before rejecting the type.
+            Err(PacketError::UnknownLsaType(_)) => {
+                rest = &rest[usize::from(lsa::decode_lsa_header(rest)?.length)..];
+            }
+            Err(e) => return Err(e),
+        }
     }
-    if lsas.len() != count {
+    if seen != count {
         return Err(PacketError::TruncatedBody);
     }
     Ok(LsuPacket {
@@ -1141,6 +1156,21 @@ mod tests {
         assert_eq!(decoded.lsas.len(), pkt.lsas.len());
         assert_eq!(decoded.lsas[0].body, pkt.lsas[0].body);
         assert_eq!(decoded.lsas[1].body, pkt.lsas[1].body);
+    }
+
+    /// RFC 2328 §13 step 2: an unknown LSA type (6, MOSPF) between two good
+    /// LSAs is dropped alone; the LSU and the other two survive.
+    #[test]
+    fn lsu_skips_an_unknown_lsa_type_and_keeps_the_rest() {
+        let mut pkt = sample_lsu();
+        let mut unknown = pkt.lsas[0].clone();
+        unknown.header.lsa_type = 6;
+        pkt.lsas.insert(1, unknown);
+        let decoded =
+            decode_lsu(&encode_lsu(&pkt, &OutgoingAuth::None), &AuthPolicy::None).unwrap();
+        assert_eq!(decoded.lsas.len(), 2);
+        assert_eq!(decoded.lsas[0].body, pkt.lsas[0].body);
+        assert_eq!(decoded.lsas[1].body, pkt.lsas[2].body);
     }
 
     /// RFC 2328 §13.3: the wire age is the stored age plus `InfTransDelay`,
