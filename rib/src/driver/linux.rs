@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -34,6 +35,16 @@ const MAX_CONCURRENT_ROUTE_OPS: usize = 64;
 /// needed at failover time.
 const BACKUP_METRIC_V4: u32 = 1000;
 const BACKUP_METRIC_V6: u32 = 2000;
+
+/// Runs every op to completion, at most `MAX_CONCURRENT_ROUTE_OPS` at once,
+/// and returns every error — one failure never cancels the rest (#139).
+async fn drain<E>(ops: impl IntoIterator<Item = impl Future<Output = Result<(), E>>>) -> Vec<E> {
+    stream::iter(ops)
+        .buffer_unordered(MAX_CONCURRENT_ROUTE_OPS)
+        .filter_map(|r| async move { r.err() })
+        .collect()
+        .await
+}
 
 /// One kernel route of a prefix: `false` is the primary, `true` its backup.
 type Slot = (IpNet, bool);
@@ -293,35 +304,51 @@ impl LinuxRibDriver {
                 .collect()
         };
 
-        stream::iter(items)
-            .map(|(prefix, old, new, source)| async move {
-                // Remove before add, per prefix (a changed gateway at the
-                // same priority would otherwise hit EEXIST).
-                // A changed next-hop set is a del+add like a changed gateway.
-                let same = |a: Option<&Hops>, b: &Hops| a.map(gateways) == Some(gateways(b));
-                for (slot, hops) in &old {
-                    if !same(new.get(slot), hops) {
-                        self.remove_route(table_id, prefix, hops, slot.1).await?;
+        // The shadow state follows each op as it succeeds, so a failed one
+        // leaves its slot as the kernel still has it.
+        let set = |slot: Slot, hops: Option<Hops>| {
+            let mut installed = self.installed.lock().unwrap();
+            let table_installed = installed.entry(table_id).or_default();
+            match hops {
+                Some(hops) => table_installed.insert(slot, hops),
+                None => table_installed.remove(&slot),
+            };
+        };
+        let errors = drain(
+            items
+                .into_iter()
+                .map(|(prefix, old, new, source)| async move {
+                    // Remove before add, per prefix (a changed gateway at the
+                    // same priority would otherwise hit EEXIST).
+                    // A changed next-hop set is a del+add like a changed gateway.
+                    let same = |a: Option<&Hops>, b: &Hops| a.map(gateways) == Some(gateways(b));
+                    let mut result = Ok(());
+                    for (slot, hops) in &old {
+                        if !same(new.get(slot), hops) {
+                            match self.remove_route(table_id, prefix, hops, slot.1).await {
+                                Ok(()) => set(*slot, None),
+                                Err(e) => result = result.and(Err(e)),
+                            }
+                        }
                     }
-                }
-                for (slot, hops) in &new {
-                    if !same(old.get(slot), hops) {
-                        self.add_route(table_id, prefix, hops, source, slot.1)
-                            .await?;
+                    for (slot, hops) in new {
+                        if same(old.get(&slot), &hops) {
+                            set(slot, Some(hops));
+                            continue;
+                        }
+                        match self
+                            .add_route(table_id, prefix, &hops, source, slot.1)
+                            .await
+                        {
+                            Ok(()) => set(slot, Some(hops)),
+                            Err(e) => result = result.and(Err(e)),
+                        }
                     }
-                }
-
-                let mut installed = self.installed.lock().unwrap();
-                let table_installed = installed.entry(table_id).or_default();
-                for b in [false, true] {
-                    table_installed.remove(&(prefix, b));
-                }
-                table_installed.extend(new);
-                Ok::<(), DriverError>(())
-            })
-            .buffer_unordered(MAX_CONCURRENT_ROUTE_OPS)
-            .try_for_each(|()| async { Ok(()) })
-            .await
+                    result
+                }),
+        )
+        .await;
+        errors.into_iter().next().map_or(Ok(()), Err)
     }
 
     /// Diffs `best_routes` against what's actually installed in
@@ -369,48 +396,50 @@ impl LinuxRibDriver {
         // over the dedicated `route_channel` (see its module docs) — a
         // plain `rtnetlink::Handle` dispatches one request at a time
         // regardless of client-side concurrency, so it isn't used here.
-        stream::iter(to_remove)
-            .map(|((prefix, backup), gateways)| {
-                let message = observed_by_slot.get(&(prefix, backup)).cloned();
-                let gateway = show_gateways(&gateways);
-                async move {
-                    if let Some(message) = message {
-                        self.route_channel.del(message).await.inspect_err(|e| {
-                            warn!(%prefix, %gateway, table_id, error = %e, "failed to remove route");
-                        })?;
-                        info!(%prefix, %gateway, table_id, backup, "removed route");
-                    }
-                    Ok::<(), DriverError>(())
+        // Both phases run every op even if some fail (#139): one bad route
+        // must not hold back every other one, nor the add phase.
+        let remove_failed = drain(to_remove.into_iter().map(|((prefix, backup), gateways)| {
+            let message = observed_by_slot.get(&(prefix, backup)).cloned();
+            let gateway = show_gateways(&gateways);
+            async move {
+                if let Some(message) = message {
+                    self.route_channel.del(message).await.map_err(|e| {
+                        warn!(%prefix, %gateway, table_id, error = %e, "failed to remove route");
+                        ((prefix, backup), gateways, e)
+                    })?;
+                    info!(%prefix, %gateway, table_id, backup, "removed route");
                 }
-            })
-            .buffer_unordered(MAX_CONCURRENT_ROUTE_OPS)
-            .try_for_each(|()| async { Ok(()) })
-            .await?;
+                Ok(())
+            }
+        }))
+        .await;
 
-        stream::iter(to_add)
-            .map(|((prefix, backup), _)| {
-                let source = best_routes.get(&prefix).map(|e| e.source);
-                let hops = desired_full
-                    .get(&(prefix, backup))
-                    .cloned()
-                    .unwrap_or_default();
-                async move {
-                    self.add_route(table_id, prefix, &hops, source, backup)
-                        .await
-                }
-            })
-            .buffer_unordered(MAX_CONCURRENT_ROUTE_OPS)
-            .try_for_each(|()| async { Ok(()) })
-            .await?;
+        let add_failed = drain(to_add.into_iter().map(|(slot, _)| {
+            let source = best_routes.get(&slot.0).map(|e| e.source);
+            let hops = desired_full.get(&slot).cloned().unwrap_or_default();
+            async move {
+                self.add_route(table_id, slot.0, &hops, source, slot.1)
+                    .await
+                    .map_err(|e| (slot, e))
+            }
+        }))
+        .await;
 
-        // The kernel now matches `desired` exactly — seed/correct
-        // `apply_delta`'s shadow state from this ground truth, including on
-        // `teardown` (an empty `desired` correctly clears it).
-        self.installed
-            .lock()
-            .unwrap()
-            .insert(table_id, desired_full);
-        Ok(())
+        // Seed/correct `apply_delta`'s shadow state from this ground truth
+        // (an empty `desired` on `teardown` correctly clears it): `desired`,
+        // except where an op failed and the kernel keeps what it had.
+        let mut installed = desired_full;
+        let mut first_error = None;
+        for (slot, e) in add_failed {
+            installed.remove(&slot);
+            first_error.get_or_insert(e);
+        }
+        for (slot, gateways, e) in remove_failed {
+            installed.insert(slot, gateways.into_iter().map(|gw| (gw, None)).collect());
+            first_error.get_or_insert(e);
+        }
+        self.installed.lock().unwrap().insert(table_id, installed);
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -618,6 +647,26 @@ mod tests {
     }
     fn addr(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn drain_runs_every_op_past_a_failure() {
+        let ran = std::sync::atomic::AtomicUsize::new(0);
+        let errors = futures::executor::block_on(drain((0..200).map(|i| {
+            let ran = &ran;
+            async move {
+                ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i % 50 == 0 {
+                    Err(i)
+                } else {
+                    Ok(())
+                }
+            }
+        })));
+        assert_eq!(ran.into_inner(), 200);
+        let mut errors = errors;
+        errors.sort_unstable();
+        assert_eq!(errors, vec![0, 50, 100, 150]);
     }
 
     #[test]

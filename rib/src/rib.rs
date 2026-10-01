@@ -25,7 +25,8 @@ pub enum RouteSource {
     /// wholesale on every resync like `Static`. Its one next hop is the local
     /// address itself, for display only: the kernel installs a connected
     /// route on its own the moment the address is applied, so this source is
-    /// never installed (`Rib::best_routes_for_kernel`). It exists so
+    /// never installed (`Rib::best_routes_for_kernel`) — and, as it wins,
+    /// neither is any other source's route for that prefix. It exists so
     /// `igp_costs` can tell "directly connected" (cost 0) from "unresolvable"
     /// (absent) — RFC 4271 §9.1.2's next-hop feasibility check in `nos-bgpd`.
     Connected,
@@ -199,26 +200,21 @@ impl Rib {
             .collect()
     }
 
-    /// `best_routes` for the driver: the winner per prefix among every
-    /// candidate *except* `Connected` ones, so a `Connected` prefix is left
-    /// to the kernel's own on-link route (which exists the instant
-    /// `nos-interfaced` applies the address, and which
-    /// `driver::linux::extract_route` already ignores as an unmanaged,
-    /// gateway-less route — so it never shows up on either side of the
-    /// dump-diff), while a `Static`/`Bgp`/`Ospf` candidate shadowed by a
-    /// `Connected` one for the same prefix is still installed as before.
+    /// `best_routes` for the driver: every winner except a `Connected` one.
+    /// A prefix whose winner is `Connected` is left to the kernel's own
+    /// on-link route (it exists the instant `nos-interfaced` applies the
+    /// address, and `driver::linux::extract_route` ignores it as an
+    /// unmanaged, gateway-less route), so a `Static`/`Bgp`/`Ospf` candidate
+    /// for that same prefix is not installed either: adding it would only
+    /// collide with the kernel's route (EEXIST for IPv4, #139). Matches the
+    /// delta path, whose `best_route` already counts `Connected`.
+    /// ponytail: `Connected` is the configured address, not the observed
+    /// link state — an admin-down link (kernel flushes its on-link route)
+    /// still shadows the prefix; add an oper-state field if it ever matters.
     pub fn best_routes_for_kernel(&self) -> HashMap<IpNet, RibEntry> {
-        self.entries
-            .iter()
-            .filter_map(|(prefix, candidates)| {
-                candidates
-                    .iter()
-                    .filter(|e| e.source != RouteSource::Connected)
-                    .min_by_key(|e| e.source.preference())
-                    .cloned()
-                    .map(|e| (*prefix, e))
-            })
-            .collect()
+        let mut routes = self.best_routes();
+        routes.retain(|_, e| e.source != RouteSource::Connected);
+        routes
     }
 
     /// Every prefix's full candidate list, each sorted best (winner) to
@@ -441,14 +437,17 @@ mod tests {
     }
 
     #[test]
-    fn best_routes_for_kernel_excludes_connected_but_falls_back_to_static_for_same_prefix() {
-        let mut rib = Rib::new();
-        rib.insert(entry("10.0.0.0/24", "10.0.0.2", RouteSource::Connected));
-        rib.insert(entry("10.0.0.0/24", "10.0.0.1", RouteSource::Static));
-        let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
-        let kernel = rib.best_routes_for_kernel();
-        assert_eq!(kernel[&prefix].source, RouteSource::Static);
-        assert_eq!(rib.best_routes()[&prefix].source, RouteSource::Connected);
+    fn best_routes_for_kernel_leaves_a_connected_prefix_to_the_kernel() {
+        // #139: a static or OSPF route for a connected prefix would only
+        // collide with the kernel's own on-link route.
+        for other in [RouteSource::Static, RouteSource::Ospf] {
+            let mut rib = Rib::new();
+            rib.insert(entry("10.0.0.0/24", "10.0.0.2", RouteSource::Connected));
+            rib.insert(entry("10.0.0.0/24", "10.0.0.1", other));
+            let prefix: IpNet = "10.0.0.0/24".parse().unwrap();
+            assert!(rib.best_routes_for_kernel().is_empty());
+            assert_eq!(rib.best_routes()[&prefix].source, RouteSource::Connected);
+        }
     }
 
     #[test]
