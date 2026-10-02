@@ -725,6 +725,7 @@ mod tests {
                 mac_redistribute: None,
                 arp_redistribute: None,
                 connected_redistribute: None,
+                neigh_suppress: false,
             },
             nos_proto::BroadcastDomain {
                 name: "bd2".to_string(),
@@ -740,6 +741,7 @@ mod tests {
                 mac_redistribute: None,
                 arp_redistribute: None,
                 connected_redistribute: None,
+                neigh_suppress: false,
             },
         ];
         build_from_config(&config, &driver, &Interfaces::new()).await;
@@ -774,6 +776,7 @@ mod tests {
             mac_redistribute: None,
             arp_redistribute: None,
             connected_redistribute: None,
+            neigh_suppress: false,
         }];
         build_from_config(&config, &driver, &Interfaces::new()).await;
         let calls = driver.calls.lock().unwrap().clone();
@@ -807,6 +810,7 @@ mod tests {
             mac_redistribute: None,
             arp_redistribute: None,
             connected_redistribute: None,
+            neigh_suppress: false,
         }];
         let interfaces = build_from_config(&config, &NoopInterfaceDriver, &Interfaces::new()).await;
         let domain = interfaces.get_domain("bd1").unwrap();
@@ -839,6 +843,7 @@ mod tests {
             mac_redistribute: None,
             arp_redistribute: None,
             connected_redistribute: None,
+            neigh_suppress: false,
         }];
         let previous = build_from_config(&config_with_domain, &driver, &Interfaces::new()).await;
 

@@ -138,6 +138,7 @@ async fn resolve(cfg: &Config, d: &BroadcastDomain, watchdog_socket: &Path) -> O
             Vec::new()
         },
         es_ports,
+        neigh_suppress: d.neigh_suppress,
     })
 }
 

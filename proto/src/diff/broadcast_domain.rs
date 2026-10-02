@@ -104,6 +104,7 @@ fn evpn_fields(d: &BroadcastDomain) -> Vec<(&'static str, String)> {
         ("redistribute-mac", opt(&d.mac_redistribute)),
         ("redistribute-arp", opt(&d.arp_redistribute)),
         ("redistribute-connected", opt(&d.connected_redistribute)),
+        ("neigh-suppress", d.neigh_suppress.to_string()),
     ]
 }
 
@@ -232,7 +233,18 @@ mod tests {
             mac_redistribute: None,
             arp_redistribute: None,
             connected_redistribute: None,
+            neigh_suppress: false,
         }
+    }
+
+    #[test]
+    fn neigh_suppress_edit_is_a_change() {
+        let mut candidate_domain = domain("bd1");
+        candidate_domain.neigh_suppress = true;
+        let sections = diff_broadcast_domains(&[domain("bd1")], &[candidate_domain]);
+        assert_eq!(sections[0].fields.len(), 1);
+        assert_eq!(sections[0].fields[0].label, "neigh-suppress");
+        assert_eq!(sections[0].fields[0].new.as_deref(), Some("true"));
     }
 
     #[test]

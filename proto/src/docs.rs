@@ -161,6 +161,8 @@ topics! {
     BroadcastDomainArpRedistribute,
     /// `BroadcastDomain.connected_redistribute`
     BroadcastDomainConnectedRedistribute,
+    /// `BroadcastDomain.neigh_suppress`
+    BroadcastDomainNeighSuppress,
     /// `Config.switching_profiles`
     SwitchingProfile,
     /// `SwitchingProfile.members`

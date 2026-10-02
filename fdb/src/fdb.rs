@@ -53,6 +53,8 @@ pub struct Ready {
     /// The bridge ports of this domain that attach an Ethernet Segment (a
     /// port aggregate with an `esi`, member of this domain).
     pub es_ports: Vec<EsPort>,
+    /// `neigh-suppress`: ARP/ND suppression on the VXLAN bridge port.
+    pub neigh_suppress: bool,
 }
 
 /// A bridge port attached to an Ethernet Segment.
@@ -469,6 +471,9 @@ struct Inner {
     ads: Ads,
     /// Attached segment ports with no carrier (unknown counts as up).
     es_down: BTreeSet<String>,
+    /// The `neigh_suppress` last applied by `ensure_vxlan` (what `show fdb`
+    /// reports).
+    neigh_suppress: bool,
 }
 
 /// Recomputes `g.ads` and returns the segments whose PE set changed.
@@ -542,6 +547,10 @@ impl Fdb {
     /// everything on it when that changed, and heals drift when it didn't.
     pub async fn set_ready(&self, ready: Option<Ready>) {
         let mut g = self.inner.lock().await;
+        // `ensure_vxlan` applies a neigh-suppress toggle in place: no rebuild.
+        if let (Some(old), Some(new)) = (g.ready.as_mut(), ready.as_ref()) {
+            old.neigh_suppress = new.neigh_suppress;
+        }
         if g.ready != ready {
             if let Some(old) = g.ready.take() {
                 let mut items: Vec<Installed> = Vec::new();
@@ -564,22 +573,31 @@ impl Fdb {
             self.publish(&g);
         }
         let Some(want) = ready else {
+            g.neigh_suppress = false;
             self.sync_df(&mut g).await;
             return;
         };
         // Idempotent: also the tick's repair path for a deleted/changed link.
         if let Err(e) = self
             .driver
-            .ensure_vxlan(want.vni, want.vtep, &want.underlay, &want.bridge)
+            .ensure_vxlan(
+                want.vni,
+                want.vtep,
+                &want.underlay,
+                &want.bridge,
+                want.neigh_suppress,
+            )
             .await
         {
             debug!(domain = %self.domain, error = %e, "vxlan device not ready yet, retrying");
+            g.neigh_suppress = false;
             g.ready = None;
             g.installed.clear();
             self.publish(&g);
             self.sync_df(&mut g).await;
             return;
         }
+        g.neigh_suppress = want.neigh_suppress;
         if g.ready.is_none() {
             info!(
                 domain = %self.domain, vni = want.vni, vxlan = %vxlan_name(want.vni),
@@ -1074,6 +1092,7 @@ impl Fdb {
                     single_active: s.single_active,
                 })
                 .collect(),
+            neigh_suppress: g.neigh_suppress,
         }
     }
 }
@@ -1119,6 +1138,7 @@ mod tests {
             arp: false,
             connected: Vec::new(),
             es_ports: Vec::new(),
+            neigh_suppress: false,
         }
     }
 
@@ -1291,6 +1311,7 @@ mod tests {
             _: IpAddr,
             _: &str,
             _: &str,
+            _: bool,
         ) -> Result<(), DriverError> {
             self.0.lock().unwrap().push(format!("ensure {vni}"));
             Ok(())
@@ -1385,6 +1406,29 @@ mod tests {
 
     fn calls(d: &Recorder) -> Vec<String> {
         std::mem::take(&mut *d.0.lock().unwrap())
+    }
+
+    #[tokio::test]
+    async fn neigh_suppress_is_applied_in_place_and_reported() {
+        let driver = Arc::new(Recorder::default());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
+        fdb.set_ready(Some(ready())).await;
+        fdb.apply_push(EvpnUpdate::Add(mac_route(1, 10100, RT, REMOTE)))
+            .await;
+        calls(&driver);
+        assert!(!fdb.table().await.neigh_suppress);
+
+        // A toggle doesn't tear down what's installed: only `ensure_vxlan` runs.
+        let on = Ready {
+            neigh_suppress: true,
+            ..ready()
+        };
+        fdb.set_ready(Some(on)).await;
+        assert_eq!(calls(&driver), ["ensure 10100"]);
+        assert!(fdb.table().await.neigh_suppress);
+
+        fdb.set_ready(None).await;
+        assert!(!fdb.table().await.neigh_suppress);
     }
 
     #[tokio::test]

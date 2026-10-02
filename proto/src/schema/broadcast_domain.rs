@@ -104,6 +104,17 @@ pub struct BroadcastDomain {
     #[garde(custom(|v: &Option<String>, ctx: &Config| bgp_instance_exists(v.as_ref(), ctx)))]
     #[cli(topic = BroadcastDomainConnectedRedistribute, words = "redistribute from connected to bgp", alias = "redistribute from connected")]
     pub connected_redistribute: Option<String>,
+
+    /// ARP/ND suppression: `nos-fdbd` sets `IFLA_BRPORT_NEIGH_SUPPRESS` on the
+    /// domain's VXLAN bridge port, so the bridge answers an ARP request or
+    /// IPv6 NS itself whenever it holds the target's binding (every remote
+    /// Type-2 carrying an IP is installed as one) instead of flooding it
+    /// over the fabric. Gratuitous ARP is then no longer flooded to the
+    /// VXLAN port either. Off by default; requires a `vni`.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BroadcastDomainNeighSuppress, words = "neigh-suppress")]
+    pub neigh_suppress: bool,
 }
 
 fn valid_vni(vni: Option<u32>) -> garde::Result {
@@ -165,10 +176,11 @@ pub(crate) fn valid_broadcast_domains(domains: &[BroadcastDomain]) -> garde::Res
                 || d.vtep_source.is_some()
                 || d.mac_redistribute.is_some()
                 || d.arp_redistribute.is_some()
-                || d.connected_redistribute.is_some())
+                || d.connected_redistribute.is_some()
+                || d.neigh_suppress)
         {
             return Err(garde::Error::new(
-                "rd, route-targets, vtep-source and redistribute require a vni on the same broadcast domain",
+                "rd, route-targets, vtep-source, redistribute and neigh-suppress require a vni on the same broadcast domain",
             ));
         }
         if d.mac_redistribute.is_some() && (d.rd.is_none() || d.vtep_source.is_none()) {
@@ -208,6 +220,7 @@ mod tests {
             mac_redistribute: None,
             arp_redistribute: None,
             connected_redistribute: None,
+            neigh_suppress: false,
         }
     }
 
@@ -406,6 +419,22 @@ mod tests {
     fn evpn_fields_without_vni_fail() {
         let mut d = evpn_domain();
         d.vni = None;
+        let cfg = config_with_instance(d);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn neigh_suppress_requires_vni() {
+        let mut d = evpn_domain();
+        d.neigh_suppress = true;
+        let cfg = config_with_instance(d.clone());
+        cfg.validate_with(&cfg).unwrap();
+        d.vni = None;
+        d.rd = None;
+        d.route_targets_import.clear();
+        d.route_targets_export.clear();
+        d.vtep_source = None;
+        d.mac_redistribute = None;
         let cfg = config_with_instance(d);
         assert!(cfg.validate_with(&cfg).is_err());
     }

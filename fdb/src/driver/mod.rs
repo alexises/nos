@@ -44,12 +44,15 @@ pub trait FdbDriver: Send + Sync {
     /// enslaved to (and up under) `bridge`. A device with a different
     /// VNI/address/underlay is recreated. `Err` also when `bridge` or
     /// `underlay` doesn't exist yet — the caller retries next tick.
+    /// `neigh_suppress` is the port's `IFLA_BRPORT_NEIGH_SUPPRESS` (ARP/ND
+    /// suppression), set or cleared to match.
     async fn ensure_vxlan(
         &self,
         vni: u32,
         vtep: IpAddr,
         underlay: &str,
         bridge: &str,
+        neigh_suppress: bool,
     ) -> Result<(), DriverError>;
 
     /// Deletes `vx<vni>` (and with it every FDB entry on it). No-op if absent.

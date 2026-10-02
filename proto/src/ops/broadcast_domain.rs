@@ -113,6 +113,11 @@ pub enum BroadcastDomainOp {
     ClearConnectedRedistribute {
         name: String,
     },
+    /// `neigh-suppress` (ARP/ND suppression on the VXLAN bridge port).
+    SetNeighSuppress {
+        name: String,
+        enabled: bool,
+    },
 }
 
 impl BroadcastDomainOp {
@@ -134,6 +139,7 @@ impl BroadcastDomainOp {
                         mac_redistribute: None,
                         arp_redistribute: None,
                         connected_redistribute: None,
+                        neigh_suppress: false,
                     });
                 }
                 Ok(())
@@ -288,6 +294,10 @@ impl BroadcastDomainOp {
                 find_domain_mut(config, name)?.connected_redistribute = None;
                 Ok(())
             }
+            BroadcastDomainOp::SetNeighSuppress { name, enabled } => {
+                find_domain_mut(config, name)?.neigh_suppress = *enabled;
+                Ok(())
+            }
         }
     }
 }
@@ -322,11 +332,28 @@ mod tests {
             mac_redistribute: None,
             arp_redistribute: None,
             connected_redistribute: None,
+            neigh_suppress: false,
         }
     }
 
     fn addr(s: &str) -> IpNet {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn set_neigh_suppress_toggles() {
+        let mut cfg = Config {
+            broadcast_domains: vec![domain("bd1")],
+            ..Default::default()
+        };
+        let op = |enabled| BroadcastDomainOp::SetNeighSuppress {
+            name: "bd1".to_string(),
+            enabled,
+        };
+        op(true).apply(&mut cfg).unwrap();
+        assert!(cfg.broadcast_domains[0].neigh_suppress);
+        op(false).apply(&mut cfg).unwrap();
+        assert!(!cfg.broadcast_domains[0].neigh_suppress);
     }
 
     #[test]

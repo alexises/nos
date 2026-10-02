@@ -582,6 +582,7 @@ mod tests {
                 mac_redistribute: None,
                 arp_redistribute: None,
                 connected_redistribute: None,
+                neigh_suppress: false,
             }],
             ..Default::default()
         };
@@ -634,6 +635,7 @@ mod tests {
                 mac_redistribute: None,
                 arp_redistribute: None,
                 connected_redistribute: None,
+                neigh_suppress: false,
             }],
             ..Default::default()
         };

@@ -791,6 +791,7 @@ mod tests {
             mac_redistribute: None,
             arp_redistribute: None,
             connected_redistribute: None,
+            neigh_suppress: false,
             name: name.to_string(),
             addresses: Vec::new(),
             routing_table: None,

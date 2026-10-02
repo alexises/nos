@@ -220,6 +220,7 @@ fn lab() -> Lab {
                     neighbours: Vec::new(),
                     flood: Vec::new(),
                     segments: Vec::new(),
+                    neigh_suppress: false,
                 })]
             }),
             "interfaces" => serve(role, name, &path, |r: InterfaceRequest| {
