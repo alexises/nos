@@ -110,6 +110,10 @@ pub struct FdbTable {
     /// `esi` that is a member of the domain) and this PE's Designated
     /// Forwarder role on each.
     pub segments: Vec<EsEntry>,
+    /// Whether ARP/ND suppression (`neigh-suppress`) is in effect on the
+    /// VXLAN bridge port: the value nos-fdbd last applied to the kernel,
+    /// not merely the configured one.
+    pub neigh_suppress: bool,
 }
 
 /// One locally attached Ethernet Segment, as seen from one broadcast domain.

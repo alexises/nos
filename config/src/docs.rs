@@ -657,6 +657,16 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              carrying the bridge's MAC and that IP. The instance must be the one named by \
              `redistribute from mac`.",
         ),
+        Topic::BroadcastDomainNeighSuppress => (
+            "Answer ARP/ND locally for EVPN-learned hosts (ARP/ND suppression).",
+            "Sets neighbour suppression on the domain's VXLAN bridge port: an ARP request or \
+             IPv6 neighbour solicitation for a host whose MAC+IP binding the bridge already \
+             holds (every received EVPN Type-2 route with an IP is installed as one) is \
+             answered by the bridge itself instead of being flooded over the fabric; an \
+             unknown target still floods. Gratuitous ARP is no longer flooded to the VXLAN \
+             port either, so remote hosts only learn a moved local IP once their cache \
+             expires. Requires a vni. `delete` turns it off.",
+        ),
         Topic::SwitchingProfile => (
             "Create a switching profile in the transaction if it doesn't already exist.",
             concat!(

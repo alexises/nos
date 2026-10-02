@@ -77,6 +77,35 @@ impl LinuxFdbDriver {
         })
     }
 
+    /// `ip link set dev <port> type bridge_slave ..`: an `RTM_NEWLINK` (not
+    /// SETLINK — only the newlink path reaches the master's
+    /// `slave_changelink`) carrying the port data. Only the bridge's own ports
+    /// accept it (EOPNOTSUPP otherwise), so a port that isn't enslaved yet is
+    /// an error the tick retries.
+    async fn set_bridge_port(
+        &self,
+        index: u32,
+        attrs: Vec<InfoBridgePort>,
+    ) -> Result<(), DriverError> {
+        let mut msg = LinkMessage::default();
+        msg.header.index = index;
+        msg.attributes.push(LinkAttribute::LinkInfo(vec![
+            LinkInfo::PortKind(InfoPortKind::Bridge),
+            LinkInfo::PortData(InfoPortData::BridgePort(attrs)),
+        ]));
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+        let mut response = self.handle.clone().request(req)?;
+        while let Some(m) = response.next().await {
+            if let NetlinkPayload::Error(e) = m.payload {
+                if e.raw_code() != 0 {
+                    return Err(rtnetlink::Error::NetlinkError(e).into());
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn find_link(&self, name: &str) -> Result<Option<LinkMessage>, DriverError> {
         let mut links = self
             .handle
@@ -250,6 +279,24 @@ fn master_of(link: &LinkMessage) -> Option<u32> {
     })
 }
 
+/// `IFLA_BRPORT_NEIGH_SUPPRESS` as the link dump reports it (`false` when the
+/// link isn't a bridge port yet — the kernel default).
+fn neigh_suppressed(link: &LinkMessage) -> bool {
+    link.attributes
+        .iter()
+        .filter_map(|a| match a {
+            LinkAttribute::LinkInfo(infos) => Some(infos),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|i| match i {
+            LinkInfo::PortData(InfoPortData::BridgePort(attrs)) => Some(attrs),
+            _ => None,
+        })
+        .flatten()
+        .any(|a| matches!(a, InfoBridgePort::NeighSupress(true)))
+}
+
 fn link_mac(link: &LinkMessage) -> Option<Mac> {
     link.attributes.iter().find_map(|a| match a {
         LinkAttribute::Address(b) => Mac::try_from(b.as_slice()).ok(),
@@ -356,6 +403,7 @@ impl FdbDriver for LinuxFdbDriver {
         vtep: IpAddr,
         underlay: &str,
         bridge: &str,
+        neigh_suppress: bool,
     ) -> Result<(), DriverError> {
         let bridge_idx = self
             .find_link(bridge)
@@ -408,6 +456,15 @@ impl FdbDriver for LinuxFdbDriver {
                 .execute()
                 .await?;
             info!(vxlan = %name, bridge = %bridge, "enslaved vxlan device to bridge");
+        }
+        // Read back every tick, so a recreated port is healed and unsetting
+        // works too. A just-enslaved link's dump carried no port data: off.
+        // ponytail: the same flag suppresses IPv6 ND, untested end to end, and a
+        // proxied NA's Router flag isn't signalled (no RFC 9047 community).
+        if neigh_suppressed(&link) != neigh_suppress {
+            self.set_bridge_port(idx, vec![InfoBridgePort::NeighSupress(neigh_suppress)])
+                .await?;
+            info!(vxlan = %name, suppress = neigh_suppress, "vxlan neigh suppression set");
         }
         self.handle
             .link()
@@ -503,31 +560,16 @@ impl FdbDriver for LinuxFdbDriver {
             .await?
             .ok_or_else(|| DriverError::Other(format!("port {port} does not exist yet")))?;
         // `ip link set dev <port> type bridge_slave flood .. mcast_flood ..
-        // bcast_flood ..`: an RTM_NEWLINK (not SETLINK — only the newlink path
-        // reaches the master's `slave_changelink`) carrying the port data. Only the
-        // bridge's own ports accept it (EOPNOTSUPP otherwise), so a bond that
-        // isn't enslaved yet is an error the tick retries.
-        let mut msg = LinkMessage::default();
-        msg.header.index = link.header.index;
-        msg.attributes.push(LinkAttribute::LinkInfo(vec![
-            LinkInfo::PortKind(InfoPortKind::Bridge),
-            LinkInfo::PortData(InfoPortData::BridgePort(vec![
+        // bcast_flood ..`.
+        self.set_bridge_port(
+            link.header.index,
+            vec![
                 InfoBridgePort::UnicastFlood(flood),
                 InfoBridgePort::MulticastFlood(flood),
                 InfoBridgePort::BroadcastFlood(flood),
-            ])),
-        ]));
-        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
-        let mut response = self.handle.clone().request(req)?;
-        while let Some(m) = response.next().await {
-            if let NetlinkPayload::Error(e) = m.payload {
-                if e.raw_code() != 0 {
-                    return Err(rtnetlink::Error::NetlinkError(e).into());
-                }
-            }
-        }
-        Ok(())
+            ],
+        )
+        .await
     }
 
     async fn set_port_forwarding(&self, port: &str, forwarding: bool) -> Result<(), DriverError> {
@@ -724,5 +766,33 @@ impl FdbDriver for LinuxFdbDriver {
             debug!("neighbour notification stream ended");
         });
         Some(rx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn neigh_suppressed_reads_the_bridge_port_flag() {
+        let port = |attrs| {
+            let mut l = LinkMessage::default();
+            l.attributes.push(LinkAttribute::LinkInfo(vec![
+                LinkInfo::PortKind(InfoPortKind::Bridge),
+                LinkInfo::PortData(InfoPortData::BridgePort(attrs)),
+            ]));
+            l
+        };
+        assert!(!neigh_suppressed(&LinkMessage::default()));
+        assert!(!neigh_suppressed(&port(vec![InfoBridgePort::Learning(
+            false
+        )])));
+        assert!(!neigh_suppressed(&port(vec![
+            InfoBridgePort::NeighSupress(false)
+        ])));
+        assert!(neigh_suppressed(&port(vec![
+            InfoBridgePort::Learning(false),
+            InfoBridgePort::NeighSupress(true),
+        ])));
     }
 }

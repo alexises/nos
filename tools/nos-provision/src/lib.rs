@@ -480,6 +480,11 @@ pub struct Args {
     #[arg(long)]
     pub evpn_redistribute_connected_bgp: Option<String>,
 
+    /// `neigh-suppress` (ARP/ND suppression) on `--broadcast-domain`: `true`
+    /// sets it, `false` clears it.
+    #[arg(long)]
+    pub evpn_neigh_suppress: Option<bool>,
+
     /// If set, undoes the EVPN config of `--broadcast-domain`: clears
     /// redistribute, vtep-source, rd and vni (in that order, so validation
     /// passes) and removes any route target named by `--evpn-rt-import`/
@@ -834,7 +839,8 @@ fn evpn_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || args.evpn_vtep_source_loopback
         || args.evpn_redistribute_bgp.is_some()
         || args.evpn_redistribute_arp_bgp.is_some()
-        || args.evpn_redistribute_connected_bgp.is_some();
+        || args.evpn_redistribute_connected_bgp.is_some()
+        || args.evpn_neigh_suppress.is_some();
     if args.evpn_clear && setting {
         bail!("--evpn-clear is mutually exclusive with the other --evpn-* setting flags");
     }
@@ -854,6 +860,10 @@ fn evpn_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 }));
             }
         }
+        ops.push(op(BroadcastDomainOp::SetNeighSuppress {
+            name: name(),
+            enabled: false,
+        }));
         ops.push(op(BroadcastDomainOp::ClearArpRedistribute { name: name() }));
         ops.push(op(BroadcastDomainOp::ClearConnectedRedistribute {
             name: name(),
@@ -917,6 +927,12 @@ fn evpn_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(op(BroadcastDomainOp::SetConnectedRedistribute {
             name: name(),
             bgp_instance: instance.clone(),
+        }));
+    }
+    if let Some(enabled) = args.evpn_neigh_suppress {
+        ops.push(op(BroadcastDomainOp::SetNeighSuppress {
+            name: name(),
+            enabled,
         }));
     }
     Ok(ops)
@@ -2199,6 +2215,8 @@ mod tests {
             "r1",
             "--evpn-redistribute-connected-bgp",
             "r1",
+            "--evpn-neigh-suppress",
+            "true",
             "--switching-profile",
             "sp",
             "--switching-profile-member",
@@ -2279,6 +2297,13 @@ mod tests {
                 name: "bd-svi".into(),
                 import: false,
                 route_target: "65001:2".into(),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::BroadcastDomain(BroadcastDomainOp::SetNeighSuppress {
+                name: "bd-svi".into(),
+                enabled: true,
             }),
         );
     }
@@ -2393,6 +2418,13 @@ mod tests {
             &all,
             &ConfigOp::BroadcastDomain(BroadcastDomainOp::ClearVni {
                 name: "bd-svi".into(),
+            }),
+        );
+        has(
+            &all,
+            &ConfigOp::BroadcastDomain(BroadcastDomainOp::SetNeighSuppress {
+                name: "bd-svi".into(),
+                enabled: false,
             }),
         );
         assert!(!all

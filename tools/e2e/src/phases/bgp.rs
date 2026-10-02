@@ -2643,12 +2643,18 @@ async fn host_sh(w: &World, host: &str, script: &str) -> anyhow::Result<String> 
     Ok(out)
 }
 
-/// How many ARP requests for the CE from the host a capture file holds.
-/// `arping` prints the target MAC (`who-has X (ff:ff:..) tell Y`), the kernel's
-/// own requests don't.
-async fn arp_requests(w: &World, file: &str) -> anyhow::Result<usize> {
-    let script = format!("grep -c -E 'who-has {CE_IP}( .*)? tell {H_IP}' {file} || true");
-    let out = host_sh(w, CE_HOST, &script).await?;
+/// How many ARP requests for `target` from `sender` a capture file on `host`
+/// holds. `arping` prints the target MAC (`who-has X (ff:ff:..) tell Y`), the
+/// kernel's own requests don't.
+async fn arp_requests(
+    w: &World,
+    host: &str,
+    file: &str,
+    target: &str,
+    sender: &str,
+) -> anyhow::Result<usize> {
+    let script = format!("grep -c -E 'who-has {target}( .*)? tell {sender}' {file} || true");
+    let out = host_sh(w, host, &script).await?;
     out.trim()
         .parse()
         .with_context(|| format!("counting ARP requests in {file}: {out:?}"))
@@ -2806,6 +2812,8 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
     host_sh(w, H_HOST, &format!("ping -c 3 -W 2 {CE_IP}")).await?;
 
+    neigh_suppression(w).await?;
+
     log("BUM: one broadcast from the host reaches the CE once, through the DF only");
     host_sh(w, CE_HOST, "ip link set eth1 up; sleep 1").await?;
     host_sh(
@@ -2825,8 +2833,8 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     .await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
     let (via_df, via_non_df) = (
-        arp_requests(w, "/tmp/e0").await?,
-        arp_requests(w, "/tmp/e1").await?,
+        arp_requests(w, CE_HOST, "/tmp/e0", CE_IP, H_IP).await?,
+        arp_requests(w, CE_HOST, "/tmp/e1", CE_IP, H_IP).await?,
     );
     if (via_df, via_non_df) != (1, 0) {
         bail!(
@@ -2842,6 +2850,145 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
 
     dataplane_teardown(w).await
+}
+
+/// The CE ARPs for the host once (`arping` from its bond, entering router-a);
+/// returns arping's exit code and how many of those requests reached the host
+/// across the VXLAN.
+async fn ce_arps_host(w: &World) -> anyhow::Result<(i64, usize)> {
+    host_sh(
+        w,
+        H_HOST,
+        "rm -f /tmp/h; timeout 8 tcpdump -l -n -Q in -i eth0 arp >/tmp/h 2>&1 & sleep 2",
+    )
+    .await?;
+    let (code, _) = w
+        .dock
+        .exec(
+            CE_HOST,
+            &[
+                "arping", "-c", "1", "-w", "3", "-I", "bond0", "-s", CE_IP, H_IP,
+            ],
+        )
+        .await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    Ok((code, arp_requests(w, H_HOST, "/tmp/h", H_IP, CE_IP).await?))
+}
+
+/// ARP suppression (`neigh-suppress`, RFC 7432 §10): with the CE's link to
+/// router-b down, the CE's ARP for the host enters router-a. Once router-b
+/// originates the host's MAC+IP (`redistribute from arp`, its binding pinned
+/// on router-b's bridge) and router-a holds it as a neighbour, router-a's
+/// bridge answers the request itself and nothing crosses the VXLAN; with the
+/// setting cleared the request floods to the host again.
+async fn neigh_suppression(w: &World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let vxlan = format!("vx{EVPN_VNI}");
+
+    log("neigh-suppress: without it, the CE's ARP for the host crosses the VXLAN");
+    let (code, seen) = ce_arps_host(w).await?;
+    if code != 0 || seen != 1 {
+        bail!("control: arping exited {code}, the host saw {seen} request(s); expected 0 and 1");
+    }
+
+    log("neigh-suppress on router-a; router-b originates the host's MAC+IP");
+    let mut on_a = evpn_pe_flags(A, EVPN_DP_RD_A);
+    on_a.extend(strings(&["--evpn-neigh-suppress", "true"]));
+    a.provision_flags(&on_a).await?;
+    let mut on_b = evpn_pe_flags(B, EVPN_DP_RD_B);
+    on_b.extend(strings(&["--evpn-redistribute-arp-bgp", "r1"]));
+    b.provision_flags(&on_b).await?;
+    let fdb: serde_json::Value = serde_json::from_str(
+        &b.rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
+            .await?,
+    )?;
+    let bridge_b = fdb["bridge"]
+        .as_str()
+        .context("router-b's show fdb has no bridge name")?
+        .to_string();
+    let h_mac = host_sh(w, H_HOST, "cat /sys/class/net/eth0/address")
+        .await?
+        .trim()
+        .to_string();
+    w.dock
+        .in_netns(
+            NETNS_HELPER_IMAGE,
+            "router-b",
+            &[
+                "ip",
+                "neigh",
+                "add",
+                H_IP,
+                "lladdr",
+                &h_mac,
+                "dev",
+                &bridge_b,
+                "nud",
+                "permanent",
+            ],
+        )
+        .await?;
+    a.wait(&format!(
+        "vxlan neigh suppression set vxlan={vxlan} suppress=true"
+    ))
+    .await?;
+    a.wait(&format!(
+        "remote neighbour installed domain={EVPN_DOMAIN} mac={h_mac} ip={H_IP} vtep={IP_B}"
+    ))
+    .await?;
+    let link = w
+        .dock
+        .in_netns(
+            NETNS_HELPER_IMAGE,
+            "router-a",
+            &["bridge", "-d", "link", "show", "dev", &vxlan],
+        )
+        .await?;
+    if !link.contains("neigh_suppress on") {
+        bail!("router-a's {vxlan} does not read neigh_suppress on: {link}");
+    }
+    let fdb: serde_json::Value = serde_json::from_str(
+        &a.rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
+            .await?,
+    )?;
+    if fdb["neigh_suppress"] != true {
+        bail!("router-a's show fdb does not report neigh_suppress: {fdb}");
+    }
+
+    log("router-a's bridge answers the CE's ARP itself: nothing reaches the host");
+    let (code, seen) = ce_arps_host(w).await?;
+    if code != 0 || seen != 0 {
+        bail!("suppressed: arping exited {code}, the host saw {seen} request(s); expected 0 and 0");
+    }
+
+    log("neigh-suppress off again: the request floods to the host");
+    let base = a.count(&format!(
+        "vxlan neigh suppression set vxlan={vxlan} suppress=false"
+    ));
+    let mut off_a = evpn_pe_flags(A, EVPN_DP_RD_A);
+    off_a.extend(strings(&["--evpn-neigh-suppress", "false"]));
+    a.provision_flags(&off_a).await?;
+    a.wait_new(
+        &format!("vxlan neigh suppression set vxlan={vxlan} suppress=false"),
+        base,
+        30,
+    )
+    .await?;
+    let (code, seen) = ce_arps_host(w).await?;
+    if code != 0 || seen != 1 {
+        bail!(
+            "unsuppressed: arping exited {code}, the host saw {seen} request(s); expected 0 and 1"
+        );
+    }
+
+    w.dock
+        .in_netns(
+            NETNS_HELPER_IMAGE,
+            "router-b",
+            &["ip", "neigh", "del", H_IP, "dev", &bridge_b],
+        )
+        .await?;
+    Ok(())
 }
 
 /// Reads the real bridge port `dev` back, in `container`'s netns, until its STP

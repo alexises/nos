@@ -1345,11 +1345,12 @@ pub fn render_prefix_list(list: &PrefixList) -> String {
 pub fn render_fdb_table(t: &nos_proto::FdbTable) -> String {
     let dev = |d: &Option<String>| d.as_deref().unwrap_or("not created yet").to_string();
     let mut lines = vec![format!(
-        "broadcast-domain {}: vni {}, bridge {}, vxlan {}",
+        "broadcast-domain {}: vni {}, bridge {}, vxlan {}, neigh-suppress {}",
         t.domain,
         t.vni,
         dev(&t.bridge),
-        dev(&t.vxlan)
+        dev(&t.vxlan),
+        if t.neigh_suppress { "on" } else { "off" }
     )];
     if t.macs.is_empty() {
         lines.push("  no MAC addresses".to_string());
@@ -1445,7 +1446,7 @@ pub fn render_broadcast_domain(domain: &BroadcastDomain) -> String {
         let list = |v: &[String]| v.join(",");
         let _ = write!(
             line,
-            ", vni {vni}, rd {}, rt-import [{}], rt-export [{}], vtep-source {}, redistribute-mac {}, redistribute-arp {}, redistribute-connected {}",
+            ", vni {vni}, rd {}, rt-import [{}], rt-export [{}], vtep-source {}, redistribute-mac {}, redistribute-arp {}, redistribute-connected {}, neigh-suppress {}",
             domain.rd.as_deref().unwrap_or("unset"),
             list(&domain.route_targets_import),
             list(&domain.route_targets_export),
@@ -1456,6 +1457,7 @@ pub fn render_broadcast_domain(domain: &BroadcastDomain) -> String {
             domain.mac_redistribute.as_deref().unwrap_or("unset"),
             domain.arp_redistribute.as_deref().unwrap_or("unset"),
             domain.connected_redistribute.as_deref().unwrap_or("unset"),
+            if domain.neigh_suppress { "on" } else { "off" },
         );
     }
     line
@@ -2805,10 +2807,11 @@ mod tests {
                 up: true,
                 single_active: false,
             }],
+            neigh_suppress: true,
         };
         assert_eq!(
             render_fdb_table(&t),
-            "broadcast-domain bd1: vni 10100, bridge br1, vxlan vx10100\n  \
+            "broadcast-domain bd1: vni 10100, bridge br1, vxlan vx10100, neigh-suppress on\n  \
              02:00:00:00:00:01 local, esi 00:11:22:33:44:55:66:77:88:99\n  \
              02:00:00:00:00:09 remote via 192.0.2.9\n  \
              02:00:00:00:00:0a remote via 192.0.2.9, 192.0.2.10 (aliased)\n  \
@@ -3063,7 +3066,7 @@ mod tests {
             "prefix-list empty: entries [none]",
             "broadcast-domain bd1: address [10.1.0.1/24], routing-table rt1, ospf-profile unset, vni 10100, \
              rd 1.1.1.1:100, rt-import [65000:100], rt-export [65000:100,65000:101], vtep-source ",
-            "redistribute-mac r1, redistribute-arp unset, redistribute-connected unset",
+            "redistribute-mac r1, redistribute-arp unset, redistribute-connected unset, neigh-suppress off",
             "broadcast-domain bd2: address [none], routing-table unset, ospf-profile unset\n",
             "switching-profile trunk: members [bd1: untagged, bd2: dot1q 200]",
             "switching-profile empty: members [none]",
@@ -3357,10 +3360,11 @@ mod tests {
             }],
             flood: Vec::new(),
             segments: Vec::new(),
+            neigh_suppress: false,
         };
         assert_eq!(
             render_fdb_table(&t),
-            "broadcast-domain bd: vni 1, bridge not created yet, vxlan not created yet\n  \
+            "broadcast-domain bd: vni 1, bridge not created yet, vxlan not created yet, neigh-suppress off\n  \
              02:00:00:00:00:01 remote\n  10.0.0.9 is at 02:00:00:00:00:01 remote\n  flood list: none"
         );
         t.macs.clear();

@@ -18,8 +18,9 @@ impl FdbDriver for NoopFdbDriver {
         vtep: IpAddr,
         underlay: &str,
         bridge: &str,
+        neigh_suppress: bool,
     ) -> Result<(), DriverError> {
-        info!(vni, vtep = %vtep, underlay = %underlay, bridge = %bridge, "noop driver: ensure vxlan");
+        info!(vni, vtep = %vtep, underlay = %underlay, bridge = %bridge, neigh_suppress, "noop driver: ensure vxlan");
         Ok(())
     }
     async fn remove_vxlan(&self, vni: u32) -> Result<(), DriverError> {
