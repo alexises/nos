@@ -47,8 +47,14 @@ async fn reestablished(r: &Router, baseline: usize) -> anyhow::Result<()> {
 }
 
 pub async fn established(w: &mut World) -> anyhow::Result<()> {
-    w.a()?.established().await?;
-    w.b()?.established().await?;
+    let waited = async {
+        w.a()?.established().await?;
+        w.b()?.established().await
+    };
+    if let Err(e) = waited.await {
+        dump_bgp_state(w).await;
+        return Err(e);
+    }
     // RFC 8654: both nos-bgpd always advertise Extended Message, so each side
     // must have negotiated it with the other.
     w.a()?
@@ -57,6 +63,27 @@ pub async fn established(w: &mut World) -> anyhow::Result<()> {
     w.b()?
         .wait("extended message negotiated extended_message=true")
         .await
+}
+
+/// On an `established` timeout (#158): each router's port-179 sockets
+/// (`/proc/net/tcp*` — the image has no `ss`; `00B3` is 179, `st` 02 is
+/// SYN_SENT) and its recent BGP log lines, so a flake arrives with evidence.
+async fn dump_bgp_state(w: &World) {
+    for r in [w.a(), w.b()].into_iter().flatten() {
+        let tcp = w
+            .dock
+            .exec(r.name(), &["cat", "/proc/net/tcp", "/proc/net/tcp6"])
+            .await
+            .map_or_else(|e| e.to_string(), |(_, out)| out);
+        log(format!("{}: port 179 sockets:", r.name()));
+        for l in tcp.lines().filter(|l| l.contains(":00B3")) {
+            log(format!("  {l}"));
+        }
+        log(format!("{}: last bgp log lines:", r.name()));
+        for l in r.logs.tail("bgp", 40) {
+            log(format!("  {l}"));
+        }
+    }
 }
 
 pub async fn reconnect(w: &mut World) -> anyhow::Result<()> {

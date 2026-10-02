@@ -803,7 +803,7 @@ fn diff_peers(
 }
 
 /// One peer's outbound side: while the VRF is resolved, attempts a connect
-/// on a fixed retry interval; on success, runs the FSM until the session
+/// every jittered retry interval (each attempt bounded by it too); on success, runs the FSM until the session
 /// ends, then resumes retrying. Runs until aborted by `SessionManager`
 /// (peer removed from config, or process shutdown).
 async fn active_connect_loop(
@@ -825,15 +825,27 @@ async fn active_connect_loop(
                 // Held down by its maximum-prefix limit: not until released.
             } else if slot.begin(Role::Active).await {
                 let remote = SocketAddr::new(slot.peer.remote_address, peer_port);
-                match tcp::connect(
-                    remote,
-                    slot.peer.source_address,
-                    bind_vrf.then_some(vrf_name.as_str()),
-                    slot.peer.auth.as_ref(),
-                    slot.peer.max_hops,
+                // RFC 4271 §8.2.2: ConnectRetryTimer expiring in Connect drops
+                // the attempt — an unanswered SYN would otherwise hold the
+                // Active role for the kernel's whole SYN-retry budget (~2min).
+                let connect = tokio::time::timeout(
+                    slot.peer.connect_retry_time,
+                    tcp::connect(
+                        remote,
+                        slot.peer.source_address,
+                        bind_vrf.then_some(vrf_name.as_str()),
+                        slot.peer.auth.as_ref(),
+                        slot.peer.max_hops,
+                    ),
                 )
                 .await
-                {
+                .unwrap_or_else(|_| {
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "connect timed out after connect-retry-time",
+                    ))
+                });
+                match connect {
                     Ok(stream) => {
                         info!(
                             instance = %instance, peer = %slot.peer.remote_address,
@@ -877,15 +889,34 @@ async fn active_connect_loop(
             }
         }
         tokio::select! {
-            () = tokio::time::sleep(slot.peer.connect_retry_time) => {}
+            () = tokio::time::sleep(jittered(slot.peer.connect_retry_time)) => {}
             _ = vrf.changed() => {}
         }
     }
 }
 
+/// `d` scaled by a random factor in `[0.75, 1.0]` — RFC 4271 §10's jitter on
+/// `ConnectRetryTimer`, so two routers whose sessions ended together (a §6.8
+/// collision closes both connections at once) don't redial in lockstep and
+/// collide again every cycle. std-only: `RandomState` is randomly seeded.
+fn jittered(d: Duration) -> Duration {
+    use std::hash::BuildHasher;
+    let r = std::hash::RandomState::new().hash_one(std::time::Instant::now());
+    let r = f64::from(u32::try_from(r >> 32).unwrap_or(0)) / f64::from(u32::MAX);
+    d.mul_f64(0.75 + 0.25 * r)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jittered_stays_between_three_quarters_and_whole() {
+        let d = Duration::from_secs(3);
+        let samples: Vec<_> = (0..100).map(|_| jittered(d)).collect();
+        assert!(samples.iter().all(|j| *j >= d.mul_f64(0.75) && *j <= d));
+        assert!(samples.iter().any(|j| *j != samples[0]));
+    }
 
     fn peer(addr: &str) -> ResolvedPeer {
         ResolvedPeer {
