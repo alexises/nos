@@ -27,7 +27,11 @@ use std::time::Instant;
 use crate::lsa::{self, Lsa, LsaHeader, LsaKey};
 use crate::lsdb::Lsdb;
 use crate::neighbor::{Event, NeighborState};
-use crate::packet::{DbdPacket, LsAckPacket, LsrPacket, LsuPacket};
+use crate::packet::{DbdPacket, LsAckPacket, LsrPacket, LsuPacket, OPTION_E, OPTION_O};
+
+/// Options this router sends in every DBD: RFC 2328's E-bit (as in its
+/// Hellos) and RFC 5250's O-bit.
+pub const DBD_OPTIONS: u8 = OPTION_E | OPTION_O;
 
 /// A conservative per-DBD-packet LSA-header budget: 1500-byte Ethernet MTU
 /// − 20 (IP) − 24 (OSPF common header) − 8 (`DBD_BODY_FIXED_LEN`) ≈ 1448
@@ -82,6 +86,9 @@ pub struct AdjacencyData {
     /// When `pending_acks` last went from empty to non-empty — purely for
     /// the "how long was this batch held" figure the flush logs.
     pub pending_acks_since: Option<std::time::Instant>,
+    /// RFC 5250 §3: the neighbor's DBD set the O-bit, so it may be sent
+    /// opaque LSAs (types 9-11). Learnt in `ExStart`.
+    pub opaque_capable: bool,
 }
 
 /// Pops up to `max` headers off the front of `remaining` for the next DBD
@@ -229,7 +236,7 @@ fn on_dbd_in_exstart(
                 return Vec::new();
             }
             adj.is_master = false;
-            adj.summary_remaining = local_lsdb_headers.iter().copied().collect();
+            seed_summary(adj, dbd, local_lsdb_headers);
             // Real content always starts with *our* reply (slave replies
             // to the master's bare attempt with its own first chunk
             // immediately, RFC 2328 §10.6) — correct whether `dbd` is the
@@ -271,7 +278,7 @@ fn on_dbd_in_exstart(
                 return Vec::new();
             }
             adj.is_master = true;
-            adj.summary_remaining = local_lsdb_headers.iter().copied().collect();
+            seed_summary(adj, dbd, local_lsdb_headers);
             if is_negotiation_attempt {
                 // The bare handshake only — no content from either side
                 // yet. RFC 2328 §10.8: the master's *own* content-sending
@@ -318,6 +325,17 @@ fn on_dbd_in_exstart(
     }
 }
 
+/// Learns whether the neighbor is opaque-capable from its DBD and seeds the
+/// summary list — without opaque LSAs for one that isn't (RFC 5250 §3).
+fn seed_summary(adj: &mut AdjacencyData, dbd: &DbdPacket, local_lsdb_headers: &[LsaHeader]) {
+    adj.opaque_capable = dbd.options & OPTION_O != 0;
+    adj.summary_remaining = local_lsdb_headers
+        .iter()
+        .filter(|h| adj.opaque_capable || !lsa::is_opaque(h.lsa_type))
+        .copied()
+        .collect();
+}
+
 /// The slave's side of one round: adopt the sender's sequence number,
 /// extend the request list from its chunk, and reply with our own next
 /// chunk. Shared by `on_dbd_in_exstart` (the very first round, where the
@@ -342,7 +360,7 @@ fn slave_process_poll(
         router_id: local_router_id,
         area_id: dbd.area_id,
         interface_mtu: mtu,
-        options: 0,
+        options: DBD_OPTIONS,
         init: false,
         more,
         master: false,
@@ -388,7 +406,7 @@ fn master_process_reply(
         router_id: local_router_id,
         area_id: dbd.area_id,
         interface_mtu: mtu,
-        options: 0,
+        options: DBD_OPTIONS,
         init: false,
         more,
         master: true,
@@ -469,16 +487,22 @@ fn on_dbd_in_exchange(
     }
 }
 
-/// Handles one received LSR: looks up every requested LSA in `lsdb`. If any
+/// Handles one received LSR: looks up every requested LSA in the area
+/// store, then this link's own (type 9, RFC 5250). If any
 /// requested LSA isn't held, that's RFC 2328 §10.7's `BadLSReq` — the two
 /// databases have diverged, so negotiation restarts from scratch rather
 /// than sending a partial/wrong answer. Otherwise, sends everything found
 /// as one LSU and records it as outstanding until acked (see
 /// `on_lsack_received`).
-pub fn on_lsr_received(adj: &mut AdjacencyData, lsdb: &Lsdb, lsr: &LsrPacket) -> Vec<Action> {
+pub fn on_lsr_received(
+    adj: &mut AdjacencyData,
+    lsdb: &Lsdb,
+    link_local_lsdb: &Lsdb,
+    lsr: &LsrPacket,
+) -> Vec<Action> {
     let mut found = Vec::with_capacity(lsr.requests.len());
     for key in &lsr.requests {
-        match lsdb.get(key) {
+        match lsdb.get(key).or_else(|| link_local_lsdb.get(key)) {
             Some(l) => found.push(l),
             None => return vec![Action::NeighborEvent(Event::SeqNumberMismatch)],
         }
@@ -492,7 +516,7 @@ pub fn on_lsr_received(adj: &mut AdjacencyData, lsdb: &Lsdb, lsr: &LsrPacket) ->
     vec![Action::SendLsu(found)]
 }
 
-/// Handles one received LSU: installs every carried LSA into `lsdb` (RFC
+/// Handles one received LSU: installs every carried LSA into its store (RFC
 /// 2328 §13's "is this instance newer" check, via `Lsdb::install`), clears
 /// any now-satisfied entries from the request list, and queues an ack for
 /// every LSA regardless of whether it was actually newer — an ack for a
@@ -510,7 +534,8 @@ pub fn on_lsr_received(adj: &mut AdjacencyData, lsdb: &Lsdb, lsr: &LsrPacket) ->
 /// resend produces.
 pub fn on_lsu_received(
     adj: &mut AdjacencyData,
-    lsdb: &mut Lsdb,
+    area_lsdb: &mut Lsdb,
+    link_local_lsdb: &mut Lsdb,
     lsu: &LsuPacket,
     now: Instant,
 ) -> (Vec<Action>, Vec<LsaHeader>) {
@@ -518,6 +543,13 @@ pub fn on_lsu_received(
     let mut newly_installed = Vec::new();
     for l in &lsu.lsas {
         let key = l.header.key();
+        // RFC 5250 §3: a type-9 LSA lives in the store of the link it arrived
+        // on, so no other link's resend floods it.
+        let lsdb = if lsa::is_link_local_scope(l.header.lsa_type) {
+            &mut *link_local_lsdb
+        } else {
+            &mut *area_lsdb
+        };
         // RFC 2328 §13 step 4: a MaxAge instance of an LSA this router holds
         // no copy of is acknowledged and discarded, never installed — except
         // one it asked for during exchange (the RFC's "a neighbor is in
@@ -602,7 +634,7 @@ mod tests {
             router_id,
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 0,
-            options: 0,
+            options: DBD_OPTIONS,
             init: true,
             more: true,
             master: true,
@@ -668,7 +700,7 @@ mod tests {
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 0,
-            options: 0,
+            options: DBD_OPTIONS,
             init: false,
             more: false,
             master: true,
@@ -698,7 +730,7 @@ mod tests {
                     router_id: router_id("9.9.9.9"),
                     area_id: Ipv4Addr::UNSPECIFIED,
                     interface_mtu: 1500,
-                    options: 0,
+                    options: DBD_OPTIONS,
                     init: false,
                     more: false,
                     master: false,
@@ -762,7 +794,7 @@ mod tests {
             router_id: router_id("9.9.9.5"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 0,
-            options: 0,
+            options: DBD_OPTIONS,
             init: false,
             more: false,
             master: false,
@@ -805,7 +837,7 @@ mod tests {
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 0,
-            options: 0,
+            options: DBD_OPTIONS,
             init: false,
             more: false,
             master: false,
@@ -854,7 +886,7 @@ mod tests {
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 0,
-            options: 0,
+            options: DBD_OPTIONS,
             init: false,
             more: false,
             master: false,
@@ -896,7 +928,7 @@ mod tests {
             router_id: router_id("9.9.9.5"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 0,
-            options: 0,
+            options: DBD_OPTIONS,
             init: false,
             more: false,
             master: true,
@@ -924,7 +956,7 @@ mod tests {
                     router_id: router_id("9.9.9.9"),
                     area_id: Ipv4Addr::UNSPECIFIED,
                     interface_mtu: 1500,
-                    options: 0,
+                    options: DBD_OPTIONS,
                     init: false,
                     more: false,
                     master: false,
@@ -950,7 +982,7 @@ mod tests {
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 0,
-            options: 0,
+            options: DBD_OPTIONS,
             init: false,
             more: false,
             master: false,
@@ -989,7 +1021,7 @@ mod tests {
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 0,
-            options: 0,
+            options: DBD_OPTIONS,
             init: false,
             more: false,
             master: false,
@@ -1032,7 +1064,7 @@ mod tests {
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 0,
-            options: 0,
+            options: DBD_OPTIONS,
             init: false,
             more: false,
             master: false,
@@ -1060,7 +1092,7 @@ mod tests {
                 router_id: router_id("9.9.9.9"),
                 area_id: Ipv4Addr::UNSPECIFIED,
                 interface_mtu: 1500,
-                options: 0,
+                options: DBD_OPTIONS,
                 init: false,
                 more: true,
                 master: true,
@@ -1088,7 +1120,7 @@ mod tests {
                 router_id: router_id("9.9.9.9"),
                 area_id: Ipv4Addr::UNSPECIFIED,
                 interface_mtu: 1500,
-                options: 0,
+                options: DBD_OPTIONS,
                 init: false,
                 more: false,
                 master: true,
@@ -1133,7 +1165,7 @@ mod tests {
             router_id: router_id("9.9.9.5"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 0,
-            options: 0,
+            options: DBD_OPTIONS,
             init: false,
             more,
             master: true,
@@ -1161,7 +1193,7 @@ mod tests {
                 router_id: router_id("9.9.9.9"),
                 area_id: Ipv4Addr::UNSPECIFIED,
                 interface_mtu: 1500,
-                options: 0,
+                options: DBD_OPTIONS,
                 init: false,
                 more: true,
                 master: false,
@@ -1191,7 +1223,7 @@ mod tests {
                     router_id: router_id("9.9.9.9"),
                     area_id: Ipv4Addr::UNSPECIFIED,
                     interface_mtu: 1500,
-                    options: 0,
+                    options: DBD_OPTIONS,
                     init: false,
                     more: false,
                     master: false,
@@ -1223,7 +1255,7 @@ mod tests {
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 0,
-            options: 0,
+            options: DBD_OPTIONS,
             init: false,
             more,
             master: false,
@@ -1248,7 +1280,7 @@ mod tests {
                 router_id: router_id("9.9.9.9"),
                 area_id: Ipv4Addr::UNSPECIFIED,
                 interface_mtu: 1500,
-                options: 0,
+                options: DBD_OPTIONS,
                 init: false,
                 more: false,
                 master: true,
@@ -1291,7 +1323,7 @@ mod tests {
             router_id: router_id("9.9.9.10"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 0,
-            options: 0,
+            options: DBD_OPTIONS,
             init: false,
             more: false,
             master: false,
@@ -1330,7 +1362,7 @@ mod tests {
             router_id: router_id("9.9.9.5"),
             area_id: Ipv4Addr::UNSPECIFIED,
             interface_mtu: 0,
-            options: 0,
+            options: DBD_OPTIONS,
             init: false,
             more: false,
             master: true,
@@ -1514,7 +1546,7 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             requests: vec![l.header.key()],
         };
-        let actions = on_lsr_received(&mut adj, &lsdb, &lsr);
+        let actions = on_lsr_received(&mut adj, &lsdb, &Lsdb::new(), &lsr);
         assert_eq!(actions.len(), 1);
         assert!(matches!(&actions[0], Action::SendLsu(lsas) if lsas.len() == 1));
         assert!(adj.retransmission_list.contains_key(&l.header.key()));
@@ -1529,7 +1561,7 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             requests: vec![header("1.1.1.1", 1).key()],
         };
-        let actions = on_lsr_received(&mut adj, &lsdb, &lsr);
+        let actions = on_lsr_received(&mut adj, &lsdb, &Lsdb::new(), &lsr);
         assert_eq!(
             actions,
             vec![Action::NeighborEvent(Event::SeqNumberMismatch)]
@@ -1549,7 +1581,8 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![l.clone()],
         };
-        let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
+        let (actions, newly_installed) =
+            on_lsu_received(&mut adj, &mut lsdb, &mut Lsdb::new(), &lsu, Instant::now());
         assert_eq!(adj.request_list, []);
         assert!(lsdb.get(&l.header.key()).is_some());
         assert_eq!(actions, vec![Action::NeighborEvent(Event::LoadingDone)]);
@@ -1575,7 +1608,8 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![l.clone()],
         };
-        let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
+        let (actions, newly_installed) =
+            on_lsu_received(&mut adj, &mut lsdb, &mut Lsdb::new(), &lsu, Instant::now());
         assert_eq!(actions, vec![Action::NeighborEvent(Event::LoadingDone)]);
         assert_eq!(adj.pending_acks, vec![l.header]);
         assert_eq!(newly_installed, []);
@@ -1594,7 +1628,8 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![l.clone()],
         };
-        let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
+        let (actions, newly_installed) =
+            on_lsu_received(&mut adj, &mut lsdb, &mut Lsdb::new(), &lsu, Instant::now());
         assert_eq!(adj.request_list, vec![header("2.2.2.2", 1).key()]);
         assert_eq!(actions, []);
         assert_eq!(adj.pending_acks, vec![l.header]);
@@ -1614,7 +1649,8 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![l.clone()],
         };
-        let (actions, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
+        let (actions, newly_installed) =
+            on_lsu_received(&mut adj, &mut lsdb, &mut Lsdb::new(), &lsu, Instant::now());
         assert!(lsdb.get(&l.header.key()).is_none());
         assert_eq!(newly_installed, []);
         assert!(!actions.iter().any(|a| matches!(a, Action::SendLsAck(_))));
@@ -1624,7 +1660,8 @@ mod tests {
             request_list: vec![l.header.key()],
             ..Default::default()
         };
-        let (_, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
+        let (_, newly_installed) =
+            on_lsu_received(&mut adj, &mut lsdb, &mut Lsdb::new(), &lsu, Instant::now());
         assert_eq!(newly_installed, vec![l.header]);
         assert_eq!(adj.request_list, []);
     }
@@ -1644,7 +1681,8 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![flushed.clone()],
         };
-        let (_, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
+        let (_, newly_installed) =
+            on_lsu_received(&mut adj, &mut lsdb, &mut Lsdb::new(), &lsu, Instant::now());
         assert_eq!(newly_installed, vec![flushed.header]);
         assert_eq!(lsdb.get(&l.header.key()).unwrap().header.age, lsa::MAX_AGE);
     }
@@ -1663,7 +1701,7 @@ mod tests {
                 area_id: Ipv4Addr::UNSPECIFIED,
                 lsas: vec![l.clone()],
             };
-            on_lsu_received(&mut adj, &mut lsdb, &lsu, Instant::now());
+            on_lsu_received(&mut adj, &mut lsdb, &mut Lsdb::new(), &lsu, Instant::now());
         }
         assert_eq!(
             take_pending_acks(&mut adj),
@@ -1693,6 +1731,7 @@ mod tests {
         let (actions, newly_installed) = on_lsu_received(
             &mut adj,
             &mut lsdb,
+            &mut Lsdb::new(),
             &lsu,
             t0 + crate::lsdb::MIN_LS_ARRIVAL / 2,
         );
@@ -1708,11 +1747,78 @@ mod tests {
             first.header.sequence_number
         );
 
-        let (actions, newly_installed) =
-            on_lsu_received(&mut adj, &mut lsdb, &lsu, t0 + crate::lsdb::MIN_LS_ARRIVAL);
+        let (actions, newly_installed) = on_lsu_received(
+            &mut adj,
+            &mut lsdb,
+            &mut Lsdb::new(),
+            &lsu,
+            t0 + crate::lsdb::MIN_LS_ARRIVAL,
+        );
         assert_eq!(newly_installed, vec![second.header]);
         assert_eq!(adj.pending_acks, vec![second.header]);
         assert_eq!(actions, vec![Action::NeighborEvent(Event::LoadingDone)]);
+    }
+
+    fn opaque(lsa_type: u8) -> Lsa {
+        Lsa {
+            header: LsaHeader {
+                lsa_type,
+                link_state_id: router_id("4.0.0.1"),
+                ..header("9.9.9.10", 1)
+            },
+            body: lsa::LsaBody::Opaque(vec![1, 2, 3, 4]),
+        }
+    }
+
+    /// RFC 5250: a type-9 LSA lands in the link store, a type-10 in the area
+    /// store, and an LSR for either is answered.
+    #[test]
+    fn opaque_lsas_are_stored_by_scope_and_requestable() {
+        let mut adj = AdjacencyData::default();
+        let (mut area, mut link) = (Lsdb::new(), Lsdb::new());
+        let (l9, l10) = (
+            opaque(lsa::LSA_TYPE_OPAQUE_LINK),
+            opaque(lsa::LSA_TYPE_OPAQUE_AREA),
+        );
+        let lsu = LsuPacket {
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsas: vec![l9.clone(), l10.clone()],
+        };
+        on_lsu_received(&mut adj, &mut area, &mut link, &lsu, Instant::now());
+        assert!(link.get(&l9.header.key()).is_some());
+        assert!(area.get(&l9.header.key()).is_none());
+        assert!(area.get(&l10.header.key()).is_some());
+        assert!(link.get(&l10.header.key()).is_none());
+
+        let lsr = LsrPacket {
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            requests: vec![l9.header.key(), l10.header.key()],
+        };
+        let actions = on_lsr_received(&mut adj, &area, &link, &lsr);
+        assert!(matches!(&actions[..], [Action::SendLsu(lsas)] if lsas.len() == 2));
+    }
+
+    /// RFC 5250 §3: opaque headers are summarized only to a neighbor whose
+    /// DBD set the O-bit.
+    #[test]
+    fn opaque_headers_are_summarized_only_to_an_opaque_capable_neighbor() {
+        let local = [
+            header("1.1.1.1", 1),
+            opaque(lsa::LSA_TYPE_OPAQUE_AREA).header,
+            opaque(lsa::LSA_TYPE_OPAQUE_AS).header,
+        ];
+        for (options, expected) in [(DBD_OPTIONS, 3), (OPTION_E, 1)] {
+            let mut adj = AdjacencyData::default();
+            let dbd = DbdPacket {
+                options,
+                ..negotiation_dbd(router_id("9.9.9.10"), 1)
+            };
+            seed_summary(&mut adj, &dbd, &local);
+            assert_eq!(adj.opaque_capable, options & OPTION_O != 0);
+            assert_eq!(adj.summary_remaining.len(), expected);
+        }
     }
 
     #[test]

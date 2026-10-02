@@ -144,7 +144,8 @@ fn routers_and_networks(
             LsaBody::Network(_)
             | LsaBody::Summary(_)
             | LsaBody::AsExternal(_)
-            | LsaBody::Grace(_) => None,
+            | LsaBody::Grace(_)
+            | LsaBody::Opaque(_) => None,
         })
         .collect();
     let networks = lsas
@@ -154,7 +155,8 @@ fn routers_and_networks(
             LsaBody::Router(_)
             | LsaBody::Summary(_)
             | LsaBody::AsExternal(_)
-            | LsaBody::Grace(_) => None,
+            | LsaBody::Grace(_)
+            | LsaBody::Opaque(_) => None,
         })
         .collect();
     (routers, networks)
@@ -177,9 +179,11 @@ pub fn compute(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<RouteEntry> {
             LsaBody::AsExternal(e) => {
                 Some((l.header.advertising_router, l.header.link_state_id, e))
             }
-            LsaBody::Router(_) | LsaBody::Network(_) | LsaBody::Summary(_) | LsaBody::Grace(_) => {
-                None
-            }
+            LsaBody::Router(_)
+            | LsaBody::Network(_)
+            | LsaBody::Summary(_)
+            | LsaBody::Grace(_)
+            | LsaBody::Opaque(_) => None,
         })
         .collect();
     let network_summaries: Vec<(Ipv4Addr, Ipv4Addr, &SummaryLsaBody)> = lsas

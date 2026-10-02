@@ -101,6 +101,29 @@ impl Dock {
         let _ = self.docker.connect_network(network, req).await;
     }
 
+    /// `network_connect` at a fixed address, so nos's config can name it.
+    pub async fn network_connect_ip(
+        &self,
+        network: &str,
+        container: &str,
+        ip: &str,
+    ) -> anyhow::Result<()> {
+        let req = NetworkConnectRequest {
+            container: container.to_string(),
+            endpoint_config: Some(EndpointSettings {
+                ipam_config: Some(EndpointIpamConfig {
+                    ipv4_address: Some(ip.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+        self.docker
+            .connect_network(network, req)
+            .await
+            .with_context(|| format!("connecting {container} to {network}"))
+    }
+
     pub async fn network_disconnect(&self, network: &str, container: &str) {
         let req = NetworkDisconnectRequest {
             container: container.to_string(),
@@ -215,6 +238,23 @@ impl Dock {
         cmd: &[&str],
         seed: (&str, &str, &[u8]),
     ) -> anyhow::Result<()> {
+        self.start_plain_caps(name, image, network, ip, cmd, seed, &[])
+            .await
+    }
+
+    /// `start_plain` with extra capabilities (FRR's daemons need
+    /// `NET_ADMIN`/`NET_RAW`/`SYS_ADMIN` to start at all).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_plain_caps(
+        &self,
+        name: &str,
+        image: &str,
+        network: &str,
+        ip: &str,
+        cmd: &[&str],
+        seed: (&str, &str, &[u8]),
+        caps: &[&str],
+    ) -> anyhow::Result<()> {
         self.container_remove(name).await;
         let endpoint = EndpointSettings {
             ipam_config: Some(EndpointIpamConfig {
@@ -228,6 +268,7 @@ impl Dock {
             cmd: Some(cmd.iter().map(|s| (*s).to_string()).collect()),
             host_config: Some(HostConfig {
                 network_mode: Some(network.to_string()),
+                cap_add: Some(caps.iter().map(|c| (*c).to_string()).collect()),
                 ..Default::default()
             }),
             networking_config: Some(NetworkingConfig {
@@ -363,6 +404,21 @@ impl Dock {
             && rm -rf /var/lib/apt/lists/*\n",
         )
         .await
+    }
+
+    /// Pulls `image` (a `repo:tag`) unless it is already present.
+    pub async fn ensure_pulled(&self, image: &str) -> anyhow::Result<()> {
+        if self.docker.inspect_image(image).await.is_ok() {
+            return Ok(());
+        }
+        let opts = bollard::query_parameters::CreateImageOptionsBuilder::default()
+            .from_image(image)
+            .build();
+        let mut stream = self.docker.create_image(Some(opts), None, None);
+        while let Some(step) = stream.next().await {
+            step.with_context(|| format!("pulling image {image}"))?;
+        }
+        Ok(())
     }
 
     /// Builds `tag` from an inline Dockerfile, once.
