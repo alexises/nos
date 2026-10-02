@@ -46,6 +46,8 @@ fn peer(remote: Ipv4Addr, source: Ipv4Addr, remote_as: u32) -> ResolvedPeer {
         export_policy: accept,
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        confed_id: None,
+        confed_member: false,
     }
 }
 
@@ -92,6 +94,7 @@ fn routers() -> (Router, Router, u16) {
         asn,
         router_id: id,
         cluster_id: id,
+        confed_id: None,
     };
     (
         Router {

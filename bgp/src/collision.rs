@@ -418,6 +418,8 @@ mod tests {
             export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             shutdown: None,
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+            confed_id: None,
+            confed_member: false,
         })
     }
 

@@ -93,6 +93,8 @@ async fn two_real_instances_establish_a_session() {
         export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        confed_id: None,
+        confed_member: false,
     });
     let slot_b = PeerSlot::new(ResolvedPeer {
         remote_address: "10.0.0.1".parse().unwrap(),
@@ -114,6 +116,8 @@ async fn two_real_instances_establish_a_session() {
         export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        confed_id: None,
+        confed_member: false,
     });
 
     let a_fut = fsm::run(
@@ -123,6 +127,7 @@ async fn two_real_instances_establish_a_session() {
             asn: a_asn,
             router_id: a_router_id,
             cluster_id: a_router_id,
+            confed_id: None,
         },
         PeerContext {
             remote_address: "10.0.0.2".parse().unwrap(),
@@ -148,6 +153,7 @@ async fn two_real_instances_establish_a_session() {
             asn: b_asn,
             router_id: b_router_id,
             cluster_id: b_router_id,
+            confed_id: None,
         },
         PeerContext {
             remote_address: "10.0.0.1".parse().unwrap(),
@@ -216,6 +222,8 @@ async fn established_session_honors_configured_non_default_hold_time() {
         export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        confed_id: None,
+        confed_member: false,
     });
 
     let a_fut = fsm::run(
@@ -225,6 +233,7 @@ async fn established_session_honors_configured_non_default_hold_time() {
             asn: a_asn,
             router_id: a_router_id,
             cluster_id: a_router_id,
+            confed_id: None,
         },
         PeerContext {
             remote_address: "10.0.0.2".parse().unwrap(),
@@ -291,6 +300,8 @@ async fn established_session_reports_status_via_peer_slot() {
         export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        confed_id: None,
+        confed_member: false,
     });
     let mut status = slot_a.status_receiver();
 
@@ -301,6 +312,7 @@ async fn established_session_reports_status_via_peer_slot() {
             asn: a_asn,
             router_id: a_router_id,
             cluster_id: a_router_id,
+            confed_id: None,
         },
         PeerContext {
             remote_address: "10.0.0.2".parse().unwrap(),
@@ -365,6 +377,7 @@ async fn collision_leaves_exactly_one_side_running() {
         asn: 65001,
         router_id: Ipv4Addr::new(5, 5, 5, 5),
         cluster_id: Ipv4Addr::new(5, 5, 5, 5),
+        confed_id: None,
     };
 
     let fake_active = tokio::spawn(fake_peer(active_fake, remote_asn, remote_router_id, 90));
@@ -390,6 +403,8 @@ async fn collision_leaves_exactly_one_side_running() {
         export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        confed_id: None,
+        confed_member: false,
     });
 
     let peer_ctx = || PeerContext {
@@ -586,6 +601,8 @@ async fn evpn_routes_from_a_real_session_are_stored_and_cleared_on_close() {
         export_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        confed_id: None,
+        confed_member: false,
     });
     let rib = new_bgp_rib();
     rib.lock()
@@ -599,6 +616,7 @@ async fn evpn_routes_from_a_real_session_are_stored_and_cleared_on_close() {
             asn: a_asn,
             router_id: a_router_id,
             cluster_id: a_router_id,
+            confed_id: None,
         },
         PeerContext {
             remote_address: peer_addr,

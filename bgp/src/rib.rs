@@ -53,6 +53,13 @@
 //!   `LOCAL_PREF` is included only toward iBGP peers.
 //! - A received route whose `AS_PATH` already contains our own ASN is dropped
 //!   (loop prevention), not just deprioritized.
+//! - RFC 5065 confederations (`set_confederation`, `set_peer_confed`): a
+//!   confederation-external peer is treated as iBGP for next hop, MED and
+//!   `LOCAL_PREF` and gets our member AS in an `AS_CONFED_SEQUENCE`; an
+//!   external peer gets the path without confederation segments and the
+//!   identifier prepended. Confederation segments from outside the
+//!   confederation are treat-as-withdraw; loop detection checks the
+//!   identifier in plain segments and the member AS in confed segments.
 //! - A peer only ever gets a prefix whose address family is in its own
 //!   `negotiated_afs` (config ∩ what was actually negotiated in OPEN — see
 //!   `fsm::negotiate_address_families`); `mp_bgp_negotiated` then picks
@@ -327,8 +334,12 @@ pub struct RibRoute {
     /// `None` for `origin == Local` — a locally-redistributed route never
     /// carries one.
     pub med: Option<u32>,
-    /// Meaningless when `origin == Local`.
+    /// Learned from an `Internal` peer (the member AS, in an RFC 5065
+    /// confederation). Meaningless when `origin == Local`.
     pub learned_via_ibgp: bool,
+    /// Learned from a confederation-external peer (RFC 5065) — ranks
+    /// between external and internal at decision step 6.
+    pub learned_via_confed: bool,
     /// The advertising peer's BGP Identifier, for `origin == Peer(_)` —
     /// used as the RFC 4271 §9.1.2.2 router-id tiebreak. Always `None` for
     /// `origin == Local`.
@@ -443,7 +454,14 @@ pub struct AdvertisedRoute {
 #[allow(clippy::similar_names)] // is_rr_client (reflector) vs. is_rs_client (server) are deliberately parallel
 struct PeerOutbox {
     tx: mpsc::UnboundedSender<OutboundUpdate>,
+    /// `Internal` (the member AS, in a confederation).
     is_ibgp: bool,
+    /// RFC 5065 confederation-external: next hop, MED and `LOCAL_PREF`
+    /// kept as for iBGP, `AS_CONFED_SEQUENCE` prepended.
+    is_confed: bool,
+    /// This instance's confederation identifier when the peer was
+    /// registered — the AS an external peer sees.
+    confed_id: Option<u32>,
     /// This session's own transport-local address, of whatever family —
     /// used as next-hop-self for every negotiated address family this peer
     /// carries, cross-family or not (RFC 8950). `None` if it couldn't be
@@ -483,7 +501,12 @@ struct PeerOutbox {
 /// The BGP RIB engine for one `nos-bgpd` instance. See the module doc
 /// comment for the locking model.
 pub struct BgpRib {
+    /// Our AS — the member AS in an RFC 5065 confederation.
     local_asn: u32,
+    /// RFC 5065 confederation identifier, if this instance is a member.
+    confed_id: Option<u32>,
+    /// Peers in another member AS of our confederation (`set_peer_confed`).
+    confed_peers: HashSet<IpAddr>,
     /// This instance's own router-id — used for RFC 4456 §5 `ORIGINATOR_ID`
     /// loop-prevention on receipt (`handle_update`).
     local_router_id: Ipv4Addr,
@@ -581,6 +604,8 @@ impl BgpRib {
     pub fn new() -> Self {
         Self {
             local_asn: 0,
+            confed_id: None,
+            confed_peers: HashSet::new(),
             local_router_id: Ipv4Addr::UNSPECIFIED,
             cluster_id: Ipv4Addr::UNSPECIFIED,
             adj_rib_in: HashMap::new(),
@@ -618,6 +643,21 @@ impl BgpRib {
         self.local_asn = asn;
         self.local_router_id = router_id;
         self.cluster_id = cluster_id;
+    }
+
+    /// Sets the RFC 5065 confederation identifier (`None`: not confederated).
+    pub fn set_confederation(&mut self, confed_id: Option<u32>) {
+        self.confed_id = confed_id;
+    }
+
+    /// Records whether `peer` is in another member AS of our confederation.
+    /// Call before `peer_established`, like `set_peer_asn`.
+    pub fn set_peer_confed(&mut self, peer: IpAddr, confed: bool) {
+        if confed {
+            self.confed_peers.insert(peer);
+        } else {
+            self.confed_peers.remove(&peer);
+        }
     }
 
     /// Sets the broadcast domains fed by `fdb_push_client`.
@@ -678,6 +718,8 @@ impl BgpRib {
             PeerOutbox {
                 tx,
                 is_ibgp,
+                is_confed: self.confed_peers.contains(&peer),
+                confed_id: self.confed_id,
                 local_addr,
                 negotiated_afs,
                 mp_bgp_negotiated,
@@ -1072,7 +1114,24 @@ impl BgpRib {
                 }
                 return;
             };
-            if attrs.as_path.contains(self.local_asn) {
+            let from_confed = self.confed_peers.contains(&from);
+            // RFC 5065 §5.3 / RFC 7606 §7.2: confederation segments only ever
+            // come from inside our own confederation.
+            let stray_confed = attrs.as_path.has_confed()
+                && (self.confed_id.is_none() || !(remote_is_ibgp || from_confed));
+            // RFC 5065 §5.1: our confederation identifier (or AS) in a plain
+            // segment, or our member AS in a confederation segment.
+            let looped = attrs
+                .as_path
+                .contains(self.confed_id.unwrap_or(self.local_asn))
+                || (self.confed_id.is_some() && attrs.as_path.contains_confed(self.local_asn));
+            if stray_confed {
+                warn!(
+                    peer = %from, as_path = ?attrs.as_path,
+                    "treating bgp update as withdraw: as_path has confederation segments from outside the confederation"
+                );
+                self.withdraw_announced(from, update, &mut touched);
+            } else if looped {
                 warn!(
                     peer = %from, as_path = ?attrs.as_path,
                     "dropping bgp update: as_path already contains our own asn (loop prevention)"
@@ -1105,6 +1164,7 @@ impl BgpRib {
                     local_pref: attrs.local_pref.unwrap_or(DEFAULT_LOCAL_PREF),
                     med: attrs.med,
                     learned_via_ibgp: remote_is_ibgp,
+                    learned_via_confed: from_confed,
                     router_id: Some(remote_bgp_id),
                     next_hop: None,
                     received_at: Instant::now(),
@@ -1169,6 +1229,40 @@ impl BgpRib {
 
         for prefix in touched {
             self.recompute_and_propagate(prefix);
+        }
+    }
+
+    /// RFC 7606 treat-as-withdraw, decided here rather than in the codec
+    /// because it depends on the peer: every route `update` announces is
+    /// removed from `from`'s Adj-RIB-In.
+    fn withdraw_announced(
+        &mut self,
+        from: IpAddr,
+        update: &UpdateMessage,
+        touched: &mut HashSet<IpNet>,
+    ) {
+        let announced = update
+            .nlri
+            .iter()
+            .copied()
+            .map(IpNet::V4)
+            .chain(update.mp_reach.iter().flat_map(|m| m.nlri.iter().copied()));
+        if let Some(table) = self.adj_rib_in.get_mut(&from) {
+            for prefix in announced {
+                if table.remove(&prefix).is_some() {
+                    if prefix.addr().is_ipv6() {
+                        *self.v6_counts.entry(from).or_default() -= 1;
+                    }
+                    touched.insert(prefix);
+                }
+            }
+        }
+        if let Some(table) = self.evpn_adj_rib_in.get_mut(&from) {
+            for nlri in update.mp_reach.iter().flat_map(|m| &m.evpn) {
+                if table.remove(nlri).is_some() {
+                    info!(peer = %from, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
+                }
+            }
         }
     }
 
@@ -1495,6 +1589,7 @@ fn redistributed_route() -> RibRoute {
         local_pref: DEFAULT_LOCAL_PREF,
         med: None,
         learned_via_ibgp: false,
+        learned_via_confed: false,
         router_id: None,
         next_hop: None,
         received_at: Instant::now(),
@@ -1530,6 +1625,18 @@ fn compare_med(a: &RibRoute, b: &RibRoute) -> std::cmp::Ordering {
     match (neighboring_as(a), neighboring_as(b)) {
         (Some(x), Some(y)) if x == y => b.med.unwrap_or(0).cmp(&a.med.unwrap_or(0)),
         _ => std::cmp::Ordering::Equal,
+    }
+}
+
+/// Decision step 6 rank, higher wins: external 2, confederation-external 1,
+/// internal 0.
+fn peer_rank(route: &RibRoute) -> u8 {
+    if route.learned_via_ibgp {
+        0
+    } else if route.learned_via_confed {
+        1
+    } else {
+        2
     }
 }
 
@@ -1600,14 +1707,15 @@ fn best_path(
                 .then_with(|| b.as_path.selection_len().cmp(&a.as_path.selection_len())) // step 3
                 .then_with(|| origin_rank(b.bgp_origin).cmp(&origin_rank(a.bgp_origin))) // step 4
                 .then_with(|| compare_med(a, b)) // step 5
-                .then_with(|| b.learned_via_ibgp.cmp(&a.learned_via_ibgp)) // step 6: eBGP beats iBGP
+                // Step 6: eBGP beats confederation-eBGP beats iBGP (RFC 5065 §5.3).
+                .then_with(|| peer_rank(a).cmp(&peer_rank(b)))
                 // Step 7: lower IGP cost to the next hop wins (evaluated
                 // lazily — only reached when steps 1-6 tie).
                 .then_with(|| igp_cost(igp, b.next_hop).cmp(&igp_cost(igp, a.next_hop)))
                 .then_with(|| {
                     // Step 8: oldest route wins, only between two
                     // eBGP-learned candidates (RFC 4271's anti-flap rule).
-                    if !a.learned_via_ibgp && !b.learned_via_ibgp {
+                    if peer_rank(a) == 2 && peer_rank(b) == 2 {
                         b.received_at.cmp(&a.received_at)
                     } else {
                         std::cmp::Ordering::Equal
@@ -1679,7 +1787,12 @@ fn build_advertisement(
     // passed on to another AS. It is cleared before the export policy runs,
     // so a MED the policy sets (or a locally originated one) is still sent.
     // RFC 7947 §2.2: a route server passes MED through unchanged to its clients.
-    if !outbox.is_ibgp && !outbox.is_rs_client && matches!(best.origin, RouteOrigin::Peer(_)) {
+    // RFC 5065 §5.3: kept within the confederation too.
+    if !outbox.is_ibgp
+        && !outbox.is_confed
+        && !outbox.is_rs_client
+        && matches!(best.origin, RouteOrigin::Peer(_))
+    {
         adjusted.med = None;
     }
     let verdict = nos_rpl::vm::run(
@@ -1693,13 +1806,13 @@ fn build_advertisement(
     // RFC 7947 §2.2.1: a route server passes NEXT_HOP through unchanged, so
     // a route-server client defaults to `Unchanged` like an iBGP peer. An
     // explicit `next-hop self` still wins.
-    let mode = outbox
-        .next_hop_mode
-        .unwrap_or(if outbox.is_ibgp || outbox.is_rs_client {
+    let mode = outbox.next_hop_mode.unwrap_or(
+        if outbox.is_ibgp || outbox.is_confed || outbox.is_rs_client {
             NextHopMode::Unchanged
         } else {
             NextHopMode::SelfAddress
-        });
+        },
+    );
     let next_hop = match (nh_edit, mode) {
         (nos_rpl::NextHopSet::Addr(a), _) => a,
         (nos_rpl::NextHopSet::SelfAddress, _) | (_, NextHopMode::SelfAddress) => {
@@ -1719,14 +1832,24 @@ fn build_advertisement(
     // of cloning twice (once wastefully inside `adjusted = best.clone()`
     // above, once again here) like the pre-Arc version of this code did.
     let mut as_path = Arc::clone(&best.as_path);
-    // RFC 7947 route-server clients get a fully transparent AS_PATH: no
-    // local-ASN prepend, even though they're always eBGP (enforced at
-    // config-validation time — see `bgp_instance::valid_route_reflection_and_server`).
-    if !outbox.is_ibgp && !outbox.is_rs_client {
-        Arc::make_mut(&mut as_path).prepend_seq(local_asn);
+    if outbox.is_confed {
+        // RFC 5065 §4.1: our member AS, in an AS_CONFED_SEQUENCE.
+        Arc::make_mut(&mut as_path).prepend_confed_seq(local_asn);
+    } else if !outbox.is_ibgp {
+        // RFC 5065 §4.1: outside the confederation, its segments go and
+        // only the identifier is prepended.
+        if as_path.has_confed() {
+            Arc::make_mut(&mut as_path).strip_confed();
+        }
+        // RFC 7947 route-server clients get a fully transparent AS_PATH: no
+        // local-ASN prepend, even though they're always eBGP (enforced at
+        // config-validation time — see `bgp_instance::valid_route_reflection_and_server`).
+        if !outbox.is_rs_client {
+            Arc::make_mut(&mut as_path).prepend_seq(outbox.confed_id.unwrap_or(local_asn));
+        }
     }
     let as_path: AsPath = Arc::try_unwrap(as_path).unwrap_or_else(|arc| (*arc).clone());
-    let local_pref = outbox.is_ibgp.then_some(best.local_pref);
+    let local_pref = (outbox.is_ibgp || outbox.is_confed).then_some(best.local_pref);
     let med = best.med;
 
     let (originator_id, cluster_list) = if reflecting {
@@ -2560,6 +2683,240 @@ mod tests {
             })
             .expect("expected an announcement for 198.51.100.0/24");
         assert_eq!(adv.as_path, vec![65001, 64999, 64999]);
+    }
+
+    /// RFC 5065: member AS 65101 of confederation 65100.
+    fn confed_rib() -> BgpRib {
+        let mut rib = new_rib(65101);
+        rib.set_confederation(Some(65100));
+        rib
+    }
+
+    fn register_confed_peer(
+        rib: &mut BgpRib,
+        peer: IpAddr,
+    ) -> mpsc::UnboundedReceiver<OutboundUpdate> {
+        rib.set_peer_confed(peer, true);
+        register_peer(rib, peer, false, addr("10.0.0.254"))
+    }
+
+    fn confed_update(nlri: &str, confed: &[u32], seq: &[u32], next_hop: &str) -> UpdateMessage {
+        let mut u = ebgp_update(vec![nlri], seq.to_vec(), next_hop);
+        let path = &mut u.attributes.as_mut().unwrap().as_path;
+        for &asn in confed.iter().rev() {
+            path.prepend_confed_seq(asn);
+        }
+        u
+    }
+
+    fn announced(
+        rx: &mut mpsc::UnboundedReceiver<OutboundUpdate>,
+        p: &str,
+    ) -> Option<AdvertisedRoute> {
+        recv_all(rx).into_iter().find_map(|u| match u {
+            OutboundUpdate::Announce(a) if a.prefix == prefix(p) => Some(a),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn confed_send_rules_per_peer_kind() {
+        let mut rib = confed_rib();
+        let mut confed = register_confed_peer(&mut rib, addr("10.0.0.2"));
+        let mut external = register_peer(&mut rib, addr("10.0.0.3"), false, addr("10.0.0.254"));
+        let mut internal = register_peer(&mut rib, addr("10.0.0.4"), true, addr("10.0.0.254"));
+        let mut u = ebgp_update(vec!["198.51.100.0/24"], vec![65003], "192.0.2.5");
+        u.attributes.as_mut().unwrap().med = Some(50);
+        rib.handle_update(
+            addr("10.0.0.5"),
+            false,
+            v4("5.5.5.5"),
+            &u,
+            &accept_all_policy(),
+        );
+
+        let c = announced(&mut confed, "198.51.100.0/24").unwrap();
+        assert_eq!(format!("{:?}", c.as_path), "[(65101), 65003]");
+        assert_eq!(c.next_hop, addr("192.0.2.5"), "next hop kept");
+        assert_eq!((c.med, c.local_pref), (Some(50), Some(DEFAULT_LOCAL_PREF)));
+
+        let e = announced(&mut external, "198.51.100.0/24").unwrap();
+        assert_eq!(e.as_path, vec![65100, 65003], "identifier only");
+        assert_eq!(
+            (e.next_hop, e.med, e.local_pref),
+            (addr("10.0.0.254"), None, None)
+        );
+
+        let i = announced(&mut internal, "198.51.100.0/24").unwrap();
+        assert_eq!(i.as_path, vec![65003]);
+
+        // A route from the confed peer: stripped toward the external peer,
+        // and sent to the internal one (it is not an iBGP-learned route).
+        let u = confed_update("198.51.101.0/24", &[65102], &[65004], "192.0.2.2");
+        rib.handle_update(
+            addr("10.0.0.2"),
+            false,
+            v4("2.2.2.2"),
+            &u,
+            &accept_all_policy(),
+        );
+        let e = announced(&mut external, "198.51.101.0/24").unwrap();
+        assert_eq!(e.as_path, vec![65100, 65004]);
+        let i = announced(&mut internal, "198.51.101.0/24").unwrap();
+        assert_eq!(format!("{:?}", i.as_path), "[(65102), 65004]");
+    }
+
+    #[test]
+    fn confed_segments_from_outside_the_confederation_are_withdrawn() {
+        for mut rib in [confed_rib(), new_rib(65101)] {
+            let from = addr("10.0.0.3");
+            let u = ebgp_update(vec!["198.51.100.0/24"], vec![65003], "192.0.2.3");
+            rib.handle_update(from, false, v4("3.3.3.3"), &u, &accept_all_policy());
+            assert!(rib.loc_rib.contains_key(&prefix("198.51.100.0/24")));
+            let bad = confed_update("198.51.100.0/24", &[65109], &[65003], "192.0.2.3");
+            rib.handle_update(from, false, v4("3.3.3.3"), &bad, &accept_all_policy());
+            assert!(!rib.loc_rib.contains_key(&prefix("198.51.100.0/24")));
+        }
+    }
+
+    #[test]
+    fn confed_loop_detection() {
+        let mut rib = confed_rib();
+        // The identifier in a plain segment, from an external peer.
+        let u = ebgp_update(vec!["198.51.100.0/24"], vec![65003, 65100], "192.0.2.3");
+        rib.handle_update(
+            addr("10.0.0.3"),
+            false,
+            v4("3.3.3.3"),
+            &u,
+            &accept_all_policy(),
+        );
+        // Our member AS in a confed segment, from a confed peer.
+        rib.set_peer_confed(addr("10.0.0.2"), true);
+        let u = confed_update("198.51.101.0/24", &[65102, 65101], &[65003], "192.0.2.2");
+        rib.handle_update(
+            addr("10.0.0.2"),
+            false,
+            v4("2.2.2.2"),
+            &u,
+            &accept_all_policy(),
+        );
+        assert!(rib.loc_rib.is_empty());
+        // Our member AS in a plain segment is someone else's AS, not a loop.
+        let u = ebgp_update(vec!["198.51.102.0/24"], vec![65003, 65101], "192.0.2.3");
+        rib.handle_update(
+            addr("10.0.0.3"),
+            false,
+            v4("3.3.3.3"),
+            &u,
+            &accept_all_policy(),
+        );
+        assert_eq!(rib.loc_rib.len(), 1);
+    }
+
+    #[test]
+    fn confed_step_six_external_then_confed_then_internal() {
+        let mut rib = confed_rib();
+        rib.set_peer_confed(addr("10.0.0.2"), true);
+        let p = "198.51.100.0/24";
+        // Same length once confed segments are ignored, same neighbour AS.
+        let internal = ebgp_update(vec![p], vec![65003], "192.0.2.4");
+        let confed = confed_update(p, &[65102], &[65003], "192.0.2.2");
+        let external = ebgp_update(vec![p], vec![65003], "192.0.2.3");
+        rib.handle_update(
+            addr("10.0.0.4"),
+            true,
+            v4("4.4.4.4"),
+            &internal,
+            &accept_all_policy(),
+        );
+        rib.handle_update(
+            addr("10.0.0.2"),
+            false,
+            v4("2.2.2.2"),
+            &confed,
+            &accept_all_policy(),
+        );
+        rib.handle_update(
+            addr("10.0.0.3"),
+            false,
+            v4("3.3.3.3"),
+            &external,
+            &accept_all_policy(),
+        );
+        let best = |rib: &BgpRib| rib.loc_rib[&prefix(p)].origin;
+        assert_eq!(best(&rib), RouteOrigin::Peer(addr("10.0.0.3")));
+        rib.peer_disconnected(addr("10.0.0.3"));
+        assert_eq!(best(&rib), RouteOrigin::Peer(addr("10.0.0.2")));
+    }
+
+    #[test]
+    fn as_set_counts_as_one_hop() {
+        let mut rib = new_rib(65001);
+        let p = "198.51.100.0/24";
+        let mut set = ebgp_update(vec![p], vec![65003], "192.0.2.2");
+        let path = &mut set.attributes.as_mut().unwrap().as_path;
+        let mut with_set = AsPath::from(vec![65003]);
+        with_set.push_segment(crate::as_path::SegKind::Set, &[1, 2, 3]);
+        *path = with_set;
+        let seq = ebgp_update(vec![p], vec![65004, 65005, 65006], "192.0.2.3");
+        rib.handle_update(
+            addr("10.0.0.2"),
+            false,
+            v4("2.2.2.2"),
+            &set,
+            &accept_all_policy(),
+        );
+        rib.handle_update(
+            addr("10.0.0.3"),
+            false,
+            v4("3.3.3.3"),
+            &seq,
+            &accept_all_policy(),
+        );
+        assert_eq!(
+            rib.loc_rib[&prefix(p)].origin,
+            RouteOrigin::Peer(addr("10.0.0.2"))
+        );
+    }
+
+    #[test]
+    fn rpl_prepend_on_a_confed_path_joins_the_sequence() {
+        let mut rib = confed_rib();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        rib.peer_established(
+            addr("10.0.0.4"),
+            true,
+            Some(addr("10.0.0.254")),
+            all_afs(),
+            false,
+            None,
+            false,
+            false,
+            HashSet::new(),
+            Arc::new(
+                nos_rpl::compile(
+                    "this.bgp.as_path.prepend(64999, 2)\naccept\n",
+                    &nos_rpl::Symbols::EMPTY,
+                )
+                .unwrap(),
+            ),
+            tx,
+        );
+        rib.set_peer_confed(addr("10.0.0.2"), true);
+        let u = confed_update("198.51.100.0/24", &[65102], &[65003], "192.0.2.2");
+        rib.handle_update(
+            addr("10.0.0.2"),
+            false,
+            v4("2.2.2.2"),
+            &u,
+            &accept_all_policy(),
+        );
+        let adv = announced(&mut rx, "198.51.100.0/24").unwrap();
+        assert_eq!(
+            format!("{:?}", adv.as_path),
+            "[64999, 64999, (65102), 65003]"
+        );
     }
 
     #[test]
