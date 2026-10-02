@@ -417,5 +417,5 @@ async fn rpki_validation_follows_the_cache() {
 
     // Removing the caches empties the VRP set.
     b.apply_with(vec![peer(A, B, 65001)], &[]).await;
-    assert!(b.manager.rpki_summaries().await.is_empty());
+    assert_eq!(b.manager.rpki_summaries().await, []);
 }

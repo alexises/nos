@@ -170,7 +170,7 @@ mod tests {
         assert!(t.withdraw(vrp("10.0.0.0/8", 8, 1)));
         assert!(!t.withdraw(vrp("10.0.0.0/8", 8, 1)));
         assert!(t.withdraw(vrp("10.0.0.0/8", 16, 1)));
-        assert!(t.is_empty());
+        assert_eq!(t.len(), 0);
         assert_eq!(t, VrpTable::default());
     }
 

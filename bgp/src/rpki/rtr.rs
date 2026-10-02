@@ -646,7 +646,7 @@ mod tests {
         let mut buf = BytesMut::new();
         codec.encode(pdu, &mut buf).unwrap();
         let frame = codec.decode(&mut buf).unwrap().unwrap();
-        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
         frame
     }
 

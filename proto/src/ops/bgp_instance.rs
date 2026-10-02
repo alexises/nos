@@ -323,7 +323,7 @@ mod tests {
         }
         .apply(&mut cfg)
         .unwrap();
-        assert!(cfg.bgp_instances[0].rpki_caches.is_empty());
+        assert_eq!(cfg.bgp_instances[0].rpki_caches, []);
     }
 
     #[test]
