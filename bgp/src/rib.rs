@@ -23,13 +23,12 @@
 //! locally-redistributed route beats any peer-learned route (not an RFC
 //! step — this implementation's equivalent of "prefer locally originated",
 //! placed here per common vendor convention, e.g. Cisco's own ordering);
-//! (3) shorter `AS_PATH` (`AS_SET` vs. `AS_SEQUENCE` segmentation isn't
-//! preserved — see `message.rs`'s documented simplification — so this
-//! compares flattened length only); (4) lowest `ORIGIN` type (`Igp` <
+//! (3) shorter `AS_PATH` (`AsPath::selection_len`: an `AS_SET` counts one,
+//! RFC 5065 confederation segments none); (4) lowest `ORIGIN` type (`Igp` <
 //! `Egp` < `Incomplete`); (5) lowest `MULTI_EXIT_DISC`, only compared
-//! between routes sharing the same neighboring AS (`AS_PATH`'s first
-//! entry), missing MED treated as 0; (6) an eBGP-learned route beats an
-//! iBGP-learned one; (7) lowest IGP metric to the next-hop, resolved by
+//! between routes sharing the same neighboring AS (`AsPath::neighbor_as`,
+//! confederation segments skipped), missing MED treated as 0; (6) an
+//! eBGP-learned route beats an iBGP-learned one; (7) lowest IGP metric to the next-hop, resolved by
 //! longest-prefix match against the table `igp_client` polls from
 //! `nos-ribd` (`set_igp`) — a directly connected one is a `Connected` route
 //! at cost 0, an unresolvable one never gets here (see above); (8) oldest route
@@ -83,6 +82,7 @@ use nos_rpl::CompiledPolicy;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::as_path::AsPath;
 use crate::damping::{Damping, CHANGE_PENALTY, WITHDRAW_PENALTY};
 use crate::evpn::EvpnNlri;
 use crate::mac_mobility::MacMobility;
@@ -108,7 +108,7 @@ fn to_policy_input(
                 message::Origin::Egp => nos_rpl::Origin::Egp,
                 message::Origin::Incomplete => nos_rpl::Origin::Incomplete,
             },
-            as_path: &route.as_path,
+            as_path: route.as_path.flat(),
             local_pref: route.local_pref,
             med: route.med,
             next_hop: route.next_hop,
@@ -164,8 +164,13 @@ fn apply_verdict(route: &mut RibRoute, verdict: nos_rpl::Verdict) -> Option<nos_
     route.communities = communities;
     route.extended_communities = extended_communities;
     route.large_communities = large_communities;
-    if let Some(as_path) = edits.as_path {
-        route.as_path = Arc::new(as_path);
+    // RPL only prepends: the new leading ASNs join the leading AS_SEQUENCE.
+    if let Some(flat) = edits.as_path {
+        let added = flat.len().saturating_sub(route.as_path.flat().len());
+        let path = Arc::make_mut(&mut route.as_path);
+        for &asn in flat[..added].iter().rev() {
+            path.prepend_seq(asn);
+        }
     }
     if let Some(origin) = edits.origin {
         route.bgp_origin = match origin {
@@ -313,7 +318,7 @@ pub struct RibRoute {
     /// Never mutated in place by RPL (a `prepend` replaces the whole `Arc`)
     /// — shared via `Arc` so cloning a `RibRoute` (candidate collection,
     /// `loc_rib`/`adj_rib_in` storage) never deep-copies this list.
-    pub as_path: Arc<Vec<u32>>,
+    pub as_path: Arc<AsPath>,
     pub bgp_origin: message::Origin,
     /// Always the effective value — defaulted to `DEFAULT_LOCAL_PREF` when
     /// the peer's UPDATE omitted `LOCAL_PREF`, or for a `Local` route.
@@ -391,7 +396,7 @@ pub struct AdvertisedRoute {
     pub prefix: IpNet,
     /// Already rewritten for the destination peer (our ASN prepended iff
     /// eBGP and not a `route_server_client`).
-    pub as_path: Vec<u32>,
+    pub as_path: AsPath,
     /// Rewritten per the destination peer-group's effective `NextHopMode` —
     /// either that peer's own session's local address (`SelfAddress`) or the
     /// route's stored next-hop (`Unchanged`).
@@ -1067,7 +1072,7 @@ impl BgpRib {
                 }
                 return;
             };
-            if attrs.as_path.contains(&self.local_asn) {
+            if attrs.as_path.contains(self.local_asn) {
                 warn!(
                     peer = %from, as_path = ?attrs.as_path,
                     "dropping bgp update: as_path already contains our own asn (loop prevention)"
@@ -1095,7 +1100,7 @@ impl BgpRib {
                 );
                 let base_route = RibRoute {
                     origin: RouteOrigin::Peer(from),
-                    as_path: attrs.as_path.clone().into(),
+                    as_path: Arc::new(attrs.as_path.clone()),
                     bgp_origin: attrs.origin,
                     local_pref: attrs.local_pref.unwrap_or(DEFAULT_LOCAL_PREF),
                     med: attrs.med,
@@ -1485,7 +1490,7 @@ impl BgpRib {
 fn redistributed_route() -> RibRoute {
     RibRoute {
         origin: RouteOrigin::Local,
-        as_path: Vec::new().into(),
+        as_path: Arc::default(),
         bgp_origin: message::Origin::Igp,
         local_pref: DEFAULT_LOCAL_PREF,
         med: None,
@@ -1515,7 +1520,7 @@ fn origin_rank(origin: message::Origin) -> u8 {
 /// through an eBGP hop), which makes it ineligible for MED comparison
 /// against anything.
 fn neighboring_as(route: &RibRoute) -> Option<u32> {
-    route.as_path.first().copied()
+    route.as_path.neighbor_as()
 }
 
 /// Step 5: lower `MULTI_EXIT_DISC` wins, but only between routes sharing
@@ -1592,7 +1597,7 @@ fn best_path(
                     let b_is_local = matches!(b.origin, RouteOrigin::Local);
                     a_is_local.cmp(&b_is_local)
                 })
-                .then_with(|| b.as_path.len().cmp(&a.as_path.len())) // step 3
+                .then_with(|| b.as_path.selection_len().cmp(&a.as_path.selection_len())) // step 3
                 .then_with(|| origin_rank(b.bgp_origin).cmp(&origin_rank(a.bgp_origin))) // step 4
                 .then_with(|| compare_med(a, b)) // step 5
                 .then_with(|| b.learned_via_ibgp.cmp(&a.learned_via_ibgp)) // step 6: eBGP beats iBGP
@@ -1718,9 +1723,9 @@ fn build_advertisement(
     // local-ASN prepend, even though they're always eBGP (enforced at
     // config-validation time — see `bgp_instance::valid_route_reflection_and_server`).
     if !outbox.is_ibgp && !outbox.is_rs_client {
-        Arc::make_mut(&mut as_path).insert(0, local_asn);
+        Arc::make_mut(&mut as_path).prepend_seq(local_asn);
     }
-    let as_path: Vec<u32> = Arc::try_unwrap(as_path).unwrap_or_else(|arc| (*arc).clone());
+    let as_path: AsPath = Arc::try_unwrap(as_path).unwrap_or_else(|arc| (*arc).clone());
     let local_pref = outbox.is_ibgp.then_some(best.local_pref);
     let med = best.med;
 
@@ -1917,7 +1922,7 @@ mod tests {
             nlri_path_ids: vec![],
             attributes: Some(message::PathAttributes {
                 origin: message::Origin::Igp,
-                as_path,
+                as_path: as_path.into(),
                 next_hop: v4(next_hop),
                 local_pref: None,
                 med: None,
@@ -2830,7 +2835,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("192.168.1.0/24"),
-                as_path: vec![65000],
+                as_path: vec![65000].into(),
                 next_hop: addr("10.0.0.254"),
                 local_pref: None,
                 med: None,
@@ -2861,7 +2866,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("192.168.1.0/24"),
-                as_path: vec![],
+                as_path: vec![].into(),
                 next_hop: addr("10.0.0.253"),
                 local_pref: Some(100),
                 med: None,
@@ -3026,7 +3031,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("1.2.3.0/24"),
-                as_path: vec![65000, 65001],
+                as_path: vec![65000, 65001].into(),
                 next_hop: addr("10.0.0.253"),
                 local_pref: None,
                 med: None,
@@ -3084,7 +3089,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("1.2.3.0/24"),
-                as_path: vec![65001],
+                as_path: vec![65001].into(),
                 // iBGP defaults to Unchanged: the eBGP source's own
                 // next-hop (10.0.0.1) is preserved, not rewritten to the
                 // ibgp_peer's own local address.
@@ -3132,7 +3137,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("1.2.3.0/24"),
-                as_path: vec![65001],
+                as_path: vec![65001].into(),
                 next_hop: addr("10.0.0.253"),
                 local_pref: Some(100),
                 med: None,
@@ -3177,7 +3182,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("1.2.3.0/24"),
-                as_path: vec![65000, 65001],
+                as_path: vec![65000, 65001].into(),
                 next_hop: addr("10.0.0.1"),
                 local_pref: None,
                 med: None,
@@ -3214,7 +3219,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("192.168.1.0/24"),
-                as_path: vec![],
+                as_path: vec![].into(),
                 // No stored next-hop on a Local-origin route, so it always
                 // falls back to next-hop-self regardless of mode.
                 next_hop: addr("10.0.0.253"),
@@ -3266,7 +3271,7 @@ mod tests {
                 nlri: vec!["9.9.9.0/24".parse().unwrap()],
                 attributes: Some(message::PathAttributes {
                     origin: message::Origin::Igp,
-                    as_path: vec![],
+                    as_path: vec![].into(),
                     next_hop: v4("10.0.0.1"),
                     local_pref: Some(50),
                     med: None,
@@ -3293,7 +3298,7 @@ mod tests {
                 nlri: vec!["9.9.9.0/24".parse().unwrap()],
                 attributes: Some(message::PathAttributes {
                     origin: message::Origin::Igp,
-                    as_path: vec![],
+                    as_path: vec![].into(),
                     next_hop: v4("10.0.0.2"),
                     local_pref: Some(200),
                     med: None,
@@ -3324,7 +3329,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("9.9.9.0/24"),
-                as_path: vec![],
+                as_path: vec![].into(),
                 // iBGP defaults to Unchanged: peer_b's own advertised
                 // next-hop (10.0.0.2) is preserved, not rewritten to the
                 // observer's local address.
@@ -3369,7 +3374,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("5.5.5.0/24"),
-                as_path: vec![65000],
+                as_path: vec![65000].into(),
                 next_hop: addr("10.0.0.253"),
                 local_pref: None,
                 med: None,
@@ -3525,7 +3530,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("192.168.1.0/24"),
-                as_path: vec![65000],
+                as_path: vec![65000].into(),
                 next_hop: addr("10.0.0.253"),
                 local_pref: None,
                 med: None,
@@ -3556,7 +3561,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("2001:db8:1::/48"),
-                as_path: vec![65000],
+                as_path: vec![65000].into(),
                 next_hop: addr("2001:db8::254"),
                 local_pref: None,
                 med: None,
@@ -3612,7 +3617,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("192.168.1.0/24"),
-                as_path: vec![65000],
+                as_path: vec![65000].into(),
                 next_hop: addr("2001:db8::254"),
                 local_pref: None,
                 med: None,
@@ -3705,7 +3710,7 @@ mod tests {
             nlri: vec![nlri.parse().unwrap()],
             attributes: Some(message::PathAttributes {
                 origin,
-                as_path,
+                as_path: as_path.into(),
                 next_hop: v4(next_hop),
                 local_pref: None,
                 med,
@@ -3774,7 +3779,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("9.9.9.0/24"),
-                as_path: vec![65001],
+                as_path: vec![65001].into(),
                 next_hop: addr("10.0.0.2"),
                 local_pref: Some(100),
                 med: None,
@@ -3838,7 +3843,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("9.9.9.0/24"),
-                as_path: vec![65001],
+                as_path: vec![65001].into(),
                 next_hop: addr("10.0.0.2"),
                 local_pref: Some(100),
                 med: Some(100), // forwarded: the destination is an iBGP peer
@@ -3890,7 +3895,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("9.9.9.0/24"),
-                as_path: vec![65001],
+                as_path: vec![65001].into(),
                 next_hop: addr("10.0.0.1"),
                 local_pref: Some(100),
                 med: Some(999), // forwarded: the destination is an iBGP peer
@@ -3974,7 +3979,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("9.9.9.0/24"),
-                as_path: vec![65000, 65001],
+                as_path: vec![65000, 65001].into(),
                 // Destination is eBGP, so next-hop-self rewrites to the
                 // observer's own local address, not either source's.
                 next_hop: addr("10.0.0.252"),
@@ -4238,7 +4243,7 @@ mod tests {
                 // Destination is eBGP, so our own ASN is prepended and
                 // next-hop-self rewrites to the observer's own local
                 // address, not either source's.
-                as_path: vec![65000, 65001],
+                as_path: vec![65000, 65001].into(),
                 next_hop: addr("10.0.0.252"),
                 local_pref: None,
                 med: None,
@@ -4288,7 +4293,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("9.9.9.0/24"),
-                as_path: vec![65001],
+                as_path: vec![65001].into(),
                 next_hop: addr("10.0.0.9"),
                 local_pref: Some(100),
                 med: None,
@@ -4358,7 +4363,7 @@ mod tests {
                 aggregator: None,
                 path_id: None,
                 prefix: prefix("1.2.3.0/24"),
-                as_path: vec![],
+                as_path: vec![].into(),
                 next_hop: addr("10.0.0.1"),
                 local_pref: Some(100),
                 med: None,
@@ -4407,7 +4412,7 @@ mod tests {
                 aggregator: None,
                 path_id: None,
                 prefix: prefix("4.5.6.0/24"),
-                as_path: vec![],
+                as_path: vec![].into(),
                 next_hop: addr("10.0.0.1"),
                 local_pref: Some(100),
                 med: None,
@@ -4484,7 +4489,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("192.168.1.0/24"),
-                as_path: vec![65000],
+                as_path: vec![65000].into(),
                 next_hop: addr("10.0.0.254"),
                 local_pref: None,
                 med: None,
@@ -4506,7 +4511,7 @@ mod tests {
                 large_communities: Vec::new(),
                 path_id: None,
                 prefix: prefix("192.168.1.0/24"),
-                as_path: vec![], // route-server-client: transparent, no local-asn prepend
+                as_path: vec![].into(), // route-server-client: transparent, no local-asn prepend
                 next_hop: addr("10.0.0.253"),
                 local_pref: None,
                 med: None,

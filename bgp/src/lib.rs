@@ -1,5 +1,6 @@
 // nos-bgp: BGP-4 implementation
 
+pub mod as_path;
 pub mod collision;
 pub mod config_client;
 pub mod damping;

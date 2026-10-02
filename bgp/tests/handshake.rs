@@ -514,7 +514,7 @@ async fn fake_evpn_peer(
         nlri_path_ids: vec![],
         attributes: Some(message::PathAttributes {
             origin: message::Origin::Igp,
-            as_path: vec![asn],
+            as_path: vec![asn].into(),
             next_hop: Ipv4Addr::UNSPECIFIED,
             local_pref: None,
             med: None,
