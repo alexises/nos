@@ -34,7 +34,7 @@ use crate::message::{
     UpdateMessageSubcode, WireError,
 };
 use crate::rib::{BgpRib, OutboundUpdate};
-use crate::session::LocalIdentity;
+use crate::session::{LocalIdentity, PeerKind};
 use crate::status::{PeerState, PeerStatus};
 
 /// RFC 4760/8950 AFI values this crate understands.
@@ -732,7 +732,9 @@ pub async fn run(
     // for a `TCP_AO_INFO` getsockopt once this session reaches `Established`
     // (see `Action::ReportEstablished` below).
     let fd = stream.as_raw_fd();
-    let remote_is_ibgp = local.asn == peer.expected_remote_as;
+    // RFC 5065: `Internal` is the member AS, in a confederation.
+    let kind = slot.peer.kind(local.asn);
+    let remote_is_ibgp = kind == PeerKind::Internal;
     let (outbox_tx, mut outbox_rx) = mpsc::unbounded_channel::<OutboundUpdate>();
     let mut mrai = crate::mrai::Mrai::new(peer.mrai);
 
@@ -797,7 +799,11 @@ pub async fn run(
     // ...`) funnels through the same `bgp_rib.peer_disconnected` call after
     // this block, rather than returning directly.
     let outcome = 'session: {
-        let mut open = message::build_open(local.asn, local.router_id, peer.local_hold_time);
+        let mut open = message::build_open(
+            slot.peer.open_as(local.asn),
+            local.router_id,
+            peer.local_hold_time,
+        );
         open.capabilities.extend(build_mp_capabilities(
             &peer.address_families,
             ctx.transport_afi,
@@ -1015,6 +1021,7 @@ pub async fn run(
                         rib.set_peer_damping(peer.remote_address, peer.damping);
                         rib.set_peer_max_prefix(peer.remote_address, slot.peer.maximum_prefix);
                         rib.set_peer_asn(peer.remote_address, *remote_asn);
+                        rib.set_peer_confed(peer.remote_address, kind == PeerKind::ConfedExternal);
                         rib.peer_established(
                             peer.remote_address,
                             remote_is_ibgp,

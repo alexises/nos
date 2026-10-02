@@ -109,7 +109,7 @@ mod tests {
     fn route(prefix: &str, med: u32) -> OutboundUpdate {
         OutboundUpdate::Announce(AdvertisedRoute {
             prefix: prefix.parse().unwrap(),
-            as_path: vec![],
+            as_path: vec![].into(),
             next_hop: "192.0.2.1".parse().unwrap(),
             local_pref: None,
             med: Some(med),

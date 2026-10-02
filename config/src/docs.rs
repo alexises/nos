@@ -979,6 +979,32 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "0 (the default) keeps the peer down until `clear bgp <instance> <peer>` or a \
              shutdown and un-shutdown.",
         ),
+        Topic::BgpInstanceConfederation => (
+            "Make a BGP instance a member of an RFC 5065 confederation.",
+            "Takes `identifier <asn>` and `peer <asn>` (repeatable). With an identifier, the \
+             instance's asn is its member AS: peers whose remote-as is a confederation peer are \
+             confederation-external (AS_CONFED_SEQUENCE prepended, next hop, MED and LOCAL_PREF \
+             kept as for iBGP), and peers outside the confederation see only the identifier, in \
+             their OPEN and in AS_PATH. Changing it restarts the instance's sessions.",
+        ),
+        Topic::BgpInstanceConfederationIdentifier => (
+            "Set the AS a confederation shows to peers outside it.",
+            concat!(
+                "A valid asn (1..=4294967294), different from the instance's own asn (its member \
+             AS). Setting it is what makes the instance a confederation member.",
+                " ",
+                "Leave the confederation; the instance's asn is its AS to everyone again.",
+            ),
+        ),
+        Topic::BgpInstanceConfederationPeer => (
+            "Add another member AS of the confederation.",
+            concat!(
+                "A peer-group whose remote-as is listed here is confederation-external rather than \
+             external. Must differ from the instance's asn and from the confederation identifier.",
+                " ",
+                "Remove a member AS from the confederation's peer list.",
+            ),
+        ),
         Topic::BgpClearPeer => (
             "Reset one BGP peer's session.",
             "Releases a peer held down by its maximum-prefix limit so it can reconnect. A peer \

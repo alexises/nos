@@ -253,6 +253,12 @@ topics! {
     BgpPeerGroupMaximumPrefixRestartInterval,
     /// `clear bgp <instance> <peer>`
     BgpClearPeer,
+    /// `BgpInstance.confederation`
+    BgpInstanceConfederation,
+    /// `BgpConfederation.identifier`
+    BgpInstanceConfederationIdentifier,
+    /// `BgpConfederation.peers`
+    BgpInstanceConfederationPeer,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

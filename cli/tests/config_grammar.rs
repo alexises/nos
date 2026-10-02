@@ -322,3 +322,38 @@ fn maximum_prefix_per_family() {
         Some(serde_json::json!([[path("ipv6"), null]]))
     );
 }
+
+/// #15: an RFC 5065 confederation, built and torn down from the root.
+#[test]
+fn confederation_identifier_and_peers() {
+    let mut doc = serde_json::to_value(populated()).unwrap();
+    let run = |line: &str, doc: &mut Value| {
+        let edit = config_grammar::parse(line, &[], doc).unwrap_or_else(|| panic!("{line}"));
+        for (path, value) in edit.writes {
+            config_path::set(doc, &path, value).unwrap();
+        }
+    };
+    for line in [
+        "set bgp instance R1 confederation identifier 65100",
+        "set bgp instance R1 confederation peer 65102",
+        "set bgp instance R1 confederation peer 65103",
+        "delete bgp instance R1 confederation peer 65103",
+    ] {
+        run(line, &mut doc);
+    }
+    let cfg: Config = serde_json::from_value(doc.clone()).unwrap();
+    assert_eq!(
+        cfg.bgp_instances[0].confederation,
+        BgpConfederation {
+            identifier: Some(65100),
+            peers: vec![65102],
+        }
+    );
+    run("delete bgp instance R1 confederation peer 65102", &mut doc);
+    run("delete bgp instance R1 confederation identifier", &mut doc);
+    let cfg: Config = serde_json::from_value(doc).unwrap();
+    assert_eq!(
+        cfg.bgp_instances[0].confederation,
+        BgpConfederation::default()
+    );
+}

@@ -24,6 +24,7 @@ use nos_proto::{AddressFamily, EvpnKey, EvpnRoute as WireRoute, EvpnUpdate};
 use tracing::warn;
 
 use super::{BgpRib, OutboundUpdate, PeerOutbox};
+use crate::as_path::AsPath;
 use crate::evpn::EvpnNlri;
 use crate::mac_mobility::format_mac;
 use crate::message::Pmsi;
@@ -35,7 +36,7 @@ pub struct AdvertisedEvpn {
     /// The VTEP, verbatim — never rewritten to next-hop-self.
     pub next_hop: IpAddr,
     /// Our ASN toward an eBGP peer, empty toward iBGP.
-    pub as_path: Vec<u32>,
+    pub as_path: AsPath,
     /// `Some` only toward iBGP peers.
     pub local_pref: Option<u32>,
     pub extended_communities: Vec<u64>,
@@ -92,12 +93,17 @@ fn advertise(outbox: &PeerOutbox, local_asn: u32, r: &WireRoute) -> Option<Adver
     Some(AdvertisedEvpn {
         nlri: nlri_of(r),
         next_hop: r.next_hop,
+        // RFC 5065 §4.1, as `rib::build_advertisement`.
         as_path: if outbox.is_ibgp {
-            Vec::new()
+            AsPath::default()
+        } else if outbox.is_confed {
+            let mut p = AsPath::default();
+            p.prepend_confed_seq(local_asn);
+            p
         } else {
-            vec![local_asn]
+            vec![outbox.confed_id.unwrap_or(local_asn)].into()
         },
-        local_pref: outbox.is_ibgp.then_some(LOCAL_PREF),
+        local_pref: (outbox.is_ibgp || outbox.is_confed).then_some(LOCAL_PREF),
         extended_communities: r.ext_communities.clone(),
         pmsi: match &r.key {
             EvpnKey::Imet { origin, .. } => Some(Pmsi {

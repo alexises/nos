@@ -53,6 +53,10 @@ pub struct LocalIdentity {
     /// `reconcile::resync`) — threaded straight through to
     /// `crate::rib::BgpRib::set_local_identity`.
     pub cluster_id: Ipv4Addr,
+    /// RFC 5065 confederation identifier, when this instance is a member —
+    /// `asn` is then its member AS. Threaded to
+    /// `crate::rib::BgpRib::set_confederation`.
+    pub confed_id: Option<u32>,
 }
 
 /// A configured peer with the fields needed to open its TCP session and
@@ -99,6 +103,43 @@ pub struct ResolvedPeer {
     pub shutdown: Option<BgpShutdown>,
     /// The peer-group's RFC 4486 maximum-prefix limits.
     pub maximum_prefix: nos_proto::BgpMaximumPrefix,
+    /// RFC 5065: this instance's confederation identifier (what an
+    /// external peer's OPEN carries), and whether `remote_as` is another
+    /// member AS. Here rather than read from `LocalIdentity` so a change
+    /// restarts the session (`diff_peers`).
+    pub confed_id: Option<u32>,
+    pub confed_member: bool,
+}
+
+/// RFC 5065 §2: how a peer relates to this instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerKind {
+    /// Same AS (the member AS, in a confederation).
+    Internal,
+    /// Another member AS of our confederation.
+    ConfedExternal,
+    External,
+}
+
+impl ResolvedPeer {
+    pub fn kind(&self, local_asn: u32) -> PeerKind {
+        if self.remote_as == local_asn {
+            PeerKind::Internal
+        } else if self.confed_member {
+            PeerKind::ConfedExternal
+        } else {
+            PeerKind::External
+        }
+    }
+
+    /// The AS this instance presents in its OPEN to this peer (RFC 5065
+    /// §4): the confederation identifier to an external peer, else `asn`.
+    pub fn open_as(&self, local_asn: u32) -> u32 {
+        match self.kind(local_asn) {
+            PeerKind::External => self.confed_id.unwrap_or(local_asn),
+            PeerKind::Internal | PeerKind::ConfedExternal => local_asn,
+        }
+    }
 }
 
 /// A peer-group's `BgpAuth` translated into `nos-tcp-auth`'s wire-level
@@ -203,6 +244,7 @@ impl SessionManager {
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
             cluster_id: Ipv4Addr::UNSPECIFIED,
+            confed_id: None,
         });
         Arc::new(Self {
             instance,
@@ -237,6 +279,7 @@ impl SessionManager {
         {
             let mut bgp_rib = self.bgp_rib.lock().await;
             bgp_rib.set_local_identity(local.asn, local.router_id, local.cluster_id);
+            bgp_rib.set_confederation(local.confed_id);
             bgp_rib.set_routing_table(routing_table);
             bgp_rib.set_redistribute_policy(redistribute_policy);
             bgp_rib.set_fdb_domains(fdb_domains);
@@ -939,7 +982,32 @@ mod tests {
             export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             shutdown: None,
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+            confed_id: None,
+            confed_member: false,
         }
+    }
+
+    /// RFC 5065 §4: the OPEN carries the confederation identifier only to a
+    /// peer outside the confederation.
+    #[test]
+    fn open_as_by_peer_kind() {
+        let p = |remote_as, confed_member| ResolvedPeer {
+            remote_as,
+            confed_id: Some(65100),
+            confed_member,
+            ..peer("10.0.0.1")
+        };
+        assert_eq!(p(65101, false).kind(65101), PeerKind::Internal);
+        assert_eq!(p(65101, false).open_as(65101), 65101);
+        assert_eq!(p(65102, true).kind(65101), PeerKind::ConfedExternal);
+        assert_eq!(p(65102, true).open_as(65101), 65101);
+        assert_eq!(p(65003, false).kind(65101), PeerKind::External);
+        assert_eq!(p(65003, false).open_as(65101), 65100);
+        let plain = ResolvedPeer {
+            remote_as: 65003,
+            ..peer("10.0.0.1")
+        };
+        assert_eq!(plain.open_as(65101), 65101);
     }
 
     #[test]

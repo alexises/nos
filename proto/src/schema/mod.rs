@@ -24,7 +24,7 @@ pub mod switching_profile;
 pub mod user;
 
 pub use as_path_list::AsPathList;
-pub use bgp_instance::BgpInstance;
+pub use bgp_instance::{BgpConfederation, BgpInstance};
 pub use bgp_peer::BgpPeer;
 pub use bgp_peer_group::{
     AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpDamping, BgpMaximumPrefix, BgpPeerGroup,

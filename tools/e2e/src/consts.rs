@@ -58,6 +58,17 @@ pub const AS4_BAD_PREFIX: &str = "203.0.114.0/24";
 /// `maximum-prefix`: the IPv4 routes ExaBGP announces to router-a — one more
 /// than the limit the phase trips.
 pub const MAX_PREFIX_ROUTES: [&str; 3] = ["203.0.113.0/24", "203.0.115.0/24", "203.0.116.0/24"];
+/// `confederation` (RFC 5065): router-a and router-b are member ASes of
+/// `CONFED_ID`; ExaBGP (router-g, `ASN_G`) is outside it, peering router-a.
+/// ExaBGP announces `CONFED_LEARNED_PREFIX` normally, `CONFED_LOOP_PREFIX`
+/// with `CONFED_ID` in its path, and `CONFED_BAD_PREFIX` with an
+/// AS_CONFED_SEQUENCE (which an external peer must never send).
+pub const CONFED_ID: u32 = 65100;
+pub const CONFED_ASN_A: u32 = 65101;
+pub const CONFED_ASN_B: u32 = 65102;
+pub const CONFED_LEARNED_PREFIX: &str = "203.0.117.0/24";
+pub const CONFED_LOOP_PREFIX: &str = "203.0.118.0/24";
+pub const CONFED_BAD_PREFIX: &str = "203.0.119.0/24";
 pub const EXABGP_IMAGE: &str = "nos-e2e-exabgp:local";
 /// Same release `tools/bench-bgp.sh` pins.
 pub const EXABGP_VERSION: &str = "5.0.13";

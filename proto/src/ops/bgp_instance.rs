@@ -35,6 +35,24 @@ pub enum BgpInstanceOp {
     Delete {
         name: String,
     },
+    /// RFC 5065: makes the instance a confederation member.
+    SetConfederationIdentifier {
+        name: String,
+        identifier: u32,
+    },
+    ClearConfederation {
+        name: String,
+    },
+    /// Adds another member AS; no-op if already listed. Refused at commit
+    /// until an identifier is set too.
+    AddConfederationPeer {
+        name: String,
+        asn: u32,
+    },
+    RemoveConfederationPeer {
+        name: String,
+        asn: u32,
+    },
 }
 
 impl BgpInstanceOp {
@@ -49,6 +67,7 @@ impl BgpInstanceOp {
                         peer_groups: Vec::new(),
                         peers: Vec::new(),
                         cluster_id: None,
+                        confederation: crate::schema::BgpConfederation::default(),
                         routing_table: None,
                         redistribute_policy: None,
                     });
@@ -69,6 +88,29 @@ impl BgpInstanceOp {
             }
             BgpInstanceOp::ClearClusterId { name } => {
                 find_instance_mut(config, name)?.cluster_id = None;
+                Ok(())
+            }
+            BgpInstanceOp::SetConfederationIdentifier { name, identifier } => {
+                find_instance_mut(config, name)?.confederation.identifier = Some(*identifier);
+                Ok(())
+            }
+            BgpInstanceOp::ClearConfederation { name } => {
+                find_instance_mut(config, name)?.confederation =
+                    crate::schema::BgpConfederation::default();
+                Ok(())
+            }
+            BgpInstanceOp::AddConfederationPeer { name, asn } => {
+                let c = &mut find_instance_mut(config, name)?.confederation;
+                if !c.peers.contains(asn) {
+                    c.peers.push(*asn);
+                }
+                Ok(())
+            }
+            BgpInstanceOp::RemoveConfederationPeer { name, asn } => {
+                find_instance_mut(config, name)?
+                    .confederation
+                    .peers
+                    .retain(|p| p != asn);
                 Ok(())
             }
             BgpInstanceOp::Delete { name } => {
@@ -106,6 +148,7 @@ mod tests {
             peer_groups: Vec::new(),
             peers: Vec::new(),
             cluster_id: None,
+            confederation: crate::schema::BgpConfederation::default(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -180,6 +223,53 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].router_id, Ipv4Addr::new(10, 0, 0, 1));
+    }
+
+    #[test]
+    fn confederation_ops() {
+        let mut cfg = Config {
+            bgp_instances: vec![instance("r1", 65101)],
+            ..Default::default()
+        };
+        let name = "r1".to_string();
+        for op in [
+            BgpInstanceOp::AddConfederationPeer {
+                name: name.clone(),
+                asn: 65102,
+            },
+            BgpInstanceOp::AddConfederationPeer {
+                name: name.clone(),
+                asn: 65102,
+            },
+            BgpInstanceOp::SetConfederationIdentifier {
+                name: name.clone(),
+                identifier: 65100,
+            },
+            BgpInstanceOp::AddConfederationPeer {
+                name: name.clone(),
+                asn: 65103,
+            },
+            BgpInstanceOp::RemoveConfederationPeer {
+                name: name.clone(),
+                asn: 65103,
+            },
+        ] {
+            op.apply(&mut cfg).unwrap();
+        }
+        assert_eq!(
+            cfg.bgp_instances[0].confederation,
+            crate::schema::BgpConfederation {
+                identifier: Some(65100),
+                peers: vec![65102],
+            }
+        );
+        BgpInstanceOp::ClearConfederation { name }
+            .apply(&mut cfg)
+            .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].confederation,
+            crate::schema::BgpConfederation::default()
+        );
     }
 
     #[test]

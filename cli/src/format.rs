@@ -163,8 +163,13 @@ pub fn render_bgp_instance(instance: &BgpInstance) -> String {
     let cluster_id = instance
         .cluster_id
         .map_or_else(|| "default (= router-id)".to_string(), |c| c.to_string());
+    let c = &instance.confederation;
+    let confederation = c.identifier.map_or_else(String::new, |id| {
+        let peers: Vec<String> = c.peers.iter().map(u32::to_string).collect();
+        format!(", confederation {id} peers [{}]", peers.join(", "))
+    });
     let mut lines = vec![format!(
-        "bgp instance {}: router-id {}, asn {}, cluster-id {cluster_id}",
+        "bgp instance {}: router-id {}, asn {}, cluster-id {cluster_id}{confederation}",
         instance.name, instance.router_id, instance.asn
     )];
     for group in &instance.peer_groups {
@@ -1676,6 +1681,7 @@ mod tests {
             peer_groups: Vec::new(),
             peers: Vec::new(),
             cluster_id: None,
+            confederation: nos_proto::BgpConfederation::default(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -2808,6 +2814,7 @@ mod tests {
                     ..Default::default()
                 }],
                 cluster_id: Some(Ipv4Addr::new(9, 9, 9, 9)),
+                confederation: nos_proto::BgpConfederation::default(),
                 ..instance("r1", 65001)
             }],
             routing_tables: vec![RoutingTable {

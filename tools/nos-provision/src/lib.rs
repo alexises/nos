@@ -341,6 +341,16 @@ pub struct Args {
     #[arg(long)]
     pub cluster_id: Option<Ipv4Addr>,
 
+    /// RFC 5065: makes `--bgp-instance` a confederation member, with this
+    /// identifier (`BgpInstanceOp::SetConfederationIdentifier`).
+    #[arg(long)]
+    pub confederation_id: Option<u32>,
+
+    /// Another member AS of the confederation, repeatable
+    /// (`BgpInstanceOp::AddConfederationPeer`).
+    #[arg(long)]
+    pub confederation_peer: Vec<u32>,
+
     #[arg(long)]
     pub save: bool,
 
@@ -1129,6 +1139,20 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::BgpInstance(BgpInstanceOp::SetClusterId {
             name: args.bgp_instance.clone(),
             cluster_id,
+        }));
+    }
+    if let Some(identifier) = args.confederation_id {
+        ops.push(ConfigOp::BgpInstance(
+            BgpInstanceOp::SetConfederationIdentifier {
+                name: args.bgp_instance.clone(),
+                identifier,
+            },
+        ));
+    }
+    for &asn in &args.confederation_peer {
+        ops.push(ConfigOp::BgpInstance(BgpInstanceOp::AddConfederationPeer {
+            name: args.bgp_instance.clone(),
+            asn,
         }));
     }
 

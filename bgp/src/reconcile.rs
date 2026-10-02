@@ -216,6 +216,8 @@ async fn resync(
             export_policy: policy_cache.resolve(group.export_policy.as_deref()),
             shutdown: peer.shutdown.clone().or_else(|| group.shutdown.clone()),
             maximum_prefix: group.maximum_prefix,
+            confed_id: own.confederation.identifier,
+            confed_member: own.confederation.is_member(group.remote_as),
         });
     }
 
@@ -223,6 +225,7 @@ async fn resync(
         asn: own.asn,
         router_id: own.router_id,
         cluster_id: own.cluster_id.unwrap_or(own.router_id),
+        confed_id: own.confederation.identifier,
     };
 
     // Unlike `import_policy`/`export_policy`, `None` here means accept-all,
