@@ -530,12 +530,11 @@ pub async fn next_hop_reachability(w: &mut World) -> anyhow::Result<()> {
         "next-hop-loopback",
         &format!("set this.bgp.next_hop = {next_hop}\naccept\n"),
     )?;
-    let advertise = vec![
-        "--static-route",
-        NHR_PREFIX,
-        "--static-gateway",
-        REDISTRIBUTE_GATEWAY,
-        "--redistribute",
+    // Two commits: the export policy alone first (it restarts the session),
+    // then the prefix. In one commit, nos-ribd's redistribution push can
+    // reach the old session before the restart and announce the prefix under
+    // the previous policy, with router-b's own (resolvable) address (#159).
+    let policy = vec![
         "--policy-name",
         "next-hop-loopback",
         "--policy-source-file",
@@ -543,6 +542,14 @@ pub async fn next_hop_reachability(w: &mut World) -> anyhow::Result<()> {
         "--export-policy",
         "next-hop-loopback",
     ];
+    let mut advertise = policy.clone();
+    advertise.extend([
+        "--static-route",
+        NHR_PREFIX,
+        "--static-gateway",
+        REDISTRIBUTE_GATEWAY,
+        "--redistribute",
+    ]);
     let mut with_ospf = advertise.clone();
     with_ospf.extend(["--ospf-loopback-profile", OSPF_PROFILE]);
     let mut withdraw = advertise.clone();
@@ -554,15 +561,18 @@ pub async fn next_hop_reachability(w: &mut World) -> anyhow::Result<()> {
 
     let excluded = format!("candidate excluded, next hop unresolvable.*prefix={NHR_PREFIX}");
     let loc = format!("loc-rib best path for {NHR_PREFIX} updated");
-    let (ex0, loc0) = (a.count(&excluded), a.count(&loc));
+    let via_loopback = format!("{loc}.*next_hop=Some({next_hop})");
+    let (ex0, loc0, via0) = (a.count(&excluded), a.count(&loc), a.count(&via_loopback));
     let (est_a, est_b) = (
         a.count("bgp session established"),
         b.count("bgp session established"),
     );
-    b.provision(&advertise).await?;
+    b.provision(&policy).await?;
     // A new export policy restarts router-b's session.
     reestablished(a, est_a).await?;
     reestablished(b, est_b).await?;
+    // Same policy, so no restart: the first UPDATE already carries the loopback.
+    b.provision(&advertise).await?;
     a.wait(&format!("learned route for {NHR_PREFIX} into adj-rib-in"))
         .await?;
     a.wait_new(&excluded, ex0, 60).await?;
@@ -574,7 +584,7 @@ pub async fn next_hop_reachability(w: &mut World) -> anyhow::Result<()> {
     let r0 = a.count(&route);
     b.provision(&with_ospf).await?;
     a.wait_new(&route, r0, 60).await?;
-    a.wait_new(&loc, loc0, 60).await?;
+    a.wait_new(&via_loopback, via0, 60).await?;
 
     log("withdrawing the prefix and taking router-b's loopback out of ospf again");
     let withdrawn = format!("loc-rib route for {NHR_PREFIX} withdrawn");
