@@ -1,8 +1,8 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{BgpInstance, Config};
+use crate::schema::{BgpInstance, Config, RpkiCache};
 
 use super::OpError;
 
@@ -53,6 +53,15 @@ pub enum BgpInstanceOp {
         name: String,
         asn: u32,
     },
+    /// RFC 8210: adds an RPKI cache, or replaces the one with that address.
+    SetRpkiCache {
+        name: String,
+        cache: RpkiCache,
+    },
+    RemoveRpkiCache {
+        name: String,
+        address: IpAddr,
+    },
 }
 
 impl BgpInstanceOp {
@@ -68,6 +77,7 @@ impl BgpInstanceOp {
                         peers: Vec::new(),
                         cluster_id: None,
                         confederation: crate::schema::BgpConfederation::default(),
+                        rpki_caches: Vec::new(),
                         routing_table: None,
                         redistribute_policy: None,
                     });
@@ -113,6 +123,20 @@ impl BgpInstanceOp {
                     .retain(|p| p != asn);
                 Ok(())
             }
+            BgpInstanceOp::SetRpkiCache { name, cache } => {
+                let caches = &mut find_instance_mut(config, name)?.rpki_caches;
+                match caches.iter_mut().find(|c| c.address == cache.address) {
+                    Some(c) => *c = cache.clone(),
+                    None => caches.push(cache.clone()),
+                }
+                Ok(())
+            }
+            BgpInstanceOp::RemoveRpkiCache { name, address } => {
+                find_instance_mut(config, name)?
+                    .rpki_caches
+                    .retain(|c| c.address != *address);
+                Ok(())
+            }
             BgpInstanceOp::Delete { name } => {
                 let before = config.bgp_instances.len();
                 config.bgp_instances.retain(|i| &i.name != name);
@@ -149,6 +173,7 @@ mod tests {
             peers: Vec::new(),
             cluster_id: None,
             confederation: crate::schema::BgpConfederation::default(),
+            rpki_caches: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -270,6 +295,35 @@ mod tests {
             cfg.bgp_instances[0].confederation,
             crate::schema::BgpConfederation::default()
         );
+    }
+
+    #[test]
+    fn rpki_cache_ops_upsert_by_address() {
+        let mut cfg = Config {
+            bgp_instances: vec![instance("r1", 65000)],
+            ..Default::default()
+        };
+        let cache = |port| RpkiCache {
+            address: "192.0.2.9".parse().unwrap(),
+            port,
+            preference: 1,
+        };
+        for port in [323, 8282] {
+            BgpInstanceOp::SetRpkiCache {
+                name: "r1".into(),
+                cache: cache(port),
+            }
+            .apply(&mut cfg)
+            .unwrap();
+        }
+        assert_eq!(cfg.bgp_instances[0].rpki_caches, vec![cache(8282)]);
+        BgpInstanceOp::RemoveRpkiCache {
+            name: "r1".into(),
+            address: "192.0.2.9".parse().unwrap(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].rpki_caches, []);
     }
 
     #[test]

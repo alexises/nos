@@ -69,6 +69,15 @@ pub const CONFED_ASN_B: u32 = 65102;
 pub const CONFED_LEARNED_PREFIX: &str = "203.0.117.0/24";
 pub const CONFED_LOOP_PREFIX: &str = "203.0.118.0/24";
 pub const CONFED_BAD_PREFIX: &str = "203.0.119.0/24";
+/// `rpki`: the StayRTR cache (RFC 8210) router-a validates against, and an
+/// address nothing answers on, configured as the more preferred cache so the
+/// phase sees the failover. The ASN the first VRP set wrongly authorizes for
+/// `REDISTRIBUTE_PREFIX` (router-b, `ASN_B`, really originates it).
+pub const RPKI_CACHE: &str = "rpki-cache";
+pub const IP_RPKI: &str = "10.50.0.8";
+pub const IP_RPKI_DEAD: &str = "10.50.0.9";
+pub const RPKI_WRONG_ASN: u32 = 64999;
+pub const STAYRTR_IMAGE: &str = "rpki/stayrtr:v0.6.4";
 pub const EXABGP_IMAGE: &str = "nos-e2e-exabgp:local";
 /// Same release `tools/bench-bgp.sh` pins.
 pub const EXABGP_VERSION: &str = "5.0.13";

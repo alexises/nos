@@ -351,6 +351,11 @@ pub struct Args {
     #[arg(long)]
     pub confederation_peer: Vec<u32>,
 
+    /// An RFC 8210 RPKI cache for `--bgp-instance`, `<addr>:<port>`,
+    /// repeatable; its preference is its position (`BgpInstanceOp::SetRpkiCache`).
+    #[arg(long)]
+    pub rpki_cache: Vec<std::net::SocketAddr>,
+
     #[arg(long)]
     pub save: bool,
 
@@ -1153,6 +1158,16 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::BgpInstance(BgpInstanceOp::AddConfederationPeer {
             name: args.bgp_instance.clone(),
             asn,
+        }));
+    }
+    for (preference, cache) in args.rpki_cache.iter().enumerate() {
+        ops.push(ConfigOp::BgpInstance(BgpInstanceOp::SetRpkiCache {
+            name: args.bgp_instance.clone(),
+            cache: nos_proto::RpkiCache {
+                address: cache.ip(),
+                port: cache.port(),
+                preference: u8::try_from(preference).unwrap_or(u8::MAX),
+            },
         }));
     }
 

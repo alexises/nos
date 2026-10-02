@@ -2698,6 +2698,7 @@ fn passes_redistribute_policy(prefix: Ipv4Net, policy: &CompiledPolicy) -> bool 
             communities: &[],
             extended_communities: &[],
             large_communities: &[],
+            validation_state: nos_rpl::ValidationState::default(),
         },
     };
     matches!(

@@ -259,6 +259,12 @@ topics! {
     BgpInstanceConfederationIdentifier,
     /// `BgpConfederation.peers`
     BgpInstanceConfederationPeer,
+    /// `BgpInstance.rpki_caches`
+    BgpInstanceRpkiCache,
+    /// `RpkiCache.port`
+    BgpInstanceRpkiCachePort,
+    /// `RpkiCache.preference`
+    BgpInstanceRpkiCachePreference,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

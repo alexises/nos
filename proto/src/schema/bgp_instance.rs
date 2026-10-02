@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use garde::Validate;
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,15 @@ pub struct BgpInstance {
     #[cli(topic = BgpInstanceConfederation)]
     pub confederation: BgpConfederation,
 
+    /// RFC 8210 RPKI-to-Router caches this instance's `nos-bgpd` takes its
+    /// validated ROA payloads from, reached inside the instance's VRF. One
+    /// is used at a time: the lowest `preference` that answers (RFC 8210
+    /// §10), ties in list order.
+    #[serde(default)]
+    #[garde(custom(|c: &Vec<RpkiCache>, _ctx: &Config| valid_rpki_caches(c)))]
+    #[cli(topic = BgpInstanceRpkiCache, words = "rpki-cache")]
+    pub rpki_caches: Vec<RpkiCache>,
+
     /// The name of the `RoutingTable` that claims this instance (i.e. the
     /// VRF it belongs to), mirrored from that table's `bgp_instance` field.
     /// Derived and read-only: never set by any `BgpInstanceOp`, recomputed
@@ -84,6 +93,53 @@ pub struct BgpInstance {
     #[garde(skip)]
     #[cli(hidden)]
     pub redistribute_policy: Option<String>,
+}
+
+/// The well-known RPKI-RTR port (RFC 8210 §3 / IANA `rpki-rtr`).
+pub const RPKI_RTR_PORT_DEFAULT: u16 = 323;
+
+fn rpki_rtr_port_default() -> u16 {
+    RPKI_RTR_PORT_DEFAULT
+}
+
+/// One RPKI-to-Router cache (RFC 8210), keyed by its address.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub struct RpkiCache {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(key)]
+    pub address: IpAddr,
+    #[serde(default = "rpki_rtr_port_default")]
+    #[cli(topic = BgpInstanceRpkiCachePort)]
+    pub port: u16,
+    /// Lower is preferred (RFC 8210 §10).
+    #[serde(default)]
+    #[cli(topic = BgpInstanceRpkiCachePreference)]
+    pub preference: u8,
+}
+
+impl Default for RpkiCache {
+    fn default() -> Self {
+        RpkiCache {
+            address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            port: RPKI_RTR_PORT_DEFAULT,
+            preference: 0,
+        }
+    }
+}
+
+fn valid_rpki_caches(caches: &[RpkiCache]) -> garde::Result {
+    for (i, c) in caches.iter().enumerate() {
+        if c.port == 0 || c.address.is_unspecified() {
+            return Err(garde::Error::new(
+                "an rpki cache needs a specified address and a non-zero port",
+            ));
+        }
+        if caches[..i].iter().any(|o| o.address == c.address) {
+            return Err(garde::Error::new("rpki cache addresses must be unique"));
+        }
+    }
+    Ok(())
 }
 
 /// RFC 5065 §2: the confederation identifier (`None`: not in a
@@ -145,6 +201,7 @@ impl Default for BgpInstance {
             peers: Vec::new(),
             cluster_id: None,
             confederation: crate::schema::BgpConfederation::default(),
+            rpki_caches: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -220,6 +277,7 @@ mod tests {
             peers: Vec::new(),
             cluster_id: None,
             confederation: crate::schema::BgpConfederation::default(),
+            rpki_caches: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -413,6 +471,42 @@ mod tests {
         inst.confederation.peers = vec![65102];
         let cfg = config_with(vec![inst]);
         assert!(cfg.validate_with(&cfg).is_err(), "peers without identifier");
+    }
+
+    #[test]
+    fn rpki_caches_are_checked() {
+        use super::RpkiCache;
+        let check = |caches: Vec<RpkiCache>| {
+            let mut inst = instance("r1", 65000);
+            inst.rpki_caches = caches;
+            let cfg = config_with(vec![inst]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        let cache = |a: &str, port: u16| RpkiCache {
+            address: a.parse().unwrap(),
+            port,
+            preference: 0,
+        };
+        assert!(check(vec![
+            cache("192.0.2.1", 323),
+            cache("2001:db8::1", 8282)
+        ]));
+        assert!(!check(vec![cache("192.0.2.1", 0)]), "port 0");
+        assert!(!check(vec![RpkiCache::default()]), "unspecified address");
+        assert!(
+            !check(vec![cache("192.0.2.1", 323), cache("192.0.2.1", 8282)]),
+            "duplicate address"
+        );
+        let old: super::BgpInstance = serde_json::from_str(
+            r#"{"name":"r1","router_id":"1.1.1.1","asn":1,"peer_groups":[],"peers":[],"cluster_id":null,"routing_table":null,"redistribute_policy":null}"#,
+        )
+        .unwrap();
+        assert!(
+            old.rpki_caches.is_empty(),
+            "a saved config without caches loads"
+        );
+        let c: RpkiCache = serde_json::from_str(r#"{"address":"192.0.2.1"}"#).unwrap();
+        assert_eq!((c.port, c.preference), (323, 0));
     }
 
     #[test]

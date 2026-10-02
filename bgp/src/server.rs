@@ -33,7 +33,8 @@ fn allowed(role: Role, req: &BgpRequest) -> bool {
         BgpRequest::GetSummary
         | BgpRequest::GetEvpnRoutes
         | BgpRequest::SendRouteRefresh { .. }
-        | BgpRequest::ClearPeer { .. } => {
+        | BgpRequest::ClearPeer { .. }
+        | BgpRequest::GetRpkiSummary => {
             matches!(role, Role::User | Role::Restd)
         }
         BgpRequest::RedistributeRoutes(_) => role == Role::Ribd,
@@ -103,6 +104,12 @@ async fn handle_connection(
             }
             BgpRequest::GetEvpnRoutes => {
                 let event = BgpEvent::EvpnRoutes(sessions.evpn_route_summaries().await);
+                if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
+            BgpRequest::GetRpkiSummary => {
+                let event = BgpEvent::RpkiSummary(sessions.rpki_summaries().await);
                 if writer.send(event).await.is_err() {
                     break;
                 }
@@ -180,6 +187,11 @@ mod authz_tests {
                 ),
                 matches!(role, Role::User | Role::Restd),
                 "{role:?} clear peer"
+            );
+            assert_eq!(
+                allowed(role, &BgpRequest::GetRpkiSummary),
+                matches!(role, Role::User | Role::Restd),
+                "{role:?} rpki summary"
             );
             assert_eq!(
                 allowed(role, &BgpRequest::GetEvpnRoutes),

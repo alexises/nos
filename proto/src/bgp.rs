@@ -79,6 +79,39 @@ pub struct EvpnRouteSummary {
     pub extended_communities: Vec<String>,
 }
 
+/// RFC 8210 session state of one configured RPKI cache, as seen by one
+/// `nos-bgpd`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RpkiSessionState {
+    /// Not connected (or a lower-preference cache is in use).
+    Idle,
+    /// Connected, waiting for the first End of Data.
+    Syncing,
+    /// Holding a complete VRP set from this cache.
+    Established,
+}
+
+/// One configured RPKI cache's status, for `show bgp rpki`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RpkiCacheStatus {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub address: IpAddr,
+    pub port: u16,
+    pub preference: u8,
+    pub state: RpkiSessionState,
+    /// This cache's VRPs are the ones validating routes right now.
+    pub active: bool,
+    /// RTR protocol version negotiated (0 or 1).
+    pub version: Option<u8>,
+    pub session_id: Option<u16>,
+    pub serial: Option<u32>,
+    pub vrp_count: usize,
+    /// Seconds since the last End of Data from this cache.
+    pub last_update_secs: Option<u64>,
+}
+
 /// A single already-resolved winning route pushed by `nos-ribd` for
 /// redistribution into BGP — not `PrefixRoutes`/`RouteEntry`'s
 /// multi-candidate shape. `gateway` is carried for completeness only: the
@@ -133,6 +166,8 @@ pub enum BgpRequest {
     /// by its maximum-prefix limit, and reset its session if one is up
     /// (Cease/Administrative Reset). Replies `PeerCleared` or `PeerNotFound`.
     ClearPeer { peer: IpAddr },
+    /// One-shot: every configured RPKI cache's RTR session (`show bgp rpki`).
+    GetRpkiSummary,
 }
 
 /// Messages sent from `nos-bgpd` to a query client.
@@ -149,4 +184,6 @@ pub enum BgpEvent {
     EvpnRoutes(Vec<EvpnRouteSummary>),
     /// Reply to `ClearPeer`.
     PeerCleared,
+    /// Reply to `GetRpkiSummary`.
+    RpkiSummary(Vec<RpkiCacheStatus>),
 }

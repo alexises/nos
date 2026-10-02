@@ -80,6 +80,7 @@ mod tests {
                 peers: Vec::new(),
                 cluster_id: None,
                 confederation: nos_proto::BgpConfederation::default(),
+                rpki_caches: Vec::new(),
                 routing_table: None,
                 redistribute_policy: None,
             }],

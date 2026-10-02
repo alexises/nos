@@ -8,7 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use ipnet::IpNet;
 use nos_proto::bgp::{BgpSessionState, PeerSummary};
-use nos_proto::{AddressFamily, BgpAoAlgorithm, BgpAuth, BgpShutdown, NextHopMode};
+use nos_proto::{AddressFamily, BgpAoAlgorithm, BgpAuth, BgpShutdown, NextHopMode, RpkiCache};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -19,10 +19,15 @@ use crate::collision::{FsmCommand, PeerSlot, Role};
 use crate::fsm::{self, PeerContext};
 use crate::message::CeaseSubcode;
 use crate::rib::BgpRib;
+use crate::rpki;
 use crate::status::{PeerState, PeerStatus};
 use crate::tcp;
 
 const BGP_PORT: u16 = 179;
+
+/// How long after a VRP change the policy-reading peers are asked for a
+/// route refresh — a burst of serials (or a cache switch) costs one refresh.
+const RPKI_REFRESH_DELAY: Duration = Duration::from_secs(5);
 
 /// Whether, and how, this `nos-bgpd` instance is scoped into a VRF.
 /// Sessions/the listener only ever come up in `Resolved` — see root
@@ -220,6 +225,8 @@ pub struct SessionManager {
     /// Scope sockets into the resolved VRF (`SO_BINDTODEVICE`). Always true
     /// except in `with_listen`'s tests; nothing in config reaches it.
     bind_vrf: bool,
+    /// The RTR client (`rpki::Client`) and the task applying its VRP sets.
+    rpki: Mutex<Option<(rpki::Client, JoinHandle<()>)>>,
 }
 
 impl SessionManager {
@@ -257,9 +264,11 @@ impl SessionManager {
             listen_port,
             peer_port,
             bind_vrf,
+            rpki: Mutex::new(None),
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn reconcile(
         self: &Arc<Self>,
         vrf: VrfRequirement,
@@ -268,6 +277,7 @@ impl SessionManager {
         desired: Vec<ResolvedPeer>,
         redistribute_policy: Arc<nos_rpl::CompiledPolicy>,
         fdb_domains: Vec<String>,
+        rpki_caches: &[RpkiCache],
     ) {
         // `send_replace`, not `send`: `send` leaves the value unchanged when
         // no receiver exists yet — true on the very first reconcile, before
@@ -289,6 +299,87 @@ impl SessionManager {
         }
         self.rebind_listeners(&vrf, &desired).await;
         self.reconcile_peers(desired).await;
+        self.reconcile_rpki(rpki_caches, &vrf).await;
+    }
+
+    /// (Re)starts the RTR client when the cache list or the VRF changes. It
+    /// runs only once the VRF is resolved, like the sessions; without caches
+    /// the VRP set is emptied, so every route is `not_found` again.
+    async fn reconcile_rpki(self: &Arc<Self>, caches: &[RpkiCache], vrf: &VrfRequirement) {
+        let want = match vrf {
+            VrfRequirement::Resolved(name) if !caches.is_empty() => Some((
+                rpki::sorted(caches.to_vec()),
+                self.bind_vrf.then(|| name.clone()),
+            )),
+            _ => None,
+        };
+        let mut rpki = self.rpki.lock().await;
+        let have = rpki
+            .as_ref()
+            .map(|(c, _)| (c.caches.clone(), c.vrf.clone()));
+        if want == have {
+            return;
+        }
+        if let Some((client, applier)) = rpki.take() {
+            client.task.abort();
+            applier.abort();
+            info!(instance = %self.instance, "rpki client stopped");
+        }
+        if caches.is_empty() && !self.bgp_rib.lock().await.vrps().is_empty() {
+            self.bgp_rib.lock().await.set_vrps(Arc::default());
+        }
+        if let Some((caches, vrf)) = want {
+            let current = self.bgp_rib.lock().await.vrps();
+            let (client, rx) = rpki::Client::spawn(&caches, vrf, current);
+            let applier = tokio::spawn(self.clone().apply_vrps(rx));
+            info!(instance = %self.instance, caches = caches.len(), "rpki client started");
+            *rpki = Some((client, applier));
+        }
+    }
+
+    /// Installs every VRP set the RTR client publishes, then — once per
+    /// `RPKI_REFRESH_DELAY` — asks each established peer whose import policy
+    /// reads `this.bgp.validation_state` for a route refresh: a route that
+    /// policy rejected isn't held, so only the peer can give it back.
+    async fn apply_vrps(self: Arc<Self>, mut rx: watch::Receiver<Arc<rpki::VrpTable>>) {
+        let mut refresh_at: Option<Instant> = None;
+        loop {
+            tokio::select! {
+                changed = rx.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    let vrps = rx.borrow_and_update().clone();
+                    self.bgp_rib.lock().await.set_vrps(vrps);
+                    refresh_at.get_or_insert_with(|| Instant::now() + RPKI_REFRESH_DELAY);
+                }
+                () = tokio::time::sleep_until(refresh_at.unwrap_or_else(Instant::now)), if refresh_at.is_some() => {
+                    refresh_at = None;
+                    let slots: Vec<Arc<PeerSlot>> = self.peers.read().await.values().cloned().collect();
+                    for slot in slots {
+                        if slot.peer.import_policy.reads_validation_state()
+                            && slot.is_established().await
+                            && slot.send_command(FsmCommand::SendRouteRefresh)
+                        {
+                            info!(
+                                instance = %self.instance, peer = %slot.peer.remote_address,
+                                "rpki change: requesting route refresh"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every configured RPKI cache's RTR session, for `show bgp rpki`.
+    pub async fn rpki_summaries(&self) -> Vec<nos_proto::RpkiCacheStatus> {
+        self.rpki
+            .lock()
+            .await
+            .as_ref()
+            .map(|(client, _)| rpki::summaries(&client.status))
+            .unwrap_or_default()
     }
 
     /// Applies one redistribution update pushed by `nos-ribd`, for
@@ -410,6 +501,10 @@ impl SessionManager {
             }
         }
         drop(tasks);
+        if let Some((client, applier)) = self.rpki.lock().await.take() {
+            client.task.abort();
+            applier.abort();
+        }
         self.peers.write().await.clear();
         if let Some(listeners) = self.listeners.lock().await.take() {
             listeners.v4.abort();

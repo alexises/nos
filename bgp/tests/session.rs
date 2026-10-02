@@ -58,6 +58,10 @@ struct Router {
 
 impl Router {
     async fn apply(&self, peers: Vec<ResolvedPeer>) {
+        self.apply_with(peers, &[]).await;
+    }
+
+    async fn apply_with(&self, peers: Vec<ResolvedPeer>, rpki_caches: &[nos_proto::RpkiCache]) {
         self.manager
             .reconcile(
                 VrfRequirement::Resolved("unscoped".to_string()),
@@ -66,6 +70,7 @@ impl Router {
                 peers,
                 Arc::new(nos_rpl::ACCEPT_ALL.clone()),
                 Vec::new(),
+                rpki_caches,
             )
             .await;
     }
@@ -286,4 +291,131 @@ async fn md5_on_both_ends_establishes_over_localhost() {
     a.wait_for(BgpSessionState::Established).await;
     a.manager.shutdown().await;
     b.manager.shutdown().await;
+}
+
+/// #17 end to end over localhost: a scripted RTR cache makes A's route
+/// invalid, B's import policy rejects it; a serial update makes it valid and
+/// B gets it back through a route refresh, with no session reset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rpki_validation_follows_the_cache() {
+    use futures::{SinkExt, StreamExt};
+    use nos_bgp::rpki::rtr::{Intervals, Pdu, RtrCodec};
+    use nos_bgp::rpki::Vrp;
+
+    let prefix: ipnet::IpNet = "198.51.100.0/24".parse().unwrap();
+    let vrp = move |asn| Vrp {
+        prefix,
+        max_len: 24,
+        asn,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cache_addr = listener.local_addr().unwrap();
+    let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel::<()>();
+    let cache = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut f = tokio_util::codec::Framed::new(stream, RtrCodec { version: 1 });
+        assert_eq!(f.next().await.unwrap().unwrap().pdu, Pdu::ResetQuery);
+        for p in [
+            Pdu::CacheResponse { session: 9 },
+            Pdu::Prefix {
+                announce: true,
+                vrp: vrp(65999),
+            },
+            Pdu::EndOfData {
+                session: 9,
+                serial: 1,
+                intervals: Some(Intervals::default()),
+            },
+        ] {
+            f.send(p).await.unwrap();
+        }
+        proceed_rx.await.unwrap();
+        f.send(Pdu::SerialNotify {
+            session: 9,
+            serial: 2,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            f.next().await.unwrap().unwrap().pdu,
+            Pdu::SerialQuery {
+                session: 9,
+                serial: 1
+            }
+        );
+        for p in [
+            Pdu::CacheResponse { session: 9 },
+            Pdu::Prefix {
+                announce: false,
+                vrp: vrp(65999),
+            },
+            Pdu::Prefix {
+                announce: true,
+                vrp: vrp(65001),
+            },
+            Pdu::EndOfData {
+                session: 9,
+                serial: 2,
+                intervals: Some(Intervals::default()),
+            },
+        ] {
+            f.send(p).await.unwrap();
+        }
+        f
+    });
+
+    let (a, b, _) = routers();
+    let mut to_a = peer(A, B, 65001);
+    to_a.import_policy = Arc::new(
+        nos_rpl::compile(
+            "if this.bgp.validation_state == rpki.invalid:\n    reject\naccept\n",
+            &nos_rpl::Symbols::EMPTY,
+        )
+        .unwrap(),
+    );
+    let caches = [nos_proto::RpkiCache {
+        address: cache_addr.ip(),
+        port: cache_addr.port(),
+        preference: 0,
+    }];
+    a.apply(vec![peer(B, A, 65002)]).await;
+    b.apply_with(vec![to_a], &caches).await;
+    a.wait_for(BgpSessionState::Established).await;
+    b.wait_for(BgpSessionState::Established).await;
+    // Wait for the cache's first End of Data before A's route arrives.
+    for _ in 0..100 {
+        if b.manager.rpki_summaries().await[0].serial == Some(1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let s = &b.manager.rpki_summaries().await[0];
+    assert!(s.active && s.vrp_count == 1, "{s:?}");
+    a.manager
+        .apply_redistribute_update(RedistributeUpdate::Full(vec![RedistributedRoute {
+            prefix,
+            gateway: "10.0.0.9".parse().unwrap(),
+        }]))
+        .await;
+    let has = || async { b.manager.bgp_push_snapshot().await.1.contains_key(&prefix) };
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!has().await, "an invalid route was accepted");
+
+    proceed_tx.send(()).unwrap();
+    let mut learned = false;
+    for _ in 0..200 {
+        if has().await {
+            learned = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(learned, "the now-valid route never came back");
+    assert_eq!(b.manager.rpki_summaries().await[0].serial, Some(2));
+    b.wait_for(BgpSessionState::Established).await;
+    let _cache = cache.await.unwrap();
+
+    // Removing the caches empties the VRP set.
+    b.apply_with(vec![peer(A, B, 65001)], &[]).await;
+    assert_eq!(b.manager.rpki_summaries().await, []);
 }

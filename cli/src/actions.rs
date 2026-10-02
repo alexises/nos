@@ -222,6 +222,10 @@ pub async fn handle_action(
             show_bgp_evpn(socket, watchdog_socket).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowBgpRpki => {
+            show_bgp_rpki(socket, watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
         Resolved::ShowOspfNeigh => {
             show_ospf_neigh(socket, watchdog_socket).await;
             Outcome::Continue(mode)
@@ -678,6 +682,36 @@ async fn show_bgp_evpn(config_socket: &Path, watchdog_socket: &Path) {
         {
             Ok(Some(bgp_socket)) => match bgp_client::get_evpn_routes(&bgp_socket).await {
                 Ok(routes) => println!("{}", format::render_bgp_evpn(&instance.name, &routes)),
+                Err(e) => eprintln!("error: {e}"),
+            },
+            Ok(None) => println!("bgp instance '{}' is not running", instance.name),
+            Err(e) => eprintln!("error: {e}"),
+        }
+    }
+}
+
+/// `show bgp rpki` — same shape as `show_bgp_evpn`.
+async fn show_bgp_rpki(config_socket: &Path, watchdog_socket: &Path) {
+    let cfg = match client::fetch_running_config(config_socket).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return;
+        }
+    };
+    if cfg.bgp_instances.is_empty() {
+        println!("no bgp instances configured");
+        return;
+    }
+    for instance in &cfg.bgp_instances {
+        match watchdog_client::resolve(
+            watchdog_socket,
+            nos_proto::ServiceRef::BgpInstance(instance.name.clone()),
+        )
+        .await
+        {
+            Ok(Some(bgp_socket)) => match bgp_client::get_rpki_summary(&bgp_socket).await {
+                Ok(caches) => println!("{}", format::render_bgp_rpki(&instance.name, &caches)),
                 Err(e) => eprintln!("error: {e}"),
             },
             Ok(None) => println!("bgp instance '{}' is not running", instance.name),

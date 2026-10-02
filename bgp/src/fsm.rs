@@ -261,6 +261,9 @@ struct RemoteInfo {
     extended_message: bool,
     /// The peer sent the RFC 7313 Enhanced Route Refresh capability (we always do).
     enhanced_refresh: bool,
+    /// The peer sent the RFC 2918 Route Refresh capability: without it we
+    /// must never send it a `ROUTE_REFRESH`.
+    route_refresh: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -442,6 +445,9 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
         enhanced_refresh: open
             .capabilities
             .contains(&message::Capability::EnhancedRouteRefresh),
+        route_refresh: open
+            .capabilities
+            .contains(&message::Capability::RouteRefresh),
     };
     (
         Some(State::OpenConfirm(remote)),
@@ -627,6 +633,13 @@ async fn send_route_refresh(
     let State::Established(remote) = state else {
         return;
     };
+    if !remote.route_refresh {
+        warn!(
+            peer = %peer.remote_address,
+            "route refresh not sent: the peer did not advertise the route refresh capability (rfc 2918)"
+        );
+        return;
+    }
     let afis = [
         remote.negotiated_ipv4_unicast.then_some(AFI_IPV4),
         remote.negotiated_ipv6_unicast.then_some(AFI_IPV6),
@@ -1503,6 +1516,25 @@ mod tests {
         assert!(!r.extended_message);
     }
 
+    /// RFC 2918 §4: no `ROUTE_REFRESH` toward a peer that didn't advertise
+    /// the capability (#17).
+    #[test]
+    fn route_refresh_follows_the_peers_capability() {
+        let mut with_cap = valid_open(65002, 90);
+        with_cap
+            .capabilities
+            .push(message::Capability::RouteRefresh);
+        let (Some(State::OpenConfirm(r)), _) = handle_open(&with_cap, &ctx(65002)) else {
+            panic!("expected OpenConfirm");
+        };
+        assert!(r.route_refresh);
+        let (Some(State::OpenConfirm(r)), _) = handle_open(&valid_open(65002, 90), &ctx(65002))
+        else {
+            panic!("expected OpenConfirm");
+        };
+        assert!(!r.route_refresh);
+    }
+
     #[test]
     fn four_octet_as_follows_the_peers_capability() {
         let with_cap = valid_open(65002, 90);
@@ -1532,6 +1564,7 @@ mod tests {
             four_octet_as: true,
             extended_message: false,
             enhanced_refresh: false,
+            route_refresh: false,
         };
         let (next, actions) = step(
             State::OpenConfirm(remote),
@@ -1558,6 +1591,7 @@ mod tests {
             four_octet_as: true,
             extended_message: false,
             enhanced_refresh: false,
+            route_refresh: false,
         };
         for state in [
             State::OpenSent,
@@ -1587,6 +1621,7 @@ mod tests {
             four_octet_as: true,
             extended_message: false,
             enhanced_refresh: false,
+            route_refresh: false,
         };
         for (state, event, subcode) in [
             (State::OpenSent, Event::KeepaliveReceived, 1),
@@ -1649,6 +1684,7 @@ mod tests {
             four_octet_as: true,
             extended_message: false,
             enhanced_refresh: false,
+            route_refresh: false,
         };
         let (next, actions) = step(
             State::Established(remote),
@@ -1673,6 +1709,7 @@ mod tests {
             four_octet_as: true,
             extended_message: false,
             enhanced_refresh: false,
+            route_refresh: false,
         };
         let (next, actions) = step(
             State::Established(remote),

@@ -146,7 +146,7 @@ All are `GET`, and each returns the same data as the matching shell command, as 
 - `/v1/interfaces` and `/v1/interfaces/{name}`: applied interface state.
 - `/v1/port-aggregates[/{name}]` and `/v1/lacp[/{name}]`: bonds, their members and LACP state.
 - `/v1/lldp/neighbors`: LLDP neighbours.
-- `/v1/bgp/summary` and `/v1/bgp/evpn`: BGP peers and received EVPN routes, per instance.
+- `/v1/bgp/summary`, `/v1/bgp/evpn` and `/v1/bgp/rpki`: BGP peers, received EVPN routes and RPKI cache sessions, per instance.
 - `/v1/ospf/neighbors`, `/v1/ospf/database`, and the same under `/v1/ospfv3/`: neighbours and LSDB, per instance.
 - `/v1/fdb/{domain}`: a broadcast domain's MAC table and flood list.
 - `/v1/logs?source=&limit=`: log entries, optionally from one source and only the last `limit`. `/v1/logs/follow` does the same, then streams new entries (see [below](#following-the-log-server-sent-events)).

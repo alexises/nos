@@ -9,7 +9,9 @@ use std::net::IpAddr;
 use crate::ast::{BinOp, Expr, ExprKind, Policy, Postfix, Stmt, StmtKind, UnaryOp};
 use crate::schema::{self, FieldInfo, FieldType};
 use crate::symbols::Symbols;
-use crate::vm::{AsPathRegexes, CommunityValue, CompiledPolicy, Op, MAX_STACK_DEPTH};
+use crate::vm::{
+    AsPathRegexes, CommunityValue, CompiledPolicy, Op, ValidationState, MAX_STACK_DEPTH,
+};
 use crate::CompileError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -792,6 +794,9 @@ fn resolve_enum_literal(
         ("origin", "igp") => Ok(("origin", 0)),
         ("origin", "egp") => Ok(("origin", 1)),
         ("origin", "incomplete") => Ok(("origin", 2)),
+        ("rpki", "valid") => Ok(("rpki", ValidationState::Valid as u8)),
+        ("rpki", "invalid") => Ok(("rpki", ValidationState::Invalid as u8)),
+        ("rpki", "not_found") => Ok(("rpki", ValidationState::NotFound as u8)),
         _ => Err(CompileError::new(
             line,
             format!("unknown enum literal '{name}.{variant}'"),
@@ -863,6 +868,7 @@ mod tests {
                 communities: &[],
                 extended_communities: &[],
                 large_communities: &[],
+                validation_state: ValidationState::default(),
             },
         }
     }
@@ -890,8 +896,43 @@ mod tests {
                 communities,
                 extended_communities,
                 large_communities,
+                validation_state: ValidationState::default(),
             },
         }
+    }
+
+    /// RFC 6811 / #17: `this.bgp.validation_state` against `rpki.*`.
+    #[test]
+    fn validation_state_enum() {
+        let policy =
+            compile_src("if this.bgp.validation_state == rpki.invalid:\n    reject\naccept\n");
+        assert!(policy.reads_validation_state());
+        assert!(!compile_src("accept\n").reads_validation_state());
+        let (prefix, as_path, cluster_list) = default_input("10.0.0.0/8");
+        let mut input = make_input(prefix, &as_path, 100, None, &cluster_list);
+        for (state, rejected) in [
+            (vm::ValidationState::Invalid, true),
+            (vm::ValidationState::Valid, false),
+            (vm::ValidationState::NotFound, false),
+        ] {
+            input.bgp.validation_state = state;
+            assert_eq!(vm::run(&policy, &input) == Verdict::Reject, rejected);
+        }
+        assert!(
+            compile_err("if this.bgp.validation_state == origin.igp:\n    reject\naccept\n")
+                .message
+                .contains("Enum")
+        );
+        assert!(
+            compile_err("if this.bgp.validation_state == rpki.bogus:\n    reject\naccept\n")
+                .message
+                .contains("unknown enum literal")
+        );
+        assert!(
+            compile_err("set this.bgp.validation_state = rpki.valid\naccept\n")
+                .message
+                .contains("not settable")
+        );
     }
 
     #[test]

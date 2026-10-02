@@ -1325,6 +1325,169 @@ pub async fn maximum_prefix(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// StayRTR's VRP file (`-cache`): one VRP for `REDISTRIBUTE_PREFIX`.
+fn rpki_vrps(asn: u32) -> String {
+    format!(
+        "{{\"roas\":[{{\"prefix\":\"{REDISTRIBUTE_PREFIX}\",\"maxLength\":24,\"asn\":\"AS{asn}\"}}]}}\n"
+    )
+}
+
+/// RFC 6811 origin validation fed over RFC 8210 by a real cache (StayRTR,
+/// self-contained): router-a validates router-b's redistributed prefix and
+/// its import policy rejects `rpki.invalid`.
+///
+/// - router-a's preferred cache doesn't answer; it fails over to StayRTR;
+/// - the VRP set authorizes another AS: the prefix is invalid, not learned;
+/// - the VRP file changes: StayRTR's Serial Notify brings the new set, router-a
+///   asks router-b for a route refresh and learns it as valid — no session reset;
+/// - StayRTR goes away: after its 10s expire interval the VRPs are dropped and
+///   the prefix is not-found (still accepted).
+pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
+    w.dock.ensure_pulled(STAYRTR_IMAGE).await?;
+    w.ensure_network().await?;
+    w.dock
+        .start_plain(
+            RPKI_CACHE,
+            STAYRTR_IMAGE,
+            NET,
+            IP_RPKI,
+            &[
+                "-cache",
+                "/vrps.json",
+                "-checktime=false",
+                "-refresh",
+                "2",
+                // Refresh well inside the 10s expire, or a healthy session's
+                // VRPs would expire between two serial queries.
+                "-rtr.refresh",
+                "4",
+                "-rtr.retry",
+                "2",
+                "-rtr.expire",
+                "10",
+                "-bind",
+                ":323",
+            ],
+            ("/", "vrps.json", rpki_vrps(RPKI_WRONG_ASN).as_bytes()),
+        )
+        .await?;
+    let policy = policy_file(
+        "rpki-reject-invalid",
+        "if this.bgp.validation_state == rpki.invalid:\n    reject\naccept\n",
+    )?;
+    let mut a_flags = A.base_flags();
+    a_flags.extend(strings(&[
+        "--policy-name",
+        "rpki-reject-invalid",
+        "--policy-source-file",
+        &policy,
+        "--import-policy",
+        "rpki-reject-invalid",
+        "--rpki-cache",
+        &format!("{IP_RPKI_DEAD}:323"),
+        "--rpki-cache",
+        &format!("{IP_RPKI}:323"),
+    ]));
+    let mut b_flags = B.base_flags();
+    b_flags.extend(strings(&redistribute()));
+    w.start(A, Some(a_flags), &[]).await?;
+    w.start(B, Some(b_flags), &[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    let cache = format!("cache={IP_RPKI}:323");
+
+    log("the preferred cache never answers: router-a fails over to StayRTR");
+    a.wait(&format!("rpki cache unreachable cache={IP_RPKI_DEAD}:323"))
+        .await?;
+    a.wait(&format!("rpki cache connected {cache} version=1"))
+        .await?;
+    a.wait(&format!("rpki end of data {cache} .*vrps=1"))
+        .await?;
+    a.established().await?;
+    let summary = a
+        .rest_expect(Method::GET, "/v1/bgp/rpki", None, 200)
+        .await?;
+    anyhow::ensure!(
+        summary.contains(&format!(
+            "\"address\":\"{IP_RPKI}\",\"port\":323,\"preference\":1,\"state\":\"Established\",\"active\":true,\"version\":1"
+        )) && summary.contains("\"vrp_count\":1"),
+        "GET /v1/bgp/rpki does not show the StayRTR session in use: {summary}"
+    );
+
+    log(format!(
+        "VRPs authorize AS{RPKI_WRONG_ASN}: router-b's prefix is invalid and rejected"
+    ));
+    b.wait(&loc_rib()).await?;
+    // It can reach router-a before the first End of Data (then it is
+    // not-found, accepted, and only dropped by the route refresh that follows
+    // the VRP change): wait until rt1 no longer holds it from BGP.
+    let mut gone = false;
+    for _ in 0..30 {
+        if !a.rt1_has(REDISTRIBUTE_PREFIX, "Bgp").await? {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    anyhow::ensure!(gone, "router-a still holds the invalid route");
+    let learned_before = a.count(&learned());
+    a.assert_quiet(&learned(), learned_before, 8).await?;
+
+    log(format!(
+        "the VRP file now authorizes AS{ASN_B}: serial update, route refresh, learned as valid"
+    ));
+    // From here on the session must never reset (the start-up one may have
+    // flapped once already: that is router-b provisioning, not RPKI).
+    let mut peers = String::new();
+    for _ in 0..30 {
+        peers = a
+            .rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
+            .await?;
+        if peers.contains("\"state\":\"Established\"") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    anyhow::ensure!(
+        peers.contains("\"state\":\"Established\""),
+        "the session with router-b is not up: {peers}"
+    );
+    let sessions = a.count("bgp session established");
+    let refreshes = a.count("rpki change: requesting route refresh");
+    let valid = format!("{} .*validation_state=Valid", learned());
+    let valid_before = a.count(&valid);
+    w.dock
+        .upload(RPKI_CACHE, "/", "vrps.json", rpki_vrps(ASN_B).as_bytes())
+        .await?;
+    a.wait(&format!("rpki end of data {cache} .*serial=1 vrps=1"))
+        .await?;
+    a.wait_new(
+        &format!("rpki change: requesting route refresh .*peer={IP_B}"),
+        refreshes,
+        30,
+    )
+    .await?;
+    a.wait_new(&valid, valid_before, 30).await?;
+
+    log("StayRTR goes away: its VRPs expire after 10s and the prefix is not-found");
+    let not_found = format!("{} .*validation_state=NotFound", learned());
+    let not_found_before = a.count(&not_found);
+    let refreshes = a.count("rpki change: requesting route refresh");
+    w.dock.container_remove(RPKI_CACHE).await;
+    a.wait("rpki data expired").await?;
+    a.wait_new(
+        &format!("rpki change: requesting route refresh .*peer={IP_B}"),
+        refreshes,
+        30,
+    )
+    .await?;
+    a.wait_new(&not_found, not_found_before, 30).await?;
+    anyhow::ensure!(
+        a.count("bgp session established") == sessions,
+        "a VRP change reset the BGP session"
+    );
+    Ok(())
+}
+
 /// GoBGP release image, built once — same recipe as `tools/bench-bgp.sh`.
 fn gobgp_dockerfile() -> String {
     format!(

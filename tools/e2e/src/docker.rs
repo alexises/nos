@@ -282,16 +282,27 @@ impl Dock {
             .await
             .with_context(|| format!("creating container {name}"))?;
         let (dir, file, contents) = seed;
-        let opts = UploadToContainerOptionsBuilder::default().path(dir).build();
-        self.docker
-            .upload_to_container(name, Some(opts), body_full(tar_one(file, contents)?.into()))
-            .await
-            .with_context(|| format!("seeding {dir}/{file} into {name}"))?;
+        self.upload(name, dir, file, contents).await?;
         self.docker
             .start_container(name, None)
             .await
             .with_context(|| format!("starting container {name}"))?;
         Ok(())
+    }
+
+    /// Writes `dir/file` into a container, created or running.
+    pub async fn upload(
+        &self,
+        name: &str,
+        dir: &str,
+        file: &str,
+        contents: &[u8],
+    ) -> anyhow::Result<()> {
+        let opts = UploadToContainerOptionsBuilder::default().path(dir).build();
+        self.docker
+            .upload_to_container(name, Some(opts), body_full(tar_one(file, contents)?.into()))
+            .await
+            .with_context(|| format!("writing {dir}/{file} into {name}"))
     }
 
     /// Starts an end-host container: `image` on `network` with `NET_ADMIN`/

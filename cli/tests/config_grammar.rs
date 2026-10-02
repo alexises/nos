@@ -357,3 +357,32 @@ fn confederation_identifier_and_peers() {
         BgpConfederation::default()
     );
 }
+
+/// #17: RPKI caches, keyed by address, with a default port and preference.
+#[test]
+fn rpki_cache_list() {
+    let mut doc = serde_json::to_value(populated()).unwrap();
+    let run = |line: &str, doc: &mut Value| {
+        let edit = config_grammar::parse(line, &[], doc).unwrap_or_else(|| panic!("{line}"));
+        for (path, value) in edit.writes {
+            config_path::set(doc, &path, value).unwrap();
+        }
+    };
+    for line in [
+        "set bgp instance R1 rpki-cache 192.0.2.50 port 3323",
+        "set bgp instance R1 rpki-cache 192.0.2.50 preference 1",
+        "set bgp instance R1 rpki-cache 192.0.2.51",
+        "delete bgp instance R1 rpki-cache 192.0.2.51",
+    ] {
+        run(line, &mut doc);
+    }
+    let cfg: Config = serde_json::from_value(doc).unwrap();
+    assert_eq!(
+        cfg.bgp_instances[0].rpki_caches,
+        vec![nos_proto::RpkiCache {
+            address: "192.0.2.50".parse().unwrap(),
+            port: 3323,
+            preference: 1,
+        }]
+    );
+}
