@@ -225,7 +225,7 @@ These work in both modes. Only `clear` acts on anything, and it never changes co
 - `show interface [<name>]`: what is actually applied to each interface and subinterface: addresses, routing table, MTU.
 - `show port-aggregate [<name>]` and `show lacp [<name>]`: bonds, their members, and LACP negotiation state.
 - `show lldp neighbors`: every LLDP neighbour heard, on every interface.
-- `show bgp brief`: one line per BGP peer across every instance, with state, remote AS, uptime and hold time. `show bgp evpn` lists received EVPN routes.
+- `show bgp brief`: one line per BGP peer across every instance, with state, remote AS, uptime and hold time. `show bgp evpn` lists received EVPN routes, `show bgp rpki` the RPKI cache sessions.
 - `show ospf neigh` and `show ospf database`, and their `ospfv3` counterparts: neighbours and their state, and the LSA headers in each LSDB.
 - `show fdb <domain>`: an EVPN broadcast domain's MAC table and flood list.
 - `show log [<source>] [--follow]`: the router's log, all sources or just one (see [Concepts: Logs](concepts.md#logs)). With `--follow` it keeps printing new entries until Ctrl-C.

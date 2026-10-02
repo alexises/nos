@@ -196,12 +196,13 @@ Every field starts with `this.`. The prefix and the BGP attributes are:
 - `this.bgp.originator_id`: the `ORIGINATOR_ID` of a reflected route (RFC 4456). Compare with `==` or `!=`.
 - `this.bgp.cluster_list`: the `CLUSTER_LIST`, a list of IPv4 addresses. Read it with `.length` and `.contains(<address>)`.
 - `this.bgp.communities`, `this.bgp.extended_communities`, `this.bgp.large_communities`: the three kinds of communities. Read them with `.length` and `.contains(<value>)`; change them with `.add`, `.remove` and `.clear`.
+- `this.bgp.validation_state`: the route's RPKI origin validation state (RFC 6811), `rpki.valid`, `rpki.invalid` or `rpki.not_found`. Compare with `==` or `!=`; read-only. It is `rpki.not_found` unless the instance has an RPKI cache (see [RPKI origin validation](bgp.md#rpki-origin-validation-rfc-6811-rfc-8210)).
 
 A list field (the AS path, the cluster list and the communities) cannot be used as a whole value; use one of its methods.
 
 ### Conditions
 
-- `==`, `!=`, `<`, `<=`, `>`, `>=` compare numbers. `==` and `!=` also compare an origin with an `origin.*` value, and an address field with an address.
+- `==`, `!=`, `<`, `<=`, `>`, `>=` compare numbers. `==` and `!=` also compare an origin with an `origin.*` value, the validation state with an `rpki.*` value, and an address field with an address.
 - `this.prefix in <prefix>` is true when the route's prefix is that prefix or a more specific one inside it: `this.prefix in 10.0.0.0/8` matches 10.0.0.0/8, 10.1.0.0/16 and 10.1.2.0/24.
 - `this.prefix in <prefix-list>` uses a named prefix list, which can match exactly (see [Prefix lists](#prefix-lists)).
 - `this.bgp.as_path in <as-path-list>` is true when any pattern of the named AS-path list matches.
@@ -219,7 +220,7 @@ A list field (the AS path, the cluster list and the communities) cannot be used 
   - an extended community (RFC 4360) is `<type>:<subtype>:<value>`, with type and subtype 0 to 255 and a 48-bit value: `0:2:100`;
   - a large community (RFC 8092) is `<global>:<local1>:<local2>`, each 0 to 4294967295: `65001:1:1`.
 - Strings in double quotes, used only as the regular expression of `.matches(…)`.
-- `origin.igp`, `origin.egp`, `origin.incomplete`, and `self` (only as a next hop).
+- `origin.igp`, `origin.egp`, `origin.incomplete`, `rpki.valid`, `rpki.invalid`, `rpki.not_found`, and `self` (only as a next hop).
 - A bare name refers to a prefix list, community alias or group, or AS-path list, depending on where it is used. A name that is not defined is a compile error.
 
 ### Errors

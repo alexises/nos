@@ -423,7 +423,7 @@ See [Shutting a session down](#shutting-a-session-down). While a peer is shut do
 
 ### Route refresh (RFC 2918, RFC 7313)
 
-When a peer asks for a route refresh, NOS resends its routes for that address family. If both sides support enhanced route refresh, the resent routes are framed by begin and end markers, and routes the peer no longer sends are removed at the end. `clear bgp … soft-in` asks the peer to do the same (see [Asking a peer to resend its routes](#asking-a-peer-to-resend-its-routes)).
+When a peer asks for a route refresh, NOS resends its routes for that address family. If both sides support enhanced route refresh, the resent routes are framed by begin and end markers, and routes the peer no longer sends are removed at the end. `clear bgp … soft-in` asks the peer to do the same (see [Asking a peer to resend its routes](#asking-a-peer-to-resend-its-routes)). A peer that did not advertise the route refresh capability is never sent a request: the router logs `route refresh not sent` instead.
 
 ### MRAI (RFC 4271 §9.2.1.1)
 
@@ -507,6 +507,54 @@ set bgp instance r1 confederation peer 65102
 ```
 
 A peer-group whose `remote-as` is a confederation peer is confederation eBGP. Toward it NOS sends its member AS in the OPEN, prepends it in an `AS_CONFED_SEQUENCE`, and keeps the next hop, `MED` and `LOCAL_PREF` as for iBGP. Toward a peer outside the confederation it sends the identifier in the OPEN, removes the confederation segments from the AS path and prepends the identifier, so that peer configures `remote-as 65100`. A path that already holds the identifier, or that holds the member AS in a confederation segment, is a loop and is dropped. A peer outside the confederation never sends confederation segments: a route that has them is treated as withdrawn, and so is any such route when no confederation is configured. Changing the confederation resets the instance's sessions. `delete confederation peer <asn>` and `delete confederation identifier` undo it.
+
+### RPKI origin validation (RFC 6811, RFC 8210)
+
+NOS checks each route's origin AS against the Validated ROA Payloads (VRPs) of an RPKI cache, such as Routinator or StayRTR. Give the instance one or more caches:
+
+```
+set bgp instance r1 rpki-cache 192.0.2.50
+set bgp instance r1 rpki-cache 192.0.2.51 port 3323
+set bgp instance r1 rpki-cache 192.0.2.51 preference 1
+```
+
+```sh
+$C -X PUT -H 'Content-Type: application/json' -d '{"address":"192.0.2.50","port":323,"preference":0}' \
+  $B/v1/transactions/t9/bgp-instance/r1/rpki-cache/192.0.2.50
+```
+
+The port defaults to 323 and the preference to 0. The instance's nos-bgpd connects to the caches from inside the instance's VRF, over the RTR protocol, version 1 (RFC 8210), or version 0 (RFC 6810) if the cache only speaks that. It uses one cache at a time: the lowest preference that answers, in configured order on a tie. When that cache goes away it moves to the next one. It does not switch back to a more preferred cache until the session with the current one ends.
+
+Each route is valid, invalid or not-found (RFC 6811):
+
+- not-found: no VRP covers the prefix;
+- valid: a VRP covers it, with the route's origin AS and a max length at least the prefix length;
+- invalid: VRPs cover it, but none of them matches.
+
+The origin AS is the last AS in the AS path. A route whose path ends in an `AS_SET` has no origin AS, so it is invalid when covered. A route with no AS in its path, such as a redistributed one, has this router's AS as origin.
+
+Validation changes nothing by itself (RFC 8481): an import or export policy decides what to do with `this.bgp.validation_state`. For example, to drop invalid routes:
+
+```
+if this.bgp.validation_state == rpki.invalid:
+    reject
+accept
+```
+
+When the VRPs change, NOS re-validates every route it holds. A route the import policy rejected is not held, so about 5 seconds after a change NOS asks each established peer whose import policy reads the state for a route refresh. A peer that did not advertise the route refresh capability is not asked; its routes are checked again on its next session. The session is never reset.
+
+The cache's End of Data sets the refresh, retry and expire intervals (RFC 8210 §6; version 0 uses the defaults 3600, 600 and 7200 seconds). If no cache answers for the expire interval, the VRPs are dropped and every route is not-found.
+
+`show bgp rpki` (`GET /v1/bgp/rpki`) shows each cache: its state, whether its VRPs are in use, the protocol version, session ID, serial, VRP count and the time since its last update:
+
+```
+edge-1> show bgp rpki
+bgp instance r1:
+  192.0.2.50 port 323 preference 0 Established (in use) version 1 session 780 serial 4 vrps 412345 updated 12s ago
+  192.0.2.51 port 3323 preference 1 Idle version - session - serial - vrps 0 updated -
+```
+
+Not supported: RTR over SSH or TLS, TCP-MD5/TCP-AO toward the cache, BGPsec router keys (received and ignored), ASPA, signalling the state to peers with the RFC 8097 extended community, and validating EVPN routes.
 
 ### Route server (RFC 7947)
 
