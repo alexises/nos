@@ -5,6 +5,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use ipnet::IpNet;
 use nos_proto::bgp::{BgpSessionState, PeerSummary};
 use nos_proto::{AddressFamily, BgpAoAlgorithm, BgpAuth, BgpShutdown, NextHopMode};
@@ -96,6 +97,8 @@ pub struct ResolvedPeer {
     /// Effective administrative shutdown (the peer's own, else its
     /// peer-group's): no session is opened or accepted while set.
     pub shutdown: Option<BgpShutdown>,
+    /// The peer-group's RFC 4486 maximum-prefix limits.
+    pub maximum_prefix: nos_proto::BgpMaximumPrefix,
 }
 
 /// A peer-group's `BgpAuth` translated into `nos-tcp-auth`'s wire-level
@@ -306,15 +309,29 @@ impl SessionManager {
         slot.send_command(cmd)
     }
 
+    /// `clear bgp <instance> <peer>`: releases a maximum-prefix hold, and
+    /// resets an `Established` session with Cease/Administrative Reset (RFC
+    /// 4486). The peer then reconnects on its next connect-retry tick (or its
+    /// own inbound connect). `false` if `peer` isn't configured.
+    pub async fn clear_peer(&self, peer: IpAddr) -> bool {
+        let Some(slot) = self.peers.read().await.get(&peer).cloned() else {
+            return false;
+        };
+        slot.clear_max_prefix();
+        cease_established(&slot, CeaseSubcode::AdministrativeReset, Bytes::new()).await;
+        info!(instance = %self.instance, peer = %peer, "bgp peer cleared");
+        true
+    }
+
     /// Every currently-configured peer's current session summary, for
     /// `server.rs`'s `BgpRequest::GetSummary` handler — backs `nos-cli`'s
     /// `show bgp brief`.
     pub async fn peer_summaries(&self) -> Vec<PeerSummary> {
-        self.peers
-            .read()
-            .await
+        let peers = self.peers.read().await;
+        let rib = self.bgp_rib.lock().await;
+        peers
             .values()
-            .map(|slot| to_peer_summary(slot))
+            .map(|slot| to_peer_summary(slot, &rib))
             .collect()
     }
 
@@ -464,6 +481,13 @@ impl SessionManager {
             );
             return;
         }
+        if slot.max_prefix_held() {
+            debug!(
+                instance = %self.instance, peer = %remote,
+                "rejecting inbound tcp connection from peer held by maximum prefix limit"
+            );
+            return;
+        }
         if let Some(hops) = slot.peer.max_hops {
             if let Err(error) = tcp::apply_max_hops(stream.as_raw_fd(), remote, hops) {
                 warn!(
@@ -545,18 +569,14 @@ impl SessionManager {
         let mut stopped = Vec::new();
         for addr in &to_stop {
             let slot = self.peers.write().await.remove(addr);
-            let (subcode, message) = cease_reason(current.get(addr), desired.get(addr));
-            stopped.push((*addr, slot, subcode, message));
+            let (subcode, data) = cease_reason(current.get(addr), desired.get(addr));
+            stopped.push((*addr, slot, subcode, data));
         }
-        futures::future::join_all(
-            stopped
-                .iter()
-                .map(|(_, slot, subcode, message)| async move {
-                    if let Some(slot) = slot {
-                        cease_established(slot, *subcode, message.clone()).await;
-                    }
-                }),
-        )
+        futures::future::join_all(stopped.iter().map(|(_, slot, subcode, data)| async move {
+            if let Some(slot) = slot {
+                cease_established(slot, *subcode, data.clone()).await;
+            }
+        }))
         .await;
 
         for (addr, slot, _, _) in stopped {
@@ -652,26 +672,30 @@ impl SessionManager {
 /// and the session to end before it aborts the task regardless.
 const CEASE_GRACE: Duration = Duration::from_secs(1);
 
-/// The RFC 4486 Cease subcode (and RFC 9003 message) for taking a running
-/// peer down: `wanted` is `None` when it left the config entirely.
+/// The RFC 4486 Cease subcode (and NOTIFICATION data: an RFC 9003 message
+/// for Administrative Shutdown) for taking a running peer down: `wanted` is
+/// `None` when it left the config entirely.
 fn cease_reason(
     running: Option<&ResolvedPeer>,
     wanted: Option<&ResolvedPeer>,
-) -> (CeaseSubcode, Option<String>) {
+) -> (CeaseSubcode, Bytes) {
     match (running, wanted) {
-        (_, None) => (CeaseSubcode::PeerDeconfigured, None),
+        (_, None) => (CeaseSubcode::PeerDeconfigured, Bytes::new()),
         (Some(old), Some(new)) if new.shutdown.is_some() && new.shutdown != old.shutdown => (
             CeaseSubcode::AdministrativeShutdown,
-            new.shutdown.as_ref().and_then(|s| s.message.clone()),
+            new.shutdown
+                .as_ref()
+                .and_then(|s| s.message.as_deref())
+                .map_or_else(Bytes::new, crate::message::encode_shutdown_message),
         ),
-        _ => (CeaseSubcode::OtherConfigurationChange, None),
+        _ => (CeaseSubcode::OtherConfigurationChange, Bytes::new()),
     }
 }
 
 /// Asks an `Established` session to send a Cease and close, and waits (up to
 /// `CEASE_GRACE`) for it to end. A no-op for a peer that isn't established.
-async fn cease_established(slot: &PeerSlot, subcode: CeaseSubcode, message: Option<String>) {
-    if !slot.is_established().await || !slot.send_command(FsmCommand::Cease { subcode, message }) {
+async fn cease_established(slot: &PeerSlot, subcode: CeaseSubcode, data: Bytes) {
+    if !slot.is_established().await || !slot.send_command(FsmCommand::Cease { subcode, data }) {
         return;
     }
     let _ = tokio::time::timeout(CEASE_GRACE, async {
@@ -697,7 +721,7 @@ fn listener_fd_for(addr: IpAddr, v4_fd: RawFd, v6_fd: RawFd) -> RawFd {
 /// `PeerSummary` — `PeerStatus.established_since` (a `tokio::time::Instant`)
 /// isn't itself meaningful to another process, so it's converted to an
 /// uptime measured right now instead.
-fn to_peer_summary(slot: &PeerSlot) -> PeerSummary {
+fn to_peer_summary(slot: &PeerSlot, rib: &BgpRib) -> PeerSummary {
     let status = *slot.status_receiver().borrow();
     // ponytail: a session that ends between fsm::run returning and the next
     // OpenSent write clearing `status.fd` leaves a brief window where this fd
@@ -731,6 +755,9 @@ fn to_peer_summary(slot: &PeerSlot) -> PeerSummary {
         ao_packets_good: ao_info.as_ref().map(|i| i.pkt_good),
         ao_packets_bad: ao_info.as_ref().map(|i| i.pkt_bad),
         ao_packets_key_not_found: ao_info.as_ref().map(|i| i.pkt_key_not_found),
+        max_prefix_held: slot.max_prefix_held(),
+        accepted_prefixes: (status.state == PeerState::Established)
+            .then(|| rib.accepted_prefixes(slot.peer.remote_address)),
     }
 }
 
@@ -790,11 +817,12 @@ async fn active_connect_loop(
     loop {
         let current_vrf = vrf.borrow().clone();
         if let VrfRequirement::Resolved(vrf_name) = current_vrf {
-            if slot.is_established().await {
+            if slot.is_established().await || slot.max_prefix_held() {
                 // Already up (via either role) — dialing out again would
                 // just create a pointless collision the existing session
                 // would win anyway. Wait for the retry interval (or a VRF
                 // change) and check again, rather than actually connecting.
+                // Held down by its maximum-prefix limit: not until released.
             } else if slot.begin(Role::Active).await {
                 let remote = SocketAddr::new(slot.peer.remote_address, peer_port);
                 match tcp::connect(
@@ -879,13 +907,14 @@ mod tests {
             import_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             shutdown: None,
+            maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         }
     }
 
     #[test]
     fn to_peer_summary_of_a_never_connected_peer_is_idle() {
         let slot = PeerSlot::new(peer("10.0.0.1"));
-        let summary = to_peer_summary(&slot);
+        let summary = to_peer_summary(&slot, &BgpRib::new());
         assert_eq!(
             summary.remote_address,
             "10.0.0.1".parse::<IpAddr>().unwrap()
@@ -902,6 +931,8 @@ mod tests {
         assert_eq!(summary.ao_packets_good, None);
         assert_eq!(summary.ao_packets_bad, None);
         assert_eq!(summary.ao_packets_key_not_found, None);
+        assert!(!summary.max_prefix_held);
+        assert_eq!(summary.accepted_prefixes, None);
     }
 
     /// A TCP-AO peer with no `fd` recorded yet (e.g. `OpenSent`, before
@@ -920,7 +951,7 @@ mod tests {
             exclude_options: false,
         }]));
         let slot = PeerSlot::new(p);
-        let summary = to_peer_summary(&slot);
+        let summary = to_peer_summary(&slot, &BgpRib::new());
         assert_eq!(summary.ao_current_key, None);
         assert_eq!(summary.ao_rnext_key, None);
     }
@@ -1045,7 +1076,7 @@ mod tests {
             cease_reason(Some(&running), Some(&wanted)),
             (
                 CeaseSubcode::AdministrativeShutdown,
-                Some("maint".to_string())
+                crate::message::encode_shutdown_message("maint")
             )
         );
     }
@@ -1057,11 +1088,11 @@ mod tests {
         b.hold_time = 30;
         assert_eq!(
             cease_reason(Some(&a), None),
-            (CeaseSubcode::PeerDeconfigured, None)
+            (CeaseSubcode::PeerDeconfigured, Bytes::new())
         );
         assert_eq!(
             cease_reason(Some(&a), Some(&b)),
-            (CeaseSubcode::OtherConfigurationChange, None)
+            (CeaseSubcode::OtherConfigurationChange, Bytes::new())
         );
     }
 }

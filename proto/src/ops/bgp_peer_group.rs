@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{
-    AddressFamily, BgpAoKey, BgpAuth, BgpDamping, BgpPeerGroup, BgpShutdown, Config, NextHopMode,
-    SourceAddress,
+    AddressFamily, BgpAoKey, BgpAuth, BgpDamping, BgpPeerGroup, BgpPrefixLimit, BgpShutdown,
+    Config, NextHopMode, SourceAddress,
 };
 
 use super::bgp_instance::find_instance_mut;
@@ -201,6 +201,19 @@ pub enum BgpPeerGroupOp {
         instance: String,
         name: String,
     },
+    /// Sets one address family's RFC 4486 maximum-prefix limit.
+    SetMaximumPrefix {
+        instance: String,
+        name: String,
+        family: AddressFamily,
+        limit: BgpPrefixLimit,
+    },
+    /// Removes one address family's maximum-prefix limit (no-op if unset).
+    ClearMaximumPrefix {
+        instance: String,
+        name: String,
+        family: AddressFamily,
+    },
 }
 
 impl BgpPeerGroupOp {
@@ -227,8 +240,30 @@ impl BgpPeerGroupOp {
                         import_policy: None,
                         export_policy: None,
                         shutdown: None,
+                        maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
                     });
                 }
+                Ok(())
+            }
+            BgpPeerGroupOp::SetMaximumPrefix {
+                instance,
+                name,
+                family,
+                limit,
+            } => {
+                *find_group_mut(config, instance, name)?
+                    .maximum_prefix
+                    .slot_mut(*family) = Some(*limit);
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearMaximumPrefix {
+                instance,
+                name,
+                family,
+            } => {
+                *find_group_mut(config, instance, name)?
+                    .maximum_prefix
+                    .slot_mut(*family) = None;
                 Ok(())
             }
             BgpPeerGroupOp::SetShutdown {
@@ -569,6 +604,7 @@ mod tests {
             import_policy: None,
             export_policy: None,
             shutdown: None,
+            maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
         }
     }
 
@@ -857,6 +893,37 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].peer_groups[0].damping, None);
+    }
+
+    #[test]
+    fn set_and_clear_maximum_prefix_per_family() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        let lim = BgpPrefixLimit {
+            limit: 2,
+            warning_only: false,
+            restart_interval: 0,
+        };
+        BgpPeerGroupOp::SetMaximumPrefix {
+            instance: "r1".into(),
+            name: "pg1".into(),
+            family: AddressFamily::Ipv4Unicast,
+            limit: lim,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        let m = cfg.bgp_instances[0].peer_groups[0].maximum_prefix;
+        assert_eq!((m.ipv4, m.ipv6, m.l2vpn_evpn), (Some(lim), None, None));
+        BgpPeerGroupOp::ClearMaximumPrefix {
+            instance: "r1".into(),
+            name: "pg1".into(),
+            family: AddressFamily::Ipv4Unicast,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].maximum_prefix,
+            crate::schema::BgpMaximumPrefix::default()
+        );
     }
 
     #[test]

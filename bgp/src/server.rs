@@ -32,7 +32,8 @@ fn allowed(role: Role, req: &BgpRequest) -> bool {
     match req {
         BgpRequest::GetSummary
         | BgpRequest::GetEvpnRoutes
-        | BgpRequest::SendRouteRefresh { .. } => {
+        | BgpRequest::SendRouteRefresh { .. }
+        | BgpRequest::ClearPeer { .. } => {
             matches!(role, Role::User | Role::Restd)
         }
         BgpRequest::RedistributeRoutes(_) => role == Role::Ribd,
@@ -125,6 +126,16 @@ async fn handle_connection(
                     break;
                 }
             }
+            BgpRequest::ClearPeer { peer } => {
+                let event = if sessions.clear_peer(peer).await {
+                    BgpEvent::PeerCleared
+                } else {
+                    BgpEvent::PeerNotFound
+                };
+                if writer.send(event).await.is_err() {
+                    break;
+                }
+            }
         }
     }
 }
@@ -159,6 +170,16 @@ mod authz_tests {
                 allowed(role, &BgpRequest::GetSummary),
                 matches!(role, Role::User | Role::Restd),
                 "{role:?} summary"
+            );
+            assert_eq!(
+                allowed(
+                    role,
+                    &BgpRequest::ClearPeer {
+                        peer: "10.0.0.1".parse().unwrap()
+                    }
+                ),
+                matches!(role, Role::User | Role::Restd),
+                "{role:?} clear peer"
             );
             assert_eq!(
                 allowed(role, &BgpRequest::GetEvpnRoutes),

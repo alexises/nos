@@ -981,6 +981,144 @@ pub async fn malformed_update(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// RFC 4486 §4 maximum-prefix (#79): ExaBGP (router-g) announces
+/// `MAX_PREFIX_ROUTES` (3) IPv4 routes to router-a, whose peer-group allows
+/// fewer. A trip closes the session with Cease subcode 1 and holds the peer
+/// down until a REST clear or a shut/no-shut; raising the limit lets the
+/// routes in; `warning-only` only logs; a restart interval retries by itself.
+pub async fn maximum_prefix(w: &mut World) -> anyhow::Result<()> {
+    let base = strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--remote-as",
+        &ASN_G.to_string(),
+        "--peer",
+        IP_G,
+    ]);
+    let with = |extra: &[&str]| {
+        let mut f = base.clone();
+        f.extend(strings(extra));
+        f
+    };
+    w.start(A, Some(with(&["--maximum-prefix", "ipv4=2"])), &[])
+        .await?;
+    w.dock
+        .ensure_image(
+            EXABGP_IMAGE,
+            &format!(
+                "FROM ghcr.io/exa-networks/exabgp:{EXABGP_VERSION}\n\
+                 ENV exabgp_daemon_daemonize=false exabgp_log_destination=stdout \\\n    \
+                 exabgp_log_level=DEBUG exabgp_log_all=true\n"
+            ),
+        )
+        .await?;
+    let routes = MAX_PREFIX_ROUTES
+        .map(|p| format!("        route {p} next-hop {IP_G} as-path [ {ASN_G} ];\n"))
+        .concat();
+    let conf = format!(
+        "neighbor {IP_A} {{\n    router-id {RID_G};\n    local-address {IP_G};\n    \
+         local-as {ASN_G};\n    peer-as {ASN_A};\n    family {{ ipv4 unicast; }}\n    \
+         static {{\n{routes}    }}\n}}\n"
+    );
+    w.dock
+        .start_plain(
+            "router-g",
+            EXABGP_IMAGE,
+            NET,
+            IP_G,
+            &["/etc/exabgp.conf"],
+            ("/etc", "exabgp.conf", conf.as_bytes()),
+        )
+        .await?;
+    let a = w.a()?;
+    let est = "bgp session established";
+    let tripped = "maximum prefix limit exceeded.*family=ipv4 count=3 limit=2 warning_only=false";
+    let cease1 = "sent cease notification peer=.* subcode=1";
+    let summary = || a.rest_expect(Method::GET, "/v1/bgp/summary", None, 200);
+
+    log("limit 2: the third prefix trips it, and the peer stays down");
+    a.wait(tripped).await?;
+    a.wait(cease1).await?;
+    let held_since = a.count(est);
+    a.assert_quiet(est, held_since, 12).await?;
+    anyhow::ensure!(
+        summary().await?.contains("\"max_prefix_held\":true"),
+        "show bgp brief does not report the max-prefix hold"
+    );
+
+    log("a REST clear releases the hold; ExaBGP still sends 3, so it trips again");
+    let ceases = a.count(cease1);
+    a.rest_expect(
+        Method::POST,
+        &format!("/v1/bgp/r1/peer/{IP_G}/clear"),
+        None,
+        200,
+    )
+    .await?;
+    a.wait_new(est, held_since, 30).await?;
+    a.wait_new(cease1, ceases, 30).await?;
+
+    log("a shutdown and un-shutdown releases it too");
+    let (est_before, ceases) = (a.count(est), a.count(cease1));
+    a.provision_flags(&with(&["--shutdown-peer-group", ""]))
+        .await?;
+    a.provision_flags(&with(&["--unshutdown-peer-group"]))
+        .await?;
+    a.wait_new(est, est_before, 30).await?;
+    a.wait_new(cease1, ceases, 30).await?;
+
+    log("limit 5: all three routes are learned, no cease");
+    let (est_before, ceases) = (a.count(est), a.count(cease1));
+    a.provision_flags(&with(&["--maximum-prefix", "ipv4=5"]))
+        .await?;
+    a.wait_new(est, est_before, 30).await?;
+    let mut counted = false;
+    for _ in 0..30 {
+        if summary().await?.contains("\"accepted_prefixes\":[3,0,0]") {
+            counted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    anyhow::ensure!(
+        counted,
+        "show bgp brief never counted the 3 accepted prefixes"
+    );
+    a.assert_quiet(cease1, ceases, 8).await?;
+
+    log("limit 2 warning-only: a warning, the session stays up");
+    let (est_before, ceases) = (a.count(est), a.count(cease1));
+    let warned = "maximum prefix limit exceeded.*count=3 limit=2 warning_only=true";
+    let warned_before = a.count(warned);
+    a.provision_flags(&with(&[
+        "--maximum-prefix",
+        "ipv4=2",
+        "--maximum-prefix-warning-only",
+    ]))
+    .await?;
+    a.wait_new(est, est_before, 30).await?;
+    a.wait_new(warned, warned_before, 30).await?;
+    let est_now = a.count(est);
+    a.assert_quiet(cease1, ceases, 10).await?;
+    anyhow::ensure!(a.count(est) == est_now, "warning-only reset the session");
+
+    log("limit 2 restart-interval 5: it trips and retries by itself");
+    let ceases = a.count(cease1);
+    a.provision_flags(&with(&[
+        "--maximum-prefix",
+        "ipv4=2",
+        "--maximum-prefix-restart-interval",
+        "5",
+    ]))
+    .await?;
+    a.wait_new(cease1, ceases + 1, 40).await?;
+    Ok(())
+}
+
 /// GoBGP release image, built once — same recipe as `tools/bench-bgp.sh`.
 fn gobgp_dockerfile() -> String {
     format!(

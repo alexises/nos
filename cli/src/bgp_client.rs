@@ -68,6 +68,20 @@ pub async fn get_evpn_routes(bgp_socket: &Path) -> Result<Vec<EvpnRouteSummary>,
     }
 }
 
+/// `clear bgp <instance> <peer>`: releases `peer`'s maximum-prefix hold and
+/// resets its session. `Ok(false)` if `peer` isn't configured.
+pub async fn clear_peer(bgp_socket: &Path, peer: IpAddr) -> Result<bool, BgpClientError> {
+    let (mut reader, mut writer) = connect(bgp_socket).await?;
+    writer.send(BgpRequest::ClearPeer { peer }).await?;
+    match reader.next().await {
+        Some(Ok(BgpEvent::PeerCleared)) => Ok(true),
+        Some(Ok(BgpEvent::PeerNotFound)) => Ok(false),
+        Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
+        Some(Err(e)) => Err(BgpClientError::Io(e)),
+        None => Err(BgpClientError::ConnectionClosed),
+    }
+}
+
 /// Asks `peer`'s live session to send it an RFC 2918 `ROUTE_REFRESH`.
 /// `Ok(true)` if a live `Established` session for `peer` was found and the
 /// command was delivered; `Ok(false)` if there's nothing to refresh right

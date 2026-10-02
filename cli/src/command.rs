@@ -64,6 +64,12 @@ pub enum Command {
         instance: String,
         peer: IpAddr,
     },
+    /// `clear bgp <instance> <peer>` — release `<peer>`'s maximum-prefix
+    /// hold and reset its session (Cease/Administrative Reset).
+    ClearBgpPeer {
+        instance: String,
+        peer: IpAddr,
+    },
     Save,
     Help,
     /// `exit` | `quit` | `end`
@@ -402,6 +408,21 @@ mod tests {
     #[test]
     fn show_ospf_neigh() {
         assert_eq!(Command::parse("show ospf neigh"), Command::ShowOspfNeigh);
+    }
+
+    #[test]
+    fn clear_bgp_peer() {
+        assert_eq!(
+            Command::parse("clear bgp r1 10.0.0.1"),
+            Command::ClearBgpPeer {
+                instance: "r1".to_string(),
+                peer: "10.0.0.1".parse().unwrap(),
+            }
+        );
+        assert_eq!(
+            Command::parse("clear bgp r1 not-an-ip"),
+            Command::Unknown("clear bgp r1 not-an-ip".to_string())
+        );
     }
 
     #[test]

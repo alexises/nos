@@ -55,6 +55,12 @@ pub struct PeerSummary {
     pub ao_packets_good: Option<u64>,
     pub ao_packets_bad: Option<u64>,
     pub ao_packets_key_not_found: Option<u64>,
+    /// Held down by an RFC 4486 maximum-prefix trip: no session is opened or
+    /// accepted until `ClearPeer`, a shut/no-shut, or the restart interval.
+    pub max_prefix_held: bool,
+    /// Accepted (post-import-policy) prefixes from this peer per address
+    /// family: ipv4, ipv6, l2vpn-evpn. `Some` only while `Established`.
+    pub accepted_prefixes: Option<[u32; 3]>,
 }
 
 /// One received EVPN (RFC 7432) route, for `show bgp evpn`. `route` is the
@@ -123,6 +129,10 @@ pub enum BgpRequest {
         domain: String,
         update: crate::fdb::EvpnUpdate,
     },
+    /// Operator-triggered `clear bgp <instance> <peer>`: release a peer held
+    /// by its maximum-prefix limit, and reset its session if one is up
+    /// (Cease/Administrative Reset). Replies `PeerCleared` or `PeerNotFound`.
+    ClearPeer { peer: IpAddr },
 }
 
 /// Messages sent from `nos-bgpd` to a query client.
@@ -133,8 +143,10 @@ pub enum BgpEvent {
     /// `Established` session for that peer.
     RouteRefreshSent,
     /// Reply to `SendRouteRefresh`: no `Established` session with that peer
-    /// exists right now.
+    /// exists right now. Reply to `ClearPeer`: that peer isn't configured.
     PeerNotFound,
     /// Reply to `GetEvpnRoutes`.
     EvpnRoutes(Vec<EvpnRouteSummary>),
+    /// Reply to `ClearPeer`.
+    PeerCleared,
 }

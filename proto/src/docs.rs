@@ -243,6 +243,16 @@ topics! {
     AsPathList,
     /// `AsPathList.patterns`
     AsPathListPattern,
+    /// `BgpPeerGroup.maximum_prefix` and its per-family words
+    BgpPeerGroupMaximumPrefix,
+    /// `BgpPrefixLimit.limit`
+    BgpPeerGroupMaximumPrefixLimit,
+    /// `BgpPrefixLimit.warning_only`
+    BgpPeerGroupMaximumPrefixWarningOnly,
+    /// `BgpPrefixLimit.restart_interval`
+    BgpPeerGroupMaximumPrefixRestartInterval,
+    /// `clear bgp <instance> <peer>`
+    BgpClearPeer,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

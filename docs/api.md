@@ -284,6 +284,13 @@ $ $C -X POST $B/v1/bgp/r1/peer/10.50.0.3/soft-in
 {"instance":"r1","peer":"10.50.0.3","route_refresh":"sent"}
 ```
 
+`POST /v1/bgp/{instance}/peer/{peer}/clear` releases a peer held down by its maximum-prefix limit and resets its session if it is up, like `clear bgp <instance> <peer>`. It answers `404` if the peer is not configured.
+
+```sh
+$ $C -X POST $B/v1/bgp/r1/peer/10.50.0.3/clear
+{"instance":"r1","peer":"10.50.0.3","cleared":true}
+```
+
 ## Following the log (Server-Sent Events)
 
 `GET /v1/logs/follow` is a [Server-Sent Events](https://html.spec.whatwg.org/multipage/server-sent-events.html) stream. It sends the existing entries first (the last `limit`, if given), then each new entry as it is logged, until you disconnect. Each entry is an `event: log`, whose `data` is one JSON log entry. Use `curl -N` so the output is not buffered:

@@ -230,6 +230,7 @@ These work in both modes. Only `clear` acts on anything, and it never changes co
 - `show fdb <domain>`: an EVPN broadcast domain's MAC table and flood list.
 - `show log [<source>] [--follow]`: the router's log, all sources or just one (see [Concepts: Logs](concepts.md#logs)). With `--follow` it keeps printing new entries until Ctrl-C.
 - `clear bgp <instance> <peer> soft-in`: ask a live BGP session to resend its routes (an RFC 2918 route refresh).
+- `clear bgp <instance> <peer>`: release a peer held down by its maximum-prefix limit, and reset its session if it is up.
 
 Examples from a running router:
 

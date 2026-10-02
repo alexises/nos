@@ -138,6 +138,11 @@ pub enum Resolved {
         instance: String,
         peer: IpAddr,
     },
+    /// `clear bgp <instance> <peer>` — likewise valid in any mode.
+    ClearBgpPeer {
+        instance: String,
+        peer: IpAddr,
+    },
     SaveRunningConfig,
     OpenTransaction {
         name: String,
@@ -197,6 +202,7 @@ pub fn resolve(mode: &Mode, cmd: Command) -> Resolved {
         Command::ShowOspfv3Neigh => Resolved::ShowOspfv3Neigh,
         Command::ShowOspfv3Database => Resolved::ShowOspfv3Database,
         Command::ClearBgpSoftIn { instance, peer } => Resolved::ClearBgpSoftIn { instance, peer },
+        Command::ClearBgpPeer { instance, peer } => Resolved::ClearBgpPeer { instance, peer },
         Command::Unknown(s) => {
             Resolved::Error(format!("unknown command: '{s}' (type 'help' for a list)"))
         }
@@ -292,6 +298,7 @@ fn resolve_in_transaction(path: &Path, cmd: Command) -> Resolved {
         | Command::ShowOspfv3Neigh
         | Command::ShowOspfv3Database
         | Command::ClearBgpSoftIn { .. }
+        | Command::ClearBgpPeer { .. }
         | Command::Unknown(_)
         | Command::Exit
         | Command::Save => {

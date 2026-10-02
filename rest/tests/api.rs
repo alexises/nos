@@ -889,6 +889,39 @@ async fn follow_logs_streams_backlog_then_live_lines_as_sse() {
 }
 
 #[tokio::test]
+async fn clear_bgp_peer_maps_the_daemons_reply_to_a_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let bgpd = dir.path().join("bgp.sock");
+    serve(&bgpd, ("bgpd", "r1"), |req: BgpRequest| match req {
+        BgpRequest::ClearPeer { peer } if peer.to_string() == "192.0.2.1" => BgpEvent::PeerCleared,
+        _ => BgpEvent::PeerNotFound,
+    });
+    let f = fixture(vec![(ServiceRef::BgpInstance("r1".into()), bgpd)]).await;
+    let (s, v) = send(
+        &f.app,
+        Method::POST,
+        "/v1/bgp/r1/peer/192.0.2.1/clear",
+        None,
+    )
+    .await;
+    assert_eq!(
+        (s, v),
+        (
+            StatusCode::OK,
+            json!({ "instance": "r1", "peer": "192.0.2.1", "cleared": true })
+        )
+    );
+    let (s, _) = send(
+        &f.app,
+        Method::POST,
+        "/v1/bgp/r1/peer/192.0.2.9/clear",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn clear_bgp_soft_in_maps_the_daemons_reply_to_a_status() {
     let dir = tempfile::tempdir().unwrap();
     let bgpd = dir.path().join("bgp.sock");

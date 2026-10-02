@@ -25,6 +25,13 @@ pub enum AddressFamily {
 }
 
 impl AddressFamily {
+    /// Every variant, in declaration order.
+    pub const ALL: [AddressFamily; 3] = [
+        AddressFamily::Ipv4Unicast,
+        AddressFamily::Ipv6Unicast,
+        AddressFamily::L2vpnEvpn,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             AddressFamily::Ipv4Unicast => "ipv4",
@@ -165,6 +172,67 @@ pub(super) fn valid_damping(d: Option<&BgpDamping>) -> garde::Result {
     Ok(())
 }
 
+/// One address family's RFC 4486 §4 maximum-prefix limit: more than `limit`
+/// accepted (post-import-policy) prefixes from one peer closes the session
+/// with Cease/Maximum Number of Prefixes Reached, unless `warning_only`.
+/// `restart_interval` (seconds) re-allows the session after that long; `0`
+/// keeps the peer down until `clear bgp <instance> <peer>` or a shut/no-shut.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
+pub struct BgpPrefixLimit {
+    #[cli(topic = BgpPeerGroupMaximumPrefixLimit)]
+    pub limit: u32,
+    #[serde(default)]
+    #[cli(topic = BgpPeerGroupMaximumPrefixWarningOnly)]
+    pub warning_only: bool,
+    #[serde(default)]
+    #[cli(topic = BgpPeerGroupMaximumPrefixRestartInterval)]
+    pub restart_interval: u16,
+}
+
+/// Per-address-family maximum-prefix limits; `None` means unlimited. A fixed
+/// struct rather than a list keyed by `AddressFamily`: the family set is
+/// closed, and three fields give the same CLI/REST shape with no enum-keyed
+/// list support in the config path grammar.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
+pub struct BgpMaximumPrefix {
+    #[cli(topic = BgpPeerGroupMaximumPrefix)]
+    pub ipv4: Option<BgpPrefixLimit>,
+    #[cli(topic = BgpPeerGroupMaximumPrefix)]
+    pub ipv6: Option<BgpPrefixLimit>,
+    #[cli(topic = BgpPeerGroupMaximumPrefix)]
+    pub l2vpn_evpn: Option<BgpPrefixLimit>,
+}
+
+impl BgpMaximumPrefix {
+    pub fn get(&self, family: AddressFamily) -> Option<BgpPrefixLimit> {
+        match family {
+            AddressFamily::Ipv4Unicast => self.ipv4,
+            AddressFamily::Ipv6Unicast => self.ipv6,
+            AddressFamily::L2vpnEvpn => self.l2vpn_evpn,
+        }
+    }
+
+    pub fn slot_mut(&mut self, family: AddressFamily) -> &mut Option<BgpPrefixLimit> {
+        match family {
+            AddressFamily::Ipv4Unicast => &mut self.ipv4,
+            AddressFamily::Ipv6Unicast => &mut self.ipv6,
+            AddressFamily::L2vpnEvpn => &mut self.l2vpn_evpn,
+        }
+    }
+}
+
+fn valid_maximum_prefix(m: &BgpMaximumPrefix) -> garde::Result {
+    if AddressFamily::ALL
+        .iter()
+        .any(|af| m.get(*af).is_some_and(|l| l.limit == 0))
+    {
+        return Err(garde::Error::new("maximum-prefix limit must be at least 1"));
+    }
+    Ok(())
+}
+
 /// RFC 9003 §2: the shutdown communication is at most 255 octets of UTF-8.
 pub const SHUTDOWN_MESSAGE_MAX: usize = 255;
 
@@ -301,6 +369,14 @@ pub struct BgpPeerGroup {
     #[garde(custom(|s: &Option<BgpShutdown>, _ctx: &Config| valid_shutdown(s.as_ref())))]
     #[cli(topic = BgpPeerGroupShutdown, sugar(word = "shutdown", with = sugar::shutdown, topic = BgpPeerGroupShutdown))]
     pub shutdown: Option<BgpShutdown>,
+
+    /// RFC 4486 §4 per-address-family maximum-prefix limits — see
+    /// `BgpPrefixLimit`. A limit for a family not in `address_families` is
+    /// rejected (`valid_peer_group_timers`).
+    #[serde(default)]
+    #[garde(custom(|m: &BgpMaximumPrefix, _ctx: &Config| valid_maximum_prefix(m)))]
+    #[cli(topic = BgpPeerGroupMaximumPrefix)]
+    pub maximum_prefix: BgpMaximumPrefix,
 }
 
 /// `"accept-all"`/`"deny-all"` are always valid regardless of what's
@@ -507,6 +583,13 @@ pub(crate) fn valid_peer_group_timers(groups: &[BgpPeerGroup]) -> garde::Result 
                 ));
             }
         }
+        if AddressFamily::ALL.iter().any(|af| {
+            group.maximum_prefix.get(*af).is_some() && !group.address_families.contains(af)
+        }) {
+            return Err(garde::Error::new(
+                "maximum-prefix is set for an address family the peer-group does not negotiate",
+            ));
+        }
     }
     Ok(())
 }
@@ -551,6 +634,7 @@ mod tests {
             import_policy: None,
             export_policy: None,
             shutdown: None,
+            maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
         }
     }
 
@@ -559,6 +643,23 @@ mod tests {
             bgp_instances: instances,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn maximum_prefix_needs_a_negotiated_family_and_a_nonzero_limit() {
+        let check = |family: AddressFamily, limit: u32| {
+            let mut g = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
+            *g.maximum_prefix.slot_mut(family) = Some(BgpPrefixLimit {
+                limit,
+                ..Default::default()
+            });
+            let cfg = config_with(vec![instance_with_groups("r1", vec![g])]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(check(AddressFamily::Ipv4Unicast, 1));
+        assert!(!check(AddressFamily::Ipv4Unicast, 0), "limit 0");
+        assert!(!check(AddressFamily::Ipv6Unicast, 5), "ipv6 not negotiated");
+        assert!(!check(AddressFamily::L2vpnEvpn, 5), "evpn not negotiated");
     }
 
     #[test]

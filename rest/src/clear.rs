@@ -56,7 +56,57 @@ pub async fn bgp_soft_in(
         BgpEvent::PeerNotFound => Err(ApiError::NotFound(format!(
             "no Established session with {peer} in bgp instance '{instance}'"
         ))),
-        other @ (BgpEvent::Summary(_) | BgpEvent::EvpnRoutes(_)) => {
+        other @ (BgpEvent::Summary(_) | BgpEvent::EvpnRoutes(_) | BgpEvent::PeerCleared) => {
+            Err(unexpected("nos-bgpd", &other))
+        }
+    }
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ClearPeerResult {
+    instance: String,
+    #[schema(value_type = String)]
+    peer: IpAddr,
+    /// Always `true`: any maximum-prefix hold is released, and an
+    /// Established session was reset with Cease/Administrative Reset.
+    cleared: bool,
+}
+
+/// `clear bgp <instance> <peer>`: release a peer held down by its
+/// maximum-prefix limit (RFC 4486), and reset its session if one is up.
+#[utoipa::path(
+    post, path = "/v1/bgp/{instance}/peer/{peer}/clear", tag = "clear",
+    summary = "Reset a BGP peer (and release a maximum-prefix hold)",
+    params(
+        ("instance" = String, Path, description = "BGP instance name"),
+        ("peer" = String, Path, description = "peer address")
+    ),
+    responses(
+        (status = 200, body = ClearPeerResult),
+        (status = 404, body = ErrorBody, description = "peer not configured"),
+        (status = 503, body = ErrorBody, description = "that instance's nos-bgpd is not running")
+    )
+)]
+pub async fn bgp_clear_peer(
+    State(d): State<Daemons>,
+    Path((instance, peer)): Path<(String, IpAddr)>,
+) -> ApiResult<Json<ClearPeerResult>> {
+    match d
+        .service(
+            ServiceRef::BgpInstance(instance.clone()),
+            BgpRequest::ClearPeer { peer },
+        )
+        .await?
+    {
+        BgpEvent::PeerCleared => Ok(Json(ClearPeerResult {
+            instance,
+            peer,
+            cleared: true,
+        })),
+        BgpEvent::PeerNotFound => Err(ApiError::NotFound(format!(
+            "no peer {peer} in bgp instance '{instance}'"
+        ))),
+        other @ (BgpEvent::Summary(_) | BgpEvent::EvpnRoutes(_) | BgpEvent::RouteRefreshSent) => {
             Err(unexpected("nos-bgpd", &other))
         }
     }

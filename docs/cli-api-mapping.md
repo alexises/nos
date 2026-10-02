@@ -23,6 +23,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show log` / `show log <source>` | `GET /v1/logs` / `GET /v1/logs?source=<source>` (also `&limit=<n>`) |
 | `show log [<source>] --follow` | `GET /v1/logs/follow[?source=<source>]` (Server-Sent Events) |
 | `clear bgp <instance> <peer> soft-in` | `POST /v1/bgp/{instance}/peer/{peer}/soft-in` |
+| `clear bgp <instance> <peer>` | `POST /v1/bgp/{instance}/peer/{peer}/clear` |
 
 The shell formats the data as text and REST returns it as JSON, but the data is the same. For example, `show bgp brief`'s line
 

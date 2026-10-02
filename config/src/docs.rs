@@ -956,6 +956,35 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Add or remove an AS-path list pattern.",
             "A regular expression matched against the AS path rendered as space-separated ASNs, where `_` matches the start, the end, or a space.",
         ),
+        Topic::BgpPeerGroupMaximumPrefix => (
+            "Limit how many prefixes a peer-group's peers may send, per address family.",
+            "Takes an address family (`ipv4`, `ipv6`, `l2vpn-evpn`) then `limit <n>` and optionally \
+             `warning-only` and `restart-interval <s>` (RFC 4486). Prefixes are counted per peer \
+             after the import policy. Over the limit the session is closed with Cease/Maximum \
+             Number of Prefixes Reached and the peer stays down until `clear bgp <instance> <peer>`, \
+             a shutdown and un-shutdown, or the restart interval elapses. The family must be one \
+             the peer-group negotiates. Changing it restarts the peer-group's sessions. \
+             `delete maximum-prefix <family>` removes that family's limit.",
+        ),
+        Topic::BgpPeerGroupMaximumPrefixLimit => (
+            "Set the most prefixes a peer may send in this address family.",
+            "At least 1. One more accepted prefix than this trips the limit.",
+        ),
+        Topic::BgpPeerGroupMaximumPrefixWarningOnly => (
+            "Only log when the maximum-prefix limit is exceeded.",
+            "Logs a warning each time a peer crosses the limit instead of closing the session.",
+        ),
+        Topic::BgpPeerGroupMaximumPrefixRestartInterval => (
+            "Retry a peer held down by its maximum-prefix limit after this many seconds.",
+            "0 (the default) keeps the peer down until `clear bgp <instance> <peer>` or a \
+             shutdown and un-shutdown.",
+        ),
+        Topic::BgpClearPeer => (
+            "Reset one BGP peer's session.",
+            "Releases a peer held down by its maximum-prefix limit so it can reconnect. A peer \
+             with an established session is closed with Cease/Administrative Reset (RFC 4486) \
+             and reconnects. Changes no configuration.",
+        ),
     };
     CommandDoc {
         topic,

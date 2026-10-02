@@ -215,6 +215,7 @@ async fn resync(
             import_policy: policy_cache.resolve(group.import_policy.as_deref()),
             export_policy: policy_cache.resolve(group.export_policy.as_deref()),
             shutdown: peer.shutdown.clone().or_else(|| group.shutdown.clone()),
+            maximum_prefix: group.maximum_prefix,
         });
     }
 

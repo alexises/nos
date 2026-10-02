@@ -45,6 +45,7 @@ fn peer(remote: Ipv4Addr, source: Ipv4Addr, remote_as: u32) -> ResolvedPeer {
         import_policy: accept.clone(),
         export_policy: accept,
         shutdown: None,
+        maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
     }
 }
 
@@ -202,6 +203,62 @@ async fn two_instances_peer_exchange_a_route_and_follow_config_changes() {
 
     a.manager.shutdown().await;
     b.manager.shutdown().await;
+}
+
+/// RFC 4486 §4 (#79): b allows one prefix from a, which sends two — b closes
+/// the session and holds a down; a clear is accepted, a raised limit lets
+/// both routes in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn maximum_prefix_trips_holds_and_clears() {
+    let (a, b, _) = routers();
+    let limited = |limit| ResolvedPeer {
+        maximum_prefix: nos_proto::BgpMaximumPrefix {
+            ipv4: Some(nos_proto::BgpPrefixLimit {
+                limit,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..peer(A, B, 65001)
+    };
+    a.manager
+        .apply_redistribute_update(RedistributeUpdate::Full(
+            ["198.51.100.0/24", "198.51.101.0/24"]
+                .map(|p| RedistributedRoute {
+                    prefix: p.parse().unwrap(),
+                    gateway: "10.0.0.9".parse().unwrap(),
+                })
+                .to_vec(),
+        ))
+        .await;
+    a.apply(vec![peer(B, A, 65002)]).await;
+    b.apply(vec![limited(1)]).await;
+    let mut held = false;
+    for _ in 0..200 {
+        if b.manager.peer_summaries().await[0].max_prefix_held {
+            held = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(held, "b never tripped");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_ne!(b.state().await, Some(BgpSessionState::Established));
+
+    assert!(b.manager.clear_peer(IpAddr::V4(A)).await);
+    assert!(!b.manager.clear_peer(IpAddr::V4(B)).await);
+
+    b.apply(vec![limited(5)]).await;
+    b.wait_for(BgpSessionState::Established).await;
+    for _ in 0..200 {
+        if b.manager.peer_summaries().await[0].accepted_prefixes == Some([2, 0, 0]) {
+            a.manager.shutdown().await;
+            b.manager.shutdown().await;
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("b never counted both routes");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

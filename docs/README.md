@@ -26,7 +26,7 @@ Each protocol and feature gets its own page with four parts: what it is and what
 
 Per-protocol guides:
 
-- **[BGP](protocols/bgp.md)**: instances, peer-groups, timers, MRAI, damping, GTSM, MD5 and TCP-AO authentication, route reflection, route servers
+- **[BGP](protocols/bgp.md)**: instances, peer-groups, timers, MRAI, damping, maximum-prefix, GTSM, MD5 and TCP-AO authentication, route reflection, route servers
 - **[Routing policy](protocols/routing-policy.md)**: the RPL language, prefix lists, community aliases and groups, AS-path lists
 - [OSPF (OSPFv2)](protocols/ospf.md): instances, areas, profiles, point-to-point and LAN links, loopbacks, authentication, ASBR, ABR, loop-free alternates
 - [OSPFv3](protocols/ospfv3.md): the IPv6 differences, RFC 7166 authentication, extended LSAs, and what is not supported yet

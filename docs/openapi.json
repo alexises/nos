@@ -214,6 +214,42 @@
         ],
         "type": "object"
       },
+      "BgpMaximumPrefix": {
+        "description": "Per-address-family maximum-prefix limits; `None` means unlimited. A fixed\nstruct rather than a list keyed by `AddressFamily`: the family set is\nclosed, and three fields give the same CLI/REST shape with no enum-keyed\nlist support in the config path grammar.",
+        "properties": {
+          "ipv4": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BgpPrefixLimit"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ipv6": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BgpPrefixLimit"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "l2vpn_evpn": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BgpPrefixLimit"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
       "BgpPeer": {
         "description": "Associates a remote address with a peer-group, by name — the bulk of\nsession config (remote-as, source-address, address-families) lives on\nthe referenced `BgpPeerGroup`, not here.",
         "properties": {
@@ -321,6 +357,10 @@
               "null"
             ]
           },
+          "maximum_prefix": {
+            "$ref": "#/components/schemas/BgpMaximumPrefix",
+            "description": "RFC 4486 §4 per-address-family maximum-prefix limits — see\n`BgpPrefixLimit`. A limit for a family not in `address_families` is\nrejected (`valid_peer_group_timers`)."
+          },
           "mrai": {
             "description": "RFC 4271 §9.2.1.1 `MinRouteAdvertisementInterval`, in seconds: at most\none batch of advertisements per this interval to each peer (withdrawals\nare exempt). `None` (or 0) disables pacing — every change is sent at once.",
             "format": "int32",
@@ -385,6 +425,28 @@
           "address_families",
           "route_reflector_client",
           "route_server_client"
+        ],
+        "type": "object"
+      },
+      "BgpPrefixLimit": {
+        "description": "One address family's RFC 4486 §4 maximum-prefix limit: more than `limit`\naccepted (post-import-policy) prefixes from one peer closes the session\nwith Cease/Maximum Number of Prefixes Reached, unless `warning_only`.\n`restart_interval` (seconds) re-allows the session after that long; `0`\nkeeps the peer down until `clear bgp <instance> <peer>` or a shut/no-shut.",
+        "properties": {
+          "limit": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "restart_interval": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "warning_only": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "limit"
         ],
         "type": "object"
       },
@@ -527,6 +589,26 @@
         "required": [
           "certificate",
           "lifetime_secs"
+        ],
+        "type": "object"
+      },
+      "ClearPeerResult": {
+        "properties": {
+          "cleared": {
+            "description": "Always `true`: any maximum-prefix hold is released, and an\nEstablished session was reset with Cease/Administrative Reset.",
+            "type": "boolean"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "peer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "instance",
+          "peer",
+          "cleared"
         ],
         "type": "object"
       },
@@ -2785,6 +2867,67 @@
         "summary": "BGP session summary, per instance",
         "tags": [
           "show"
+        ]
+      }
+    },
+    "/v1/bgp/{instance}/peer/{peer}/clear": {
+      "post": {
+        "operationId": "bgp_clear_peer",
+        "parameters": [
+          {
+            "description": "BGP instance name",
+            "in": "path",
+            "name": "instance",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "peer address",
+            "in": "path",
+            "name": "peer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClearPeerResult"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "peer not configured"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "that instance's nos-bgpd is not running"
+          }
+        },
+        "summary": "Reset a BGP peer (and release a maximum-prefix hold)",
+        "tags": [
+          "clear"
         ]
       }
     },
@@ -7077,6 +7220,1631 @@
           }
         },
         "summary": "Set: The `max-hops` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/maximum-prefix": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `maximum-prefix` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BgpMaximumPrefix",
+                  "description": "RFC 4486 §4 per-address-family maximum-prefix limits — see\n`BgpPrefixLimit`. A limit for a family not in `address_families` is\nrejected (`valid_peer_group_timers`)."
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `maximum-prefix` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BgpMaximumPrefix",
+                "description": "RFC 4486 §4 per-address-family maximum-prefix limits — see\n`BgpPrefixLimit`. A limit for a family not in `address_families` is\nrejected (`valid_peer_group_timers`)."
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BgpMaximumPrefix",
+                  "description": "RFC 4486 §4 per-address-family maximum-prefix limits — see\n`BgpPrefixLimit`. A limit for a family not in `address_families` is\nrejected (`valid_peer_group_timers`)."
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `maximum-prefix` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/maximum-prefix/ipv4": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `ipv4` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BgpPrefixLimit"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `ipv4` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BgpPrefixLimit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BgpPrefixLimit"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `ipv4` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/maximum-prefix/ipv4/limit": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `limit` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `limit` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `limit` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/maximum-prefix/ipv4/restart-interval": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `restart-interval` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `restart-interval` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `restart-interval` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/maximum-prefix/ipv4/warning-only": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `warning-only` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `warning-only` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "boolean"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `warning-only` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/maximum-prefix/ipv6": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `ipv6` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BgpPrefixLimit"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `ipv6` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BgpPrefixLimit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BgpPrefixLimit"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `ipv6` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/maximum-prefix/ipv6/limit": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `limit` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `limit` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `limit` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/maximum-prefix/ipv6/restart-interval": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `restart-interval` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `restart-interval` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `restart-interval` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/maximum-prefix/ipv6/warning-only": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `warning-only` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `warning-only` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "boolean"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `warning-only` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/maximum-prefix/l2vpn-evpn": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `l2vpn-evpn` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BgpPrefixLimit"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `l2vpn-evpn` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BgpPrefixLimit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BgpPrefixLimit"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `l2vpn-evpn` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/maximum-prefix/l2vpn-evpn/limit": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `limit` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `limit` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `limit` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/maximum-prefix/l2vpn-evpn/restart-interval": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `restart-interval` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `restart-interval` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "format": "int32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `restart-interval` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/peer-group/{peer_group}/maximum-prefix/l2vpn-evpn/warning-only": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `warning-only` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `warning-only` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "peer_group",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "boolean"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `warning-only` setting.",
         "tags": [
           "transactions"
         ]

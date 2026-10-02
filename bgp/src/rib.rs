@@ -226,8 +226,10 @@ fn learn_evpn(
 /// A rejected prefix is *removed* rather than skipped — a policy that now
 /// rejects it must not leave an earlier, now-superseded copy behind — and is
 /// `touched` either way so best-path selection re-runs for it.
+#[allow(clippy::too_many_arguments)]
 fn learn_prefix(
     table: &mut HashMap<IpNet, RibRoute>,
+    v6_count: &mut u32,
     damping: &mut Damping,
     touched: &mut HashSet<IpNet>,
     peer: (IpAddr, u32),
@@ -255,10 +257,15 @@ fn learn_prefix(
                 aggregator = ?route.aggregator.map(|a| (a.asn, a.router_id)),
                 "bgp: learned route for {prefix} into adj-rib-in"
             );
-            table.insert(prefix, route);
+            if table.insert(prefix, route).is_none() && prefix.addr().is_ipv6() {
+                *v6_count += 1;
+            }
         }
         None => {
             if table.remove(&prefix).is_some() {
+                if prefix.addr().is_ipv6() {
+                    *v6_count -= 1;
+                }
                 damping.flap(from, prefix, WITHDRAW_PENALTY, Instant::now());
             }
         }
@@ -480,6 +487,15 @@ pub struct BgpRib {
     /// reflection and checked for loop-prevention on receipt.
     cluster_id: Ipv4Addr,
     adj_rib_in: HashMap<IpAddr, HashMap<IpNet, RibRoute>>,
+    /// How many of each peer's `adj_rib_in` prefixes are IPv6 (the rest are
+    /// IPv4) — kept in step at every `adj_rib_in` mutation so the RFC 4486
+    /// maximum-prefix check is O(1) per UPDATE, not a table scan.
+    v6_counts: HashMap<IpAddr, u32>,
+    /// Each peer's maximum-prefix limits (`set_peer_max_prefix`), and the
+    /// `(peer, family)` pairs already warned about for a `warning_only` limit,
+    /// so the warning is logged once per crossing.
+    max_prefix: HashMap<IpAddr, nos_proto::BgpMaximumPrefix>,
+    max_prefix_warned: HashSet<(IpAddr, AddressFamily)>,
     /// Received EVPN (RFC 7432) routes per peer, keyed by NLRI.
     // ponytail: Adj-RIB-In only — no best-path, Route-Target import filtering,
     // import policy (RPL's `Input` is prefix-shaped) or re-advertisement, since
@@ -563,6 +579,9 @@ impl BgpRib {
             local_router_id: Ipv4Addr::UNSPECIFIED,
             cluster_id: Ipv4Addr::UNSPECIFIED,
             adj_rib_in: HashMap::new(),
+            v6_counts: HashMap::new(),
+            max_prefix: HashMap::new(),
+            max_prefix_warned: HashSet::new(),
             evpn_adj_rib_in: HashMap::new(),
             stale: HashMap::new(),
             evpn_local: HashMap::new(),
@@ -757,6 +776,9 @@ impl BgpRib {
                 .get_mut(&peer)
                 .is_some_and(|t| t.remove(&prefix).is_some())
             {
+                if prefix.addr().is_ipv6() {
+                    *self.v6_counts.entry(peer).or_default() -= 1;
+                }
                 info!(peer = %peer, %prefix, "bgp: purged stale route at end of route refresh");
                 self.recompute_and_propagate(prefix);
             }
@@ -807,6 +829,54 @@ impl BgpRib {
 
     pub fn set_peer_damping(&mut self, peer: IpAddr, params: Option<BgpDamping>) {
         self.damping.set_params(peer, params);
+    }
+
+    /// Sets `peer`'s RFC 4486 maximum-prefix limits (see `check_max_prefix`).
+    pub fn set_peer_max_prefix(&mut self, peer: IpAddr, limits: nos_proto::BgpMaximumPrefix) {
+        self.max_prefix.insert(peer, limits);
+    }
+
+    /// Accepted (post-import-policy) prefixes held from `peer`: ipv4, ipv6,
+    /// l2vpn-evpn.
+    pub fn accepted_prefixes(&self, peer: IpAddr) -> [u32; 3] {
+        let len = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let total = len(self.adj_rib_in.get(&peer).map_or(0, HashMap::len));
+        let v6 = self.v6_counts.get(&peer).copied().unwrap_or(0);
+        let evpn = len(self.evpn_adj_rib_in.get(&peer).map_or(0, HashMap::len));
+        [total - v6, v6, evpn]
+    }
+
+    /// RFC 4486 §4: the first address family whose accepted-prefix count from
+    /// `peer` is over a hard (not `warning_only`) limit, with that count —
+    /// the caller closes the session. Logs `maximum prefix limit exceeded`
+    /// once per crossing for every family over its limit, hard or not.
+    pub fn check_max_prefix(
+        &mut self,
+        peer: IpAddr,
+    ) -> Option<(AddressFamily, nos_proto::BgpPrefixLimit, u32)> {
+        let limits = *self.max_prefix.get(&peer)?;
+        let counts = self.accepted_prefixes(peer);
+        let mut tripped = None;
+        for (family, count) in AddressFamily::ALL.into_iter().zip(counts) {
+            let Some(limit) = limits.get(family) else {
+                continue;
+            };
+            if count <= limit.limit {
+                self.max_prefix_warned.remove(&(peer, family));
+                continue;
+            }
+            if self.max_prefix_warned.insert((peer, family)) {
+                warn!(
+                    peer = %peer, family = %family, count, limit = limit.limit,
+                    warning_only = limit.warning_only,
+                    "maximum prefix limit exceeded"
+                );
+            }
+            if !limit.warning_only && tripped.is_none() {
+                tripped = Some((family, limit, count));
+            }
+        }
+        tripped
     }
 
     /// Installs a fresh IGP cost table (see `igp_client`) and, if it changed
@@ -867,6 +937,8 @@ impl BgpRib {
 
     pub fn peer_disconnected(&mut self, peer: IpAddr) {
         self.peer_outboxes.remove(&peer);
+        self.v6_counts.remove(&peer);
+        self.max_prefix_warned.retain(|(p, _)| *p != peer);
         // ponytail: a session reset forgets its flap history (RFC 2439 allows
         // keeping it); keep entries across resets to damp session flaps too.
         self.damping.clear_peer(peer);
@@ -972,8 +1044,12 @@ impl BgpRib {
         }
         if !withdrawn.is_empty() {
             let table = self.adj_rib_in.entry(from).or_default();
+            let v6_count = self.v6_counts.entry(from).or_default();
             for prefix in &withdrawn {
                 if table.remove(prefix).is_some() {
+                    if prefix.addr().is_ipv6() {
+                        *v6_count -= 1;
+                    }
                     touched.insert(*prefix);
                     self.damping
                         .flap(from, *prefix, WITHDRAW_PENALTY, Instant::now());
@@ -1009,6 +1085,7 @@ impl BgpRib {
             } else {
                 let mut evpn_recheck: Vec<(u32, [u8; 6])> = Vec::new();
                 let table = self.adj_rib_in.entry(from).or_default();
+                let v6_count = self.v6_counts.entry(from).or_default();
                 // This UPDATE adds at most this many entries — reserving
                 // once lets the per-peer table grow in fewer, larger steps
                 // on the way up to a full table, instead of rehashing on
@@ -1041,6 +1118,7 @@ impl BgpRib {
                     };
                     learn_prefix(
                         table,
+                        v6_count,
                         &mut self.damping,
                         &mut touched,
                         (from, peer_as),
@@ -1057,6 +1135,7 @@ impl BgpRib {
                         };
                         learn_prefix(
                             table,
+                            v6_count,
                             &mut self.damping,
                             &mut touched,
                             (from, peer_as),
@@ -4723,5 +4802,130 @@ mod tests {
         }
         assert!(!rib.damping.is_suppressed(peer, &prefix("1.2.3.0/24")));
         assert!(rib.push_snapshot().1.contains_key(&prefix("1.2.3.0/24")));
+    }
+
+    fn v6_update(nlri: Vec<&str>) -> UpdateMessage {
+        let mut u = ebgp_update(vec![], vec![65001], "0.0.0.0");
+        u.mp_reach = vec![message::MpReachNlri {
+            afi: 2,
+            safi: 1,
+            next_hop: addr("2001:db8::1"),
+            nlri: nlri.into_iter().map(prefix).collect(),
+            nlri_path_ids: vec![],
+            evpn: vec![],
+        }];
+        u
+    }
+
+    /// What `accepted_prefixes` must always equal: a full scan.
+    fn recount(rib: &BgpRib, peer: IpAddr) -> [u32; 3] {
+        let table = rib.adj_rib_in.get(&peer);
+        let count = |v6: bool| {
+            table.map_or(0, |t| {
+                u32::try_from(t.keys().filter(|p| p.addr().is_ipv6() == v6).count()).unwrap()
+            })
+        };
+        let evpn = rib.evpn_adj_rib_in.get(&peer).map_or(0, HashMap::len);
+        [count(false), count(true), u32::try_from(evpn).unwrap()]
+    }
+
+    #[test]
+    fn prefix_counters_match_a_recount_through_every_mutation() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        let accept = &nos_rpl::ACCEPT_ALL;
+        let step = |rib: &mut BgpRib, u: &UpdateMessage, policy: &CompiledPolicy, want| {
+            rib.handle_update(peer, false, v4("192.0.2.1"), u, policy);
+            assert_eq!(rib.accepted_prefixes(peer), recount(rib, peer));
+            assert_eq!(rib.accepted_prefixes(peer), want);
+        };
+        let v4s = ebgp_update(vec!["1.0.0.0/24", "2.0.0.0/24"], vec![65001], "10.0.0.1");
+        let v6s = v6_update(vec!["2001:db8:1::/48", "2001:db8:2::/48"]);
+        step(&mut rib, &v4s, accept, [2, 0, 0]);
+        step(&mut rib, &v6s, accept, [2, 2, 0]);
+        // Re-announcing is not a new prefix.
+        step(&mut rib, &v4s, accept, [2, 2, 0]);
+        step(&mut rib, &v6s, accept, [2, 2, 0]);
+        let withdraw = UpdateMessage {
+            withdrawn_routes: vec!["1.0.0.0/24".parse().unwrap()],
+            mp_unreach: vec![message::MpUnreachNlri {
+                afi: 2,
+                safi: 1,
+                withdrawn: vec![prefix("2001:db8:1::/48")],
+                withdrawn_path_ids: vec![],
+                evpn: vec![],
+            }],
+            ..empty_update()
+        };
+        step(&mut rib, &withdraw, accept, [1, 1, 0]);
+        // An import policy now rejecting a held route removes it.
+        step(
+            &mut rib,
+            &v6_update(vec!["2001:db8:2::/48"]),
+            &nos_rpl::DENY_ALL,
+            [1, 0, 0],
+        );
+        step(&mut rib, &v6s, accept, [1, 2, 0]);
+        // RFC 7313: a refresh that re-announces nothing purges everything.
+        rib.begin_refresh_in(peer, AddressFamily::Ipv6Unicast);
+        rib.end_refresh_in(peer, AddressFamily::Ipv6Unicast);
+        assert_eq!(rib.accepted_prefixes(peer), [1, 0, 0]);
+        assert_eq!(rib.accepted_prefixes(peer), recount(&rib, peer));
+        rib.peer_disconnected(peer);
+        assert_eq!(rib.accepted_prefixes(peer), [0, 0, 0]);
+    }
+
+    #[test]
+    fn maximum_prefix_families_are_independent_and_warning_only_never_trips() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        let limit = |limit, warning_only| {
+            Some(nos_proto::BgpPrefixLimit {
+                limit,
+                warning_only,
+                restart_interval: 0,
+            })
+        };
+        rib.set_peer_max_prefix(
+            peer,
+            nos_proto::BgpMaximumPrefix {
+                ipv4: limit(5, false),
+                ipv6: limit(1, false),
+                l2vpn_evpn: None,
+            },
+        );
+        let accept = &nos_rpl::ACCEPT_ALL;
+        let three_v4 = ebgp_update(
+            vec!["1.0.0.0/24", "2.0.0.0/24", "3.0.0.0/24"],
+            vec![65001],
+            "10.0.0.1",
+        );
+        rib.handle_update(peer, false, v4("192.0.2.1"), &three_v4, accept);
+        assert_eq!(
+            rib.check_max_prefix(peer),
+            None,
+            "3 v4 under v4's 5, v6's 1 unused"
+        );
+        rib.handle_update(
+            peer,
+            false,
+            v4("192.0.2.1"),
+            &v6_update(vec!["2001:db8:1::/48", "2001:db8:2::/48"]),
+            accept,
+        );
+        let (family, l, count) = rib.check_max_prefix(peer).expect("v6 over its limit");
+        assert_eq!((family, l.limit, count), (AddressFamily::Ipv6Unicast, 1, 2));
+
+        rib.set_peer_max_prefix(
+            peer,
+            nos_proto::BgpMaximumPrefix {
+                ipv4: limit(2, true),
+                ipv6: limit(1, true),
+                l2vpn_evpn: None,
+            },
+        );
+        assert_eq!(rib.check_max_prefix(peer), None, "warning-only never trips");
     }
 }

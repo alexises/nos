@@ -89,7 +89,7 @@ $C -X PUT -H 'Content-Type: application/json' \
 
 ## Checking sessions and routes
 
-`show bgp brief` (REST: `GET /v1/bgp/summary`) lists every peer of every instance: its state, the AS it announced, how long it has been up, and the negotiated hold time. The states are `Idle` (no OPEN exchanged yet: not connected, or retrying), `OpenSent`, `OpenConfirm` and `Established`. A shut-down peer shows as `Idle (shutdown)`.
+`show bgp brief` (REST: `GET /v1/bgp/summary`) lists every peer of every instance: its state, the AS it announced, how long it has been up, and the negotiated hold time. The states are `Idle` (no OPEN exchanged yet: not connected, or retrying), `OpenSent`, `OpenConfirm` and `Established`. A shut-down peer shows as `Idle (shutdown)`, and a peer held down by its [maximum-prefix](#limiting-the-prefixes-a-peer-sends) limit as `Idle (max-prefix)`. An Established line ends with the accepted prefixes per address family, for example `prefixes v4 3`.
 
 ```
 edge-1> show bgp brief
@@ -228,6 +228,58 @@ $ $C -X POST $B/v1/bgp/r1/peer/10.50.0.3/soft-in
 ```
 
 The request fails with `404` over REST if the peer is not configured or its session is not Established.
+
+## Limiting the prefixes a peer sends
+
+`set maximum-prefix <family> limit <n>` caps how many prefixes each peer of the peer-group may send in that address family (RFC 4486). The family is `ipv4`, `ipv6` or `l2vpn-evpn`, and must be one the peer-group negotiates.
+
+- Prefixes are counted per peer, after the import policy: a route the policy rejects does not count.
+- Each family has its own limit and its own count.
+- One prefix over the limit closes the session with a Cease NOTIFICATION, subcode 1 (Maximum Number of Prefixes Reached), carrying the family and the limit.
+- The peer then stays down: NOS neither connects to it nor accepts its connections.
+
+```
+edge-1(t3/bgp-instance:r1/peer-group:pg1)> set maximum-prefix ipv4 limit 1000
+edge-1(t3/bgp-instance:r1/peer-group:pg1)> commit
+transaction 't3' committed
+edge-1> show bgp brief
+bgp instance r1:
+  10.50.0.3 AS - peer-group pg1 Idle (max-prefix) uptime - hold-time -
+```
+
+```sh
+$C -X PUT -H 'Content-Type: application/json' -d '{"limit":1000,"warning_only":false,"restart_interval":0}' \
+  $B/v1/transactions/t3/bgp-instance/r1/peer-group/pg1/maximum-prefix/ipv4
+```
+
+To bring a held peer back, do one of:
+
+- `clear bgp <instance> <peer>` (REST: `POST /v1/bgp/{instance}/peer/{peer}/clear`). On a peer whose session is up, this resets the session with Cease subcode 4 (Administrative Reset). It changes no configuration.
+- Shut the peer or its peer-group down and bring it back up.
+- Change the limit. Any change to `maximum-prefix` restarts the peer-group's sessions.
+
+```
+edge-1> clear bgp r1 10.50.0.3
+cleared 10.50.0.3
+```
+
+```sh
+$ $C -X POST $B/v1/bgp/r1/peer/10.50.0.3/clear
+{"instance":"r1","peer":"10.50.0.3","cleared":true}
+```
+
+If the peer keeps sending too many prefixes, the limit trips again as soon as it reconnects.
+
+Two options change what a trip does:
+
+- `warning-only`: log `maximum prefix limit exceeded` and keep the session up. The warning is logged once each time the count goes over the limit.
+- `restart-interval <seconds>`: let the peer reconnect by itself after that long. `0`, the default, keeps it down until cleared.
+
+```
+edge-1(t4/bgp-instance:r1/peer-group:pg1)> set maximum-prefix ipv4 limit 1000 restart-interval 300
+```
+
+`delete maximum-prefix <family>` removes that family's limit. The router logs every trip (`maximum prefix limit exceeded`, with the peer, family, count and limit) and the Cease it sends.
 
 ## Removing peers and instances
 
@@ -508,6 +560,7 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 | import-policy | `… import-policy <policy>` / `set import-policy <policy>`; `delete import-policy` | `…/import-policy`, `"accept-all"` or `null` | policy name; default `deny-all` | `accept-all`, `deny-all` or an existing policy-definition | Filters and modifies received routes | `show config`; `show route` |
 | export-policy | `… export-policy <policy>` / `set export-policy <policy>`; `delete export-policy` | `…/export-policy`, `"accept-all"` or `null` | policy name; default `deny-all` | as import-policy | Filters and modifies advertised routes | `show config`; `show route` on the peer |
 | shutdown | `… shutdown [<message>]` / `set shutdown [<message>]`; `delete shutdown` | `…/shutdown`, `{"message":"…"}` or `{"message":null}` or `null` | message up to 255 bytes; default: not shut | message ≤ 255 bytes | Closes and keeps closed every session of the group | `show bgp brief` (`Idle (shutdown)`) |
+| maximum-prefix | `… maximum-prefix ipv4\|ipv6\|l2vpn-evpn limit <n> [warning-only] [restart-interval <s>]` / `set maximum-prefix …`; `delete maximum-prefix <family>` | `…/maximum-prefix/<family>`, `{"limit":1000,"warning_only":false,"restart_interval":0}` or `null` | limit 1 to 4294967295; default: no limit; restart-interval 0 (stay down) | limit ≥ 1; the family must be in address-family | Closes the session with Cease subcode 1 when a peer sends more prefixes | `show bgp brief` (`Idle (max-prefix)`, `prefixes`) |
 
 `show config` and `show this` end each peer-group line with its `import-policy` and `export-policy` (`default (deny-all)` when unset). Over REST, `GET …/peer-group/<g>/import-policy`.
 
@@ -529,4 +582,5 @@ Created with `set bgp instance <i> peer <address> peer-group <g>` (or `set peer 
 | `show bgp evpn` | `GET /v1/bgp/evpn` | EVPN routes received, per instance |
 | `show route <table> [<address>]` | `GET /v1/routes/{table}[/{addr}]` | Installed routes, BGP ones marked `bgp` |
 | `clear bgp <instance> <peer> soft-in` | `POST /v1/bgp/{instance}/peer/{peer}/soft-in` | Route refresh request to one peer |
+| `clear bgp <instance> <peer>` | `POST /v1/bgp/{instance}/peer/{peer}/clear` | Releases a maximum-prefix hold; resets an Established session |
 | `show log nos-bgpd[<instance>]` | `GET /v1/logs?source=nos-bgpd%5B<instance>%5D` | The instance's log: sessions, NOTIFICATIONs, learned routes, damping |
