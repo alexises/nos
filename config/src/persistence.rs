@@ -79,6 +79,7 @@ mod tests {
                 peer_groups: Vec::new(),
                 peers: Vec::new(),
                 cluster_id: None,
+                confederation: nos_proto::BgpConfederation::default(),
                 routing_table: None,
                 redistribute_policy: None,
             }],

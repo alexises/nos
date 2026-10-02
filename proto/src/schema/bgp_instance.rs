@@ -51,6 +51,16 @@ pub struct BgpInstance {
     #[cli(topic = BgpInstanceClusterId)]
     pub cluster_id: Option<Ipv4Addr>,
 
+    /// RFC 5065 confederation: once `identifier` is set, `asn` is this
+    /// router's member AS and `identifier` the AS the confederation shows
+    /// to the outside. A plain struct (not an `Option`) so the CLI can set
+    /// its two fields one at a time. Checked by
+    /// `valid_route_reflection_and_server`.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BgpInstanceConfederation)]
+    pub confederation: BgpConfederation,
+
     /// The name of the `RoutingTable` that claims this instance (i.e. the
     /// VRF it belongs to), mirrored from that table's `bgp_instance` field.
     /// Derived and read-only: never set by any `BgpInstanceOp`, recomputed
@@ -76,6 +86,54 @@ pub struct BgpInstance {
     pub redistribute_policy: Option<String>,
 }
 
+/// RFC 5065 §2: the confederation identifier (`None`: not in a
+/// confederation) and the other member ASes (`peers`) — a peer-group whose
+/// `remote_as` is one of them is a confederation-external peer, not an
+/// external one.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
+pub struct BgpConfederation {
+    #[serde(default)]
+    #[cli(topic = BgpInstanceConfederationIdentifier)]
+    pub identifier: Option<u32>,
+    #[serde(default)]
+    #[cli(topic = BgpInstanceConfederationPeer)]
+    pub peers: Vec<u32>,
+}
+
+impl BgpConfederation {
+    /// `asn` is another member AS — only meaningful with an identifier set.
+    pub fn is_member(&self, asn: u32) -> bool {
+        self.identifier.is_some() && self.peers.contains(&asn)
+    }
+}
+
+fn valid_confederation(instance: &BgpInstance) -> garde::Result {
+    let c = &instance.confederation;
+    let Some(id) = c.identifier else {
+        if c.peers.is_empty() {
+            return Ok(());
+        }
+        return Err(garde::Error::new(
+            "confederation peers need a confederation identifier",
+        ));
+    };
+    if id == 0 || id == u32::MAX || id == instance.asn {
+        return Err(garde::Error::new(
+            "confederation identifier must be a valid asn (1..=4294967294) different from this instance's asn",
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for &p in &c.peers {
+        if p == 0 || p == u32::MAX || p == instance.asn || p == id || !seen.insert(p) {
+            return Err(garde::Error::new(
+                "confederation peers must be distinct valid asns, neither this instance's asn nor the confederation identifier",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The placeholder a new `BgpInstance` starts from (`edit` on a missing one).
 impl Default for BgpInstance {
     fn default() -> Self {
@@ -86,6 +144,7 @@ impl Default for BgpInstance {
             peer_groups: Vec::new(),
             peers: Vec::new(),
             cluster_id: None,
+            confederation: crate::schema::BgpConfederation::default(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -105,9 +164,12 @@ impl Default for BgpInstance {
 ///   asn`) — reflection is an iBGP-only concept (RFC 4456).
 /// - `route_server_client` requires an eBGP peer-group (`remote_as != asn`)
 ///   — a route server's transparency (no `AS_PATH` prepend) is an eBGP concept
-///   (RFC 7947).
+///   (RFC 7947) — outside the confederation, if there is one.
+/// - `confederation`: identifier in 1..=4294967294 and not `asn`; peers
+///   distinct, neither `asn` nor the identifier (RFC 5065).
 pub(crate) fn valid_route_reflection_and_server(instances: &[BgpInstance]) -> garde::Result {
     for instance in instances {
+        valid_confederation(instance)?;
         for group in &instance.peer_groups {
             if group.route_reflector_client && group.route_server_client {
                 return Err(garde::Error::new(
@@ -127,6 +189,11 @@ pub(crate) fn valid_route_reflection_and_server(instances: &[BgpInstance]) -> ga
             if group.route_server_client && group.remote_as == instance.asn {
                 return Err(garde::Error::new(
                     "route-server-client requires an eBGP peer-group (remote-as must differ from this instance's asn)",
+                ));
+            }
+            if group.route_server_client && instance.confederation.is_member(group.remote_as) {
+                return Err(garde::Error::new(
+                    "route-server-client requires a peer-group outside the confederation (remote-as must not be a confederation peer)",
                 ));
             }
         }
@@ -152,6 +219,7 @@ mod tests {
             peer_groups: Vec::new(),
             peers: Vec::new(),
             cluster_id: None,
+            confederation: crate::schema::BgpConfederation::default(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -316,6 +384,35 @@ mod tests {
         inst.peer_groups = vec![group_with_flags("pg1", 65001, false, true)];
         let cfg = config_with(vec![inst]);
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn confederation_is_checked() {
+        use super::BgpConfederation;
+        let check = |identifier: u32, peers: Vec<u32>, rs_remote: Option<u32>| {
+            let mut inst = instance("r1", 65101);
+            inst.confederation = BgpConfederation {
+                identifier: Some(identifier),
+                peers,
+            };
+            if let Some(r) = rs_remote {
+                inst.peer_groups = vec![group_with_flags("pg1", r, false, true)];
+            }
+            let cfg = config_with(vec![inst]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(check(65100, vec![65102, 65103], None));
+        assert!(!check(0, vec![], None), "identifier 0");
+        assert!(!check(65101, vec![], None), "identifier == asn");
+        assert!(!check(65100, vec![65101], None), "peer == asn");
+        assert!(!check(65100, vec![65100], None), "peer == identifier");
+        assert!(!check(65100, vec![65102, 65102], None), "duplicate peer");
+        assert!(check(65100, vec![65102], Some(65003)), "external rs client");
+        assert!(!check(65100, vec![65102], Some(65102)), "confed rs client");
+        let mut inst = instance("r1", 65101);
+        inst.confederation.peers = vec![65102];
+        let cfg = config_with(vec![inst]);
+        assert!(cfg.validate_with(&cfg).is_err(), "peers without identifier");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::schema::BgpInstance;
+use crate::schema::{BgpConfederation, BgpInstance};
 
 use super::{bgp_peer, bgp_peer_group, DiffStatus, FieldDiff, SectionDiff};
 
@@ -64,7 +64,25 @@ fn changed_fields(base: &BgpInstance, candidate: &BgpInstance) -> Vec<FieldDiff>
             new: Some(candidate.asn.to_string()),
         });
     }
+    if base.confederation != candidate.confederation {
+        fields.push(FieldDiff {
+            label: "confederation".to_string(),
+            old: render_confederation(&base.confederation),
+            new: render_confederation(&candidate.confederation),
+        });
+    }
     fields
+}
+
+fn render_confederation(c: &BgpConfederation) -> Option<String> {
+    if *c == BgpConfederation::default() {
+        return None;
+    }
+    let id = c
+        .identifier
+        .map_or_else(|| "unset".to_string(), |i| i.to_string());
+    let peers: Vec<String> = c.peers.iter().map(u32::to_string).collect();
+    Some(format!("identifier {id} peers [{}]", peers.join(", ")))
 }
 
 fn removed_section(instance: &BgpInstance) -> SectionDiff {
@@ -93,22 +111,28 @@ fn removed_section(instance: &BgpInstance) -> SectionDiff {
 }
 
 fn added_section(instance: &BgpInstance) -> SectionDiff {
+    let mut fields = changed_fields(&BgpInstance::default(), instance);
+    fields.retain(|f| f.label == "confederation");
     SectionDiff {
         header: header_for(&instance.name),
         name: instance.name.clone(),
         status: DiffStatus::Added,
-        fields: vec![
-            FieldDiff {
-                label: "router-id".to_string(),
-                old: None,
-                new: Some(instance.router_id.to_string()),
-            },
-            FieldDiff {
-                label: "asn".to_string(),
-                old: None,
-                new: Some(instance.asn.to_string()),
-            },
-        ],
+        fields: [
+            vec![
+                FieldDiff {
+                    label: "router-id".to_string(),
+                    old: None,
+                    new: Some(instance.router_id.to_string()),
+                },
+                FieldDiff {
+                    label: "asn".to_string(),
+                    old: None,
+                    new: Some(instance.asn.to_string()),
+                },
+            ],
+            fields,
+        ]
+        .concat(),
         subsections: [
             bgp_peer_group::diff_bgp_peer_groups(&[], &instance.peer_groups),
             bgp_peer::diff_bgp_peers(&[], &instance.peers),
@@ -131,6 +155,7 @@ mod tests {
             peer_groups: Vec::new(),
             peers: Vec::new(),
             cluster_id: None,
+            confederation: crate::schema::BgpConfederation::default(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -176,6 +201,22 @@ mod tests {
         assert_eq!(sections[0].fields[0].label, "asn");
         assert_eq!(sections[0].fields[0].old.as_deref(), Some("65000"));
         assert_eq!(sections[0].fields[0].new.as_deref(), Some("65001"));
+    }
+
+    #[test]
+    fn confederation_change_is_a_field_diff() {
+        let base = vec![instance("r1", 65101)];
+        let mut c = instance("r1", 65101);
+        c.confederation = BgpConfederation {
+            identifier: Some(65100),
+            peers: vec![65102],
+        };
+        let sections = diff_bgp_instances(&base, &[c]);
+        assert_eq!(sections[0].fields[0].label, "confederation");
+        assert_eq!(
+            sections[0].fields[0].new.as_deref(),
+            Some("identifier 65100 peers [65102]")
+        );
     }
 
     #[test]
