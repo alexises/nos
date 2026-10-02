@@ -25,8 +25,11 @@ use std::cmp::Ordering;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
+use std::time::Duration;
+
 use tokio::sync::{mpsc, watch, Mutex, Notify};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tracing::warn;
 
 use crate::session::ResolvedPeer;
@@ -45,12 +48,12 @@ pub enum FsmCommand {
     /// `clear bgp <instance> <peer> soft-in` — ask this peer to resend its
     /// Adj-RIB-Out to us, for every address family this session negotiated.
     SendRouteRefresh,
-    /// The peer is being administratively shut, de-configured or restarted
-    /// with new config: send a Cease NOTIFICATION (`message` becomes an
-    /// RFC 9003 shutdown communication, for subcode 2 only) and close.
+    /// Send a Cease NOTIFICATION with this subcode and data (already
+    /// encoded by the caller, e.g. an RFC 9003 shutdown communication or the
+    /// RFC 4486 §4 maximum-prefix AFI/SAFI/limit) and close.
     Cease {
         subcode: crate::message::CeaseSubcode,
-        message: Option<String>,
+        data: bytes::Bytes,
     },
 }
 
@@ -115,6 +118,11 @@ pub struct PeerSlot {
     /// indefinitely. Parked here because the slot is already the one
     /// per-peer object shared across both roles.
     passive_task: Mutex<Option<JoinHandle<()>>>,
+    /// Set when the peer tripped its RFC 4486 maximum-prefix limit: when, and
+    /// the `restart_interval` (seconds) after which it may reconnect — `0`
+    /// holds it until `clear_max_prefix`. A shut/no-shut or config change
+    /// replaces the whole slot, which releases it too.
+    max_prefix_hold: std::sync::Mutex<Option<(Instant, u16)>>,
 }
 
 impl PeerSlot {
@@ -128,6 +136,7 @@ impl PeerSlot {
             command_tx,
             command_rx: Mutex::new(command_rx),
             passive_task: Mutex::new(None),
+            max_prefix_hold: std::sync::Mutex::new(None),
         })
     }
 
@@ -146,6 +155,32 @@ impl PeerSlot {
         if let Some(task) = self.passive_task.lock().await.take() {
             task.abort();
         }
+    }
+
+    /// Holds the peer down after a maximum-prefix trip (see `max_prefix_hold`).
+    pub fn trip_max_prefix(&self, restart_interval: u16) {
+        *self.hold() = Some((Instant::now(), restart_interval));
+    }
+
+    /// Releases a maximum-prefix hold (`clear bgp <instance> <peer>`).
+    pub fn clear_max_prefix(&self) {
+        *self.hold() = None;
+    }
+
+    /// Whether the peer is held down by its maximum-prefix limit: no session
+    /// is dialed or accepted while it is.
+    pub fn max_prefix_held(&self) -> bool {
+        match *self.hold() {
+            None => false,
+            Some((_, 0)) => true,
+            Some((at, secs)) => at.elapsed() < Duration::from_secs(u64::from(secs)),
+        }
+    }
+
+    fn hold(&self) -> std::sync::MutexGuard<'_, Option<(Instant, u16)>> {
+        self.max_prefix_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// A snapshot receiver for `session::SessionManager::peer_summaries` to
@@ -382,6 +417,7 @@ mod tests {
             import_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             shutdown: None,
+            maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         })
     }
 
@@ -475,6 +511,23 @@ mod tests {
         assert!(!slot.begin(Role::Passive).await);
         slot.clear(Role::Passive).await;
         assert!(slot.begin(Role::Passive).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn max_prefix_hold_lasts_until_cleared_or_the_restart_interval() {
+        let slot = peer_slot();
+        assert!(!slot.max_prefix_held());
+        slot.trip_max_prefix(0);
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert!(slot.max_prefix_held(), "0 holds until cleared");
+        slot.clear_max_prefix();
+        assert!(!slot.max_prefix_held());
+
+        slot.trip_max_prefix(5);
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert!(slot.max_prefix_held());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(!slot.max_prefix_held(), "released after the interval");
     }
 
     #[tokio::test]

@@ -201,8 +201,10 @@ pub enum FsmSubcode {
 pub enum CeaseSubcode {
     #[allow(dead_code)] // generic fallback, not yet triggered by any code path
     Other = 0,
+    MaximumPrefixesReached = 1,
     AdministrativeShutdown = 2,
     PeerDeconfigured = 3,
+    AdministrativeReset = 4,
     OtherConfigurationChange = 6,
     ConnectionCollisionResolution = 7,
 }
@@ -218,6 +220,16 @@ pub fn encode_shutdown_message(text: &str) -> Bytes {
     let mut data = Vec::with_capacity(end + 1);
     data.push(u8::try_from(end).unwrap_or(u8::MAX));
     data.extend_from_slice(&text.as_bytes()[..end]);
+    Bytes::from(data)
+}
+
+/// RFC 4486 §4: the NOTIFICATION data of a Cease/Maximum Number of Prefixes
+/// Reached is `AFI(2) || SAFI(1) || upper bound(4)`.
+pub fn encode_max_prefix_data(afi: u16, safi: u8, limit: u32) -> Bytes {
+    let mut data = Vec::with_capacity(7);
+    data.extend_from_slice(&afi.to_be_bytes());
+    data.push(safi);
+    data.extend_from_slice(&limit.to_be_bytes());
     Bytes::from(data)
 }
 

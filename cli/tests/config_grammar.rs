@@ -283,3 +283,42 @@ fn ao_key_exclude_options() {
         None
     );
 }
+
+/// #79: per-family maximum-prefix, set and deleted from inside a peer-group.
+#[test]
+fn maximum_prefix_per_family() {
+    let doc = serde_json::to_value(populated()).unwrap();
+    let at: Vec<String> = ["bgp-instance", "R1", "peer-group", "PG1"]
+        .map(String::from)
+        .to_vec();
+    let path = |af: &str| {
+        serde_json::json!([
+            "bgp-instance",
+            "R1",
+            "peer-group",
+            "PG1",
+            "maximum-prefix",
+            af
+        ])
+    };
+    let w =
+        |line: &str| config_grammar::parse(line, &at, &doc).map(|e| serde_json::json!(e.writes));
+    assert_eq!(
+        w("set maximum-prefix ipv4 limit 2 warning-only restart-interval 5"),
+        Some(serde_json::json!([[
+            path("ipv4"),
+            {"limit": 2, "warning_only": true, "restart_interval": 5}
+        ]]))
+    );
+    assert_eq!(
+        w("set maximum-prefix l2vpn-evpn limit 9"),
+        Some(serde_json::json!([[
+            path("l2vpn-evpn"),
+            {"limit": 9, "warning_only": false, "restart_interval": 0}
+        ]]))
+    );
+    assert_eq!(
+        w("delete maximum-prefix ipv6"),
+        Some(serde_json::json!([[path("ipv6"), null]]))
+    );
+}

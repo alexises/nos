@@ -513,6 +513,7 @@ async fn classify_inbound(
     peer: &PeerContext,
     remote_is_ibgp: bool,
     bgp_rib: &Mutex<BgpRib>,
+    slot: &PeerSlot,
 ) -> Option<Event> {
     match msg {
         BgpMessage::Open(open) => Some(Event::OpenReceived(open)),
@@ -520,13 +521,31 @@ async fn classify_inbound(
         BgpMessage::Notification(n) => Some(Event::NotificationReceived(n)),
         BgpMessage::Update(update) => {
             if let State::Established(remote) = state {
-                bgp_rib.lock().await.handle_update(
+                let mut rib = bgp_rib.lock().await;
+                rib.handle_update(
                     peer.remote_address,
                     remote_is_ibgp,
                     remote.bgp_id,
                     &update,
                     &peer.import_policy,
                 );
+                // RFC 4486 §4: over a hard limit, hold the peer down and have
+                // the command arm send the Cease. Once only: UPDATEs read
+                // before that arm runs must not queue a second Cease, which
+                // would outlive this session in the slot's channel.
+                if let Some((family, limit, _)) = rib.check_max_prefix(peer.remote_address) {
+                    if !slot.max_prefix_held() {
+                        slot.trip_max_prefix(limit.restart_interval);
+                        slot.send_command(FsmCommand::Cease {
+                            subcode: CeaseSubcode::MaximumPrefixesReached,
+                            data: message::encode_max_prefix_data(
+                                afi_of(family),
+                                safi_of(family),
+                                limit.limit,
+                            ),
+                        });
+                    }
+                }
             } else {
                 debug!(
                     peer = %peer.remote_address,
@@ -816,7 +835,7 @@ pub async fn run(
                         if let Some(period) = hold_period {
                             hold_deadline = Some(Instant::now() + period);
                         }
-                        match classify_inbound(bgp_msg, &state, &peer, remote_is_ibgp, &bgp_rib).await {
+                        match classify_inbound(bgp_msg, &state, &peer, remote_is_ibgp, &bgp_rib, &slot).await {
                             Some(event) => event,
                             None => continue,
                         }
@@ -868,13 +887,7 @@ pub async fn run(
                         FsmCommand::SendRouteRefresh => {
                             send_route_refresh(&mut writer, &state, &peer).await;
                         }
-                        FsmCommand::Cease { subcode, message } => {
-                            let data = match (subcode, &message) {
-                                (CeaseSubcode::AdministrativeShutdown, Some(m)) => {
-                                    message::encode_shutdown_message(m)
-                                }
-                                _ => Bytes::new(),
-                            };
+                        FsmCommand::Cease { subcode, data } => {
                             let _ = writer
                                 .send(BgpMessage::Notification(NotificationMessage {
                                     error_code: ErrorCode::Cease as u8,
@@ -1000,6 +1013,7 @@ pub async fn run(
                         );
                         let mut rib = bgp_rib.lock().await;
                         rib.set_peer_damping(peer.remote_address, peer.damping);
+                        rib.set_peer_max_prefix(peer.remote_address, slot.peer.maximum_prefix);
                         rib.set_peer_asn(peer.remote_address, *remote_asn);
                         rib.peer_established(
                             peer.remote_address,
@@ -1711,5 +1725,15 @@ mod tests {
         );
         assert!(actions.contains(&Action::ArmHoldTimer(Duration::ZERO)));
         assert!(actions.contains(&Action::ArmKeepaliveTimer(Duration::ZERO)));
+    }
+
+    /// RFC 4486 §4: Cease/Maximum Number of Prefixes Reached carries
+    /// `AFI(2) SAFI(1) limit(4)` for the family that tripped.
+    #[test]
+    fn max_prefix_cease_data_per_family() {
+        let data = |f| message::encode_max_prefix_data(afi_of(f), safi_of(f), 1000).to_vec();
+        assert_eq!(data(AddressFamily::Ipv4Unicast), [0, 1, 1, 0, 0, 3, 0xe8]);
+        assert_eq!(data(AddressFamily::Ipv6Unicast), [0, 2, 1, 0, 0, 3, 0xe8]);
+        assert_eq!(data(AddressFamily::L2vpnEvpn), [0, 25, 70, 0, 0, 3, 0xe8]);
     }
 }

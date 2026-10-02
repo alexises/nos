@@ -295,6 +295,22 @@ pub struct Args {
     #[arg(long)]
     pub clear_damping: bool,
 
+    /// One `<family>=<limit>` per repetition (`ipv4`, `ipv6`, `l2vpn-evpn`):
+    /// sets `--peer-group`'s RFC 4486 maximum-prefix for that family
+    /// (`BgpPeerGroupOp::SetMaximumPrefix`), with the two flags below.
+    #[arg(long = "maximum-prefix", value_parser = parse_maximum_prefix)]
+    pub maximum_prefix: Vec<(AddressFamily, u32)>,
+    /// Applied to every `--maximum-prefix` given: log only, never close.
+    #[arg(long)]
+    pub maximum_prefix_warning_only: bool,
+    /// Applied to every `--maximum-prefix` given: retry after this many
+    /// seconds (0, the default, stays down until cleared).
+    #[arg(long, default_value_t = 0)]
+    pub maximum_prefix_restart_interval: u16,
+    /// Removes that family's maximum-prefix (`ClearMaximumPrefix`).
+    #[arg(long = "clear-maximum-prefix", value_parser = parse_family)]
+    pub clear_maximum_prefix: Vec<AddressFamily>,
+
     /// If set, sets `--peer-group`'s RFC 5082 `max-hops`
     /// (`BgpPeerGroupOp::SetMaxHops`).
     #[arg(long)]
@@ -773,6 +789,20 @@ pub struct Args {
 /// Builds the ordered `ConfigOp` list for one provisioning invocation — pure,
 /// so a caller can apply it over IPC (this crate's bin) or locally onto a
 /// `Config` (`nos-e2e`, which then PUTs the result over the REST API).
+fn parse_family(s: &str) -> Result<AddressFamily, String> {
+    AddressFamily::ALL
+        .into_iter()
+        .find(|af| af.as_str() == s)
+        .ok_or_else(|| format!("unknown address family '{s}' (ipv4, ipv6, l2vpn-evpn)"))
+}
+
+fn parse_maximum_prefix(s: &str) -> Result<(AddressFamily, u32), String> {
+    let (af, n) = s
+        .split_once('=')
+        .ok_or_else(|| "expected <family>=<limit>".to_string())?;
+    Ok((parse_family(af)?, n.parse().map_err(|e| format!("{e}"))?))
+}
+
 fn parse_user(s: &str) -> Result<(String, String), String> {
     s.split_once('=')
         .map(|(n, p)| (n.to_string(), p.to_string()))
@@ -1181,6 +1211,25 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearDamping {
             instance: args.bgp_instance.clone(),
             name: args.peer_group.clone(),
+        }));
+    }
+    for &(family, limit) in &args.maximum_prefix {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetMaximumPrefix {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            family,
+            limit: nos_proto::BgpPrefixLimit {
+                limit,
+                warning_only: args.maximum_prefix_warning_only,
+                restart_interval: args.maximum_prefix_restart_interval,
+            },
+        }));
+    }
+    for &family in &args.clear_maximum_prefix {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearMaximumPrefix {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            family,
         }));
     }
 
@@ -1977,6 +2026,13 @@ mod tests {
             "--damping-half-life",
             "20",
             "--clear-damping",
+            "--maximum-prefix",
+            "ipv4=2",
+            "--maximum-prefix-warning-only",
+            "--maximum-prefix-restart-interval",
+            "5",
+            "--clear-maximum-prefix",
+            "l2vpn-evpn",
             "--source-address-interface",
             "eth1",
             "--source-address-label",
@@ -2031,6 +2087,27 @@ mod tests {
                     half_life: 20,
                     ..Default::default()
                 },
+            }),
+        );
+        has(
+            &ops,
+            &pg(BgpPeerGroupOp::SetMaximumPrefix {
+                instance: "r1".into(),
+                name: "pg1".into(),
+                family: AddressFamily::Ipv4Unicast,
+                limit: nos_proto::BgpPrefixLimit {
+                    limit: 2,
+                    warning_only: true,
+                    restart_interval: 5,
+                },
+            }),
+        );
+        has(
+            &ops,
+            &pg(BgpPeerGroupOp::ClearMaximumPrefix {
+                instance: "r1".into(),
+                name: "pg1".into(),
+                family: AddressFamily::L2vpnEvpn,
             }),
         );
         has(

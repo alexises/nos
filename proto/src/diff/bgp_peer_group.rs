@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use crate::schema::{
     AddressFamily, BgpAoAlgorithm, BgpAuth, BgpPeerGroup, BgpShutdown, SourceAddress,
 };
@@ -95,6 +97,22 @@ fn damping_str(pg: &BgpPeerGroup) -> String {
                 "half-life {} reuse {} suppress {} max-suppress {}",
                 d.half_life, d.reuse, d.suppress, d.max_suppress
             )
+        },
+    )
+}
+
+fn prefix_limit_str(l: Option<crate::schema::BgpPrefixLimit>) -> String {
+    l.map_or_else(
+        || "unset".to_string(),
+        |l| {
+            let mut s = format!("limit {}", l.limit);
+            if l.warning_only {
+                s.push_str(" warning-only");
+            }
+            if l.restart_interval > 0 {
+                let _ = write!(s, " restart-interval {}", l.restart_interval);
+            }
+            s
         },
     )
 }
@@ -240,6 +258,19 @@ fn changed_fields(base: &BgpPeerGroup, candidate: &BgpPeerGroup) -> Vec<FieldDif
             old: Some(shutdown_str(base.shutdown.as_ref())),
             new: Some(shutdown_str(candidate.shutdown.as_ref())),
         });
+    }
+    for af in crate::schema::AddressFamily::ALL {
+        let (old, new) = (
+            base.maximum_prefix.get(af),
+            candidate.maximum_prefix.get(af),
+        );
+        if old != new {
+            fields.push(FieldDiff {
+                label: format!("maximum-prefix {af}"),
+                old: Some(prefix_limit_str(old)),
+                new: Some(prefix_limit_str(new)),
+            });
+        }
     }
     fields
 }
@@ -411,6 +442,7 @@ mod tests {
             import_policy: None,
             export_policy: None,
             shutdown: None,
+            maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
         }
     }
 
@@ -494,6 +526,18 @@ mod tests {
             import_policy: Some("in".to_string()),
             export_policy: Some("out".to_string()),
             shutdown: Some(BgpShutdown { message: None }),
+            maximum_prefix: crate::schema::BgpMaximumPrefix {
+                ipv4: Some(crate::schema::BgpPrefixLimit {
+                    limit: 2,
+                    warning_only: true,
+                    restart_interval: 5,
+                }),
+                l2vpn_evpn: Some(crate::schema::BgpPrefixLimit {
+                    limit: 9,
+                    ..Default::default()
+                }),
+                ipv6: None,
+            },
             ..base.clone()
         };
         let sections = diff_bgp_peer_groups(std::slice::from_ref(&base), &[candidate]);
@@ -528,6 +572,12 @@ mod tests {
                 ("import-policy", nos_rpl::DENY_ALL_NAME, "in"),
                 ("export-policy", nos_rpl::DENY_ALL_NAME, "out"),
                 ("shutdown", "no", "yes"),
+                (
+                    "maximum-prefix ipv4",
+                    "unset",
+                    "limit 2 warning-only restart-interval 5"
+                ),
+                ("maximum-prefix l2vpn-evpn", "unset", "limit 9"),
             ]
         );
         // md5 and a shutdown message render too.

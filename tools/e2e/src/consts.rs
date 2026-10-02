@@ -55,6 +55,9 @@ pub const AS4_AGGREGATOR_ID: &str = "192.0.2.9";
 /// RFC 7606: ExaBGP announces this with a 3-byte (malformed) COMMUNITY, which
 /// router-a must treat as a withdraw instead of resetting the session.
 pub const AS4_BAD_PREFIX: &str = "203.0.114.0/24";
+/// `maximum-prefix`: the IPv4 routes ExaBGP announces to router-a — one more
+/// than the limit the phase trips.
+pub const MAX_PREFIX_ROUTES: [&str; 3] = ["203.0.113.0/24", "203.0.115.0/24", "203.0.116.0/24"];
 pub const EXABGP_IMAGE: &str = "nos-e2e-exabgp:local";
 /// Same release `tools/bench-bgp.sh` pins.
 pub const EXABGP_VERSION: &str = "5.0.13";

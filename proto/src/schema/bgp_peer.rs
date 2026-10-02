@@ -112,6 +112,7 @@ mod tests {
             import_policy: None,
             export_policy: None,
             shutdown: None,
+            maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
         }
     }
 

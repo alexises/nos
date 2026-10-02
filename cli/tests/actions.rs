@@ -243,6 +243,7 @@ fn lab() -> Lab {
                 vec![match r {
                     BgpRequest::GetEvpnRoutes => BgpEvent::EvpnRoutes(Vec::new()),
                     BgpRequest::SendRouteRefresh { .. } => BgpEvent::RouteRefreshSent,
+                    BgpRequest::ClearPeer { .. } => BgpEvent::PeerCleared,
                     _ => BgpEvent::Summary(Vec::new()),
                 }]
             }),
@@ -352,6 +353,7 @@ async fn every_show_command_runs_against_its_daemon() {
             "show ospfv3 database",
             "clear bgp b1 192.0.2.2 soft-in",
             "clear bgp nope 192.0.2.2 soft-in",
+            "clear bgp b1 192.0.2.2",
             "save",
             "not a command",
         ],

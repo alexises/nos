@@ -222,6 +222,7 @@ mod tests {
                 import_policy: None,
                 export_policy: None,
                 shutdown: None,
+                maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             },
             BgpPeerGroup {
                 name: "invalid".to_string(),
@@ -241,6 +242,7 @@ mod tests {
                 import_policy: None,
                 export_policy: None,
                 shutdown: None,
+                maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             },
         ];
         let cfg = config_with(vec![inst]);
@@ -272,6 +274,7 @@ mod tests {
             import_policy: None,
             export_policy: None,
             shutdown: None,
+            maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
         }
     }
 

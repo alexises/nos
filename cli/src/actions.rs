@@ -239,7 +239,11 @@ pub async fn handle_action(
             Outcome::Continue(mode)
         }
         Resolved::ClearBgpSoftIn { instance, peer } => {
-            clear_bgp_soft_in(socket, watchdog_socket, &instance, peer).await;
+            clear_bgp(socket, watchdog_socket, &instance, peer, true).await;
+            Outcome::Continue(mode)
+        }
+        Resolved::ClearBgpPeer { instance, peer } => {
+            clear_bgp(socket, watchdog_socket, &instance, peer, false).await;
             Outcome::Continue(mode)
         }
         Resolved::SaveRunningConfig => {
@@ -834,13 +838,15 @@ async fn show_ospfv3_database(config_socket: &Path, watchdog_socket: &Path) {
     }
 }
 
-/// Targets one named instance (errors clearly if it isn't in the running
-/// config), unlike `show_bgp_brief`'s all-instances loop.
-async fn clear_bgp_soft_in(
+/// `clear bgp <instance> <peer> [soft-in]`. Targets one named instance
+/// (errors clearly if it isn't in the running config), unlike
+/// `show_bgp_brief`'s all-instances loop.
+async fn clear_bgp(
     config_socket: &Path,
     watchdog_socket: &Path,
     instance: &str,
     peer: IpAddr,
+    soft_in: bool,
 ) {
     let cfg = match client::fetch_running_config(config_socket).await {
         Ok(cfg) => cfg,
@@ -860,9 +866,16 @@ async fn clear_bgp_soft_in(
     )
     .await
     {
-        Ok(Some(bgp_socket)) => match bgp_client::send_route_refresh(&bgp_socket, peer).await {
-            Ok(true) => println!("route refresh requested for {peer}"),
-            Ok(false) => eprintln!("error: no established session with {peer} on '{instance}'"),
+        Ok(Some(bgp_socket)) if soft_in => {
+            match bgp_client::send_route_refresh(&bgp_socket, peer).await {
+                Ok(true) => println!("route refresh requested for {peer}"),
+                Ok(false) => eprintln!("error: no established session with {peer} on '{instance}'"),
+                Err(e) => eprintln!("error: {e}"),
+            }
+        }
+        Ok(Some(bgp_socket)) => match bgp_client::clear_peer(&bgp_socket, peer).await {
+            Ok(true) => println!("cleared {peer}"),
+            Ok(false) => eprintln!("error: no peer {peer} on '{instance}'"),
             Err(e) => eprintln!("error: {e}"),
         },
         Ok(None) => println!("bgp instance '{instance}' is not running"),

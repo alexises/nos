@@ -579,6 +579,13 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             instance: instance.to_string(),
             peer: peer.parse().ok()?,
         }),
+    cmd!(["clear" "bgp" (instance: BgpInstanceName) (peer: IpAddr)],
+        Doc::FromConfig(Topic::BgpClearPeer),
+        Always,
+        |instance, peer| Command::ClearBgpPeer {
+            instance: instance.to_string(),
+            peer: peer.parse().ok()?,
+        }),
 ];
 
 /// One whitespace-delimited token of `line`, with its start byte offset.
@@ -710,6 +717,7 @@ mod tests {
         let usages: Vec<_> = COMMAND_SPECS.iter().map(|s| s.usage).collect();
         assert!(usages.contains(&"show route <table> <address>"));
         assert!(usages.contains(&"clear bgp <instance> <peer> soft-in"));
+        assert!(usages.contains(&"clear bgp <instance> <peer>"));
         assert!(usages.contains(&"set source line <line> <text>"));
     }
 

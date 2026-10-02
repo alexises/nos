@@ -80,6 +80,17 @@ pub fn render_bgp_peer_group(group: &BgpPeerGroup, local_asn: u32) -> String {
             d.half_life, d.reuse, d.suppress, d.max_suppress
         );
     }
+    for af in nos_proto::AddressFamily::ALL {
+        if let Some(l) = group.maximum_prefix.get(af) {
+            let _ = write!(line, ", maximum-prefix {af} limit {}", l.limit);
+            if l.warning_only {
+                line.push_str(" warning-only");
+            }
+            if l.restart_interval > 0 {
+                let _ = write!(line, " restart-interval {}", l.restart_interval);
+            }
+        }
+    }
     if group.route_reflector_client {
         line.push_str(", route-reflector-client");
     }
@@ -766,15 +777,32 @@ pub fn render_bgp_summary(instance: &str, peers: &[PeerSummary]) -> String {
             ),
             _ => String::new(),
         };
+        let mut counts = String::new();
+        for (af, n) in ["v4", "v6", "evpn"]
+            .iter()
+            .zip(peer.accepted_prefixes.unwrap_or_default())
+        {
+            if n > 0 {
+                let _ = write!(counts, " {af} {n}");
+            }
+        }
+        let prefixes = if counts.is_empty() {
+            String::new()
+        } else {
+            format!(" prefixes{counts}")
+        };
         lines.push(format!(
-            "  {} AS {remote_as} peer-group {} {} uptime {uptime} hold-time {hold_time}{ao}",
+            "  {} AS {remote_as} peer-group {} {} uptime {uptime} hold-time {hold_time}{ao}{}",
             peer.remote_address,
             peer.peer_group,
             if peer.shutdown {
                 "Idle (shutdown)"
+            } else if peer.max_prefix_held {
+                "Idle (max-prefix)"
             } else {
                 render_bgp_session_state(peer.state)
             },
+            prefixes,
         ));
     }
     lines.join("\n")
@@ -2036,6 +2064,7 @@ mod tests {
             import_policy: None,
             export_policy: None,
             shutdown: None,
+            maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         }
     }
 
@@ -2332,7 +2361,23 @@ mod tests {
             ao_packets_good: None,
             ao_packets_bad: None,
             ao_packets_key_not_found: None,
+            max_prefix_held: false,
+            accepted_prefixes: None,
         }
+    }
+
+    #[test]
+    fn render_bgp_summary_shows_max_prefix_hold_and_prefix_counts() {
+        let mut held = idle_peer("10.0.0.1");
+        held.max_prefix_held = true;
+        let mut up = idle_peer("10.0.0.2");
+        up.state = BgpSessionState::Established;
+        up.accepted_prefixes = Some([3, 0, 2]);
+        assert_eq!(
+            render_bgp_summary("r1", &[held, up]),
+            "bgp instance r1:\n  10.0.0.1 AS - peer-group pg1 Idle (max-prefix) uptime - hold-time -\n  \
+             10.0.0.2 AS - peer-group pg1 Established uptime - hold-time - prefixes v4 3 evpn 2"
+        );
     }
 
     #[test]
