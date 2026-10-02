@@ -118,6 +118,22 @@ impl Logs {
             .cloned()
     }
 
+    /// The last `n` lines matching `pattern`, oldest first.
+    pub fn tail(&self, pattern: &str, n: usize) -> Vec<String> {
+        let re = bre(pattern);
+        let store = self.store.lock().unwrap();
+        let mut out: Vec<_> = store
+            .lines
+            .iter()
+            .rev()
+            .filter(|l| re.is_match(l))
+            .take(n)
+            .cloned()
+            .collect();
+        out.reverse();
+        out
+    }
+
     /// Waits until more than `baseline` lines match; `false` on timeout.
     pub async fn wait_over(&self, pattern: &str, baseline: usize, timeout: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
