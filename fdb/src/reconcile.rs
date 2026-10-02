@@ -179,6 +179,7 @@ async fn es_ports(cfg: &Config, domain: &str, watchdog_socket: &Path) -> Vec<EsP
             port,
             esi,
             single_active: agg.redundancy_mode == nos_proto::EsRedundancy::SingleActive,
+            df_algorithm: agg.df_algorithm,
         });
     }
     out

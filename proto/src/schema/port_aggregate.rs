@@ -57,6 +57,20 @@ pub enum EsRedundancy {
     SingleActive,
 }
 
+/// The RFC 8584 Designated Forwarder election algorithm this PE asks for on
+/// an Ethernet Segment, advertised in its Type-4 route's DF Election extended
+/// community. `Hrw` only takes effect when every PE on the segment advertises
+/// it; otherwise every PE falls back to `Modulo` (RFC 8584 §2.2.3).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
+pub enum DfAlgorithm {
+    /// RFC 7432 §8.5 service carving: `VNI mod N` over the ordered PEs.
+    #[default]
+    Modulo,
+    /// RFC 8584 §3 Highest Random Weight.
+    Hrw,
+}
+
 /// A named Linux bonding device, statically (`Xor`) or LACP-negotiated
 /// (`Lacp`). Same
 /// config surface as a *physical* `Interface` (never a loopback — bonding a
@@ -109,6 +123,13 @@ pub struct PortAggregate {
     #[garde(skip)]
     #[cli(topic = PortAggregateRedundancyMode)]
     pub redundancy_mode: EsRedundancy,
+
+    /// See [`DfAlgorithm`]. `#[serde(default)]` so a config persisted before
+    /// this field existed still loads (as modulo, what it always was).
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = PortAggregateDfAlgorithm)]
+    pub df_algorithm: DfAlgorithm,
 
     /// Overrides `nos-lacpd`'s derived LACP Actor System ID for this bond, so
     /// two PEs sharing an ESI can present the same actor to the customer
@@ -181,6 +202,12 @@ pub(crate) fn valid_port_aggregates(aggregates: &[PortAggregate], ctx: &Config) 
                 agg.name
             )));
         }
+        if agg.df_algorithm != DfAlgorithm::Modulo && agg.esi.is_none() {
+            return Err(garde::Error::new(format!(
+                "port aggregate {} sets a df-algorithm but has no esi",
+                agg.name
+            )));
+        }
     }
     // One aggregate per Ethernet Segment on a PE: two bonds claiming the same
     // ESI would make `nos-fdbd` unable to tell which port a MAC was learned on.
@@ -235,6 +262,7 @@ mod tests {
             lacp_rate: LacpRate::default(),
             esi: None,
             redundancy_mode: EsRedundancy::default(),
+            df_algorithm: DfAlgorithm::default(),
             lacp_system_id: None,
             switching_profile: None,
             mtu: None,
@@ -290,6 +318,17 @@ mod tests {
     fn single_active_needs_an_esi() {
         let mut a = aggregate("bond1");
         a.redundancy_mode = EsRedundancy::SingleActive;
+        let cfg = config_with(vec![a.clone()]);
+        assert!(cfg.validate_with(&cfg).is_err());
+        a.esi = Some("00:11:22:33:44:55:66:77:88:99".to_string());
+        let cfg = config_with(vec![a]);
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn df_algorithm_needs_an_esi() {
+        let mut a = aggregate("bond1");
+        a.df_algorithm = DfAlgorithm::Hrw;
         let cfg = config_with(vec![a.clone()]);
         assert!(cfg.validate_with(&cfg).is_err());
         a.esi = Some("00:11:22:33:44:55:66:77:88:99".to_string());

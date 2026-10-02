@@ -179,6 +179,8 @@ topics! {
     PortAggregateLacpSystemId,
     /// `PortAggregate.redundancy_mode`
     PortAggregateRedundancyMode,
+    /// `PortAggregate.df_algorithm`
+    PortAggregateDfAlgorithm,
     /// `Config.ospf_instances`
     OspfInstance,
     /// `OspfInstance.router_id`

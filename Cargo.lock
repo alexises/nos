@@ -1820,6 +1820,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
+ "crc32fast",
  "futures",
  "netlink-packet-core",
  "netlink-packet-route",

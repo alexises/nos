@@ -83,6 +83,13 @@ fn changed_fields(base: &PortAggregate, candidate: &PortAggregate) -> Vec<FieldD
             new: Some(format!("{:?}", candidate.redundancy_mode)),
         });
     }
+    if base.df_algorithm != candidate.df_algorithm {
+        fields.push(FieldDiff {
+            label: "df-algorithm".to_string(),
+            old: Some(format!("{:?}", base.df_algorithm)),
+            new: Some(format!("{:?}", candidate.df_algorithm)),
+        });
+    }
     for (label, old, new) in [
         ("esi", &base.esi, &candidate.esi),
         (
@@ -180,6 +187,7 @@ mod tests {
             lacp_rate: crate::schema::LacpRate::default(),
             esi: None,
             redundancy_mode: crate::schema::EsRedundancy::default(),
+            df_algorithm: crate::schema::DfAlgorithm::default(),
             lacp_system_id: None,
             switching_profile: None,
             mtu: None,
