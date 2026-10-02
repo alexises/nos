@@ -315,7 +315,7 @@ Over REST the list is `address_families`, with the values `Ipv4Unicast`, `Ipv6Un
 
 ### Four-octet AS numbers (RFC 6793)
 
-AS numbers can be anywhere from 1 to 4294967294. With a peer that does not support four-octet AS numbers, NOS uses the RFC 6793 transition mechanism: its own AS appears as 23456 (`AS_TRANS`) in the OPEN, and AS paths are exchanged as two-octet paths plus an `AS4_PATH` attribute. You configure the real AS numbers on both sides in all cases.
+AS numbers can be anywhere from 1 to 4294967294. With a peer that does not support four-octet AS numbers, NOS uses the RFC 6793 transition mechanism: its own AS appears as 23456 (`AS_TRANS`) in the OPEN, and AS paths are exchanged as two-octet paths plus an `AS4_PATH` attribute. You configure the real AS numbers on both sides in all cases. A received `AS4_PATH` that is malformed, or that carries confederation segments, is ignored and the route is kept with its two-octet path (RFC 7606 §7.11).
 
 ### Source address
 
@@ -346,7 +346,7 @@ A received route is used only if its next hop is reachable through the routing t
 
 ### Best path
 
-For each prefix NOS runs the RFC 4271 §9.1.2.2 decision process over the candidates that passed the import policy, damping and next-hop checks, in this order: highest `LOCAL_PREF`; a route redistributed on this router over a learned one; shortest AS path; lowest origin (IGP, then EGP, then incomplete); lowest `MED`, compared only between routes from the same neighbouring AS (a missing MED counts as 0); eBGP over iBGP; lowest IGP cost to the next hop; between two eBGP routes, the older one; lowest BGP identifier; lowest peer address. The best route is installed in the routing table. When a second-best route with a different next hop exists, it is installed as a backup at a higher metric, so traffic can fail over without waiting for BGP to reconverge.
+For each prefix NOS runs the RFC 4271 §9.1.2.2 decision process over the candidates that passed the import policy, damping and next-hop checks, in this order: highest `LOCAL_PREF`; a route redistributed on this router over a learned one; shortest AS path (an `AS_SET` counts as one AS, confederation segments as none); lowest origin (IGP, then EGP, then incomplete); lowest `MED`, compared only between routes from the same neighbouring AS (a missing MED counts as 0); eBGP over confederation eBGP over iBGP; lowest IGP cost to the next hop; between two eBGP routes, the older one; lowest BGP identifier; lowest peer address. The best route is installed in the routing table. When a second-best route with a different next hop exists, it is installed as a backup at a higher metric, so traffic can fail over without waiting for BGP to reconverge.
 
 ### Communities
 
@@ -496,6 +496,18 @@ $C -X PUT -H 'Content-Type: application/json' -d '"10.255.0.1"' \
   $B/v1/transactions/t8/bgp-instance/r1/cluster-id
 ```
 
+### Confederations (RFC 5065)
+
+A confederation splits one AS into member ASes that peer over eBGP among themselves while the outside world sees a single AS. On each router, the instance's `asn` is its member AS; add the confederation identifier and the other member ASes it peers with:
+
+```
+set bgp instance r1 asn 65101
+set bgp instance r1 confederation identifier 65100
+set bgp instance r1 confederation peer 65102
+```
+
+A peer-group whose `remote-as` is a confederation peer is confederation eBGP. Toward it NOS sends its member AS in the OPEN, prepends it in an `AS_CONFED_SEQUENCE`, and keeps the next hop, `MED` and `LOCAL_PREF` as for iBGP. Toward a peer outside the confederation it sends the identifier in the OPEN, removes the confederation segments from the AS path and prepends the identifier, so that peer configures `remote-as 65100`. A path that already holds the identifier, or that holds the member AS in a confederation segment, is a loop and is dropped. A peer outside the confederation never sends confederation segments: a route that has them is treated as withdrawn, and so is any such route when no confederation is configured. Changing the confederation resets the instance's sessions. `delete confederation peer <asn>` and `delete confederation identifier` undo it.
+
 ### Route server (RFC 7947)
 
 At an exchange point, a route server passes routes between its clients without appearing in their paths. Mark the clients' peer-group with `set route-server-client`; it must be eBGP. For such peers NOS:
@@ -529,6 +541,8 @@ Created with `edit bgp instance <name>`; deleted with `delete bgp instance <name
 | asn | `set bgp instance <i> asn <n>` / `set asn <n>` | `…/asn`, number | 1 to 4294967294; required | not 0 or 4294967295 | This router's AS number | `show config` |
 | router-id | `set bgp instance <i> router-id <a.b.c.d>` / `set router-id <a.b.c.d>` | `…/router-id`, `"1.1.1.1"` | IPv4 address; required | must be set (`0.0.0.0` is refused by peers) | BGP identifier in the OPEN; best-path tie-breaker | `GET /v1/bgp/summary` on the peer (`remote_bgp_id`) |
 | cluster-id | `set bgp instance <i> cluster-id <a.b.c.d>` / `set cluster-id <a.b.c.d>`; `delete bgp instance <i> cluster-id` / `delete cluster-id` | `…/cluster-id`, `"10.255.0.1"` or `null` | IPv4 address; default: the router ID | none | Cluster ID added to `CLUSTER_LIST` when reflecting | `show config` |
+| confederation identifier | `set bgp instance <i> confederation identifier <n>` / `set confederation identifier <n>`; `delete … confederation identifier` | `…/confederation/identifier`, number or `null` | 1 to 4294967294; default: none (not in a confederation) | differs from `asn` | The AS peers outside the confederation see; `asn` becomes the member AS | `show config`; `remote_asn` in the outside peer's `GET /v1/bgp/summary` |
+| confederation peer | `set bgp instance <i> confederation peer <n>` / `set confederation peer <n>`; `delete … confederation peer <n>` | `…/confederation/peer`, list of numbers | ASNs; default: none | distinct, not `asn` nor the identifier, needs an identifier; a route-server-client peer-group can't be one | Peer-groups with this `remote-as` are confederation eBGP | `show config` |
 | routing table | `set routing-table <t> bgp-instance <i>`; `delete routing-table <t> bgp-instance` | `routing-table/<t>/bgp-instance`, `"r1"` | name; default: none | instance must exist; one table per instance | Runs the instance in that table's VRF. Without it, the instance opens no session | `show bgp brief` |
 
 `bgp-instance/<name>/routing-table` and `bgp-instance/<name>/redistribute-policy` also appear in the REST tree. They are read-only copies of the routing table's settings, recomputed at every commit; set the routing table's fields instead.

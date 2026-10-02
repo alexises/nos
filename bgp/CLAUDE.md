@@ -118,6 +118,20 @@ Verified by `nos-e2e maximum-prefix` against ExaBGP.
 
 The command channel lives on `PeerSlot` (not per-connection) since it's already the single per-peer object shared across a peer's active/passive reconnects, alongside `status`. Its receiver is polled in `fsm::run`'s `select!` loop **only while that task's own state is `Established`** — RFC 4271 §6.8 collision resolution always happens before either side reaches `Established` (see above), so the collision loser never polls it: exactly one task ever contends for the shared receiver at a time, with no take/hand-off dance needed.
 
+### Confederations (RFC 5065)
+
+`BgpInstance.confederation { identifier, peers }` (`set bgp instance <i> confederation identifier <asn>` / `... peer <asn>`): once `identifier` is set, `asn` is this router's **member AS** and each peer is one of `session::PeerKind` — `Internal` (`remote_as == asn`), `ConfedExternal` (`remote_as` in `peers`), `External` (anything else). `reconcile::resync` puts the identifier and the peer's membership on `ResolvedPeer`, so a change restarts the session; `LocalIdentity.confed_id` reaches the RIB (`BgpRib::set_confederation`), and `fsm::run` tells it which peers are confed-external (`set_peer_confed`) before `peer_established`.
+
+| Toward | OPEN `My AS` | AS_PATH | NEXT_HOP / MED / LOCAL_PREF |
+|---|---|---|---|
+| `Internal` | member AS | unchanged | as iBGP |
+| `ConfedExternal` | member AS | member AS prepended in an `AS_CONFED_SEQUENCE` | as iBGP: next hop unchanged by default, MED kept, LOCAL_PREF sent |
+| `External` | identifier | confed segments stripped, identifier prepended (route-server clients: stripped, no prepend) | as eBGP |
+
+EVPN origination (`evpn_out::advertise`) follows the same table. On receipt, confed segments from an `External` peer, or from anyone when no confederation is configured, are treat-as-withdraw (`withdraw_announced`, logged `treating bgp update as withdraw: as_path has confederation segments ...`); loop detection drops the identifier (or `asn`) in a plain segment and the member AS in a confed segment, with the existing `dropping bgp update: as_path already contains our own asn` line. Decision step 6 ranks external > confed-external > internal (`peer_rank`; step 8's oldest-route rule applies between two external routes only); a route learned from a confed peer is not iBGP-learned, so it reaches `Internal` peers without route reflection, and the RFC 4456 gate stays keyed on `Internal` only. RPL sees the flat path (`AsPath::flat`), confed ASNs included; an RPL prepend joins the leading `AS_SEQUENCE`.
+
+`AS_PATH` is a structured `as_path::AsPath` (segment types kept, `Debug` of a pure sequence unchanged: `[a, b]`; mixed: `[(65101), 65003, {1, 2}]`), so step 3 counts an `AS_SET` as one hop and confed segments as none, and MED's neighbour AS skips confed segments. Not implemented: `local-as` (a separate issue), a `bestpath med confed` knob. Verified by `nos-e2e confederation`.
+
 ### Route reflection and route server
 
 A `BgpPeerGroup` carries two mutually exclusive bools, `route_reflector_client` and `route_server_client` (enforced, along with the iBGP/eBGP requirement below, by `nos-config`'s commit-time validation — `bgp_instance::valid_route_reflection_and_server`), plus a `BgpInstance.cluster_id: Option<Ipv4Addr>` (`None` resolves to the instance's own `router_id`). Both features are additive on top of the existing single-best-path `BgpRib` — no new process, no new IPC socket.

@@ -1018,6 +1018,175 @@ pub async fn malformed_update(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// RFC 5065 confederation (#15): router-a (member AS `CONFED_ASN_A`) and
+/// router-b (`CONFED_ASN_B`) form confederation `CONFED_ID` and peer as
+/// confederation-external; ExaBGP (router-g) is outside it and peers router-a
+/// with `peer-as CONFED_ID`, so the session coming up proves router-a's OPEN
+/// carries the identifier. Then: ExaBGP's route reaches router-b behind an
+/// AS_CONFED_SEQUENCE of router-a's member AS; router-b's redistributed route
+/// reaches router-a the same way and ExaBGP with only the identifier
+/// (asserted on ExaBGP's parser log, like `as4`); a path holding the
+/// identifier is a loop; and a confed segment from ExaBGP is treat-as-withdraw
+/// without resetting the session.
+pub async fn confederation(w: &mut World) -> anyhow::Result<()> {
+    let confed = |own: u32, peer: u32| {
+        strings(&[
+            "--confederation-id",
+            &CONFED_ID.to_string(),
+            "--confederation-peer",
+            &peer.to_string(),
+            "--asn",
+            &own.to_string(),
+        ])
+    };
+    let mut a_flags = strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--router-id",
+        RID_A,
+        "--peer-group",
+        "pg-b",
+        "--remote-as",
+        &CONFED_ASN_B.to_string(),
+        "--peer",
+        IP_B,
+    ]);
+    a_flags.extend(confed(CONFED_ASN_A, CONFED_ASN_B));
+    let mut b_flags = strings(&[
+        "--address",
+        &format!("{IP_B}/24"),
+        "--router-id",
+        RID_B,
+        "--remote-as",
+        &CONFED_ASN_A.to_string(),
+        "--peer",
+        IP_A,
+    ]);
+    b_flags.extend(confed(CONFED_ASN_B, CONFED_ASN_A));
+    b_flags.extend(strings(&redistribute()));
+    w.start(A, Some(a_flags), &[]).await?;
+    w.start(B, Some(b_flags), &[]).await?;
+    let mut g_flags = strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--router-id",
+        RID_A,
+        "--peer-group",
+        "pg-g",
+        "--remote-as",
+        &ASN_G.to_string(),
+        "--peer",
+        IP_G,
+    ]);
+    g_flags.extend(confed(CONFED_ASN_A, CONFED_ASN_B));
+    w.a()?.provision_flags(&g_flags).await?;
+
+    w.dock
+        .ensure_image(
+            EXABGP_IMAGE,
+            &format!(
+                "FROM ghcr.io/exa-networks/exabgp:{EXABGP_VERSION}\n\
+                 ENV exabgp_daemon_daemonize=false exabgp_log_destination=stdout \\\n    \
+                 exabgp_log_level=DEBUG exabgp_log_all=true\n"
+            ),
+        )
+        .await?;
+    // ExaBGP's config syntax has no way to write a confed segment (`{` opens
+    // a block), so the bad route carries a raw AS_PATH: AS_CONFED_SEQUENCE
+    // [65109] then AS_SEQUENCE [ASN_G].
+    let bad_as_path = format!("0301{:08X}0201{ASN_G:08X}", 65109);
+    let conf = format!(
+        "neighbor {IP_A} {{\n    router-id {RID_G};\n    local-address {IP_G};\n    \
+         local-as {ASN_G};\n    peer-as {CONFED_ID};\n    family {{ ipv4 unicast; }}\n    \
+         static {{\n        route {CONFED_LEARNED_PREFIX} next-hop {IP_G} as-path [ {ASN_G} ];\n        \
+         route {CONFED_LOOP_PREFIX} next-hop {IP_G} as-path [ {ASN_G} {CONFED_ID} ];\n        \
+         route {CONFED_BAD_PREFIX} next-hop {IP_G} attribute [ 0x02 0x40 0x{bad_as_path} ];\n    }}\n}}\n"
+    );
+    w.dock
+        .start_plain(
+            "router-g",
+            EXABGP_IMAGE,
+            NET,
+            IP_G,
+            &["/etc/exabgp.conf"],
+            ("/etc", "exabgp.conf", conf.as_bytes()),
+        )
+        .await?;
+
+    let (a, b) = (w.a()?, w.b()?);
+    log("member ASes in OPEN between router-a and router-b, the identifier toward ExaBGP");
+    b.wait(&format!(
+        "bgp session established peer={IP_A} remote_asn={CONFED_ASN_A}"
+    ))
+    .await?;
+    a.wait(&format!(
+        "bgp session established peer={IP_G} remote_asn={ASN_G}"
+    ))
+    .await?;
+    let established = a.count("bgp session established");
+
+    log("ExaBGP's route reaches router-b behind router-a's member AS, as a confed segment");
+    b.wait(&format!(
+        "loc-rib best path for {CONFED_LEARNED_PREFIX} updated .*as_path=\\[({CONFED_ASN_A}), {ASN_G}\\] .*next_hop=Some({IP_G})"
+    ))
+    .await?;
+    log("router-b's route reaches router-a as a confed segment");
+    a.wait(&format!("{} .*as_path=\\[({CONFED_ASN_B})\\]", loc_rib()))
+        .await?;
+
+    log("a path holding the confederation identifier is a loop");
+    a.wait(&format!(
+        "dropping bgp update: as_path already contains our own asn .*peer={IP_G} as_path=\\[{ASN_G}, {CONFED_ID}\\]"
+    ))
+    .await?;
+    log("a confed segment from outside the confederation is treat-as-withdraw");
+    a.wait(&format!(
+        "treating bgp update as withdraw: as_path has confederation segments .*peer={IP_G}"
+    ))
+    .await?;
+    for p in [CONFED_LOOP_PREFIX, CONFED_BAD_PREFIX] {
+        anyhow::ensure!(
+            a.count(&format!("loc-rib best path for {p}")) == 0,
+            "router-a installed {p}"
+        );
+    }
+    anyhow::ensure!(
+        a.count("bgp session established") == established,
+        "a confederation check reset a session"
+    );
+
+    log("ExaBGP sees router-b's route with only the identifier: AS_SEQUENCE [65100]");
+    // `len 0x06`: one segment holding one ASN, nothing else.
+    let identifier_only = format!(
+        "as-path .* len 0x06 payload 0201 {:04X} {:04X}",
+        CONFED_ID >> 16,
+        CONFED_ID & 0xFFFF
+    );
+    let mut last = String::new();
+    for _ in 0..30 {
+        last = w.dock.logs("router-g").await?;
+        let as_paths: Vec<&str> = last
+            .lines()
+            .filter(|l| bre("as-path .* payload").is_match(l))
+            .collect();
+        if as_paths.iter().any(|l| bre(&identifier_only).is_match(l)) {
+            // A member AS or a confed segment type would mean a leak.
+            let leak = as_paths.iter().find(|l| {
+                l.contains(&format!("{CONFED_ASN_A:04X}"))
+                    || l.contains(&format!("{CONFED_ASN_B:04X}"))
+                    || l.contains("payload 03")
+                    || l.contains("payload 04")
+            });
+            if let Some(l) = leak {
+                bail!("router-a leaked the confederation to ExaBGP: {l}");
+            }
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("ExaBGP never parsed AS_PATH [{CONFED_ID}]: {last}")
+}
+
 /// RFC 4486 §4 maximum-prefix (#79): ExaBGP (router-g) announces
 /// `MAX_PREFIX_ROUTES` (3) IPv4 routes to router-a, whose peer-group allows
 /// fewer. A trip closes the session with Cease subcode 1 and holds the peer
