@@ -747,6 +747,14 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              blocked port keeps its carrier, so a single-active customer device needs end-to-end \
              failure detection (for example an ARP-monitored active-backup bond) to move over.",
         ),
+        Topic::PortAggregateDfAlgorithm => (
+            "Set the Designated Forwarder election algorithm of a port aggregate's Ethernet Segment.",
+            "Sets the df-algorithm of the named port aggregate: `modulo` (the default, RFC 7432 \
+             service carving) or `hrw` (RFC 8584 Highest Random Weight). The choice is advertised \
+             in the segment's Type-4 route; HRW only takes effect when every PE on the segment \
+             asks for it, otherwise every PE falls back to modulo. Needs an `esi` (checked at \
+             commit time).",
+        ),
         Topic::OspfInstance => (
             "Create an OSPF instance in the transaction if it doesn't already exist.",
             concat!(

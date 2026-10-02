@@ -13,11 +13,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nos_proto::evpn_id::{
-    es_import_rt, esi_label_ext, format_esi, parse_esi_label, Esi, DEFAULT_GATEWAY, ENCAP_VXLAN,
+    df_election_ext, es_import_rt, esi_label_ext, format_esi, parse_df_election, parse_esi_label,
+    Esi, DEFAULT_GATEWAY, DF_ALG_HRW, DF_ALG_MODULO, ENCAP_VXLAN,
 };
 use nos_proto::fdb::AD_TAG_ES;
 use nos_proto::{
-    EsEntry, EvpnKey, EvpnRoute, EvpnUpdate, FdbTable, MacEntry, MacSource, NeighEntry,
+    DfAlgorithm, EsEntry, EvpnKey, EvpnRoute, EvpnUpdate, FdbTable, MacEntry, MacSource, NeighEntry,
 };
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::{sleep_until, Instant};
@@ -66,6 +67,8 @@ pub struct EsPort {
     pub esi: Esi,
     /// `redundancy-mode single-active` on the aggregate.
     pub single_active: bool,
+    /// `df-algorithm` on the aggregate: what we ask for in our Type-4.
+    pub df_algorithm: DfAlgorithm,
 }
 
 /// One attached segment's election outcome for this domain. The four bools
@@ -87,6 +90,10 @@ struct Segment {
     ad_pes: Vec<IpAddr>,
     /// Single-active: a non-DF is blocked outright, not just refused BUM.
     single_active: bool,
+    /// The election algorithm in effect (RFC 8584 §2.2.3).
+    algorithm: DfAlgorithm,
+    /// Every PE's Type-4 carried AC-DF, so the per-EVI filter applied.
+    ac_df: bool,
 }
 
 impl Segment {
@@ -101,6 +108,8 @@ impl Segment {
             self.waiting,
             self.up,
             self.single_active,
+            self.algorithm,
+            self.ac_df,
         ) == (
             &o.esi,
             &o.port,
@@ -109,6 +118,8 @@ impl Segment {
             o.waiting,
             o.up,
             o.single_active,
+            o.algorithm,
+            o.ac_df,
         )
     }
 }
@@ -333,25 +344,32 @@ fn local_routes(
         }
         out.insert(key, evpn_route);
     }
-    let mut esis: BTreeMap<Esi, bool> = BTreeMap::new();
+    let mut esis: BTreeMap<Esi, (bool, DfAlgorithm)> = BTreeMap::new();
     for p in r.es_ports.iter().filter(|p| !down.contains(&p.port)) {
-        *esis.entry(p.esi).or_default() |= p.single_active;
+        let e = esis.entry(p.esi).or_default();
+        e.0 |= p.single_active;
+        e.1 = p.df_algorithm;
     }
-    for (esi, single_active) in esis {
+    for (esi, (single_active, alg)) in esis {
         let key = EvpnKey::EthernetSegment {
             rd: r.rd,
             esi,
             origin: r.vtep,
         };
-        // A Type-4 carries only its ES-Import Route Target (RFC 7432 §7.6):
-        // it is for the PEs on the segment, not for a MAC-VRF's import.
+        // A Type-4 carries its ES-Import Route Target (RFC 7432 §7.6) — it is
+        // for the PEs on the segment, not for a MAC-VRF's import — and the DF
+        // Election community (RFC 8584 §2.2), always with AC-DF.
+        let alg = match alg {
+            DfAlgorithm::Modulo => DF_ALG_MODULO,
+            DfAlgorithm::Hrw => DF_ALG_HRW,
+        };
         out.insert(
             key.clone(),
             EvpnRoute {
                 key,
                 vni: 0,
                 next_hop: r.vtep,
-                ext_communities: vec![es_import_rt(&esi)],
+                ext_communities: vec![es_import_rt(&esi), df_election_ext(alg, true)],
                 esi,
             },
         );
@@ -388,13 +406,35 @@ fn local_routes(
     out
 }
 
+/// What one PE's Type-4 routes for a segment ask for (RFC 8584 §2.2): the DF
+/// algorithm (`None`: no DF Election community, or one we don't implement)
+/// and the AC-DF capability. A PE has one Type-4 per domain (per RD); if they
+/// disagree, the conservative reading wins (no algorithm, no AC-DF).
+fn df_capabilities(route: &EvpnRoute) -> (Option<DfAlgorithm>, bool) {
+    route
+        .ext_communities
+        .iter()
+        .find_map(|c| parse_df_election(*c))
+        .map_or((None, false), |(alg, ac_df)| {
+            let alg = match alg {
+                DF_ALG_MODULO => Some(DfAlgorithm::Modulo),
+                DF_ALG_HRW => Some(DfAlgorithm::Hrw),
+                _ => None,
+            };
+            (alg, ac_df)
+        })
+}
+
 /// Elects the Designated Forwarder of every segment this domain attaches to,
-/// from the Type-4 routes received so far, restricted to PEs also attached to
-/// this domain's own EVI (a held per-EVI Ethernet A-D for our VNI, RFC 7432
-/// §8.5 / RFC 8584 §2.1) — a PE on the segment that never joined this EVI is
-/// not a candidate for it. Other PEs are recognised by their Type-4's
-/// originating address; our own is `r.vtep`. A segment whose port is in
-/// `down` is never the DF.
+/// from the Type-4 routes received so far. Other PEs are recognised by their
+/// Type-4's originating address; our own is `r.vtep`. A segment whose port is
+/// in `down` is never the DF.
+///
+/// RFC 8584 §2.2.3, strictly: only when every PE's Type-4 (ours always does)
+/// carries AC-DF are the candidates restricted to PEs also attached to this
+/// domain's own EVI (a held per-EVI Ethernet A-D for our VNI); otherwise the
+/// candidates are RFC 7432's, every Type-4 origin. Separately, HRW runs only
+/// when every candidate asks for it (`df::effective`), else modulo.
 fn plan_df(
     r: &Ready,
     received: &HashMap<EvpnKey, EvpnRoute>,
@@ -404,21 +444,46 @@ fn plan_df(
     r.es_ports
         .iter()
         .map(|p| {
-            let peers: BTreeSet<IpAddr> = received
+            let mut origins: BTreeMap<IpAddr, (Option<DfAlgorithm>, bool)> = BTreeMap::new();
+            for route in received.values() {
+                let EvpnKey::EthernetSegment { esi, origin, .. } = &route.key else {
+                    continue;
+                };
+                if *esi != p.esi || *origin == r.vtep {
+                    continue;
+                }
+                let (alg, ac_df) = df_capabilities(route);
+                origins
+                    .entry(*origin)
+                    .and_modify(|e| {
+                        if e.0 != alg {
+                            e.0 = None;
+                        }
+                        e.1 &= ac_df;
+                    })
+                    .or_insert((alg, ac_df));
+            }
+            let ac_df = origins.values().all(|(_, ac)| *ac);
+            let peers: BTreeSet<IpAddr> = origins
                 .keys()
-                .filter_map(|k| match k {
-                    EvpnKey::EthernetSegment { esi, origin, .. } if *esi == p.esi => Some(*origin),
-                    _ => None,
-                })
-                .filter(|o| *o != r.vtep)
-                .filter(|o| ads.get(&p.esi).is_some_and(|a| a.evi.contains(o)))
+                .filter(|o| !ac_df || ads.get(&p.esi).is_some_and(|a| a.evi.contains(o)))
+                .copied()
                 .collect();
+            let algorithm = df::effective(
+                p.df_algorithm,
+                r.vtep,
+                peers.iter().map(|o| (*o, origins[o].0)),
+            );
+            let winner = match algorithm {
+                DfAlgorithm::Modulo => df::elect(r.vtep, &peers, r.vni),
+                DfAlgorithm::Hrw => df::elect_hrw(r.vtep, &peers, r.vni, &p.esi),
+            };
             let up = !down.contains(&p.port);
             Segment {
                 esi: p.esi,
                 port: p.port.clone(),
                 pes: df::candidates(r.vtep, &peers),
-                df: up && df::elect(r.vtep, &peers, r.vni) == r.vtep,
+                df: up && winner == r.vtep,
                 waiting: false,
                 up,
                 ad_pes: ads
@@ -426,9 +491,18 @@ fn plan_df(
                     .map(|a| a.pes.iter().copied().collect())
                     .unwrap_or_default(),
                 single_active: p.single_active,
+                algorithm,
+                ac_df,
             }
         })
         .collect()
+}
+
+fn algorithm_name(a: DfAlgorithm) -> &'static str {
+    match a {
+        DfAlgorithm::Modulo => "modulo",
+        DfAlgorithm::Hrw => "hrw",
+    }
 }
 
 fn join_ips(ips: &[IpAddr]) -> String {
@@ -670,6 +744,7 @@ impl Fdb {
                 info!(
                     domain = %self.domain, esi = %format_esi(&s.esi), port = %s.port,
                     role = %role,
+                    algorithm = %algorithm_name(s.algorithm), ac_df = s.ac_df,
                     pes = %s.pes.iter().map(ToString::to_string).collect::<Vec<_>>().join(","),
                     "df elected"
                 );
@@ -1090,6 +1165,7 @@ impl Fdb {
                     ad_pes: s.ad_pes.clone(),
                     up: s.up,
                     single_active: s.single_active,
+                    df_algorithm: s.algorithm,
                 })
                 .collect(),
             neigh_suppress: g.neigh_suppress,
@@ -1151,6 +1227,7 @@ mod tests {
                 port: "eth1".to_string(),
                 esi: ESI,
                 single_active: false,
+                df_algorithm: DfAlgorithm::Modulo,
             }],
             ..ready()
         }
@@ -1582,7 +1659,13 @@ mod tests {
         assert!(rx.borrow().routes.is_empty() && rx.borrow().bgp_instance.is_none());
     }
 
+    /// A Type-4 as another nos PE sends it: modulo, AC-DF.
     fn es_route(esi: Esi, origin: &str) -> EvpnRoute {
+        es_route_df(esi, origin, Some(df_election_ext(DF_ALG_MODULO, true)))
+    }
+
+    /// A Type-4 with the given DF Election community, or none (as `GoBGP` sends).
+    fn es_route_df(esi: Esi, origin: &str, df_election: Option<u64>) -> EvpnRoute {
         let origin: IpAddr = origin.parse().unwrap();
         EvpnRoute {
             key: EvpnKey::EthernetSegment {
@@ -1592,9 +1675,88 @@ mod tests {
             },
             vni: 0,
             next_hop: origin,
-            ext_communities: vec![es_import_rt(&esi)],
+            ext_communities: std::iter::once(es_import_rt(&esi))
+                .chain(df_election)
+                .collect(),
             esi,
         }
+    }
+
+    /// `plan_df` for one segment (ours asking for `ours`) against `routes`.
+    fn plan_one(ours: DfAlgorithm, routes: Vec<EvpnRoute>) -> Segment {
+        let mut r = ready_with_segment();
+        r.es_ports[0].df_algorithm = ours;
+        let received: HashMap<EvpnKey, EvpnRoute> =
+            routes.into_iter().map(|x| (x.key.clone(), x)).collect();
+        let ads = ad_index(&r, &received);
+        plan_df(&r, &received, &ads, &BTreeSet::new()).remove(0)
+    }
+
+    // With us (192.0.2.1) and 192.0.1.9 on ESI for VNI 10100, modulo elects
+    // [192.0.1.9, 192.0.2.1][10100 % 2] = 192.0.1.9 but HRW elects us
+    // (weights 1081544908 vs 1754456132, see `df::hrw_weight`).
+    const LOW_PE: &str = "192.0.1.9";
+
+    #[test]
+    fn hrw_runs_only_when_every_pe_asks_for_it() {
+        use DfAlgorithm::{Hrw, Modulo};
+        let peer = |c: Option<u64>| vec![es_route_df(ESI, LOW_PE, c), evi_ad(ESI, LOW_PE)];
+        let hrw = Some(df_election_ext(DF_ALG_HRW, true));
+        let s = plan_one(Hrw, peer(hrw));
+        assert_eq!((s.algorithm, s.df, s.ac_df), (Hrw, true, true));
+        // A peer with no community, or alg 2 (Preference), or modulo: fallback.
+        for c in [
+            None,
+            Some(df_election_ext(2, true)),
+            Some(df_election_ext(DF_ALG_MODULO, true)),
+        ] {
+            let s = plan_one(Hrw, peer(c));
+            assert_eq!((s.algorithm, s.df), (Modulo, false), "{c:?}");
+        }
+        // We are on modulo, the peer on HRW: modulo.
+        let s = plan_one(Modulo, peer(hrw));
+        assert_eq!((s.algorithm, s.df), (Modulo, false));
+    }
+
+    #[test]
+    fn the_per_evi_filter_needs_ac_df_from_every_pe() {
+        // AC-DF everywhere: the PE without this EVI's per-EVI A-D is no candidate.
+        let s = plan_one(
+            DfAlgorithm::Modulo,
+            vec![
+                es_route(ESI, REMOTE),
+                evi_ad(ESI, REMOTE),
+                es_route(ESI, LOW_PE),
+            ],
+        );
+        assert!(s.ac_df);
+        assert!(!s.pes.contains(&LOW_PE.parse().unwrap()));
+        // One PE without AC-DF: back to RFC 7432's list, every Type-4 origin.
+        let s = plan_one(
+            DfAlgorithm::Modulo,
+            vec![
+                es_route(ESI, REMOTE),
+                evi_ad(ESI, REMOTE),
+                es_route_df(ESI, LOW_PE, None),
+            ],
+        );
+        assert!(!s.ac_df);
+        assert_eq!(s.pes.len(), 3);
+    }
+
+    #[test]
+    fn our_type4_asks_for_the_configured_algorithm_with_ac_df() {
+        let mut r = ready_with_segment();
+        r.es_ports[0].df_algorithm = DfAlgorithm::Hrw;
+        let routes = local_routes(&r, &BTreeMap::new(), &BTreeSet::new(), &BTreeSet::new());
+        let es = routes
+            .values()
+            .find(|x| matches!(x.key, EvpnKey::EthernetSegment { .. }))
+            .unwrap();
+        assert_eq!(
+            es.ext_communities,
+            vec![es_import_rt(&ESI), df_election_ext(DF_ALG_HRW, true)]
+        );
     }
 
     fn ad_route(esi: Esi, tag: u32, vni: u32, origin: &str) -> EvpnRoute {
@@ -1748,7 +1910,10 @@ mod tests {
             .values()
             .find(|r| matches!(r.key, EvpnKey::EthernetSegment { .. }))
             .unwrap();
-        assert_eq!(es.ext_communities, vec![es_import_rt(&ESI)]);
+        assert_eq!(
+            es.ext_communities,
+            vec![es_import_rt(&ESI), df_election_ext(DF_ALG_MODULO, true)]
+        );
         // Per-ES A-D: MAX-ET, the RTs, encapsulation and an all-active ESI Label.
         let per_es = t
             .routes

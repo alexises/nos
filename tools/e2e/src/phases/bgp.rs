@@ -2066,6 +2066,31 @@ pub async fn evpn_fdb(w: &mut World) -> anyhow::Result<()> {
 const GOBGP_ESI: [&str; 2] = ["arbitrary", "11:22:33:44:55:66:77:88:99"];
 /// How GoBGP prints that ESI in its RIB.
 const GOBGP_ESI_TEXT: &str = "ESI_ARBITRARY | 11:22:33:44:55:66:77:88:99";
+/// What GoBGP (4.9.0) logs on router-a's Type-4: it has no decoder for the
+/// RFC 8584 DF Election community (EVPN extended community subtype 6) and,
+/// against RFC 4360/7606, treats the whole UPDATE as a withdraw rather than
+/// ignoring the unknown community — so the Type-4 never reaches its RIB.
+const GOBGP_DF_ELECTION_REJECT: &str = "unknown evpn subtype: 6";
+
+/// Waits for GoBGP to log rejecting one more of router-a's Type-4 routes than
+/// `base` (see `GOBGP_DF_ELECTION_REJECT`): the evidence a Type-4 was sent.
+async fn wait_gobgp_type4(w: &World, base: usize) -> anyhow::Result<()> {
+    for _ in 0..30 {
+        if gobgp_type4_count(w).await? > base {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("GoBGP never logged receiving (and rejecting) router-a's Type-4 with its DF Election community")
+}
+
+async fn gobgp_type4_count(w: &World) -> anyhow::Result<usize> {
+    Ok(w.dock
+        .logs("router-g")
+        .await?
+        .matches(GOBGP_DF_ELECTION_REJECT)
+        .count())
+}
 
 /// EVPN multi-homing (RFC 7432 §8): a port aggregate with an `esi` that is an
 /// untagged member of the EVPN broadcast domain.
@@ -2105,6 +2130,8 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
         "bond1",
         "--port-aggregate-esi",
         ESI,
+        "--port-aggregate-df-algorithm",
+        "hrw",
         "--port-aggregate-untagged-domain",
         EVPN_DOMAIN,
         "--enslave-interface-into-port-aggregate",
@@ -2145,8 +2172,12 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
         bail!("show fdb lists router-a as the DF during its wait timer: {table}");
     }
 
-    log("alone on the segment: once the timer ends router-a is the DF and the bond floods");
-    a.wait(&role("df")).await?;
+    log("alone on the segment: once the timer ends router-a is the DF (hrw, nobody disagrees) and the bond floods");
+    a.wait(&format!(
+        "{} algorithm=hrw ac_df=true pes={IP_A}",
+        role("df")
+    ))
+    .await?;
     a.wait(&flooding(true)).await?;
 
     log("pinning a MAC behind the bond and another behind an ordinary port");
@@ -2197,7 +2228,12 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
                 && l.contains(&format!("ip:{IP_A}"))
         })
     };
-    gobgp_evpn_rib(w, "showed router-a's Type-4", es_route).await?;
+    // RFC 8584 §2.2: router-a's Type-4 carries the DF Election community.
+    // GoBGP can't decode it and drops the Type-4 (`GOBGP_DF_ELECTION_REJECT`),
+    // which is the evidence the community is on the wire; the rest of the
+    // routes (separate UPDATEs, other attributes) are unaffected.
+    log("router-a's Type-4 carries the DF Election community (GoBGP rejects it as unknown)");
+    wait_gobgp_type4(w, 0).await?;
 
     // Type-1 (RFC 7432 §8.2/§8.4): per-ES is MAX-ET with an ESI Label community
     // (all-active here), per-EVI is tag 0 with the VNI in the label.
@@ -2246,7 +2282,12 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     };
     bridge_port_flood(w, "router-a", &bond, true).await?;
 
-    log("a peer with only a bare Type-4 (no per-EVI A-D) is not a df candidate for this domain");
+    // RFC 8584 §2.2.3, strictly: GoBGP's Type-4 carries no DF Election
+    // community, so no AC-DF — the per-EVI filter is off and RFC 7432's
+    // candidate list (every Type-4 origin) applies, and HRW falls back to
+    // modulo. The bare-Type-4 PE is a candidate and, lower than router-a,
+    // wins the even VNI (see `consts::ESI_PEER_NO_EVI_ORIGIN`).
+    log("a peer with only a bare Type-4 and no AC-DF is a df candidate again (RFC 7432 list), and hrw falls back to modulo");
     let peer_es_no_evi = |verb: &'static str| {
         let mut v = strings(&[
             "global",
@@ -2265,10 +2306,20 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
         }
         v
     };
-    let base = a.count(&role("non-df"));
+    let fallback = |r: &str| {
+        format!(
+            "{} algorithm=modulo ac_df=false pes={ESI_PEER_NO_EVI_ORIGIN},{IP_A}",
+            role(r)
+        )
+    };
+    let base = a.count(&fallback("non-df"));
     gobgp_owned(w, peer_es_no_evi("add")).await?;
-    a.assert_quiet(&role("non-df"), base, 5).await?;
+    a.wait_new(&fallback("non-df"), base, 30).await?;
+    bridge_port_flood(w, "router-a", &bond, false).await?;
+    let base = a.count(&role("df"));
     gobgp_owned(w, peer_es_no_evi("del")).await?;
+    a.wait_new(&role("df"), base, 30).await?;
+    bridge_port_flood(w, "router-a", &bond, true).await?;
 
     log("a second PE on the segment, also attached to this EVI (per-EVI A-D), with a lower address wins the election");
     let base = a.count(&role("non-df"));
@@ -2452,12 +2503,15 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     let carrier_up =
         format!("segment port carrier changed domain={EVPN_DOMAIN} port={bond} up=true");
     let base = a.count(&carrier_up);
+    let type4_base = gobgp_type4_count(w).await?;
     netns_a(w, &["ip", "link", "set", &bond, "up"]).await?;
     a.wait_new(&carrier_up, base, 30).await?;
     gobgp_evpn_rib(w, "re-advertised router-a's segment routes", |rib| {
-        es_route(rib) && ad_route(rib, true) && ad_route(rib, false)
+        ad_route(rib, true) && ad_route(rib, false)
     })
     .await?;
+    // The Type-4 itself only shows as GoBGP rejecting it again.
+    wait_gobgp_type4(w, type4_base).await?;
 
     log("back to non-DF, then clearing the ESI restores flooding and withdraws it");
     let base = a.count(&role("non-df"));
@@ -2476,6 +2530,12 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
         .context("the ESI flag is in the base flags")?;
     clear.drain(at..=at + 1);
     clear.push("--delete-port-aggregate-esi".to_string());
+    // A df-algorithm needs an esi (commit-time check): back to the default.
+    for f in &mut clear {
+        if f == "hrw" {
+            "modulo".clone_into(f);
+        }
+    }
     a.provision_flags(&clear).await?;
     bridge_port_flood(w, "router-a", &bond, true).await?;
     gobgp_evpn_rib(
@@ -2660,7 +2720,14 @@ async fn arp_requests(
         .with_context(|| format!("counting ARP requests in {file}: {out:?}"))
 }
 
-async fn dataplane_setup(w: &mut World, single_active: bool) -> anyhow::Result<(String, String)> {
+/// `hrw` sets `df-algorithm hrw` on both PEs' bonds; the DF is then router-b
+/// (see the HRW note in `consts.rs`), modulo's router-a. Returns (router-a's bond,
+/// router-b's bond).
+async fn dataplane_setup(
+    w: &mut World,
+    single_active: bool,
+    hrw: bool,
+) -> anyhow::Result<(String, String)> {
     w.start(A, Some(evpn_pe_flags(A, EVPN_DP_RD_A)), &[])
         .await?;
     w.start(B, Some(evpn_pe_flags(B, EVPN_DP_RD_B)), &[])
@@ -2705,24 +2772,22 @@ async fn dataplane_setup(w: &mut World, single_active: bool) -> anyhow::Result<(
     w.dock.network_connect(NET_CE_B, CE_HOST).await;
     w.dock.start_host(H_HOST, HOST_IMAGE, NET_H).await?;
 
-    let mut on_a = evpn_pe_flags(A, EVPN_DP_RD_A);
-    on_a.extend(bond_flags("bond1", true, "eth1"));
-    if single_active {
-        on_a.extend(strings(&[
-            "--port-aggregate-redundancy-mode",
-            "single-active",
-        ]));
-    }
-    a.provision_flags(&on_a).await?;
-    let mut on_b = evpn_pe_flags(B, EVPN_DP_RD_B);
-    on_b.extend(bond_flags("bond1", true, "eth1"));
-    if single_active {
-        on_b.extend(strings(&[
-            "--port-aggregate-redundancy-mode",
-            "single-active",
-        ]));
-    }
-    b.provision_flags(&on_b).await?;
+    let segment_flags = |rd: &str, router: Id| {
+        let mut f = evpn_pe_flags(router, rd);
+        f.extend(bond_flags("bond1", true, "eth1"));
+        if single_active {
+            f.extend(strings(&[
+                "--port-aggregate-redundancy-mode",
+                "single-active",
+            ]));
+        }
+        if hrw {
+            f.extend(strings(&["--port-aggregate-df-algorithm", "hrw"]));
+        }
+        f
+    };
+    a.provision_flags(&segment_flags(EVPN_DP_RD_A, A)).await?;
+    b.provision_flags(&segment_flags(EVPN_DP_RD_B, B)).await?;
     let mut host_port = evpn_pe_flags(B, EVPN_DP_RD_B);
     host_port.extend(bond_flags("bond2", false, "eth2"));
     b.provision_flags(&host_port).await?;
@@ -2743,13 +2808,33 @@ async fn dataplane_setup(w: &mut World, single_active: bool) -> anyhow::Result<(
     ))
     .await?;
 
-    log("election: router-a (lower address) is the segment's DF, router-b is not");
+    // Both PEs always advertise AC-DF (both nos), so `ac_df=true`; `pes=`
+    // names both, so a PE's own lone election before the other's Type-4
+    // arrives can't match.
+    let (alg, a_role, b_role) = if hrw {
+        log("election (hrw): router-b wins on weight, router-a does not");
+        ("hrw", "non-df", "df")
+    } else {
+        log("election (modulo): router-a (lower address) is the segment's DF, router-b is not");
+        ("modulo", "df", "non-df")
+    };
     let (bond_a, bond_b) = (bond_name(a, "bond1").await?, bond_name(b, "bond1").await?);
     let role = |bond: &str, r: &str| {
-        format!("df elected domain={EVPN_DOMAIN} esi={ESI} port={bond} role={r}")
+        format!(
+            "df elected domain={EVPN_DOMAIN} esi={ESI} port={bond} role={r} \
+             algorithm={alg} ac_df=true pes={IP_A},{IP_B}"
+        )
     };
-    a.wait(&role(&bond_a, "df")).await?;
-    b.wait(&role(&bond_b, "non-df")).await?;
+    a.wait(&role(&bond_a, a_role)).await?;
+    b.wait(&role(&bond_b, b_role)).await?;
+    // Each decodes the other's DF Election community (RFC 8584 §2.2).
+    let community = format!("df-election:{alg},ac-df");
+    let evpn = a
+        .rest_expect(Method::GET, "/v1/bgp/evpn", None, 200)
+        .await?;
+    if !evpn.contains(&community) {
+        bail!("router-a's show bgp evpn does not show router-b's {community}: {evpn}");
+    }
     Ok((bond_a, bond_b))
 }
 
@@ -2793,16 +2878,18 @@ async fn dataplane_teardown(w: &World) -> anyhow::Result<()> {
 /// `evpn-fdb`/`evpn-esi` (control plane and kernel state, against GoBGP) this
 /// sends frames.
 ///
-/// Router-a has the lower address, so for the even VNI it is the segment's DF
-/// and router-b is not. With the CE's link to router-b down, every frame the
-/// CE sends enters router-a and must cross the VXLAN to reach the host, and
-/// back; with both up, one broadcast from the host reaches the CE through the
-/// DF only — once — while the non-DF's link stays silent; with the link to
-/// router-a down instead, the CE is bridged locally on router-b.
+/// Both PEs run RFC 8584 HRW (`df-algorithm hrw`), which elects router-b
+/// where modulo would elect router-a (the HRW note in `consts.rs`), so the DF read
+/// back from the kernel proves HRW ran. With the CE's link to router-b down,
+/// every frame the CE sends enters router-a (the non-DF) and must cross the
+/// VXLAN to reach the host, and back; with both up, one broadcast from the
+/// host reaches the CE through the DF only — once — while the non-DF's link
+/// stays silent; with the link to router-a down instead, the CE is bridged
+/// locally on router-b.
 pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
-    let (bond_a, bond_b) = dataplane_setup(w, false).await?;
-    bridge_port_flood(w, "router-a", &bond_a, true).await?;
-    bridge_port_flood(w, "router-b", &bond_b, false).await?;
+    let (bond_a, bond_b) = dataplane_setup(w, false, true).await?;
+    bridge_port_flood(w, "router-a", &bond_a, false).await?;
+    bridge_port_flood(w, "router-b", &bond_b, true).await?;
 
     log("the CE bonds its two links; the host takes an address");
     dataplane_ce(w, "mode balance-xor miimon 100 xmit_hash_policy layer2").await?;
@@ -2814,7 +2901,7 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
 
     neigh_suppression(w).await?;
 
-    log("BUM: one broadcast from the host reaches the CE once, through the DF only");
+    log("BUM: one broadcast from the host reaches the CE once, through the DF (router-b) only");
     host_sh(w, CE_HOST, "ip link set eth1 up; sleep 1").await?;
     host_sh(
         w,
@@ -2832,14 +2919,15 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
+    // The CE's eth0 is its link to router-a (the non-DF), eth1 to router-b.
     let (via_df, via_non_df) = (
-        arp_requests(w, CE_HOST, "/tmp/e0", CE_IP, H_IP).await?,
         arp_requests(w, CE_HOST, "/tmp/e1", CE_IP, H_IP).await?,
+        arp_requests(w, CE_HOST, "/tmp/e0", CE_IP, H_IP).await?,
     );
     if (via_df, via_non_df) != (1, 0) {
         bail!(
-            "the host's broadcast reached the CE {via_df}x through router-a (the DF) and \
-             {via_non_df}x through router-b (the non-DF); expected exactly 1 and 0\n\
+            "the host's broadcast reached the CE {via_df}x through router-b (the DF) and \
+             {via_non_df}x through router-a (the non-DF); expected exactly 1 and 0\n\
              arping: {arping}\ncaptures: {}",
             host_sh(w, CE_HOST, "tail -n +1 /tmp/e0 /tmp/e1").await?
         );
@@ -3049,7 +3137,7 @@ async fn ping_until(w: &World, host: &str, ip: &str, secs: u32) -> anyhow::Resul
 /// ARP probes unanswered on router-a's dead link) moves over; when the carrier
 /// returns router-a is elected again and router-b is blocked again.
 pub async fn evpn_single_active(w: &mut World) -> anyhow::Result<()> {
-    let (bond_a, bond_b) = dataplane_setup(w, true).await?;
+    let (bond_a, bond_b) = dataplane_setup(w, true, false).await?;
     let (a, b) = (w.a()?, w.b()?);
     let role = |bond: &str, r: &str| {
         format!("df elected domain={EVPN_DOMAIN} esi={ESI} port={bond} role={r}")

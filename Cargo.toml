@@ -44,6 +44,7 @@ rtnetlink           = "0.23"
 netlink-packet-core  = "0.9"
 netlink-packet-route = "0.33"
 netlink-sys          = { version = "0.9", features = ["tokio_socket"] }
+crc32fast            = "1"
 fs2                 = "0.4"
 socket2             = { version = "0.5", features = ["all"] }
 libc                = "0.2"

@@ -492,8 +492,12 @@ pub fn render_port_aggregate(agg: &PortAggregate) -> String {
         nos_proto::EsRedundancy::AllActive => "",
         nos_proto::EsRedundancy::SingleActive => ", redundancy-mode single-active",
     };
+    let df_algorithm = match agg.df_algorithm {
+        nos_proto::DfAlgorithm::Modulo => "",
+        nos_proto::DfAlgorithm::Hrw => ", df-algorithm hrw",
+    };
     let mut lines = vec![format!(
-        "port-aggregate {}: mode {:?}, switching-profile {switching_profile}, mtu {mtu}{esi}{redundancy}{system_id}",
+        "port-aggregate {}: mode {:?}, switching-profile {switching_profile}, mtu {mtu}{esi}{redundancy}{df_algorithm}{system_id}",
         agg.name, agg.mode
     )];
     for sub in &agg.subinterfaces {
@@ -1394,7 +1398,7 @@ pub fn render_fdb_table(t: &nos_proto::FdbTable) -> String {
         let pes: Vec<String> = e.pes.iter().map(ToString::to_string).collect();
         let ads: Vec<String> = e.ad_pes.iter().map(ToString::to_string).collect();
         lines.push(format!(
-            "  ethernet-segment {} on {}: {} (PEs {}){}{}",
+            "  ethernet-segment {} on {}: {} (PEs {}){}{}{}",
             e.esi,
             e.port,
             if !e.up {
@@ -1416,6 +1420,10 @@ pub fn render_fdb_table(t: &nos_proto::FdbTable) -> String {
                 ", single-active"
             } else {
                 ""
+            },
+            match e.df_algorithm {
+                nos_proto::DfAlgorithm::Modulo => "",
+                nos_proto::DfAlgorithm::Hrw => ", df-algorithm hrw",
             }
         ));
     }
@@ -2806,6 +2814,7 @@ mod tests {
                 ad_pes: vec!["192.0.2.9".parse().unwrap()],
                 up: true,
                 single_active: false,
+                df_algorithm: nos_proto::DfAlgorithm::Modulo,
             }],
             neigh_suppress: true,
         };
@@ -2828,6 +2837,10 @@ mod tests {
             "non-designated forwarder, port blocked (PEs 192.0.2.1, 192.0.2.9), \
              per-ES A-D from 192.0.2.9, single-active"
         ));
+        // HRW in effect says so.
+        let mut hrw = t.clone();
+        hrw.segments[0].df_algorithm = nos_proto::DfAlgorithm::Hrw;
+        assert!(render_fdb_table(&hrw).ends_with("192.0.2.9, df-algorithm hrw"));
         // A segment without carrier says so instead of naming a role.
         let mut down = t.clone();
         down.segments[0].up = false;
@@ -3030,6 +3043,7 @@ mod tests {
                 name: "bond1".to_string(),
                 esi: Some("00:11:22:33:44:55:66:77:88:99".to_string()),
                 redundancy_mode: nos_proto::EsRedundancy::SingleActive,
+                df_algorithm: nos_proto::DfAlgorithm::default(),
                 lacp_system_id: Some("02:00:00:00:00:01".to_string()),
                 mtu: Some(9000),
                 subinterfaces: vec![Subinterface {
@@ -3377,6 +3391,7 @@ mod tests {
             ad_pes: Vec::new(),
             up: true,
             single_active: false,
+            df_algorithm: nos_proto::DfAlgorithm::Modulo,
         });
         let out = render_fdb_table(&t);
         assert!(out.contains("  no MAC addresses\n"), "{out}");

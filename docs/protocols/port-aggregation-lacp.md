@@ -140,7 +140,7 @@ REST: `DELETE …/interface/eth1/port-aggregate`, the same for `eth2`, then `DEL
 
 **LACP identity.** An LACP partner is identified by a system ID (a MAC address) and a key. NOS derives both from the router and the aggregate; `show lacp` shows them as `system` and `key`. `lacp-system-id` overrides the system ID. It is meant for EVPN multi-homing, where two routers present one LACP partner to a dual-homed device: set the same value on both.
 
-**EVPN multi-homing.** `esi` attaches the aggregate to an EVPN Ethernet Segment, and `redundancy-mode` chooses all-active or single-active forwarding for it. They are documented with EVPN.
+**EVPN multi-homing.** `esi` attaches the aggregate to an EVPN Ethernet Segment, `redundancy-mode` chooses all-active or single-active forwarding for it, and `df-algorithm` the designated forwarder election. They are documented with EVPN.
 
 **`show port-aggregate`** shows each aggregate's mode, switching profile, MTU and subinterfaces, as applied; `show lacp` the LACP state of every `lacp` aggregate. Neither lists the members of an `xor` aggregate: check them in `show config`.
 
@@ -162,11 +162,12 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 | lacp-system-id | `set port-aggregate <pa> lacp-system-id <mac>` / `set lacp-system-id <mac>`; `delete … lacp-system-id` | `port-aggregate/<pa>/lacp-system-id` | unicast MAC, `02:00:00:00:00:01`; default derived | a unicast MAC | the LACP system ID advertised to the partner | `show lacp` (`system`) |
 | esi | `set port-aggregate <pa> esi <esi>` / `set esi <esi>`; `delete … esi` | `port-aggregate/<pa>/esi` | 10 hex bytes; default unset | not all zero; unique among aggregates | EVPN Ethernet Segment, see EVPN | `show bgp evpn` |
 | redundancy-mode | `set port-aggregate <pa> redundancy-mode all-active\|single-active` / `set redundancy-mode …` | `port-aggregate/<pa>/redundancy-mode`, body `"AllActive"` or `"SingleActive"` | `all-active` (default) | `single-active` needs an `esi` | EVPN multi-homing mode, see EVPN | `show config` |
+| df-algorithm | `set port-aggregate <pa> df-algorithm modulo\|hrw` / `set df-algorithm …` | `port-aggregate/<pa>/df-algorithm`, body `"Modulo"` or `"Hrw"` | `modulo` (default) | `hrw` needs an `esi` | EVPN designated forwarder election algorithm, see EVPN | `show config` |
 | switching-profile | `set port-aggregate <pa> switching-profile <sp>` / `set switching-profile <sp>`; `delete … switching-profile` | `port-aggregate/<pa>/switching-profile` | name; default unset | profile exists; tags don't collide with the aggregate's subinterfaces | trunks the bond into the profile's broadcast domains | `show port-aggregate <pa>` |
 | mtu | `set port-aggregate <pa> mtu <n>` / `set mtu <n>`; `delete … mtu` | `port-aggregate/<pa>/mtu` | 68-65535; default 1500, enforced | range | the bond's MTU, which the bond also sets on its members | `show port-aggregate <pa>` |
 | subinterface | `edit port-aggregate <pa> subinterface <tag>`, then `set address <cidr>` / `set routing-table <t>`; `delete port-aggregate <pa> subinterface <tag>` | `port-aggregate/<pa>/subinterface/<tag>`, body `{"tag":<n>,"addresses":[…],"routing_table":…}` | tag 0-4094, as on an interface | as on an interface | routed subinterfaces of the bond (tag 0 is the bond itself) | `show port-aggregate <pa>` |
 
-`delete mode`, `delete lacp-rate` and `delete redundancy-mode` put them back to their default (`xor`, `slow`, `all-active`).
+`delete mode`, `delete lacp-rate`, `delete redundancy-mode` and `delete df-algorithm` put them back to their default (`xor`, `slow`, `all-active`, `modulo`).
 
 ### On a member interface
 

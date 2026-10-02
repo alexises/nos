@@ -114,9 +114,13 @@ pub const LACP_SYSTEM_ID_B: &str = "02:00:00:00:0b:01";
 pub const ESI: &str = "00:11:22:33:44:55:66:77:88:99";
 pub const ESI_PEER_ORIGIN: &str = "10.50.0.1";
 /// `evpn-esi`: a PE that advertises only a bare Type-4 for `ESI` — no per-EVI
-/// A-D for `EVPN_VNI` — lower than router-a's own address, proving RFC 7432
-/// §8.5 / RFC 8584 §2.1's per-EVI membership requirement: it must never win
-/// the DF election for `EVPN_DOMAIN` despite outranking router-a numerically.
+/// A-D for `EVPN_VNI` — and, being GoBGP, no DF Election community, so no
+/// AC-DF. RFC 8584 §2.2.3 (strictly): the per-EVI filter only applies when
+/// every PE advertises AC-DF, so this PE *is* a candidate (RFC 7432's list),
+/// and router-a's `hrw` falls back to modulo. Ranked [10.49.0.1, `IP_A`
+/// (10.50.0.2)], 10100 % 2 == 0: it wins and router-a is the non-DF. The
+/// filter itself (AC-DF everywhere) is covered by `nos-fdb`'s unit tests:
+/// GoBGP's CLI can't attach a DF Election community to its Type-4.
 pub const ESI_PEER_NO_EVI_ORIGIN: &str = "10.49.0.1";
 /// `evpn-esi`: router-a's `--df-wait` — long enough to read the port's real
 /// flood flags while it is still blocked.
@@ -143,6 +147,11 @@ pub const ESI3_MAC: (&str, &str) = ("aa:bb:cc:00:00:05", "192.0.2.35");
 pub const EVPN_DP_RT: &str = "65000:10100";
 pub const EVPN_DP_RD_A: &str = "65001:1";
 pub const EVPN_DP_RD_B: &str = "65002:1";
+// `evpn-dataplane` runs HRW on both PEs. With `ESI` and `EVPN_VNI` (CRC-32 of
+// the tag + ESI = 1003094399), RFC 8584 §3.2 weighs `IP_A` (10.50.0.2) at
+// 51651125 and `IP_B` (10.50.0.3) at 1988780236 — router-b is the HRW DF,
+// where modulo ([.2, .3][10100 % 2]) would pick router-a. Deterministic: the
+// addresses, ESI and VNI are all fixed constants.
 pub const NET_CE_A: &str = "nos-verify-net-ce-a";
 pub const NET_CE_B: &str = "nos-verify-net-ce-b";
 pub const NET_H: &str = "nos-verify-net-h";

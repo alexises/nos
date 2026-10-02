@@ -143,6 +143,9 @@ pub struct EsEntry {
     /// Single-active redundancy: a non-DF blocks the port outright (unicast
     /// too), instead of only refusing BUM.
     pub single_active: bool,
+    /// The DF election algorithm in effect (RFC 8584 §2.2.3): `Hrw` only when
+    /// every candidate PE asked for it, else `Modulo`.
+    pub df_algorithm: crate::DfAlgorithm,
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

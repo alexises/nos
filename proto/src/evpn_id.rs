@@ -149,6 +149,27 @@ pub fn parse_esi_label(c: u64) -> Option<bool> {
     (b[0] == 0x06 && b[1] == 0x01).then_some(b[2] & 1 == 1)
 }
 
+/// RFC 8584 §2.2 DF Alg values.
+pub const DF_ALG_MODULO: u8 = 0;
+pub const DF_ALG_HRW: u8 = 1;
+
+/// The DF Election extended community (RFC 8584 §2.2, type 0x06 subtype 0x06)
+/// a Type-4 route carries: the DF Alg in the low 5 bits of octet 2, then a
+/// 2-octet capability bitmap whose bit 1 (`0x4000`) is AC-DF.
+#[must_use]
+pub fn df_election_ext(alg: u8, ac_df: bool) -> u64 {
+    let bitmap: u16 = if ac_df { 0x4000 } else { 0 };
+    let b = bitmap.to_be_bytes();
+    u64::from_be_bytes([0x06, 0x06, alg & 0x1f, b[0], b[1], 0, 0, 0])
+}
+
+/// `Some((alg, ac_df))` when `c` is a DF Election extended community.
+#[must_use]
+pub fn parse_df_election(c: u64) -> Option<(u8, bool)> {
+    let b = c.to_be_bytes();
+    (b[0] == 0x06 && b[1] == 0x06).then(|| (b[2] & 0x1f, b[3] & 0x40 != 0))
+}
+
 /// The MAC Mobility extended community (RFC 7432 §7.7, type 0x06 subtype
 /// 0x00): a flags octet (bit 0 is the Sticky/static bit), a reserved octet,
 /// then a 4-byte big-endian sequence number.
@@ -183,6 +204,19 @@ mod tests {
         assert_eq!(parse_esi_label(esi_label_ext(true)), Some(true));
         assert_eq!(parse_esi_label(esi_label_ext(false)), Some(false));
         assert_eq!(parse_esi_label(ENCAP_VXLAN), None);
+    }
+
+    #[test]
+    fn df_election_round_trips() {
+        assert_eq!(df_election_ext(DF_ALG_HRW, true), 0x0606_0140_0000_0000);
+        assert_eq!(df_election_ext(DF_ALG_MODULO, false), 0x0606_0000_0000_0000);
+        for alg in [DF_ALG_MODULO, DF_ALG_HRW, 2] {
+            for ac in [false, true] {
+                assert_eq!(parse_df_election(df_election_ext(alg, ac)), Some((alg, ac)));
+            }
+        }
+        assert_eq!(parse_df_election(esi_label_ext(true)), None);
+        assert_eq!(parse_df_election(ENCAP_VXLAN), None);
     }
 
     #[test]

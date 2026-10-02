@@ -62,6 +62,22 @@ impl From<EsRedundancyArg> for EsRedundancy {
     }
 }
 
+/// Clap-facing mirror of `nos_proto::DfAlgorithm` (`modulo` / `hrw`).
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum DfAlgorithmArg {
+    Modulo,
+    Hrw,
+}
+
+impl From<DfAlgorithmArg> for nos_proto::DfAlgorithm {
+    fn from(a: DfAlgorithmArg) -> Self {
+        match a {
+            DfAlgorithmArg::Modulo => nos_proto::DfAlgorithm::Modulo,
+            DfAlgorithmArg::Hrw => nos_proto::DfAlgorithm::Hrw,
+        }
+    }
+}
+
 /// Clap-facing mirror of `nos_proto::LacpRate`, for the same reason as
 /// `PortAggregateModeArg`.
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -582,6 +598,12 @@ pub struct Args {
     /// (`PortAggregateOp::SetRedundancyMode`); needs an ESI at commit time.
     #[arg(long, value_enum)]
     pub port_aggregate_redundancy_mode: Option<EsRedundancyArg>,
+
+    /// If set (requires `--port-aggregate`), sets the aggregate's Ethernet
+    /// Segment DF election algorithm (`PortAggregateOp::SetDfAlgorithm`);
+    /// needs an ESI at commit time. `modulo` resets it.
+    #[arg(long, value_enum)]
+    pub port_aggregate_df_algorithm: Option<DfAlgorithmArg>,
 
     /// If set (requires `--port-aggregate`), overrides the aggregate's LACP
     /// Actor System ID (`PortAggregateOp::SetLacpSystemId`).
@@ -1577,6 +1599,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 },
             ));
         }
+        if let Some(algorithm) = args.port_aggregate_df_algorithm {
+            ops.push(ConfigOp::PortAggregate(PortAggregateOp::SetDfAlgorithm {
+                name: name.clone(),
+                algorithm: algorithm.into(),
+            }));
+        }
         if let Some(system_id) = args.lacp_system_id.clone() {
             ops.push(ConfigOp::PortAggregate(PortAggregateOp::SetLacpSystemId {
                 name: name.clone(),
@@ -1617,13 +1645,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || args.port_aggregate_esi.is_some()
         || args.delete_port_aggregate_esi
         || args.port_aggregate_redundancy_mode.is_some()
+        || args.port_aggregate_df_algorithm.is_some()
         || args.lacp_system_id.is_some()
         || args.port_aggregate_untagged_domain.is_some()
         || args.lacp_rate.is_some()
         || !args.port_aggregate_members.is_empty()
     {
         bail!(
-            "--port-aggregate-mtu/--port-aggregate-address/--port-aggregate-esi/--port-aggregate-redundancy-mode/--lacp-system-id/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
+            "--port-aggregate-mtu/--port-aggregate-address/--port-aggregate-esi/--port-aggregate-redundancy-mode/--port-aggregate-df-algorithm/--lacp-system-id/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
         );
     }
 

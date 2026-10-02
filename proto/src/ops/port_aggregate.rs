@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Config, EsRedundancy, LacpRate, PortAggregate, PortAggregateMode};
+use crate::schema::{
+    Config, DfAlgorithm, EsRedundancy, LacpRate, PortAggregate, PortAggregateMode,
+};
 
 use super::OpError;
 
@@ -63,6 +65,11 @@ pub enum PortAggregateOp {
         name: String,
         mode: EsRedundancy,
     },
+    /// Appended (postcard indexes variants by position).
+    SetDfAlgorithm {
+        name: String,
+        algorithm: DfAlgorithm,
+    },
 }
 
 impl PortAggregateOp {
@@ -76,6 +83,7 @@ impl PortAggregateOp {
                         lacp_rate: LacpRate::default(),
                         esi: None,
                         redundancy_mode: EsRedundancy::default(),
+                        df_algorithm: DfAlgorithm::default(),
                         lacp_system_id: None,
                         switching_profile: None,
                         mtu: None,
@@ -132,6 +140,10 @@ impl PortAggregateOp {
                 find_aggregate_mut(config, name)?.redundancy_mode = *mode;
                 Ok(())
             }
+            PortAggregateOp::SetDfAlgorithm { name, algorithm } => {
+                find_aggregate_mut(config, name)?.df_algorithm = *algorithm;
+                Ok(())
+            }
             PortAggregateOp::Delete { name } => {
                 let before = config.port_aggregates.len();
                 config.port_aggregates.retain(|a| &a.name != name);
@@ -166,6 +178,7 @@ mod tests {
             lacp_rate: LacpRate::default(),
             esi: None,
             redundancy_mode: EsRedundancy::default(),
+            df_algorithm: DfAlgorithm::default(),
             lacp_system_id: None,
             switching_profile: None,
             mtu: None,

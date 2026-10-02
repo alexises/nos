@@ -429,7 +429,8 @@ pub fn encode_nlri(nlri: &EvpnNlri, out: &mut Vec<u8>) {
 /// Route Target / Route Origin as `RT:65000:10000`, VXLAN-style Encapsulation
 /// as `encap:8`, ES-Import as `ES-Import:…`, an ESI Label as
 /// `esi-label:single-active|all-active`, the §7.8 Default Gateway flag as
-/// `default-gw`; anything else as raw hex.
+/// `default-gw`, an RFC 8584 DF Election as `df-election:modulo|hrw|alg<N>`
+/// (`,ac-df` when that capability is set); anything else as raw hex.
 #[must_use]
 pub fn format_ext_community(c: u64) -> String {
     let b = c.to_be_bytes();
@@ -468,6 +469,15 @@ pub fn format_ext_community(c: u64) -> String {
                 "all-active"
             }
         ),
+        (0x06, _) if b[1] == 0x06 => {
+            let alg = match b[2] & 0x1f {
+                0 => "modulo".to_string(),
+                1 => "hrw".to_string(),
+                n => format!("alg{n}"),
+            };
+            let ac_df = if b[3] & 0x40 != 0 { ",ac-df" } else { "" };
+            format!("df-election:{alg}{ac_df}")
+        }
         _ => format!("0x{c:016x}"),
     }
 }
@@ -638,6 +648,18 @@ mod tests {
         assert_eq!(
             format_ext_community(0x0601_0000_0000_0000),
             "esi-label:all-active"
+        );
+        assert_eq!(
+            format_ext_community(0x0606_0140_0000_0000),
+            "df-election:hrw,ac-df"
+        );
+        assert_eq!(
+            format_ext_community(0x0606_0000_0000_0000),
+            "df-election:modulo"
+        );
+        assert_eq!(
+            format_ext_community(0x0606_0200_0000_0000),
+            "df-election:alg2"
         );
         assert_eq!(samples()[4].to_string(), "[3]:[65000:1]:[0]:[192.0.2.1]");
     }

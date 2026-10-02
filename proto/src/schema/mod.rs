@@ -48,7 +48,7 @@ pub use ospfv3_area::Ospfv3Area;
 pub use ospfv3_instance::Ospfv3Instance;
 pub use ospfv3_profile::Ospfv3Profile;
 pub use policy_definition::PolicyDefinition;
-pub use port_aggregate::{EsRedundancy, LacpRate, PortAggregate, PortAggregateMode};
+pub use port_aggregate::{DfAlgorithm, EsRedundancy, LacpRate, PortAggregate, PortAggregateMode};
 pub use prefix_list::{PrefixList, PrefixListEntry};
 pub use routing_table::{
     Redistribute, RedistributeSource, RedistributeTarget, RestApi, RoutingTable,
