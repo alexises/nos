@@ -128,6 +128,7 @@ fn to_policy_input(
             communities: &route.communities,
             extended_communities: &route.extended_communities,
             large_communities: &route.large_communities,
+            validation_state: route.validation_state,
         },
     }
 }
@@ -254,8 +255,10 @@ fn learn_prefix(
         Some(route) => {
             if damping.enabled(from) {
                 if let Some(old) = table.get(&prefix) {
+                    // An RPKI state change alone is no flap (#17).
                     let same = RibRoute {
                         received_at: old.received_at,
+                        validation_state: old.validation_state,
                         ..route.clone()
                     } == *old;
                     if !same {
@@ -267,6 +270,7 @@ fn learn_prefix(
                 peer = %from,
                 atomic_aggregate = route.atomic_aggregate,
                 aggregator = ?route.aggregator.map(|a| (a.asn, a.router_id)),
+                validation_state = ?route.validation_state,
                 "bgp: learned route for {prefix} into adj-rib-in"
             );
             if table.insert(prefix, route).is_none() && prefix.addr().is_ipv6() {
@@ -375,6 +379,9 @@ pub struct RibRoute {
     /// RFC 4271 §5.1.6/§5.1.7, preserved in transit (never set locally).
     pub atomic_aggregate: bool,
     pub aggregator: Option<message::Aggregator>,
+    /// RFC 6811 origin validation against the instance's current VRP set,
+    /// computed before import policy runs (`this.bgp.validation_state`).
+    pub validation_state: nos_rpl::ValidationState,
 }
 
 /// One update this instance needs to send out over a specific peer's
@@ -592,6 +599,9 @@ pub struct BgpRib {
     /// to resolve which `nos-ribd` instance, if any, this instance's best
     /// routes should be pushed to.
     owning_routing_table: Option<String>,
+    /// The RPKI VRP set (RFC 6811) every route is validated against, from
+    /// the instance's RTR client (`crate::rpki`).
+    vrps: Arc<crate::rpki::VrpTable>,
 }
 
 impl Default for BgpRib {
@@ -633,6 +643,56 @@ impl BgpRib {
             damping: Damping::default(),
             mac_mobility: MacMobility::default(),
             owning_routing_table: None,
+            vrps: Arc::default(),
+        }
+    }
+
+    /// The origin AS a route with `path` validates as (RFC 6811 §2): our
+    /// own AS — the confederation identifier, if any — for a path with no
+    /// non-confederation segment.
+    fn validate(&self, prefix: IpNet, path: &AsPath) -> nos_rpl::ValidationState {
+        self.vrps.validate(
+            prefix,
+            crate::rpki::origin_as(path, self.confed_id.unwrap_or(self.local_asn)),
+        )
+    }
+
+    pub fn vrps(&self) -> Arc<crate::rpki::VrpTable> {
+        self.vrps.clone()
+    }
+
+    /// Installs a new VRP set and re-validates every held route in place,
+    /// re-deciding each prefix whose state changed — so best path and export
+    /// policies see it at once. An import policy reading the state needs the
+    /// routes again (rejected ones aren't held), which is the caller's route
+    /// refresh (`SessionManager::apply_vrps`).
+    pub fn set_vrps(&mut self, vrps: Arc<crate::rpki::VrpTable>) {
+        self.vrps = vrps;
+        let local = self.confed_id.unwrap_or(self.local_asn);
+        let mut touched = HashSet::new();
+        for table in self.adj_rib_in.values_mut() {
+            for (prefix, route) in table.iter_mut() {
+                let state = self
+                    .vrps
+                    .validate(*prefix, crate::rpki::origin_as(&route.as_path, local));
+                if state != route.validation_state {
+                    route.validation_state = state;
+                    touched.insert(*prefix);
+                }
+            }
+        }
+        for prefix in self.redistribute_raw.clone() {
+            if self.refilter_redistribute(prefix) {
+                touched.insert(prefix);
+            }
+        }
+        info!(
+            vrps = self.vrps.len(),
+            revalidated = touched.len(),
+            "rpki vrp set applied"
+        );
+        for prefix in touched {
+            self.recompute_and_propagate(prefix);
         }
     }
 
@@ -1175,10 +1235,16 @@ impl BgpRib {
                     large_communities: attrs.large_communities.clone(),
                     atomic_aggregate: attrs.atomic_aggregate,
                     aggregator: attrs.aggregator,
+                    validation_state: nos_rpl::ValidationState::NotFound,
                 };
+                let origin_as = crate::rpki::origin_as(
+                    &attrs.as_path,
+                    self.confed_id.unwrap_or(self.local_asn),
+                );
                 for prefix in &update.nlri {
                     let candidate = RibRoute {
                         next_hop: Some(IpAddr::V4(attrs.next_hop)),
+                        validation_state: self.vrps.validate(IpNet::V4(*prefix), origin_as),
                         ..base_route.clone()
                     };
                     learn_prefix(
@@ -1196,6 +1262,7 @@ impl BgpRib {
                     for prefix in &mp.nlri {
                         let candidate = RibRoute {
                             next_hop: Some(mp.next_hop),
+                            validation_state: self.vrps.validate(*prefix, origin_as),
                             ..base_route.clone()
                         };
                         learn_prefix(
@@ -1306,12 +1373,11 @@ impl BgpRib {
     /// this to decide whether `recompute_and_propagate` is warranted.
     fn refilter_redistribute(&mut self, prefix: IpNet) -> bool {
         let new = if self.redistribute_raw.contains(&prefix) {
-            apply_policy(
-                prefix,
-                redistributed_route(),
-                &self.redistribute_policy,
-                None,
-            )
+            let route = RibRoute {
+                validation_state: self.validate(prefix, &AsPath::default()),
+                ..redistributed_route()
+            };
+            apply_policy(prefix, route, &self.redistribute_policy, None)
         } else {
             None
         };
@@ -1600,6 +1666,7 @@ fn redistributed_route() -> RibRoute {
         communities: Vec::new(),
         extended_communities: Vec::new(),
         large_communities: Vec::new(),
+        validation_state: nos_rpl::ValidationState::NotFound,
     }
 }
 
@@ -5164,6 +5231,65 @@ mod tests {
         }
         assert!(!rib.damping.is_suppressed(peer, &prefix("1.2.3.0/24")));
         assert!(rib.push_snapshot().1.contains_key(&prefix("1.2.3.0/24")));
+    }
+
+    /// #17: routes are validated on receipt and re-validated in place by
+    /// `set_vrps`; an import policy reading the state filters invalid ones,
+    /// and a state change alone is not a flap.
+    #[test]
+    fn rpki_validation_on_receipt_and_on_vrp_change() {
+        use crate::rpki::{Vrp, VrpTable};
+        use nos_rpl::ValidationState::{Invalid, NotFound, Valid};
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        rib.set_peer_damping(peer, Some(BgpDamping::default()));
+        let vrps = |asn| {
+            let mut t = VrpTable::default();
+            t.announce(Vrp {
+                prefix: prefix("1.2.0.0/16"),
+                max_len: 24,
+                asn,
+            });
+            Arc::new(t)
+        };
+        let state = |rib: &BgpRib, p| rib.adj_rib_in[&peer][&prefix(p)].validation_state;
+        rib.set_vrps(vrps(65001));
+        let reject_invalid = nos_rpl::compile(
+            "if this.bgp.validation_state == rpki.invalid:\n    reject\naccept\n",
+            &nos_rpl::Symbols::EMPTY,
+        )
+        .unwrap();
+        let update = ebgp_update(vec!["1.2.3.0/24", "9.9.9.0/24"], vec![65001], "10.0.0.1");
+        rib.handle_update(peer, false, v4("192.0.2.1"), &update, &reject_invalid);
+        assert_eq!(state(&rib, "1.2.3.0/24"), Valid);
+        assert_eq!(state(&rib, "9.9.9.0/24"), NotFound);
+
+        rib.set_vrps(vrps(65002));
+        assert_eq!(state(&rib, "1.2.3.0/24"), Invalid, "re-validated in place");
+        // The peer re-sends it (a route refresh): now rejected.
+        rib.handle_update(peer, false, v4("192.0.2.1"), &update, &reject_invalid);
+        assert!(!rib.adj_rib_in[&peer].contains_key(&prefix("1.2.3.0/24")));
+
+        // Accepted again with a changed state only: no change penalty.
+        rib.set_vrps(vrps(65001));
+        rib.handle_update(peer, false, v4("192.0.2.1"), &update, &nos_rpl::ACCEPT_ALL);
+        rib.set_vrps(vrps(65002));
+        rib.handle_update(peer, false, v4("192.0.2.1"), &update, &nos_rpl::ACCEPT_ALL);
+        assert_eq!(state(&rib, "1.2.3.0/24"), Invalid);
+        assert!(!rib.damping.is_suppressed(peer, &prefix("1.2.3.0/24")));
+
+        // A redistributed route is validated against our own AS.
+        rib.apply_redistribute_update(full_update(vec![("1.2.4.0/24", "10.0.0.9")]));
+        assert_eq!(
+            rib.redistributed[&prefix("1.2.4.0/24")].validation_state,
+            Invalid
+        );
+        rib.set_vrps(vrps(65000));
+        assert_eq!(
+            rib.redistributed[&prefix("1.2.4.0/24")].validation_state,
+            Valid
+        );
     }
 
     fn v6_update(nlri: Vec<&str>) -> UpdateMessage {

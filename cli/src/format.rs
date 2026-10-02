@@ -178,6 +178,12 @@ pub fn render_bgp_instance(instance: &BgpInstance) -> String {
     for peer in &instance.peers {
         lines.push(format!("  {}", render_bgp_peer(peer)));
     }
+    for c in &instance.rpki_caches {
+        lines.push(format!(
+            "  rpki-cache {} port {} preference {}",
+            c.address, c.port, c.preference
+        ));
+    }
     lines.join("\n")
 }
 
@@ -827,6 +833,31 @@ pub fn render_bgp_evpn(instance: &str, routes: &[EvpnRouteSummary]) -> String {
             r.next_hop,
             r.route,
             r.extended_communities.join(" ")
+        ));
+    }
+    lines.join("\n")
+}
+
+/// One BGP instance's RPKI caches, one line each — `show bgp rpki`.
+pub fn render_bgp_rpki(instance: &str, caches: &[nos_proto::RpkiCacheStatus]) -> String {
+    if caches.is_empty() {
+        return format!("bgp instance {instance}: no rpki caches");
+    }
+    let opt = |v: Option<String>| v.unwrap_or_else(|| "-".to_string());
+    let mut lines = vec![format!("bgp instance {instance}:")];
+    for c in caches {
+        lines.push(format!(
+            "  {} port {} preference {} {:?}{} version {} session {} serial {} vrps {} updated {}",
+            c.address,
+            c.port,
+            c.preference,
+            c.state,
+            if c.active { " (in use)" } else { "" },
+            opt(c.version.map(|v| v.to_string())),
+            opt(c.session_id.map(|v| v.to_string())),
+            opt(c.serial.map(|v| v.to_string())),
+            c.vrp_count,
+            opt(c.last_update_secs.map(|s| format!("{s}s ago"))),
         ));
     }
     lines.join("\n")
@@ -1682,6 +1713,7 @@ mod tests {
             peers: Vec::new(),
             cluster_id: None,
             confederation: nos_proto::BgpConfederation::default(),
+            rpki_caches: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -2387,6 +2419,31 @@ mod tests {
     }
 
     #[test]
+    fn render_bgp_rpki_lists_one_cache_per_line() {
+        assert_eq!(
+            render_bgp_rpki("r1", &[]),
+            "bgp instance r1: no rpki caches"
+        );
+        let c = nos_proto::RpkiCacheStatus {
+            address: "192.0.2.5".parse().unwrap(),
+            port: 323,
+            preference: 1,
+            state: nos_proto::RpkiSessionState::Established,
+            active: true,
+            version: Some(1),
+            session_id: Some(7),
+            serial: Some(42),
+            vrp_count: 3,
+            last_update_secs: Some(5),
+        };
+        assert_eq!(
+            render_bgp_rpki("r1", &[c]),
+            "bgp instance r1:\n  192.0.2.5 port 323 preference 1 Established (in use) version 1 \
+             session 7 serial 42 vrps 3 updated 5s ago"
+        );
+    }
+
+    #[test]
     fn render_bgp_evpn_lists_one_route_per_line() {
         assert_eq!(
             render_bgp_evpn("r1", &[]),
@@ -2815,6 +2872,7 @@ mod tests {
                 }],
                 cluster_id: Some(Ipv4Addr::new(9, 9, 9, 9)),
                 confederation: nos_proto::BgpConfederation::default(),
+                rpki_caches: Vec::new(),
                 ..instance("r1", 65001)
             }],
             routing_tables: vec![RoutingTable {

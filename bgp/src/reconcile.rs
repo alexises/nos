@@ -256,6 +256,7 @@ async fn resync(
             peers,
             redistribute_policy,
             fdb_domains,
+            &own.rpki_caches,
         )
         .await;
 }

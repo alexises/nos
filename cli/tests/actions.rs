@@ -98,6 +98,7 @@ fn fake_configd(path: &Path) {
             peers: Vec::new(),
             cluster_id: None,
             confederation: nos_proto::BgpConfederation::default(),
+            rpki_caches: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
         }],
@@ -243,6 +244,7 @@ fn lab() -> Lab {
             "bgp" => serve(role, name, &path, |r: BgpRequest| {
                 vec![match r {
                     BgpRequest::GetEvpnRoutes => BgpEvent::EvpnRoutes(Vec::new()),
+                    BgpRequest::GetRpkiSummary => BgpEvent::RpkiSummary(Vec::new()),
                     BgpRequest::SendRouteRefresh { .. } => BgpEvent::RouteRefreshSent,
                     BgpRequest::ClearPeer { .. } => BgpEvent::PeerCleared,
                     _ => BgpEvent::Summary(Vec::new()),
@@ -348,6 +350,7 @@ async fn every_show_command_runs_against_its_daemon() {
             "show log configd --follow",
             "show bgp brief",
             "show bgp evpn",
+            "show bgp rpki",
             "show ospf neigh",
             "show ospf database",
             "show ospfv3 neigh",

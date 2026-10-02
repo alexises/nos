@@ -27,6 +27,8 @@ pub enum FieldId {
     BgpCommunities,
     BgpExtCommunities,
     BgpLargeCommunities,
+    /// RFC 6811 origin validation state, read-only.
+    BgpValidationState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +178,14 @@ const FIELDS: &[(&[&str], FieldInfo)] = &[
             id: FieldId::BgpLargeCommunities,
             ty: FieldType::ListLargeCommunity,
             mutable: true,
+        },
+    ),
+    (
+        &["bgp", "validation_state"],
+        FieldInfo {
+            id: FieldId::BgpValidationState,
+            ty: FieldType::Enum("rpki"),
+            mutable: false,
         },
     ),
 ];

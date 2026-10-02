@@ -56,9 +56,10 @@ pub async fn bgp_soft_in(
         BgpEvent::PeerNotFound => Err(ApiError::NotFound(format!(
             "no Established session with {peer} in bgp instance '{instance}'"
         ))),
-        other @ (BgpEvent::Summary(_) | BgpEvent::EvpnRoutes(_) | BgpEvent::PeerCleared) => {
-            Err(unexpected("nos-bgpd", &other))
-        }
+        other @ (BgpEvent::Summary(_)
+        | BgpEvent::EvpnRoutes(_)
+        | BgpEvent::PeerCleared
+        | BgpEvent::RpkiSummary(_)) => Err(unexpected("nos-bgpd", &other)),
     }
 }
 
@@ -106,8 +107,9 @@ pub async fn bgp_clear_peer(
         BgpEvent::PeerNotFound => Err(ApiError::NotFound(format!(
             "no peer {peer} in bgp instance '{instance}'"
         ))),
-        other @ (BgpEvent::Summary(_) | BgpEvent::EvpnRoutes(_) | BgpEvent::RouteRefreshSent) => {
-            Err(unexpected("nos-bgpd", &other))
-        }
+        other @ (BgpEvent::Summary(_)
+        | BgpEvent::EvpnRoutes(_)
+        | BgpEvent::RouteRefreshSent
+        | BgpEvent::RpkiSummary(_)) => Err(unexpected("nos-bgpd", &other)),
     }
 }

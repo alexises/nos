@@ -64,6 +64,22 @@ fn changed_fields(base: &BgpInstance, candidate: &BgpInstance) -> Vec<FieldDiff>
             new: Some(candidate.asn.to_string()),
         });
     }
+    if base.rpki_caches != candidate.rpki_caches {
+        let render = |i: &BgpInstance| {
+            (!i.rpki_caches.is_empty()).then(|| {
+                i.rpki_caches
+                    .iter()
+                    .map(|c| format!("{} port {} preference {}", c.address, c.port, c.preference))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+        };
+        fields.push(FieldDiff {
+            label: "rpki-cache".to_string(),
+            old: render(base),
+            new: render(candidate),
+        });
+    }
     if base.confederation != candidate.confederation {
         fields.push(FieldDiff {
             label: "confederation".to_string(),
@@ -112,7 +128,7 @@ fn removed_section(instance: &BgpInstance) -> SectionDiff {
 
 fn added_section(instance: &BgpInstance) -> SectionDiff {
     let mut fields = changed_fields(&BgpInstance::default(), instance);
-    fields.retain(|f| f.label == "confederation");
+    fields.retain(|f| f.label == "confederation" || f.label == "rpki-cache");
     SectionDiff {
         header: header_for(&instance.name),
         name: instance.name.clone(),
@@ -156,6 +172,7 @@ mod tests {
             peers: Vec::new(),
             cluster_id: None,
             confederation: crate::schema::BgpConfederation::default(),
+            rpki_caches: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
         }

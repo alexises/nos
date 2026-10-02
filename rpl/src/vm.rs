@@ -31,6 +31,16 @@ pub enum Origin {
     Incomplete = 2,
 }
 
+/// RFC 6811 §2 origin validation state, `rpki.valid`/`rpki.invalid`/
+/// `rpki.not_found` in a script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ValidationState {
+    Valid = 0,
+    Invalid = 1,
+    #[default]
+    NotFound = 2,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Value {
     Int(i64),
@@ -148,6 +158,15 @@ pub struct CompiledPolicy {
     pub max_stack_depth: usize,
 }
 
+impl CompiledPolicy {
+    /// Whether the script reads `this.bgp.validation_state` — only such a
+    /// policy's verdict can change when the RPKI VRP set does.
+    pub fn reads_validation_state(&self) -> bool {
+        self.code
+            .contains(&Op::LoadField(FieldId::BgpValidationState))
+    }
+}
+
 /// The route data a policy script can see, adapted from whatever the caller's
 /// own route type is — `nos-rpl` has zero knowledge of `RibRoute` or any
 /// other NOS-internal type, so a consumer (e.g. `nos-bgp`) writes a plain
@@ -175,6 +194,7 @@ pub struct BgpInput<'a> {
     pub communities: &'a [u32],
     pub extended_communities: &'a [u64],
     pub large_communities: &'a [(u32, u32, u32)],
+    pub validation_state: ValidationState,
 }
 
 /// Attribute rewrites beyond the always-carried ones on `Verdict::Accept`.
@@ -265,6 +285,7 @@ pub fn run(policy: &CompiledPolicy, input: &Input) -> Verdict {
                     FieldId::BgpPeerAs => Value::Int(i64::from(input.bgp.peer_as)),
                     FieldId::BgpLocalPref => Value::Int(i64::from(cur_local_pref)),
                     FieldId::BgpLearnedViaIbgp => Value::Bool(input.bgp.learned_via_ibgp),
+                    FieldId::BgpValidationState => Value::Enum(input.bgp.validation_state as u8),
                     _ => unreachable!("check.rs rejects LoadField for {id:?}"),
                 };
                 push!(v);

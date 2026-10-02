@@ -1005,6 +1005,28 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Remove a member AS from the confederation's peer list.",
             ),
         ),
+        Topic::BgpInstanceRpkiCache => (
+            "Take RPKI origin validation data from an RPKI-to-Router cache.",
+            concat!(
+                "`rpki-cache <address>`, then `port <n>` / `preference <n>` on it: the instance's nos-bgpd \
+             connects to the cache over RFC 8210 (falling back to version 0) inside the \
+             instance's VRF, and validates every received route's origin AS against the VRPs it \
+             serves (RFC 6811). Only one cache is used at a time: the lowest preference that \
+             answers. Validation changes nothing by itself: an import policy reads \
+             `this.bgp.validation_state` (`rpki.valid`, `rpki.invalid`, `rpki.not_found`).",
+                " ",
+                "Stop using this RPKI cache.",
+            ),
+        ),
+        Topic::BgpInstanceRpkiCachePort => (
+            "Set the RPKI cache's TCP port.",
+            "Defaults to 323, the IANA rpki-rtr port.",
+        ),
+        Topic::BgpInstanceRpkiCachePreference => (
+            "Set the RPKI cache's preference.",
+            "Lower is preferred (RFC 8210 §10); defaults to 0. A cache is used only while every \
+             more preferred one is unreachable.",
+        ),
         Topic::BgpClearPeer => (
             "Reset one BGP peer's session.",
             "Releases a peer held down by its maximum-prefix limit so it can reconnect. A peer \

@@ -528,6 +528,17 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowBgpEvpn),
+    cmd!(["show" "bgp" "rpki"],
+        Doc::Local {
+            summary: "Show every BGP instance's RPKI cache sessions (RFC 8210).",
+            detail: "Queries every configured BGP instance's nos-bgpd (each resolved via \
+                     nos-watchdogd) for its rpki-cache sessions: state, whether the cache's \
+                     VRPs are the ones in use, RTR version, session id, serial, VRP count and \
+                     the time since its last End of Data. An instance whose nos-bgpd isn't \
+                     running is reported individually rather than aborting the whole command.",
+        },
+        Always,
+        Command::ShowBgpRpki),
     cmd!(["show" "ospf" "neigh"],
         Doc::Local {
             summary: "Show a one-line-per-neighbor OSPF adjacency summary across every instance.",

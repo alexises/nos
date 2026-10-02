@@ -68,6 +68,20 @@ pub async fn get_evpn_routes(bgp_socket: &Path) -> Result<Vec<EvpnRouteSummary>,
     }
 }
 
+/// Every configured RPKI cache's RTR session.
+pub async fn get_rpki_summary(
+    bgp_socket: &Path,
+) -> Result<Vec<nos_proto::RpkiCacheStatus>, BgpClientError> {
+    let (mut reader, mut writer) = connect(bgp_socket).await?;
+    writer.send(BgpRequest::GetRpkiSummary).await?;
+    match reader.next().await {
+        Some(Ok(BgpEvent::RpkiSummary(caches))) => Ok(caches),
+        Some(Ok(other)) => Err(BgpClientError::UnexpectedReply(other)),
+        Some(Err(e)) => Err(BgpClientError::Io(e)),
+        None => Err(BgpClientError::ConnectionClosed),
+    }
+}
+
 /// `clear bgp <instance> <peer>`: releases `peer`'s maximum-prefix hold and
 /// resets its session. `Ok(false)` if `peer` isn't configured.
 pub async fn clear_peer(bgp_socket: &Path, peer: IpAddr) -> Result<bool, BgpClientError> {

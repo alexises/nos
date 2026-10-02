@@ -198,6 +198,7 @@ pub async fn logs(
 /// Named so `#[utoipa::path]` can take them as a `body` (it cannot parse nested generics).
 pub type BgpSummaryReport = Vec<InstanceReport<Vec<PeerSummary>>>;
 pub type BgpEvpnReport = Vec<InstanceReport<Vec<EvpnRouteSummary>>>;
+pub type BgpRpkiReport = Vec<InstanceReport<Vec<nos_proto::RpkiCacheStatus>>>;
 pub type OspfNeighborsReport = Vec<InstanceReport<Vec<NeighborSummary>>>;
 pub type OspfDatabaseReport = Vec<InstanceReport<Vec<LsaSummary>>>;
 pub type Ospfv3NeighborsReport = Vec<InstanceReport<Vec<Ospfv3NeighborSummary>>>;
@@ -348,6 +349,30 @@ pub async fn bgp_evpn(State(d): State<Daemons>) -> ApiResult<Json<BgpEvpnReport>
             || BgpRequest::GetEvpnRoutes,
             |e| match e {
                 BgpEvent::EvpnRoutes(v) => Some(v),
+                _ => None,
+            },
+        )
+        .await,
+    ))
+}
+
+#[utoipa::path(get, path = "/v1/bgp/rpki", tag = "show", summary = "RPKI cache sessions (RFC 8210), per instance", responses((status = 200, body = BgpRpkiReport), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn bgp_rpki(State(d): State<Daemons>) -> ApiResult<Json<BgpRpkiReport>> {
+    let names = d
+        .running_config()
+        .await?
+        .bgp_instances
+        .into_iter()
+        .map(|i| i.name)
+        .collect();
+    Ok(Json(
+        per_instance(
+            &d,
+            names,
+            ServiceRef::BgpInstance,
+            || BgpRequest::GetRpkiSummary,
+            |e| match e {
+                BgpEvent::RpkiSummary(v) => Some(v),
                 _ => None,
             },
         )

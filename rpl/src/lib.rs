@@ -16,7 +16,8 @@ pub mod vm;
 
 pub use symbols::{PrefixListEntry, Symbols};
 pub use vm::{
-    AsPathRegexes, BgpInput, CompiledPolicy, Edits, Input, NextHopSet, Op, Origin, Value, Verdict,
+    AsPathRegexes, BgpInput, CompiledPolicy, Edits, Input, NextHopSet, Op, Origin, ValidationState,
+    Value, Verdict,
 };
 
 use std::fmt;
@@ -127,6 +128,7 @@ mod tests {
                 communities: &[],
                 extended_communities: &[],
                 large_communities: &[],
+                validation_state: ValidationState::default(),
             },
         };
         assert_eq!(
@@ -161,6 +163,7 @@ mod tests {
                 communities: &[],
                 extended_communities: &[],
                 large_communities: &[],
+                validation_state: ValidationState::default(),
             },
         };
         assert_eq!(vm::run(&DENY_ALL, &input), Verdict::Reject);

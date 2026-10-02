@@ -46,6 +46,8 @@ pub enum Command {
     /// `show bgp evpn` — every EVPN route received by every configured BGP
     /// instance.
     ShowBgpEvpn,
+    /// `show bgp rpki` — every configured BGP instance's RPKI cache sessions.
+    ShowBgpRpki,
     /// `show ospf neigh` — a one-line-per-link neighbor summary across every
     /// configured OSPF instance.
     ShowOspfNeigh,
@@ -403,6 +405,7 @@ mod tests {
     #[test]
     fn show_bgp_evpn() {
         assert_eq!(Command::parse("show bgp evpn"), Command::ShowBgpEvpn);
+        assert_eq!(Command::parse("show bgp rpki"), Command::ShowBgpRpki);
     }
 
     #[test]

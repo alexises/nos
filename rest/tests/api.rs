@@ -211,6 +211,7 @@ fn bgp_instance(name: &str, asn: u32) -> Value {
         peers: Vec::new(),
         cluster_id: None,
         confederation: nos_proto::BgpConfederation::default(),
+        rpki_caches: Vec::new(),
         routing_table: None,
         redistribute_policy: None,
     })
@@ -653,6 +654,9 @@ async fn router_wide_show_reports_each_instance_that_is_not_running() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v, json!([{ "instance": "r1", "error": "not running" }]));
     let (s, v) = send(app, Method::GET, "/v1/bgp/evpn", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v, json!([{ "instance": "r1", "error": "not running" }]));
+    let (s, v) = send(app, Method::GET, "/v1/bgp/rpki", None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v, json!([{ "instance": "r1", "error": "not running" }]));
     assert_eq!(

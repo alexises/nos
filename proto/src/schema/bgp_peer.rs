@@ -89,6 +89,7 @@ mod tests {
             peers,
             cluster_id: None,
             confederation: crate::schema::BgpConfederation::default(),
+            rpki_caches: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
         }
