@@ -9,7 +9,7 @@ CARGO_FEATURES ?=
 # since #131 (measured 91.7%); raise it as tests land, never lower it.
 COVERAGE_MIN ?= 90
 
-.PHONY: help build fmt fmt-fix clippy clippy-fix fix test test-plain \
+.PHONY: help toolchain-check build fmt fmt-fix clippy clippy-fix fix test test-plain \
         deny audit sast miri coverage mutants check ci tools docker-lint docker-build \
         e2e-preflight docs-fix
 
@@ -17,16 +17,27 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
 		awk 'BEGIN{FS=":.*## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
-build: ## Build the whole workspace
+# Local == CI: rustc must be the toolchain pinned in rust-toolchain.toml, which must equal
+# ci.yml's RUST_TOOLCHAIN. Install with `rustup toolchain install 1.99.0` (rustup reads the
+# file automatically). Escape hatch: ALLOW_TOOLCHAIN_MISMATCH=1.
+toolchain-check: ## Fail unless local rustc == CI's pinned toolchain
+	@pin=$$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml); \
+	ci=$$(sed -n 's/^ *RUST_TOOLCHAIN: *"\(.*\)"/\1/p' .github/workflows/ci.yml); \
+	have=$$(rustc --version | awk '{print $$2}'); \
+	[ "$$pin" = "$$ci" ] || { echo "rust-toolchain.toml ($$pin) != ci.yml RUST_TOOLCHAIN ($$ci)"; exit 1; }; \
+	[ "$$have" = "$$pin" ] || [ -n "$$ALLOW_TOOLCHAIN_MISMATCH" ] || { \
+	  echo "rustc $$have != CI's $$pin: run 'rustup toolchain install $$pin' (or ALLOW_TOOLCHAIN_MISMATCH=1)"; exit 1; }
+
+build: toolchain-check ## Build the whole workspace
 	cargo build --workspace
 
-fmt: ## Check formatting (matches CI)
+fmt: toolchain-check ## Check formatting (matches CI)
 	cargo fmt --all -- --check
 
 fmt-fix: ## Apply formatting
 	cargo fmt --all
 
-clippy: ## Lint the whole workspace, warnings deny (matches CI)
+clippy: toolchain-check ## Lint the whole workspace, warnings deny (matches CI)
 	cargo clippy --workspace --all-targets
 
 clippy-fix: ## Apply clippy's auto-fixable suggestions, then re-check
@@ -35,7 +46,7 @@ clippy-fix: ## Apply clippy's auto-fixable suggestions, then re-check
 
 fix: fmt-fix clippy-fix ## Autofix everything that has an autofix (fmt + clippy --fix)
 
-test: ## Run tests via nextest (matches CI)
+test: toolchain-check ## Run tests via nextest (matches CI)
 	@command -v cargo-nextest >/dev/null 2>&1 || { echo "cargo-nextest not found — run 'make tools'"; exit 1; }
 	cargo nextest run --workspace
 
