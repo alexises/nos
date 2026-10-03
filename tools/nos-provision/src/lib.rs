@@ -825,6 +825,10 @@ pub struct Args {
     /// instead (`BroadcastDomainOp::SetOspfv3Profile`).
     #[arg(long)]
     pub ospfv3_broadcast_domain_profile: Option<String>,
+    /// Detaches `OSPFv3` from `--broadcast-domain`
+    /// (`BroadcastDomainOp::ClearOspfv3Profile`).
+    #[arg(long, conflicts_with = "ospfv3_broadcast_domain_profile")]
+    pub clear_ospfv3_broadcast_domain_profile: bool,
 
     /// If set, adds this IPv6 address to `--routing-table`'s loopback
     /// interface (`loopback-<routing-table>`) alongside `--loopback-address`
@@ -2044,6 +2048,13 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             },
         ));
     }
+    if args.clear_ospfv3_broadcast_domain_profile {
+        ops.push(ConfigOp::BroadcastDomain(
+            BroadcastDomainOp::ClearOspfv3Profile {
+                name: args.broadcast_domain.clone(),
+            },
+        ));
+    }
     Ok(ops)
 }
 
@@ -2549,6 +2560,7 @@ mod tests {
             "--delete-loopback",
             "--clear-ospf-loopback-profile",
             "--clear-ospfv3-loopback-profile",
+            "--clear-ospfv3-broadcast-domain-profile",
             "--delete-broadcast-domain-svi",
             "--evpn-clear",
             "--evpn-rt-import",
@@ -2580,6 +2592,12 @@ mod tests {
             &ConfigOp::BroadcastDomain(BroadcastDomainOp::SetNeighSuppress {
                 name: "bd-svi".into(),
                 enabled: false,
+            }),
+        );
+        has(
+            &all,
+            &ConfigOp::BroadcastDomain(BroadcastDomainOp::ClearOspfv3Profile {
+                name: "bd-svi".into(),
             }),
         );
         assert!(!all

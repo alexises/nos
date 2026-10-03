@@ -1753,3 +1753,32 @@ pub async fn ospfv3_lfa(w: &mut World) -> anyhow::Result<()> {
     b.provision(&["--clear-ospfv3-loopback-profile"]).await?;
     a.wait_new(&removed, r0, 60).await
 }
+
+/// #157, RFC 2328 §14.1 (requires `ospfv3-dr`): router-a and router-c leave
+/// the bridge, so router-b — its DR — loses its last `Full` neighbor there
+/// and prematurely ages its Network-LSA (legacy 0x2002 or, after `ospfv3`
+/// turned extended-lsa on, E-Network 0xa022); router-a, still adjacent over
+/// `eth0.0`, flushes it within seconds instead of at `MaxAge` an hour later.
+pub async fn ospfv3_flush(w: &mut World) -> anyhow::Result<()> {
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    // `logs::bre` has top-level `\|` only, no `\( \)` groups.
+    let either = |f: &dyn Fn(u16) -> String| format!(r"{}\|{}", f(0x2002), f(0xa022));
+    let aged = either(&|t| format!("ospfv3 lsa prematurely aged lsa_type={t} "));
+    let flushed = either(&|t| {
+        format!(
+            "ospfv3 lsa maxage flushed .*lsa_type={t} .*advertising_router={OSPFV3_ROUTER_ID_B}"
+        )
+    });
+    let (aged0, flushed0) = (b.count(&aged), a.count(&flushed));
+    let leave = strings(&[
+        "--broadcast-domain",
+        BD,
+        "--clear-ospfv3-broadcast-domain-profile",
+    ]);
+    a.provision(&leave).await?;
+    c.provision_flags(&with_base(crate::router::C, leave))
+        .await?;
+    // Dead interval (40s) on router-b, then one origination tick.
+    b.wait_new(&aged, aged0, 90).await?;
+    a.wait_new(&flushed, flushed0, 60).await
+}
