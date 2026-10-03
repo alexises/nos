@@ -9,7 +9,7 @@ CARGO_FEATURES ?=
 # since #131 (measured 91.7%); raise it as tests land, never lower it.
 COVERAGE_MIN ?= 90
 
-.PHONY: help toolchain-check build fmt fmt-fix clippy clippy-fix fix test test-plain \
+.PHONY: help ci-image toolchain-check build fmt fmt-fix clippy clippy-fix fix test test-plain \
         deny audit sast miri coverage mutants check ci tools docker-lint docker-build \
         e2e-preflight docs-fix
 
@@ -17,68 +17,80 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
 		awk 'BEGIN{FS=":.*## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
-# Local == CI: rustc must be the toolchain pinned in rust-toolchain.toml, which must equal
-# ci.yml's RUST_TOOLCHAIN. Install with `rustup toolchain install 1.99.0` (rustup reads the
-# file automatically). Escape hatch: ALLOW_TOOLCHAIN_MISMATCH=1.
-toolchain-check: ## Fail unless local rustc == CI's pinned toolchain
-	@pin=$$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml); \
-	ci=$$(sed -n 's/^ *RUST_TOOLCHAIN: *"\(.*\)"/\1/p' .github/workflows/ci.yml); \
-	have=$$(rustc --version | awk '{print $$2}'); \
-	[ "$$pin" = "$$ci" ] || { echo "rust-toolchain.toml ($$pin) != ci.yml RUST_TOOLCHAIN ($$ci)"; exit 1; }; \
-	[ "$$have" = "$$pin" ] || [ -n "$$ALLOW_TOOLCHAIN_MISMATCH" ] || { \
-	  echo "rustc $$have != CI's $$pin: run 'rustup toolchain install $$pin' (or ALLOW_TOOLCHAIN_MISMATCH=1)"; exit 1; }
+# Local == CI (#180): every Rust target runs on the toolchain CI pins. PIN is
+# rust-toolchain.toml's channel (must equal ci.yml's RUST_TOOLCHAIN), MIRI_TOOLCHAIN is
+# ci.yml's dated nightly. If the local rustc already is PIN (rustup reads the file), RUN
+# is empty and cargo runs natively, as on CI. Otherwise RUN runs it in the nos-ci image
+# (tools/ci/Dockerfile, built by `make ci-image`), with its own target dir and cargo
+# home under target/ so it never mixes with the host toolchain's build.
+PIN := $(shell sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+MIRI_TOOLCHAIN := $(shell sed -n 's/^ *MIRI_TOOLCHAIN: *"\(.*\)"/\1/p' .github/workflows/ci.yml)
+CI_IMAGE := nos-ci:$(PIN)-$(MIRI_TOOLCHAIN)
+ifeq ($(shell rustc --version 2>/dev/null | awk '{print $$2}'),$(PIN))
+RUN :=
+else
+RUN := docker run --rm --user $(shell id -u):$(shell id -g) -v $(CURDIR):/src -w /src \
+	-e RUSTFLAGS -e MIRIFLAGS -e UPDATE_OPENAPI_SNAPSHOT -e CARGO_TERM_COLOR \
+	-e HOME=/src/target/ci-home -e CARGO_HOME=/src/target/ci-cargo -e CARGO_TARGET_DIR=/src/target/ci \
+	$(CI_IMAGE)
+endif
+
+ci-image: ## Build the nos-ci toolchain image if this host needs it and it is missing
+	@[ -z "$(RUN)" ] || docker image inspect $(CI_IMAGE) >/dev/null 2>&1 || \
+	  docker build --build-arg RUST_TOOLCHAIN=$(PIN) --build-arg MIRI_TOOLCHAIN=$(MIRI_TOOLCHAIN) \
+	    -t $(CI_IMAGE) tools/ci
+
+toolchain-check: ci-image ## Fail unless rust-toolchain.toml == ci.yml's RUST_TOOLCHAIN; say where cargo runs
+	@ci=$$(sed -n 's/^ *RUST_TOOLCHAIN: *"\(.*\)"/\1/p' .github/workflows/ci.yml); \
+	[ "$(PIN)" = "$$ci" ] || { echo "rust-toolchain.toml ($(PIN)) != ci.yml RUST_TOOLCHAIN ($$ci)"; exit 1; }; \
+	echo "toolchain: $(PIN) ($(if $(RUN),docker $(CI_IMAGE),native))"
 
 build: toolchain-check ## Build the whole workspace
-	cargo build --workspace
+	$(RUN) cargo build --workspace
 
 fmt: toolchain-check ## Check formatting (matches CI)
-	cargo fmt --all -- --check
+	$(RUN) cargo fmt --all -- --check
 
-fmt-fix: ## Apply formatting
-	cargo fmt --all
+fmt-fix: toolchain-check ## Apply formatting
+	$(RUN) cargo fmt --all
 
 clippy: toolchain-check ## Lint the whole workspace, warnings deny (matches CI)
-	cargo clippy --workspace --all-targets
+	$(RUN) cargo clippy --workspace --all-targets
 
-clippy-fix: ## Apply clippy's auto-fixable suggestions, then re-check
-	cargo clippy --fix --workspace --all-targets --allow-dirty --allow-staged
+clippy-fix: toolchain-check ## Apply clippy's auto-fixable suggestions, then re-check
+	$(RUN) cargo clippy --fix --workspace --all-targets --allow-dirty --allow-staged
 	$(MAKE) clippy
 
 fix: fmt-fix clippy-fix ## Autofix everything that has an autofix (fmt + clippy --fix)
 
 test: toolchain-check ## Run tests via nextest (matches CI)
-	@command -v cargo-nextest >/dev/null 2>&1 || { echo "cargo-nextest not found — run 'make tools'"; exit 1; }
-	cargo nextest run --workspace
+	$(RUN) cargo nextest run --workspace
 
-test-plain: ## Run tests via plain `cargo test` (no extra tool needed)
-	cargo test --workspace
+test-plain: toolchain-check ## Run tests via plain `cargo test` (no extra tool needed)
+	$(RUN) cargo test --workspace
 
-deny: ## Check license/ban/source policy (matches CI)
-	@command -v cargo-deny >/dev/null 2>&1 || { echo "cargo-deny not found — run 'make tools'"; exit 1; }
-	cargo deny check
+deny: toolchain-check ## Check license/ban/source policy (matches CI)
+	$(RUN) cargo deny check
 
-audit: ## Check for known security advisories (matches CI)
-	@command -v cargo-audit >/dev/null 2>&1 || { echo "cargo-audit not found — run 'make tools'"; exit 1; }
-	cargo audit
+audit: toolchain-check ## Check for known security advisories (matches CI)
+	$(RUN) cargo audit
 
 sast: ## Static analysis with semgrep's p/rust ruleset (matches CI; needs docker)
 	docker run --rm -v "$(CURDIR):/src" semgrep/semgrep semgrep scan --config p/rust --exclude target --error --metrics=off /src
 
-miri: ## Run miri UB checks on the pure-logic crates (needs a nightly toolchain + miri component; slow, matches CI)
-	@command -v cargo-miri >/dev/null 2>&1 || { echo "cargo-miri not found — needs rustup + 'rustup +nightly component add miri'"; exit 1; }
-	RUSTFLAGS="-D warnings -A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p nos-rpl -p nos-ospf-common -p nos-proto
+miri: toolchain-check ## Run miri UB checks on the pure-logic crates on ci.yml's MIRI_TOOLCHAIN (slow, matches CI)
+	RUSTFLAGS="-D warnings -A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" $(RUN) cargo +$(MIRI_TOOLCHAIN) miri test -p nos-rpl -p nos-ospf-common -p nos-proto
 
-coverage: ## Collect test coverage as lcov.info, failing under COVERAGE_MIN% lines (matches CI)
-	@command -v cargo-llvm-cov >/dev/null 2>&1 || { echo "cargo-llvm-cov not found — run 'make tools'"; exit 1; }
-	cargo llvm-cov --workspace --ignore-filename-regex '/tools/e2e/|/driver/linux\.rs$$|/driver/route_channel\.rs$$|/l2-socket/|/ospf(v3)?/src/socket\.rs$$' \
+coverage: toolchain-check ## Collect test coverage as lcov.info, failing under COVERAGE_MIN% lines (matches CI)
+	$(RUN) cargo llvm-cov --workspace --ignore-filename-regex '/tools/e2e/|/driver/linux\.rs$$|/driver/route_channel\.rs$$|/l2-socket/|/ospf(v3)?/src/socket\.rs$$' \
 		--fail-under-lines $(COVERAGE_MIN) --lcov --output-path lcov.info
 
 mutants: ## Run mutation testing (needs a nightly toolchain; slow — CI only runs this on schedule)
 	@command -v cargo-mutants >/dev/null 2>&1 || { echo "cargo-mutants not found — run 'make tools'"; exit 1; }
 	cargo +nightly mutants --workspace
 
-docs-fix: ## Regenerate docs/openapi.json from nos-restd's OpenAPI document
-	UPDATE_OPENAPI_SNAPSHOT=1 cargo test -p nos-rest --test openapi_snapshot
+docs-fix: toolchain-check ## Regenerate docs/openapi.json from nos-restd's OpenAPI document
+	UPDATE_OPENAPI_SNAPSHOT=1 $(RUN) cargo test -p nos-rest --test openapi_snapshot
 
 check: build fmt clippy test ## Fast local check: build + fmt + clippy + test (run before pushing)
 

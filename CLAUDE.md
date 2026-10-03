@@ -238,7 +238,23 @@ make coverage  # line coverage, fails under COVERAGE_MIN (CI runs this) — excl
 
 `COVERAGE_MIN` in the `Makefile` is 90% (#104, #131): raise it when a change lifts the total, never lower it. The metric excludes code that only runs against the real kernel — `*/driver/linux.rs`, `rib/src/driver/route_channel.rs`, `l2-socket/`, `ospf{,v3}/src/socket.rs` (#131): a mock under them would only test the mock, and `nos-e2e` is their real test.
 
-**Rust toolchain.** CI pins `RUST_TOOLCHAIN` in `.github/workflows/ci.yml` for fmt, clippy, test and coverage (#153); the `Clippy (stable canary)` job runs the newest stable and only warns, never fails, when it breaks the build. `rust-toolchain.toml` pins the same version and `make toolchain-check` (a prerequisite of build/fmt/clippy/test) fails when local `rustc` or the pin differs from CI's — an older local toolchain once let newer-lint failures (e.g. `assert_is_empty`) through twice; install the pin with `rustup toolchain install 1.99.0`. Still confirm `gh pr checks` is green after pushing. To bump: change `RUST_TOOLCHAIN` and `rust-toolchain.toml`, run `cargo +<new> clippy --workspace --all-targets` with `RUSTFLAGS=-D warnings` and `cargo +<new> nextest run --workspace`, and fix the new lints and deprecations in the same PR —  A lint the older toolchain doesn't know only prints an `unknown_lints` warning, which `-D warnings` doesn't promote. The `Dockerfile` floats on `rust:1-slim-bookworm`, harmless since release builds don't use `-D warnings`.
+**Rust toolchain.** Local `make` and CI run the same commands on the same toolchain (#153, #180):
+
+- `ci.yml` pins `RUST_TOOLCHAIN` (fmt, clippy, test, coverage) and `MIRI_TOOLCHAIN` (a dated nightly, for `make miri`); `rust-toolchain.toml` pins the same stable. Every CI job runs the Makefile target (`make fmt`, `make clippy`, …), so commands, flags and `RUSTFLAGS` live in one place.
+- Every Rust `make` target depends on `toolchain-check`, which fails when `rust-toolchain.toml` ≠ `RUST_TOOLCHAIN` and prints where cargo runs: `toolchain: 1.99.0 (native)` when local `rustc` is the pin (rustup, CI), else `(docker nos-ci:<pin>-<nightly>)` — the `tools/ci/Dockerfile` image (`make ci-image`, built on first use), with its own `target/ci` and cargo home under `target/`. A host without rustup (Fedora's older `rustc`) therefore still gets CI's exact clippy lints and nightly.
+- The nightly cron runs two canaries that only warn: `Clippy (stable canary)` on the newest stable (also on every push/PR) and `Miri (nightly canary)` on the newest nightly.
+- The `alert` job opens one `ci-red` issue (or comments on the open one) when any job or canary is red outside a PR. Branch protection isn't available on this plan, so nothing blocks a red merge: merge only after `gh pr checks <N> --watch` is all green.
+
+To bump:
+
+- Change `RUST_TOOLCHAIN` (ci.yml) and `channel` (rust-toolchain.toml) together; `make toolchain-check` enforces it.
+- Bump `MIRI_TOOLCHAIN` to a recent nightly date that ships `miri`.
+- Run `make ci-image check miri` — on a host without the new toolchain it runs in the new `nos-ci` image automatically.
+- Fix the new lints and deprecations in the same PR. A lint an older toolchain doesn't know only prints an `unknown_lints` warning, which `-D warnings` doesn't promote.
+- The PR touches `ci.yml`, so every job runs on it: don't merge until `gh pr checks` is all green, Miri included.
+- Close any open `ci-red` issue the bump fixes.
+
+The release `Dockerfile` floats on `rust:1-slim-bookworm`, harmless since release builds don't use `-D warnings`.
 
 `watchdog/tests/system.rs` is the unprivileged whole-stack smoke test: the real `nos-watchdogd` supervising every real daemon (`--driver noop`, every socket and state file under a temp dir — `--run-dir` moves the per-instance `<prefix>-<name>.sock` sockets off `/run/nos`), provisioned by the real `nos-provision`, reconfigured, then stopped with SIGTERM. It needs every daemon binary built next to `nos-watchdogd`, which is why each daemon crate has at least one integration test (`tests/bin.rs` where nothing else existed); a single-package run without them skips.
 
