@@ -75,6 +75,12 @@ pub const LINK_TYPE_POINT_TO_POINT: u8 = 1;
 pub const LINK_TYPE_TRANSIT_NETWORK: u8 = 2;
 pub const LINK_TYPE_STUB_NETWORK: u8 = 3;
 
+/// RFC 2328 A.4.2's Router-LSA flags: B (area border router) and E (AS
+/// boundary router). V (virtual link endpoint) is never set — no virtual
+/// links.
+pub const ROUTER_FLAG_B: u8 = 0x01;
+pub const ROUTER_FLAG_E: u8 = 0x02;
+
 pub const LSA_HEADER_LEN: usize = 20;
 /// One Router-LSA link entry's wire length (Appendix A.4.2): Link ID (4) +
 /// Link Data (4) + Type (1) + # TOS (1, always 0 — no TOS metrics) + metric

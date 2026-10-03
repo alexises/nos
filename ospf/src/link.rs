@@ -1878,6 +1878,22 @@ impl LinkManager {
             .chain(self.lsdbs.lock().await.keys().copied())
             .collect();
 
+        // RFC 2328 A.4.2: B when this router has a link or stub in 2+ areas
+        // (not `lsdbs.len()`, which never shrinks after leaving an area); E
+        // when it originates a Type-5 (the same set
+        // `originate_as_external_lsas` reads).
+        let active_areas = area_ids
+            .iter()
+            .filter(|a| by_area.contains_key(a) || stub_networks.contains_key(a))
+            .count();
+        let mut flags = 0;
+        if active_areas >= 2 {
+            flags |= lsa::ROUTER_FLAG_B;
+        }
+        if !self.redistribute_filtered.lock().await.is_empty() {
+            flags |= lsa::ROUTER_FLAG_E;
+        }
+
         for area_id in area_ids {
             let links = by_area.get(&area_id).cloned().unwrap_or_default();
             let lsdb = self.lsdb_for(area_id).await;
@@ -1915,7 +1931,7 @@ impl LinkManager {
                 lsa::LSA_TYPE_ROUTER,
                 local_router_id,
                 LsaBody::Router(RouterLsaBody {
-                    flags: 0,
+                    flags,
                     links: router_links,
                 }),
             );
@@ -3137,6 +3153,72 @@ mod tests {
         assert_eq!(body.links[0].metric, 5);
     }
 
+    /// RFC 2328 A.4.2 (#34): B while stubs sit in 2+ areas, E while a
+    /// Type-5 is originated — each cleared again once that stops, even
+    /// though `lsdbs` still holds the area that was left.
+    #[tokio::test]
+    async fn originate_router_lsas_sets_b_and_e_flags() {
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
+        let area0 = Ipv4Addr::UNSPECIFIED;
+        let area1 = Ipv4Addr::new(0, 0, 0, 1);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let stub0 = ("192.168.9.0/24".parse::<Ipv4Net>().unwrap(), 1);
+        let stub1 = ("192.168.10.0/24".parse::<Ipv4Net>().unwrap(), 1);
+        let key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_ROUTER,
+            link_state_id: router_id,
+            advertising_router: router_id,
+        };
+        // Originates, then reads the area's Router-LSA flags; ages every
+        // area past MinLSInterval first so changed content isn't paced.
+        let flags = |area: Ipv4Addr| {
+            let manager = &manager;
+            async move {
+                for lsdb in manager.lsdbs.lock().await.values() {
+                    lsdb.lock()
+                        .await
+                        .age_and_evict(lsa::MIN_LS_INTERVAL, &HashSet::new());
+                }
+                manager.originate_router_lsas(router_id).await;
+                let lsdb = manager.lsdb_for(area).await;
+                let lsa = lsdb.lock().await.get(&key).unwrap();
+                let LsaBody::Router(body) = &lsa.body else {
+                    panic!("expected router lsa")
+                };
+                body.flags
+            }
+        };
+
+        manager
+            .reconcile(Vec::new(), HashMap::from([(area0, vec![stub0])]), router_id)
+            .await;
+        assert_eq!(flags(area0).await, 0);
+
+        manager
+            .reconcile(
+                Vec::new(),
+                HashMap::from([(area0, vec![stub0]), (area1, vec![stub1])]),
+                router_id,
+            )
+            .await;
+        assert_eq!(flags(area0).await, lsa::ROUTER_FLAG_B);
+        assert_eq!(flags(area1).await, lsa::ROUTER_FLAG_B);
+
+        *manager.redistribute_filtered.lock().await = HashSet::from([stub1.0]);
+        assert_eq!(flags(area0).await, lsa::ROUTER_FLAG_B | lsa::ROUTER_FLAG_E);
+
+        *manager.redistribute_filtered.lock().await = HashSet::new();
+        manager
+            .reconcile(Vec::new(), HashMap::from([(area0, vec![stub0])]), router_id)
+            .await;
+        assert_eq!(flags(area0).await, 0);
+        assert!(manager.lsdbs.lock().await.contains_key(&area1));
+    }
+
     #[tokio::test]
     async fn originate_summary_lsas_installs_type3_into_every_other_area() {
         let manager = LinkManager::new(
@@ -4251,6 +4333,22 @@ mod tests {
             .await
             .iter()
             .any(|l| l.lsa_type == 5 && l.advertising_router == id(2)));
+        // RFC 2328 A.4.2 (#34): B's Router-LSA reached A with E set.
+        let b_router = a
+            .lsdb_for(Ipv4Addr::UNSPECIFIED)
+            .await
+            .lock()
+            .await
+            .get(&LsaKey {
+                lsa_type: lsa::LSA_TYPE_ROUTER,
+                link_state_id: id(2),
+                advertising_router: id(2),
+            })
+            .unwrap();
+        let LsaBody::Router(body) = &b_router.body else {
+            panic!("expected router lsa")
+        };
+        assert_eq!(body.flags, lsa::ROUTER_FLAG_E);
 
         // B goes silent: A's dead interval drops the neighbor.
         wire.cut.lock().unwrap().insert(Ipv4Addr::new(10, 0, 0, 2));

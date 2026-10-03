@@ -887,6 +887,40 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
         b.wait(&from_frr(&on_b, t)).await?;
     }
 
+    // RFC 2328 A.4.2 (#34): router-a becomes an ASBR (a redistributed static)
+    // and an ABR (a loopback in area 1). FRR builds a router route — needed to
+    // resolve a Type-5's ASBR or a Type-3's ABR — only from a Router-LSA with
+    // E or B set, so without the bits it never lists router-a as a border
+    // router nor installs either prefix.
+    log("making router-a an asbr and an abr; FRR must see its E and B bits");
+    a.provision_flags(&with_base(
+        A,
+        asbr(strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            OSPF_ROUTER_ID,
+            "--ospf-area",
+            OSPF_AREA_1,
+            "--ospf-profile",
+            OSPF_PROFILE_AREA1,
+            "--loopback-address",
+            OSPF_ABR_LOOPBACK_ADDRESS,
+            "--ospf-loopback-profile",
+            OSPF_PROFILE_AREA1,
+        ])),
+    ))
+    .await?;
+    frr_until(w, "show ip ospf border-routers", 60, |out| {
+        out.lines()
+            .any(|l| l.contains(OSPF_ROUTER_ID) && l.contains("ABR,") && l.contains("ASBR"))
+    })
+    .await?;
+    frr_until(w, "show ip ospf route", 60, |out| {
+        out.contains(ASBR_PREFIX) && out.contains(OSPF_ABR_LOOPBACK_ADDRESS)
+    })
+    .await?;
+
     log("FRR announces a graceful restart: a type-9 grace-lsa, link-local");
     let b9 = b.count(&from_frr(".*", 9));
     let (code, out) = w
@@ -925,6 +959,24 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
 
     w.dock.container_remove("router-f").await;
     Ok(())
+}
+
+/// Polls `vtysh -c <cmd>` on router-f every second until `ok` holds.
+async fn frr_until(
+    w: &World,
+    cmd: &str,
+    secs: u64,
+    ok: impl Fn(&str) -> bool,
+) -> anyhow::Result<()> {
+    let mut out = String::new();
+    for _ in 0..secs {
+        out = w.dock.exec("router-f", &["vtysh", "-c", cmd]).await?.1;
+        if ok(&out) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("FRR `{cmd}` never matched within {secs}s:\n{out}")
 }
 
 // --- OSPFv3 (RFC 5340) ---
