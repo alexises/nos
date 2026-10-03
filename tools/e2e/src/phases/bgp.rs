@@ -138,7 +138,22 @@ pub async fn redistribute_phase(w: &mut World) -> anyhow::Result<()> {
     a.wait(&loc_rib()).await?;
     b.wait(&learned()).await?;
     b.wait(&loc_rib()).await?;
-    b.wait_new("added route", kernel_baseline, 60).await
+    b.wait_new("added route", kernel_baseline, 60).await?;
+
+    // #160: a soft-in makes router-a re-announce the prefix unchanged; that
+    // must not count as a new best path on router-b.
+    let base = b.count(&loc_rib());
+    let eorr = format!("bgp: received EoRR peer={IP_A}");
+    let eorr_base = b.count(&eorr);
+    b.rest_expect(
+        Method::POST,
+        &format!("/v1/bgp/r1/peer/{IP_A}/soft-in"),
+        None,
+        200,
+    )
+    .await?;
+    b.wait_new(&eorr, eorr_base, 30).await?;
+    b.assert_quiet(&loc_rib(), base, 8).await
 }
 
 pub async fn auth(w: &mut World) -> anyhow::Result<()> {

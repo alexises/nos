@@ -252,18 +252,21 @@ fn learn_prefix(
 ) {
     let (from, _) = peer;
     match apply_policy(prefix, candidate, import_policy, Some(peer)) {
-        Some(route) => {
-            if damping.enabled(from) {
-                if let Some(old) = table.get(&prefix) {
-                    // An RPKI state change alone is no flap (#17).
-                    let same = RibRoute {
-                        received_at: old.received_at,
-                        validation_state: old.validation_state,
-                        ..route.clone()
-                    } == *old;
-                    if !same {
-                        damping.flap(from, prefix, CHANGE_PENALTY, Instant::now());
-                    }
+        Some(mut route) => {
+            if let Some(old) = table.get(&prefix) {
+                // An RPKI state change alone is no flap (#17).
+                let same = RibRoute {
+                    received_at: old.received_at,
+                    validation_state: old.validation_state,
+                    ..route.clone()
+                } == *old;
+                if same {
+                    // Keep the age: `received_at` is part of `PartialEq`, so a
+                    // fresh one would make every identical re-announcement
+                    // look changed downstream and be re-propagated (#160).
+                    route.received_at = old.received_at;
+                } else if damping.enabled(from) {
+                    damping.flap(from, prefix, CHANGE_PENALTY, Instant::now());
                 }
             }
             info!(
@@ -354,7 +357,8 @@ pub struct RibRoute {
     /// Local`: a locally-redistributed route has no "received" next-hop to
     /// preserve, so it always gets next-hop-self regardless of mode.
     pub next_hop: Option<IpAddr>,
-    /// When this candidate was learned — used only by the RFC 4271
+    /// When this candidate was first received with these attributes (an
+    /// identical re-announcement keeps it, #160) — used only by the RFC 4271
     /// §9.1.2.2 "oldest route wins" tiebreak between two eBGP-learned
     /// candidates. Meaningless when `origin == Local`.
     pub received_at: Instant,
@@ -5231,6 +5235,50 @@ mod tests {
         }
         assert!(!rib.damping.is_suppressed(peer, &prefix("1.2.3.0/24")));
         assert!(rib.push_snapshot().1.contains_key(&prefix("1.2.3.0/24")));
+    }
+
+    #[test]
+    fn identical_reannouncement_is_not_repropagated() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        let mut observer_rx = register_peer(&mut rib, addr("10.0.0.2"), false, addr("10.0.0.253"));
+        let announce = ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1");
+        let send = |rib: &mut BgpRib| {
+            rib.handle_update(
+                peer,
+                false,
+                v4("192.0.2.1"),
+                &announce,
+                &nos_rpl::ACCEPT_ALL,
+            );
+        };
+        send(&mut rib);
+        assert_eq!(recv_all(&mut observer_rx).len(), 1);
+        let age = rib.loc_rib[&prefix("1.2.3.0/24")].received_at;
+        send(&mut rib);
+        assert_eq!(recv_all(&mut observer_rx), vec![]);
+        assert_eq!(rib.loc_rib[&prefix("1.2.3.0/24")].received_at, age);
+    }
+
+    #[test]
+    fn identical_reannouncement_keeps_oldest_route_tiebreak() {
+        // Step 8: the older eBGP route wins; re-sending it unchanged must not
+        // make it "newer" and hand the best path to the other peer (#160).
+        let mut rib = new_rib(65000);
+        let (old, new) = (addr("10.0.0.1"), addr("10.0.0.2"));
+        let _a = register_peer(&mut rib, old, false, addr("10.0.0.254"));
+        let _b = register_peer(&mut rib, new, false, addr("10.0.0.253"));
+        let from_old = ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1");
+        let from_new = ebgp_update(vec!["1.2.3.0/24"], vec![65002], "10.0.0.2");
+        // `old` has the higher router id, so only step 8 can make it win.
+        rib.handle_update(old, false, v4("192.0.2.2"), &from_old, &nos_rpl::ACCEPT_ALL);
+        rib.handle_update(new, false, v4("192.0.2.1"), &from_new, &nos_rpl::ACCEPT_ALL);
+        rib.handle_update(old, false, v4("192.0.2.2"), &from_old, &nos_rpl::ACCEPT_ALL);
+        assert_eq!(
+            rib.loc_rib[&prefix("1.2.3.0/24")].origin,
+            RouteOrigin::Peer(old)
+        );
     }
 
     /// #17: routes are validated on receipt and re-validated in place by
