@@ -77,6 +77,11 @@ pub const RPKI_CACHE: &str = "rpki-cache";
 pub const IP_RPKI: &str = "10.50.0.8";
 pub const IP_RPKI_DEAD: &str = "10.50.0.9";
 pub const RPKI_WRONG_ASN: u32 = 64999;
+/// `rpki`, RFC 8097 (#162): ExaBGP's two routes to router-a — one a VRP makes
+/// invalid (authorizes `RPKI_WRONG_ASN`), one no VRP covers but tagged with
+/// RFC 8097 "invalid", which router-a must ignore from eBGP.
+pub const RPKI_INVALID_PREFIX: &str = "203.0.120.0/24";
+pub const RPKI_TAGGED_PREFIX: &str = "203.0.121.0/24";
 pub const STAYRTR_IMAGE: &str = "rpki/stayrtr:v0.6.4";
 pub const EXABGP_IMAGE: &str = "nos-e2e-exabgp:local";
 /// Same release `tools/bench-bgp.sh` pins.

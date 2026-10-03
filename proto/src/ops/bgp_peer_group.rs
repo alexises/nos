@@ -161,6 +161,12 @@ pub enum BgpPeerGroupOp {
         instance: String,
         name: String,
     },
+    /// RFC 8097 `announce_rpki_state` on/off.
+    SetAnnounceRpkiState {
+        instance: String,
+        name: String,
+        enabled: bool,
+    },
     ClearRouteReflectorClient {
         instance: String,
         name: String,
@@ -241,6 +247,7 @@ impl BgpPeerGroupOp {
                         export_policy: None,
                         shutdown: None,
                         maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
+                        announce_rpki_state: false,
                     });
                 }
                 Ok(())
@@ -473,6 +480,14 @@ impl BgpPeerGroupOp {
                 find_group_mut(config, instance, name)?.next_hop = None;
                 Ok(())
             }
+            BgpPeerGroupOp::SetAnnounceRpkiState {
+                instance,
+                name,
+                enabled,
+            } => {
+                find_group_mut(config, instance, name)?.announce_rpki_state = *enabled;
+                Ok(())
+            }
             BgpPeerGroupOp::SetRouteReflectorClient { instance, name } => {
                 find_group_mut(config, instance, name)?.route_reflector_client = true;
                 Ok(())
@@ -607,6 +622,7 @@ mod tests {
             export_policy: None,
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
+            announce_rpki_state: false,
         }
     }
 

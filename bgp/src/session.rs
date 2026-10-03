@@ -71,6 +71,7 @@ pub struct LocalIdentity {
 /// when the peer-group leaves them unset; `keepalive_interval` stays `None`
 /// through to `fsm::run`, which derives `negotiated_hold / 3` itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // independent per-peer-group flags
 pub struct ResolvedPeer {
     pub remote_address: IpAddr,
     pub source_address: Option<IpAddr>,
@@ -108,6 +109,8 @@ pub struct ResolvedPeer {
     pub shutdown: Option<BgpShutdown>,
     /// The peer-group's RFC 4486 maximum-prefix limits.
     pub maximum_prefix: nos_proto::BgpMaximumPrefix,
+    /// The peer-group's RFC 8097 `announce_rpki_state` (see `BgpRib::set_peer_rpki_state`).
+    pub announce_rpki_state: bool,
     /// RFC 5065: this instance's confederation identifier (what an
     /// external peer's OPEN carries), and whether `remote_as` is another
     /// member AS. Here rather than read from `LocalIdentity` so a change
@@ -1077,6 +1080,7 @@ mod tests {
             export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
             shutdown: None,
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+            announce_rpki_state: false,
             confed_id: None,
             confed_member: false,
         }
