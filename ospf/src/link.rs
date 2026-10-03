@@ -169,10 +169,13 @@ pub struct LinkConfig {
     /// until it's updated too, which is exactly the desired match/mismatch
     /// behavior.
     pub auth: LinkAuthConfig,
-    /// The link's area is a stub (RFC 2328 §3.6): Hellos and DBDs go
-    /// without the E-bit and a peer's must match, and AS-scope LSAs stay out
-    /// of the exchange. Changing an area's type restarts its links.
+    /// The link's area is a stub (RFC 2328 §3.6) or an NSSA: Hellos and DBDs
+    /// go without the E-bit and a peer's must match, and AS-scope LSAs stay
+    /// out of the exchange. Changing an area's type restarts its links.
     pub stub: bool,
+    /// The link's area is an NSSA (RFC 3101, `stub` is set too): Hellos carry
+    /// the N-bit and a peer's must match, and only here are Type-7s exchanged.
+    pub nssa: bool,
 }
 
 /// One link's resolved OSPF authentication — `OspfProfile.auth` translated
@@ -366,6 +369,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
         pending_acks_since: None,
         opaque_capable: false, // learnt from the neighbor's DBD
         stub: cfg.stub,
+        nssa: cfg.nssa,
     };
     (adj, dbd)
 }
@@ -633,7 +637,7 @@ fn send_hello(
         area_id: cfg.area_id,
         network_mask: local_netmask(cfg),
         hello_interval: cfg.hello_interval,
-        options: if cfg.stub { 0 } else { packet::OPTION_E },
+        options: hello_options(cfg),
         dead_interval: u32::from(cfg.dead_interval),
         router_priority: cfg.priority,
         designated_router,
@@ -645,6 +649,16 @@ fn send_hello(
         .as_outgoing(next_crypto_seq(next_seq, &cfg.auth), cfg.local_addr);
     if let Err(e) = socket.send_multicast(&packet::encode_hello(&pkt, &auth)) {
         warn!(link = %cfg.attach_point, error = %e, "failed to send ospf hello");
+    }
+}
+
+/// The Hello options for a link's area: E outside a stub area/NSSA (RFC 2328
+/// §3.6), N in an NSSA (RFC 3101 §2.1).
+fn hello_options(cfg: &LinkConfig) -> u8 {
+    match (cfg.stub, cfg.nssa) {
+        (_, true) => packet::OPTION_N,
+        (true, false) => 0,
+        (false, false) => packet::OPTION_E,
     }
 }
 
@@ -704,6 +718,14 @@ fn handle_hello(
         warn!(
             link = %cfg.attach_point, neighbor = %hello.router_id,
             "dropping ospf hello with mismatched e-bit"
+        );
+        return false;
+    }
+    // RFC 3101 §2.1: the N-bit is set exactly in an NSSA.
+    if (hello.options & packet::OPTION_N != 0) != cfg.nssa {
+        warn!(
+            link = %cfg.attach_point, neighbor = %hello.router_id,
+            "dropping ospf hello with mismatched n-bit"
         );
         return false;
     }
@@ -1314,7 +1336,7 @@ async fn flood_full_neighbors(
     lsas.extend(link_local_lsdb.lock().await.all());
     // A stub area carries no AS-scope LSA (RFC 2328 §3.6) — one held from
     // before the area turned stub just ages out here.
-    lsas.retain(|l| !(cfg.stub && lsa::is_as_scope(l.header.lsa_type)));
+    lsas.retain(|l| lsa::in_area_scope(l.header.lsa_type, cfg.stub, cfg.nssa));
     // One signed payload per group (opaque-capable or not), reused for every
     // neighbor in it — safe even under Crypto auth: RFC 2328 D.4.3's
     // anti-replay check is per-neighbor on the receive side
@@ -1725,17 +1747,31 @@ pub struct LinkManager {
     /// `originate_summary_lsas` pass — `compute_routes` turns them into
     /// discard routes.
     active_ranges: Mutex<HashMap<Ipv4Net, u32>>,
+    /// Each NSSA's last translator election result (RFC 3101 §3.1), only to
+    /// log a change.
+    nssa_translating: Mutex<HashMap<Ipv4Addr, bool>>,
     opener: Opener,
 }
 
-/// One area's RFC 2328 §3.5/§3.6 settings, resolved from `OspfArea`.
+/// One area's RFC 2328 §3.5/§3.6 and RFC 3101 settings, resolved from
+/// `OspfArea`.
+// Independent config flags, each read on its own.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AreaSettings {
-    /// No AS-external LSAs; as an ABR, originate a default Type-3 into it.
+    /// No AS-external LSAs (a stub area or an NSSA); as an ABR of a stub
+    /// area, originate a default Type-3 into it.
     pub stub: bool,
-    /// RFC 2328 Appendix C.2 `ImportSummaries`: `false` (totally stubby)
-    /// sends only the default Type-3 into a stub area.
+    /// An RFC 3101 NSSA (`stub` is set too): Type-7s instead of Type-5s, and
+    /// a default Type-3 from an ABR only without `import_summaries`.
+    pub nssa: bool,
+    /// RFC 2328 Appendix C.2 `ImportSummaries`: `false` (totally stubby,
+    /// NSSA no-summary) sends only the default Type-3 into the area.
     pub import_summaries: bool,
+    /// RFC 3101 `NSSATranslatorRole` `Always` (else `Candidate`).
+    pub nssa_translate_always: bool,
+    /// RFC 3101 §2.7: as an ABR, originate a default Type-7 into the NSSA.
+    pub nssa_default_originate: bool,
     /// `StubDefaultCost`.
     pub default_cost: u32,
     /// `(range, advertise)`, applied to this area's prefixes when summarized
@@ -1782,6 +1818,7 @@ impl LinkManager {
             restarting: AtomicBool::new(false),
             area_settings: Mutex::new(HashMap::new()),
             active_ranges: Mutex::new(HashMap::new()),
+            nssa_translating: Mutex::new(HashMap::new()),
             opener,
         });
         let background = Arc::clone(&manager);
@@ -1823,12 +1860,52 @@ impl LinkManager {
         *self.area_settings.lock().await = settings;
     }
 
-    async fn is_stub_area(&self, area_id: Ipv4Addr) -> bool {
+    /// `area_id`'s settings — a normal area's when not configured.
+    async fn area(&self, area_id: Ipv4Addr) -> AreaSettings {
         self.area_settings
             .lock()
             .await
             .get(&area_id)
-            .is_some_and(|s| s.stub)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// RFC 2328 A.4.2's B-bit test: a link or loopback stub in 2+ areas (not
+    /// `lsdbs.len()`, which never shrinks after leaving an area).
+    async fn is_area_border_router(&self) -> bool {
+        let mut areas: HashSet<Ipv4Addr> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .map(|e| e.config.area_id)
+            .collect();
+        areas.extend(self.stub_networks.lock().await.keys().copied());
+        areas.len() >= 2
+    }
+
+    /// RFC 3101 §2.3: a Type-7's forwarding address — one of this router's
+    /// own addresses in the NSSA (the lowest link address, else a loopback
+    /// stub's), so a translator can translate it.
+    async fn nssa_forwarding_address(&self, area_id: Ipv4Addr) -> Ipv4Addr {
+        let link = self
+            .links
+            .lock()
+            .await
+            .values()
+            .filter(|e| e.config.area_id == area_id)
+            .map(|e| e.config.local_addr)
+            .min();
+        match link {
+            Some(addr) => addr,
+            None => self
+                .stub_networks
+                .lock()
+                .await
+                .get(&area_id)
+                .and_then(|stubs| stubs.iter().map(|(net, _)| net.addr()).min())
+                .unwrap_or(Ipv4Addr::UNSPECIFIED),
+        }
     }
 
     /// Gets or creates the shared LSDB for `area_id`.
@@ -1920,16 +1997,11 @@ impl LinkManager {
             .chain(self.lsdbs.lock().await.keys().copied())
             .collect();
 
-        // RFC 2328 A.4.2: B when this router has a link or stub in 2+ areas
-        // (not `lsdbs.len()`, which never shrinks after leaving an area); E
-        // when it originates a Type-5 (the same set
+        // RFC 2328 A.4.2: B when this router has a link or stub in 2+ areas;
+        // E when it originates a Type-5 (the same set
         // `originate_as_external_lsas` reads).
-        let active_areas = area_ids
-            .iter()
-            .filter(|a| by_area.contains_key(a) || stub_networks.contains_key(a))
-            .count();
         let mut flags = 0;
-        if active_areas >= 2 {
+        if self.is_area_border_router().await {
             flags |= lsa::ROUTER_FLAG_B;
         }
         if !self.redistribute_filtered.lock().await.is_empty() {
@@ -1967,12 +2039,17 @@ impl LinkManager {
                 });
             }
 
-            // No Type-5 goes into a stub area, so we are no ASBR there.
-            let area_flags = if self.is_stub_area(area_id).await {
-                flags & !lsa::ROUTER_FLAG_E
-            } else {
-                flags
-            };
+            // No Type-5 goes into a stub area, so we are no ASBR there (in an
+            // NSSA we are, through Type-7s). RFC 3101 A.2: Nt on an NSSA
+            // border router that always translates.
+            let area = self.area(area_id).await;
+            let mut area_flags = flags;
+            if area.stub && !area.nssa {
+                area_flags &= !lsa::ROUTER_FLAG_E;
+            }
+            if area.nssa_translate_always && flags & lsa::ROUTER_FLAG_B != 0 {
+                area_flags |= lsa::ROUTER_FLAG_NT;
+            }
             install_self_originated(
                 &mut lsdb,
                 local_router_id,
@@ -2048,27 +2125,73 @@ impl LinkManager {
     /// full `Lsdb` periodically, so a freshly-installed Type-5 propagates
     /// automatically.
     async fn originate_as_external_lsas(&self, local_router_id: Ipv4Addr) {
-        let prefixes: Vec<Ipv4Net> = self
+        let redistributed: Vec<Ipv4Net> = self
             .redistribute_filtered
             .lock()
             .await
             .iter()
             .copied()
             .collect();
-        let area_ids: Vec<Ipv4Addr> = self.lsdbs.lock().await.keys().copied().collect();
+        let areas: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
+            .lsdbs
+            .lock()
+            .await
+            .iter()
+            .map(|(id, lsdb)| (*id, Arc::clone(lsdb)))
+            .collect();
+        let settings = self.area_settings.lock().await.clone();
+        let abr = self.is_area_border_router().await;
 
-        for area_id in area_ids {
-            // RFC 2328 §3.6: none into a stub area — one that just turned
-            // stub gets this router's own flushed.
-            let prefixes: &[Ipv4Net] = if self.is_stub_area(area_id).await {
-                &[]
-            } else {
-                &prefixes
-            };
-            let desired: HashSet<Ipv4Addr> = prefixes.iter().map(Ipv4Net::network).collect();
-            let lsdb = self.lsdb_for(area_id).await;
+        // RFC 3101 §3.1/§3.2: as the elected translator of an NSSA, its P-bit
+        // Type-7s become this router's own Type-5s in the normal areas.
+        let mut translated: Vec<(Ipv4Net, u32)> = Vec::new();
+        {
+            let mut roles = self.nssa_translating.lock().await;
+            for (area_id, lsdb) in &areas {
+                let Some(area) = settings.get(area_id).filter(|a| a.nssa) else {
+                    roles.remove(area_id);
+                    continue;
+                };
+                let lsas = lsdb.lock().await.all();
+                let translating =
+                    abr && spf::nssa_translator(local_router_id, &lsas, area.nssa_translate_always);
+                if roles.insert(*area_id, translating) != Some(translating) {
+                    info!(area = %area_id, translating, "ospf nssa translator role changed");
+                }
+                if translating {
+                    translated.extend(spf::nssa_translations(local_router_id, &lsas));
+                }
+            }
+        }
+
+        for (area_id, lsdb) in &areas {
+            let area = settings.get(area_id).cloned().unwrap_or_default();
+            // Keyed by prefix, so a redistributed prefix that is also
+            // translated is originated once. Type-7: `(options, metric,
+            // forwarding address)`.
+            let mut type5: HashMap<Ipv4Net, u32> = HashMap::new();
+            let mut type7: HashMap<Ipv4Net, (u8, u32, Ipv4Addr)> = HashMap::new();
+            if !area.stub {
+                type5.extend(translated.iter().copied());
+                type5.extend(redistributed.iter().map(|&p| (p, 0)));
+            } else if area.nssa {
+                // RFC 3101 §2.4: an ABR clears the P-bit, since it originates
+                // the Type-5 for the same prefix itself.
+                let options = if abr { 0 } else { lsa::OPTION_P };
+                let fa = self.nssa_forwarding_address(*area_id).await;
+                type7.extend(redistributed.iter().map(|&p| (p, (options, 0, fa))));
+                if abr && area.nssa_default_originate {
+                    type7.insert(
+                        Ipv4Net::default(),
+                        (0, area.default_cost, Ipv4Addr::UNSPECIFIED),
+                    );
+                }
+            }
+            // RFC 2328 §3.6: no Type-5 in a stub area or NSSA (one that just
+            // turned stub gets this router's own flushed), and a Type-7 only
+            // in an NSSA.
             let mut lsdb = lsdb.lock().await;
-            for prefix in prefixes {
+            for (&prefix, &metric) in &type5 {
                 install_self_originated(
                     &mut lsdb,
                     local_router_id,
@@ -2076,20 +2199,45 @@ impl LinkManager {
                     prefix.network(),
                     LsaBody::AsExternal(AsExternalLsaBody {
                         network_mask: prefix.netmask(),
-                        metric: 0,
+                        metric,
+                        // ponytail: a translated Type-5 doesn't carry the
+                        // Type-7's forwarding address (§3.2 (3)), so traffic
+                        // to it goes through the translator, not straight to
+                        // the NSSA ASBR. Copy it once SPF resolves one.
                         forwarding_address: Ipv4Addr::UNSPECIFIED,
                         external_route_tag: 0,
                     }),
                 );
             }
-            // RFC 2328 §14.1: a prefix no longer redistributed is flushed,
-            // not left to age out over `MAX_AGE`.
-            withdraw_undesired(
-                &mut lsdb,
-                local_router_id,
-                lsa::LSA_TYPE_AS_EXTERNAL,
-                &desired,
-            );
+            for (&prefix, &(options, metric, forwarding_address)) in &type7 {
+                install_self_originated_with_options(
+                    &mut lsdb,
+                    local_router_id,
+                    lsa::LSA_TYPE_NSSA_EXTERNAL,
+                    prefix.network(),
+                    options,
+                    LsaBody::AsExternal(AsExternalLsaBody {
+                        network_mask: prefix.netmask(),
+                        metric,
+                        forwarding_address,
+                        external_route_tag: 0,
+                    }),
+                );
+            }
+            // RFC 2328 §14.1: a prefix no longer redistributed (or
+            // translated) is flushed, not left to age out over `MAX_AGE`.
+            for (lsa_type, desired) in [
+                (
+                    lsa::LSA_TYPE_AS_EXTERNAL,
+                    type5.keys().map(Ipv4Net::network).collect(),
+                ),
+                (
+                    lsa::LSA_TYPE_NSSA_EXTERNAL,
+                    type7.keys().map(Ipv4Net::network).collect(),
+                ),
+            ] {
+                withdraw_undesired(&mut lsdb, local_router_id, lsa_type, &desired);
+            }
         }
     }
 
@@ -2142,7 +2290,8 @@ impl LinkManager {
             // area — and, totally stubby (no `ImportSummaries`), nothing else.
             // ponytail: ABR-ness stays "2+ areas", with no check that one of
             // them is the backbone.
-            if dest.stub && !per_area.is_empty() {
+            // RFC 3101 §2.3: into an NSSA, only when it's no-summary.
+            if dest.stub && (!dest.nssa || !dest.import_summaries) && !per_area.is_empty() {
                 network_ids.insert(Ipv4Addr::UNSPECIFIED);
                 install_self_originated(
                     &mut dest_lsdb,
@@ -2178,7 +2327,8 @@ impl LinkManager {
                         }),
                     );
                 }
-                // No ASBR-summary into a stub area: it carries no Type-5.
+                // No ASBR-summary into a stub area or NSSA: it carries no
+                // Type-5.
                 if dest.stub {
                     continue;
                 }
@@ -2406,11 +2556,11 @@ impl LinkManager {
         let mut merged: HashMap<Ipv4Net, spf::RouteEntry> = HashMap::new();
         for (area_id, lsdb) in areas {
             let mut lsas = lsdb.lock().await.all();
-            // A Type-5 still held from before the area turned stub (until it
-            // ages out) is not a route there.
-            if self.is_stub_area(area_id).await {
-                lsas.retain(|l| !lsa::is_as_scope(l.header.lsa_type));
-            }
+            // A Type-5 still held from before the area turned stub, or a
+            // Type-7 from before it stopped being an NSSA (until it ages
+            // out), is not a route there.
+            let area = self.area(area_id).await;
+            lsas.retain(|l| lsa::in_area_scope(l.header.lsa_type, area.stub, area.nssa));
             for entry in spf::compute(router_id, &lsas) {
                 match merged.get_mut(&entry.prefix) {
                     None => {
@@ -2674,6 +2824,19 @@ fn install_self_originated(
     link_state_id: Ipv4Addr,
     body: LsaBody,
 ) {
+    install_self_originated_with_options(lsdb, local_router_id, lsa_type, link_state_id, 0, body);
+}
+
+/// `install_self_originated` with header `options` (a Type-7's P-bit), which
+/// count as content: a change re-originates.
+fn install_self_originated_with_options(
+    lsdb: &mut Lsdb,
+    local_router_id: Ipv4Addr,
+    lsa_type: u8,
+    link_state_id: Ipv4Addr,
+    options: u8,
+    body: LsaBody,
+) {
     let key = LsaKey {
         lsa_type,
         link_state_id,
@@ -2684,7 +2847,7 @@ fn install_self_originated(
         .as_ref()
         .is_some_and(|e| e.header.age >= lsa::LS_REFRESH_TIME);
     let sequence_number = match &existing {
-        Some(e) if e.body == body && !needs_refresh => return,
+        Some(e) if e.body == body && e.header.options == options && !needs_refresh => return,
         // RFC 2328 §12.1.6: at `MaxSequenceNumber` the instance is flushed
         // (at that same sequence number — never the reserved 0x8000_0000 a
         // wrapping increment would produce) and re-originated at
@@ -2707,7 +2870,7 @@ fn install_self_originated(
     let mut fresh = Lsa {
         header: LsaHeader {
             age: 0,
-            options: 0,
+            options,
             lsa_type,
             link_state_id,
             advertising_router: local_router_id,
@@ -2876,6 +3039,7 @@ mod tests {
             mtu: 1500,
             auth: LinkAuthConfig::None,
             stub: false,
+            nssa: false,
         }
     }
 
@@ -4416,6 +4580,7 @@ mod tests {
                         import_summaries,
                         default_cost: 5,
                         ranges: Vec::new(),
+                        ..AreaSettings::default()
                     },
                 );
             }
@@ -4559,6 +4724,161 @@ mod tests {
             );
             assert_eq!(status.borrow().neighbors.contains_key(&peer), accepted);
         }
+    }
+
+    /// RFC 3101 §2.1: the N-bit must match the link's NSSA-ness (with the
+    /// E-bit clear in an NSSA).
+    #[test]
+    fn handle_hello_matches_the_n_bit_to_the_nssa_flag() {
+        let peer = Ipv4Addr::new(9, 9, 9, 9);
+        for (nssa, options, accepted) in [
+            (true, packet::OPTION_N, true),
+            (true, 0, false),
+            (false, packet::OPTION_N | packet::OPTION_E, false),
+            (false, packet::OPTION_E, true),
+        ] {
+            let cfg = LinkConfig {
+                stub: nssa,
+                nssa,
+                ..link("eth0.0", 10)
+            };
+            assert_eq!(hello_options(&cfg) & packet::OPTION_N != 0, nssa);
+            let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+            let hello = packet::HelloPacket {
+                options,
+                ..matching_hello(&cfg, peer)
+            };
+            handle_hello(
+                &cfg,
+                Ipv4Addr::new(1, 1, 1, 1),
+                &status,
+                Ipv4Addr::new(10, 0, 0, 2),
+                &hello,
+                &mut Instant::now(),
+                false,
+            );
+            assert_eq!(
+                status.borrow().neighbors.contains_key(&peer),
+                accepted,
+                "nssa={nssa} options={options}"
+            );
+        }
+    }
+
+    /// RFC 3101 (#36) over the in-memory wire: C is internal to NSSA area 1
+    /// and redistributes a static, B is the area's only ABR (so its
+    /// translator), A is in the backbone only.
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::too_many_lines)]
+    async fn nssa_type7_is_translated_into_the_backbone() {
+        let area1 = Ipv4Addr::new(0, 0, 0, 1);
+        let settings = HashMap::from([(
+            area1,
+            AreaSettings {
+                stub: true,
+                nssa: true,
+                import_summaries: true,
+                default_cost: 1,
+                ..AreaSettings::default()
+            },
+        )]);
+        let in_area1 = |addr| LinkConfig {
+            area_id: area1,
+            stub: true,
+            nssa: true,
+            ..wired_link(addr, 30, NetworkType::PointToPoint)
+        };
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b, c) = (router(&wire), router(&wire), router(&wire));
+        for r in [&a, &b, &c] {
+            r.set_area_settings(settings.clone()).await;
+        }
+        let prefix: Ipv4Net = "198.51.100.0/24".parse().unwrap();
+        let redistribute = |routes: Vec<Ipv4Net>| {
+            RedistributeUpdate::Full(
+                routes
+                    .into_iter()
+                    .map(|p| nos_proto::RedistributedRoute {
+                        prefix: p.into(),
+                        gateway: "10.9.9.9".parse().unwrap(),
+                    })
+                    .collect(),
+            )
+        };
+        c.apply_redistribute_update(redistribute(vec![prefix]))
+            .await;
+        c.set_redistribute_policy(Arc::new(nos_rpl::ACCEPT_ALL.clone()))
+            .await;
+        a.reconcile(
+            vec![wired_link([10, 0, 0, 1], 30, NetworkType::PointToPoint)],
+            HashMap::new(),
+            id(1),
+        )
+        .await;
+        b.reconcile(
+            vec![
+                wired_link([10, 0, 0, 2], 30, NetworkType::PointToPoint),
+                in_area1([10, 0, 1, 1]),
+            ],
+            HashMap::new(),
+            id(2),
+        )
+        .await;
+        c.reconcile(vec![in_area1([10, 0, 1, 2])], HashMap::new(), id(3))
+            .await;
+        settle(60).await;
+
+        let held = |lsdbs: Vec<LsaSummary>, lsa_type| -> Vec<(Ipv4Addr, Ipv4Addr)> {
+            lsdbs
+                .into_iter()
+                .filter(|l| l.lsa_type == lsa_type && l.age < lsa::MAX_AGE)
+                .map(|l| (l.link_state_id, l.advertising_router))
+                .collect()
+        };
+        let net = prefix.network();
+        // The backbone holds B's translated Type-5 and no Type-7.
+        assert_eq!(
+            held(a.database_summaries().await, lsa::LSA_TYPE_AS_EXTERNAL),
+            [(net, id(2))]
+        );
+        assert!(held(a.database_summaries().await, lsa::LSA_TYPE_NSSA_EXTERNAL).is_empty());
+        let route = a
+            .compute_routes()
+            .await
+            .into_iter()
+            .find(|r| r.prefix == prefix)
+            .expect("translated route on A");
+        assert_eq!(route.next_hops, [Ipv4Addr::new(10, 0, 0, 2)]);
+        // The NSSA holds C's Type-7 (P-bit, forwarding address C's own
+        // link address) and no Type-5.
+        assert!(held(c.database_summaries().await, lsa::LSA_TYPE_AS_EXTERNAL).is_empty());
+        let type7 = b
+            .lsdb_for(area1)
+            .await
+            .lock()
+            .await
+            .get(&LsaKey {
+                lsa_type: lsa::LSA_TYPE_NSSA_EXTERNAL,
+                link_state_id: net,
+                advertising_router: id(3),
+            })
+            .expect("type-7 on B");
+        assert_eq!(type7.header.options, lsa::OPTION_P);
+        let LsaBody::AsExternal(body) = &type7.body else {
+            panic!("expected an external body")
+        };
+        assert_eq!(body.forwarding_address, Ipv4Addr::new(10, 0, 1, 2));
+        // B, the ABR, routes to it from the Type-7.
+        assert!(b.compute_routes().await.iter().any(|r| r.prefix == prefix));
+
+        // Redistribution removed: C flushes its Type-7. (B's Type-5 flush
+        // can't follow here — `MinLSArrival` runs on the real clock, which a
+        // paused-time test never advances; `nos-e2e ospf-nssa` covers it.)
+        c.apply_redistribute_update(redistribute(Vec::new())).await;
+        c.set_redistribute_policy(Arc::new(nos_rpl::ACCEPT_ALL.clone()))
+            .await;
+        settle(4).await;
+        assert!(held(c.database_summaries().await, lsa::LSA_TYPE_NSSA_EXTERNAL).is_empty());
     }
 
     #[tokio::test(start_paused = true)]

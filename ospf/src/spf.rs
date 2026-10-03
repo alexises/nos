@@ -39,7 +39,8 @@ use ipnet::Ipv4Net;
 use crate::lsa::{
     AsExternalLsaBody, Lsa, LsaBody, NetworkLsaBody, RouterLsaBody, SummaryLsaBody,
     LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK, LINK_TYPE_TRANSIT_NETWORK,
-    LSA_TYPE_ASBR_SUMMARY, LSA_TYPE_AS_EXTERNAL, LSA_TYPE_NETWORK_SUMMARY, MAX_AGE,
+    LSA_TYPE_ASBR_SUMMARY, LSA_TYPE_AS_EXTERNAL, LSA_TYPE_NETWORK_SUMMARY, LSA_TYPE_NSSA_EXTERNAL,
+    MAX_AGE, OPTION_P, ROUTER_FLAG_B, ROUTER_FLAG_NT,
 };
 
 /// `ponytail:` RFC 2328 §16.4's E1/E2 external-metric-type distinction is not
@@ -422,6 +423,51 @@ pub fn intra_area_routes(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> IntraAreaRoutes {
         routes: out.into_values().collect(),
         asbrs,
     }
+}
+
+/// RFC 3101 §3.1 translator election, for `root` as one ABR of an NSSA whose
+/// LSDB is `lsas`: `root` translates unless `always` is off and another ABR
+/// (B-bit Router-LSA) reachable in the area has the Nt-bit or a higher
+/// router-id. `ponytail:` no `TranslatorStabilityInterval` — a translator
+/// that loses the election flushes its Type-5s at once.
+pub fn nssa_translator(root: Ipv4Addr, lsas: &[Arc<Lsa>], always: bool) -> bool {
+    if always {
+        return true;
+    }
+    let live = live_lsas(lsas);
+    let (routers, networks) = routers_and_networks(&live);
+    let (dist, next_hop) = run_dijkstra(root, &routers, &networks);
+    !routers.iter().any(|(&id, r)| {
+        id != root
+            && r.flags & ROUTER_FLAG_B != 0
+            && (r.flags & ROUTER_FLAG_NT != 0 || id > root)
+            && asbr_distance(id, &[], &dist, &next_hop).is_some()
+    })
+}
+
+/// RFC 3101 §3.2: what an elected translator turns into Type-5s from this
+/// NSSA's LSDB — every live Type-7 with the P-bit and a non-zero forwarding
+/// address, from an ASBR other than `root` reachable in the area, as
+/// `(prefix, metric)`. `ponytail:` two Type-7s for one prefix aren't
+/// compared (§3.2's preference rules) — the last one wins.
+pub fn nssa_translations(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Summaries {
+    let live = live_lsas(lsas);
+    let (routers, networks) = routers_and_networks(&live);
+    let (dist, next_hop) = run_dijkstra(root, &routers, &networks);
+    live.iter()
+        .filter(|l| {
+            l.header.lsa_type == LSA_TYPE_NSSA_EXTERNAL
+                && l.header.options & OPTION_P != 0
+                && l.header.advertising_router != root
+                && asbr_distance(l.header.advertising_router, &[], &dist, &next_hop).is_some()
+        })
+        .filter_map(|l| match &l.body {
+            LsaBody::AsExternal(e) if !e.forwarding_address.is_unspecified() => {
+                Some((net_from(l.header.link_state_id, e.network_mask), e.metric))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The Dijkstra core: standard lazy-deletion priority-queue shortest path,
@@ -1215,6 +1261,84 @@ mod tests {
         assert_eq!(routes[0].prefix, "192.0.2.0/24".parse().unwrap());
         assert_eq!(routes[0].next_hops, vec![addr(10, 0, 0, 2)]);
         assert_eq!(routes[0].metric, 5 + EXTERNAL_METRIC_CONSTANT);
+    }
+
+    fn type7(prefix: Ipv4Addr, asbr: Ipv4Addr, p_bit: bool, fa: Ipv4Addr) -> Arc<Lsa> {
+        let mut l = (*as_external_lsa(prefix, addr(255, 255, 255, 0), asbr)).clone();
+        l.header.lsa_type = LSA_TYPE_NSSA_EXTERNAL;
+        l.header.options = if p_bit { OPTION_P } else { 0 };
+        if let LsaBody::AsExternal(e) = &mut l.body {
+            e.forwarding_address = fa;
+        }
+        Arc::new(l)
+    }
+
+    fn with_flags(lsa: &Arc<Lsa>, flags: u8) -> Arc<Lsa> {
+        let mut l = (**lsa).clone();
+        if let LsaBody::Router(r) = &mut l.body {
+            r.flags = flags;
+        }
+        Arc::new(l)
+    }
+
+    /// RFC 3101: a Type-7 is an external route inside the NSSA, and only a
+    /// P-bit one with a forwarding address from a reachable ASBR is
+    /// translated.
+    #[test]
+    fn type7_routes_and_translations() {
+        let (root, asbr, gone) = (router_id(1), router_id(2), router_id(9));
+        let lsas = [
+            router_lsa(root, vec![p2p(asbr, addr(10, 0, 0, 1), 5)]),
+            router_lsa(asbr, vec![p2p(root, addr(10, 0, 0, 2), 5)]),
+            type7(addr(192, 0, 2, 0), asbr, true, addr(10, 0, 0, 2)),
+            type7(addr(198, 51, 100, 0), asbr, false, addr(10, 0, 0, 2)),
+            type7(addr(203, 0, 113, 0), asbr, true, Ipv4Addr::UNSPECIFIED),
+            type7(addr(192, 0, 3, 0), gone, true, addr(10, 0, 0, 9)),
+        ];
+        let routes = compute(root, &lsas);
+        assert_eq!(routes.len(), 3, "{routes:?}");
+        assert!(routes
+            .iter()
+            .all(|r| r.metric == 5 + EXTERNAL_METRIC_CONSTANT));
+        assert_eq!(
+            nssa_translations(root, &lsas),
+            vec![("192.0.2.0/24".parse().unwrap(), EXTERNAL_METRIC_CONSTANT)]
+        );
+    }
+
+    /// RFC 3101 §3.1: the highest router-id among reachable ABRs translates,
+    /// unless another has the Nt-bit; `always` translates regardless; an
+    /// unreachable ABR doesn't count.
+    #[test]
+    fn nssa_translator_election() {
+        let (low, high, far) = (router_id(1), router_id(2), router_id(3));
+        let lsas = |high_flags, far_flags| {
+            vec![
+                with_flags(
+                    &router_lsa(low, vec![p2p(high, addr(10, 0, 0, 1), 1)]),
+                    ROUTER_FLAG_B,
+                ),
+                with_flags(
+                    &router_lsa(high, vec![p2p(low, addr(10, 0, 0, 2), 1)]),
+                    high_flags,
+                ),
+                // No link back to it: unreachable.
+                with_flags(&router_lsa(far, vec![]), far_flags),
+            ]
+        };
+        // Alone (the other isn't an ABR): low translates.
+        assert!(nssa_translator(low, &lsas(0, ROUTER_FLAG_B), false));
+        // Two ABRs: the higher id wins.
+        let two = lsas(ROUTER_FLAG_B, ROUTER_FLAG_B | ROUTER_FLAG_NT);
+        assert!(!nssa_translator(low, &two, false));
+        assert!(nssa_translator(high, &two, false));
+        // Always beats a higher id; Nt on the lower one beats the higher id.
+        assert!(nssa_translator(low, &two, true));
+        let nt_low = vec![
+            with_flags(&two[0], ROUTER_FLAG_B | ROUTER_FLAG_NT),
+            two[1].clone(),
+        ];
+        assert!(!nssa_translator(high, &nt_low, false));
     }
 
     #[test]

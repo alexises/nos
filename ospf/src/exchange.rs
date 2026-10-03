@@ -65,6 +65,8 @@ pub fn mtu_based_max_headers(mtu: u16) -> usize {
 }
 
 /// One neighbor's DBD/LSR/LSU exchange state, from `ExStart` onward.
+// Independent flags, each read on its own.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AdjacencyData {
     pub is_master: bool,
@@ -99,10 +101,13 @@ pub struct AdjacencyData {
     /// RFC 5250 §3: the neighbor's DBD set the O-bit, so it may be sent
     /// opaque LSAs (types 9-11). Learnt in `ExStart`.
     pub opaque_capable: bool,
-    /// The link is in a stub area (RFC 2328 §3.6): DBDs go without the
-    /// E-bit, and AS-scope LSAs (Type-5/11) are never summarized, accepted
-    /// or requested.
+    /// The link is in a stub area (RFC 2328 §3.6) or an NSSA: DBDs go
+    /// without the E-bit, and AS-scope LSAs (Type-5/11) are never
+    /// summarized, accepted or requested.
     pub stub: bool,
+    /// The link is in an NSSA (RFC 3101): the only kind of link a Type-7 is
+    /// summarized, accepted or requested on (`lsa::in_area_scope`).
+    pub nssa: bool,
 }
 
 /// Pops up to `max` headers off the front of `remaining` for the next DBD
@@ -159,11 +164,14 @@ pub fn on_dbd_received(
     max_headers: usize,
     mtu: u16,
 ) -> Vec<Action> {
-    // RFC 2328 §10.6: an AS-external LSA listed on a stub area's link means
-    // the two databases can't agree — restart the exchange.
-    if adj.stub
-        && matches!(state, NeighborState::ExStart | NeighborState::Exchange)
-        && dbd.lsa_headers.iter().any(|h| lsa::is_as_scope(h.lsa_type))
+    // RFC 2328 §10.6: an AS-external LSA listed on a stub area's link (or a
+    // Type-7 outside an NSSA) means the two databases can't agree — restart
+    // the exchange.
+    if matches!(state, NeighborState::ExStart | NeighborState::Exchange)
+        && dbd
+            .lsa_headers
+            .iter()
+            .any(|h| !lsa::in_area_scope(h.lsa_type, adj.stub, adj.nssa))
     {
         return vec![Action::NeighborEvent(Event::SeqNumberMismatch)];
     }
@@ -354,7 +362,7 @@ fn seed_summary(adj: &mut AdjacencyData, dbd: &DbdPacket, local_lsdb_headers: &[
     adj.summary_remaining = local_lsdb_headers
         .iter()
         .filter(|h| adj.opaque_capable || !lsa::is_opaque(h.lsa_type))
-        .filter(|h| !(adj.stub && lsa::is_as_scope(h.lsa_type)))
+        .filter(|h| lsa::in_area_scope(h.lsa_type, adj.stub, adj.nssa))
         .copied()
         .collect();
 }
@@ -566,8 +574,9 @@ pub fn on_lsu_received(
     let mut newly_installed = Vec::new();
     for l in &lsu.lsas {
         // RFC 2328 §13 step 3: an AS-external (or AS-scope opaque) LSA on a
-        // stub area's link is discarded — neither installed nor acked.
-        if adj.stub && lsa::is_as_scope(l.header.lsa_type) {
+        // stub area's or NSSA's link, or a Type-7 outside an NSSA (RFC 3101
+        // §2.4), is discarded — neither installed nor acked.
+        if !lsa::in_area_scope(l.header.lsa_type, adj.stub, adj.nssa) {
             continue;
         }
         let key = l.header.key();
@@ -1893,6 +1902,52 @@ mod tests {
         on_lsu_received(&mut adj, &mut area, &mut link, &lsu, Instant::now());
         assert!(area.get(&as_scope.header.key()).is_none());
         assert!(adj.pending_acks.is_empty());
+    }
+
+    /// RFC 3101 §2.4: a Type-7 is accepted only on an NSSA's link, and a
+    /// Type-5 never there.
+    #[test]
+    fn type7_only_in_an_nssa_and_type5_never_there() {
+        let external = |lsa_type| {
+            let mut l = Lsa {
+                header: LsaHeader {
+                    lsa_type,
+                    link_state_id: router_id("192.0.2.0"),
+                    ..header("9.9.9.10", 0x8000_0001u32.cast_signed())
+                },
+                body: lsa::LsaBody::AsExternal(lsa::AsExternalLsaBody {
+                    network_mask: router_id("255.255.255.0"),
+                    metric: 0,
+                    forwarding_address: Ipv4Addr::UNSPECIFIED,
+                    external_route_tag: 0,
+                }),
+            };
+            lsa::fill_checksum(&mut l);
+            l
+        };
+        let (type5, type7) = (
+            external(lsa::LSA_TYPE_AS_EXTERNAL),
+            external(lsa::LSA_TYPE_NSSA_EXTERNAL),
+        );
+        for (stub, nssa, installed) in [(false, false, [true, false]), (true, true, [false, true])]
+        {
+            let mut adj = AdjacencyData {
+                stub,
+                nssa,
+                ..Default::default()
+            };
+            let (mut area, mut link) = (Lsdb::default(), Lsdb::default());
+            let lsu = LsuPacket {
+                router_id: router_id("9.9.9.10"),
+                area_id: Ipv4Addr::UNSPECIFIED,
+                lsas: vec![type5.clone(), type7.clone()],
+            };
+            on_lsu_received(&mut adj, &mut area, &mut link, &lsu, Instant::now());
+            for (l, want) in [&type5, &type7].into_iter().zip(installed) {
+                assert_eq!(area.get(&l.header.key()).is_some(), want, "nssa={nssa}");
+            }
+            assert_eq!(adj.pending_acks.len(), 1);
+        }
     }
 
     #[test]

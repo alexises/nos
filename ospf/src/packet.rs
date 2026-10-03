@@ -34,10 +34,12 @@ pub const AUTH_TYPE_CRYPTO: u16 = 2;
 pub const AUTH_TYPE_CRYPTO_EXT: u16 = 3;
 
 /// RFC 2328 Appendix A.2's `E` (`ExternalRoutingCapability`) Options bit —
-/// checked by `handle_hello`'s RFC 2328 §10.5 packet-validity check. This NOS
-/// has no stub-area concept, so it always sets this bit and always requires
-/// a peer to as well (see `ospf::link::handle_hello`'s doc comment).
+/// checked by `handle_hello`'s RFC 2328 §10.5 packet-validity check: clear
+/// in a stub area or NSSA, set otherwise, and a peer's must match.
 pub const OPTION_E: u8 = 0x02;
+/// RFC 3101 §2.1's N-bit in Hellos: set exactly in an NSSA, and a peer's must
+/// match. The same bit is the P-bit in an LSA header (`lsa::OPTION_P`).
+pub const OPTION_N: u8 = 0x08;
 /// RFC 5250 §3's `O` bit: "I store and flood opaque LSAs". Set in DBDs only
 /// (it SHOULD NOT be set in Hellos), read from the peer's DBD.
 pub const OPTION_O: u8 = 0x40;

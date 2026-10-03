@@ -217,11 +217,20 @@ pub fn render_ospf_area(area: &OspfArea) -> String {
         OspfAreaType::Normal => "",
         OspfAreaType::Stub => " stub",
         OspfAreaType::TotallyStubby => " totally-stubby",
+        OspfAreaType::Nssa => " nssa",
+        OspfAreaType::NssaNoSummary => " nssa-no-summary",
     };
     let cost = area
         .stub_default_cost
         .map_or(String::new(), |c| format!(" stub-default-cost {c}"));
-    let mut lines = vec![format!("area {}{area_type}{cost}", area.area_id)];
+    let mut nssa = String::new();
+    if area.nssa_translate_always {
+        nssa.push_str(" nssa-translate-always");
+    }
+    if area.nssa_default_originate {
+        nssa.push_str(" nssa-default-originate");
+    }
+    let mut lines = vec![format!("area {}{area_type}{cost}{nssa}", area.area_id)];
     for range in &area.ranges {
         let suffix = if range.not_advertise {
             " not-advertise"
@@ -1748,10 +1757,21 @@ mod tests {
                 cidr: "10.1.0.0/16".parse().unwrap(),
                 not_advertise: true,
             }],
+            ..Default::default()
         };
         assert_eq!(
             render_ospf_area(&area),
             "area 0.0.0.1 totally-stubby stub-default-cost 5\n  range 10.1.0.0/16 not-advertise"
+        );
+        let nssa = OspfArea {
+            area_id: "0.0.0.2".parse().unwrap(),
+            area_type: OspfAreaType::Nssa,
+            nssa_translate_always: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            render_ospf_area(&nssa),
+            "area 0.0.0.2 nssa nssa-translate-always"
         );
     }
 
@@ -2970,6 +2990,8 @@ mod tests {
                     area_id: area("0.0.0.0"),
                     area_type: nos_proto::OspfAreaType::Normal,
                     stub_default_cost: None,
+                    nssa_translate_always: false,
+                    nssa_default_originate: false,
                     ranges: Vec::new(),
                     profiles: vec![OspfProfile {
                         name: "op".to_string(),

@@ -14,8 +14,9 @@
 //! redistribution (see `ospf/CLAUDE.md`'s "ASBR and AS-external-LSA
 //! origination"), and Summary-LSA (types 3/4, Appendix A.4.4) is implemented
 //! for a real, 2-area-scoped ABR mechanism (see `ospf/CLAUDE.md`'s "ABR and
-//! Summary-LSA origination") — stub/NSSA areas, virtual links, and area-range
-//! aggregation remain out of scope.
+//! Summary-LSA origination"), stub areas and area ranges (#35), and RFC 3101
+//! NSSA-external (type 7, the Type-5 body) for NSSA areas — virtual links
+//! remain out of scope.
 //!
 //! RFC 5250 opaque LSAs (types 9/10/11) are stored and flooded as raw bytes
 //! (`LsaBody::Opaque`); only the RFC 3623 Grace-LSA is parsed.
@@ -30,6 +31,13 @@ pub const LSA_TYPE_NETWORK: u8 = 2;
 pub const LSA_TYPE_NETWORK_SUMMARY: u8 = 3;
 pub const LSA_TYPE_ASBR_SUMMARY: u8 = 4;
 pub const LSA_TYPE_AS_EXTERNAL: u8 = 5;
+/// RFC 3101 NSSA-external-LSA: a Type-5 body, area-scoped, only ever held in
+/// an NSSA.
+pub const LSA_TYPE_NSSA_EXTERNAL: u8 = 7;
+/// RFC 3101 §2.4: the P-bit in an LSA header's options — an NSSA ABR may
+/// translate this Type-7 into a Type-5. Same bit as the Hello N-bit
+/// (`packet::OPTION_NP`).
+pub const OPTION_P: u8 = 0x08;
 /// RFC 5250 opaque LSAs, by flooding scope: link-local (9), area (10), AS
 /// (11). Held and flooded as raw bytes (`LsaBody::Opaque`), except the RFC
 /// 3623 Grace-LSA (type 9, opaque type 3), decoded as `LsaBody::Grace`.
@@ -37,8 +45,8 @@ pub const LSA_TYPE_OPAQUE_LINK: u8 = 9;
 pub const LSA_TYPE_OPAQUE_AREA: u8 = 10;
 /// ponytail: held in the area store it arrived in, like a received Type-5 —
 /// an ABR doesn't flood it on into its other areas. Add that with real
-/// Type-5 cross-area flooding. No stub areas, so RFC 5250's "not into stub
-/// areas" rule has nothing to apply to.
+/// Type-5 cross-area flooding. Kept out of stub areas and NSSAs
+/// (`is_as_scope`).
 pub const LSA_TYPE_OPAQUE_AS: u8 = 11;
 /// RFC 3623 Appendix A: the Grace-LSA's opaque type — the top octet of its
 /// Link State ID, so the Link State ID is always `3.0.0.0` (opaque ID 0).
@@ -65,6 +73,13 @@ pub fn is_as_scope(lsa_type: u8) -> bool {
     matches!(lsa_type, LSA_TYPE_AS_EXTERNAL | LSA_TYPE_OPAQUE_AS)
 }
 
+/// Whether an LSA of `lsa_type` belongs in an area of this kind: no AS-scope
+/// LSA in a stub area or NSSA (`stub` is set for both), and a Type-7 only in
+/// an NSSA (RFC 3101 §2.4).
+pub fn in_area_scope(lsa_type: u8, stub: bool, nssa: bool) -> bool {
+    !(stub && is_as_scope(lsa_type)) && (nssa || lsa_type != LSA_TYPE_NSSA_EXTERNAL)
+}
+
 /// Type 9: held per link, never flooded past the link it arrived on.
 pub fn is_link_local_scope(lsa_type: u8) -> bool {
     lsa_type == LSA_TYPE_OPAQUE_LINK
@@ -86,6 +101,8 @@ pub const LINK_TYPE_STUB_NETWORK: u8 = 3;
 /// links.
 pub const ROUTER_FLAG_B: u8 = 0x01;
 pub const ROUTER_FLAG_E: u8 = 0x02;
+/// RFC 3101 A.2: Nt — an NSSA border router that always translates Type-7s.
+pub const ROUTER_FLAG_NT: u8 = 0x10;
 
 pub const LSA_HEADER_LEN: usize = 20;
 /// One Router-LSA link entry's wire length (Appendix A.4.2): Link ID (4) +
@@ -432,7 +449,7 @@ fn decode_body(header: &LsaHeader, data: &[u8]) -> Result<LsaBody, PacketError> 
                 attached_routers,
             }))
         }
-        LSA_TYPE_AS_EXTERNAL => {
+        LSA_TYPE_AS_EXTERNAL | LSA_TYPE_NSSA_EXTERNAL => {
             if data.len() < 16 {
                 return Err(PacketError::TruncatedBody);
             }
@@ -692,6 +709,18 @@ mod tests {
     fn as_external_lsa_round_trips() {
         let lsa = as_external_lsa();
         let decoded = decode_lsa(&encode_lsa(&lsa)).unwrap();
+        assert_eq!(decoded.body, lsa.body);
+    }
+
+    /// RFC 3101: a Type-7 is a Type-5 body; the header keeps its P-bit.
+    #[test]
+    fn nssa_external_lsa_round_trips_with_its_p_bit() {
+        let mut lsa = as_external_lsa();
+        lsa.header.lsa_type = LSA_TYPE_NSSA_EXTERNAL;
+        lsa.header.options = OPTION_P;
+        let decoded = decode_lsa(&encode_lsa(&lsa)).unwrap();
+        assert_eq!(decoded.header.options, OPTION_P);
+        assert_eq!(decoded.header.lsa_type, LSA_TYPE_NSSA_EXTERNAL);
         assert_eq!(decoded.body, lsa.body);
     }
 

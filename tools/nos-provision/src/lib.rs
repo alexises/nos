@@ -704,7 +704,8 @@ pub struct Args {
     /// (`OspfAreaOp::Ensure`).
     #[arg(long)]
     pub ospf_area: Option<Ipv4Addr>,
-    /// `normal`, `stub` or `totally-stubby` for `--ospf-area`
+    /// `normal`, `stub`, `totally-stubby`, `nssa` or `nssa-no-summary` for
+    /// `--ospf-area`
     /// (`OspfAreaOp::SetAreaType`).
     #[arg(long, requires = "ospf_area", value_parser = parse_ospf_area_type)]
     pub ospf_area_type: Option<OspfAreaType>,
@@ -855,8 +856,10 @@ fn parse_ospf_area_type(s: &str) -> Result<OspfAreaType, String> {
         "normal" => Ok(OspfAreaType::Normal),
         "stub" => Ok(OspfAreaType::Stub),
         "totally-stubby" => Ok(OspfAreaType::TotallyStubby),
+        "nssa" => Ok(OspfAreaType::Nssa),
+        "nssa-no-summary" => Ok(OspfAreaType::NssaNoSummary),
         _ => Err(format!(
-            "unknown area type {s:?} (normal, stub, totally-stubby)"
+            "unknown area type {s:?} (normal, stub, totally-stubby, nssa, nssa-no-summary)"
         )),
     }
 }

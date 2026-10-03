@@ -1046,14 +1046,18 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              more preferred one is unreachable.",
         ),
         Topic::OspfAreaType => (
-            "Make an OSPF area a stub or totally-stubby area.",
+            "Make an OSPF area a stub, totally-stubby or not-so-stubby area.",
             concat!(
-                "Sets area-type to normal, stub or totally-stubby (RFC 2328 §3.6). A stub area \
-             carries no AS-external LSAs and its Hellos have the E-bit clear; an area border \
-             router sends a default summary route into it instead. A totally-stubby area gets \
-             only that default, no other summary. Every router on the area's links must agree, \
-             or they won't form adjacencies — changing it restarts the area's links. The \
-             backbone (0.0.0.0) can't be a stub.",
+                "Sets area-type to normal, stub, totally-stubby, nssa or nssa-no-summary (RFC \
+             2328 §3.6, RFC 3101). A stub area carries no AS-external LSAs and its Hellos have \
+             the E-bit clear; an area border router sends a default summary route into it \
+             instead. A totally-stubby area gets only that default, no other summary. An NSSA \
+             also carries no AS-external LSA, but a router in it may still redistribute: its \
+             routes travel as Type-7 LSAs, which one area border router translates into \
+             AS-external LSAs for the rest of the network. nssa-no-summary is an NSSA that \
+             gets only a default summary. Every router on the area's links must agree, or they \
+             won't form adjacencies — changing it restarts the area's links. The backbone \
+             (0.0.0.0) can't be any of them.",
                 " ",
                 "Reset the area to normal.",
             ),
@@ -1061,9 +1065,9 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         Topic::OspfAreaStubDefaultCost => (
             "Set the cost of the default route an ABR sends into this stub area.",
             concat!(
-                "Sets stub-default-cost (1-65535) — the metric of the 0.0.0.0/0 summary this \
+                "Sets stub-default-cost (1-65535) — the metric of the 0.0.0.0/0 default this \
              router originates into the area when it is an area border router. Only allowed \
-             on a stub or totally-stubby area.",
+             on a stub area or an NSSA.",
                 " ",
                 "Clear it, back to 1.",
             ),
@@ -1078,6 +1082,27 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              not-advertise, the covered prefixes are hidden from the other areas entirely.",
                 " ",
                 "Remove an address range.",
+            ),
+        ),
+        Topic::OspfAreaNssaTranslateAlways => (
+            "Always translate this NSSA's Type-7 routes, as its area border router.",
+            concat!(
+                "Sets nssa-translate-always: this router translates the NSSA's Type-7 LSAs into \
+             AS-external LSAs whenever it is one of the area's border routers, instead of only \
+             when elected translator (the border router with the highest router id, RFC 3101 \
+             §3.1). Only allowed on an NSSA.",
+                " ",
+                "Go back to translating only when elected.",
+            ),
+        ),
+        Topic::OspfAreaNssaDefaultOriginate => (
+            "Send a default route into this NSSA, as its area border router.",
+            concat!(
+                "Sets nssa-default-originate: as one of the NSSA's border routers, this router \
+             originates a 0.0.0.0/0 Type-7 LSA into it (RFC 3101 §2.7), at stub-default-cost. \
+             It is never translated out of the area. Only allowed on an NSSA.",
+                " ",
+                "Stop originating it.",
             ),
         ),
         Topic::OspfAreaRangeAdvertise => (

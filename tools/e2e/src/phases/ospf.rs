@@ -8,7 +8,7 @@ use anyhow::bail;
 use reqwest::Method;
 
 use crate::consts::*;
-use crate::router::{log, strings, Router, A, B};
+use crate::router::{log, strings, Router, A, B, C};
 use crate::world::World;
 
 const BD: &str = OSPF_BROADCAST_DOMAIN;
@@ -63,6 +63,10 @@ fn asbr(mut f: Vec<String>) -> Vec<String> {
 /// Trunks eth0 into the ospf broadcast domain (dot1q 400), addresses the
 /// domain's bridge (an SVI) and points the domain's ospf field at the profile.
 fn ospf_broadcast(svi: &str) -> Vec<String> {
+    ospf_broadcast_profile(svi, OSPF_PROFILE)
+}
+
+fn ospf_broadcast_profile(svi: &str, profile: &str) -> Vec<String> {
     strings(&[
         "--routing-table",
         "rt1",
@@ -75,7 +79,7 @@ fn ospf_broadcast(svi: &str) -> Vec<String> {
         "--broadcast-domain-svi-address",
         svi,
         "--ospf-broadcast-domain-profile",
-        OSPF_PROFILE,
+        profile,
     ])
 }
 
@@ -977,6 +981,104 @@ pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
         bail!("router-a lost its default route in the totally-stubby area");
     }
     Ok(())
+}
+
+/// RFC 3101 NSSA, self-contained, three routers. eth0.0 (a-b) is the
+/// backbone; the bd-ospf bridge (a, b and c) is NSSA area 1, so router-a and
+/// router-b are its two ABRs and router-c is internal to it. Router-c
+/// redistributes a static route as a Type-7; router-b, the higher router-id,
+/// is the elected translator and floods the Type-5 into the backbone, which
+/// router-a learns over eth0.0. No Type-5 ever enters the NSSA.
+pub async fn ospf_nssa(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    w.start(C, None, &[]).await?;
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let lsid = ASBR_PREFIX.split('/').next().unwrap_or(ASBR_PREFIX);
+    let nssa = |router_id: &str, svi: &str| {
+        let mut flags = strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            router_id,
+            "--ospf-area",
+            OSPF_AREA_1,
+            "--ospf-area-type",
+            "nssa",
+            "--ospf-profile",
+            OSPF_PROFILE_AREA1,
+        ]);
+        flags.extend(ospf_broadcast_profile(svi, OSPF_PROFILE_AREA1));
+        flags
+    };
+    a.provision_flags(&with_base(A, ospf(OSPF_ROUTER_ID)))
+        .await?;
+    b.provision_flags(&with_base(B, ospf(OSPF_ROUTER_ID_B)))
+        .await?;
+    a.provision_flags(&with_base(
+        A,
+        nssa(OSPF_ROUTER_ID, OSPF_BROADCAST_ADDRESS_A),
+    ))
+    .await?;
+    b.provision_flags(&with_base(
+        B,
+        nssa(OSPF_ROUTER_ID_B, OSPF_BROADCAST_ADDRESS_B),
+    ))
+    .await?;
+    c.provision_flags(&with_base(
+        C,
+        asbr(nssa(OSPF_ROUTER_ID_C, OSPF_BROADCAST_ADDRESS_C)),
+    ))
+    .await?;
+
+    both_full_p2p(a, b).await?;
+    let link = format!("link=broadcast-domain:{BD}");
+    for neighbor in [OSPF_ROUTER_ID, OSPF_ROUTER_ID_B] {
+        c.wait(&format!(
+            "ospf neighbor reached full {link} neighbor={neighbor}"
+        ))
+        .await?;
+    }
+    // Router-c's Type-7, translated by router-b alone into a Type-5 that
+    // router-a learns over the backbone and routes.
+    c.wait(&format!(
+        "ospf lsa originated.*lsa_type=7 link_state_id={lsid}"
+    ))
+    .await?;
+    b.wait(&format!(
+        "ospf nssa translator role changed area={OSPF_AREA_1} translating=true"
+    ))
+    .await?;
+    b.wait(&format!(
+        "ospf lsa originated.*lsa_type=5 link_state_id={lsid}"
+    ))
+    .await?;
+    a.wait(&format!(
+        "ospf lsa installed link=eth0.0 .*lsa_type=5 link_state_id={lsid} advertising_router={OSPF_ROUTER_ID_B}"
+    ))
+    .await?;
+    a.wait(&format!(
+        "added route prefix={ASBR_PREFIX} .*source=Some(Ospf)"
+    ))
+    .await?;
+    log("confirming router-a doesn't translate too and no type-5 enters the nssa");
+    let a_type5 = "ospf lsa originated.*lsa_type=5";
+    a.assert_quiet(a_type5, a.count(a_type5), 10).await?;
+    c.assert_quiet("ospf lsa installed.*lsa_type=5", 0, 0)
+        .await?;
+
+    // Redistribution removed: the Type-7 and the Type-5 translated from it
+    // are both flushed (RFC 2328 §14.1) and router-a's route goes.
+    let removed = format!("removed route prefix={ASBR_PREFIX}");
+    c.provision(&["--clear-redistribute-to-ospf"]).await?;
+    c.wait(&format!(
+        "ospf lsa prematurely aged.*lsa_type=7 link_state_id={lsid}"
+    ))
+    .await?;
+    b.wait(&format!(
+        "ospf lsa prematurely aged.*lsa_type=5 link_state_id={lsid}"
+    ))
+    .await?;
+    a.wait(&removed).await
 }
 
 /// RFC 5250 opaque LSAs against a real third-party router, self-contained.

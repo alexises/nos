@@ -6,7 +6,8 @@ use super::{ospf_profile, DiffStatus, FieldDiff, SectionDiff};
 
 /// Diffs two lists of `OspfArea`s, matched by `area_id` (unique within the
 /// owning instance — see `schema::ospf_instance::unique_area_ids`). The
-/// area's own `area_type`/`stub_default_cost`/`ranges` go in `fields`, its
+/// area's own `area_type`/`stub_default_cost`/`nssa_*`/`ranges` go in
+/// `fields`, its
 /// profiles' changes nested in `subsections`.
 pub fn diff_ospf_areas(base: &[OspfArea], candidate: &[OspfArea]) -> Vec<SectionDiff> {
     let mut sections = Vec::new();
@@ -48,6 +49,8 @@ fn area_type_str(t: OspfAreaType) -> &'static str {
         OspfAreaType::Normal => "normal",
         OspfAreaType::Stub => "stub",
         OspfAreaType::TotallyStubby => "totally-stubby",
+        OspfAreaType::Nssa => "nssa",
+        OspfAreaType::NssaNoSummary => "nssa-no-summary",
     }
 }
 
@@ -85,6 +88,26 @@ fn changed_fields(base: &OspfArea, candidate: &OspfArea) -> Vec<FieldDiff> {
             old: Some(cost(base)),
             new: Some(cost(candidate)),
         });
+    }
+    for (label, old, new) in [
+        (
+            "nssa-translate-always",
+            base.nssa_translate_always,
+            candidate.nssa_translate_always,
+        ),
+        (
+            "nssa-default-originate",
+            base.nssa_default_originate,
+            candidate.nssa_default_originate,
+        ),
+    ] {
+        if old != new {
+            fields.push(FieldDiff {
+                label: label.to_string(),
+                old: Some(old.to_string()),
+                new: Some(new.to_string()),
+            });
+        }
     }
     if base.ranges != candidate.ranges {
         fields.push(FieldDiff {
