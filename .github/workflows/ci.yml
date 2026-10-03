@@ -4,8 +4,8 @@ on:
   push:
     branches: ["master", "main"]
   pull_request:
-  # `mutants` only: too slow for every push, so it runs on the nightly cron and on
-  # manual dispatch; every other job skips the cron (`github.event_name != 'schedule'`).
+  # `mutants` and the two canaries: the canaries float (newest stable / nightly), so
+  # the cron finds drift within a day without anyone pushing. Every other job skips it.
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
@@ -15,7 +15,11 @@ env:
   RUSTFLAGS: "-D warnings"
   # The toolchain fmt/clippy/test/coverage run on. Bump it on purpose (see CLAUDE.md
   # "Rust toolchain"); `clippy-canary` warns when the newest stable would break.
+  # Every job runs the Makefile target, so a local `make <target>` is the same command
+  # on the same toolchain (natively, or in the nos-ci image on a host without it).
   RUST_TOOLCHAIN: "1.99.0"
+  # The dated nightly Miri runs on (`make miri`); `miri-canary` tries the newest one.
+  MIRI_TOOLCHAIN: "nightly-2026-10-03"
 
 jobs:
   fmt:
@@ -28,7 +32,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
-      - run: cargo fmt --all --check
+      - run: make fmt
 
   clippy:
     name: Clippy
@@ -41,12 +45,13 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets
+      - run: make clippy
 
   clippy-canary:
     name: Clippy (stable canary)
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule'
+    outputs:
+      outcome: ${{ steps.canary.outcome }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -57,7 +62,8 @@ jobs:
       # shows a red X on the commit/PR.
       - id: canary
         continue-on-error: true
-        run: cargo clippy --workspace --all-targets
+        # `+stable`: rust-toolchain.toml would otherwise pin it back to RUST_TOOLCHAIN.
+        run: cargo +stable clippy --workspace --all-targets
       - if: steps.canary.outcome == 'failure'
         run: echo "::warning::The newest stable rustc breaks clippy -D warnings; bump RUST_TOOLCHAIN in ci.yml (see CLAUDE.md \"Rust toolchain\")."
 
@@ -72,7 +78,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --workspace
+      - run: make test
 
   coverage:
     name: Coverage
@@ -132,24 +138,44 @@ jobs:
     name: Miri (UB check)
     runs-on: ubuntu-latest
     if: github.event_name != 'schedule'
-    env:
-      # Nightly deprecations land ahead of stable; that lint noise must not gate CI,
-      # `-D warnings` on the pinned toolchain already covers the rest.
-      RUSTFLAGS: "-D warnings -A deprecated"
-      # Tests read the clock and open files/sockets; Miri's sandbox would refuse them.
-      MIRIFLAGS: "-Zmiri-disable-isolation"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      # The pinned stable too: `make` checks rustc against it to stay native.
+      - uses: dtolnay/rust-toolchain@master
         with:
-          components: miri
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.MIRI_TOOLCHAIN }}
+          components: miri, rust-src
       - uses: Swatinem/rust-cache@v2
       # Only the pure-logic leaf crates: Miri cannot execute FFI, and everything else in
       # the workspace either is FFI (`nos-tcp-auth`/`nos-l2-socket` — raw setsockopt and
       # AF_PACKET), runs TLS through aws-lc-rs's C code in its tests (`nos-pki` and every
       # daemon/client), or is argon2 (`nos-password`), hours long under an interpreter.
-      # `+nightly`: rust-toolchain.toml pins the stable toolchain, which has no miri.
-      - run: cargo +nightly miri test -p nos-rpl -p nos-ospf-common -p nos-proto
+      # RUSTFLAGS/MIRIFLAGS are set by the Makefile target.
+      - run: make miri
+
+  miri-canary:
+    name: Miri (nightly canary)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    outputs:
+      outcome: ${{ steps.canary.outcome }}
+    env:
+      RUSTFLAGS: "-D warnings -A deprecated"
+      MIRIFLAGS: "-Zmiri-disable-isolation"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - uses: Swatinem/rust-cache@v2
+      - id: canary
+        continue-on-error: true
+        run: cargo +nightly miri test -p nos-rpl -p nos-ospf-common -p nos-proto
+      - if: steps.canary.outcome == 'failure'
+        run: echo "::warning::The newest nightly breaks Miri; bump MIRI_TOOLCHAIN in ci.yml once a fixed one exists (see CLAUDE.md \"Rust toolchain\")."
 
   mutants:
     name: Mutation testing
@@ -162,3 +188,31 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-mutants
       - run: cargo mutants --workspace
+
+  # A red master (or canary) opens one `ci-red` issue, or comments on the open one, the
+  # same day — instead of the next PR finding it (#180). Never on PRs: their checks are
+  # the gate there.
+  alert:
+    name: Alert on red
+    runs-on: ubuntu-latest
+    needs: [fmt, clippy, clippy-canary, test, coverage, audit, deny, sast, miri, miri-canary, mutants]
+    if: >-
+      always() && github.event_name != 'pull_request' &&
+      (contains(needs.*.result, 'failure') ||
+       needs.clippy-canary.outputs.outcome == 'failure' ||
+       needs.miri-canary.outputs.outcome == 'failure')
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      NEEDS: ${{ toJSON(needs) }}
+    steps:
+      - run: |
+          red=$(jq -r 'to_entries[] | select(.value.result == "failure" or .value.outputs.outcome == "failure") | .key' <<<"$NEEDS" | paste -sd, -)
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          body="CI red on \`$GITHUB_REF_NAME\` ($GITHUB_EVENT_NAME, $GITHUB_SHA): **$red** — $url"
+          gh label create ci-red --color B60205 --description "CI is red on master or a canary" 2>/dev/null || true
+          n=$(gh issue list --label ci-red --state open --json number --jq '.[0].number')
+          if [ -n "$n" ]; then gh issue comment "$n" --body "$body"
+          else gh issue create --label ci-red --title "CI red on $GITHUB_REF_NAME: $red" --body "$body"; fi
