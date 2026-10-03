@@ -179,6 +179,8 @@ mod tests {
             area_type: crate::schema::OspfAreaType::Normal,
             stub_default_cost: None,
             ranges: Vec::new(),
+            nssa_translate_always: false,
+            nssa_default_originate: false,
             profiles: Vec::new(),
         });
 

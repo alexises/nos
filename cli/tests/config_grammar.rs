@@ -33,6 +33,8 @@ fn populated() -> Config {
         area_id: "0.0.0.0".parse().unwrap(),
         area_type: nos_proto::OspfAreaType::Normal,
         stub_default_cost: None,
+        nssa_translate_always: false,
+        nssa_default_originate: false,
         ranges: Vec::new(),
         profiles: vec![OspfProfile {
             name: "p1".into(),

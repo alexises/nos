@@ -277,6 +277,10 @@ topics! {
     OspfAreaRange,
     /// `OspfAreaRange.not_advertise`
     OspfAreaRangeAdvertise,
+    /// `OspfArea.nssa_translate_always`
+    OspfAreaNssaTranslateAlways,
+    /// `OspfArea.nssa_default_originate`
+    OspfAreaNssaDefaultOriginate,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

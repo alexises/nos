@@ -148,7 +148,8 @@ jobs:
       # the workspace either is FFI (`nos-tcp-auth`/`nos-l2-socket` — raw setsockopt and
       # AF_PACKET), runs TLS through aws-lc-rs's C code in its tests (`nos-pki` and every
       # daemon/client), or is argon2 (`nos-password`), hours long under an interpreter.
-      - run: cargo miri test -p nos-rpl -p nos-ospf-common -p nos-proto
+      # `+nightly`: rust-toolchain.toml pins the stable toolchain, which has no miri.
+      - run: cargo +nightly miri test -p nos-rpl -p nos-ospf-common -p nos-proto
 
   mutants:
     name: Mutation testing
