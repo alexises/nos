@@ -4671,7 +4671,7 @@ mod tests {
         assert_eq!(body.flags & lsa::ROUTER_FLAG_E, 0);
         // The ABR holds a discard route for its active range.
         let discard = route(&b.compute_routes().await, "192.0.2.0/24").expect("discard");
-        assert!(discard.next_hops.is_empty());
+        assert_eq!(discard.next_hops, Vec::<Ipv4Addr>::new());
 
         // Totally stubby: the range summary is flushed, the default stays.
         b.set_area_settings(settings(Some(false), vec![(net("192.0.2.0/24"), true)]))
@@ -4841,7 +4841,10 @@ mod tests {
             held(a.database_summaries().await, lsa::LSA_TYPE_AS_EXTERNAL),
             [(net, id(2))]
         );
-        assert!(held(a.database_summaries().await, lsa::LSA_TYPE_NSSA_EXTERNAL).is_empty());
+        assert_eq!(
+            held(a.database_summaries().await, lsa::LSA_TYPE_NSSA_EXTERNAL),
+            vec![]
+        );
         let route = a
             .compute_routes()
             .await
@@ -4851,7 +4854,10 @@ mod tests {
         assert_eq!(route.next_hops, [Ipv4Addr::new(10, 0, 0, 2)]);
         // The NSSA holds C's Type-7 (P-bit, forwarding address C's own
         // link address) and no Type-5.
-        assert!(held(c.database_summaries().await, lsa::LSA_TYPE_AS_EXTERNAL).is_empty());
+        assert_eq!(
+            held(c.database_summaries().await, lsa::LSA_TYPE_AS_EXTERNAL),
+            vec![]
+        );
         let type7 = b
             .lsdb_for(area1)
             .await
@@ -4878,7 +4884,10 @@ mod tests {
         c.set_redistribute_policy(Arc::new(nos_rpl::ACCEPT_ALL.clone()))
             .await;
         settle(4).await;
-        assert!(held(c.database_summaries().await, lsa::LSA_TYPE_NSSA_EXTERNAL).is_empty());
+        assert_eq!(
+            held(c.database_summaries().await, lsa::LSA_TYPE_NSSA_EXTERNAL),
+            vec![]
+        );
     }
 
     #[tokio::test(start_paused = true)]

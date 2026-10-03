@@ -1901,7 +1901,7 @@ mod tests {
         };
         on_lsu_received(&mut adj, &mut area, &mut link, &lsu, Instant::now());
         assert!(area.get(&as_scope.header.key()).is_none());
-        assert!(adj.pending_acks.is_empty());
+        assert_eq!(adj.pending_acks, vec![]);
     }
 
     /// RFC 3101 §2.4: a Type-7 is accepted only on an NSSA's link, and a
