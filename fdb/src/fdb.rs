@@ -137,6 +137,9 @@ struct SegmentAds {
     evi: BTreeSet<IpAddr>,
     /// A per-ES route carried the Single-Active flag in its ESI Label.
     single_active: bool,
+    /// The PEs whose Type-4 for this segment we hold: who the segment would
+    /// elect as DF, so whom a single-active backup path points at.
+    es_pes: BTreeSet<IpAddr>,
 }
 
 type Ads = HashMap<Esi, SegmentAds>;
@@ -174,9 +177,16 @@ enum Installed {
 /// The A-D index of `received`: only routes carrying one of our import Route
 /// Targets count (a per-ES route carries the RTs of the EVIs on the segment),
 /// and never our own. A per-EVI route also has to name this domain's VNI.
+/// Type-4s carry only an ES-Import RT, so they skip the RT filter.
 fn ad_index(r: &Ready, received: &HashMap<EvpnKey, EvpnRoute>) -> Ads {
     let mut out = Ads::new();
     for route in received.values() {
+        if let EvpnKey::EthernetSegment { esi, origin, .. } = &route.key {
+            if *origin != r.vtep {
+                out.entry(*esi).or_default().es_pes.insert(*origin);
+            }
+            continue;
+        }
         let EvpnKey::EthernetAd {
             esi, tag, origin, ..
         } = &route.key
@@ -208,14 +218,30 @@ fn ad_index(r: &Ready, received: &HashMap<EvpnKey, EvpnRoute>) -> Ads {
 /// The PEs a MAC on an all-active segment is load-balanced over (aliasing,
 /// RFC 7432 §8.4.1.1): those that advertise both the segment (per-ES A-D) and
 /// the EVI (per-EVI A-D). Only when there are several, the MAC's own PE is one
-/// of them, and they are all IPv4 (an FDB nexthop's gateway).
-fn alias_group(a: &SegmentAds, owner: IpAddr) -> Option<Vec<IpAddr>> {
+/// of them, and they all share our VTEP's address family (the kernel refuses
+/// a mixed group, or one whose family differs from the VXLAN device's).
+fn alias_group(a: &SegmentAds, owner: IpAddr, own_vtep: IpAddr) -> Option<Vec<IpAddr>> {
     if a.single_active {
         return None;
     }
     let members: Vec<IpAddr> = a.pes.intersection(&a.evi).copied().collect();
-    (members.len() > 1 && members.contains(&owner) && members.iter().all(IpAddr::is_ipv4))
-        .then_some(members)
+    let same_family = members.iter().all(|m| m.is_ipv4() == own_vtep.is_ipv4());
+    (members.len() > 1 && members.contains(&owner) && same_family).then_some(members)
+}
+
+/// A single-active segment's backup PE once the MAC's own PE lost its per-ES
+/// A-D (RFC 7432 §8.4.1.2): among the PEs still advertising both the segment
+/// and the EVI, the one the segment elects as DF, by its Type-4s; the lowest
+/// address when none of their Type-4s is held (an RT-Constraint or reflector
+/// may filter them, §7.6). `ponytail:` modulo only — the DF is not on the
+/// wire, so a remote segment running HRW or Preference may disagree.
+fn backup_pe(a: &SegmentAds, vni: u32) -> Option<IpAddr> {
+    let usable: BTreeSet<IpAddr> = a.pes.intersection(&a.evi).copied().collect();
+    let elected: BTreeSet<IpAddr> = a.es_pes.intersection(&usable).copied().collect();
+    match elected.first() {
+        Some(any) => Some(df::elect(*any, &elected, vni)),
+        None => usable.first().copied(),
+    }
 }
 
 /// What a received route should become in the kernel, if anything: it must
@@ -244,7 +270,7 @@ fn desired(r: &Ready, route: &EvpnRoute, ads: &Ads) -> Vec<Installed> {
             if a.pes.contains(&route.next_hop) {
                 Some(route.next_hop)
             } else if a.single_active {
-                a.pes.intersection(&a.evi).next().copied()
+                backup_pe(a, r.vni)
             } else {
                 None
             }
@@ -257,7 +283,7 @@ fn desired(r: &Ready, route: &EvpnRoute, ads: &Ads) -> Vec<Installed> {
     let group = (via == Some(route.next_hop))
         .then(|| {
             ads.get(&route.esi)
-                .and_then(|a| alias_group(a, route.next_hop))
+                .and_then(|a| alias_group(a, route.next_hop, r.vtep))
         })
         .flatten();
     let mac_item = |mac: Mac| match &group {
@@ -855,9 +881,10 @@ impl Fdb {
             )
         });
         let mut keys = keys;
-        if keys.iter().any(|k| matches!(k, EvpnKey::EthernetAd { .. })) {
+        if segments_changed {
             // A PE's per-ES A-D coming or going re-decides every MAC on that
-            // segment at once (mass withdrawal, RFC 7432 §8.2.1).
+            // segment at once (mass withdrawal, RFC 7432 §8.2.1); its Type-4
+            // can move a single-active segment's backup PE.
             let stale = refresh_ads(&mut g);
             for esi in &stale {
                 info!(
@@ -2157,6 +2184,7 @@ mod tests {
                     pes: BTreeSet::from([backup.parse().unwrap()]),
                     evi: evi.iter().map(|p| p.parse().unwrap()).collect(),
                     single_active,
+                    ..SegmentAds::default()
                 },
             )])
         };
@@ -2195,28 +2223,62 @@ mod tests {
             pes: pes.iter().map(|p| ip(p)).collect(),
             evi: evi.iter().map(|p| ip(p)).collect(),
             single_active,
+            ..SegmentAds::default()
         };
         let (a, b) = ("192.0.2.9", "192.0.2.20");
         // Both PEs serve the segment and the EVI: balanced over both, sorted.
         assert_eq!(
-            alias_group(&ads(&[b, a], &[a, b], false), ip(a)),
+            alias_group(&ads(&[b, a], &[a, b], false), ip(a), ip(a)),
             Some(vec![ip(a), ip(b)])
         );
         // One PE is no group; a PE without the EVI's A-D is left out.
-        assert_eq!(alias_group(&ads(&[a], &[a], false), ip(a)), None);
-        assert_eq!(alias_group(&ads(&[a, b], &[a], false), ip(a)), None);
+        assert_eq!(alias_group(&ads(&[a], &[a], false), ip(a), ip(a)), None);
+        assert_eq!(alias_group(&ads(&[a, b], &[a], false), ip(a), ip(a)), None);
         // The MAC's own PE has to be one of them.
         assert_eq!(
-            alias_group(&ads(&[a, b], &[b, "192.0.2.30"], false), ip(a)),
+            alias_group(&ads(&[a, b], &[b, "192.0.2.30"], false), ip(a), ip(a)),
             None
         );
         // Single-active has a backup path, not aliasing.
-        assert_eq!(alias_group(&ads(&[a, b], &[a, b], true), ip(a)), None);
-        // An FDB nexthop's gateway is IPv4.
         assert_eq!(
-            alias_group(&ads(&[a, "2001:db8::1"], &[a, "2001:db8::1"], false), ip(a)),
+            alias_group(&ads(&[a, b], &[a, b], true), ip(a), ip(a)),
             None
         );
+        // One address family, our VTEP's: an all-IPv6 set aliases over an
+        // IPv6 underlay, never a mixed set or one of the other family.
+        let (c, d) = ("2001:db8::1", "2001:db8::2");
+        assert_eq!(
+            alias_group(&ads(&[c, d], &[c, d], false), ip(c), ip("2001:db8::9")),
+            Some(vec![ip(c), ip(d)])
+        );
+        assert_eq!(
+            alias_group(&ads(&[a, c], &[a, c], false), ip(a), ip(a)),
+            None
+        );
+        assert_eq!(
+            alias_group(&ads(&[c, d], &[c, d], false), ip(c), ip(a)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_single_active_backup_is_the_segments_elected_df() {
+        let ip = |s: &str| -> IpAddr { s.parse().unwrap() };
+        let set = |v: &[&str]| v.iter().map(|p| ip(p)).collect::<BTreeSet<_>>();
+        let (b, c) = ("192.0.2.20", "192.0.2.30");
+        let ads = |es: &[&str]| SegmentAds {
+            pes: set(&[b, c]),
+            evi: set(&[b, c]),
+            single_active: true,
+            es_pes: set(es),
+        };
+        // Ordered .20 .30, VNI 10101 % 2 == 1: the DF is .30, not the lowest.
+        assert_eq!(backup_pe(&ads(&["192.0.2.10", b, c]), 10101), Some(ip(c)));
+        assert_eq!(backup_pe(&ads(&[b, c]), 10100), Some(ip(b)));
+        // No Type-4 held: the lowest usable address.
+        assert_eq!(backup_pe(&ads(&[]), 10101), Some(ip(b)));
+        // A Type-4 from a PE that lost its A-D routes doesn't count.
+        assert_eq!(backup_pe(&ads(&["192.0.2.40"]), 10101), Some(ip(b)));
     }
 
     #[tokio::test]
@@ -2277,6 +2339,7 @@ mod tests {
                 pes: [a, b].iter().map(|p| p.parse().unwrap()).collect(),
                 evi: [a, b].iter().map(|p| p.parse().unwrap()).collect(),
                 single_active: false,
+                ..SegmentAds::default()
             },
         )]);
         // The MAC advertised by each PE (each under its own RD): the same item,

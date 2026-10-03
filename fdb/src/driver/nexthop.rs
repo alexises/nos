@@ -6,6 +6,8 @@
 //! socket.
 
 use std::io;
+use std::net::IpAddr;
+#[cfg(test)]
 use std::net::Ipv4Addr;
 
 use netlink_sys::{protocols::NETLINK_ROUTE, Socket, SocketAddr};
@@ -24,6 +26,7 @@ const NHA_GATEWAY: u16 = 6;
 const NHA_FDB: u16 = 11;
 
 const AF_INET: u8 = 2;
+const AF_INET6: u8 = 10;
 const RTPROT_STATIC: u8 = 4;
 
 /// What one request creates or removes.
@@ -32,7 +35,7 @@ pub(super) enum Nexthop {
     /// An FDB nexthop: just a remote VTEP.
     Gateway {
         id: u32,
-        gateway: Ipv4Addr,
+        gateway: IpAddr,
     },
     /// An FDB group over existing gateway nexthops (equal weight).
     Group {
@@ -55,7 +58,11 @@ fn nla(out: &mut Vec<u8>, kind: u16, payload: &[u8]) {
 /// The whole netlink message, `seq` chosen by the caller.
 pub(super) fn encode(nh: &Nexthop, seq: u32) -> Vec<u8> {
     let (kind, flags, family) = match nh {
-        Nexthop::Gateway { .. } => (RTM_NEWNEXTHOP, NLM_F_CREATE | NLM_F_REPLACE, AF_INET),
+        Nexthop::Gateway { gateway, .. } => (
+            RTM_NEWNEXTHOP,
+            NLM_F_CREATE | NLM_F_REPLACE,
+            if gateway.is_ipv4() { AF_INET } else { AF_INET6 },
+        ),
         // A group has no family of its own.
         Nexthop::Group { .. } => (RTM_NEWNEXTHOP, NLM_F_CREATE | NLM_F_REPLACE, 0),
         Nexthop::Delete { .. } => (RTM_DELNEXTHOP, 0, 0),
@@ -73,7 +80,10 @@ pub(super) fn encode(nh: &Nexthop, seq: u32) -> Vec<u8> {
     match nh {
         Nexthop::Gateway { id, gateway } => {
             nla(&mut body, NHA_ID, &id.to_ne_bytes());
-            nla(&mut body, NHA_GATEWAY, &gateway.octets());
+            match gateway {
+                IpAddr::V4(a) => nla(&mut body, NHA_GATEWAY, &a.octets()),
+                IpAddr::V6(a) => nla(&mut body, NHA_GATEWAY, &a.octets()),
+            }
             nla(&mut body, NHA_FDB, &[]);
         }
         Nexthop::Group { id, members } => {
@@ -144,7 +154,7 @@ mod tests {
         let m = encode(
             &Nexthop::Gateway {
                 id: 0x0102_0304,
-                gateway: Ipv4Addr::new(10, 50, 0, 7),
+                gateway: Ipv4Addr::new(10, 50, 0, 7).into(),
             },
             9,
         );
@@ -168,6 +178,23 @@ mod tests {
         assert_eq!(&m[36..40], &[10, 50, 0, 7]);
         assert_eq!((u16_at(&m, 40), u16_at(&m, 42)), (4, NHA_FDB));
         assert_eq!(m.len(), 44);
+    }
+
+    #[test]
+    fn a_v6_gateway_is_af_inet6_with_16_octets() {
+        let gw: std::net::Ipv6Addr = "fd00:10:50::a".parse().unwrap();
+        let m = encode(
+            &Nexthop::Gateway {
+                id: 1,
+                gateway: gw.into(),
+            },
+            1,
+        );
+        assert_eq!(&m[16..20], &[AF_INET6, 0, RTPROT_STATIC, 0]);
+        assert_eq!((u16_at(&m, 32), u16_at(&m, 34)), (4 + 16, NHA_GATEWAY));
+        assert_eq!(&m[36..52], &gw.octets());
+        assert_eq!((u16_at(&m, 52), u16_at(&m, 54)), (4, NHA_FDB));
+        assert_eq!(m.len(), 56);
     }
 
     #[test]
@@ -206,7 +233,7 @@ mod tests {
     fn the_kernel_accepts_gateways_a_group_and_their_removal() {
         let gw = |id, a: [u8; 4]| Nexthop::Gateway {
             id,
-            gateway: Ipv4Addr::from(a),
+            gateway: Ipv4Addr::from(a).into(),
         };
         send(&gw(1, [10, 50, 0, 11]), 0).unwrap();
         send(&gw(2, [10, 50, 0, 12]), 0).unwrap();
@@ -226,6 +253,24 @@ mod tests {
         // Already gone: only fine when tolerated.
         assert!(send(&Nexthop::Delete { id: 2 }, 0).is_err());
         send(&Nexthop::Delete { id: 2 }, 2).unwrap();
+        // IPv6 gateways and a group over them (one family per group).
+        let gw6 = |id, a: &str| Nexthop::Gateway {
+            id,
+            gateway: a.parse().unwrap(),
+        };
+        send(&gw6(4, "fd00:10:50::a"), 0).unwrap();
+        send(&gw6(5, "fd00:10:50::b"), 0).unwrap();
+        send(
+            &Nexthop::Group {
+                id: 6,
+                members: vec![4, 5],
+            },
+            0,
+        )
+        .unwrap();
+        for id in [6, 4, 5] {
+            send(&Nexthop::Delete { id }, 0).unwrap();
+        }
     }
 
     #[test]

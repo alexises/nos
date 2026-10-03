@@ -2,7 +2,7 @@
 //! `rtnetlink`. Idempotent throughout — see `FdbDriver`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -41,8 +41,8 @@ const NH_SLOTS: u32 = 255;
 #[derive(Default)]
 struct NhState {
     slots: u32,
-    gateways: HashMap<Ipv4Addr, u32>,
-    groups: HashMap<Vec<Ipv4Addr>, u32>,
+    gateways: HashMap<IpAddr, u32>,
+    groups: HashMap<Vec<IpAddr>, u32>,
 }
 
 /// `IFLA_BRPORT_STATE` and the two bridge-port states used (`BR_STATE_*`).
@@ -62,6 +62,13 @@ pub struct LinuxFdbDriver {
     underlay: Mutex<HashMap<u32, u32>>,
     /// `vni ->` the FDB nexthops and groups created for it (see `NhState`).
     nexthops: Mutex<HashMap<u32, NhState>>,
+    /// `vni ->` the underlay's master (its VRF) when this process brought the
+    /// device up. The kernel binds the VXLAN socket to that VRF only when the
+    /// device opens, so an underlay that joined its VRF later leaves an
+    /// unbound socket: entries without a `via` (FDB nexthop groups) are then
+    /// looked up in the main table and dropped (`ENETUNREACH`,
+    /// `tx_carrier_errors`). A change, or no record, reopens the device.
+    bound_master: Mutex<HashMap<u32, Option<u32>>>,
 }
 
 impl LinuxFdbDriver {
@@ -74,6 +81,7 @@ impl LinuxFdbDriver {
             ifindex: Mutex::new(HashMap::new()),
             underlay: Mutex::new(HashMap::new()),
             nexthops: Mutex::new(HashMap::new()),
+            bound_master: Mutex::new(HashMap::new()),
         })
     }
 
@@ -200,7 +208,7 @@ impl LinuxFdbDriver {
 
     /// The id of the FDB group over `vteps`, creating its member nexthops and
     /// the group itself first when this is a new set.
-    async fn ensure_group(&self, vni: u32, vteps: &[Ipv4Addr]) -> Result<u32, DriverError> {
+    async fn ensure_group(&self, vni: u32, vteps: &[IpAddr]) -> Result<u32, DriverError> {
         let mut key = vteps.to_vec();
         key.sort();
         key.dedup();
@@ -411,12 +419,12 @@ impl FdbDriver for LinuxFdbDriver {
             .ok_or_else(|| DriverError::Other(format!("bridge {bridge} does not exist yet")))?
             .header
             .index;
-        let underlay_idx = self
+        let underlay_link = self
             .find_link(underlay)
             .await?
-            .ok_or_else(|| DriverError::Other(format!("underlay {underlay} does not exist yet")))?
-            .header
-            .index;
+            .ok_or_else(|| DriverError::Other(format!("underlay {underlay} does not exist yet")))?;
+        let underlay_idx = underlay_link.header.index;
+        let underlay_master = master_of(&underlay_link);
         let name = vxlan_name(vni);
 
         let mut link = self.find_link(&name).await?;
@@ -425,6 +433,16 @@ impl FdbDriver for LinuxFdbDriver {
                 info!(vxlan = %name, vni, vtep = %vtep, "vxlan device drifted, recreating");
                 self.handle.link().del(l.header.index).execute().await?;
                 link = None;
+            } else if self.bound_master.lock().unwrap().get(&vni) != Some(&underlay_master) {
+                // Reopening the socket is enough, and keeps every entry: a
+                // down flushes only non-permanent VXLAN entries, and the bridge
+                // keeps extern-learned ones.
+                self.handle
+                    .link()
+                    .set(LinkUnspec::new_with_index(l.header.index).down().build())
+                    .execute()
+                    .await?;
+                info!(vxlan = %name, vni, "vxlan device reopened in its underlay's vrf");
             }
         }
         let link = if let Some(l) = link {
@@ -471,12 +489,17 @@ impl FdbDriver for LinuxFdbDriver {
             .set(LinkUnspec::new_with_index(idx).up().build())
             .execute()
             .await?;
+        self.bound_master
+            .lock()
+            .unwrap()
+            .insert(vni, underlay_master);
         self.ifindex.lock().unwrap().insert(vni, idx);
         self.underlay.lock().unwrap().insert(vni, underlay_idx);
         Ok(())
     }
 
     async fn remove_vxlan(&self, vni: u32) -> Result<(), DriverError> {
+        self.bound_master.lock().unwrap().remove(&vni);
         self.ifindex.lock().unwrap().remove(&vni);
         self.underlay.lock().unwrap().remove(&vni);
         if let Some(l) = self.find_link(&vxlan_name(vni)).await? {
@@ -514,16 +537,7 @@ impl FdbDriver for LinuxFdbDriver {
         mac: Mac,
         vteps: &[IpAddr],
     ) -> Result<(), DriverError> {
-        let v4 = vteps
-            .iter()
-            .map(|v| match v {
-                IpAddr::V4(a) => Ok(*a),
-                IpAddr::V6(_) => Err(DriverError::Other(
-                    "an aliased MAC needs IPv4 VTEPs".to_string(),
-                )),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let nhid = self.ensure_group(vni, &v4).await?;
+        let nhid = self.ensure_group(vni, vteps).await?;
         let idx = self.vxlan_index(vni).await?;
         let msg = fdb_group_msg(idx, mac, nhid);
         // A REPLACE does not turn a `dst` entry into a nexthop one (or the

@@ -79,6 +79,17 @@ impl World {
         Ok(())
     }
 
+    /// Fails clearly unless `NET` is dual-stack: `ensure_network` falls back
+    /// to IPv4-only when the docker daemon can't make an IPv6 network.
+    pub async fn require_ipv6(&self) -> anyhow::Result<()> {
+        self.ensure_network().await?;
+        let net = self.dock.docker.inspect_network(NET, None).await?;
+        if net.enable_ipv6 != Some(true) {
+            anyhow::bail!("docker daemon lacks IPv6: {NET} is IPv4-only");
+        }
+        Ok(())
+    }
+
     /// (Re)starts `id`; see `Router::start`.
     pub async fn start(
         &mut self,

@@ -197,7 +197,7 @@ const BASE: &[&str] = &[
     "p3",
     "--ospfv3-interface-profile",
     "p3",
-    "--ospfv3-address",
+    "--address6",
     "2001:db8::1/64",
     "--broadcast-domain",
     "bd1",

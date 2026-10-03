@@ -762,9 +762,13 @@ pub struct Args {
     /// If set, adds this IPv6 address to `--interface`'s
     /// `--subinterface-tag` subinterface alongside `--address` — `OSPFv3`
     /// (RFC 5340) needs a real IPv6 prefix on the link, distinct from
-    /// `--address`'s own (typically IPv4, for BGP) subnet.
+    /// `--address`'s own (typically IPv4, for BGP) subnet; an IPv6 EVPN
+    /// underlay selects it by `--address6-label`.
     #[arg(long)]
-    pub ospfv3_address: Option<IpNet>,
+    pub address6: Option<IpNet>,
+    /// The label of `--address6` (requires it).
+    #[arg(long, requires = "address6")]
+    pub address6_label: Option<String>,
 
     /// Same shape as `--ospf-instance`/`--ospf-router-id`, joining `OSPFv3`
     /// instead (`RoutingTableOp::SetOspfv3Instance`).
@@ -992,12 +996,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             tag: args.subinterface_tag,
             routing_table: args.routing_table.clone(),
         }));
-        if let Some(address) = args.ospfv3_address {
+        if let Some(address) = args.address6 {
             ops.push(ConfigOp::Subinterface(SubinterfaceOp::AddAddress {
                 interface: args.interface.clone(),
                 tag: args.subinterface_tag,
                 address,
-                label: None,
+                label: args.address6_label.clone(),
             }));
         }
     }
@@ -1445,7 +1449,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
 
     // Adds a second (IPv6) address to `--broadcast-domain`'s SVI alongside
     // `--broadcast-domain-svi-address` — same dual-stack rationale as
-    // `--ospfv3-address`/`--ospfv3-loopback-address`.
+    // `--address6`/`--ospfv3-loopback-address`.
     if let Some(address) = args.ospfv3_broadcast_domain_svi_address {
         ops.push(ConfigOp::BroadcastDomain(BroadcastDomainOp::Ensure {
             name: args.broadcast_domain.clone(),
@@ -2066,8 +2070,10 @@ mod tests {
         let ops = ops(&[
             "--mtu",
             "9000",
-            "--ospfv3-address",
+            "--address6",
             "2001:db8::1/64",
+            "--address6-label",
+            "v6",
             "--static-route",
             "192.0.2.0/24",
             "--static-gateway",
