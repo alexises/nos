@@ -93,7 +93,7 @@ fn ospfv3_instance_only(router_id: &str) -> Vec<String> {
 }
 
 fn ospfv3(address: &str, router_id: &str) -> Vec<String> {
-    let mut f = strings(&["--ospfv3-address", address]);
+    let mut f = strings(&["--address6", address]);
     f.extend(ospfv3_instance_only(router_id));
     f.extend(strings(&["--ospfv3-interface-profile", OSPFV3_PROFILE]));
     f

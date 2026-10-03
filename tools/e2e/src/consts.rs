@@ -161,6 +161,26 @@ pub const H_HOST: &str = "e2e-h";
 pub const CE_IP: &str = "192.168.10.10";
 pub const H_IP: &str = "192.168.10.20";
 pub const ESI_MAC: &str = "02:00:00:00:00:0e";
+/// `evpn-v6`: each PE's IPv6 VTEP/BGP address on eth0 (in `SUBNET6`, above
+/// the low addresses docker hands out — nos-interfaced removes docker's own
+/// anyway), selected as the VTEP by its label.
+pub const V6_A: &str = "fd00:10:50::a";
+pub const V6_B: &str = "fd00:10:50::b";
+pub const V6_C: &str = "fd00:10:50::c";
+pub const V6_LABEL: &str = "v6";
+/// `evpn-esi`, DF-aware backup: a fourth, single-active segment router-a is
+/// not on, served by four PEs GoBGP plays (fake VTEPs). The MAC's own PE is
+/// the first; once it loses its per-ES A-D the other three are the backup
+/// candidates, ordered .22 .23 .24: 10100 % 3 == 2 elects .24, where the
+/// lowest-address fallback picks .22.
+pub const ESI4: [&str; 2] = ["arbitrary", "11:22:33:44:55:66:77:88:cc"];
+pub const ESI4_PES: [(&str, &str); 4] = [
+    ("10.50.0.21", "65010:21"),
+    ("10.50.0.22", "65010:22"),
+    ("10.50.0.23", "65010:23"),
+    ("10.50.0.24", "65010:24"),
+];
+pub const ESI4_MAC: (&str, &str) = ("aa:bb:cc:00:00:06", "192.0.2.36");
 pub const ASN_B: u32 = 65002;
 /// Only `route-server` (router-b and router-c must be in distinct ASes from
 /// each other and from router-a) and `ospf-dr`'s router-c use this.

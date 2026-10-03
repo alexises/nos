@@ -67,7 +67,7 @@ pub trait FdbDriver: Send + Sync {
     /// balances by flow hash (an FDB nexthop group): how a MAC on an
     /// all-active Ethernet Segment is aliased over the segment's PEs. The
     /// same `extern_learn` marking as `set_remote_mac`; replaces whatever
-    /// entry the MAC had. IPv4 VTEPs only. Groups and their nexthops are
+    /// entry the MAC had. One address family, the VXLAN device's. Groups and their nexthops are
     /// created as needed and kept until `remove_vxlan`.
     async fn set_remote_mac_group(
         &self,

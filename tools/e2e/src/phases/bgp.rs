@@ -2490,6 +2490,8 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     }
     gobgp_owned(w, gobgp_ad("del", &ESI3, false, pe1)).await?;
 
+    single_active_backup(w).await?;
+
     log("ES down: the bond losing carrier withdraws Type-4 and both Type-1, carrier back restores them");
     netns_a(w, &["ip", "link", "set", &bond, "down"]).await?;
     a.wait(&format!(
@@ -2551,6 +2553,79 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
         },
     )
     .await
+}
+
+/// `evpn-esi`, RFC 7432 §8.4.1.2: on a single-active segment router-a is not
+/// on, a MAC whose own PE loses its per-ES A-D moves to the PE the segment
+/// elects as DF among the remaining ones (by their Type-4s), not to the
+/// lowest address — and to the lowest address once no Type-4 is held. Read
+/// back from the real kernel FDB (see `consts::ESI4_PES`).
+async fn single_active_backup(w: &World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    log("single-active backup: the MAC moves to the segment's elected DF, not the lowest address");
+    let single = |v: Vec<String>| -> Vec<String> {
+        v.into_iter()
+            .map(|s| {
+                if s == "all-active" {
+                    "single-active".to_string()
+                } else {
+                    s
+                }
+            })
+            .collect()
+    };
+    let type4 = |verb: &'static str, (origin, rd): (&str, &str)| {
+        let mut v = strings(&["global", "rib", verb, "-a", "evpn", "esi", origin, "esi"]);
+        v.extend(strings(&ESI4));
+        v.extend(strings(&["rd", rd]));
+        if verb == "add" {
+            v.extend(strings(&["rt", EVPN_RT_IMPORT, "encap", "vxlan"]));
+        }
+        v
+    };
+    let mac = ESI4_MAC.0;
+    let at = |pe: &str| format!("remote mac installed domain={EVPN_DOMAIN} mac={mac} vtep={pe}");
+    let in_kernel = |pe: &'static str| async move {
+        let (_, entry) = kernel_aliasing(w, mac).await?;
+        if entry.contains("nhid") || !entry.contains(&format!("dst {pe}")) {
+            bail!("the MAC's FDB entry is not a plain one to {pe}: {entry:?}");
+        }
+        anyhow::Ok(())
+    };
+    let [p1, p2, _, p4] = ESI4_PES;
+    let base = a.count(&at(p1.0));
+    for pe in ESI4_PES {
+        gobgp_owned(w, single(gobgp_ad("add", &ESI4, true, pe))).await?;
+        gobgp_owned(w, gobgp_ad("add", &ESI4, false, pe)).await?;
+        gobgp_owned(w, type4("add", pe)).await?;
+    }
+    gobgp_owned(w, gobgp_macadv("add", &ESI4, ESI4_MAC, p1)).await?;
+    a.wait_new(&at(p1.0), base, 30).await?;
+    in_kernel(p1.0).await?;
+
+    log("its PE loses its per-ES A-D: the backup is the DF of the other three (.24)");
+    let base = a.count(&at(p4.0));
+    gobgp_owned(w, gobgp_ad("del", &ESI4, true, p1)).await?;
+    a.wait_new(&at(p4.0), base, 30).await?;
+    in_kernel(p4.0).await?;
+
+    log("their Type-4s withdrawn: the lowest address (.22)");
+    let base = a.count(&at(p2.0));
+    for pe in &ESI4_PES[1..] {
+        gobgp_owned(w, type4("del", *pe)).await?;
+    }
+    a.wait_new(&at(p2.0), base, 30).await?;
+    in_kernel(p2.0).await?;
+
+    gobgp_owned(w, gobgp_macadv("del", &ESI4, ESI4_MAC, p1)).await?;
+    for pe in ESI4_PES {
+        gobgp_owned(w, gobgp_ad("del", &ESI4, false, pe)).await?;
+    }
+    for pe in &ESI4_PES[1..] {
+        gobgp_owned(w, gobgp_ad("del", &ESI4, true, *pe)).await?;
+    }
+    gobgp_owned(w, type4("del", p1)).await?;
+    Ok(())
 }
 
 /// GoBGP arguments to add/delete one PE's A-D route for `esi`: per-ES (MAX-ET,
@@ -3214,6 +3289,369 @@ pub async fn evpn_single_active(w: &mut World) -> anyhow::Result<()> {
     ping_until(w, CE_HOST, H_IP, 30).await?;
 
     dataplane_teardown(w).await
+}
+
+/// `evpn-v6`: one PE's flags toward one peer over the IPv6 underlay — eth0
+/// keeps its IPv4 address (REST) plus `v6` (labelled, so it is the VTEP), one
+/// `l2vpn-evpn` peer-group per peer (their ASes differ), and the domain.
+fn v6_pe_flags(
+    me: Id,
+    me6: &str,
+    rd: &str,
+    (pg, peer_as, peer6): (&str, u32, &str),
+) -> Vec<String> {
+    strings(&[
+        "--address",
+        &format!("{}/24", me.ip),
+        "--address6",
+        &format!("{me6}/64"),
+        "--address6-label",
+        V6_LABEL,
+        "--asn",
+        &me.asn.to_string(),
+        "--router-id",
+        me.rid,
+        "--peer-group",
+        pg,
+        "--remote-as",
+        &peer_as.to_string(),
+        "--peer",
+        peer6,
+        "--evpn",
+        "--broadcast-domain",
+        EVPN_DOMAIN,
+        "--evpn-vni",
+        &EVPN_VNI.to_string(),
+        "--evpn-rd",
+        rd,
+        "--evpn-rt-import",
+        EVPN_DP_RT,
+        "--evpn-rt-export",
+        EVPN_DP_RT,
+        "--evpn-vtep-source-interface",
+        "eth0",
+        "--evpn-vtep-source-label",
+        V6_LABEL,
+        "--evpn-redistribute-bgp",
+        "r1",
+    ])
+}
+
+/// Runs a command inside `router`'s network namespace.
+async fn netns(w: &World, router: &str, cmd: &[&str]) -> anyhow::Result<String> {
+    w.dock.in_netns(NETNS_HELPER_IMAGE, router, cmd).await
+}
+
+/// `evpn-v6`'s router-c: its FDB nexthops and the CE MAC's `vx<vni>` entry.
+async fn kernel_c(w: &World, mac: &str) -> anyhow::Result<(String, String)> {
+    let nexthops = netns(w, "router-c", &["ip", "nexthop", "show"]).await?;
+    let fdb = netns(
+        w,
+        "router-c",
+        &["bridge", "fdb", "show", "dev", &format!("vx{EVPN_VNI}")],
+    )
+    .await?;
+    let entry = fdb
+        .lines()
+        .filter(|l| l.contains(mac) && l.contains(" self"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((nexthops, entry))
+}
+
+/// `evpn-v6`: no BUM from the CE once the host's address is resolved —
+/// static neighbours both ways and no IPv6 on the CE (no ND/MLD). A broadcast
+/// the CE sends through one PE is flooded to the other PE, whose bridge then
+/// learns the CE behind its VXLAN port and drops aliased traffic for it there
+/// (no local bias / split horizon, see fdb/CLAUDE.md).
+async fn quiet_ce(w: &World) -> anyhow::Result<()> {
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    netns(
+        w,
+        CE_HOST,
+        &[
+            "sh",
+            "-c",
+            "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6; \
+             echo 1 > /proc/sys/net/ipv6/conf/bond0/disable_ipv6",
+        ],
+    )
+    .await?;
+    let h_mac = host_sh(w, H_HOST, "cat /sys/class/net/eth0/address").await?;
+    let ce_mac = host_sh(w, CE_HOST, "cat /sys/class/net/bond0/address").await?;
+    host_sh(
+        w,
+        CE_HOST,
+        &format!(
+            "ip neigh replace {H_IP} lladdr {} dev bond0 nud permanent",
+            h_mac.trim()
+        ),
+    )
+    .await?;
+    host_sh(
+        w,
+        H_HOST,
+        &format!(
+            "ip neigh replace {CE_IP} lladdr {} dev eth0 nud permanent",
+            ce_mac.trim()
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// `evpn-v6`: router-c balances flows to the CE over both PEs, so both bridges
+/// must know the CE's MAC behind their segment port: the CE sends unicast on
+/// each link alone. A PE that doesn't would flood the frame, and the non-DF
+/// floods nothing to the segment — nos doesn't pin a remote Type-2 for a
+/// segment it is on to that segment's port (fdb/CLAUDE.md).
+async fn learn_ce_on_both_pes(w: &World) -> anyhow::Result<()> {
+    for link in ["eth1", "eth0"] {
+        host_sh(
+            w,
+            CE_HOST,
+            &format!(
+                "ip link set {link} down; sleep 1; ping -c 2 -W 1 {H_IP} || true; \
+                 ip link set {link} up; sleep 1"
+            ),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// EVPN over an IPv6-only underlay, with aliasing (RFC 7432 §8.4.1.1) and real
+/// forwarding. Three `nos` PEs in a full mesh of IPv6 eBGP sessions, `l2vpn-evpn`
+/// only, each VTEP the labelled IPv6 address on eth0 (in `rt1`'s VRF). A CE is
+/// dual-homed to router-a and router-b through one all-active Ethernet
+/// Segment, a host is behind router-c. Router-c balances the CE's MAC over an
+/// IPv6 FDB nexthop group of both PEs (read back from the kernel), the CE and
+/// the host ping across the IPv6 VXLAN both ways; router-c shutting its
+/// session to router-a shrinks the group to router-b alone and un-shutting
+/// restores it; unsetting the VNI removes the VXLAN device and its IPv6
+/// nexthops.
+pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
+    const RD_C: &str = "65003:1";
+    w.require_ipv6().await?;
+    let a_b = ("pg-b", ASN_B, V6_B);
+    let a_c = ("pg-c", ASN_C, V6_C);
+    let b_a = ("pg-a", ASN_A, V6_A);
+    let c_a = ("pg-a", ASN_A, V6_A);
+    w.start(A, Some(v6_pe_flags(A, V6_A, EVPN_DP_RD_A, a_b)), &[])
+        .await?;
+    w.start(B, Some(v6_pe_flags(B, V6_B, EVPN_DP_RD_B, b_a)), &[])
+        .await?;
+    w.start(C, Some(v6_pe_flags(C, V6_C, RD_C, c_a)), &[])
+        .await?;
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    a.provision_flags(&v6_pe_flags(A, V6_A, EVPN_DP_RD_A, a_c))
+        .await?;
+    b.provision_flags(&v6_pe_flags(B, V6_B, EVPN_DP_RD_B, ("pg-c", ASN_C, V6_C)))
+        .await?;
+    c.provision_flags(&v6_pe_flags(C, V6_C, RD_C, ("pg-b", ASN_B, V6_B)))
+        .await?;
+
+    log("the IPv6 sessions: each PE peers the other two over its v6 address");
+    for (r, peers) in [(a, [V6_B, V6_C]), (b, [V6_A, V6_C]), (c, [V6_A, V6_B])] {
+        for peer in peers {
+            r.wait(&format!("bgp session established.*{peer}")).await?;
+        }
+        let summary = r
+            .rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
+            .await?;
+        for peer in peers {
+            if !summary.contains(peer) {
+                bail!("{}: /v1/bgp/summary lacks {peer}: {summary}", r.name());
+            }
+        }
+    }
+
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    for router in ["router-a", "router-b", "router-c"] {
+        // Also governs udp6 sockets (`udp_sk_bound_dev_eq`): there is no
+        // IPv6 twin of this sysctl.
+        netns(
+            w,
+            router,
+            &["sh", "-c", "echo 1 > /proc/sys/net/ipv4/udp_l3mdev_accept"],
+        )
+        .await?;
+    }
+
+    log("wiring the CE (to router-a and router-b) and the host (to router-c)");
+    for net in [NET_CE_A, NET_CE_B, NET_H] {
+        if !w.dock.network_exists(net).await {
+            w.dock.network_create(net, &[], false).await?;
+        }
+    }
+    w.dock.network_connect(NET_CE_A, "router-a").await;
+    w.dock.network_connect(NET_CE_B, "router-b").await;
+    w.dock.network_connect(NET_H, "router-c").await;
+    w.dock
+        .ensure_image(
+            HOST_IMAGE,
+            "FROM debian:bookworm-slim\n\
+             RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
+             iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    w.dock.start_host(CE_HOST, HOST_IMAGE, NET_CE_A).await?;
+    w.dock.network_connect(NET_CE_B, CE_HOST).await;
+    w.dock.start_host(H_HOST, HOST_IMAGE, NET_H).await?;
+
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let mut fa = v6_pe_flags(A, V6_A, EVPN_DP_RD_A, a_b);
+    fa.extend(bond_flags("bond1", true, "eth1"));
+    a.provision_flags(&fa).await?;
+    let mut fb = v6_pe_flags(B, V6_B, EVPN_DP_RD_B, b_a);
+    fb.extend(bond_flags("bond1", true, "eth1"));
+    b.provision_flags(&fb).await?;
+    let mut fc = v6_pe_flags(C, V6_C, RD_C, c_a);
+    fc.extend(bond_flags("bond2", false, "eth1"));
+    c.provision_flags(&fc).await?;
+
+    let vxlan = format!("vx{EVPN_VNI}");
+    for (r, me) in [(a, V6_A), (b, V6_B), (c, V6_C)] {
+        r.wait(&format!(
+            "vxlan device ready domain={EVPN_DOMAIN} vni={EVPN_VNI} vxlan={vxlan} .*vtep={me}"
+        ))
+        .await?;
+    }
+    for peer in [V6_A, V6_B] {
+        c.wait(&format!(
+            "flood entry installed domain={EVPN_DOMAIN} vtep={peer}"
+        ))
+        .await?;
+    }
+    // Modulo over [::a, ::b] (HRW needs IPv4): 10100 % 2 == 0, router-a.
+    let bond_a = bond_name(a, "bond1").await?;
+    a.wait(&format!(
+        "df elected domain={EVPN_DOMAIN} esi={ESI} port={bond_a} role=df algorithm=modulo ac_df=true pes={V6_A},{V6_B}"
+    ))
+    .await?;
+
+    log("the CE bonds its two links; the host takes an address; they ping across the IPv6 VXLAN");
+    dataplane_ce(w, "mode balance-xor miimon 100 xmit_hash_policy layer2").await?;
+    quiet_ce(w).await?;
+    let ce_mac = host_sh(w, CE_HOST, "cat /sys/class/net/bond0/address")
+        .await?
+        .trim()
+        .to_string();
+    learn_ce_on_both_pes(w).await?;
+    ping_until(w, CE_HOST, H_IP, 30).await?;
+    ping_until(w, H_HOST, CE_IP, 30).await?;
+    host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
+    host_sh(w, H_HOST, &format!("ping -c 3 -W 2 {CE_IP}")).await?;
+
+    log("router-c aliases the CE's MAC over an IPv6 FDB nexthop group of both PEs");
+    let group =
+        format!("remote mac group installed domain={EVPN_DOMAIN} mac={ce_mac} vteps={V6_A},{V6_B}");
+    c.wait(&group).await?;
+    let (nexthops, entry) = kernel_c(w, &ce_mac).await?;
+    if !entry.contains("nhid") {
+        bail!("the CE MAC's FDB entry on router-c does not use a nexthop group: {entry:?}");
+    }
+    if nexthops.lines().filter(|l| l.contains("group ")).count() != 1
+        || !nexthops.contains(&format!("via {V6_A}"))
+        || !nexthops.contains(&format!("via {V6_B}"))
+    {
+        bail!("expected one IPv6 FDB group over both PEs on router-c: {nexthops}");
+    }
+    let body = c
+        .rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
+        .await?;
+    let table: serde_json::Value = serde_json::from_str(&body)?;
+    let vteps = table["macs"]
+        .as_array()
+        .and_then(|m| m.iter().find(|e| e["mac"] == ce_mac.as_str()))
+        .map(|e| e["vteps"].to_string())
+        .context("router-c's show fdb lacks the CE's MAC")?;
+    if !vteps.contains(V6_A) || !vteps.contains(V6_B) {
+        bail!("router-c's show fdb does not list both VTEPs of the CE's MAC: {vteps}");
+    }
+
+    // A control-plane withdrawal, not router-a's bond going down: nos-interfaced
+    // brings a downed bond back up within seconds (#169). Not asserted: which
+    // PE's Type-2 router-c then uses — nos-bgpd treats one MAC on one ESI from
+    // two PEs as a MAC move (RFC 7432 §15).
+    log("router-c shuts its session to router-a: router-a's A-D routes go, the group with them, the CE still reaches the host");
+    let removed =
+        format!("remote mac group removed domain={EVPN_DOMAIN} mac={ce_mac} vteps={V6_A},{V6_B}");
+    let only_b = format!("segment per-es a-d changed domain={EVPN_DOMAIN} esi={ESI} pes={V6_B}$");
+    let (base, base_b) = (c.count(&removed), c.count(&only_b));
+    let mut shut = v6_pe_flags(C, V6_C, RD_C, c_a);
+    shut.extend(strings(&["--shutdown-peer", ""]));
+    c.provision_flags(&shut).await?;
+    c.wait_new(&removed, base, 60).await?;
+    c.wait_new(&only_b, base_b, 60).await?;
+    let (_, entry) = kernel_c(w, &ce_mac).await?;
+    if entry.contains("nhid") || (!entry.is_empty() && !entry.contains(&format!("dst {V6_B}"))) {
+        bail!("router-c still sends the CE's MAC to router-a: {entry:?}");
+    }
+    // Router-a has lost router-c's routes too: the CE's link to it would
+    // black-hole whatever the CE hashes onto it.
+    host_sh(w, CE_HOST, "ip link set eth0 down; sleep 1").await?;
+    ping_until(w, CE_HOST, H_IP, 30).await?;
+    ping_until(w, H_HOST, CE_IP, 30).await?;
+
+    log("the session back: the group over both returns");
+    let base = c.count(&group);
+    let mut unshut = v6_pe_flags(C, V6_C, RD_C, c_a);
+    unshut.push("--unshutdown-peer".to_string());
+    c.provision_flags(&unshut).await?;
+    host_sh(w, CE_HOST, "ip link set eth0 up; sleep 1").await?;
+    learn_ce_on_both_pes(w).await?;
+    c.wait_new(&group, base, 60).await?;
+    let (_, entry) = kernel_c(w, &ce_mac).await?;
+    if !entry.contains("nhid") {
+        bail!("router-c's CE MAC entry did not go back to a group: {entry:?}");
+    }
+    ping_until(w, H_HOST, CE_IP, 30).await?;
+    ping_until(w, CE_HOST, H_IP, 30).await?;
+
+    log("unsetting router-c's vni removes its VXLAN device and IPv6 nexthops");
+    // `v6_pe_flags`' route targets are the ones `--evpn-clear` removes.
+    let mut clear = v6_pe_flags(C, V6_C, RD_C, c_a);
+    clear.push("--evpn-clear".to_string());
+    // `--evpn-clear` refuses the other `--evpn-*` setting flags.
+    for flag in [
+        "--evpn-vni",
+        "--evpn-rd",
+        "--evpn-vtep-source-interface",
+        "--evpn-vtep-source-label",
+        "--evpn-redistribute-bgp",
+    ] {
+        let at = clear
+            .iter()
+            .position(|f| f == flag)
+            .context("a flag v6_pe_flags sets")?;
+        clear.drain(at..=at + 1);
+    }
+    c.provision_flags(&clear).await?;
+    let mut left = String::new();
+    for _ in 0..30 {
+        left = netns(w, "router-c", &["ip", "nexthop", "show"]).await?;
+        let gone = netns(w, "router-c", &["ip", "link", "show", &vxlan])
+            .await
+            .is_err();
+        if gone && left.trim().is_empty() {
+            for host in [CE_HOST, H_HOST] {
+                w.dock.container_remove(host).await;
+            }
+            for (net, router) in [
+                (NET_CE_A, "router-a"),
+                (NET_CE_B, "router-b"),
+                (NET_H, "router-c"),
+            ] {
+                w.dock.network_disconnect(net, router).await;
+                w.dock.network_remove(net).await;
+            }
+            w.remove(C).await;
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("router-c kept {vxlan} or its IPv6 nexthops: {left}")
 }
 
 /// RFC 5082 GTSM: `max-hops 1` on both peer-groups (TTL 255 out, kernel drops
