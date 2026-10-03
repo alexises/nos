@@ -1,17 +1,18 @@
 use std::net::Ipv4Addr;
 
+use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Config, OspfArea};
+use crate::schema::{Config, OspfArea, OspfAreaRange, OspfAreaType};
 
 use super::ospf_instance::find_instance_mut;
 use super::OpError;
 
 /// An edit to a single `OspfArea` (keyed by `area_id`) nested under a named
 /// `OspfInstance`, within a transaction's in-progress config. Applied
-/// without validation, matching every other `Op`. No `Set*` variant — an
-/// area's only content today is its key plus its `profiles` list, handled
-/// entirely by `OspfProfileOp` — mirrors `StaticRoutingInstanceOp`.
+/// without validation, matching every other `Op`. Its `profiles` list is
+/// `OspfProfileOp`'s. The CLI/REST reach the stub/range fields through
+/// `SetTransactionPath`; these ops exist for `nos-provision`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OspfAreaOp {
     /// Creates the area if it doesn't already exist (creating its parent
@@ -26,6 +27,28 @@ pub enum OspfAreaOp {
         instance: String,
         area_id: Ipv4Addr,
     },
+    SetAreaType {
+        instance: String,
+        area_id: Ipv4Addr,
+        area_type: OspfAreaType,
+    },
+    SetStubDefaultCost {
+        instance: String,
+        area_id: Ipv4Addr,
+        cost: Option<u16>,
+    },
+    /// Upserts by `cidr`.
+    SetRange {
+        instance: String,
+        area_id: Ipv4Addr,
+        cidr: Ipv4Net,
+        not_advertise: bool,
+    },
+    RemoveRange {
+        instance: String,
+        area_id: Ipv4Addr,
+        cidr: Ipv4Net,
+    },
 }
 
 impl OspfAreaOp {
@@ -36,7 +59,57 @@ impl OspfAreaOp {
                 if !inst.areas.iter().any(|a| &a.area_id == area_id) {
                     inst.areas.push(OspfArea {
                         area_id: *area_id,
-                        profiles: Vec::new(),
+                        ..Default::default()
+                    });
+                }
+                Ok(())
+            }
+            OspfAreaOp::SetAreaType {
+                instance,
+                area_id,
+                area_type,
+            } => {
+                find_area_mut(config, instance, *area_id)?.area_type = *area_type;
+                Ok(())
+            }
+            OspfAreaOp::SetStubDefaultCost {
+                instance,
+                area_id,
+                cost,
+            } => {
+                find_area_mut(config, instance, *area_id)?.stub_default_cost = *cost;
+                Ok(())
+            }
+            OspfAreaOp::SetRange {
+                instance,
+                area_id,
+                cidr,
+                not_advertise,
+            } => {
+                let ranges = &mut find_area_mut(config, instance, *area_id)?.ranges;
+                let range = OspfAreaRange {
+                    cidr: *cidr,
+                    not_advertise: *not_advertise,
+                };
+                match ranges.iter_mut().find(|r| r.cidr == *cidr) {
+                    Some(r) => *r = range,
+                    None => ranges.push(range),
+                }
+                Ok(())
+            }
+            OspfAreaOp::RemoveRange {
+                instance,
+                area_id,
+                cidr,
+            } => {
+                let ranges = &mut find_area_mut(config, instance, *area_id)?.ranges;
+                let before = ranges.len();
+                ranges.retain(|r| r.cidr != *cidr);
+                if ranges.len() == before {
+                    return Err(OpError::OspfAreaRangeNotFound {
+                        instance: instance.clone(),
+                        area_id: *area_id,
+                        cidr: *cidr,
                     });
                 }
                 Ok(())
@@ -126,6 +199,7 @@ mod tests {
                         auth: None,
                         extended_sequence_numbers: false,
                     }],
+                    ..Default::default()
                 }],
             )],
             ..Default::default()
@@ -160,11 +234,11 @@ mod tests {
                 vec![
                     OspfArea {
                         area_id: area_id("0.0.0.0"),
-                        profiles: Vec::new(),
+                        ..Default::default()
                     },
                     OspfArea {
                         area_id: area_id("0.0.0.1"),
-                        profiles: Vec::new(),
+                        ..Default::default()
                     },
                 ],
             )],
@@ -196,6 +270,70 @@ mod tests {
             err,
             OpError::OspfAreaNotFound { instance, area_id }
             if instance == "o1" && area_id == self::area_id("0.0.0.0")
+        ));
+    }
+
+    #[test]
+    fn stub_settings_and_ranges_apply() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance(
+                "o1",
+                vec![OspfArea {
+                    area_id: area_id("0.0.0.1"),
+                    ..Default::default()
+                }],
+            )],
+            ..Default::default()
+        };
+        let (instance, area_id) = ("o1".to_string(), area_id("0.0.0.1"));
+        let cidr: Ipv4Net = "10.0.0.0/16".parse().unwrap();
+        for op in [
+            OspfAreaOp::SetAreaType {
+                instance: instance.clone(),
+                area_id,
+                area_type: OspfAreaType::TotallyStubby,
+            },
+            OspfAreaOp::SetStubDefaultCost {
+                instance: instance.clone(),
+                area_id,
+                cost: Some(7),
+            },
+            OspfAreaOp::SetRange {
+                instance: instance.clone(),
+                area_id,
+                cidr,
+                not_advertise: false,
+            },
+            // Upsert: flips the same range, never duplicates it.
+            OspfAreaOp::SetRange {
+                instance: instance.clone(),
+                area_id,
+                cidr,
+                not_advertise: true,
+            },
+        ] {
+            op.apply(&mut cfg).unwrap();
+        }
+        let a = &cfg.ospf_instances[0].areas[0];
+        assert_eq!(a.area_type, OspfAreaType::TotallyStubby);
+        assert_eq!(a.stub_default_cost, Some(7));
+        assert_eq!(
+            a.ranges,
+            vec![OspfAreaRange {
+                cidr,
+                not_advertise: true
+            }]
+        );
+        let remove = OspfAreaOp::RemoveRange {
+            instance,
+            area_id,
+            cidr,
+        };
+        remove.apply(&mut cfg).unwrap();
+        assert!(cfg.ospf_instances[0].areas[0].ranges.is_empty());
+        assert!(matches!(
+            remove.apply(&mut cfg),
+            Err(OpError::OspfAreaRangeNotFound { .. })
         ));
     }
 

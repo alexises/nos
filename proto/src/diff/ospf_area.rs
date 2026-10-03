@@ -1,15 +1,13 @@
 use std::net::Ipv4Addr;
 
-use crate::schema::OspfArea;
+use crate::schema::{OspfArea, OspfAreaType};
 
-use super::{ospf_profile, DiffStatus, SectionDiff};
+use super::{ospf_profile, DiffStatus, FieldDiff, SectionDiff};
 
 /// Diffs two lists of `OspfArea`s, matched by `area_id` (unique within the
-/// owning instance — see `schema::ospf_instance::unique_area_ids`). No own
-/// scalar fields to compare — an `OspfArea` has only `area_id`/`profiles` —
-/// so `fields` is always empty and an area is only ever reported when its
-/// profiles changed, nested in `subsections` — mirrors
-/// `diff_static_routing_instances`.
+/// owning instance — see `schema::ospf_instance::unique_area_ids`). The
+/// area's own `area_type`/`stub_default_cost`/`ranges` go in `fields`, its
+/// profiles' changes nested in `subsections`.
 pub fn diff_ospf_areas(base: &[OspfArea], candidate: &[OspfArea]) -> Vec<SectionDiff> {
     let mut sections = Vec::new();
 
@@ -18,12 +16,13 @@ pub fn diff_ospf_areas(base: &[OspfArea], candidate: &[OspfArea]) -> Vec<Section
             None => sections.push(removed_section(b)),
             Some(c) => {
                 let subsections = ospf_profile::diff_ospf_profiles(&b.profiles, &c.profiles);
-                if !subsections.is_empty() {
+                let fields = changed_fields(b, c);
+                if !subsections.is_empty() || !fields.is_empty() {
                     sections.push(SectionDiff {
                         header: header_for(b.area_id),
                         name: b.area_id.to_string(),
                         status: DiffStatus::Modified,
-                        fields: Vec::new(),
+                        fields,
                         subsections,
                     });
                 }
@@ -42,6 +41,59 @@ pub fn diff_ospf_areas(base: &[OspfArea], candidate: &[OspfArea]) -> Vec<Section
 
 fn header_for(area_id: Ipv4Addr) -> String {
     format!("ospf area {area_id}")
+}
+
+fn area_type_str(t: OspfAreaType) -> &'static str {
+    match t {
+        OspfAreaType::Normal => "normal",
+        OspfAreaType::Stub => "stub",
+        OspfAreaType::TotallyStubby => "totally-stubby",
+    }
+}
+
+fn ranges_str(a: &OspfArea) -> String {
+    let rendered: Vec<String> = a
+        .ranges
+        .iter()
+        .map(|r| {
+            if r.not_advertise {
+                format!("{} not-advertise", r.cidr)
+            } else {
+                r.cidr.to_string()
+            }
+        })
+        .collect();
+    format!("[{}]", rendered.join(", "))
+}
+
+fn changed_fields(base: &OspfArea, candidate: &OspfArea) -> Vec<FieldDiff> {
+    let mut fields = Vec::new();
+    if base.area_type != candidate.area_type {
+        fields.push(FieldDiff {
+            label: "area-type".to_string(),
+            old: Some(area_type_str(base.area_type).to_string()),
+            new: Some(area_type_str(candidate.area_type).to_string()),
+        });
+    }
+    if base.stub_default_cost != candidate.stub_default_cost {
+        let cost = |a: &OspfArea| {
+            a.stub_default_cost
+                .map_or_else(|| "default (1)".to_string(), |c| c.to_string())
+        };
+        fields.push(FieldDiff {
+            label: "stub-default-cost".to_string(),
+            old: Some(cost(base)),
+            new: Some(cost(candidate)),
+        });
+    }
+    if base.ranges != candidate.ranges {
+        fields.push(FieldDiff {
+            label: "ranges".to_string(),
+            old: Some(ranges_str(base)),
+            new: Some(ranges_str(candidate)),
+        });
+    }
+    fields
 }
 
 fn removed_section(area: &OspfArea) -> SectionDiff {
@@ -77,7 +129,33 @@ mod tests {
         OspfArea {
             area_id: area_id(id),
             profiles,
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn stub_settings_and_ranges_are_fields() {
+        let base = vec![area("0.0.0.1", vec![])];
+        let mut candidate = base.clone();
+        candidate[0].area_type = OspfAreaType::Stub;
+        candidate[0].stub_default_cost = Some(5);
+        candidate[0].ranges.push(crate::schema::OspfAreaRange {
+            cidr: "10.0.0.0/16".parse().unwrap(),
+            not_advertise: true,
+        });
+        let sections = diff_ospf_areas(&base, &candidate);
+        assert_eq!(sections.len(), 1);
+        let labels: Vec<_> = sections[0]
+            .fields
+            .iter()
+            .map(|f| f.label.as_str())
+            .collect();
+        assert_eq!(labels, ["area-type", "stub-default-cost", "ranges"]);
+        assert_eq!(sections[0].fields[0].new.as_deref(), Some("stub"));
+        assert_eq!(
+            sections[0].fields[2].new.as_deref(),
+            Some("[10.0.0.0/16 not-advertise]")
+        );
     }
 
     fn profile(name: &str) -> OspfProfile {

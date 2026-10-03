@@ -6,14 +6,16 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use ipnet::Ipv4Net;
-use nos_proto::{DiffScope, Event, NetworkType, OspfAuth, OspfCryptoAlgorithm, ServiceRef};
+use nos_proto::{
+    DiffScope, Event, NetworkType, OspfAreaType, OspfAuth, OspfCryptoAlgorithm, ServiceRef,
+};
 use nos_rpl::CompiledPolicy;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::config_client;
 use crate::interface_client;
-use crate::link::{LinkAuthConfig, LinkConfig, LinkManager};
+use crate::link::{AreaSettings, LinkAuthConfig, LinkConfig, LinkManager};
 use crate::packet;
 use crate::rib_client;
 use crate::watchdog_client;
@@ -145,6 +147,7 @@ async fn resync(
         "ospf instance config resolved"
     );
     links.set_graceful_restart(own.graceful_restart_grace_period);
+    links.set_area_settings(area_settings(&own.areas)).await;
 
     let mut desired_links = Vec::new();
     let mut desired_stubs: HashMap<Ipv4Addr, Vec<(Ipv4Net, u16)>> = HashMap::new();
@@ -212,6 +215,7 @@ async fn resync(
                     priority,
                     mtu: resolve_effective_mtu(profile, Some(resolved_mtu)),
                     auth: auth.clone(),
+                    stub: area.area_type.is_stub(),
                 });
             }
 
@@ -270,6 +274,7 @@ async fn resync(
                     priority,
                     mtu: resolve_effective_mtu(profile, None),
                     auth: auth.clone(),
+                    stub: area.area_type.is_stub(),
                 });
             }
         }
@@ -281,6 +286,27 @@ async fn resync(
     links
         .reconcile(desired_links, desired_stubs, own.router_id)
         .await;
+}
+
+/// Each area's RFC 2328 §3.5/§3.6 settings, for `LinkManager`'s
+/// summary/external origination and discard routes.
+fn area_settings(areas: &[nos_proto::OspfArea]) -> HashMap<Ipv4Addr, AreaSettings> {
+    areas
+        .iter()
+        .map(|a| {
+            let settings = AreaSettings {
+                stub: a.area_type.is_stub(),
+                import_summaries: a.area_type != OspfAreaType::TotallyStubby,
+                default_cost: u32::from(a.stub_default_cost.unwrap_or(1)),
+                ranges: a
+                    .ranges
+                    .iter()
+                    .map(|r| (r.cidr, !r.not_advertise))
+                    .collect(),
+            };
+            (a.area_id, settings)
+        })
+        .collect()
 }
 
 /// Resolves the mirrored `OspfInstance.redistribute_policy` field to a

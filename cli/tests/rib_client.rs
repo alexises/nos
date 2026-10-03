@@ -11,6 +11,7 @@ fn sample_prefix_routes() -> PrefixRoutes {
             gateways: vec!["10.0.0.1".parse().unwrap()],
             source: RouteSourceKind::Static,
             backup: None,
+            discard: false,
         }],
     }
 }

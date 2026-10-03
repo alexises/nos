@@ -269,6 +269,14 @@ topics! {
     BgpInstanceRpkiCachePort,
     /// `RpkiCache.preference`
     BgpInstanceRpkiCachePreference,
+    /// `OspfArea.area_type`
+    OspfAreaType,
+    /// `OspfArea.stub_default_cost`
+    OspfAreaStubDefaultCost,
+    /// `OspfArea.ranges`
+    OspfAreaRange,
+    /// `OspfAreaRange.not_advertise`
+    OspfAreaRangeAdvertise,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

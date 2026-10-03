@@ -180,6 +180,8 @@ fn to_routes(routes: &HashMap<IpNet, Hops>) -> Vec<OspfRoute> {
 }
 
 /// RFC 2328 next hops are routable IPv4 addresses: no interface id needed.
+/// No next hop at all is an area range's discard route
+/// (`LinkManager::compute_routes`).
 fn to_route(prefix: IpNet, (next_hops, backup_next_hop, metric): &Hops) -> OspfRoute {
     OspfRoute {
         prefix,
@@ -187,6 +189,7 @@ fn to_route(prefix: IpNet, (next_hops, backup_next_hop, metric): &Hops) -> OspfR
         backup_next_hop: *backup_next_hop,
         backup_interface_id: None,
         metric: *metric,
+        discard: next_hops.is_empty(),
     }
 }
 
@@ -247,7 +250,31 @@ mod tests {
                 backup_next_hop: None,
                 backup_interface_id: None,
                 metric: 10,
+                discard: false,
             })]
+        );
+    }
+
+    /// A discard route is pushed with `discard` set, and withdrawn with an
+    /// ordinary `Remove` once its range goes away.
+    #[test]
+    fn discard_route_is_pushed_then_removed() {
+        let p: IpNet = "10.9.0.0/16".parse().unwrap();
+        let with = HashMap::from([(p, (Vec::new(), None, 5))]);
+        assert_eq!(
+            diff_routes(&HashMap::new(), &with),
+            vec![OspfRouteUpdate::Add(OspfRoute {
+                prefix: p,
+                next_hops: Vec::new(),
+                backup_next_hop: None,
+                backup_interface_id: None,
+                metric: 5,
+                discard: true,
+            })]
+        );
+        assert_eq!(
+            diff_routes(&with, &HashMap::new()),
+            vec![OspfRouteUpdate::Remove(p)]
         );
     }
 
@@ -273,6 +300,7 @@ mod tests {
                 backup_next_hop: None,
                 backup_interface_id: None,
                 metric: 10,
+                discard: false,
             }),
             OspfRouteUpdate::Remove("10.0.1.0/24".parse().unwrap()),
         ];
@@ -295,6 +323,7 @@ mod tests {
                 backup_next_hop: Some(bk),
                 backup_interface_id: None,
                 metric: 10,
+                discard: false,
             })]
         );
     }
@@ -313,6 +342,7 @@ mod tests {
                 backup_next_hop: None,
                 backup_interface_id: None,
                 metric: 10,
+                discard: false,
             })]
         );
     }

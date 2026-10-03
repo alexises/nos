@@ -16,15 +16,15 @@ use std::path::PathBuf;
 use anyhow::{bail, Context};
 use clap::Parser;
 
-use ipnet::IpNet;
+use ipnet::{IpNet, Ipv4Net};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp,
     BroadcastDomainOp, ConfigOp, EsRedundancy, InterfaceOp, LacpRate, LldpDestination, LldpOp,
-    OspfAreaOp, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp,
-    Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp, PortAggregateMode, PortAggregateOp,
-    PortAggregateSubinterfaceOp, Redistribute, RedistributeSource, RedistributeTarget,
-    RoutingTableOp, SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp,
-    SwitchingProfileOp, UserOp, VlanTag,
+    OspfAreaOp, OspfAreaType, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstanceOp, OspfProfileOp,
+    Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp, PortAggregateMode,
+    PortAggregateOp, PortAggregateSubinterfaceOp, Redistribute, RedistributeSource,
+    RedistributeTarget, RoutingTableOp, SourceAddress, StaticRouteOp, StaticRoutingInstanceOp,
+    SubinterfaceOp, SwitchingProfileOp, UserOp, VlanTag,
 };
 
 /// Clap-facing mirror of `nos_proto::PortAggregateMode` — `clap::ValueEnum`
@@ -704,6 +704,21 @@ pub struct Args {
     /// (`OspfAreaOp::Ensure`).
     #[arg(long)]
     pub ospf_area: Option<Ipv4Addr>,
+    /// `normal`, `stub` or `totally-stubby` for `--ospf-area`
+    /// (`OspfAreaOp::SetAreaType`).
+    #[arg(long, requires = "ospf_area", value_parser = parse_ospf_area_type)]
+    pub ospf_area_type: Option<OspfAreaType>,
+    /// The default summary's cost into a stub `--ospf-area`
+    /// (`OspfAreaOp::SetStubDefaultCost`); `0` clears it.
+    #[arg(long, requires = "ospf_area")]
+    pub ospf_stub_default_cost: Option<u16>,
+    /// `<cidr>[:not-advertise]`: an RFC 2328 §3.5 range on `--ospf-area`
+    /// (`OspfAreaOp::SetRange`, upserted).
+    #[arg(long, requires = "ospf_area")]
+    pub ospf_area_range: Option<String>,
+    /// Removes that range from `--ospf-area` (`OspfAreaOp::RemoveRange`).
+    #[arg(long, requires = "ospf_area")]
+    pub ospf_clear_area_range: Option<Ipv4Net>,
     /// If set (requires `--ospf-area`), ensures this OSPF profile under it
     /// (`OspfProfileOp::Ensure`).
     #[arg(long)]
@@ -835,6 +850,17 @@ pub struct Args {
 /// Builds the ordered `ConfigOp` list for one provisioning invocation — pure,
 /// so a caller can apply it over IPC (this crate's bin) or locally onto a
 /// `Config` (`nos-e2e`, which then PUTs the result over the REST API).
+fn parse_ospf_area_type(s: &str) -> Result<OspfAreaType, String> {
+    match s {
+        "normal" => Ok(OspfAreaType::Normal),
+        "stub" => Ok(OspfAreaType::Stub),
+        "totally-stubby" => Ok(OspfAreaType::TotallyStubby),
+        _ => Err(format!(
+            "unknown area type {s:?} (normal, stub, totally-stubby)"
+        )),
+    }
+}
+
 fn parse_family(s: &str) -> Result<AddressFamily, String> {
     AddressFamily::ALL
         .into_iter()
@@ -1790,6 +1816,41 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             instance: instance.clone(),
             area_id,
         }));
+        if let Some(area_type) = args.ospf_area_type {
+            ops.push(ConfigOp::OspfArea(OspfAreaOp::SetAreaType {
+                instance: instance.clone(),
+                area_id,
+                area_type,
+            }));
+        }
+        if let Some(cost) = args.ospf_stub_default_cost {
+            ops.push(ConfigOp::OspfArea(OspfAreaOp::SetStubDefaultCost {
+                instance: instance.clone(),
+                area_id,
+                cost: (cost != 0).then_some(cost),
+            }));
+        }
+        if let Some(spec) = &args.ospf_area_range {
+            let (cidr, not_advertise) = match spec.strip_suffix(":not-advertise") {
+                Some(cidr) => (cidr, true),
+                None => (spec.as_str(), false),
+            };
+            ops.push(ConfigOp::OspfArea(OspfAreaOp::SetRange {
+                instance: instance.clone(),
+                area_id,
+                cidr: cidr
+                    .parse()
+                    .with_context(|| format!("--ospf-area-range: bad cidr {cidr:?}"))?,
+                not_advertise,
+            }));
+        }
+        if let Some(cidr) = args.ospf_clear_area_range {
+            ops.push(ConfigOp::OspfArea(OspfAreaOp::RemoveRange {
+                instance: instance.clone(),
+                area_id,
+                cidr,
+            }));
+        }
         if let Some(name) = args.ospf_profile.clone() {
             ops.push(ConfigOp::OspfProfile(OspfProfileOp::Ensure {
                 instance: instance.clone(),
@@ -2063,6 +2124,62 @@ mod tests {
                 import_policy: "accept-all".into(),
             }),
         );
+    }
+
+    #[test]
+    fn ospf_area_stub_and_range_flags() {
+        let ops = ops(&[
+            "--ospf-instance",
+            "o",
+            "--ospf-router-id",
+            "1.1.1.1",
+            "--ospf-area",
+            "0.0.0.1",
+            "--ospf-area-type",
+            "totally-stubby",
+            "--ospf-stub-default-cost",
+            "0",
+            "--ospf-area-range",
+            "10.1.0.0/16:not-advertise",
+            "--ospf-clear-area-range",
+            "10.2.0.0/16",
+        ])
+        .unwrap();
+        let (instance, area_id) = (String::from("o"), "0.0.0.1".parse().unwrap());
+        has(
+            &ops,
+            &ConfigOp::OspfArea(OspfAreaOp::SetAreaType {
+                instance: instance.clone(),
+                area_id,
+                area_type: OspfAreaType::TotallyStubby,
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::OspfArea(OspfAreaOp::SetStubDefaultCost {
+                instance: instance.clone(),
+                area_id,
+                cost: None,
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::OspfArea(OspfAreaOp::SetRange {
+                instance: instance.clone(),
+                area_id,
+                cidr: "10.1.0.0/16".parse().unwrap(),
+                not_advertise: true,
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::OspfArea(OspfAreaOp::RemoveRange {
+                instance,
+                area_id,
+                cidr: "10.2.0.0/16".parse().unwrap(),
+            }),
+        );
+        assert!(err(&["--ospf-area-type", "stub"]).contains("--ospf-area"));
     }
 
     #[test]

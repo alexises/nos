@@ -169,6 +169,10 @@ pub struct LinkConfig {
     /// until it's updated too, which is exactly the desired match/mismatch
     /// behavior.
     pub auth: LinkAuthConfig,
+    /// The link's area is a stub (RFC 2328 §3.6): Hellos and DBDs go
+    /// without the E-bit and a peer's must match, and AS-scope LSAs stay out
+    /// of the exchange. Changing an area's type restarts its links.
+    pub stub: bool,
 }
 
 /// One link's resolved OSPF authentication — `OspfProfile.auth` translated
@@ -341,7 +345,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
         router_id: local_router_id,
         area_id: cfg.area_id,
         interface_mtu: cfg.mtu,
-        options: exchange::DBD_OPTIONS,
+        options: exchange::dbd_options(cfg.stub),
         init: true,
         more: true,
         master: true,
@@ -361,6 +365,7 @@ fn start_negotiation(cfg: &LinkConfig, local_router_id: Ipv4Addr) -> (AdjacencyD
         pending_acks: Vec::new(),
         pending_acks_since: None,
         opaque_capable: false, // learnt from the neighbor's DBD
+        stub: cfg.stub,
     };
     (adj, dbd)
 }
@@ -628,7 +633,7 @@ fn send_hello(
         area_id: cfg.area_id,
         network_mask: local_netmask(cfg),
         hello_interval: cfg.hello_interval,
-        options: packet::OPTION_E,
+        options: if cfg.stub { 0 } else { packet::OPTION_E },
         dead_interval: u32::from(cfg.dead_interval),
         router_priority: cfg.priority,
         designated_router,
@@ -693,11 +698,9 @@ fn handle_hello(
             return false;
         }
     }
-    // This NOS has no stub-area concept, so our own E-bit is always set —
-    // a peer that ever clears its own can never be a legitimate neighbor
-    // today, but the comparison is real (not a no-op) so it starts doing
-    // something meaningful the moment stub areas exist on either side.
-    if hello.options & packet::OPTION_E == 0 {
+    // RFC 2328 §10.5: the E-bit is clear exactly in a stub area, so both
+    // ends must agree on whether the area is one.
+    if (hello.options & packet::OPTION_E != 0) == cfg.stub {
         warn!(
             link = %cfg.attach_point, neighbor = %hello.router_id,
             "dropping ospf hello with mismatched e-bit"
@@ -1309,6 +1312,9 @@ async fn flood_full_neighbors(
     }
     let mut lsas = lsdb.lock().await.all();
     lsas.extend(link_local_lsdb.lock().await.all());
+    // A stub area carries no AS-scope LSA (RFC 2328 §3.6) — one held from
+    // before the area turned stub just ages out here.
+    lsas.retain(|l| !(cfg.stub && lsa::is_as_scope(l.header.lsa_type)));
     // One signed payload per group (opaque-capable or not), reused for every
     // neighbor in it — safe even under Crypto auth: RFC 2328 D.4.3's
     // anti-replay check is per-neighbor on the receive side
@@ -1712,7 +1718,29 @@ pub struct LinkManager {
     /// Set by `announce_graceful_restart`: `shutdown` then keeps every
     /// self-originated LSA instead of flushing it (RFC 3623 §2).
     restarting: AtomicBool,
+    /// Each configured area's stub/range settings (`OspfArea`), replaced on
+    /// every resync; an area missing here is a normal area with no range.
+    area_settings: Mutex<HashMap<Ipv4Addr, AreaSettings>>,
+    /// Active advertised area ranges and their metric, rewritten by every
+    /// `originate_summary_lsas` pass — `compute_routes` turns them into
+    /// discard routes.
+    active_ranges: Mutex<HashMap<Ipv4Net, u32>>,
     opener: Opener,
+}
+
+/// One area's RFC 2328 §3.5/§3.6 settings, resolved from `OspfArea`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AreaSettings {
+    /// No AS-external LSAs; as an ABR, originate a default Type-3 into it.
+    pub stub: bool,
+    /// RFC 2328 Appendix C.2 `ImportSummaries`: `false` (totally stubby)
+    /// sends only the default Type-3 into a stub area.
+    pub import_summaries: bool,
+    /// `StubDefaultCost`.
+    pub default_cost: u32,
+    /// `(range, advertise)`, applied to this area's prefixes when summarized
+    /// into the other areas.
+    pub ranges: Vec<(Ipv4Net, bool)>,
 }
 
 impl LinkManager {
@@ -1752,6 +1780,8 @@ impl LinkManager {
             shutting_down: AtomicBool::new(false),
             grace_period: AtomicU16::new(0),
             restarting: AtomicBool::new(false),
+            area_settings: Mutex::new(HashMap::new()),
+            active_ranges: Mutex::new(HashMap::new()),
             opener,
         });
         let background = Arc::clone(&manager);
@@ -1787,6 +1817,18 @@ impl LinkManager {
     pub fn set_graceful_restart(&self, grace_period: Option<u16>) {
         self.grace_period
             .store(grace_period.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    pub async fn set_area_settings(&self, settings: HashMap<Ipv4Addr, AreaSettings>) {
+        *self.area_settings.lock().await = settings;
+    }
+
+    async fn is_stub_area(&self, area_id: Ipv4Addr) -> bool {
+        self.area_settings
+            .lock()
+            .await
+            .get(&area_id)
+            .is_some_and(|s| s.stub)
     }
 
     /// Gets or creates the shared LSDB for `area_id`.
@@ -1925,13 +1967,19 @@ impl LinkManager {
                 });
             }
 
+            // No Type-5 goes into a stub area, so we are no ASBR there.
+            let area_flags = if self.is_stub_area(area_id).await {
+                flags & !lsa::ROUTER_FLAG_E
+            } else {
+                flags
+            };
             install_self_originated(
                 &mut lsdb,
                 local_router_id,
                 lsa::LSA_TYPE_ROUTER,
                 local_router_id,
                 LsaBody::Router(RouterLsaBody {
-                    flags,
+                    flags: area_flags,
                     links: router_links,
                 }),
             );
@@ -2008,12 +2056,19 @@ impl LinkManager {
             .copied()
             .collect();
         let area_ids: Vec<Ipv4Addr> = self.lsdbs.lock().await.keys().copied().collect();
-        let desired: HashSet<Ipv4Addr> = prefixes.iter().map(Ipv4Net::network).collect();
 
         for area_id in area_ids {
+            // RFC 2328 §3.6: none into a stub area — one that just turned
+            // stub gets this router's own flushed.
+            let prefixes: &[Ipv4Net] = if self.is_stub_area(area_id).await {
+                &[]
+            } else {
+                &prefixes
+            };
+            let desired: HashSet<Ipv4Addr> = prefixes.iter().map(Ipv4Net::network).collect();
             let lsdb = self.lsdb_for(area_id).await;
             let mut lsdb = lsdb.lock().await;
-            for prefix in &prefixes {
+            for prefix in prefixes {
                 install_self_originated(
                     &mut lsdb,
                     local_router_id,
@@ -2060,42 +2115,74 @@ impl LinkManager {
         // A single-area router summarizes nothing (and, `lsdbs` never
         // shrinking, can't hold a stale summary either); the per-area
         // withdrawal below is then a cheap no-op header scan.
-        let mut per_area: HashMap<Ipv4Addr, spf::IntraAreaRoutes> = HashMap::new();
+        let settings = self.area_settings.lock().await.clone();
+        // Per source area: what to summarize from it (its area ranges
+        // applied, RFC 2328 §12.4.3) and the ASBRs in it.
+        let mut per_area: HashMap<Ipv4Addr, (spf::Summaries, Vec<(Ipv4Addr, u32)>)> =
+            HashMap::new();
+        let mut active_ranges = HashMap::new();
         if areas.len() >= 2 {
             for (area_id, lsdb) in &areas {
                 let lsas = lsdb.lock().await.all();
-                per_area.insert(*area_id, spf::intra_area_routes(local_router_id, &lsas));
+                let view = spf::intra_area_routes(local_router_id, &lsas);
+                let ranges = settings.get(area_id).map_or(&[][..], |s| &s.ranges[..]);
+                let (prefixes, active) = spf::apply_ranges(&view.routes, ranges);
+                active_ranges.extend(active);
+                per_area.insert(*area_id, (prefixes, view.asbrs));
             }
         }
+        *self.active_ranges.lock().await = active_ranges;
 
         for (dest_area, dest_lsdb) in &areas {
+            let dest = settings.get(dest_area).cloned().unwrap_or_default();
             let mut dest_lsdb = dest_lsdb.lock().await;
             let mut network_ids = HashSet::new();
             let mut asbr_ids = HashSet::new();
-            for (src_area, view) in &per_area {
-                if src_area == dest_area {
+            // RFC 2328 §12.4.3.1: an ABR sends a default Type-3 into a stub
+            // area — and, totally stubby (no `ImportSummaries`), nothing else.
+            // ponytail: ABR-ness stays "2+ areas", with no check that one of
+            // them is the backbone.
+            if dest.stub && !per_area.is_empty() {
+                network_ids.insert(Ipv4Addr::UNSPECIFIED);
+                install_self_originated(
+                    &mut dest_lsdb,
+                    local_router_id,
+                    lsa::LSA_TYPE_NETWORK_SUMMARY,
+                    Ipv4Addr::UNSPECIFIED,
+                    LsaBody::Summary(SummaryLsaBody {
+                        network_mask: Ipv4Addr::UNSPECIFIED,
+                        metric: dest.default_cost,
+                    }),
+                );
+            }
+            for (src_area, (prefixes, asbrs)) in &per_area {
+                if src_area == dest_area || (dest.stub && !dest.import_summaries) {
                     continue;
                 }
-                for route in &view.routes {
+                for &(prefix, metric) in prefixes {
                     // ponytail: if the identical prefix happens to be
                     // intra-area in more than one source area (a subnet
                     // spanning areas — not a real topology), the last
                     // src_area processed here (HashMap iteration order) wins;
                     // not worth cross-area coordination machinery for a case
                     // that shouldn't occur.
-                    network_ids.insert(route.prefix.network());
+                    network_ids.insert(prefix.network());
                     install_self_originated(
                         &mut dest_lsdb,
                         local_router_id,
                         lsa::LSA_TYPE_NETWORK_SUMMARY,
-                        route.prefix.network(),
+                        prefix.network(),
                         LsaBody::Summary(SummaryLsaBody {
-                            network_mask: route.prefix.netmask(),
-                            metric: route.metric,
+                            network_mask: prefix.netmask(),
+                            metric,
                         }),
                     );
                 }
-                for &(asbr, dist) in &view.asbrs {
+                // No ASBR-summary into a stub area: it carries no Type-5.
+                if dest.stub {
+                    continue;
+                }
+                for &(asbr, dist) in asbrs {
                     asbr_ids.insert(asbr);
                     install_self_originated(
                         &mut dest_lsdb,
@@ -2309,10 +2396,21 @@ impl LinkManager {
         let Some(router_id) = *self.router_id.lock().await else {
             return Vec::new();
         };
-        let areas: Vec<Arc<Mutex<Lsdb>>> = self.lsdbs.lock().await.values().cloned().collect();
+        let areas: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
+            .lsdbs
+            .lock()
+            .await
+            .iter()
+            .map(|(id, lsdb)| (*id, Arc::clone(lsdb)))
+            .collect();
         let mut merged: HashMap<Ipv4Net, spf::RouteEntry> = HashMap::new();
-        for lsdb in areas {
-            let lsas = lsdb.lock().await.all();
+        for (area_id, lsdb) in areas {
+            let mut lsas = lsdb.lock().await.all();
+            // A Type-5 still held from before the area turned stub (until it
+            // ages out) is not a route there.
+            if self.is_stub_area(area_id).await {
+                lsas.retain(|l| !lsa::is_as_scope(l.header.lsa_type));
+            }
             for entry in spf::compute(router_id, &lsas) {
                 match merged.get_mut(&entry.prefix) {
                     None => {
@@ -2325,6 +2423,14 @@ impl LinkManager {
                     Some(_) => {}
                 }
             }
+        }
+        // RFC 2328 §3.5: a discard route per active advertised range, so
+        // traffic to an unused part of it is dropped here rather than looping
+        // on a covering route — unless SPF has a real route for exactly it.
+        for (&range, &metric) in self.active_ranges.lock().await.iter() {
+            merged
+                .entry(range)
+                .or_insert_with(|| spf::RouteEntry::discard(range, metric));
         }
         merged.into_values().collect()
     }
@@ -2769,6 +2875,7 @@ mod tests {
             priority: 1,
             mtu: 1500,
             auth: LinkAuthConfig::None,
+            stub: false,
         }
     }
 
@@ -4284,6 +4391,174 @@ mod tests {
 
     async fn settle(secs: u64) {
         tokio::time::sleep(Duration::from_secs(secs)).await;
+    }
+
+    /// RFC 2328 §3.5/§3.6 (#35) over the in-memory wire: A is internal to
+    /// stub area 1, B its ABR (loopback in area 0, redistributing a static).
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::too_many_lines)]
+    async fn stub_area_gets_a_default_and_ranges_summarize() {
+        let area1 = Ipv4Addr::new(0, 0, 0, 1);
+        let net = |s: &str| s.parse::<Ipv4Net>().unwrap();
+        let settings = |area_type: Option<bool>, ranges: Vec<(Ipv4Net, bool)>| {
+            let mut m = HashMap::from([(
+                Ipv4Addr::UNSPECIFIED,
+                AreaSettings {
+                    ranges,
+                    ..AreaSettings::default()
+                },
+            )]);
+            if let Some(import_summaries) = area_type {
+                m.insert(
+                    area1,
+                    AreaSettings {
+                        stub: true,
+                        import_summaries,
+                        default_cost: 5,
+                        ranges: Vec::new(),
+                    },
+                );
+            }
+            m
+        };
+        let link_in_area1 = |addr, stub| LinkConfig {
+            area_id: area1,
+            stub,
+            ..wired_link(addr, 30, NetworkType::PointToPoint)
+        };
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b) = (router(&wire), router(&wire));
+        a.set_area_settings(settings(Some(true), Vec::new())).await;
+        a.reconcile(
+            vec![link_in_area1([10, 0, 0, 1], true)],
+            HashMap::new(),
+            id(1),
+        )
+        .await;
+        let b_stubs = HashMap::from([(Ipv4Addr::UNSPECIFIED, vec![(net("192.0.2.2/32"), 1)])]);
+        b.set_redistribute_policy(Arc::new(nos_rpl::ACCEPT_ALL.clone()))
+            .await;
+        b.apply_redistribute_update(RedistributeUpdate::Full(vec![
+            nos_proto::RedistributedRoute {
+                prefix: "198.51.100.0/24".parse().unwrap(),
+                gateway: "10.9.9.9".parse().unwrap(),
+            },
+        ]))
+        .await;
+        b.set_redistribute_policy(Arc::new(nos_rpl::ACCEPT_ALL.clone()))
+            .await;
+
+        // Stub on A only: the E-bits disagree, so not even Init.
+        b.set_area_settings(settings(None, Vec::new())).await;
+        b.reconcile(
+            vec![link_in_area1([10, 0, 0, 2], false)],
+            b_stubs.clone(),
+            id(2),
+        )
+        .await;
+        settle(60).await;
+        assert_eq!(
+            a.neighbor_summaries().await[0].state,
+            OspfNeighborState::Down
+        );
+
+        // Stub on both, with a range over B's loopback: Full, a default and
+        // the range, never the /32 nor the Type-5.
+        b.set_area_settings(settings(Some(true), vec![(net("192.0.2.0/24"), true)]))
+            .await;
+        b.reconcile(
+            vec![link_in_area1([10, 0, 0, 2], true)],
+            b_stubs.clone(),
+            id(2),
+        )
+        .await;
+        settle(60).await;
+        assert_eq!(
+            a.neighbor_summaries().await[0].state,
+            OspfNeighborState::Full
+        );
+        let route = |routes: &[spf::RouteEntry], p: &str| {
+            routes.iter().find(|r| r.prefix == net(p)).cloned()
+        };
+        let routes = a.compute_routes().await;
+        let default = route(&routes, "0.0.0.0/0").expect("default route");
+        assert_eq!(default.next_hops, [Ipv4Addr::new(10, 0, 0, 2)]);
+        assert_eq!(default.metric, 1 + 5);
+        assert!(route(&routes, "192.0.2.0/24").is_some(), "{routes:?}");
+        assert!(route(&routes, "192.0.2.2/32").is_none(), "{routes:?}");
+        assert!(route(&routes, "198.51.100.0/24").is_none(), "{routes:?}");
+        assert!(!a
+            .database_summaries()
+            .await
+            .iter()
+            .any(|l| l.lsa_type == lsa::LSA_TYPE_AS_EXTERNAL));
+        // B is no ASBR in the stub area: E clear in its Router-LSA there.
+        let b_router = a
+            .lsdb_for(area1)
+            .await
+            .lock()
+            .await
+            .get(&router_key(id(2)))
+            .unwrap();
+        let LsaBody::Router(body) = &b_router.body else {
+            panic!("expected router lsa")
+        };
+        assert_eq!(body.flags & lsa::ROUTER_FLAG_E, 0);
+        // The ABR holds a discard route for its active range.
+        let discard = route(&b.compute_routes().await, "192.0.2.0/24").expect("discard");
+        assert!(discard.next_hops.is_empty());
+
+        // Totally stubby: the range summary is flushed, the default stays.
+        b.set_area_settings(settings(Some(false), vec![(net("192.0.2.0/24"), true)]))
+            .await;
+        // (Checked on B: A's `MinLSArrival` runs on the real clock, which a
+        // paused-time test never advances past, so the flush can't reach A
+        // here — `nos-e2e ospf-stub` covers that.)
+        settle(4).await;
+        let live_summaries: Vec<Ipv4Addr> = b
+            .database_summaries()
+            .await
+            .into_iter()
+            .filter(|l| {
+                l.area_id == area1
+                    && l.lsa_type == lsa::LSA_TYPE_NETWORK_SUMMARY
+                    && l.age < lsa::MAX_AGE
+            })
+            .map(|l| l.link_state_id)
+            .collect();
+        assert_eq!(live_summaries, [Ipv4Addr::UNSPECIFIED]);
+
+        // Not-advertise: no discard route on the ABR either.
+        b.set_area_settings(settings(Some(true), vec![(net("192.0.2.0/24"), false)]))
+            .await;
+        settle(4).await;
+        assert!(route(&b.compute_routes().await, "192.0.2.0/24").is_none());
+    }
+
+    #[test]
+    fn handle_hello_matches_the_e_bit_to_the_stub_flag() {
+        let cfg = LinkConfig {
+            stub: true,
+            ..link("eth0.0", 10)
+        };
+        let peer = Ipv4Addr::new(9, 9, 9, 9);
+        for (options, accepted) in [(packet::OPTION_E, false), (0, true)] {
+            let (status, _rx) = watch::channel(LinkStatus::new(NetworkType::PointToPoint));
+            let hello = packet::HelloPacket {
+                options,
+                ..matching_hello(&cfg, peer)
+            };
+            handle_hello(
+                &cfg,
+                Ipv4Addr::new(1, 1, 1, 1),
+                &status,
+                Ipv4Addr::new(10, 0, 0, 2),
+                &hello,
+                &mut Instant::now(),
+                false,
+            );
+            assert_eq!(status.borrow().neighbors.contains_key(&peer), accepted);
+        }
     }
 
     #[tokio::test(start_paused = true)]

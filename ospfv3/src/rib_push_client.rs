@@ -152,6 +152,7 @@ impl Pushed {
             backup_next_hop: self.backup_next_hop,
             backup_interface_id: self.backup_interface_id,
             metric: self.metric,
+            discard: false,
         }
     }
 }
@@ -266,6 +267,7 @@ mod tests {
                 backup_next_hop: None,
                 backup_interface_id: None,
                 metric: 10,
+                discard: false,
             })]
         );
     }
@@ -298,6 +300,7 @@ mod tests {
                 backup_next_hop: None,
                 backup_interface_id: None,
                 metric: 10,
+                discard: false,
             }),
             OspfRouteUpdate::Remove("2001:db8:2::/64".parse().unwrap()),
         ];

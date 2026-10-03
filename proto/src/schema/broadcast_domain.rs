@@ -311,6 +311,9 @@ mod tests {
                 router_id: "1.1.1.1".parse().unwrap(),
                 areas: vec![OspfArea {
                     area_id: "0.0.0.0".parse().unwrap(),
+                    area_type: crate::schema::OspfAreaType::Normal,
+                    stub_default_cost: None,
+                    ranges: Vec::new(),
                     profiles: vec![OspfProfile {
                         name: "p1".to_string(),
                         hello_interval: None,

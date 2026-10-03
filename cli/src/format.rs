@@ -7,12 +7,13 @@ use nos_proto::{
     BgpSessionState, BgpShutdown, BroadcastDomain, CommunityAlias, CommunityGroup, Config,
     ConfigDiff, DiffStatus, EvpnRouteSummary, FieldDiff, Interface, InterfaceAddress,
     InterfaceStatus, LacpMuxState, LacpRate, LacpReceiveState, LinkInterfaceState, LogEntry,
-    LogLevel, LsaSummary, NeighborSummary, NextHopMode, OspfArea, OspfAuth, OspfCryptoAlgorithm,
-    OspfInstance, OspfNeighborState, OspfProfile, Ospfv3Area, Ospfv3Instance, Ospfv3LsaSummary,
-    Ospfv3NeighborSummary, Ospfv3Profile, PeerSummary, PolicyDefinition, PortAggregate,
-    PortAggregateLacpSummary, PortAggregateStatus, PrefixList, PrefixListEntry, PrefixRoutes,
-    RouteSourceKind, RoutingTable, SectionDiff, SourceAddress, StaticRoute, StaticRoutingInstance,
-    Subinterface, SubinterfaceStatus, SwitchingProfile, TransactionSnapshot, VlanTag,
+    LogLevel, LsaSummary, NeighborSummary, NextHopMode, OspfArea, OspfAreaType, OspfAuth,
+    OspfCryptoAlgorithm, OspfInstance, OspfNeighborState, OspfProfile, Ospfv3Area, Ospfv3Instance,
+    Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Profile, PeerSummary, PolicyDefinition,
+    PortAggregate, PortAggregateLacpSummary, PortAggregateStatus, PrefixList, PrefixListEntry,
+    PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, SourceAddress, StaticRoute,
+    StaticRoutingInstance, Subinterface, SubinterfaceStatus, SwitchingProfile, TransactionSnapshot,
+    VlanTag,
 };
 
 use crate::session::Path;
@@ -212,7 +213,23 @@ pub fn render_ospf_instance(instance: &OspfInstance) -> String {
 /// Render one OSPF area as human-readable text, including any nested
 /// profiles, each indented one level under the area line.
 pub fn render_ospf_area(area: &OspfArea) -> String {
-    let mut lines = vec![format!("area {}", area.area_id)];
+    let area_type = match area.area_type {
+        OspfAreaType::Normal => "",
+        OspfAreaType::Stub => " stub",
+        OspfAreaType::TotallyStubby => " totally-stubby",
+    };
+    let cost = area
+        .stub_default_cost
+        .map_or(String::new(), |c| format!(" stub-default-cost {c}"));
+    let mut lines = vec![format!("area {}{area_type}{cost}", area.area_id)];
+    for range in &area.ranges {
+        let suffix = if range.not_advertise {
+            " not-advertise"
+        } else {
+            ""
+        };
+        lines.push(format!("  range {}{suffix}", range.cidr));
+    }
     for profile in &area.profiles {
         lines.push(format!("  {}", render_ospf_profile(profile)));
     }
@@ -733,14 +750,19 @@ pub fn render_prefix_routes(entries: &[PrefixRoutes]) -> String {
             let backup = candidate
                 .backup
                 .map_or_else(String::new, |b| format!(" backup {b}"));
-            let via = candidate
-                .gateways
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
+            let via = if candidate.discard {
+                "discard".to_string()
+            } else {
+                let gateways = candidate
+                    .gateways
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("via {gateways}")
+            };
             lines.push(format!(
-                "  {marker} via {via} [{}]{backup}",
+                "  {marker} {via} [{}]{backup}",
                 render_route_source(candidate.source)
             ));
         }
@@ -1699,6 +1721,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn discard_route_renders_as_discard() {
+        let routes = [PrefixRoutes {
+            prefix: "203.0.113.120/29".parse().unwrap(),
+            candidates: vec![nos_proto::RouteEntry {
+                gateways: vec![],
+                source: nos_proto::RouteSourceKind::Ospf,
+                backup: None,
+                discard: true,
+            }],
+        }];
+        assert_eq!(
+            render_prefix_routes(&routes),
+            "203.0.113.120/29\n  * discard [ospf]"
+        );
+    }
+
+    #[test]
+    fn stub_area_renders_its_type_and_ranges() {
+        let area = OspfArea {
+            area_id: "0.0.0.1".parse().unwrap(),
+            profiles: vec![],
+            area_type: OspfAreaType::TotallyStubby,
+            stub_default_cost: Some(5),
+            ranges: vec![nos_proto::OspfAreaRange {
+                cidr: "10.1.0.0/16".parse().unwrap(),
+                not_advertise: true,
+            }],
+        };
+        assert_eq!(
+            render_ospf_area(&area),
+            "area 0.0.0.1 totally-stubby stub-default-cost 5\n  range 10.1.0.0/16 not-advertise"
+        );
+    }
+
+    #[test]
     fn ecmp_route_renders_every_gateway_on_one_line() {
         let routes = [PrefixRoutes {
             prefix: "203.0.113.80/32".parse().unwrap(),
@@ -1706,6 +1763,7 @@ mod tests {
                 gateways: vec!["10.0.0.2".parse().unwrap(), "10.0.1.2".parse().unwrap()],
                 source: nos_proto::RouteSourceKind::Ospf,
                 backup: Some("10.0.1.3".parse().unwrap()),
+                discard: false,
             }],
         }];
         assert_eq!(
@@ -2910,6 +2968,9 @@ mod tests {
                 router_id: Ipv4Addr::new(1, 1, 1, 1),
                 areas: vec![OspfArea {
                     area_id: area("0.0.0.0"),
+                    area_type: nos_proto::OspfAreaType::Normal,
+                    stub_default_cost: None,
+                    ranges: Vec::new(),
                     profiles: vec![OspfProfile {
                         name: "op".to_string(),
                         extended_sequence_numbers: true,
