@@ -50,8 +50,9 @@ impl RouteSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RibEntry {
     pub prefix: IpNet,
-    /// Every equal-cost next hop, non-empty (one for `Static`/`Bgp`/
-    /// `Connected`; one or more for `Ospf`), each with the local kernel
+    /// Every equal-cost next hop (one for `Static`/`Bgp`/`Connected`; one
+    /// or more for `Ospf`, or none for an OSPF discard route — see
+    /// `is_discard`), each with the local kernel
     /// interface it is reachable over when known (mirrors
     /// `nos_proto::OspfRoute::next_hops`: always `Some` from `nos-ospfv3d`,
     /// `None` otherwise) — required for Linux's netlink route install when
@@ -66,6 +67,15 @@ pub struct RibEntry {
     /// `interface_id` of `backup` — it can leave over a different link than
     /// the primary, and an IPv6 link-local backup needs one just the same.
     pub backup_interface_id: Option<u32>,
+}
+
+impl RibEntry {
+    /// A discard (blackhole) route: no next hop at all — an OSPF ABR's route
+    /// for an active advertised area range (`OspfRoute.discard`). Installed
+    /// as `RTN_BLACKHOLE`, and never an IGP cost a BGP next hop resolves by.
+    pub fn is_discard(&self) -> bool {
+        self.next_hops.is_empty()
+    }
 }
 
 /// Whether a mutation actually changed a prefix's *winning* candidate —
@@ -260,14 +270,16 @@ impl Rib {
     }
 
     /// IGP cost per prefix: its best non-BGP candidate's cost (`Connected`/
-    /// `Static` 0, `Ospf` its SPF metric). `Bgp` candidates never count.
+    /// `Static` 0, `Ospf` its SPF metric). `Bgp` candidates never count, nor
+    /// a discard route: a next hop only reachable through an area range's
+    /// blackhole is unresolvable (RFC 4271 §9.1.2), not selectable-then-dropped.
     pub fn igp_costs(&self) -> Vec<(IpNet, u32)> {
         self.entries
             .iter()
             .filter_map(|(prefix, candidates)| {
                 let best = candidates
                     .iter()
-                    .filter(|e| e.source != RouteSource::Bgp)
+                    .filter(|e| e.source != RouteSource::Bgp && !e.is_discard())
                     .min_by_key(|e| e.source.preference())?;
                 let cost = match best.source {
                     RouteSource::Ospf => self.ospf_metrics.get(prefix).copied().unwrap_or(0),
@@ -353,6 +365,11 @@ mod tests {
         rib.insert(entry("10.1.0.0/16", RouteSource::Ospf));
         rib.insert(entry("10.2.0.0/16", RouteSource::Static));
         rib.insert(entry("10.3.0.0/16", RouteSource::Bgp));
+        // An area range's discard route is no IGP cost.
+        rib.insert(RibEntry {
+            next_hops: Vec::new(),
+            ..entry("10.4.0.0/16", RouteSource::Ospf)
+        });
         rib.set_ospf_metric("10.1.0.0/16".parse().unwrap(), Some(25));
         let mut costs = rib.igp_costs();
         costs.sort();

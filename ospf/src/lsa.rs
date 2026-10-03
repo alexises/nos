@@ -59,6 +59,12 @@ pub fn is_opaque(lsa_type: u8) -> bool {
     )
 }
 
+/// AS flooding scope (Type-5, Type-11): never present in a stub area (RFC
+/// 2328 §3.6, RFC 5250 §3).
+pub fn is_as_scope(lsa_type: u8) -> bool {
+    matches!(lsa_type, LSA_TYPE_AS_EXTERNAL | LSA_TYPE_OPAQUE_AS)
+}
+
 /// Type 9: held per link, never flooded past the link it arrived on.
 pub fn is_link_local_scope(lsa_type: u8) -> bool {
     lsa_type == LSA_TYPE_OPAQUE_LINK

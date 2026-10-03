@@ -252,6 +252,12 @@ pub enum OpError {
         tag: u16,
         address: IpNet,
     },
+    #[error("range '{cidr}' not found in area '{area_id}' of ospf instance '{instance}'")]
+    OspfAreaRangeNotFound {
+        instance: String,
+        area_id: Ipv4Addr,
+        cidr: ipnet::Ipv4Net,
+    },
 }
 
 #[cfg(test)]

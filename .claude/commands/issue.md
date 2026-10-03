@@ -15,6 +15,7 @@ All agents you spawn: `model: "opus"` (latest Opus), `run_in_background: true`, 
    - read the issue, its `## Implementation plan (Claude review)` comment and every owner reply after it;
    - branch `issue-N-<slug>`, implement, add/run the `nos-e2e` phase when the feature touches the kernel or IPC (per CLAUDE.md), run `make check`;
    - push and `gh pr create` (body has `Closes #N`, ends with the attribution line). NEVER merge.
+   - **CI must be green before it reports.** The local toolchain is older than CI's pinned `RUST_TOOLCHAIN` (newer clippy lints, e.g. `assert_is_empty`), so a green `make check` is not enough: after pushing, poll `gh pr checks <PR>` until Clippy/Format/Test/Coverage have finished, read any failure with `gh api repos/alexises/nos/actions/jobs/<id>/logs`, fix, push, repeat. Report only once they pass (or a failure is unrelated/flaky — say so).
    After its PR opens, do not start the next implem until the owner says "merged".
 2. **Plans fill idle time.** Only while no implem agent is running, spawn up to **5** parallel plan agents for `ready-for-claude-review` issues that have no plan comment, or whose owner replied after it. Each posts ONE comment headed `## Implementation plan (Claude review)`. If one exists, edit it in place by comment id — never post a second, never `--edit-last` (the owner's comments share this GitHub account):
    `rtk proxy jq -Rs '{body: .}' f > j && gh api -X PATCH repos/alexises/nos/issues/comments/<id> --input j`

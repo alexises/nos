@@ -38,7 +38,7 @@ pub use interface::{
     loopback_table_name, Interface, InterfaceAddress, Subinterface, LOOPBACK_PREFIX,
 };
 pub use lldp::{LldpDestination, LldpSettings};
-pub use ospf_area::OspfArea;
+pub use ospf_area::{OspfArea, OspfAreaRange, OspfAreaType};
 pub use ospf_instance::OspfInstance;
 pub use ospf_profile::{
     NetworkType, OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfProfile, DEAD_INTERVAL_DEFAULT,

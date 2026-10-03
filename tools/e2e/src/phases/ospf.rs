@@ -800,6 +800,185 @@ pub async fn ospf_mtu_pagination(w: &mut World) -> anyhow::Result<()> {
     both_full_p2p(a, b).await
 }
 
+/// RFC 2328 §3.5/§3.6 stub areas and area ranges, self-contained. eth0.0 is
+/// in area 1, router-a's only area; router-b's loopback is in area 0, making
+/// router-b the ABR, and router-b redistributes a static route (a Type-5 that
+/// must never reach the stub area).
+#[allow(clippy::too_many_lines)]
+pub async fn ospf_stub(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    let loopback = OSPF_STUB_LOOPBACK_ADDRESS;
+    let loopback_id = loopback.trim_end_matches("/32");
+    let range = OSPF_STUB_RANGE;
+    let range_id = range.split('/').next().unwrap_or(range);
+    let area = |router_id: &str, extra: &[&str]| {
+        let mut f = strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            router_id,
+            "--ospf-area",
+            OSPF_AREA_1,
+        ]);
+        f.extend(strings(extra));
+        f
+    };
+    let on_eth0 = |router_id: &str, area_type: &str| {
+        area(
+            router_id,
+            &[
+                "--ospf-area-type",
+                area_type,
+                "--ospf-profile",
+                OSPF_PROFILE_AREA1,
+                "--ospf-interface-profile",
+                OSPF_PROFILE_AREA1,
+            ],
+        )
+    };
+
+    // Area 1 a stub on router-a only: the Hello E-bits disagree.
+    let mismatch = "dropping ospf hello with mismatched e-bit";
+    a.provision_flags(&with_base(A, on_eth0(OSPF_ROUTER_ID, "stub")))
+        .await?;
+    b.provision_flags(&with_base(B, asbr(on_eth0(OSPF_ROUTER_ID_B, "normal"))))
+        .await?;
+    b.provision(&[
+        "--ospf-instance",
+        OSPF_INSTANCE,
+        "--ospf-router-id",
+        OSPF_ROUTER_ID_B,
+        "--ospf-area",
+        OSPF_AREA,
+        "--ospf-profile",
+        OSPF_PROFILE,
+        "--loopback-address",
+        loopback,
+        "--ospf-loopback-profile",
+        OSPF_PROFILE,
+    ])
+    .await?;
+    a.wait(mismatch).await?;
+    b.wait(mismatch).await?;
+    b.wait("ospf lsa originated.*lsa_type=5").await?;
+    log("confirming the e-bit mismatch never reaches init");
+    a.assert_quiet(
+        &format!("ospf neighbor state changed to init link=eth0.0 neighbor={OSPF_ROUTER_ID_B}"),
+        0,
+        8,
+    )
+    .await?;
+
+    // Stub on both: Full; router-b (ABR) originates a default Type-3 and a
+    // summary of its loopback; router-a installs both as kernel routes and
+    // never a Type-5.
+    b.provision(&area(OSPF_ROUTER_ID_B, &["--ospf-area-type", "stub"]))
+        .await?;
+    both_full_p2p(a, b).await?;
+    a.wait("ospf lsa installed.*lsa_type=3 link_state_id=0.0.0.0")
+        .await?;
+    a.wait("added route prefix=0.0.0.0/0 .*source=Some(Ospf)")
+        .await?;
+    a.wait(&format!(
+        "added route prefix={loopback} .*source=Some(Ospf)"
+    ))
+    .await?;
+    log("confirming no as-external lsa reaches the stub area");
+    a.assert_quiet("ospf lsa installed.*lsa_type=5", 0, 10)
+        .await?;
+
+    // A range over the loopback on area 0: router-a gets the range instead of
+    // the /32 (flushed), and router-b installs a discard route for it.
+    let discard =
+        format!("added route prefix={range} .*source=Some(Ospf) backup=false discard=true");
+    b.provision(&[
+        "--ospf-instance",
+        OSPF_INSTANCE,
+        "--ospf-router-id",
+        OSPF_ROUTER_ID_B,
+        "--ospf-area",
+        OSPF_AREA,
+        "--ospf-area-range",
+        range,
+    ])
+    .await?;
+    a.wait(&format!(
+        "ospf lsa installed.*lsa_type=3 link_state_id={range_id}"
+    ))
+    .await?;
+    a.wait(&format!("added route prefix={range} .*source=Some(Ospf)"))
+        .await?;
+    b.wait(&format!(
+        "ospf lsa prematurely aged.*lsa_type=3 link_state_id={loopback_id}"
+    ))
+    .await?;
+    a.wait(&format!("removed route prefix={loopback}")).await?;
+    b.wait(&discard).await?;
+    if !b.rt1_has(range, "Ospf").await? {
+        bail!("router-b's rt1 does not list the discard route {range}");
+    }
+    // The dumped RTN_BLACKHOLE is recognised as ours: no EEXIST re-add on the
+    // next 10s reapply.
+    log("confirming router-b's discard route survives a reapply");
+    let failed = format!("failed to add route prefix={range}");
+    b.assert_quiet(&failed, b.count(&failed), 15).await?;
+    b.assert_quiet(&discard, 1, 0).await?;
+
+    // not-advertise: the range Type-3 is flushed, router-a's route and
+    // router-b's discard route removed.
+    b.provision(&[
+        "--ospf-instance",
+        OSPF_INSTANCE,
+        "--ospf-router-id",
+        OSPF_ROUTER_ID_B,
+        "--ospf-area",
+        OSPF_AREA,
+        "--ospf-area-range",
+        &format!("{range}:not-advertise"),
+    ])
+    .await?;
+    a.wait(&format!(
+        "ospf lsa maxage flushed.*lsa_type=3 link_state_id={range_id}"
+    ))
+    .await?;
+    a.wait(&format!("removed route prefix={range}")).await?;
+    b.wait(&format!("removed route prefix={range} .*discard=true"))
+        .await?;
+
+    // Totally stubby: with the range gone the /32 summary is back, then
+    // flushed again, and only the default is left.
+    let added = format!("added route prefix={loopback} .*source=Some(Ospf)");
+    let added_before = a.count(&added);
+    b.provision(&[
+        "--ospf-instance",
+        OSPF_INSTANCE,
+        "--ospf-router-id",
+        OSPF_ROUTER_ID_B,
+        "--ospf-area",
+        OSPF_AREA,
+        "--ospf-clear-area-range",
+        range,
+    ])
+    .await?;
+    a.wait_new(&added, added_before, 60).await?;
+    let removed = format!("removed route prefix={loopback}");
+    let removed_before = a.count(&removed);
+    let default_removed = "removed route prefix=0.0.0.0/0";
+    b.provision(&area(
+        OSPF_ROUTER_ID_B,
+        &["--ospf-area-type", "totally-stubby"],
+    ))
+    .await?;
+    a.wait_new(&removed, removed_before, 60).await?;
+    log("confirming the default route stays in the totally-stubby area");
+    a.assert_quiet(default_removed, 0, 10).await?;
+    if !a.rt1_has("0.0.0.0/0", "Ospf").await? {
+        bail!("router-a lost its default route in the totally-stubby area");
+    }
+    Ok(())
+}
+
 /// RFC 5250 opaque LSAs against a real third-party router, self-contained.
 /// FRR (`router-f`) peers router-a over router-a's eth1 on its own network
 /// and originates a type 10 (segment routing's Extended Link, opaque type 8)

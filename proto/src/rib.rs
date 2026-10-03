@@ -30,6 +30,10 @@ pub struct RouteEntry {
     /// metric so it takes over the instant the primary is withdrawn.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub backup: Option<IpAddr>,
+    /// A discard (blackhole) route — no gateway; e.g. an OSPF ABR's route
+    /// for one of its advertised area ranges (RFC 2328 §3.5).
+    #[serde(default)]
+    pub discard: bool,
 }
 
 /// One prefix's full candidate list, ordered best (winner) to worst by
@@ -79,7 +83,8 @@ pub enum BgpRouteUpdate {
 pub struct OspfRoute {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub prefix: IpNet,
-    /// Every equal-cost next hop (RFC 2328 §16.1 2(d)), non-empty, each
+    /// Every equal-cost next hop (RFC 2328 §16.1 2(d)), non-empty unless
+    /// `discard` is set, each
     /// with the local kernel interface (ifindex) it is reachable over when
     /// the pushing daemon knows it — always `Some` from `nos-ospfv3d`
     /// (RFC 5340 next-hops are link-local IPv6 addresses, which Linux's
@@ -102,6 +107,12 @@ pub struct OspfRoute {
     /// SPF cost to `prefix` — what BGP's RFC 4271 §9.1.2.2(d) step compares
     /// (via `RibRequest::IgpCosts`) for paths whose `NEXT_HOP` falls in it.
     pub metric: u32,
+    /// A discard route: an ABR's blackhole for one of its active advertised
+    /// area ranges (RFC 2328 §3.5), so traffic to an unused part of the
+    /// range is dropped rather than looping on a covering route.
+    /// `next_hops` is empty and `backup_next_hop` `None` when set.
+    #[serde(default)]
+    pub discard: bool,
 }
 
 /// Sent by the owning `nos-ospfd` instance to `nos-ribd` over a persistent,

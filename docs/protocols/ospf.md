@@ -11,6 +11,7 @@ OSPF is the link-state interior gateway protocol for IPv4 (RFC 2328). NOS runs i
   - [Authenticate a link, and change its key](#authenticate-a-link-and-change-its-key)
   - [Redistribute static routes (ASBR)](#redistribute-static-routes-asbr)
   - [Add a second area (ABR)](#add-a-second-area-abr)
+  - [Make an area a stub, and summarize it with ranges](#make-an-area-a-stub-and-summarize-it-with-ranges)
   - [Restart without dropping routes (RFC 3623)](#restart-without-dropping-routes-rfc-3623)
   - [Stop running OSPF](#stop-running-ospf)
 - [Features and behaviour](#features-and-behaviour)
@@ -287,6 +288,46 @@ $C -X PUT -H 'Content-Type: application/json' -d '"p-area1"' \
   $B/v1/transactions/abr/interface/loopback-rt1/ospf-profile
 ```
 
+### Make an area a stub, and summarize it with ranges
+
+A stub area (RFC 2328 §3.6) carries no AS-external LSAs; its ABR sends a default route into it instead. Here `eth0.0` is in area 0.0.0.1 on both routers, router-b is the ABR (its loopback is in the backbone), and router-a is inside the stub area. Every router on the area's links must set the same type, or their Hellos are dropped (`dropping ospf hello with mismatched e-bit`). Changing it restarts the area's adjacencies.
+
+```
+configure stub
+set ospf instance o1 area 0.0.0.1 area-type stub
+commit
+```
+
+```sh
+$C -X POST $B/v1/transactions/stub
+$C -X PUT -H 'Content-Type: application/json' -d '"Stub"' \
+  $B/v1/transactions/stub/ospf-instance/o1/area/0.0.0.1/area-type
+$C -X POST $B/v1/transactions/stub/commit
+```
+
+- router-a then has `0.0.0.0/0 via 10.50.0.3 [ospf]` in `show route rt1`, at the default route's cost (`stub-default-cost`, 1 unless set on the ABR's area) plus its distance to the ABR, and no type-5 LSA in `show ospf database`.
+- `area-type totally-stubby` on the ABR's area also stops the other summaries: the default is the only type-3 LSA left in the area. The routers inside may use `stub` or `totally-stubby`, which are the same for them.
+- The backbone (0.0.0.0) can't be a stub.
+
+An area range (RFC 2328 §3.5) is set on the area whose prefixes it covers, on its ABR. To advertise router-b's backbone loopbacks into area 0.0.0.1 as one prefix:
+
+```
+configure range
+set ospf instance o1 area 0.0.0.0 range 203.0.113.120/29
+commit
+```
+
+```sh
+$C -X POST $B/v1/transactions/range
+$C -X PUT -H 'Content-Type: application/json' -d '{"cidr":"203.0.113.120/29"}' \
+  $B/v1/transactions/range/ospf-instance/o1/area/0.0.0.0/range/203.0.113.120%2F29
+$C -X POST $B/v1/transactions/range/commit
+```
+
+- The other areas get one type-3 LSA for the range, at the largest cost among the prefixes it covers, instead of one per prefix. A range covering no prefix of the area is not advertised.
+- The ABR installs `203.0.113.120/29 discard [ospf]` in its own routing table (a kernel blackhole route), so traffic to an unused address of the range is dropped there instead of looping. More specific routes still win.
+- `set … range 203.0.113.120/29 not-advertise` hides every prefix the range covers from the other areas, with no discard route. `delete ospf instance o1 area 0.0.0.0 range 203.0.113.120/29` removes the range.
+
 ### Restart without dropping routes (RFC 3623)
 
 Set a grace period on the instance so that its neighbours keep the adjacency and this router's routes while its OSPF daemon restarts:
@@ -335,7 +376,7 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **AS-external routes (ASBR).** Each redistributed static route becomes one type-5 LSA, flooded to every area the router is in. Other routers compute the route's metric as their distance to the ASBR plus 20. Only static routes can be redistributed, and every external route is metric type 1; there is no metric-type or per-route metric setting, and the forwarding address is always 0.0.0.0.
 
-**Inter-area routes (ABR).** Each prefix of an area is advertised into the router's other areas as its own type-3 LSA, and each ASBR as a type-4 LSA. There is no range summarisation, no stub or NSSA area, and no virtual link. This is designed and tested for one or more non-backbone areas each behind its own ABR; in topologies where several ABRs connect the same areas, check the result.
+**Inter-area routes (ABR).** Each prefix of an area is advertised into the router's other areas as its own type-3 LSA, unless an area range covers it, and each ASBR as a type-4 LSA. There is no NSSA area and no virtual link. Any router in two or more areas acts as an ABR, including towards a stub area, whether or not one of its areas is the backbone. This is designed and tested for one or more non-backbone areas each behind its own ABR; in topologies where several ABRs connect the same areas, check the result.
 
 **Opaque LSAs (RFC 5250).** NOS sets the O bit in its database description packets and stores and floods opaque LSAs it receives without reading them: type 9 (link-local) only on the link it arrived on, type 10 (area) in its area, type 11 (AS) in the area it arrived in. Opaque LSAs are offered only to neighbours whose database description packets set the O bit. NOS originates none except its own Grace-LSA. `show ospf database` lists a type-9 LSA under its link's area, without naming the link. An ABR does not pass a type-11 LSA on to its other areas. An LSA of a type NOS does not know (6, 7, 8, or above 11) is dropped on its own; the rest of the update is kept.
 
@@ -343,7 +384,9 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **MTU and database exchange (RFC 2328 §10.6–10.8).** During the database exchange, the list of LSAs is split over as many packets as the link's MTU requires. The MTU used is the link's real MTU, unless the profile sets `mtu`. The MTU that a neighbour advertises is not checked against the local one, so an MTU mismatch does not block an adjacency.
 
-**Not supported:** NSSA and stub areas, virtual links, area range summarisation, metric-type 2 external routes, redistribution of anything other than static routes, flooding type-11 opaque LSAs between areas, the restarting router's own RFC 3623 restart mode (it resynchronises from scratch while its neighbours help) and strict LSA checking in the helper, BFD, and the non-broadcast network types (NBMA and point-to-multipoint).
+**Stub areas and ranges (RFC 2328 §3.5, §3.6).** Described [above](#make-an-area-a-stub-and-summarize-it-with-ranges). In a stub area, Hellos and database description packets go without the E bit, a type-5 or type-11 LSA is neither sent nor accepted, and a router redistributing static routes does not set the ASBR bit in its router LSA there. The E bit in the header of the LSAs NOS originates is always clear.
+
+**Not supported:** NSSA areas, virtual links, metric-type 2 external routes, redistribution of anything other than static routes, flooding type-11 opaque LSAs between areas, the restarting router's own RFC 3623 restart mode (it resynchronises from scratch while its neighbours help) and strict LSA checking in the helper, BFD, and the non-broadcast network types (NBMA and point-to-multipoint).
 
 ## Configuration reference
 
@@ -367,6 +410,9 @@ The instance's JSON also carries `routing_table` and `redistribute_policy`. They
 |---|---|---|---|---|---|---|
 | area ID | `edit ospf instance <name> area <area-id>`; `delete ospf instance <name> area <area-id>`; relative `edit area <area-id>` / `delete area <area-id>` | `ospf-instance/<name>/area/<area-id>` | dotted quad; `0.0.0.0` is the backbone | unique within the instance | groups the profiles, and so the links, of one area; deleting an area deletes its profiles | `show ospf neigh` (area column) |
 | profiles | `edit ospf instance <name> area <area-id> profile <profile>`; relative `edit profile <profile>` | `…/area/<area-id>/profile/<profile>` | list of profiles | see [Profile](#profile) | | |
+| area type | `set ospf instance <name> area <area-id> area-type normal\|stub\|totally-stubby`; `delete … area-type` | `…/area/<area-id>/area-type` | `"Normal"`, `"Stub"`, `"TotallyStubby"`; `Normal` by default | not on `0.0.0.0` | stub: no type-5 LSA, E bit clear, a default route from the ABR; totally stubby: only that default; restarts the area's adjacencies | `show ospf database`, `show route <table>` |
+| stub default cost | `set … area <area-id> stub-default-cost <n>`; `delete … stub-default-cost` | `…/area/<area-id>/stub-default-cost` | 1 to 65535; 1 when unset | only on a stub or totally-stubby area | cost of the default type-3 LSA this router originates into the area as an ABR | `show route <table> 0.0.0.0` inside the area |
+| ranges | `set … area <area-id> range <cidr> [not-advertise]`; `delete … range <cidr>`; `delete … range <cidr> not-advertise` | `…/area/<area-id>/range/<cidr>` (`/` as `%2F`) | IPv4 prefix, `not_advertise` false by default | prefixes unique within the area | as an ABR, the area's prefixes inside the range are advertised to the other areas as one type-3 LSA (largest cost) with a local discard route, or not at all with `not-advertise` | `show ospf database` in another area, `show route <table>` on the ABR |
 
 ### Profile
 

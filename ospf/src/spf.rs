@@ -76,7 +76,8 @@ enum NextHop {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteEntry {
     pub prefix: Ipv4Net,
-    /// Every equal-cost first hop, sorted by address, deduped, never empty.
+    /// Every equal-cost first hop, sorted by address, deduped — empty only
+    /// for a `discard` route.
     pub next_hops: Vec<Ipv4Addr>,
     pub metric: u32,
     /// RFC 5286 loop-free alternate next hop (a first hop outside
@@ -87,6 +88,55 @@ pub struct RouteEntry {
     /// distance the metric was built from) — what the loop-free test is
     /// evaluated against, since the leaf metric cancels out of it.
     egress: Vertex,
+}
+
+impl RouteEntry {
+    /// An ABR's discard route for one of its active advertised area ranges
+    /// (RFC 2328 §3.5): no next hop, so `nos-ribd` installs a blackhole.
+    pub fn discard(prefix: Ipv4Net, metric: u32) -> Self {
+        RouteEntry {
+            prefix,
+            next_hops: Vec::new(),
+            metric,
+            backup_next_hop: None,
+            egress: Vertex::Router(Ipv4Addr::UNSPECIFIED),
+        }
+    }
+}
+
+/// `(prefix, metric)` pairs to originate as Type-3s.
+pub type Summaries = Vec<(Ipv4Net, u32)>;
+
+/// RFC 2328 §3.5/§12.4.3: applies one source area's address ranges to its
+/// intra-area routes. Returns what to summarize into the other areas — every
+/// route no range covers, plus one entry per `advertise` range with at least
+/// one covered route (metric = the *largest* covered cost, RFC 2328; RFC 1583
+/// used the smallest) — and those active advertised ranges on their own, for
+/// the ABR's discard routes. A route covered by two ranges counts towards the
+/// most specific one.
+pub fn apply_ranges(routes: &[RouteEntry], ranges: &[(Ipv4Net, bool)]) -> (Summaries, Summaries) {
+    let mut summarize = Vec::new();
+    let mut covered: HashMap<Ipv4Net, (bool, u32)> = HashMap::new();
+    for route in routes {
+        let range = ranges
+            .iter()
+            .filter(|(net, _)| net.contains(&route.prefix))
+            .max_by_key(|(net, _)| net.prefix_len());
+        match range {
+            None => summarize.push((route.prefix, route.metric)),
+            Some((net, advertise)) => {
+                let entry = covered.entry(net.trunc()).or_insert((*advertise, 0));
+                entry.1 = entry.1.max(route.metric);
+            }
+        }
+    }
+    let active: Vec<(Ipv4Net, u32)> = covered
+        .into_iter()
+        .filter(|(_, (advertise, _))| *advertise)
+        .map(|(net, (_, metric))| (net, metric))
+        .collect();
+    summarize.extend(active.iter().copied());
+    (summarize, active)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1680,5 +1730,38 @@ mod tests {
         let external = route_to(&routes, "198.51.100.0/24");
         assert_eq!(external.metric, 1 + 5 + EXTERNAL_METRIC_CONSTANT);
         assert_eq!(external.next_hops, both);
+    }
+
+    /// RFC 2328 §3.5: covered prefixes are suppressed, an advertised range
+    /// with a component is one summary at the *largest* component cost (not
+    /// RFC 1583's smallest), not-advertise hides them, and a range with no
+    /// component is not active.
+    #[test]
+    fn apply_ranges_aggregates_at_max_cost_and_hides_not_advertised() {
+        let route = |p: &str, metric| RouteEntry {
+            next_hops: vec![addr(10, 0, 0, 1)],
+            ..RouteEntry::discard(p.parse().unwrap(), metric)
+        };
+        let routes = [
+            route("10.1.1.0/24", 3),
+            route("10.1.2.0/24", 7),
+            route("10.2.1.0/24", 4),
+            route("192.168.1.0/24", 9),
+        ];
+        let net = |s: &str| s.parse::<Ipv4Net>().unwrap();
+        let ranges = [
+            (net("10.1.0.0/16"), true),
+            (net("10.2.0.0/16"), false),
+            (net("10.3.0.0/16"), true),
+        ];
+        let (mut summarize, active) = apply_ranges(&routes, &ranges);
+        summarize.sort();
+        assert_eq!(
+            summarize,
+            vec![(net("10.1.0.0/16"), 7), (net("192.168.1.0/24"), 9)]
+        );
+        assert_eq!(active, vec![(net("10.1.0.0/16"), 7)]);
+        // No ranges: every route is summarized on its own.
+        assert_eq!(apply_ranges(&routes, &[]).0.len(), 4);
     }
 }

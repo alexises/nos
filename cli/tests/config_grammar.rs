@@ -31,6 +31,9 @@ fn populated() -> Config {
     };
     let area = OspfArea {
         area_id: "0.0.0.0".parse().unwrap(),
+        area_type: nos_proto::OspfAreaType::Normal,
+        stub_default_cost: None,
+        ranges: Vec::new(),
         profiles: vec![OspfProfile {
             name: "p1".into(),
             ..Default::default()
@@ -209,6 +212,34 @@ fn every_corpus_line_makes_its_recorded_edit() {
 /// The writes a line typed at the root makes, as JSON, or `None` if it's rejected.
 fn writes(line: &str, doc: &Value) -> Option<Value> {
     config_grammar::parse(line, &[], doc).map(|e| serde_json::json!(e.writes))
+}
+
+/// #35: the stub/range fields of an OSPF area are reachable from the CLI.
+#[test]
+fn ospf_area_type_and_range() {
+    let doc = serde_json::to_value(populated()).unwrap();
+    let area = |line: &str| -> nos_proto::OspfArea {
+        let w = writes(line, &doc).unwrap_or_else(|| panic!("rejected: {line}"));
+        let mut applied = doc.clone();
+        for pair in w.as_array().unwrap() {
+            let path: Vec<String> = serde_json::from_value(pair[0].clone()).unwrap();
+            config_path::set(&mut applied, &path, pair[1].clone()).unwrap();
+        }
+        let cfg: Config = serde_json::from_value(applied).unwrap();
+        cfg.ospf_instances[0].areas[0].clone()
+    };
+    let at = "set ospf instance o1 area 0.0.0.0";
+    assert_eq!(
+        area(&format!("{at} area-type totally-stubby")).area_type,
+        nos_proto::OspfAreaType::TotallyStubby
+    );
+    assert_eq!(
+        area(&format!("{at} range 10.1.0.0/16 not-advertise")).ranges,
+        [nos_proto::OspfAreaRange {
+            cidr: "10.1.0.0/16".parse().unwrap(),
+            not_advertise: true
+        }]
+    );
 }
 
 /// #120: absolute forms that #109 made work; pinned so they stay.

@@ -1045,6 +1045,50 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Lower is preferred (RFC 8210 §10); defaults to 0. A cache is used only while every \
              more preferred one is unreachable.",
         ),
+        Topic::OspfAreaType => (
+            "Make an OSPF area a stub or totally-stubby area.",
+            concat!(
+                "Sets area-type to normal, stub or totally-stubby (RFC 2328 §3.6). A stub area \
+             carries no AS-external LSAs and its Hellos have the E-bit clear; an area border \
+             router sends a default summary route into it instead. A totally-stubby area gets \
+             only that default, no other summary. Every router on the area's links must agree, \
+             or they won't form adjacencies — changing it restarts the area's links. The \
+             backbone (0.0.0.0) can't be a stub.",
+                " ",
+                "Reset the area to normal.",
+            ),
+        ),
+        Topic::OspfAreaStubDefaultCost => (
+            "Set the cost of the default route an ABR sends into this stub area.",
+            concat!(
+                "Sets stub-default-cost (1-65535) — the metric of the 0.0.0.0/0 summary this \
+             router originates into the area when it is an area border router. Only allowed \
+             on a stub or totally-stubby area.",
+                " ",
+                "Clear it, back to 1.",
+            ),
+        ),
+        Topic::OspfAreaRange => (
+            "Summarize this area's prefixes into one range (RFC 2328 §3.5).",
+            concat!(
+                "Adds an address range to the area. As an area border router, every prefix of \
+             this area that falls inside the range is no longer summarized on its own into the \
+             other areas: the range itself is, as one summary whose metric is the largest \
+             covered cost, and a discard route for it is installed locally. With \
+             not-advertise, the covered prefixes are hidden from the other areas entirely.",
+                " ",
+                "Remove an address range.",
+            ),
+        ),
+        Topic::OspfAreaRangeAdvertise => (
+            "Hide every prefix an OSPF area range covers from the other areas.",
+            concat!(
+                "Sets not-advertise on a range: nothing it covers is summarized into the other \
+             areas, and no discard route is installed for it.",
+                " ",
+                "Advertise the range again, as one summary.",
+            ),
+        ),
         Topic::BgpClearPeer => (
             "Reset one BGP peer's session.",
             "Releases a peer held down by its maximum-prefix limit so it can reconnect. A peer \

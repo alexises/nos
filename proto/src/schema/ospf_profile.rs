@@ -315,6 +315,9 @@ mod tests {
     fn area(area_id: &str, profiles: Vec<OspfProfile>) -> OspfArea {
         OspfArea {
             area_id: area_id.parse().unwrap(),
+            area_type: crate::schema::OspfAreaType::Normal,
+            stub_default_cost: None,
+            ranges: Vec::new(),
             profiles,
         }
     }

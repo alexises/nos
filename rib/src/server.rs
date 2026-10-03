@@ -5,8 +5,8 @@ use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, Incoming, Listener};
 use nos_proto::{
-    BgpRouteUpdate, IpNet, IpcCodec, OspfRouteUpdate, PrefixRoutes, RibEvent, RibRequest, Role,
-    RouteEntry, RouteSourceKind,
+    BgpRouteUpdate, IpNet, IpcCodec, OspfRoute, OspfRouteUpdate, PrefixRoutes, RibEvent,
+    RibRequest, Role, RouteEntry, RouteSourceKind,
 };
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -245,34 +245,19 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
         match update {
             OspfRouteUpdate::Full(routes) => {
                 guard.set_ospf_metrics(routes.iter().map(|r| (r.prefix, r.metric)));
-                guard.replace_source(
-                    RouteSource::Ospf,
-                    routes.into_iter().map(|r| RibEntry {
-                        prefix: r.prefix,
-                        next_hops: r.next_hops,
-                        source: RouteSource::Ospf,
-                        backup: r.backup_next_hop,
-                        backup_interface_id: r.backup_interface_id,
-                    }),
-                );
+                guard.replace_source(RouteSource::Ospf, routes.into_iter().map(ospf_entry));
                 full_replace = true;
             }
             OspfRouteUpdate::Add(r) => {
                 guard.set_ospf_metric(r.prefix, Some(r.metric));
-                let entry = RibEntry {
-                    prefix: r.prefix,
-                    next_hops: r.next_hops,
-                    source: RouteSource::Ospf,
-                    backup: r.backup_next_hop,
-                    backup_interface_id: r.backup_interface_id,
-                };
-                match guard.upsert_and_diff(entry) {
+                let prefix = r.prefix;
+                match guard.upsert_and_diff(ospf_entry(r)) {
                     BestPathChange::Unchanged => {}
                     BestPathChange::Installed(e) => {
-                        deltas.insert(r.prefix, Some(e));
+                        deltas.insert(prefix, Some(e));
                     }
                     BestPathChange::Removed => {
-                        deltas.insert(r.prefix, None);
+                        deltas.insert(prefix, None);
                     }
                 }
             }
@@ -309,6 +294,18 @@ async fn apply_ospf_route_update(ctx: &Context, updates: Vec<OspfRouteUpdate>) {
     }
 }
 
+/// A pushed OSPF route as a `Rib` candidate: a discard route is one with no
+/// next hop (and so no backup) — see `RibEntry::is_discard`.
+fn ospf_entry(r: OspfRoute) -> RibEntry {
+    RibEntry {
+        prefix: r.prefix,
+        next_hops: if r.discard { Vec::new() } else { r.next_hops },
+        source: RouteSource::Ospf,
+        backup: r.backup_next_hop.filter(|_| !r.discard),
+        backup_interface_id: r.backup_interface_id,
+    }
+}
+
 fn to_prefix_routes(prefix: nos_proto::IpNet, candidates: &[RibEntry]) -> PrefixRoutes {
     PrefixRoutes {
         prefix,
@@ -318,6 +315,7 @@ fn to_prefix_routes(prefix: nos_proto::IpNet, candidates: &[RibEntry]) -> Prefix
                 gateways: e.next_hops.iter().map(|(gw, _)| *gw).collect(),
                 source: to_source_kind(e.source),
                 backup: e.backup,
+                discard: e.is_discard(),
             })
             .collect(),
     }
@@ -335,6 +333,27 @@ fn to_source_kind(source: RouteSource) -> RouteSourceKind {
 #[cfg(test)]
 mod authz_tests {
     use super::*;
+
+    #[test]
+    fn a_discard_ospf_route_has_no_next_hop() {
+        let route = OspfRoute {
+            prefix: "10.9.0.0/16".parse().unwrap(),
+            next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
+            backup_next_hop: Some("10.0.0.2".parse().unwrap()),
+            backup_interface_id: None,
+            metric: 3,
+            discard: true,
+        };
+        let entry = ospf_entry(route.clone());
+        assert!(entry.is_discard());
+        assert_eq!(entry.backup, None);
+        assert!(to_prefix_routes(entry.prefix, &[entry]).candidates[0].discard);
+        assert!(!ospf_entry(OspfRoute {
+            discard: false,
+            ..route
+        })
+        .is_discard());
+    }
 
     #[test]
     fn only_the_owning_daemon_family_may_push_routes() {

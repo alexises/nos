@@ -29,9 +29,19 @@ use crate::lsdb::Lsdb;
 use crate::neighbor::{Event, NeighborState};
 use crate::packet::{DbdPacket, LsAckPacket, LsrPacket, LsuPacket, OPTION_E, OPTION_O};
 
-/// Options this router sends in every DBD: RFC 2328's E-bit (as in its
-/// Hellos) and RFC 5250's O-bit.
+/// Options this router sends in every DBD of a normal area: RFC 2328's
+/// E-bit (as in its Hellos) and RFC 5250's O-bit.
 pub const DBD_OPTIONS: u8 = OPTION_E | OPTION_O;
+
+/// The DBD options for a link: `DBD_OPTIONS`, without the E-bit in a stub
+/// area (RFC 2328 §3.6).
+pub fn dbd_options(stub: bool) -> u8 {
+    if stub {
+        OPTION_O
+    } else {
+        DBD_OPTIONS
+    }
+}
 
 /// A conservative per-DBD-packet LSA-header budget: 1500-byte Ethernet MTU
 /// − 20 (IP) − 24 (OSPF common header) − 8 (`DBD_BODY_FIXED_LEN`) ≈ 1448
@@ -89,6 +99,10 @@ pub struct AdjacencyData {
     /// RFC 5250 §3: the neighbor's DBD set the O-bit, so it may be sent
     /// opaque LSAs (types 9-11). Learnt in `ExStart`.
     pub opaque_capable: bool,
+    /// The link is in a stub area (RFC 2328 §3.6): DBDs go without the
+    /// E-bit, and AS-scope LSAs (Type-5/11) are never summarized, accepted
+    /// or requested.
+    pub stub: bool,
 }
 
 /// Pops up to `max` headers off the front of `remaining` for the next DBD
@@ -145,6 +159,14 @@ pub fn on_dbd_received(
     max_headers: usize,
     mtu: u16,
 ) -> Vec<Action> {
+    // RFC 2328 §10.6: an AS-external LSA listed on a stub area's link means
+    // the two databases can't agree — restart the exchange.
+    if adj.stub
+        && matches!(state, NeighborState::ExStart | NeighborState::Exchange)
+        && dbd.lsa_headers.iter().any(|h| lsa::is_as_scope(h.lsa_type))
+    {
+        return vec![Action::NeighborEvent(Event::SeqNumberMismatch)];
+    }
     match state {
         NeighborState::ExStart => on_dbd_in_exstart(
             adj,
@@ -332,6 +354,7 @@ fn seed_summary(adj: &mut AdjacencyData, dbd: &DbdPacket, local_lsdb_headers: &[
     adj.summary_remaining = local_lsdb_headers
         .iter()
         .filter(|h| adj.opaque_capable || !lsa::is_opaque(h.lsa_type))
+        .filter(|h| !(adj.stub && lsa::is_as_scope(h.lsa_type)))
         .copied()
         .collect();
 }
@@ -360,7 +383,7 @@ fn slave_process_poll(
         router_id: local_router_id,
         area_id: dbd.area_id,
         interface_mtu: mtu,
-        options: DBD_OPTIONS,
+        options: dbd_options(adj.stub),
         init: false,
         more,
         master: false,
@@ -406,7 +429,7 @@ fn master_process_reply(
         router_id: local_router_id,
         area_id: dbd.area_id,
         interface_mtu: mtu,
-        options: DBD_OPTIONS,
+        options: dbd_options(adj.stub),
         init: false,
         more,
         master: true,
@@ -542,6 +565,11 @@ pub fn on_lsu_received(
     let acked = &mut adj.pending_acks;
     let mut newly_installed = Vec::new();
     for l in &lsu.lsas {
+        // RFC 2328 §13 step 3: an AS-external (or AS-scope opaque) LSA on a
+        // stub area's link is discarded — neither installed nor acked.
+        if adj.stub && lsa::is_as_scope(l.header.lsa_type) {
+            continue;
+        }
         let key = l.header.key();
         // RFC 5250 §3: a type-9 LSA lives in the store of the link it arrived
         // on, so no other link's resend floods it.
@@ -1819,6 +1847,52 @@ mod tests {
             assert_eq!(adj.opaque_capable, options & OPTION_O != 0);
             assert_eq!(adj.summary_remaining.len(), expected);
         }
+    }
+
+    /// RFC 2328 §3.6: on a stub area's link, AS-scope LSAs are never
+    /// summarized, a DBD listing one restarts the exchange, an LSU carrying
+    /// one is dropped unacked, and our DBDs go without the E-bit.
+    #[test]
+    fn stub_link_keeps_as_scope_lsas_out() {
+        let as_scope = opaque(lsa::LSA_TYPE_OPAQUE_AS);
+        let local = [header("1.1.1.1", 1), as_scope.header];
+        let mut adj = AdjacencyData {
+            stub: true,
+            ..Default::default()
+        };
+        seed_summary(&mut adj, &negotiation_dbd(router_id("9.9.9.10"), 1), &local);
+        assert_eq!(adj.summary_remaining.len(), 1);
+        assert_eq!(dbd_options(true) & OPTION_E, 0);
+        assert_eq!(dbd_options(false), DBD_OPTIONS);
+
+        let listing = DbdPacket {
+            lsa_headers: vec![as_scope.header],
+            ..negotiation_dbd(router_id("9.9.9.10"), 1)
+        };
+        let actions = on_dbd_received(
+            &mut adj,
+            NeighborState::Exchange,
+            router_id("9.9.9.9"),
+            router_id("9.9.9.10"),
+            &listing,
+            &[],
+            100,
+            1500,
+        );
+        assert_eq!(
+            actions,
+            vec![Action::NeighborEvent(Event::SeqNumberMismatch)]
+        );
+
+        let (mut area, mut link) = (Lsdb::default(), Lsdb::default());
+        let lsu = LsuPacket {
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsas: vec![as_scope.clone()],
+        };
+        on_lsu_received(&mut adj, &mut area, &mut link, &lsu, Instant::now());
+        assert!(area.get(&as_scope.header.key()).is_none());
+        assert!(adj.pending_acks.is_empty());
     }
 
     #[test]

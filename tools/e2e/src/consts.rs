@@ -236,6 +236,11 @@ pub const OSPF_BROADCAST_SUBNET: &str = "203.0.113.64/28";
 pub const OSPF_AREA_1: &str = "0.0.0.1";
 pub const OSPF_PROFILE_AREA1: &str = "ospf-profile-area1";
 pub const OSPF_ABR_LOOPBACK_ADDRESS: &str = "203.0.113.96/32";
+/// `ospf-stub`: router-b's (the ABR's) area-0 loopback, and the area range
+/// over it. Not the range's own network address, so its Type-3 keeps a
+/// different link-state id from the range's and is flushed, not rewritten.
+pub const OSPF_STUB_LOOPBACK_ADDRESS: &str = "203.0.113.121/32";
+pub const OSPF_STUB_RANGE: &str = "203.0.113.120/29";
 /// `ospf-graceful-restart`: router-a's loopback, which router-b must keep a
 /// route to through router-a's `nos-ospfd` restart. A prefix no earlier phase
 /// installs.

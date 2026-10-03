@@ -8,7 +8,9 @@ use async_trait::async_trait;
 use futures::{stream, StreamExt as _, TryStreamExt as _};
 use nos_proto::IpNet;
 use rtnetlink::packet_route::link::LinkMessage;
-use rtnetlink::packet_route::route::{RouteAddress, RouteAttribute, RouteMessage};
+use rtnetlink::packet_route::route::{
+    RouteAddress, RouteAttribute, RouteMessage, RouteProtocol, RouteType,
+};
 use rtnetlink::packet_route::AddressFamily;
 use rtnetlink::{Handle, LinkUnspec, LinkVrf, RouteMessageBuilder, RouteNextHopBuilder};
 use tracing::{debug, info, trace, warn};
@@ -61,7 +63,7 @@ fn slots(prefix: IpNet, entry: &RibEntry) -> Vec<(Slot, Hops)> {
 
 /// One slot's next hops, each a gateway plus (when known) the local kernel
 /// interface it's reachable over — see `RibEntry::next_hops`. Two or more
-/// are one `RTA_MULTIPATH` route.
+/// are one `RTA_MULTIPATH` route; none is a discard (`RTN_BLACKHOLE`) route.
 type Hops = Vec<(IpAddr, Option<u32>)>;
 
 /// The sorted gateways of `hops` — what a slot is compared by, since a
@@ -237,7 +239,8 @@ impl LinuxRibDriver {
         self.route_channel.add(route).await.inspect_err(|e| {
             warn!(%prefix, %gateway, table_id, backup, error = %e, "failed to add route");
         })?;
-        info!(%prefix, %gateway, next_hops = hops.len(), table_id, source = ?source, backup, "added route");
+        let discard = hops.is_empty();
+        info!(%prefix, %gateway, next_hops = hops.len(), table_id, source = ?source, backup, discard, "added route");
         Ok(())
     }
 
@@ -265,7 +268,8 @@ impl LinuxRibDriver {
         self.route_channel.del(route).await.inspect_err(|e| {
             warn!(%prefix, %gateway, table_id, backup, error = %e, "failed to remove route");
         })?;
-        info!(%prefix, %gateway, table_id, backup, "removed route");
+        let discard = hops.is_empty();
+        info!(%prefix, %gateway, table_id, backup, discard, "removed route");
         Ok(())
     }
 
@@ -401,13 +405,14 @@ impl LinuxRibDriver {
         let remove_failed = drain(to_remove.into_iter().map(|((prefix, backup), gateways)| {
             let message = observed_by_slot.get(&(prefix, backup)).cloned();
             let gateway = show_gateways(&gateways);
+            let discard = gateways.is_empty();
             async move {
                 if let Some(message) = message {
                     self.route_channel.del(message).await.map_err(|e| {
                         warn!(%prefix, %gateway, table_id, error = %e, "failed to remove route");
                         ((prefix, backup), gateways, e)
                     })?;
-                    info!(%prefix, %gateway, table_id, backup, "removed route");
+                    info!(%prefix, %gateway, table_id, backup, discard, "removed route");
                 }
                 Ok(())
             }
@@ -503,7 +508,11 @@ impl RibDriver for LinuxRibDriver {
 /// would make a multipath route look unmanaged, re-added (EEXIST) on every
 /// `apply` and never deleted. A missing `Destination` attribute means the
 /// default route (kernel omits it for 0/0), so it falls back to the family's
-/// unspecified address.
+/// unspecified address. A blackhole is a managed discard slot (empty
+/// gateways) only with `RTPROT_STATIC`, the protocol
+/// `build_route` gives every route: an operator's `ip route add blackhole`
+/// (`RTPROT_BOOT`) or a VRF recipe's `unreachable default metric …` is left
+/// alone.
 // ponytail: older kernels dump IPv6 ECMP siblings as separate routes, not
 // one `RTA_MULTIPATH`; nothing pushes IPv6 ECMP yet (ospfv3 is single-path),
 // merge siblings per slot here once it does.
@@ -523,7 +532,9 @@ fn extract_route(route: &RouteMessage) -> Option<(Slot, Vec<IpAddr>)> {
             attr => gateway_of(attr).into_iter().collect::<Vec<_>>(),
         })
         .collect();
-    if gateways.is_empty() {
+    let discard =
+        route.header.kind == RouteType::BlackHole && route.header.protocol == RouteProtocol::Static;
+    if gateways.is_empty() && !discard {
         return None;
     }
     gateways.sort_unstable();
@@ -553,20 +564,22 @@ fn extract_route(route: &RouteMessage) -> Option<(Slot, Vec<IpAddr>)> {
         .map(|prefix| ((prefix, backup), gateways))
 }
 
-/// Builds the `RouteMessage` for one kernel route, `None` on no hops or a
-/// prefix/gateway address-family mismatch. One hop is `RTA_GATEWAY` (+
-/// `RTA_OIF`), two or more are `RTA_MULTIPATH`. `backup` sets the family's
-/// backup metric.
+/// Builds the `RouteMessage` for one kernel route, `None` on a
+/// prefix/gateway address-family mismatch (or a backup with no hop). No hop
+/// is a discard (`RTN_BLACKHOLE`) route, one is `RTA_GATEWAY` (+ `RTA_OIF`),
+/// two or more are `RTA_MULTIPATH`. `backup` sets the family's backup metric.
 fn build_route(prefix: IpNet, hops: &Hops, table_id: u32, backup: bool) -> Option<RouteMessage> {
     let v4 = prefix.addr().is_ipv4();
-    if hops.is_empty() || hops.iter().any(|(gw, _)| gw.is_ipv4() != v4) {
+    if (backup && hops.is_empty()) || hops.iter().any(|(gw, _)| gw.is_ipv4() != v4) {
         return None;
     }
     let mut builder = RouteMessageBuilder::<IpAddr>::new()
         .destination_prefix(prefix.addr(), prefix.prefix_len())
         .ok()?
         .table_id(table_id);
-    if let [(gateway, interface_id)] = hops.as_slice() {
+    if hops.is_empty() {
+        builder = builder.kind(RouteType::BlackHole);
+    } else if let [(gateway, interface_id)] = hops.as_slice() {
         builder = builder.gateway(*gateway).ok()?;
         if let Some(interface_id) = interface_id {
             builder = builder.output_interface(*interface_id);
@@ -770,7 +783,34 @@ mod tests {
             Some(((p, true), vec![addr("10.0.0.1")]))
         );
         assert!(build_route(p, &vec![(addr("2001:db8::1"), None)], 100, false).is_none());
-        assert!(build_route(p, &vec![], 100, false).is_none());
+        assert!(build_route(p, &vec![], 100, true).is_none());
+    }
+
+    #[test]
+    fn discard_route_round_trips_as_a_managed_blackhole() {
+        let p = net("10.9.0.0/16");
+        let route = build_route(p, &vec![], 100, false).unwrap();
+        assert_eq!(route.header.kind, RouteType::BlackHole);
+        assert!(!route
+            .attributes
+            .iter()
+            .any(|a| matches!(a, RouteAttribute::Gateway(_) | RouteAttribute::Oif(_))));
+        assert_eq!(extract_route(&route), Some(((p, false), vec![])));
+        // An operator's own blackhole (iproute2's default `proto boot`) is
+        // not ours, so never deleted.
+        let mut foreign = route;
+        foreign.header.protocol = RouteProtocol::Boot;
+        assert_eq!(extract_route(&foreign), None);
+    }
+
+    #[test]
+    fn discard_slot_differs_from_a_gateway_route() {
+        let p = net("10.9.0.0/16");
+        let observed = HashMap::from([((p, false), vec![addr("10.0.0.1")])]);
+        let desired = HashMap::from([((p, false), Vec::<IpAddr>::new())]);
+        let (add, remove) = diff_routes(&observed, &desired);
+        assert_eq!(add, vec![((p, false), vec![])]);
+        assert_eq!(remove, vec![((p, false), vec![addr("10.0.0.1")])]);
     }
 
     #[test]

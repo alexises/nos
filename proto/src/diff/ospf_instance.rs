@@ -176,6 +176,9 @@ mod tests {
         let mut candidate = base.clone();
         candidate[0].areas.push(OspfArea {
             area_id: "0.0.0.0".parse().unwrap(),
+            area_type: crate::schema::OspfAreaType::Normal,
+            stub_default_cost: None,
+            ranges: Vec::new(),
             profiles: Vec::new(),
         });
 
