@@ -194,7 +194,7 @@ mod tests {
     fn old_area_without_new_fields_loads() {
         let a: OspfArea = serde_json::from_str(r#"{"area_id":"0.0.0.1","profiles":[]}"#).unwrap();
         assert_eq!(a.area_type, OspfAreaType::Normal);
-        assert!(a.ranges.is_empty());
+        assert_eq!(a.ranges, vec![]);
         let r: OspfAreaRange = serde_json::from_str(r#"{"cidr":"10.0.0.0/8"}"#).unwrap();
         assert!(!r.not_advertise);
     }

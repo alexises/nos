@@ -330,7 +330,7 @@ mod tests {
             cidr,
         };
         remove.apply(&mut cfg).unwrap();
-        assert!(cfg.ospf_instances[0].areas[0].ranges.is_empty());
+        assert_eq!(cfg.ospf_instances[0].areas[0].ranges, vec![]);
         assert!(matches!(
             remove.apply(&mut cfg),
             Err(OpError::OspfAreaRangeNotFound { .. })
