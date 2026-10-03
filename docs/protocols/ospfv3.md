@@ -182,6 +182,7 @@ Neighbour discovery, DR/BDR election, timers, costs, network types, the MTU over
 - **Loop-free alternates.** The backup next hop is a link-local address too, and may leave through a different interface from the primary; it is installed with its own interface, at a worse metric than the primary.
 - **Authentication** is RFC 7166's authentication trailer, with HMAC-SHA-1, -256, -384 or -512 only. A packet that fails is dropped and logged (`ospfv3 packet authentication failed`).
 - **Link-local flooding scope.** A link LSA is only ever sent on the link it belongs to (RFC 5340 §4.5.1).
+- **Withdrawal.** An LSA the router stops originating is flushed within about 2 seconds (log `ospfv3 lsa prematurely aged`): for example its network LSA after it stops being DR or loses its last Full neighbour on the link, or its LSAs in an area it has left. Unlike OSPFv2, a clean stop of `nos-ospfv3d` flushes nothing; neighbours drop the router when the dead interval runs out.
 
 ## Not supported yet
 
