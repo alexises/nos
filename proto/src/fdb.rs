@@ -52,9 +52,10 @@ pub const AD_TAG_ES: u32 = 0xFFFF_FFFF;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvpnRoute {
     pub key: EvpnKey,
-    /// The VXLAN VNI. Always set on a Type-2; on a *received* Type-3 it is 0
-    /// (the VNI rides in the PMSI Tunnel attribute, which `nos-bgpd` does not
-    /// decode yet — receivers match the domain by Route Target instead).
+    /// The VXLAN VNI. Always set on a Type-2; on a received Type-3 it is the
+    /// PMSI Tunnel attribute's label (RFC 6514 §5, ingress replication), or 0
+    /// when the route carried no PMSI — `nos-fdbd` then matches the domain by
+    /// Route Target alone.
     pub vni: u32,
     /// The remote VTEP (BGP next-hop).
     pub next_hop: IpAddr,
