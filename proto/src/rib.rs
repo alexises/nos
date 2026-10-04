@@ -15,6 +15,20 @@ pub enum RouteSourceKind {
     /// A directly-connected prefix, derived by `nos-ribd` from the
     /// addresses `nos-interfaced` applied in this table.
     Connected,
+    /// An EVPN Type-5 (RFC 9136) route received over the table's L3 VNI.
+    Evpn,
+}
+
+/// What an `Evpn`-sourced candidate is reached through: the remote VTEP (its
+/// one gateway), the remote PE's Router's MAC and the L3 VNI.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvpnRouteInfo {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    pub vtep: IpAddr,
+    /// `aa:bb:cc:dd:ee:ff`.
+    pub router_mac: String,
+    pub vni: u32,
 }
 
 /// One candidate route for a prefix.
@@ -34,6 +48,9 @@ pub struct RouteEntry {
     /// for one of its advertised area ranges (RFC 2328 §3.5).
     #[serde(default)]
     pub discard: bool,
+    /// Set on an `Evpn` candidate.
+    #[serde(default)]
+    pub evpn: Option<EvpnRouteInfo>,
 }
 
 /// One prefix's full candidate list, ordered best (winner) to worst by
@@ -171,6 +188,11 @@ pub enum RibRequest {
     /// path's `NEXT_HOP` against this for decision step (d); `Bgp`-sourced
     /// routes are excluded so a next hop never resolves recursively.
     IgpCosts,
+    /// Fire-and-forget, no reply, `nos-bgpd` only: every EVPN Type-5 route
+    /// the underlay instance named by this table's `evpn.bgp_instance`
+    /// received (`Full` on connect, then `Add`/`Remove`). Route-Target and
+    /// VNI filtering is `nos-ribd`'s.
+    PushEvpnRoutes(crate::fdb::EvpnUpdate),
 }
 
 /// Messages sent from a `nos-ribd` instance to a client.

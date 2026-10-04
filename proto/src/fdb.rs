@@ -43,6 +43,11 @@ pub enum EvpnKey {
         tag: u32,
         origin: IpAddr,
     },
+    /// Type-5 IP Prefix (RFC 9136) of an IP-VRF: its L3 VNI is
+    /// `EvpnRoute::vni`, its Router's MAC an extended community; ESI, Ethernet
+    /// tag and gateway IP are zero on every route nos originates or accepts.
+    /// Appended (postcard indexes by position).
+    IpPrefix { rd: [u8; 8], prefix: ipnet::IpNet },
 }
 
 /// The Ethernet Tag ID of a per-ES Ethernet A-D route (RFC 7432 §8.2.1,

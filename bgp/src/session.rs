@@ -280,6 +280,7 @@ impl SessionManager {
         desired: Vec<ResolvedPeer>,
         redistribute_policy: Arc<nos_rpl::CompiledPolicy>,
         fdb_domains: Vec<String>,
+        evpn_tables: Vec<String>,
         rpki_caches: &[RpkiCache],
     ) {
         // `send_replace`, not `send`: `send` leaves the value unchanged when
@@ -296,6 +297,7 @@ impl SessionManager {
             bgp_rib.set_routing_table(routing_table);
             bgp_rib.set_redistribute_policy(redistribute_policy);
             bgp_rib.set_fdb_domains(fdb_domains);
+            bgp_rib.set_evpn_tables(evpn_tables);
         }
         if *self.vrf.borrow() != vrf {
             self.vrf.send_replace(vrf.clone());
@@ -396,16 +398,34 @@ impl SessionManager {
         self.bgp_rib.lock().await.apply_evpn_local(domain, update);
     }
 
-    /// The broadcast domains fed by `fdb_push_client`, and every received
-    /// EVPN route to feed them.
-    pub async fn fdb_push_snapshot(
+    /// One `nos-ribd`'s IP-VRF Type-5 routes (`BgpRequest::RedistributeEvpnPrefixes`).
+    pub async fn apply_evpn_prefixes(&self, table: &str, update: nos_proto::EvpnUpdate) {
+        self.bgp_rib
+            .lock()
+            .await
+            .apply_evpn_source(crate::rib::EvpnSource::Table(table.to_string()), update);
+    }
+
+    /// The consumers `fdb_push_client` feeds and what to feed them: every
+    /// received Type-5 route to the IP-VRF routing tables (`to_tables`), every
+    /// other received EVPN route to the broadcast domains — so `nos-fdbd`
+    /// never sees a Type-5 and `nos-ribd` only Type-5s.
+    pub async fn evpn_feed_snapshot(
         &self,
+        to_tables: bool,
     ) -> (
         Vec<String>,
         HashMap<nos_proto::EvpnKey, nos_proto::EvpnRoute>,
     ) {
         let rib = self.bgp_rib.lock().await;
-        (rib.fdb_domains().to_vec(), rib.evpn_push_snapshot())
+        let targets = if to_tables {
+            rib.evpn_tables()
+        } else {
+            rib.fdb_domains()
+        };
+        let mut routes = rib.evpn_push_snapshot();
+        routes.retain(|k, _| matches!(k, nos_proto::EvpnKey::IpPrefix { .. }) == to_tables);
+        (targets.to_vec(), routes)
     }
 
     /// Decays flap-damping penalties and re-decides any released prefixes.

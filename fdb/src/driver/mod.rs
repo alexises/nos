@@ -17,12 +17,8 @@ pub type Mac = [u8; 6];
 /// UDP port every VXLAN device here uses (RFC 7348's IANA port).
 pub const VXLAN_PORT: u16 = 4789;
 
-/// The kernel VXLAN device for `vni`: a VNI is unique per netns, so the name
-/// needs no registry (`vx16777215` is 10 chars, under `IFNAMSIZ`).
-#[must_use]
-pub fn vxlan_name(vni: u32) -> String {
-    format!("vx{vni}")
-}
+/// Shared with `nos-ribd`'s L3 VNI devices: one VXLAN device name per VNI.
+pub use nos_proto::evpn_id::vxlan_name;
 
 /// Errors from applying state to a real (or simulated) backend — never fatal
 /// to the daemon: every call site logs and the next tick retries.

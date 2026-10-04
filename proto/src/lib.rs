@@ -65,8 +65,8 @@ pub use paths::{
     DEFAULT_WATCHDOG_SOCKET,
 };
 pub use rib::{
-    BgpRoute, BgpRouteUpdate, OspfRoute, OspfRouteUpdate, PrefixRoutes, RibEvent, RibRequest,
-    RouteEntry, RouteSourceKind,
+    BgpRoute, BgpRouteUpdate, EvpnRouteInfo, OspfRoute, OspfRouteUpdate, PrefixRoutes, RibEvent,
+    RibRequest, RouteEntry, RouteSourceKind,
 };
 pub use schema::{
     loopback_table_name, AddressFamily, AsPathList, BgpAoAlgorithm, BgpAoKey, BgpAuth,
@@ -76,8 +76,8 @@ pub use schema::{
     LldpSettings, NetworkType, NextHopMode, OspfArea, OspfAreaRange, OspfAreaType, OspfAuth,
     OspfCryptoAlgorithm, OspfCryptoKey, OspfInstance, OspfProfile, Ospfv3Area, Ospfv3Instance,
     Ospfv3Profile, PolicyDefinition, PortAggregate, PortAggregateMode, PrefixList, PrefixListEntry,
-    Redistribute, RedistributeSource, RedistributeTarget, RestApi, RoutingTable, RpkiCache,
-    SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface, SwitchingProfile,
+    Redistribute, RedistributeSource, RedistributeTarget, RestApi, RoutingTable, RoutingTableEvpn,
+    RpkiCache, SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface, SwitchingProfile,
     SwitchingProfileMember, User, VlanTag, CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT,
     HELLO_INTERVAL_DEFAULT, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX,
     PASSWORD_HASH_PREFIX, PRIORITY_DEFAULT, REST_API_PORT_DEFAULT, RPKI_RTR_PORT_DEFAULT,

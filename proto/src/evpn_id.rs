@@ -187,9 +187,54 @@ pub fn parse_mac_mobility(c: u64) -> Option<(u32, bool)> {
         .then(|| (u32::from_be_bytes([b[4], b[5], b[6], b[7]]), b[2] & 1 == 1))
 }
 
+/// The Router's MAC extended community (RFC 9135 §8.1, type 0x06 subtype
+/// 0x03): the MAC an IP-VRF's Type-5 routes are to be bridged to on the far
+/// side of the L3 VNI.
+#[must_use]
+pub fn router_mac_ext(mac: [u8; 6]) -> u64 {
+    let mut b = [0x06, 0x03, 0, 0, 0, 0, 0, 0];
+    b[2..].copy_from_slice(&mac);
+    u64::from_be_bytes(b)
+}
+
+/// The MAC a Router's MAC extended community carries.
+#[must_use]
+pub fn parse_router_mac(c: u64) -> Option<[u8; 6]> {
+    let b = c.to_be_bytes();
+    (b[0] == 0x06 && b[1] == 0x03).then(|| [b[2], b[3], b[4], b[5], b[6], b[7]])
+}
+
+/// `aa:bb:cc:dd:ee:ff`.
+#[must_use]
+pub fn format_mac(mac: &[u8; 6]) -> String {
+    mac.iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// The kernel VXLAN device for `vni` — an L2 domain's (`nos-fdbd`) or an
+/// IP-VRF's L3 VNI (`nos-ribd`) alike: a VNI is unique per netns, so the name
+/// needs no registry (`vx16777215` is 10 chars, under `IFNAMSIZ`).
+#[must_use]
+pub fn vxlan_name(vni: u32) -> String {
+    format!("vx{vni}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn router_mac_round_trips_with_the_rfc_9135_layout() {
+        let mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+        assert_eq!(router_mac_ext(mac), 0x0603_0211_2233_4455);
+        assert_eq!(parse_router_mac(router_mac_ext(mac)), Some(mac));
+        assert_eq!(parse_router_mac(ENCAP_VXLAN), None);
+        assert_eq!(parse_router_mac(esi_label_ext(true)), None);
+        assert_eq!(format_mac(&mac), "02:11:22:33:44:55");
+        assert_eq!(vxlan_name(5000), "vx5000");
+    }
 
     #[test]
     fn default_gateway_is_distinct_from_encap_vxlan() {

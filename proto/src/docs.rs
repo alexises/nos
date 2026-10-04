@@ -113,6 +113,18 @@ topics! {
     RoutingTableRedistribute,
     /// `RoutingTable.rest_api`
     RoutingTableRestApi,
+    /// `RoutingTable.evpn`
+    RoutingTableEvpn,
+    /// `RoutingTableEvpn.l3_vni`
+    RoutingTableEvpnL3Vni,
+    /// `RoutingTableEvpn.rd`
+    RoutingTableEvpnRd,
+    /// `RoutingTableEvpn.route_targets_import`/`route_targets_export`
+    RoutingTableEvpnRouteTarget,
+    /// `RoutingTableEvpn.vtep_source`
+    RoutingTableEvpnVtepSource,
+    /// `RoutingTableEvpn.bgp_instance`
+    RoutingTableEvpnBgpInstance,
     /// `Config.static_routing_instances`
     StaticRoutingInstance,
     /// `StaticRoutingInstance.routes`

@@ -1762,7 +1762,75 @@ pub async fn evpn(w: &mut World) -> anyhow::Result<()> {
         bail!("expected only the Type-3 route after the withdrawal: {body}");
     }
 
-    log("removing the speaker: its remaining route must go with the session");
+    // RFC 9136 Type-5 + RFC 9135 Router's MAC from an independent
+    // implementation: router-a's IP-VRF imports GoBGP's Route Target, and its
+    // nos-ribd installs the prefix through its L3 VNI (control plane and the
+    // kernel route only; `evpn-l3` forwards).
+    log("type-5 interop: GoBGP's IP prefix route lands in router-a's IP-VRF");
+    let mut flags = evpn_flags();
+    flags.extend(strings(&[
+        "--l3vni-table",
+        L3_TABLE,
+        "--l3vni",
+        &L3_VNI.to_string(),
+        "--l3vni-rd",
+        L3_RD_A,
+        "--l3vni-rt",
+        L3_GOBGP_RT,
+        "--l3vni-vtep-source-interface",
+        "eth0",
+    ]));
+    a.provision_flags(&flags).await?;
+    a.wait(&format!(
+        "created l3 vni vxlan device vxlan=vx{L3_VNI} vni={L3_VNI} vtep={IP_A}"
+    ))
+    .await?;
+    gobgp(
+        w,
+        &[
+            "global",
+            "rib",
+            "add",
+            "-a",
+            "evpn",
+            "prefix",
+            L3_GOBGP_PREFIX,
+            // GoBGP needs it spelled out; zero is RFC 9136's "no overlay index".
+            "gw",
+            "0.0.0.0",
+            "etag",
+            "0",
+            "label",
+            &L3_VNI.to_string(),
+            "rd",
+            "65010:5",
+            "rt",
+            L3_GOBGP_RT,
+            "encap",
+            "vxlan",
+            "router-mac",
+            L3_GOBGP_RMAC,
+        ],
+    )
+    .await?;
+    a.wait(&learned(5)).await?;
+    a.wait(&format!(
+        "evpn remote vtep installed vni={L3_VNI} vtep={IP_G} rmac={L3_GOBGP_RMAC}"
+    ))
+    .await?;
+    a.wait(&format!(
+        "added route prefix={L3_GOBGP_PREFIX} gateway={IP_G} next_hops=1 .*source=Some(Evpn)"
+    ))
+    .await?;
+    let body = show().await?;
+    if !body.contains(&format!("rmac:{L3_GOBGP_RMAC}")) {
+        bail!("show bgp evpn does not decode GoBGP's Router's MAC: {body}");
+    }
+    if !tenant_has_evpn(a, L3_GOBGP_PREFIX).await? {
+        bail!("router-a's {L3_TABLE} does not list {L3_GOBGP_PREFIX} as an evpn route");
+    }
+
+    log("removing the speaker: its remaining routes must go with the session");
     let base = a.count(&withdrawn(3));
     w.dock.container_remove("router-g").await;
     a.wait_new(&withdrawn(3), base, 60).await?;
@@ -3398,6 +3466,207 @@ pub async fn evpn_single_active(w: &mut World) -> anyhow::Result<()> {
     ping_until(w, CE_HOST, H_IP, 30).await?;
 
     dataplane_teardown(w).await
+}
+
+/// `evpn-l3`: one PE's flags — the underlay session to the other PE with
+/// `address-family l2vpn-evpn` in `rt1`, and its IP-VRF `L3_TABLE` with the
+/// L3 VNI (VTEP on eth0) and its host's subnet on eth1.
+fn l3_pe_flags(id: Id, rd: &str, gw: &str) -> Vec<String> {
+    let mut f = id.base_flags();
+    f.extend(strings(&["--peer-group", "pg-evpn", "--evpn"]));
+    f.extend(strings(&[
+        "--l3vni-table",
+        L3_TABLE,
+        "--l3vni",
+        &L3_VNI.to_string(),
+        "--l3vni-rd",
+        rd,
+        "--l3vni-rt",
+        L3_RT,
+        "--l3vni-vtep-source-interface",
+        "eth0",
+        "--l3vni-interface",
+        "eth1",
+        "--l3vni-address",
+        &format!("{gw}/24"),
+    ]));
+    f
+}
+
+/// Whether `r`'s `L3_TABLE` lists `prefix` as an `Evpn` route, over REST.
+async fn tenant_has_evpn(r: &Router, prefix: &str) -> anyhow::Result<bool> {
+    let body = r
+        .rest_expect(Method::GET, &format!("/v1/routes/{L3_TABLE}"), None, 200)
+        .await?;
+    let table: serde_json::Value = serde_json::from_str(&body)?;
+    Ok(table.as_array().into_iter().flatten().any(|p| {
+        p["prefix"] == prefix
+            && p["candidates"].as_array().into_iter().flatten().any(|c| {
+                c["source"] == "Evpn" && c["evpn"]["vni"] == L3_VNI && c["evpn"]["router_mac"] != ""
+            })
+    }))
+}
+
+/// `evpn-l3`: RFC 9136 Type-5 routes over an RFC 9135 §4.4.1 L3 VNI, for real.
+/// Two `nos` PEs peer `l2vpn-evpn` over the underlay (`rt1`); each has an
+/// IP-VRF (`L3_TABLE`) with `l3-vni`, whose `nos-ribd` builds `vx<vni>` on a
+/// bridge in the VRF, and a host on its own docker network behind it, in its
+/// own subnet. Each originates its connected subnet as a Type-5 carrying its
+/// Router's MAC; the other installs it `via <VTEP> dev brv<vni> onlink`, with
+/// the neighbour and FDB entry behind it, and the hosts ping each other
+/// across the VXLAN. Removing router-b's `evpn` withdraws its route and
+/// deletes its devices.
+pub async fn evpn_l3(w: &mut World) -> anyhow::Result<()> {
+    let base = |id: Id| {
+        let mut f = id.base_flags();
+        f.extend(strings(&["--peer-group", "pg-evpn", "--evpn"]));
+        f
+    };
+    w.start(A, Some(base(A)), &[]).await?;
+    w.start(B, Some(base(B)), &[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.established().await?;
+    b.established().await?;
+
+    // VXLAN in a VRF needs `udp_l3mdev_accept` (as `evpn-dataplane`); routing
+    // between the host's interface and the L3 bridge needs forwarding. Both
+    // operator prerequisites nothing in nos sets.
+    w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
+    for router in ["router-a", "router-b"] {
+        w.dock
+            .in_netns(
+                NETNS_HELPER_IMAGE,
+                router,
+                &[
+                    "sh",
+                    "-c",
+                    "echo 1 > /proc/sys/net/ipv4/udp_l3mdev_accept; \
+                     echo 1 > /proc/sys/net/ipv4/ip_forward",
+                ],
+            )
+            .await?;
+    }
+
+    log("a host behind each PE, each on its own network and subnet");
+    w.dock
+        .ensure_image(
+            HOST_IMAGE,
+            "FROM debian:bookworm-slim\n\
+             RUN apt-get update && apt-get install -y --no-install-recommends \\\n \
+             iproute2 iputils-ping iputils-arping tcpdump && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    for (net, subnet, router, gw, host, ip, other) in [
+        (
+            NET_L3_A,
+            L3_SUBNET_A,
+            "router-a",
+            L3_GW_A,
+            CE_HOST,
+            L3_HOST_IP_A,
+            L3_SUBNET_B,
+        ),
+        (
+            NET_L3_B,
+            L3_SUBNET_B,
+            "router-b",
+            L3_GW_B,
+            H_HOST,
+            L3_HOST_IP_B,
+            L3_SUBNET_A,
+        ),
+    ] {
+        if !w.dock.network_exists(net).await {
+            w.dock.network_create(net, &[subnet], false).await?;
+        }
+        w.dock.network_connect_ip(net, router, gw).await?;
+        w.dock.start_host(host, HOST_IMAGE, net).await?;
+        host_sh(
+            w,
+            host,
+            &format!(
+                "set -e; ip addr flush dev eth0; ip addr add {ip}/24 dev eth0; \
+                 ip route add {other} via {gw}"
+            ),
+        )
+        .await?;
+    }
+
+    log("each PE's IP-VRF gets the L3 VNI");
+    a.provision_flags(&l3_pe_flags(A, L3_RD_A, L3_GW_A)).await?;
+    b.provision_flags(&l3_pe_flags(B, L3_RD_B, L3_GW_B)).await?;
+    let vxlan = format!("vx{L3_VNI}");
+    for (r, vtep) in [(a, IP_A), (b, IP_B)] {
+        r.wait(&format!(
+            "created l3 vni vxlan device vxlan={vxlan} vni={L3_VNI} vtep={vtep} underlay=eth0"
+        ))
+        .await?;
+    }
+
+    log("each learns the other's subnet as a Type-5 with a Router's MAC, and installs it");
+    for (r, peer, prefix) in [(a, IP_B, L3_SUBNET_B), (b, IP_A, L3_SUBNET_A)] {
+        r.wait(&format!(
+            "evpn route learned peer={peer} route_type=5 .*{prefix}"
+        ))
+        .await?;
+        r.wait(&format!(
+            "evpn remote vtep installed vni={L3_VNI} vtep={peer} rmac="
+        ))
+        .await?;
+        r.wait(&format!(
+            "added route prefix={prefix} gateway={peer} next_hops=1 .*source=Some(Evpn)"
+        ))
+        .await?;
+        let evpn = r
+            .rest_expect(Method::GET, "/v1/bgp/evpn", None, 200)
+            .await?;
+        if !evpn.contains("rmac:") || !evpn.contains("\"route_type\":5") {
+            bail!(
+                "{}: show bgp evpn lacks the Type-5 / rmac: {evpn}",
+                r.name()
+            );
+        }
+        if !tenant_has_evpn(r, prefix).await? {
+            bail!(
+                "{}: {L3_TABLE} does not list {prefix} as an evpn route",
+                r.name()
+            );
+        }
+    }
+
+    log("the hosts ping each other across the L3 VNI");
+    ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
+    ping_until(w, H_HOST, L3_HOST_IP_A, 30).await?;
+
+    log("router-b's evpn removed: its Type-5 is withdrawn and its devices deleted");
+    let removed = format!("removed route prefix={L3_SUBNET_B} gateway={IP_B}");
+    let base_removed = a.count(&removed);
+    let clear: Vec<String> = {
+        // Keep the table and its subnet; drop the L3 VNI.
+        let mut out = base(B);
+        out.extend(strings(&["--l3vni-table", L3_TABLE, "--l3vni-clear"]));
+        out
+    };
+    b.provision_flags(&clear).await?;
+    b.wait(&format!("deleted l3 vni devices vni={L3_VNI}"))
+        .await?;
+    a.wait_new(&removed, base_removed, 30).await?;
+    a.wait(&format!(
+        "evpn remote vtep removed vni={L3_VNI} vtep={IP_B}"
+    ))
+    .await?;
+    if tenant_has_evpn(a, L3_SUBNET_B).await? {
+        bail!("router-a still lists {L3_SUBNET_B} after router-b's withdrawal");
+    }
+
+    for host in [CE_HOST, H_HOST] {
+        w.dock.container_remove(host).await;
+    }
+    for (net, router) in [(NET_L3_A, "router-a"), (NET_L3_B, "router-b")] {
+        w.dock.network_disconnect(net, router).await;
+        w.dock.network_remove(net).await;
+    }
+    Ok(())
 }
 
 /// `evpn-v6`: one PE's flags toward one peer over the IPv6 underlay — eth0
