@@ -2273,6 +2273,35 @@ async fn netns_a(w: &World, cmd: &[&str]) -> anyhow::Result<String> {
     w.dock.in_netns(NETNS_HELPER_IMAGE, "router-a", cmd).await
 }
 
+/// Takes `router` off `nets` from below: docker deletes its interfaces there,
+/// so a bond whose only members they were loses carrier and `nos-interfaced`
+/// has nothing to revert. `ip link set <bond> down` would not hold: the bond
+/// is a link `nos-interfaced` owns, so its next reconcile tick (≤10s) brings
+/// it back up (#169).
+async fn link_lost(w: &World, router: &str, nets: &[&str]) {
+    for net in nets {
+        w.dock.network_disconnect(net, router).await;
+    }
+}
+
+/// Undoes `link_lost`: reconnects `router` to each of `nets` and, should docker
+/// pick another name, renames the new interface (found by its MAC) back to the
+/// matching entry of `names`, so `nos-interfaced`'s next tick re-enslaves it.
+async fn link_back(w: &World, router: &str, nets: &[&str], names: &[&str]) -> anyhow::Result<()> {
+    for (net, name) in nets.iter().zip(names) {
+        w.dock.network_connect(net, router).await;
+        let mac = w.dock.mac(router, net).await?;
+        let script = format!(
+            "for i in /sys/class/net/eth*; do [ \"$(cat $i/address)\" = {mac} ] && n=${{i##*/}}; done; \
+             [ \"$n\" = {name} ] || {{ ip link set \"$n\" down && ip link set \"$n\" name {name}; }}"
+        );
+        w.dock
+            .in_netns(NETNS_HELPER_IMAGE, router, &["sh", "-c", &script])
+            .await?;
+    }
+    Ok(())
+}
+
 /// Polls GoBGP's EVPN RIB until `want(rib)` holds.
 async fn gobgp_evpn_rib(w: &World, what: &str, want: impl Fn(&str) -> bool) -> anyhow::Result<()> {
     let mut last = String::new();
@@ -3068,8 +3097,12 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
 
     single_active_backup(w).await?;
 
-    log("ES down: the bond losing carrier withdraws Type-4 and both Type-1, carrier back restores them");
-    netns_a(w, &["ip", "link", "set", &bond, "down"]).await?;
+    log("ES down: the bond losing both members withdraws Type-4 and both Type-1, their return restores them");
+    let carrier_up =
+        format!("segment port carrier changed domain={EVPN_DOMAIN} port={bond} up=true");
+    let base = a.count(&carrier_up);
+    // The bond has no link monitoring: it only loses carrier once every member is gone.
+    link_lost(w, "router-a", &[NET_BOND1, NET_BOND2]).await;
     a.wait(&format!(
         "segment port carrier changed domain={EVPN_DOMAIN} port={bond} up=false"
     ))
@@ -3078,11 +3111,8 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
         !es_route(rib) && !ad_route(rib, true) && !ad_route(rib, false)
     })
     .await?;
-    let carrier_up =
-        format!("segment port carrier changed domain={EVPN_DOMAIN} port={bond} up=true");
-    let base = a.count(&carrier_up);
     let type4_base = gobgp_type4_count(w).await?;
-    netns_a(w, &["ip", "link", "set", &bond, "up"]).await?;
+    link_back(w, "router-a", &[NET_BOND1, NET_BOND2], &["eth1", "eth2"]).await?;
     a.wait_new(&carrier_up, base, 30).await?;
     gobgp_evpn_rib(w, "re-advertised router-a's segment routes", |rib| {
         ad_route(rib, true) && ad_route(rib, false)
@@ -3783,9 +3813,10 @@ async fn ping_until(w: &World, host: &str, ip: &str, secs: u32) -> anyhow::Resul
 /// is *disabled* in the kernel (STP state, read back with `bridge -d link`) —
 /// unicast included, not just BUM — while its flooding flags stay on. Router-a
 /// sees router-b's per-ES A-D carrying the Single-Active ESI Label. The CE talks
-/// to the host through the DF. Router-a's bond then goes down: it
+/// to the host through the DF. Router-a then loses its CE link (docker
+/// disconnects it, so the bond's only member is gone and it loses carrier): it
 /// withdraws the segment, router-b becomes the DF and unblocks, and the CE (its
-/// ARP probes unanswered on router-a's dead link) moves over; when the carrier
+/// ARP probes unanswered on router-a's dead link) moves over; when the link
 /// returns router-a is elected again and router-b is blocked again.
 pub async fn evpn_single_active(w: &mut World) -> anyhow::Result<()> {
     let (bond_a, bond_b) = dataplane_setup(w, true, false).await?;
@@ -3841,22 +3872,25 @@ pub async fn evpn_single_active(w: &mut World) -> anyhow::Result<()> {
         );
     }
 
-    log("router-a's bond goes down: router-b takes over and unblocks, the CE follows");
+    log("router-a loses its CE link: router-b takes over and unblocks, the CE follows");
     let df_base = b.count(&role(&bond_b, "df"));
-    // The bond itself, not its member: the bond has no link monitoring, so a
-    // member going down would leave its carrier up.
-    netns_a(w, &["ip", "link", "set", &bond_a, "down"]).await?;
+    let up_base = a.count(&carrier(&bond_a, true));
+    // The link itself (the bond's only member) goes away, so the bond loses
+    // carrier and nothing can bring it back until the link returns.
+    link_lost(w, "router-a", &[NET_CE_A]).await;
     a.wait(&carrier(&bond_a, false)).await?;
+    // Longer than nos-interfaced's 10s reconcile tick, which re-upped a bond
+    // taken down with `ip link set` (#169).
+    a.assert_quiet(&carrier(&bond_a, true), up_base, 12).await?;
     b.wait_new(&role(&bond_b, "df"), df_base, 60).await?;
     bridge_port_state(w, "router-b", &bond_b, "forwarding").await?;
     ping_until(w, CE_HOST, H_IP, 30).await?;
     ping_until(w, H_HOST, CE_IP, 30).await?;
 
-    log("carrier back: router-a is elected again and router-b is blocked again");
+    log("CE link back: router-a is elected again and router-b is blocked again");
     let a_df = a.count(&role(&bond_a, "df"));
     let b_non_df = b.count(&role(&bond_b, "non-df"));
-    let up_base = a.count(&carrier(&bond_a, true));
-    netns_a(w, &["ip", "link", "set", &bond_a, "up"]).await?;
+    link_back(w, "router-a", &[NET_CE_A], &["eth1"]).await?;
     a.wait_new(&carrier(&bond_a, true), up_base, 30).await?;
     a.wait_new(&role(&bond_a, "df"), a_df, 60).await?;
     b.wait_new(&role(&bond_b, "non-df"), b_non_df, 60).await?;
