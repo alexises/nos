@@ -492,6 +492,9 @@ struct PeerOutbox {
     /// This instance's confederation identifier when the peer was
     /// registered — the AS an external peer sees.
     confed_id: Option<u32>,
+    /// The peer-group's vendor `local-as`, external peers only
+    /// (`set_peer_local_as`) — see `prepend_external`.
+    local_as: Option<nos_proto::BgpLocalAs>,
     /// This session's own transport-local address, of whatever family —
     /// used as next-hop-self for every negotiated address family this peer
     /// carries, cross-family or not (RFC 8950). `None` if it couldn't be
@@ -530,6 +533,21 @@ struct PeerOutbox {
     export_policy: Arc<CompiledPolicy>,
 }
 
+impl PeerOutbox {
+    /// What an external (non-confederation) peer gets prepended (RFC 5065
+    /// §4.1): our AS — the confederation identifier, if any — or, with a
+    /// vendor `local-as`, `[local-as, ours]` (`[local-as]` with `replace-as`).
+    fn prepend_external(&self, path: &mut AsPath, local_asn: u32) {
+        match self.local_as {
+            Some(l) if l.replace_as => {}
+            _ => path.prepend_seq(self.confed_id.unwrap_or(local_asn)),
+        }
+        if let Some(l) = self.local_as {
+            path.prepend_seq(l.asn);
+        }
+    }
+}
+
 /// The BGP RIB engine for one `nos-bgpd` instance. See the module doc
 /// comment for the locking model.
 pub struct BgpRib {
@@ -539,6 +557,8 @@ pub struct BgpRib {
     confed_id: Option<u32>,
     /// Peers in another member AS of our confederation (`set_peer_confed`).
     confed_peers: HashSet<IpAddr>,
+    /// External peers whose peer-group sets `local-as` (`set_peer_local_as`).
+    local_as_peers: HashMap<IpAddr, nos_proto::BgpLocalAs>,
     /// iBGP peers exchanging RFC 8097 states (`set_peer_rpki_state`).
     rpki_state_peers: HashSet<IpAddr>,
     /// This instance's own router-id — used for RFC 4456 §5 `ORIGINATOR_ID`
@@ -656,6 +676,7 @@ impl BgpRib {
             local_asn: 0,
             confed_id: None,
             confed_peers: HashSet::new(),
+            local_as_peers: HashMap::new(),
             rpki_state_peers: HashSet::new(),
             local_router_id: Ipv4Addr::UNSPECIFIED,
             cluster_id: Ipv4Addr::UNSPECIFIED,
@@ -788,6 +809,15 @@ impl BgpRib {
         }
     }
 
+    /// Records `peer`'s vendor `local-as` (`None`: none, or not an external
+    /// peer). Call before `peer_established`, like `set_peer_confed`.
+    pub fn set_peer_local_as(&mut self, peer: IpAddr, local_as: Option<nos_proto::BgpLocalAs>) {
+        match local_as {
+            Some(l) => self.local_as_peers.insert(peer, l),
+            None => self.local_as_peers.remove(&peer),
+        };
+    }
+
     /// Records whether `peer` exchanges RFC 8097 validation states (an
     /// opted-in iBGP peer). Call before `peer_established`, like `set_peer_asn`.
     pub fn set_peer_rpki_state(&mut self, peer: IpAddr, on: bool) {
@@ -873,6 +903,7 @@ impl BgpRib {
                 is_confed: self.confed_peers.contains(&peer),
                 announce_rpki_state: self.rpki_state_peers.contains(&peer),
                 confed_id: self.confed_id,
+                local_as: self.local_as_peers.get(&peer).copied(),
                 local_addr,
                 negotiated_afs,
                 mp_bgp_negotiated,
@@ -1277,10 +1308,13 @@ impl BgpRib {
                 && (self.confed_id.is_none() || !(remote_is_ibgp || from_confed));
             // RFC 5065 §5.1: our confederation identifier (or AS) in a plain
             // segment, or our member AS in a confederation segment.
+            // Vendor `local-as`: it counts as ours on this peer's routes only.
+            let local_as = self.local_as_peers.get(&from).copied();
             let looped = attrs
                 .as_path
                 .contains(self.confed_id.unwrap_or(self.local_asn))
-                || (self.confed_id.is_some() && attrs.as_path.contains_confed(self.local_asn));
+                || (self.confed_id.is_some() && attrs.as_path.contains_confed(self.local_asn))
+                || local_as.is_some_and(|l| attrs.as_path.contains(l.asn));
             if stray_confed {
                 warn!(
                     peer = %from, as_path = ?attrs.as_path,
@@ -1330,9 +1364,15 @@ impl BgpRib {
                     !ov
                 });
                 let received_ov = received_ov.filter(|_| self.rpki_state_peers.contains(&from));
+                // Vendor `local-as`: the received path gets it as a real hop,
+                // so policy and every other peer see `[local-as, peer…]`.
+                let mut as_path = attrs.as_path.clone();
+                if let Some(l) = local_as.filter(|l| !l.no_prepend) {
+                    as_path.prepend_seq(l.asn);
+                }
                 let base_route = RibRoute {
                     origin: RouteOrigin::Peer(from),
-                    as_path: Arc::new(attrs.as_path.clone()),
+                    as_path: Arc::new(as_path),
                     bgp_origin: attrs.origin,
                     local_pref: attrs.local_pref.unwrap_or(DEFAULT_LOCAL_PREF),
                     med: attrs.med,
@@ -1352,7 +1392,7 @@ impl BgpRib {
                     received_ov,
                 };
                 let origin_as = crate::rpki::origin_as(
-                    &attrs.as_path,
+                    &base_route.as_path,
                     self.confed_id.unwrap_or(self.local_asn),
                 );
                 for prefix in &update.nlri {
@@ -2139,7 +2179,7 @@ fn build_advertisement(
         // local-ASN prepend, even though they're always eBGP (enforced at
         // config-validation time — see `bgp_instance::valid_route_reflection_and_server`).
         if !outbox.is_rs_client {
-            Arc::make_mut(&mut as_path).prepend_seq(outbox.confed_id.unwrap_or(local_asn));
+            outbox.prepend_external(Arc::make_mut(&mut as_path), local_asn);
         }
     }
     let as_path: AsPath = Arc::try_unwrap(as_path).unwrap_or_else(|arc| (*arc).clone());
@@ -2409,6 +2449,31 @@ mod tests {
 
     fn evpn_afs() -> HashSet<AddressFamily> {
         HashSet::from([AddressFamily::Ipv4Unicast, AddressFamily::L2vpnEvpn])
+    }
+
+    #[test]
+    fn local_evpn_route_to_a_local_as_peer_carries_both_ases() {
+        let mut rib = new_rib(65000);
+        rib.set_peer_local_as(
+            addr("10.0.0.1"),
+            Some(nos_proto::BgpLocalAs {
+                asn: 65009,
+                ..Default::default()
+            }),
+        );
+        let mut rx = register_mp_peer(
+            &mut rib,
+            addr("10.0.0.1"),
+            false,
+            addr("10.0.0.254"),
+            evpn_afs(),
+        );
+        rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Add(mac_route(1)));
+        let updates = recv_all(&mut rx);
+        let [OutboundUpdate::AnnounceEvpn(adv)] = updates.as_slice() else {
+            panic!("expected one EVPN announcement, got {updates:?}");
+        };
+        assert_eq!(adv.as_path, vec![65009, 65000]);
     }
 
     #[test]
@@ -3221,6 +3286,97 @@ mod tests {
             false,
             v4("3.3.3.3"),
             &u,
+            &accept_all_policy(),
+        );
+        assert_eq!(rib.loc_rib.len(), 1);
+    }
+
+    fn local_as(asn: u32, no_prepend: bool, replace_as: bool) -> nos_proto::BgpLocalAs {
+        nos_proto::BgpLocalAs {
+            asn,
+            no_prepend,
+            replace_as,
+        }
+    }
+
+    /// Vendor `local-as`: `[L, G]` (`[L]` with replace-as) toward the
+    /// local-as peer, `[G]` toward everyone else.
+    #[test]
+    fn local_as_outbound_paths() {
+        for (confed, replace_as, want) in [
+            (false, false, vec![65009, 65000]),
+            (false, true, vec![65009]),
+            (true, false, vec![65009, 65100]),
+        ] {
+            let mut rib = new_rib(65000);
+            if confed {
+                rib.set_confederation(Some(65100));
+            }
+            rib.set_peer_local_as(addr("10.0.0.1"), Some(local_as(65009, false, replace_as)));
+            let mut l = register_peer(&mut rib, addr("10.0.0.1"), false, addr("10.0.0.254"));
+            let mut other = register_peer(&mut rib, addr("10.0.0.2"), false, addr("10.0.0.254"));
+            rib.apply_redistribute_update(full_update(vec![("192.168.1.0/24", "10.9.9.9")]));
+            assert_eq!(announced(&mut l, "192.168.1.0/24").unwrap().as_path, want);
+            let g = if confed { 65100 } else { 65000 };
+            assert_eq!(
+                announced(&mut other, "192.168.1.0/24").unwrap().as_path,
+                vec![g]
+            );
+        }
+    }
+
+    /// Inbound: L is prepended (unless no-prepend), seen by the import
+    /// policy, and other peers get `[G, L, peer]`.
+    #[test]
+    fn local_as_inbound_prepend_and_policy() {
+        let p = "198.51.100.0/24";
+        let mut rib = new_rib(65000);
+        let mut other = register_peer(&mut rib, addr("10.0.0.2"), false, addr("10.0.0.254"));
+        rib.set_peer_local_as(addr("10.0.0.1"), Some(local_as(65009, false, false)));
+        let only_l = nos_rpl::compile(
+            "if this.bgp.as_path.contains(65009):\n    accept\nreject\n",
+            &nos_rpl::Symbols::EMPTY,
+        )
+        .unwrap();
+        let u = ebgp_update(vec![p], vec![65001], "192.0.2.1");
+        rib.handle_update(addr("10.0.0.1"), false, v4("1.1.1.1"), &u, &only_l);
+        assert_eq!(rib.loc_rib[&prefix(p)].as_path.flat(), vec![65009, 65001]);
+        assert_eq!(
+            announced(&mut other, p).unwrap().as_path,
+            vec![65000, 65009, 65001]
+        );
+
+        rib.set_peer_local_as(addr("10.0.0.1"), Some(local_as(65009, true, false)));
+        rib.handle_update(
+            addr("10.0.0.1"),
+            false,
+            v4("1.1.1.1"),
+            &u,
+            &accept_all_policy(),
+        );
+        assert_eq!(rib.loc_rib[&prefix(p)].as_path.flat(), vec![65001]);
+    }
+
+    /// L is a loop on the local-as peer's routes only.
+    #[test]
+    fn local_as_loop_detection_is_per_peer() {
+        let mut rib = new_rib(65000);
+        rib.set_peer_local_as(addr("10.0.0.1"), Some(local_as(65009, false, false)));
+        let looped = ebgp_update(vec!["198.51.100.0/24"], vec![65001, 65009], "192.0.2.1");
+        rib.handle_update(
+            addr("10.0.0.1"),
+            false,
+            v4("1.1.1.1"),
+            &looped,
+            &accept_all_policy(),
+        );
+        assert!(rib.loc_rib.is_empty());
+        let other = ebgp_update(vec!["198.51.100.0/24"], vec![65002, 65009], "192.0.2.2");
+        rib.handle_update(
+            addr("10.0.0.2"),
+            false,
+            v4("2.2.2.2"),
+            &other,
             &accept_all_policy(),
         );
         assert_eq!(rib.loc_rib.len(), 1);

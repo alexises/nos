@@ -159,7 +159,18 @@ The command channel lives on `PeerSlot` (not per-connection) since it's already 
 
 EVPN origination (`evpn_out::advertise`) follows the same table. On receipt, confed segments from an `External` peer, or from anyone when no confederation is configured, are treat-as-withdraw (`withdraw_announced`, logged `treating bgp update as withdraw: as_path has confederation segments ...`); loop detection drops the identifier (or `asn`) in a plain segment and the member AS in a confed segment, with the existing `dropping bgp update: as_path already contains our own asn` line. Decision step 6 ranks external > confed-external > internal (`peer_rank`; step 8's oldest-route rule applies between two external routes only); a route learned from a confed peer is not iBGP-learned, so it reaches `Internal` peers without route reflection, and the RFC 4456 gate stays keyed on `Internal` only. RPL sees the flat path (`AsPath::flat`), confed ASNs included; an RPL prepend joins the leading `AS_SEQUENCE`.
 
-`AS_PATH` is a structured `as_path::AsPath` (segment types kept, `Debug` of a pure sequence unchanged: `[a, b]`; mixed: `[(65101), 65003, {1, 2}]`), so step 3 counts an `AS_SET` as one hop and confed segments as none, and MED's neighbour AS skips confed segments. Not implemented: `local-as` (a separate issue), a `bestpath med confed` knob. Verified by `nos-e2e confederation`.
+`AS_PATH` is a structured `as_path::AsPath` (segment types kept, `Debug` of a pure sequence unchanged: `[a, b]`; mixed: `[(65101), 65003, {1, 2}]`), so step 3 counts an `AS_SET` as one hop and confed segments as none, and MED's neighbour AS skips confed segments. Not implemented: a `bestpath med confed` knob. Verified by `nos-e2e confederation`.
+
+### local-as (#166)
+
+`BgpPeerGroup.local_as: Option<BgpLocalAs { asn, no_prepend, replace_as }>` (vendor IOS/Junos, no RFC; `set local-as asn <n> [no-prepend] [replace-as]`) — G below is the AS an `External` peer sees otherwise (identifier or `asn`).
+
+- **OPEN**: `ResolvedPeer::open_as` returns `local_as.asn` for an `External` peer; the field is on `ResolvedPeer`, so a change restarts the session.
+- **RIB**: `fsm::run` calls `BgpRib::set_peer_local_as` before `peer_established` (only for `External`); `PeerOutbox.local_as` is copied at registration.
+- **Outbound**: `PeerOutbox::prepend_external` (shared by `build_advertisement` and `evpn_out::advertise`) prepends `[L, G]`, or `[L]` with `replace_as`; route-server clients still get no prepend (the combination is refused at commit anyway).
+- **Inbound**: in `handle_update`, a path holding L from that peer is a loop (same log line as any loop); otherwise L is prepended before the import policy unless `no_prepend`, so policy and every other peer see `[L, peer…]`. L from other peers is not a loop (IOS behaviour, the migration case).
+- **Validation** (`bgp_instance::valid_local_as`): External peer-groups only, not `asn`/identifier/`remote_as`, not with `route_server_client`. `no_prepend`/`replace_as` are independent (inbound vs outbound); IOS's `no-prepend replace-as` is both set.
+- Not implemented: `dual-as`, per-peer local-as, Junos `private`/`alias`/`loops`. Verified by `nos-e2e local-as` against ExaBGP.
 
 ### Route reflection and route server
 

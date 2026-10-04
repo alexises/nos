@@ -70,9 +70,9 @@ pub use rib::{
 };
 pub use schema::{
     loopback_table_name, AddressFamily, AsPathList, BgpAggregate, BgpAoAlgorithm, BgpAoKey,
-    BgpAuth, BgpConfederation, BgpDamping, BgpInstance, BgpMaximumPrefix, BgpPeer, BgpPeerGroup,
-    BgpPrefixLimit, BgpShutdown, BroadcastDomain, CommunityAlias, CommunityGroup, Config,
-    DfAlgorithm, EsRedundancy, Interface, InterfaceAddress, LacpRate, LldpDestination,
+    BgpAuth, BgpConfederation, BgpDamping, BgpInstance, BgpLocalAs, BgpMaximumPrefix, BgpPeer,
+    BgpPeerGroup, BgpPrefixLimit, BgpShutdown, BroadcastDomain, CommunityAlias, CommunityGroup,
+    Config, DfAlgorithm, EsRedundancy, Interface, InterfaceAddress, LacpRate, LldpDestination,
     LldpSettings, NetworkType, NextHopMode, OspfArea, OspfAreaRange, OspfAreaType, OspfAuth,
     OspfCryptoAlgorithm, OspfCryptoKey, OspfInstance, OspfProfile, Ospfv3Area, Ospfv3Instance,
     Ospfv3Profile, PolicyDefinition, PortAggregate, PortAggregateMode, PrefixList, PrefixListEntry,

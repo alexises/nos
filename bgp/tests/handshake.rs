@@ -95,6 +95,7 @@ async fn two_real_instances_establish_a_session() {
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         announce_rpki_state: false,
+        local_as: None,
         confed_id: None,
         confed_member: false,
     });
@@ -120,6 +121,7 @@ async fn two_real_instances_establish_a_session() {
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         announce_rpki_state: false,
+        local_as: None,
         confed_id: None,
         confed_member: false,
     });
@@ -230,6 +232,7 @@ async fn established_session_honors_configured_non_default_hold_time() {
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         announce_rpki_state: false,
+        local_as: None,
         confed_id: None,
         confed_member: false,
     });
@@ -311,6 +314,7 @@ async fn established_session_reports_status_via_peer_slot() {
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         announce_rpki_state: false,
+        local_as: None,
         confed_id: None,
         confed_member: false,
     });
@@ -417,6 +421,7 @@ async fn collision_leaves_exactly_one_side_running() {
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         announce_rpki_state: false,
+        local_as: None,
         confed_id: None,
         confed_member: false,
     });
@@ -618,6 +623,7 @@ async fn evpn_routes_from_a_real_session_are_stored_and_cleared_on_close() {
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         announce_rpki_state: false,
+        local_as: None,
         confed_id: None,
         confed_member: false,
     });
@@ -804,6 +810,7 @@ async fn refresh_case(stale_time: Duration, eorr: bool) -> u32 {
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
         announce_rpki_state: false,
+        local_as: None,
         confed_id: None,
         confed_member: false,
     });

@@ -124,7 +124,9 @@ fn advertise(outbox: &PeerOutbox, local_asn: u32, r: &WireRoute) -> Option<Adver
             p.prepend_confed_seq(local_asn);
             p
         } else {
-            vec![outbox.confed_id.unwrap_or(local_asn)].into()
+            let mut p = AsPath::default();
+            outbox.prepend_external(&mut p, local_asn);
+            p
         },
         local_pref: (outbox.is_ibgp || outbox.is_confed).then_some(LOCAL_PREF),
         extended_communities: r.ext_communities.clone(),
