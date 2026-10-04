@@ -257,6 +257,7 @@ async fn resync(
         .map(|t| t.name.clone())
         .collect();
 
+    sessions.set_maximum_paths(own.maximum_paths).await;
     sessions
         .reconcile(
             vrf,

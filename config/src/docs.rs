@@ -128,6 +128,17 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Clear a BGP instance's route-reflector cluster ID override.",
             ),
         ),
+        Topic::BgpInstanceMaximumPaths => (
+            "Set how many equal BGP paths a prefix installs (multipath).",
+            concat!(
+                "Installs the best path plus every path that ties with it on local-pref, \
+             AS_PATH length, origin, MED, peer type and IGP cost to the next hop, and \
+             comes from the same neighbouring AS, up to this many next hops (1-64), as \
+             one equal-cost kernel route. Only the best path is advertised to peers.",
+                " ",
+                "Clear it to install the best path alone.",
+            ),
+        ),
         Topic::BgpPeerGroup => (
             "Create a peer-group in a BGP instance if it doesn't already exist.",
             concat!(

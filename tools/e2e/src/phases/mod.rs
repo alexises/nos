@@ -30,6 +30,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "shutdown" => bgp::shutdown(w).await,
         "reflector" => bgp::reflector(w).await,
         "route-server" => bgp::route_server(w).await,
+        "bgp-multipath" => bgp::bgp_multipath(w).await,
         "as4" => bgp::as4(w).await,
         "malformed-update" => bgp::malformed_update(w).await,
         "maximum-prefix" => bgp::maximum_prefix(w).await,
@@ -166,6 +167,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "evpn-l3",
             "reflector",
             "route-server",
+            "bgp-multipath",
         ],
         // Self-contained like `ospf-aging`: it needs its own short-lived
         // certificates, so it restarts the routers with them.
@@ -209,6 +211,7 @@ pub const ALL: &[&str] = &[
     "evpn-l3",
     "reflector",
     "route-server",
+    "bgp-multipath",
     "as4",
     "malformed-update",
     "maximum-prefix",

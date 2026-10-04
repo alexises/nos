@@ -348,6 +348,33 @@ A received route is used only if its next hop is reachable through the routing t
 
 For each prefix NOS runs the RFC 4271 §9.1.2.2 decision process over the candidates that passed the import policy, damping and next-hop checks, in this order: highest `LOCAL_PREF`; a route redistributed on this router over a learned one; shortest AS path (an `AS_SET` counts as one AS, confederation segments as none); lowest origin (IGP, then EGP, then incomplete); lowest `MED`, compared only between routes from the same neighbouring AS (a missing MED counts as 0); eBGP over confederation eBGP over iBGP; lowest IGP cost to the next hop; between two eBGP routes, the older one; lowest BGP identifier; lowest peer address. The best route is installed in the routing table. When a second-best route with a different next hop exists, it is installed as a backup at a higher metric, so traffic can fail over without waiting for BGP to reconverge.
 
+### Multipath
+
+`set maximum-paths <n>` on the instance installs up to `n` next hops (1 to 64) for a prefix as one equal-cost route, so the kernel spreads traffic over them. Unset or `1` installs the best path alone.
+
+```
+edge-1(t9/bgp-instance:r1)> set maximum-paths 4
+```
+
+```sh
+$C -X PUT -H 'Content-Type: application/json' -d '4' $B/v1/transactions/t9/bgp-instance/r1/maximum-paths
+```
+
+- A path joins the best one only if it ties with it on every step of [Best path](#best-path) up to the IGP cost to the next hop, and comes from the same neighbouring AS (the first AS in its path). Paths with equal-length AS paths from different ASes do not join.
+- Ties are picked in best-path order (oldest eBGP route, BGP identifier, peer address), up to `n`. Two paths with the same next hop count once.
+- Only the best path is advertised to peers. Multipath changes what this router installs, not what it sends.
+- The backup route (see [Best path](#best-path)) is the best path whose next hop is none of the installed ones.
+- Redistributed routes never join: they win best path on their own and are not installed.
+- A path joining or leaving replaces the kernel route: delete, then add. Traffic to the prefix can see a short gap.
+
+`show route` lists every next hop:
+
+```
+edge-1> show route rt1 198.51.100.1
+198.51.100.0/24
+  * via 10.50.0.3, 10.50.0.4 [bgp]
+```
+
 ### Communities
 
 Standard (RFC 1997), extended (RFC 4360) and large (RFC 8092) communities are passed on unchanged to every peer, with one exception: a non-transitive extended community (its type has bit `0x40` set) is never sent to an eBGP peer, route-server clients included. The well-known communities (`NO_EXPORT`, `NO_ADVERTISE`, `NO_EXPORT_SUBCONFED`) have no built-in effect: write an export policy that acts on them if you need it. Policies can match, add and remove communities; see [Routing policy](routing-policy.md).
@@ -603,6 +630,7 @@ Created with `edit bgp instance <name>`; deleted with `delete bgp instance <name
 | asn | `set bgp instance <i> asn <n>` / `set asn <n>` | `…/asn`, number | 1 to 4294967294; required | not 0 or 4294967295 | This router's AS number | `show config` |
 | router-id | `set bgp instance <i> router-id <a.b.c.d>` / `set router-id <a.b.c.d>` | `…/router-id`, `"1.1.1.1"` | IPv4 address; required | must be set (`0.0.0.0` is refused by peers) | BGP identifier in the OPEN; best-path tie-breaker | `GET /v1/bgp/summary` on the peer (`remote_bgp_id`) |
 | cluster-id | `set bgp instance <i> cluster-id <a.b.c.d>` / `set cluster-id <a.b.c.d>`; `delete bgp instance <i> cluster-id` / `delete cluster-id` | `…/cluster-id`, `"10.255.0.1"` or `null` | IPv4 address; default: the router ID | none | Cluster ID added to `CLUSTER_LIST` when reflecting | `show config` |
+| maximum-paths | `set bgp instance <i> maximum-paths <n>` / `set maximum-paths <n>`; `delete bgp instance <i> maximum-paths` / `delete maximum-paths` | `…/maximum-paths`, number or `null` | 1 to 64; default: unset (1) | 1 to 64 | How many equal paths' next hops a prefix installs; see [Multipath](#multipath) | `show route` |
 | confederation identifier | `set bgp instance <i> confederation identifier <n>` / `set confederation identifier <n>`; `delete … confederation identifier` | `…/confederation/identifier`, number or `null` | 1 to 4294967294; default: none (not in a confederation) | differs from `asn` | The AS peers outside the confederation see; `asn` becomes the member AS | `show config`; `remote_asn` in the outside peer's `GET /v1/bgp/summary` |
 | confederation peer | `set bgp instance <i> confederation peer <n>` / `set confederation peer <n>`; `delete … confederation peer <n>` | `…/confederation/peer`, list of numbers | ASNs; default: none | distinct, not `asn` nor the identifier, needs an identifier; a route-server-client peer-group can't be one | Peer-groups with this `remote-as` are confederation eBGP | `show config` |
 | routing table | `set routing-table <t> bgp-instance <i>`; `delete routing-table <t> bgp-instance` | `routing-table/<t>/bgp-instance`, `"r1"` | name; default: none | instance must exist; one table per instance | Runs the instance in that table's VRF. Without it, the instance opens no session | `show bgp brief` |

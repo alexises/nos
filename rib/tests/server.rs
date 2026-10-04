@@ -361,11 +361,12 @@ async fn push_bgp_routes_full_inserts_into_shared_rib_and_applies_to_driver() {
     let (_reader, mut writer) = connect_as(&path, "bgpd", "r1").await;
     let prefix: nos_proto::IpNet = "203.0.113.0/24".parse().unwrap();
     let next_hop: IpAddr = "203.0.113.1".parse().unwrap();
+    let sibling: IpAddr = "203.0.113.2".parse().unwrap();
     writer
         .send(RibRequest::PushBgpRoutes(vec![
             nos_proto::BgpRouteUpdate::Full(vec![nos_proto::BgpRoute {
                 prefix,
-                next_hop,
+                next_hops: vec![next_hop, sibling],
                 backup_next_hop: None,
             }]),
         ]))
@@ -378,7 +379,8 @@ async fn push_bgp_routes_full_inserts_into_shared_rib_and_applies_to_driver() {
 
     let guard = rib.read().await;
     let best = guard.best_route(&prefix).unwrap();
-    assert_eq!(best.next_hops, vec![(next_hop, None)]);
+    // A BGP multipath set reaches the kernel entry whole.
+    assert_eq!(best.next_hops, vec![(next_hop, None), (sibling, None)]);
     assert_eq!(best.source, RouteSource::Bgp);
 }
 
@@ -402,7 +404,7 @@ async fn push_bgp_routes_add_only_calls_apply_delta_when_the_winner_changes() {
     let next_hop: IpAddr = "203.0.113.1".parse().unwrap();
     let route = nos_proto::BgpRoute {
         prefix,
-        next_hop,
+        next_hops: vec![next_hop],
         backup_next_hop: None,
     };
 
@@ -436,7 +438,7 @@ async fn push_bgp_routes_add_only_calls_apply_delta_when_the_winner_changes() {
         .send(RibRequest::PushBgpRoutes(vec![
             nos_proto::BgpRouteUpdate::Add(nos_proto::BgpRoute {
                 prefix: other_prefix,
-                next_hop,
+                next_hops: vec![next_hop],
                 backup_next_hop: None,
             }),
         ]))
@@ -477,7 +479,7 @@ async fn route_pushes_from_the_wrong_role_are_refused() {
             .send(RibRequest::PushBgpRoutes(vec![
                 nos_proto::BgpRouteUpdate::Add(nos_proto::BgpRoute {
                     prefix: "10.9.0.0/24".parse().unwrap(),
-                    next_hop: "10.0.0.1".parse().unwrap(),
+                    next_hops: vec!["10.0.0.1".parse().unwrap()],
                     backup_next_hop: None,
                 }),
             ]))

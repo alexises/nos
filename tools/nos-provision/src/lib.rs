@@ -383,6 +383,11 @@ pub struct Args {
     #[arg(long)]
     pub cluster_id: Option<Ipv4Addr>,
 
+    /// BGP multipath: how many equal paths' next hops `--bgp-instance`
+    /// installs (`BgpInstanceOp::SetMaximumPaths`).
+    #[arg(long)]
+    pub maximum_paths: Option<u8>,
+
     /// RFC 5065: makes `--bgp-instance` a confederation member, with this
     /// identifier (`BgpInstanceOp::SetConfederationIdentifier`).
     #[arg(long)]
@@ -1374,6 +1379,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::BgpInstance(BgpInstanceOp::SetClusterId {
             name: args.bgp_instance.clone(),
             cluster_id,
+        }));
+    }
+    if let Some(maximum_paths) = args.maximum_paths {
+        ops.push(ConfigOp::BgpInstance(BgpInstanceOp::SetMaximumPaths {
+            name: args.bgp_instance.clone(),
+            maximum_paths,
         }));
     }
     if let Some(identifier) = args.confederation_id {

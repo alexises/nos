@@ -211,7 +211,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
                     RouteSource::Bgp,
                     routes.into_iter().map(|r| RibEntry {
                         prefix: r.prefix,
-                        next_hops: vec![(r.next_hop, None)],
+                        next_hops: r.next_hops.into_iter().map(|h| (h, None)).collect(),
                         source: RouteSource::Bgp,
                         backup: r.backup_next_hop,
                         backup_interface_id: None,
@@ -222,7 +222,7 @@ async fn apply_bgp_route_update(ctx: &Context, updates: Vec<BgpRouteUpdate>) {
             BgpRouteUpdate::Add(r) => {
                 let entry = RibEntry {
                     prefix: r.prefix,
-                    next_hops: vec![(r.next_hop, None)],
+                    next_hops: r.next_hops.iter().map(|&h| (h, None)).collect(),
                     source: RouteSource::Bgp,
                     backup: r.backup_next_hop,
                     backup_interface_id: None,

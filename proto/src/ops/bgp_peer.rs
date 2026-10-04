@@ -126,6 +126,7 @@ mod tests {
             peer_groups: Vec::new(),
             peers,
             cluster_id: None,
+            maximum_paths: None,
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
             routing_table: None,

@@ -19,6 +19,7 @@ fn instance(name: &str, asn: u32) -> BgpInstance {
         peer_groups: Vec::new(),
         peers: Vec::new(),
         cluster_id: None,
+        maximum_paths: None,
         confederation: nos_proto::BgpConfederation::default(),
         rpki_caches: Vec::new(),
         routing_table: None,

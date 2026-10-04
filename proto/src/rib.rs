@@ -73,9 +73,12 @@ pub struct PrefixRoutes {
 pub struct BgpRoute {
     #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub prefix: IpNet,
-    #[cfg_attr(feature = "openapi", schema(value_type = String))]
-    pub next_hop: IpAddr,
-    /// Runner-up path's next hop (a different one from `next_hop`), if any.
+    /// The best path's next hop plus every multipath sibling's
+    /// (`BgpInstance.maximum_paths`), sorted, never empty. Two or more
+    /// become one `RTA_MULTIPATH` kernel route.
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
+    pub next_hops: Vec<IpAddr>,
+    /// Runner-up path's next hop (none of `next_hops`), if any.
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
     pub backup_next_hop: Option<IpAddr>,
 }

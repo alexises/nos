@@ -51,6 +51,16 @@ pub struct BgpInstance {
     #[cli(topic = BgpInstanceClusterId)]
     pub cluster_id: Option<Ipv4Addr>,
 
+    /// How many equal paths' next hops a prefix installs in the kernel
+    /// (BGP multipath): the best path plus every path tying with it up to
+    /// the IGP cost to the next hop and learned from the same neighbouring
+    /// AS. Only the best path is advertised. Unset or 1 installs the best
+    /// path alone.
+    #[serde(default)]
+    #[garde(range(min = 1, max = 64))]
+    #[cli(topic = BgpInstanceMaximumPaths)]
+    pub maximum_paths: Option<u8>,
+
     /// RFC 5065 confederation: once `identifier` is set, `asn` is this
     /// router's member AS and `identifier` the AS the confederation shows
     /// to the outside. A plain struct (not an `Option`) so the CLI can set
@@ -200,6 +210,7 @@ impl Default for BgpInstance {
             peer_groups: Vec::new(),
             peers: Vec::new(),
             cluster_id: None,
+            maximum_paths: None,
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
             routing_table: None,
@@ -283,6 +294,7 @@ mod tests {
             peer_groups: Vec::new(),
             peers: Vec::new(),
             cluster_id: None,
+            maximum_paths: None,
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
             routing_table: None,
@@ -313,6 +325,16 @@ mod tests {
     fn asn_max_reserved_fails() {
         let cfg = config_with(vec![instance("default", 4_294_967_295)]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn maximum_paths_range() {
+        for (n, ok) in [(0, false), (1, true), (64, true), (65, false)] {
+            let mut i = instance("default", 65000);
+            i.maximum_paths = Some(n);
+            let cfg = config_with(vec![i]);
+            assert_eq!(cfg.validate_with(&cfg).is_ok(), ok, "maximum-paths {n}");
+        }
     }
 
     #[test]
