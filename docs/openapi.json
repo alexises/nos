@@ -1454,6 +1454,74 @@
         ],
         "type": "string"
       },
+      "LldpLinkStats": {
+        "description": "One LLDP-enabled interface's IEEE 802.1AB §9.2.6 statistics (the\nLLDP-MIB `lldpStatsTxPortTable`/`lldpStatsRxPortTable` counters), for\n`show lldp statistics`. Every counter resets only when `nos-lldpd`\nrestarts or LLDP is turned off on that interface.",
+        "properties": {
+          "ageouts": {
+            "description": "`statsAgeoutsTotal`: neighbors dropped because their TTL lapsed.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "frames_discarded": {
+            "description": "`statsFramesDiscardedTotal`: every invalid frame, plus every frame\ndropped because the neighbor table was full.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "frames_in": {
+            "description": "`statsFramesInTotal`: valid LLDPDUs received (our own reflected frames\nexcluded).",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "frames_in_errors": {
+            "description": "`statsFramesInErrorsTotal`: received frames that failed validation.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "frames_out": {
+            "description": "`statsFramesOutTotal`: LLDPDUs sent (periodic, fast-start, shutdown).",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "interface": {
+            "type": "string"
+          },
+          "tlvs_discarded": {
+            "description": "`statsTLVsDiscardedTotal`: optional TLVs dropped (a malformed or non-IP\nManagement Address, or one past the per-LLDPDU cap).",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tlvs_unrecognized": {
+            "description": "`statsTLVsUnrecognizedTotal`: reserved TLV types and every\norganizationally-specific TLV.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "too_many_neighbors": {
+            "description": "New neighbors refused because the table was full (802.1AB\ntooManyNeighbors; this port's share of `lldpStatsRemTablesDrops`).",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "interface",
+          "frames_out",
+          "frames_in",
+          "frames_in_errors",
+          "frames_discarded",
+          "tlvs_discarded",
+          "tlvs_unrecognized",
+          "ageouts",
+          "too_many_neighbors"
+        ],
+        "type": "object"
+      },
       "LldpNeighbor": {
         "description": "One remote system heard on one local interface, for `show lldp neighbors`.\n\nChassis/Port IDs are already formatted for display by `nos-lldpd` (a MAC\nsubtype as `aa:bb:..`, an interface-name subtype as its text, anything\nelse as hex) — this type is deliberately not a faithful copy of the\n802.1AB subtype/value pair, since nothing downstream needs to interpret it.",
         "properties": {
@@ -3575,6 +3643,40 @@
           }
         },
         "summary": "Every LLDP neighbor",
+        "tags": [
+          "show"
+        ]
+      }
+    },
+    "/v1/lldp/statistics": {
+      "get": {
+        "operationId": "lldp_statistics",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/LldpLinkStats"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "a daemon this query needs is not running"
+          }
+        },
+        "summary": "Every LLDP-enabled interface's IEEE 802.1AB counters",
         "tags": [
           "show"
         ]

@@ -47,7 +47,7 @@ pub use lacp::{
     LacpEvent, LacpMuxState, LacpPortStatus, LacpReceiveState, LacpRequest,
     PortAggregateLacpSummary,
 };
-pub use lldp::{LldpEvent, LldpNeighbor, LldpRequest};
+pub use lldp::{LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest};
 pub use log::{LogEntry, LogEvent, LogLevel, LogRequest};
 pub use ops::{
     AsPathListOp, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp, BroadcastDomainOp, CommunityAliasOp,

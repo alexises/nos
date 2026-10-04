@@ -11,10 +11,11 @@ use axum::Json;
 use futures::{Stream, StreamExt};
 use nos_proto::{
     BgpEvent, BgpRequest, Config, EvpnRouteSummary, FdbEvent, FdbRequest, FdbTable, InterfaceEvent,
-    InterfaceRequest, InterfaceStatus, LacpEvent, LacpRequest, LldpEvent, LldpNeighbor,
-    LldpRequest, LogEntry, LogEvent, LogRequest, LsaSummary, NeighborSummary, OspfEvent,
-    OspfRequest, Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request, PeerSummary,
-    PortAggregateLacpSummary, PortAggregateStatus, PrefixRoutes, RibEvent, RibRequest, ServiceRef,
+    InterfaceRequest, InterfaceStatus, LacpEvent, LacpRequest, LldpEvent, LldpLinkStats,
+    LldpNeighbor, LldpRequest, LogEntry, LogEvent, LogRequest, LsaSummary, NeighborSummary,
+    OspfEvent, OspfRequest, Ospfv3Event, Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Request,
+    PeerSummary, PortAggregateLacpSummary, PortAggregateStatus, PrefixRoutes, RibEvent, RibRequest,
+    ServiceRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -164,6 +165,18 @@ pub async fn lldp_neighbors(State(d): State<Daemons>) -> ApiResult<Json<Vec<Lldp
         .await?
     {
         LldpEvent::Neighbors(v) => Ok(Json(v)),
+        other @ LldpEvent::Statistics(_) => Err(unexpected("nos-lldpd", &other)),
+    }
+}
+
+#[utoipa::path(get, path = "/v1/lldp/statistics", tag = "show", summary = "Every LLDP-enabled interface's IEEE 802.1AB counters", responses((status = 200, body = Vec<LldpLinkStats>), (status = 503, body = ErrorBody, description = "a daemon this query needs is not running")))]
+pub async fn lldp_statistics(State(d): State<Daemons>) -> ApiResult<Json<Vec<LldpLinkStats>>> {
+    match d
+        .service(ServiceRef::Lldp, LldpRequest::GetStatistics)
+        .await?
+    {
+        LldpEvent::Statistics(v) => Ok(Json(v)),
+        other @ LldpEvent::Neighbors(_) => Err(unexpected("nos-lldpd", &other)),
     }
 }
 

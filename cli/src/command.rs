@@ -34,6 +34,8 @@ pub enum Command {
     },
     /// `show lldp neighbors` — every LLDP neighbor heard on any interface.
     ShowLldpNeighbors,
+    /// `show lldp statistics` — every LLDP-enabled interface's counters.
+    ShowLldpStatistics,
     /// `show log [<source>] [--follow]` — a one-shot buffer snapshot,
     /// optionally filtered to one source, or a live tail with `--follow`.
     ShowLog {
@@ -192,6 +194,10 @@ mod tests {
         assert_eq!(
             Command::parse("show lldp neighbors"),
             Command::ShowLldpNeighbors
+        );
+        assert_eq!(
+            Command::parse("show lldp statistics"),
+            Command::ShowLldpStatistics
         );
         assert_eq!(
             Command::parse("show lldp"),

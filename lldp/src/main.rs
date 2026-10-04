@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_lldp::{link::SharedNeighbors, reconcile, server, watchdog_client};
+use nos_lldp::{link::SharedPorts, reconcile, server, watchdog_client};
 use nos_log_client::ForwardingLayer;
 use nos_pki::Identity;
 use nos_proto::{ServiceRef, DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
@@ -68,15 +68,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let neighbors = SharedNeighbors::default();
-    let server_task = server::start(&args.listen_socket, neighbors.clone(), &identity)
+    let ports = SharedPorts::default();
+    let server_task = server::start(&args.listen_socket, ports.clone(), &identity)
         .inspect_err(|e| tracing::error!(error = %e, "failed to start lldp IPC server"))
         .context("starting lldp IPC server")?;
-    let reconcile_task = tokio::spawn(reconcile::run(
-        config_socket,
-        neighbors,
-        shutdown_rx.clone(),
-    ));
+    let reconcile_task = tokio::spawn(reconcile::run(config_socket, ports, shutdown_rx.clone()));
 
     wait_for_shutdown_signal()
         .await

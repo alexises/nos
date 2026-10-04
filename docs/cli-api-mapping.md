@@ -15,6 +15,7 @@ The REST examples use the `$B`/`$C` variables from [The REST API](api.md#a-compl
 | `show port-aggregate` / `show port-aggregate <name>` | `GET /v1/port-aggregates` / `GET /v1/port-aggregates/{name}` |
 | `show lacp` / `show lacp <name>` | `GET /v1/lacp` / `GET /v1/lacp/{name}` |
 | `show lldp neighbors` | `GET /v1/lldp/neighbors` |
+| `show lldp statistics` | `GET /v1/lldp/statistics` |
 | `show bgp brief` | `GET /v1/bgp/summary` |
 | `show bgp evpn` | `GET /v1/bgp/evpn` |
 | `show bgp rpki` | `GET /v1/bgp/rpki` |

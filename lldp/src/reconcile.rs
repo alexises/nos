@@ -16,7 +16,7 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::config_client;
-use crate::link::{self, LinkConfig, SharedNeighbors};
+use crate::link::{self, LinkConfig, SharedPorts};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
@@ -48,7 +48,7 @@ impl LinkHandle {
 }
 
 struct Links {
-    neighbors: SharedNeighbors,
+    ports: SharedPorts,
     handles: HashMap<String, LinkHandle>,
 }
 
@@ -68,6 +68,12 @@ impl Links {
                 handle.stop().await;
             }
         }
+        // LLDP turned off on an interface: drop its counters too (a restart
+        // keeps them).
+        self.ports
+            .lock()
+            .unwrap()
+            .retain(|name, _| desired.iter().any(|d| &d.interface == name));
         for cfg in desired {
             if !self.handles.contains_key(&cfg.interface) {
                 let handle = self.spawn(cfg);
@@ -78,10 +84,10 @@ impl Links {
 
     fn spawn(&self, cfg: LinkConfig) -> LinkHandle {
         let (stop, stop_rx) = watch::channel(false);
-        let neighbors = self.neighbors.clone();
+        let ports = self.ports.clone();
         let link_cfg = cfg.clone();
         let task = tokio::spawn(async move {
-            if let Err(e) = link::run(link_cfg.clone(), neighbors, stop_rx).await {
+            if let Err(e) = link::run(link_cfg.clone(), ports, stop_rx).await {
                 warn!(interface = %link_cfg.interface, error = %e, "lldp link ended");
             }
         });
@@ -115,15 +121,11 @@ fn desired_links(cfg: &Config, chassis_mac: [u8; 6]) -> Vec<LinkConfig> {
         .collect()
 }
 
-pub async fn run(
-    config_socket: PathBuf,
-    neighbors: SharedNeighbors,
-    mut shutdown: watch::Receiver<bool>,
-) {
+pub async fn run(config_socket: PathBuf, ports: SharedPorts, mut shutdown: watch::Receiver<bool>) {
     let scopes = vec![DiffScope::Interfaces, DiffScope::Hostname, DiffScope::Lldp];
     let chassis_mac = local_system_id();
     let mut links = Links {
-        neighbors,
+        ports,
         handles: HashMap::new(),
     };
 
