@@ -15,6 +15,9 @@ pub const TX_HOLD_DEFAULT: u8 = 4;
 pub const TX_INTERVAL_MAX_SECS: u16 = 3600;
 /// 802.1AB's `msgTxHold` range is 1..=100.
 pub const TX_HOLD_MAX: u8 = 100;
+/// Most Management Address TLVs one LLDPDU carries, and the most a receiver
+/// keeps — one number on both sides, so one nos never drops another's.
+pub const MAX_MANAGEMENT_ADDRESSES: usize = 4;
 
 /// System-wide LLDP settings. `None` for a timer means the 802.1AB default.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -26,11 +29,18 @@ pub struct LldpSettings {
     /// `msgTxHold`: the advertised TTL is this × the interval.
     #[cli(topic = LldpTxHold)]
     pub tx_hold: Option<u8>,
-    /// Advertised in the Management Address TLV on every LLDP-enabled link.
-    /// Taken as configured — not checked against any interface's addresses.
-    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
-    #[cli(topic = LldpManagementAddress)]
-    pub management_address: Option<IpAddr>,
+    /// Each advertised in its own Management Address TLV on every
+    /// LLDP-enabled link (at most 4). Taken as configured: an address on a
+    /// kernel interface carries that interface's ifIndex, any other is still
+    /// sent, with the interface numbering "unknown".
+    #[serde(
+        default,
+        alias = "management_address",
+        deserialize_with = "one_or_many"
+    )]
+    #[cfg_attr(feature = "openapi", schema(value_type = Vec<String>))]
+    #[cli(topic = LldpManagementAddress, words = "management-address")]
+    pub management_addresses: Vec<IpAddr>,
 }
 
 impl LldpSettings {
@@ -69,15 +79,44 @@ impl LldpSettings {
                 "lldp tx-interval × tx-hold must be at most 65535 seconds (the 16-bit TTL)",
             ));
         }
-        if let Some(addr) = self.management_address {
+        for (i, addr) in self.management_addresses.iter().enumerate() {
             if addr.is_unspecified() || addr.is_multicast() {
                 return Err(garde::Error::new(
                     "lldp management-address must be a unicast address",
                 ));
             }
+            if self.management_addresses[..i].contains(addr) {
+                return Err(garde::Error::new(format!(
+                    "lldp management-address {addr} is listed twice"
+                )));
+            }
+        }
+        if self.management_addresses.len() > MAX_MANAGEMENT_ADDRESSES {
+            return Err(garde::Error::new(format!(
+                "at most {MAX_MANAGEMENT_ADDRESSES} lldp management-addresses"
+            )));
         }
         Ok(())
     }
+}
+
+/// A list, or the single address a config saved before #62 held under
+/// `management_address`. Only a self-describing format (YAML/JSON) can tell
+/// the two apart; postcard IPC always carries the list.
+fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<IpAddr>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(IpAddr),
+        Many(Vec<IpAddr>),
+    }
+    if !d.is_human_readable() {
+        return Vec::deserialize(d);
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(a) => vec![a],
+        OneOrMany::Many(v) => v,
+    })
 }
 
 /// Which 802.1AB destination group an interface's LLDPDUs use. Both ends of a
@@ -129,7 +168,7 @@ mod tests {
         LldpSettings {
             tx_interval_secs: i,
             tx_hold: h,
-            management_address: a.map(|a| a.parse().unwrap()),
+            management_addresses: a.into_iter().map(|a| a.parse().unwrap()).collect(),
         }
     }
 
@@ -164,6 +203,35 @@ mod tests {
         assert!(settings(None, None, Some("0.0.0.0")).check().is_err());
         assert!(settings(None, None, Some("224.0.0.1")).check().is_err());
         assert!(settings(None, None, Some("ff02::1")).check().is_err());
+    }
+
+    #[test]
+    fn management_addresses_are_capped_and_unique() {
+        let mut s = LldpSettings {
+            management_addresses: (1..=4).map(|i| IpAddr::from([10, 0, 0, i])).collect(),
+            ..LldpSettings::default()
+        };
+        assert!(s.check().is_ok());
+        s.management_addresses.push(IpAddr::from([10, 0, 0, 5]));
+        assert!(s.check().is_err());
+        s.management_addresses = vec![IpAddr::from([10, 0, 0, 1]); 2];
+        assert!(s.check().is_err());
+    }
+
+    #[test]
+    fn legacy_single_address_loads_as_a_list() {
+        let s: LldpSettings = serde_json::from_str(r#"{"management_address":"10.0.0.1"}"#).unwrap();
+        assert_eq!(s.management_addresses, [IpAddr::from([10, 0, 0, 1])]);
+        let s = LldpSettings {
+            management_addresses: vec![IpAddr::from([10, 0, 0, 1]), "2001:db8::1".parse().unwrap()],
+            ..LldpSettings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(serde_json::from_str::<LldpSettings>(&json).unwrap(), s);
+        assert_eq!(
+            serde_json::from_str::<LldpSettings>("{}").unwrap(),
+            LldpSettings::default()
+        );
     }
 
     #[test]

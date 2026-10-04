@@ -51,13 +51,13 @@
 {"at":[],"fixture":"empty","line":"set lldp tx-interval 5","navigate":null,"writes":[[["lldp","tx-interval-secs"],5]]}
 {"at":[],"fixture":"populated","line":"set lldp tx-hold 3","navigate":null,"writes":[[["lldp","tx-hold"],3]]}
 {"at":[],"fixture":"empty","line":"set lldp tx-hold 3","navigate":null,"writes":[[["lldp","tx-hold"],3]]}
-{"at":[],"fixture":"populated","line":"set lldp management-address 2001:db8::1","navigate":null,"writes":[[["lldp","management-address"],"2001:db8::1"]]}
-{"at":[],"fixture":"empty","line":"set lldp management-address 2001:db8::1","navigate":null,"writes":[[["lldp","management-address"],"2001:db8::1"]]}
+{"at":[],"fixture":"populated","line":"set lldp management-address 2001:db8::1","navigate":null,"writes":[[["lldp","management-address"],["2001:db8::1"]]]}
+{"at":[],"fixture":"empty","line":"set lldp management-address 2001:db8::1","navigate":null,"writes":[[["lldp","management-address"],["2001:db8::1"]]]}
 {"line":"set lldp tx-interval fast","rejected":true}
 {"at":[],"fixture":"populated","line":"delete interface eth1 lldp destination","navigate":null,"writes":[[["interface","eth1","lldp-destination"],"NearestBridge"]]}
 {"at":["interface","eth0"],"fixture":"populated","line":"delete lldp destination","navigate":null,"writes":[[["interface","eth0","lldp-destination"],"NearestBridge"]]}
-{"at":[],"fixture":"populated","line":"delete lldp management-address","navigate":null,"writes":[[["lldp","management-address"],null]]}
-{"at":[],"fixture":"empty","line":"delete lldp management-address","navigate":null,"writes":[[["lldp","management-address"],null]]}
+{"at":[],"fixture":"populated","line":"delete lldp management-address 10.0.0.1","navigate":null,"writes":[[["lldp","management-address"],[]]]}
+{"at":[],"fixture":"empty","line":"delete lldp management-address 10.0.0.1","navigate":null,"writes":[[["lldp","management-address"],[]]]}
 {"at":[],"fixture":"populated","line":"set hostname router1","navigate":null,"writes":[[["hostname"],"router1"]]}
 {"at":[],"fixture":"empty","line":"set hostname router1","navigate":null,"writes":[[["hostname"],"router1"]]}
 {"at":[],"fixture":"populated","line":"set user alice password s3cret","navigate":null,"writes":[[["user","alice","password"],"s3cret"]]}
@@ -412,5 +412,5 @@
 {"at":[],"fixture":"empty","line":"set lldp tx-hold 1","navigate":null,"writes":[[["lldp","tx-hold"],1]]}
 {"at":[],"fixture":"populated","line":"delete lldp tx-hold","navigate":null,"writes":[[["lldp","tx-hold"],null]]}
 {"at":[],"fixture":"empty","line":"delete lldp tx-hold","navigate":null,"writes":[[["lldp","tx-hold"],null]]}
-{"at":[],"fixture":"populated","line":"set lldp management-address 10.0.0.1","navigate":null,"writes":[[["lldp","management-address"],"10.0.0.1"]]}
-{"at":[],"fixture":"empty","line":"set lldp management-address 10.0.0.1","navigate":null,"writes":[[["lldp","management-address"],"10.0.0.1"]]}
+{"at":[],"fixture":"populated","line":"set lldp management-address 10.0.0.1","navigate":null,"writes":[[["lldp","management-address"],["10.0.0.1"]]]}
+{"at":[],"fixture":"empty","line":"set lldp management-address 10.0.0.1","navigate":null,"writes":[[["lldp","management-address"],["10.0.0.1"]]]}

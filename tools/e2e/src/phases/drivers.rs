@@ -337,11 +337,19 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(burst_done, burst_a, 15).await?;
     b.wait_new(burst_done, burst_b, 15).await?;
 
-    // Tunable timers + Management Address TLV: tx-interval 5 x tx-hold 3 must
+    // Tunable timers + Management Address TLVs: tx-interval 5 x tx-hold 3 must
     // show up as the TTL the neighbor learned (15), and each router's own
-    // address as the management address it advertised.
-    let mgmt_a = learned_a(&format!(" ttl=15 management_addresses={IP_B}"));
-    let mgmt_b = learned_b(&format!(" ttl=15 management_addresses={IP_A}"));
+    // address as a management address carrying its eth0's real ifIndex
+    // (resolved in the sender's netns; docker keeps the veth's host-side
+    // index, so only non-zero is checked). router-b also advertises an
+    // address on no interface, sent with the "unknown" numbering: two TLVs in
+    // one LLDPDU.
+    let on_if = |ip: &str| format!("{ip} (ifindex [1-9][0-9]*)");
+    let mgmt_a = learned_a(&format!(
+        " ttl=15 management_addresses={},{MGMT_NOWHERE}$",
+        on_if(IP_B)
+    ));
+    let mgmt_b = learned_b(&format!(" ttl=15 management_addresses={}$", on_if(IP_A)));
     let (base_ma, base_mb) = (a.count(&mgmt_a), b.count(&mgmt_b));
     a.provision(&host(
         "router-a",
@@ -364,11 +372,24 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
             "3",
             "--lldp-management-address",
             IP_B,
+            "--lldp-management-address",
+            MGMT_NOWHERE,
         ],
     ))
     .await?;
     a.wait_new(&mgmt_a, base_ma, 60).await?;
     b.wait_new(&mgmt_b, base_mb, 60).await?;
+
+    // Removing one address restarts router-b's link; router-a relearns it
+    // with only the other.
+    let only_b = learned_a(&format!(" ttl=15 management_addresses={}$", on_if(IP_B)));
+    let base_ob = a.count(&only_b);
+    b.provision(&host(
+        "router-b",
+        &["--no-lldp-management-address", MGMT_NOWHERE],
+    ))
+    .await?;
+    a.wait_new(&only_b, base_ob, 60).await?;
 
     // 802.1AB counters over REST: both sides sent and received real frames,
     // none of them bad, and nos sends only TLVs nos recognizes.

@@ -31,6 +31,9 @@ pub const IP_B: &str = "10.50.0.3";
 pub const IP_C: &str = "10.50.0.4";
 /// The throwaway router of the `rest` phase's destructive checks.
 pub const IP_R: &str = "10.50.0.5";
+/// The `lldp` phase's second management address on router-b: TEST-NET-1, on
+/// no interface, so it is advertised with the "unknown" interface numbering.
+pub const MGMT_NOWHERE: &str = "192.0.2.1";
 /// The `evpn` phase's third-party speaker (GoBGP), which originates the EVPN
 /// routes no NOS router can yet.
 pub const IP_G: &str = "10.50.0.6";

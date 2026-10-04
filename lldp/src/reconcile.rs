@@ -114,7 +114,7 @@ fn desired_links(cfg: &Config, chassis_mac: [u8; 6]) -> Vec<LinkConfig> {
             chassis_mac,
             tx_interval: Duration::from_secs(u64::from(cfg.lldp.effective_interval_secs())),
             ttl_secs: cfg.lldp.effective_ttl_secs(),
-            management_address: cfg.lldp.management_address,
+            management_addresses: cfg.lldp.management_addresses.clone(),
             bridge: i.switching_profile.is_some(),
             destination: i.lldp_destination.mac(),
         })
@@ -294,13 +294,13 @@ mod tests {
         };
         cfg.lldp.tx_interval_secs = Some(5);
         cfg.lldp.tx_hold = Some(3);
-        cfg.lldp.management_address = Some("10.0.0.1".parse().unwrap());
+        cfg.lldp.management_addresses = vec!["10.0.0.1".parse().unwrap()];
         let before = desired_links(&cfg, [2, 0, 0, 0, 0, 1]);
         assert_eq!(before[0].tx_interval, Duration::from_secs(5));
         assert_eq!(before[0].ttl_secs, 15);
         assert_eq!(
-            before[0].management_address,
-            Some("10.0.0.1".parse().unwrap())
+            before[0].management_addresses,
+            ["10.0.0.1".parse::<std::net::IpAddr>().unwrap()]
         );
         assert!(before[0].bridge && !before[1].bridge);
         assert_eq!(before[0].destination[5], 0x00);
