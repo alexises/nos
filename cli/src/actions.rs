@@ -210,6 +210,10 @@ pub async fn handle_action(
             show_lldp_neighbors(watchdog_socket).await;
             Outcome::Continue(mode)
         }
+        Resolved::ShowLldpStatistics => {
+            show_lldp_statistics(watchdog_socket).await;
+            Outcome::Continue(mode)
+        }
         Resolved::ShowLog { source, follow } => {
             show_log(watchdog_socket, source, follow).await;
             Outcome::Continue(mode)
@@ -512,24 +516,39 @@ async fn show_lacp(watchdog_socket: &Path, name: Option<&str>) {
     }
 }
 
+/// `nos-lldpd`'s socket via the broker, or `None` after printing why not.
+async fn resolve_lldp(watchdog_socket: &Path) -> Option<std::path::PathBuf> {
+    match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Lldp).await {
+        Ok(Some(path)) => Some(path),
+        Ok(None) => {
+            eprintln!("nos-lldpd is not running");
+            None
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            None
+        }
+    }
+}
+
 /// Same resolution and shape as `show_lacp`, against `nos-lldpd`'s neighbor
 /// query.
 async fn show_lldp_neighbors(watchdog_socket: &Path) {
-    let lldp_socket =
-        match watchdog_client::resolve(watchdog_socket, nos_proto::ServiceRef::Lldp).await {
-            Ok(Some(path)) => path,
-            Ok(None) => {
-                eprintln!("nos-lldpd is not running");
-                return;
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                return;
-            }
-        };
-
+    let Some(lldp_socket) = resolve_lldp(watchdog_socket).await else {
+        return;
+    };
     match lldp_client::get_neighbors(&lldp_socket).await {
         Ok(neighbors) => println!("{}", format::render_lldp_neighbors(&neighbors)),
+        Err(e) => eprintln!("error: {e}"),
+    }
+}
+
+async fn show_lldp_statistics(watchdog_socket: &Path) {
+    let Some(lldp_socket) = resolve_lldp(watchdog_socket).await else {
+        return;
+    };
+    match lldp_client::get_statistics(&lldp_socket).await {
+        Ok(stats) => println!("{}", format::render_lldp_statistics(&stats)),
         Err(e) => eprintln!("error: {e}"),
     }
 }

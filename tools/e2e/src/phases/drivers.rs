@@ -370,6 +370,39 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&mgmt_a, base_ma, 60).await?;
     b.wait_new(&mgmt_b, base_mb, 60).await?;
 
+    // 802.1AB counters over REST: both sides sent and received real frames,
+    // none of them bad, and nos sends only TLVs nos recognizes.
+    for r in [a, b] {
+        let s = lldp_eth1_stats(r).await?;
+        if s.frames_out == 0
+            || s.frames_in == 0
+            || s.frames_in_errors != 0
+            || s.tlvs_unrecognized != 0
+        {
+            bail!("{}: unexpected lldp counters on eth1: {s:?}", r.name());
+        }
+    }
+
+    // TTL expiry for real: freeze router-b's nos-lldpd (no shutdown frame) and
+    // router-a must age it out on the 15s TTL alone, counting it, then learn
+    // it again once it resumes.
+    let expired = "lldp neighbor removed interface=eth1 .* reason=\"expired\"";
+    let (base_exp, ageouts) = (a.count(expired), lldp_eth1_stats(a).await?.ageouts);
+    log("freezing router-b's nos-lldpd: router-a must age it out within its 15s ttl");
+    w.dock
+        .signal_process("router-b", "nos-lldpd", "-STOP")
+        .await?;
+    let aged = a.wait_new(expired, base_exp, 25).await;
+    let base_a = a.count(&learned_a(""));
+    w.dock
+        .signal_process("router-b", "nos-lldpd", "-CONT")
+        .await?;
+    aged?;
+    if lldp_eth1_stats(a).await?.ageouts != ageouts + 1 {
+        bail!("router-a's lldp ageouts counter did not go up by one");
+    }
+    a.wait_new(&learned_a(""), base_a, 30).await?;
+
     // Destination group. Both on customer-bridge: still neighbors. Then only
     // router-b back on nearest-bridge: the groups never see each other, though
     // both keep transmitting. Then router-a follows and both learn again.
@@ -441,6 +474,17 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
 
     w.unlink_veths().await;
     Ok(())
+}
+
+/// `eth1`'s row of `GET /v1/lldp/statistics`.
+async fn lldp_eth1_stats(r: &Router) -> anyhow::Result<nos_proto::LldpLinkStats> {
+    let body = r
+        .rest_expect(Method::GET, "/v1/lldp/statistics", None, 200)
+        .await?;
+    let rows: Vec<nos_proto::LldpLinkStats> = serde_json::from_str(&body)?;
+    rows.into_iter()
+        .find(|s| s.interface == "eth1")
+        .with_context(|| format!("{}: no eth1 row in lldp statistics: {body}", r.name()))
 }
 
 pub async fn switching(w: &mut World) -> anyhow::Result<()> {

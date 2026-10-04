@@ -197,10 +197,27 @@ pub fn encode(pdu: &Lldpdu) -> Vec<u8> {
     out
 }
 
+/// Optional TLVs `decode_counted` dropped, for 802.1AB §9.2.6's
+/// `statsTLVsDiscardedTotal`/`statsTLVsUnrecognizedTotal`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TlvCounts {
+    /// A malformed/non-IP Management Address, or one past the cap.
+    pub discarded: u64,
+    /// A reserved TLV type (9–126) or an organizationally-specific one (127):
+    /// we recognize no OUI.
+    pub unrecognized: u64,
+}
+
 /// Decodes an LLDPDU. The first three TLVs must be Chassis ID, Port ID and TTL
 /// in that order; unknown optional TLVs are skipped; anything after the End TLV
 /// (Ethernet padding) is ignored.
-pub fn decode(mut data: &[u8]) -> Result<Lldpdu, DecodeError> {
+pub fn decode(data: &[u8]) -> Result<Lldpdu, DecodeError> {
+    decode_counted(data).map(|(pdu, _)| pdu)
+}
+
+/// `decode`, also counting the optional TLVs it skipped.
+pub fn decode_counted(mut data: &[u8]) -> Result<(Lldpdu, TlvCounts), DecodeError> {
+    let mut counts = TlvCounts::default();
     let mut chassis_id = None;
     let mut port_id = None;
     let mut ttl = None;
@@ -276,18 +293,20 @@ pub fn decode(mut data: &[u8]) -> Result<Lldpdu, DecodeError> {
             }
             // Optional and untrusted: a malformed or non-IP one is skipped
             // rather than rejecting the whole LLDPDU (and its neighbor).
-            TLV_MANAGEMENT_ADDRESS if pdu.management_addresses.len() < MAX_MANAGEMENT_ADDRESSES => {
-                pdu.management_addresses
-                    .extend(decode_management_address(value));
-            }
-            _ => {} // unknown / organizationally specific: skip
+            TLV_MANAGEMENT_ADDRESS => match decode_management_address(value) {
+                Some(addr) if pdu.management_addresses.len() < MAX_MANAGEMENT_ADDRESSES => {
+                    pdu.management_addresses.push(addr);
+                }
+                _ => counts.discarded += 1,
+            },
+            _ => counts.unrecognized += 1, // reserved / organizationally specific: skip
         }
     }
 
     pdu.chassis_id = chassis_id.ok_or(DecodeError::MissingMandatory)?;
     pdu.port_id = port_id.ok_or(DecodeError::MissingMandatory)?;
     pdu.ttl = ttl.ok_or(DecodeError::MissingMandatory)?;
-    Ok(pdu)
+    Ok((pdu, counts))
 }
 
 /// Management Address TLV value (802.1AB §8.5.9): address string length (the
@@ -477,6 +496,38 @@ mod tests {
         push_tlv(&mut bytes, 127, &[0x00, 0x80, 0xc2, 0x01, 0xff]);
         push_tlv(&mut bytes, TLV_END, &[]);
         assert_eq!(decode(&bytes).unwrap(), sample());
+    }
+
+    #[test]
+    fn skipped_tlvs_are_counted() {
+        let mut bytes = encode(&sample());
+        bytes.truncate(bytes.len() - 2);
+        push_tlv(&mut bytes, 42, &[1, 2]); // reserved type
+        push_tlv(&mut bytes, 127, &[0x00, 0x80, 0xc2, 0x01]); // org-specific
+        push_tlv(&mut bytes, TLV_MANAGEMENT_ADDRESS, &[5, AF_IPV4, 10]); // truncated
+        for i in 1..=5 {
+            let addr = IpAddr::from([10, 0, 0, i]);
+            push_tlv(
+                &mut bytes,
+                TLV_MANAGEMENT_ADDRESS,
+                &encode_management_address(addr),
+            );
+        }
+        push_tlv(&mut bytes, TLV_END, &[]);
+        let (pdu, counts) = decode_counted(&bytes).unwrap();
+        assert_eq!(pdu.management_addresses.len(), MAX_MANAGEMENT_ADDRESSES);
+        // The truncated one, and the fifth valid one past the cap.
+        assert_eq!(
+            counts,
+            TlvCounts {
+                discarded: 2,
+                unrecognized: 2
+            }
+        );
+        assert_eq!(
+            decode_counted(&encode(&sample())).unwrap().1,
+            TlvCounts::default()
+        );
     }
 
     #[test]

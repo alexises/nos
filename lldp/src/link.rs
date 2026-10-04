@@ -14,7 +14,9 @@ use tokio::sync::watch;
 use tokio::time::sleep_until;
 use tracing::{debug, info, trace, warn};
 
-use crate::neighbor::{NeighborTable, Update};
+use nos_proto::LldpLinkStats;
+
+use crate::neighbor::{NeighborTable, Update, MAX_NEIGHBORS_PER_LINK};
 use crate::packet::{
     self, Capabilities, Id, Lldpdu, CAP_BRIDGE, CAP_ROUTER, CHASSIS_SUBTYPE_MAC,
     PORT_SUBTYPE_IF_NAME,
@@ -58,10 +60,20 @@ pub struct LinkConfig {
     pub destination: [u8; 6],
 }
 
-/// Every receiving interface's neighbor table, keyed by interface name. Shared
-/// with `server.rs` so `show lldp neighbors` reads live state. A std mutex,
-/// never held across an `.await`.
-pub type SharedNeighbors = Arc<Mutex<HashMap<String, NeighborTable>>>;
+/// One LLDP-enabled interface's live state: its neighbors and its 802.1AB
+/// §9.2.6 counters (`stats.interface` is left empty; the map key names it).
+#[derive(Default)]
+pub struct Port {
+    pub neighbors: NeighborTable,
+    pub stats: LldpLinkStats,
+}
+
+/// Every LLDP-enabled interface's `Port`, keyed by interface name. Shared with
+/// `server.rs` so `show lldp neighbors`/`statistics` read live state. A std
+/// mutex, never held across an `.await`. An entry outlives its link task (the
+/// counters survive a link restart); `reconcile` removes it when LLDP is
+/// turned off on the interface.
+pub type SharedPorts = Arc<Mutex<HashMap<String, Port>>>;
 
 fn chassis_id(cfg: &LinkConfig) -> Id {
     Id {
@@ -107,11 +119,19 @@ fn shutdown_pdu(cfg: &LinkConfig) -> Lldpdu {
 /// Sends `pdu`, returning `false` only if the link was down. A link that comes
 /// up just after its task starts (`nos-interfaced` admin-ups it on its own
 /// schedule) would otherwise cost a whole `TX_INTERVAL` before the first
-/// advertisement — the caller retries after `LINK_DOWN_RETRY` instead.
-fn send(socket: &LldpSocket, interface: &str, pdu: &Lldpdu) -> bool {
+/// advertisement — the caller retries after `LINK_DOWN_RETRY` instead. Only a
+/// frame that actually left counts towards `frames_out`.
+fn send(socket: &LldpSocket, interface: &str, ports: &SharedPorts, pdu: &Lldpdu) -> bool {
     match socket.send(&packet::encode(pdu)) {
         Ok(()) => {
             trace!(interface = %interface, ttl = pdu.ttl, "lldpdu sent");
+            ports
+                .lock()
+                .unwrap()
+                .entry(interface.to_string())
+                .or_default()
+                .stats
+                .frames_out += 1;
             true
         }
         Err(e) if socket::is_link_down(&e) => {
@@ -130,10 +150,16 @@ fn send(socket: &LldpSocket, interface: &str, pdu: &Lldpdu) -> bool {
 /// that came up after us learns us without waiting out our 30s timer. Only new
 /// neighbors trigger it, so two systems settle after one burst rather than
 /// ping-ponging.
-fn handle_rx(cfg: &LinkConfig, neighbors: &SharedNeighbors, payload: &[u8], now: Instant) -> bool {
-    let pdu = match packet::decode(payload) {
-        Ok(pdu) => pdu,
+fn handle_rx(cfg: &LinkConfig, ports: &SharedPorts, payload: &[u8], now: Instant) -> bool {
+    let decoded = packet::decode_counted(payload);
+    let mut ports_guard = ports.lock().unwrap();
+    let entry = ports_guard.entry(cfg.interface.clone()).or_default();
+    let (pdu, tlvs) = match decoded {
+        Ok(decoded) => decoded,
         Err(e) => {
+            entry.stats.frames_in_errors += 1;
+            entry.stats.frames_discarded += 1;
+            drop(ports_guard);
             debug!(interface = %cfg.interface, error = %e, "dropping malformed lldpdu");
             return false;
         }
@@ -142,6 +168,9 @@ fn handle_rx(cfg: &LinkConfig, neighbors: &SharedNeighbors, payload: &[u8], now:
     if pdu.chassis_id == chassis_id(cfg) {
         return false;
     }
+    entry.stats.frames_in += 1;
+    entry.stats.tlvs_discarded += tlvs.discarded;
+    entry.stats.tlvs_unrecognized += tlvs.unrecognized;
     let chassis = pdu.chassis_display();
     let port = pdu.port_display();
     let system_name = pdu.system_name.clone().unwrap_or_default();
@@ -152,12 +181,12 @@ fn handle_rx(cfg: &LinkConfig, neighbors: &SharedNeighbors, payload: &[u8], now:
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(",");
-    let update = neighbors
-        .lock()
-        .unwrap()
-        .entry(cfg.interface.clone())
-        .or_default()
-        .apply(pdu, now);
+    let update = entry.neighbors.apply(pdu, now);
+    if let Update::TableFull { .. } = update {
+        entry.stats.too_many_neighbors += 1;
+        entry.stats.frames_discarded += 1;
+    }
+    drop(ports_guard);
     match update {
         Update::New => {
             info!(
@@ -174,16 +203,36 @@ fn handle_rx(cfg: &LinkConfig, neighbors: &SharedNeighbors, payload: &[u8], now:
             );
             false
         }
+        // A hostile segment must not flood the log through nos-logd: warn on
+        // the first refusal since the table last had room, debug after.
+        Update::TableFull { first: true } => {
+            warn!(
+                interface = %cfg.interface, chassis_id = %chassis, port_id = %port,
+                limit = MAX_NEIGHBORS_PER_LINK, "lldp neighbor table full, dropping new neighbor"
+            );
+            false
+        }
+        Update::TableFull { first: false } => {
+            debug!(
+                interface = %cfg.interface, chassis_id = %chassis, port_id = %port,
+                "lldp neighbor table full, dropping new neighbor"
+            );
+            false
+        }
         Update::Refreshed | Update::Ignored => false,
     }
 }
 
-fn expire(cfg: &LinkConfig, neighbors: &SharedNeighbors, now: Instant) {
-    let gone = neighbors
+fn expire(cfg: &LinkConfig, ports: &SharedPorts, now: Instant) {
+    let gone = ports
         .lock()
         .unwrap()
         .get_mut(&cfg.interface)
-        .map(|t| t.expire(now))
+        .map(|p| {
+            let gone = p.neighbors.expire(now);
+            p.stats.ageouts += gone.len() as u64;
+            gone
+        })
         .unwrap_or_default();
     for pdu in gone {
         info!(
@@ -193,12 +242,12 @@ fn expire(cfg: &LinkConfig, neighbors: &SharedNeighbors, now: Instant) {
     }
 }
 
-fn next_expiry(cfg: &LinkConfig, neighbors: &SharedNeighbors) -> Option<Instant> {
-    neighbors
+fn next_expiry(cfg: &LinkConfig, ports: &SharedPorts) -> Option<Instant> {
+    ports
         .lock()
         .unwrap()
         .get(&cfg.interface)
-        .and_then(NeighborTable::next_expiry)
+        .and_then(|p| p.neighbors.next_expiry())
 }
 
 /// 802.1AB §9.2.5.19-21 credit refill: one credit per whole second since
@@ -229,16 +278,18 @@ fn spend_tx(credit: &mut u8, fast: &mut u8, tx_interval: Duration, now: Instant)
 /// `reconcile` respawns a link that ended on its own.
 pub async fn run(
     cfg: LinkConfig,
-    neighbors: SharedNeighbors,
+    ports: SharedPorts,
     mut stop: watch::Receiver<bool>,
 ) -> io::Result<()> {
+    // Listed (with its counters, kept across restarts) even before the socket
+    // opens; the neighbor table starts empty.
+    ports
+        .lock()
+        .unwrap()
+        .entry(cfg.interface.clone())
+        .or_default()
+        .neighbors = NeighborTable::default();
     let socket = socket::open(&cfg.interface, cfg.destination)?;
-    if cfg.receive {
-        neighbors
-            .lock()
-            .unwrap()
-            .insert(cfg.interface.clone(), NeighborTable::default());
-    }
     info!(
         interface = %cfg.interface, transmit = cfg.transmit, receive = cfg.receive,
         tx_interval_secs = cfg.tx_interval.as_secs(), ttl_secs = cfg.ttl_secs,
@@ -255,7 +306,7 @@ pub async fn run(
         // Never leave an elapsed deadline armed: `expire` moves it forward by
         // removing the entry it belonged to, and with no entries the branch is
         // disabled by its guard.
-        let deadline = next_expiry(&cfg, &neighbors);
+        let deadline = next_expiry(&cfg, &ports);
         tokio::select! {
             _ = stop.changed() => break Ok(()),
             () = sleep_until(tokio::time::Instant::from_std(next_tx)), if cfg.transmit => {
@@ -264,7 +315,7 @@ pub async fn run(
                 // Out of credit, or the link is down: nothing spent, retry in
                 // a second (credit comes back at that rate too).
                 next_tx = now + LINK_DOWN_RETRY;
-                if tx_credit > 0 && send(&socket, &cfg.interface, &local_pdu(&cfg)) {
+                if tx_credit > 0 && send(&socket, &cfg.interface, &ports, &local_pdu(&cfg)) {
                     if tx_fast > 0 {
                         debug!(interface = %cfg.interface, remaining = tx_fast - 1, "lldp fast-start tx");
                     }
@@ -273,7 +324,7 @@ pub async fn run(
             }
             frame = socket.recv(), if cfg.receive => match frame {
                 Ok(payload) => {
-                    if handle_rx(&cfg, &neighbors, &payload, Instant::now()) && cfg.transmit {
+                    if handle_rx(&cfg, &ports, &payload, Instant::now()) && cfg.transmit {
                         tx_fast = TX_FAST_INIT;
                         next_tx = Instant::now();
                     }
@@ -283,15 +334,17 @@ pub async fn run(
             () = sleep_until(tokio::time::Instant::from_std(deadline.unwrap_or_else(Instant::now))),
                 if deadline.is_some() =>
             {
-                expire(&cfg, &neighbors, Instant::now());
+                expire(&cfg, &ports, Instant::now());
             }
         }
     };
 
     if cfg.transmit {
-        send(&socket, &cfg.interface, &shutdown_pdu(&cfg));
+        send(&socket, &cfg.interface, &ports, &shutdown_pdu(&cfg));
     }
-    neighbors.lock().unwrap().remove(&cfg.interface);
+    if let Some(port) = ports.lock().unwrap().get_mut(&cfg.interface) {
+        port.neighbors = NeighborTable::default();
+    }
     info!(interface = %cfg.interface, "lldp link stopped");
     result
 }
@@ -315,7 +368,7 @@ mod tests {
         }
     }
 
-    fn shared() -> SharedNeighbors {
+    fn shared() -> SharedPorts {
         Arc::new(Mutex::new(HashMap::new()))
     }
 
@@ -369,40 +422,43 @@ mod tests {
     fn only_a_new_neighbor_asks_for_an_immediate_reply() {
         let (me, peer) = (cfg(1), cfg(2));
         let n = shared();
-        n.lock()
-            .unwrap()
-            .insert("eth1".to_string(), NeighborTable::default());
         let now = Instant::now();
         assert!(handle_rx(&me, &n, &frame_from(&peer, 120), now));
         // The same neighbor again is a refresh: no reply, so no ping-pong.
         assert!(!handle_rx(&me, &n, &frame_from(&peer, 120), now));
-        assert_eq!(n.lock().unwrap()["eth1"].snapshot("eth1", now).len(), 1);
+        assert_eq!(
+            n.lock().unwrap()["eth1"]
+                .neighbors
+                .snapshot("eth1", now)
+                .len(),
+            1
+        );
     }
 
     #[test]
     fn shutdown_frame_removes_the_neighbor_immediately() {
         let (me, peer) = (cfg(1), cfg(2));
         let n = shared();
-        n.lock()
-            .unwrap()
-            .insert("eth1".to_string(), NeighborTable::default());
         let now = Instant::now();
         handle_rx(&me, &n, &frame_from(&peer, 120), now);
         assert!(!handle_rx(&me, &n, &frame_from(&peer, 0), now));
-        assert_eq!(n.lock().unwrap()["eth1"].snapshot("eth1", now), []);
+        assert_eq!(
+            n.lock().unwrap()["eth1"].neighbors.snapshot("eth1", now),
+            []
+        );
     }
 
     #[test]
     fn own_reflected_frame_and_garbage_are_ignored() {
         let me = cfg(1);
         let n = shared();
-        n.lock()
-            .unwrap()
-            .insert("eth1".to_string(), NeighborTable::default());
         let now = Instant::now();
         assert!(!handle_rx(&me, &n, &frame_from(&me, 120), now));
         assert!(!handle_rx(&me, &n, &[0xff, 0xff, 0x01], now));
-        assert_eq!(n.lock().unwrap()["eth1"].snapshot("eth1", now), []);
+        assert_eq!(
+            n.lock().unwrap()["eth1"].neighbors.snapshot("eth1", now),
+            []
+        );
     }
 
     #[test]
@@ -446,15 +502,47 @@ mod tests {
     fn expire_drops_lapsed_neighbors_only() {
         let (me, peer) = (cfg(1), cfg(2));
         let n = shared();
-        n.lock()
-            .unwrap()
-            .insert("eth1".to_string(), NeighborTable::default());
         let now = Instant::now();
         handle_rx(&me, &n, &frame_from(&peer, 10), now);
         expire(&me, &n, now + Duration::from_secs(5));
-        assert_eq!(n.lock().unwrap()["eth1"].snapshot("eth1", now).len(), 1);
+        assert_eq!(
+            n.lock().unwrap()["eth1"]
+                .neighbors
+                .snapshot("eth1", now)
+                .len(),
+            1
+        );
         expire(&me, &n, now + Duration::from_secs(10));
-        assert_eq!(n.lock().unwrap()["eth1"].snapshot("eth1", now), []);
+        assert_eq!(
+            n.lock().unwrap()["eth1"].neighbors.snapshot("eth1", now),
+            []
+        );
         assert_eq!(next_expiry(&me, &n), None);
+        assert_eq!(n.lock().unwrap()["eth1"].stats.ageouts, 1);
+    }
+
+    #[test]
+    fn receive_counters() {
+        let me = cfg(1);
+        let n = shared();
+        let now = Instant::now();
+        handle_rx(&me, &n, &frame_from(&cfg(2), 120), now); // valid
+        handle_rx(&me, &n, &[0xff, 0xff, 0x01], now); // garbage
+        handle_rx(&me, &n, &frame_from(&me, 120), now); // our own, not counted
+                                                        // Fill the table, then one more new neighbor is refused.
+        for i in 3..=u8::try_from(MAX_NEIGHBORS_PER_LINK + 2).unwrap() {
+            handle_rx(&me, &n, &frame_from(&cfg(i), 120), now);
+        }
+        let stats = n.lock().unwrap()["eth1"].stats.clone();
+        assert_eq!(
+            stats,
+            LldpLinkStats {
+                frames_in: u64::try_from(MAX_NEIGHBORS_PER_LINK).unwrap() + 1,
+                frames_in_errors: 1,
+                frames_discarded: 2,
+                too_many_neighbors: 1,
+                ..LldpLinkStats::default()
+            }
+        );
     }
 }

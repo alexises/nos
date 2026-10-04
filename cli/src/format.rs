@@ -654,6 +654,32 @@ pub fn render_lldp_neighbors(neighbors: &[nos_proto::LldpNeighbor]) -> String {
         .join("\n")
 }
 
+/// Render `nos-lldpd`'s per-interface counters, for `show lldp statistics`.
+pub fn render_lldp_statistics(stats: &[nos_proto::LldpLinkStats]) -> String {
+    if stats.is_empty() {
+        return "no lldp links".to_string();
+    }
+    stats
+        .iter()
+        .map(|s| {
+            format!(
+                "{}: tx {}, rx {}, rx errors {}, rx discarded {}, tlvs discarded {}, \
+                 tlvs unrecognized {}, ageouts {}, too many neighbors {}",
+                s.interface,
+                s.frames_out,
+                s.frames_in,
+                s.frames_in_errors,
+                s.frames_discarded,
+                s.tlvs_discarded,
+                s.tlvs_unrecognized,
+                s.ageouts,
+                s.too_many_neighbors,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn yes_no(value: bool) -> &'static str {
     if value {
         "yes"
@@ -2772,6 +2798,27 @@ mod tests {
         };
         assert!(render_lldp_neighbors(&[with_mgmt])
             .contains("capabilities router, management 10.0.0.2,2001:db8::2, ttl 117s"));
+    }
+
+    #[test]
+    fn render_lldp_statistics_empty_and_populated() {
+        assert_eq!(render_lldp_statistics(&[]), "no lldp links");
+        let stats = nos_proto::LldpLinkStats {
+            interface: "eth1".to_string(),
+            frames_out: 1,
+            frames_in: 2,
+            frames_in_errors: 3,
+            frames_discarded: 4,
+            tlvs_discarded: 5,
+            tlvs_unrecognized: 6,
+            ageouts: 7,
+            too_many_neighbors: 8,
+        };
+        assert_eq!(
+            render_lldp_statistics(&[stats]),
+            "eth1: tx 1, rx 2, rx errors 3, rx discarded 4, tlvs discarded 5, \
+             tlvs unrecognized 6, ageouts 7, too many neighbors 8"
+        );
     }
 
     #[test]

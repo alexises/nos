@@ -119,11 +119,50 @@ transaction 'lldp3' committed
 
 REST: `PUT …/interface/eth1/lldp-destination` with body `"CustomerBridge"`. Both ends of the link must use the same group; see below.
 
+### Read the counters
+
+```
+router-a> show lldp statistics
+eth1: tx 14, rx 12, rx errors 0, rx discarded 0, tlvs discarded 0, tlvs unrecognized 0, ageouts 0, too many neighbors 0
+```
+
+One line per LLDP-enabled interface, with the IEEE 802.1AB counters:
+
+- `tx`: frames sent, shutdown frames included.
+- `rx`: valid frames received. Our own frames looped back are not counted.
+- `rx errors`: frames that failed validation (a missing, misordered or malformed mandatory field).
+- `rx discarded`: every frame in error, plus every frame from a new neighbour refused because the table was full.
+- `tlvs discarded`: optional fields dropped: a malformed or non-IP management address, or one past the fourth in a frame.
+- `tlvs unrecognized`: fields NOS does not decode: reserved types and every organization-specific field (LLDP-MED, DCBX, …).
+- `ageouts`: neighbours removed because their time to live ran out (not those that sent a shutdown frame).
+- `too many neighbors`: new neighbours refused because the interface already had 32.
+
+The counters start at zero when `nos-lldpd` starts or LLDP is enabled on the interface. A settings change that restarts LLDP on the interface keeps them; turning both directions off drops them.
+
+REST: `GET /v1/lldp/statistics`, one object per interface.
+
+```sh
+$ $C $B/v1/lldp/statistics | jq .
+[
+  {
+    "interface": "eth1",
+    "frames_out": 14,
+    "frames_in": 12,
+    "frames_in_errors": 0,
+    "frames_discarded": 0,
+    "tlvs_discarded": 0,
+    "tlvs_unrecognized": 0,
+    "ageouts": 0,
+    "too_many_neighbors": 0
+  }
+]
+```
+
 ## How LLDP behaves
 
 **Physical interfaces only.** LLDP describes a physical link, so it can be enabled on a physical interface, including a port-aggregate member, but not on a loopback (refused at commit) and not on a subinterface or on the aggregate itself.
 
-**Neighbours.** A neighbour is identified by its chassis ID and port ID, so one device heard on two of our ports shows as two neighbours. Each entry is kept for the time to live its sender advertised, counting down in `show lldp neighbors` (`ttl`); every new frame from the neighbour restarts the count. NOS keeps at most 32 neighbours per interface. Frames that NOS itself sent, looped back by a cable or a mirror port, are ignored.
+**Neighbours.** A neighbour is identified by its chassis ID and port ID, so one device heard on two of our ports shows as two neighbours. Each entry is kept for the time to live its sender advertised, counting down in `show lldp neighbors` (`ttl`); every new frame from the neighbour restarts the count. NOS keeps at most 32 neighbours per interface: known neighbours keep refreshing, a new one is refused and counted in `too many neighbors`, and NOS logs `lldp neighbor table full, dropping new neighbor` as a warning once until the table has room again. Frames that NOS itself sent, looped back by a cable or a mirror port, are ignored.
 
 **Shutdown.** When transmit stops on an interface (you delete `lldp transmit`, remove the interface, or the router shuts down), NOS sends a last frame with a time to live of zero, so the neighbour removes this router at once instead of waiting for the entry to expire. Turning receive off forgets the neighbours heard on that interface.
 

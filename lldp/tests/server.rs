@@ -1,15 +1,14 @@
 use std::time::Instant;
 
 use futures::{SinkExt, StreamExt};
-use nos_lldp::link::SharedNeighbors;
-use nos_lldp::neighbor::NeighborTable;
+use nos_lldp::link::{Port, SharedPorts};
 use nos_lldp::packet::{Id, Lldpdu, CHASSIS_SUBTYPE_MAC, PORT_SUBTYPE_IF_NAME};
 use nos_lldp::server;
 use nos_pki::testing::shared;
-use nos_proto::{IpcCodec, LldpEvent, LldpNeighbor, LldpRequest};
+use nos_proto::{IpcCodec, LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-async fn query(path: &std::path::Path) -> Vec<LldpNeighbor> {
+async fn request(path: &std::path::Path, request: LldpRequest) -> LldpEvent {
     let stream = shared()
         .identity("user", "tester")
         .connect(path, &nos_pki::PeerId::new("lldpd", ""))
@@ -18,9 +17,46 @@ async fn query(path: &std::path::Path) -> Vec<LldpNeighbor> {
     let (r, w) = tokio::io::split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<LldpEvent>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<LldpRequest>::default());
-    writer.send(LldpRequest::GetNeighbors).await.unwrap();
-    let LldpEvent::Neighbors(neighbors) = reader.next().await.unwrap().unwrap();
-    neighbors
+    writer.send(request).await.unwrap();
+    reader.next().await.unwrap().unwrap()
+}
+
+async fn query(path: &std::path::Path) -> Vec<LldpNeighbor> {
+    match request(path, LldpRequest::GetNeighbors).await {
+        LldpEvent::Neighbors(neighbors) => neighbors,
+        other @ LldpEvent::Statistics(_) => panic!("unexpected reply {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn get_statistics_lists_every_port_sorted_and_named() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("lldp.sock");
+    let ports = SharedPorts::default();
+    for (iface, frames_out) in [("eth2", 7), ("eth1", 3)] {
+        ports.lock().unwrap().insert(
+            iface.to_string(),
+            Port {
+                stats: LldpLinkStats {
+                    frames_out,
+                    ..LldpLinkStats::default()
+                },
+                ..Port::default()
+            },
+        );
+    }
+    let _server = server::start(&path, ports, &shared().identity("lldpd", "")).unwrap();
+
+    let LldpEvent::Statistics(stats) = request(&path, LldpRequest::GetStatistics).await else {
+        panic!("expected statistics");
+    };
+    assert_eq!(
+        stats
+            .iter()
+            .map(|s| (s.interface.as_str(), s.frames_out))
+            .collect::<Vec<_>>(),
+        [("eth1", 3), ("eth2", 7)]
+    );
 }
 
 fn pdu(chassis: u8, port: &str, name: &str) -> Lldpdu {
@@ -46,12 +82,12 @@ fn pdu(chassis: u8, port: &str, name: &str) -> Lldpdu {
 async fn get_neighbors_lists_every_interface_sorted() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("lldp.sock");
-    let neighbors = SharedNeighbors::default();
+    let neighbors = SharedPorts::default();
     let now = Instant::now();
     for (iface, chassis, name) in [("eth2", 3, "router-c"), ("eth1", 2, "router-b")] {
-        let mut table = NeighborTable::default();
-        table.apply(pdu(chassis, "eth0", name), now);
-        neighbors.lock().unwrap().insert(iface.to_string(), table);
+        let mut port = Port::default();
+        port.neighbors.apply(pdu(chassis, "eth0", name), now);
+        neighbors.lock().unwrap().insert(iface.to_string(), port);
     }
     let _server = server::start(&path, neighbors, &shared().identity("lldpd", "")).unwrap();
 
@@ -71,7 +107,7 @@ async fn get_neighbors_with_no_links_is_empty() {
     let path = tmp.path().join("lldp.sock");
     let _server = server::start(
         &path,
-        SharedNeighbors::default(),
+        SharedPorts::default(),
         &shared().identity("lldpd", ""),
     )
     .unwrap();

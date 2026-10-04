@@ -423,6 +423,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         },
         Always,
         Command::ShowLldpNeighbors),
+    cmd!(["show" "lldp" "statistics"],
+        Doc::Local {
+            summary: "Show every LLDP-enabled interface's counters.",
+            detail: "Queries nos-lldpd (resolved via nos-watchdogd) for the IEEE 802.1AB \
+                     statistics of each LLDP-enabled interface: frames sent and received, \
+                     received frames in error or discarded, optional TLVs discarded or \
+                     unrecognized, neighbors aged out, and new neighbors refused because the \
+                     table was full. Counters reset when nos-lldpd restarts or LLDP is turned \
+                     off on the interface.",
+        },
+        Always,
+        Command::ShowLldpStatistics),
     cmd!(["show" "lacp"],
         Doc::Local {
             summary: "Show every LACP port aggregate's negotiation state.",

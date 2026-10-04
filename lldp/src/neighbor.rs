@@ -22,8 +22,12 @@ pub enum Update {
     Refreshed,
     /// TTL 0 — the neighbor announced it is going away.
     Removed,
-    /// Table full, or a shutdown for a neighbor we never had.
+    /// A shutdown for a neighbor we never had.
     Ignored,
+    /// 802.1AB tooManyNeighbors: a new neighbor refused because the table is
+    /// full. `first` is set on the first refusal since the table last had
+    /// room, so the caller warns once rather than once per frame.
+    TableFull { first: bool },
 }
 
 struct Entry {
@@ -34,6 +38,9 @@ struct Entry {
 #[derive(Default)]
 pub struct NeighborTable {
     entries: HashMap<(Id, Id), Entry>,
+    /// A `TableFull { first: true }` was already returned and no entry has
+    /// left since.
+    full_reported: bool,
 }
 
 impl NeighborTable {
@@ -41,6 +48,7 @@ impl NeighborTable {
         let key = (pdu.chassis_id.clone(), pdu.port_id.clone());
         if pdu.ttl == 0 {
             return if self.entries.remove(&key).is_some() {
+                self.full_reported = false;
                 Update::Removed
             } else {
                 Update::Ignored
@@ -53,7 +61,9 @@ impl NeighborTable {
                 slot.insert(Entry { pdu, expires_at });
                 Update::Refreshed
             }
-            hash_map::Entry::Vacant(_) if full => Update::Ignored,
+            hash_map::Entry::Vacant(_) if full => Update::TableFull {
+                first: !std::mem::replace(&mut self.full_reported, true),
+            },
             hash_map::Entry::Vacant(slot) => {
                 slot.insert(Entry { pdu, expires_at });
                 Update::New
@@ -69,6 +79,9 @@ impl NeighborTable {
             .filter(|(_, e)| e.expires_at <= now)
             .map(|(k, _)| k.clone())
             .collect();
+        if !expired.is_empty() {
+            self.full_reported = false;
+        }
         expired
             .into_iter()
             .filter_map(|k| self.entries.remove(&k))
@@ -189,7 +202,24 @@ mod tests {
             t.apply(pdu(i, "eth1", 120), now);
         }
         assert_eq!(t.snapshot("eth0", now).len(), MAX_NEIGHBORS_PER_LINK);
+        // The 33rd was refused, reported once; later refusals are not "first".
+        assert_eq!(
+            t.apply(pdu(200, "eth1", 120), now),
+            Update::TableFull { first: false }
+        );
         // An existing neighbor can still refresh when the table is full.
         assert_eq!(t.apply(pdu(0, "eth1", 120), now), Update::Refreshed);
+        // A shutdown for a neighbor we never had is not a table drop.
+        assert_eq!(t.apply(pdu(201, "eth1", 0), now), Update::Ignored);
+
+        // Room again (one ages out, one refills it): the next refusal is
+        // reported afresh.
+        t.apply(pdu(1, "eth1", 5), now);
+        assert_eq!(t.expire(now + Duration::from_secs(5)).len(), 1);
+        assert_eq!(t.apply(pdu(202, "eth1", 120), now), Update::New);
+        assert_eq!(
+            t.apply(pdu(203, "eth1", 120), now),
+            Update::TableFull { first: true }
+        );
     }
 }

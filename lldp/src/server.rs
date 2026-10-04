@@ -1,38 +1,39 @@
-//! Binds `--listen-socket` and serves `LldpRequest::GetNeighbors` from the live
-//! neighbor tables — backs `nos-cli`'s `show lldp neighbors`. Mirrors
-//! `nos-lacp`'s `server.rs`.
+//! Binds `--listen-socket` and serves `LldpRequest::GetNeighbors`/
+//! `GetStatistics` from the live per-interface state — backs `nos-cli`'s
+//! `show lldp neighbors`/`show lldp statistics`. Mirrors `nos-lacp`'s
+//! `server.rs`.
 
 use std::path::Path;
 use std::time::Instant;
 
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, Incoming, Listener, Stream};
-use nos_proto::{IpcCodec, LldpEvent, LldpNeighbor, LldpRequest, Role};
+use nos_proto::{IpcCodec, LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest, Role};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::link::SharedNeighbors;
+use crate::link::SharedPorts;
 
 pub fn start(
     listen_socket: &Path,
-    neighbors: SharedNeighbors,
+    ports: SharedPorts,
     identity: &Identity,
 ) -> std::io::Result<JoinHandle<()>> {
     let listener = identity.listen(listen_socket)?;
     info!(socket = %listen_socket.display(), "lldp IPC server listening");
-    Ok(tokio::spawn(accept_loop(listener, neighbors)))
+    Ok(tokio::spawn(accept_loop(listener, ports)))
 }
 
-/// The only request is a read-only neighbor query: for people, and `Restd` on
-/// their behalf.
+/// Every request is a read-only query: for people, and `Restd` on their
+/// behalf.
 fn may_query(role: Role) -> bool {
     matches!(role, Role::User | Role::Restd)
 }
 
-async fn serve(incoming: Incoming, neighbors: SharedNeighbors) {
+async fn serve(incoming: Incoming, ports: SharedPorts) {
     match incoming.handshake_as(Role::parse).await {
-        Ok((stream, role, _)) if may_query(role) => handle_connection(stream, neighbors).await,
+        Ok((stream, role, _)) if may_query(role) => handle_connection(stream, ports).await,
         Ok((_, role, name)) => warn!(
             role = role.as_str(), name = %name,
             "lldp query refused: this role may not send it"
@@ -41,11 +42,11 @@ async fn serve(incoming: Incoming, neighbors: SharedNeighbors) {
     }
 }
 
-async fn accept_loop(listener: Listener, neighbors: SharedNeighbors) {
+async fn accept_loop(listener: Listener, ports: SharedPorts) {
     loop {
         match listener.accept().await {
             Ok(incoming) => {
-                tokio::spawn(serve(incoming, neighbors.clone()));
+                tokio::spawn(serve(incoming, ports.clone()));
             }
             Err(e) => {
                 error!(error = %e, "lldp IPC accept loop terminated");
@@ -55,7 +56,7 @@ async fn accept_loop(listener: Listener, neighbors: SharedNeighbors) {
     }
 }
 
-async fn handle_connection(stream: Stream, neighbors: SharedNeighbors) {
+async fn handle_connection(stream: Stream, ports: SharedPorts) {
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<LldpRequest>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<LldpEvent>::default());
@@ -64,7 +65,11 @@ async fn handle_connection(stream: Stream, neighbors: SharedNeighbors) {
         let event = match msg {
             Ok(LldpRequest::GetNeighbors) => {
                 trace!("serving lldp neighbor query");
-                LldpEvent::Neighbors(all_neighbors(&neighbors))
+                LldpEvent::Neighbors(all_neighbors(&ports))
+            }
+            Ok(LldpRequest::GetStatistics) => {
+                trace!("serving lldp statistics query");
+                LldpEvent::Statistics(all_statistics(&ports))
             }
             Err(e) => {
                 warn!(error = %e, "lldp IPC read error");
@@ -79,13 +84,13 @@ async fn handle_connection(stream: Stream, neighbors: SharedNeighbors) {
 
 /// Every neighbor on every interface, ordered by interface then chassis then
 /// port. The std mutex is released before any `.await` in the caller.
-fn all_neighbors(neighbors: &SharedNeighbors) -> Vec<LldpNeighbor> {
+fn all_neighbors(ports: &SharedPorts) -> Vec<LldpNeighbor> {
     let now = Instant::now();
-    let mut all: Vec<LldpNeighbor> = neighbors
+    let mut all: Vec<LldpNeighbor> = ports
         .lock()
         .unwrap()
         .iter()
-        .flat_map(|(interface, table)| table.snapshot(interface, now))
+        .flat_map(|(interface, port)| port.neighbors.snapshot(interface, now))
         .collect();
     all.sort_by(|a, b| {
         (&a.local_interface, &a.chassis_id, &a.port_id).cmp(&(
@@ -94,5 +99,20 @@ fn all_neighbors(neighbors: &SharedNeighbors) -> Vec<LldpNeighbor> {
             &b.port_id,
         ))
     });
+    all
+}
+
+/// Every LLDP-enabled interface's counters, ordered by interface.
+fn all_statistics(ports: &SharedPorts) -> Vec<LldpLinkStats> {
+    let mut all: Vec<LldpLinkStats> = ports
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(interface, port)| LldpLinkStats {
+            interface: interface.clone(),
+            ..port.stats.clone()
+        })
+        .collect();
+    all.sort_by(|a, b| a.interface.cmp(&b.interface));
     all
 }
