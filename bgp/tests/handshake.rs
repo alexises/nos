@@ -93,6 +93,7 @@ async fn two_real_instances_establish_a_session() {
         export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        announce_rpki_state: false,
         confed_id: None,
         confed_member: false,
     });
@@ -116,6 +117,7 @@ async fn two_real_instances_establish_a_session() {
         export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        announce_rpki_state: false,
         confed_id: None,
         confed_member: false,
     });
@@ -222,6 +224,7 @@ async fn established_session_honors_configured_non_default_hold_time() {
         export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        announce_rpki_state: false,
         confed_id: None,
         confed_member: false,
     });
@@ -300,6 +303,7 @@ async fn established_session_reports_status_via_peer_slot() {
         export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        announce_rpki_state: false,
         confed_id: None,
         confed_member: false,
     });
@@ -403,6 +407,7 @@ async fn collision_leaves_exactly_one_side_running() {
         export_policy: std::sync::Arc::new(nos_rpl::ACCEPT_ALL.clone()),
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        announce_rpki_state: false,
         confed_id: None,
         confed_member: false,
     });
@@ -601,6 +606,7 @@ async fn evpn_routes_from_a_real_session_are_stored_and_cleared_on_close() {
         export_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
         shutdown: None,
         maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        announce_rpki_state: false,
         confed_id: None,
         confed_member: false,
     });

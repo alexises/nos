@@ -259,6 +259,14 @@ fn changed_fields(base: &BgpPeerGroup, candidate: &BgpPeerGroup) -> Vec<FieldDif
             new: Some(shutdown_str(candidate.shutdown.as_ref())),
         });
     }
+    if base.announce_rpki_state != candidate.announce_rpki_state {
+        let yes_no = |b: bool| if b { "yes" } else { "no" }.to_string();
+        fields.push(FieldDiff {
+            label: "announce-rpki-state".to_string(),
+            old: Some(yes_no(base.announce_rpki_state)),
+            new: Some(yes_no(candidate.announce_rpki_state)),
+        });
+    }
     for af in crate::schema::AddressFamily::ALL {
         let (old, new) = (
             base.maximum_prefix.get(af),
@@ -443,6 +451,7 @@ mod tests {
             export_policy: None,
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
+            announce_rpki_state: false,
         }
     }
 
@@ -526,6 +535,7 @@ mod tests {
             import_policy: Some("in".to_string()),
             export_policy: Some("out".to_string()),
             shutdown: Some(BgpShutdown { message: None }),
+            announce_rpki_state: true,
             maximum_prefix: crate::schema::BgpMaximumPrefix {
                 ipv4: Some(crate::schema::BgpPrefixLimit {
                     limit: 2,
@@ -572,6 +582,7 @@ mod tests {
                 ("import-policy", nos_rpl::DENY_ALL_NAME, "in"),
                 ("export-policy", nos_rpl::DENY_ALL_NAME, "out"),
                 ("shutdown", "no", "yes"),
+                ("announce-rpki-state", "no", "yes"),
                 (
                     "maximum-prefix ipv4",
                     "unset",

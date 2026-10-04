@@ -350,7 +350,7 @@ For each prefix NOS runs the RFC 4271 §9.1.2.2 decision process over the candid
 
 ### Communities
 
-Standard (RFC 1997), extended (RFC 4360) and large (RFC 8092) communities are passed on unchanged to every peer. The well-known communities (`NO_EXPORT`, `NO_ADVERTISE`, `NO_EXPORT_SUBCONFED`) have no built-in effect: write an export policy that acts on them if you need it. Policies can match, add and remove communities; see [Routing policy](routing-policy.md).
+Standard (RFC 1997), extended (RFC 4360) and large (RFC 8092) communities are passed on unchanged to every peer, with one exception: a non-transitive extended community (its type has bit `0x40` set) is never sent to an eBGP peer, route-server clients included. The well-known communities (`NO_EXPORT`, `NO_ADVERTISE`, `NO_EXPORT_SUBCONFED`) have no built-in effect: write an export policy that acts on them if you need it. Policies can match, add and remove communities; see [Routing policy](routing-policy.md).
 
 ### MD5 authentication (RFC 2385)
 
@@ -554,7 +554,21 @@ bgp instance r1:
   192.0.2.51 port 3323 preference 1 Idle version - session - serial - vrps 0 updated -
 ```
 
-Not supported: RTR over SSH or TLS, TCP-MD5/TCP-AO toward the cache, BGPsec router keys (received and ignored), ASPA, signalling the state to peers with the RFC 8097 extended community, and validating EVPN routes.
+#### Sharing the state with iBGP peers (RFC 8097)
+
+A router with no cache of its own can take the state from one that has one. Turn it on in the iBGP peer-group on both routers:
+
+```
+set bgp instance r1 peer-group core announce-rpki-state
+```
+
+- Every route sent to these peers carries its state in the RFC 8097 extended community (type `0x43`, subtype `0x00`: 0 valid, 1 not-found, 2 invalid). Exactly one is sent, after the export policy runs.
+- A route received from them takes its state from that community, before the import policy runs, but only while the instance has no VRPs: no cache, none synced yet, or expired. Once VRPs arrive, the local result wins.
+- The community is removed from every received route, whatever the peer. From an eBGP peer it is ignored.
+- It is refused on an eBGP peer-group at commit. Changing it restarts the peer-group's sessions.
+- `delete announce-rpki-state` turns it off.
+
+Not supported: RTR over SSH or TLS, TCP-MD5/TCP-AO toward the cache, BGPsec router keys (received and ignored), ASPA, and validating EVPN routes.
 
 ### Route server (RFC 7947)
 

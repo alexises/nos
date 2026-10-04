@@ -219,6 +219,8 @@ impl Default for BgpInstance {
 ///   exclusive on the same peer-group.
 /// - `route_reflector_client` requires an iBGP peer-group (`remote_as ==
 ///   asn`) — reflection is an iBGP-only concept (RFC 4456).
+/// - `announce_rpki_state` requires an iBGP peer-group: RFC 8097's
+///   community is non-transitive, and ignored when received over eBGP.
 /// - `route_server_client` requires an eBGP peer-group (`remote_as != asn`)
 ///   — a route server's transparency (no `AS_PATH` prepend) is an eBGP concept
 ///   (RFC 7947) — outside the confederation, if there is one.
@@ -236,6 +238,11 @@ pub(crate) fn valid_route_reflection_and_server(instances: &[BgpInstance]) -> ga
             if group.route_reflector_client && group.remote_as != instance.asn {
                 return Err(garde::Error::new(
                     "route-reflector-client requires an iBGP peer-group (remote-as must equal this instance's asn)",
+                ));
+            }
+            if group.announce_rpki_state && group.remote_as != instance.asn {
+                return Err(garde::Error::new(
+                    "announce-rpki-state requires an iBGP peer-group (remote-as must equal this instance's asn)",
                 ));
             }
             if group.damping.is_some() && group.remote_as == instance.asn {
@@ -349,6 +356,7 @@ mod tests {
                 export_policy: None,
                 shutdown: None,
                 maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
+                announce_rpki_state: false,
             },
             BgpPeerGroup {
                 name: "invalid".to_string(),
@@ -369,6 +377,7 @@ mod tests {
                 export_policy: None,
                 shutdown: None,
                 maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
+                announce_rpki_state: false,
             },
         ];
         let cfg = config_with(vec![inst]);
@@ -401,6 +410,7 @@ mod tests {
             export_policy: None,
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
+            announce_rpki_state: false,
         }
     }
 
@@ -418,6 +428,18 @@ mod tests {
         inst.peer_groups = vec![group_with_flags("pg1", 65001, true, false)];
         let cfg = config_with(vec![inst]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn announce_rpki_state_needs_an_ibgp_group() {
+        for (remote_as, ok) in [(65001, false), (65000, true)] {
+            let mut inst = instance("r1", 65000);
+            let mut g = group_with_flags("pg1", remote_as, false, false);
+            g.announce_rpki_state = true;
+            inst.peer_groups = vec![g];
+            let cfg = config_with(vec![inst]);
+            assert_eq!(cfg.validate_with(&cfg).is_ok(), ok, "remote-as {remote_as}");
+        }
     }
 
     #[test]

@@ -386,6 +386,23 @@ pub struct RibRoute {
     /// RFC 6811 origin validation against the instance's current VRP set,
     /// computed before import policy runs (`this.bgp.validation_state`).
     pub validation_state: nos_rpl::ValidationState,
+    /// The RFC 8097 state an opted-in iBGP peer sent with this route, used
+    /// instead of local validation while the VRP table is empty (`ov_state`).
+    pub received_ov: Option<nos_rpl::ValidationState>,
+}
+
+/// RFC 8097 §2: a state signalled by the peer applies only "in the absence
+/// of validation state set based on local data".
+fn ov_state(
+    vrps: &crate::rpki::VrpTable,
+    prefix: IpNet,
+    origin: Option<u32>,
+    received: Option<nos_rpl::ValidationState>,
+) -> nos_rpl::ValidationState {
+    match received {
+        Some(s) if vrps.is_empty() => s,
+        _ => vrps.validate(prefix, origin),
+    }
 }
 
 /// One update this instance needs to send out over a specific peer's
@@ -496,6 +513,8 @@ struct PeerOutbox {
     /// RFC 7947 route-server client — see `build_advertisement`'s `AS_PATH`
     /// exception and `BgpRib::propagate_rs_view`.
     is_rs_client: bool,
+    /// RFC 8097: attach the route's validation state (`set_peer_rpki_state`).
+    announce_rpki_state: bool,
     /// See `BgpRib::peer_asns`.
     remote_asn: u32,
     /// Address families this peer negotiated RFC 7911 ADD-PATH for (always
@@ -518,6 +537,8 @@ pub struct BgpRib {
     confed_id: Option<u32>,
     /// Peers in another member AS of our confederation (`set_peer_confed`).
     confed_peers: HashSet<IpAddr>,
+    /// iBGP peers exchanging RFC 8097 states (`set_peer_rpki_state`).
+    rpki_state_peers: HashSet<IpAddr>,
     /// This instance's own router-id — used for RFC 4456 §5 `ORIGINATOR_ID`
     /// loop-prevention on receipt (`handle_update`).
     local_router_id: Ipv4Addr,
@@ -620,6 +641,7 @@ impl BgpRib {
             local_asn: 0,
             confed_id: None,
             confed_peers: HashSet::new(),
+            rpki_state_peers: HashSet::new(),
             local_router_id: Ipv4Addr::UNSPECIFIED,
             cluster_id: Ipv4Addr::UNSPECIFIED,
             adj_rib_in: HashMap::new(),
@@ -676,9 +698,12 @@ impl BgpRib {
         let mut touched = HashSet::new();
         for table in self.adj_rib_in.values_mut() {
             for (prefix, route) in table.iter_mut() {
-                let state = self
-                    .vrps
-                    .validate(*prefix, crate::rpki::origin_as(&route.as_path, local));
+                let state = ov_state(
+                    &self.vrps,
+                    *prefix,
+                    crate::rpki::origin_as(&route.as_path, local),
+                    route.received_ov,
+                );
                 if state != route.validation_state {
                     route.validation_state = state;
                     touched.insert(*prefix);
@@ -721,6 +746,16 @@ impl BgpRib {
             self.confed_peers.insert(peer);
         } else {
             self.confed_peers.remove(&peer);
+        }
+    }
+
+    /// Records whether `peer` exchanges RFC 8097 validation states (an
+    /// opted-in iBGP peer). Call before `peer_established`, like `set_peer_asn`.
+    pub fn set_peer_rpki_state(&mut self, peer: IpAddr, on: bool) {
+        if on {
+            self.rpki_state_peers.insert(peer);
+        } else {
+            self.rpki_state_peers.remove(&peer);
         }
     }
 
@@ -783,6 +818,7 @@ impl BgpRib {
                 tx,
                 is_ibgp,
                 is_confed: self.confed_peers.contains(&peer),
+                announce_rpki_state: self.rpki_state_peers.contains(&peer),
                 confed_id: self.confed_id,
                 local_addr,
                 negotiated_afs,
@@ -1221,6 +1257,18 @@ impl BgpRib {
                 table.reserve(
                     update.nlri.len() + update.mp_reach.iter().map(|m| m.nlri.len()).sum::<usize>(),
                 );
+                // RFC 8097 §2: always stripped; honoured only from an
+                // opted-in iBGP peer (`rpki_state_peers` holds no other).
+                let mut extended_communities = attrs.extended_communities.clone();
+                let mut received_ov = None;
+                extended_communities.retain(|&c| {
+                    let ov = crate::rpki::community::is_ov(c);
+                    if ov && received_ov.is_none() {
+                        received_ov = crate::rpki::community::decode(c);
+                    }
+                    !ov
+                });
+                let received_ov = received_ov.filter(|_| self.rpki_state_peers.contains(&from));
                 let base_route = RibRoute {
                     origin: RouteOrigin::Peer(from),
                     as_path: Arc::new(attrs.as_path.clone()),
@@ -1235,11 +1283,12 @@ impl BgpRib {
                     originator_id: attrs.originator_id,
                     cluster_list: attrs.cluster_list.clone().into(),
                     communities: attrs.communities.clone(),
-                    extended_communities: attrs.extended_communities.clone(),
+                    extended_communities,
                     large_communities: attrs.large_communities.clone(),
                     atomic_aggregate: attrs.atomic_aggregate,
                     aggregator: attrs.aggregator,
                     validation_state: nos_rpl::ValidationState::NotFound,
+                    received_ov,
                 };
                 let origin_as = crate::rpki::origin_as(
                     &attrs.as_path,
@@ -1248,7 +1297,12 @@ impl BgpRib {
                 for prefix in &update.nlri {
                     let candidate = RibRoute {
                         next_hop: Some(IpAddr::V4(attrs.next_hop)),
-                        validation_state: self.vrps.validate(IpNet::V4(*prefix), origin_as),
+                        validation_state: ov_state(
+                            &self.vrps,
+                            IpNet::V4(*prefix),
+                            origin_as,
+                            received_ov,
+                        ),
                         ..base_route.clone()
                     };
                     learn_prefix(
@@ -1266,7 +1320,7 @@ impl BgpRib {
                     for prefix in &mp.nlri {
                         let candidate = RibRoute {
                             next_hop: Some(mp.next_hop),
-                            validation_state: self.vrps.validate(*prefix, origin_as),
+                            validation_state: ov_state(&self.vrps, *prefix, origin_as, received_ov),
                             ..base_route.clone()
                         };
                         learn_prefix(
@@ -1671,6 +1725,7 @@ fn redistributed_route() -> RibRoute {
         extended_communities: Vec::new(),
         large_communities: Vec::new(),
         validation_state: nos_rpl::ValidationState::NotFound,
+        received_ov: None,
     }
 }
 
@@ -1871,6 +1926,20 @@ fn build_advertisement(
         &to_policy_input(prefix, &adjusted, Some((peer, outbox.remote_asn))),
     );
     let nh_edit = apply_verdict(&mut adjusted, verdict)?;
+    // RFC 4360 §6: non-transitive extended communities (type bit 0x40)
+    // don't leave the AS (kept across a confederation, like MED).
+    if !outbox.is_ibgp && !outbox.is_confed {
+        adjusted.extended_communities.retain(|c| c >> 62 & 1 == 0);
+    }
+    // RFC 8097 §2: at most one, regenerated from our own state.
+    adjusted
+        .extended_communities
+        .retain(|&c| !crate::rpki::community::is_ov(c));
+    if outbox.is_ibgp && outbox.announce_rpki_state {
+        adjusted
+            .extended_communities
+            .push(crate::rpki::community::encode(adjusted.validation_state));
+    }
     let best = adjusted;
     let best = &best;
 
@@ -5338,6 +5407,116 @@ mod tests {
             rib.redistributed[&prefix("1.2.4.0/24")].validation_state,
             Valid
         );
+    }
+
+    fn rpki_vrps(asn: u32) -> Arc<crate::rpki::VrpTable> {
+        let mut t = crate::rpki::VrpTable::default();
+        t.announce(crate::rpki::Vrp {
+            prefix: prefix("1.2.0.0/16"),
+            max_len: 24,
+            asn,
+        });
+        Arc::new(t)
+    }
+
+    const RT: u64 = 0x0002_fde8_0000_0064;
+
+    /// #162 receive side: an opted-in iBGP peer's RFC 8097 community sets
+    /// the state while we have no VRPs; local data wins once we do; it is
+    /// always stripped, and ignored from eBGP.
+    #[test]
+    fn rpki_state_community_on_receipt() {
+        use crate::rpki::community::encode;
+        use nos_rpl::ValidationState::{Invalid, NotFound, Valid};
+        let mut rib = new_rib(65000);
+        let (ibgp, ebgp) = (addr("10.0.0.1"), addr("10.0.0.3"));
+        rib.set_peer_rpki_state(ibgp, true);
+        let _i = register_peer(&mut rib, ibgp, true, addr("10.0.0.254"));
+        let _e = register_peer(&mut rib, ebgp, false, addr("10.0.0.254"));
+        let reject_invalid = nos_rpl::compile(
+            "if this.bgp.validation_state == rpki.invalid:\n    reject\naccept\n",
+            &nos_rpl::Symbols::EMPTY,
+        )
+        .unwrap();
+        let tagged = |nlri, state| {
+            let mut u = ebgp_update(vec![nlri], vec![65001], "10.0.0.1");
+            u.attributes.as_mut().unwrap().extended_communities = vec![RT, encode(state)];
+            u
+        };
+        let learn = |rib: &mut BgpRib, from, ibgp, u: &UpdateMessage| {
+            rib.handle_update(from, ibgp, v4("192.0.2.1"), u, &reject_invalid);
+        };
+        learn(&mut rib, ibgp, true, &tagged("1.2.3.0/24", Invalid));
+        assert!(
+            !rib.adj_rib_in[&ibgp].contains_key(&prefix("1.2.3.0/24")),
+            "the import policy sees the signalled state"
+        );
+        learn(&mut rib, ibgp, true, &tagged("1.2.4.0/24", Valid));
+        let held = |rib: &BgpRib, peer, p| rib.adj_rib_in[&peer][&prefix(p)].clone();
+        let r = held(&rib, ibgp, "1.2.4.0/24");
+        assert_eq!(r.validation_state, Valid);
+        assert_eq!(r.extended_communities, vec![RT], "stripped");
+
+        // Local data wins, and the signalled state is back once it's gone.
+        rib.set_vrps(rpki_vrps(65002));
+        assert_eq!(held(&rib, ibgp, "1.2.4.0/24").validation_state, Invalid);
+        rib.set_vrps(Arc::default());
+        assert_eq!(held(&rib, ibgp, "1.2.4.0/24").validation_state, Valid);
+
+        // From eBGP: ignored and stripped.
+        learn(&mut rib, ebgp, false, &tagged("1.2.5.0/24", Invalid));
+        let r = held(&rib, ebgp, "1.2.5.0/24");
+        assert_eq!(r.validation_state, NotFound);
+        assert_eq!(r.extended_communities, vec![RT]);
+    }
+
+    /// #162 send side: exactly one RFC 8097 community, regenerated from our
+    /// own state, toward an opted-in iBGP peer only; non-transitive extended
+    /// communities never reach eBGP.
+    #[test]
+    fn rpki_state_community_on_advertisement() {
+        use crate::rpki::community::encode;
+        use nos_rpl::ValidationState::{Invalid, Valid};
+        const OPAQUE_NT: u64 = 0x4003_0000_0000_0001;
+        let mut rib = new_rib(65000);
+        let (src, on, off, ebgp) = (
+            addr("10.0.0.1"),
+            addr("10.0.0.2"),
+            addr("10.0.0.3"),
+            addr("10.0.0.4"),
+        );
+        rib.set_peer_rpki_state(on, true);
+        let _s = register_peer(&mut rib, src, false, addr("10.0.0.254"));
+        let mut on_rx = register_peer(&mut rib, on, true, addr("10.0.0.254"));
+        let mut off_rx = register_peer(&mut rib, off, true, addr("10.0.0.254"));
+        let mut ebgp_rx = register_peer(&mut rib, ebgp, false, addr("10.0.0.254"));
+        rib.set_vrps(rpki_vrps(65001));
+        let mut u = ebgp_update(vec!["1.2.3.0/24"], vec![65001], "10.0.0.1");
+        u.attributes.as_mut().unwrap().extended_communities = vec![RT, OPAQUE_NT];
+        // A stale copy added after receipt, by policy, is replaced too.
+        let tag_stale = nos_rpl::compile(
+            "this.bgp.extended_communities.add(67:0:2)\naccept\n",
+            &nos_rpl::Symbols::EMPTY,
+        )
+        .unwrap();
+        rib.handle_update(src, false, v4("192.0.2.1"), &u, &tag_stale);
+        let ext = |rx: &mut mpsc::UnboundedReceiver<OutboundUpdate>| {
+            recv_all(rx)
+                .into_iter()
+                .filter_map(|u| match u {
+                    OutboundUpdate::Announce(a) => Some(a.extended_communities),
+                    _ => None,
+                })
+                .next_back()
+                .expect("an announcement")
+        };
+        assert_eq!(ext(&mut on_rx), vec![RT, OPAQUE_NT, encode(Valid)]);
+        assert_eq!(ext(&mut off_rx), vec![RT, OPAQUE_NT]);
+        assert_eq!(ext(&mut ebgp_rx), vec![RT]);
+
+        // A VRP change re-advertises the new state to iBGP.
+        rib.set_vrps(rpki_vrps(65002));
+        assert_eq!(ext(&mut on_rx), vec![RT, OPAQUE_NT, encode(Invalid)]);
     }
 
     fn v6_update(nlri: Vec<&str>) -> UpdateMessage {

@@ -377,6 +377,15 @@ pub struct BgpPeerGroup {
     #[garde(custom(|m: &BgpMaximumPrefix, _ctx: &Config| valid_maximum_prefix(m)))]
     #[cli(topic = BgpPeerGroupMaximumPrefix)]
     pub maximum_prefix: BgpMaximumPrefix,
+
+    /// RFC 8097: send each route's RPKI origin validation state to these
+    /// peers as a non-transitive extended community, and take the state
+    /// from theirs while this instance has no VRP data of its own. iBGP
+    /// peer-groups only (`bgp_instance::valid_route_reflection_and_server`).
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BgpPeerGroupAnnounceRpkiState)]
+    pub announce_rpki_state: bool,
 }
 
 /// `"accept-all"`/`"deny-all"` are always valid regardless of what's
@@ -637,6 +646,7 @@ mod tests {
             export_policy: None,
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
+            announce_rpki_state: false,
         }
     }
 

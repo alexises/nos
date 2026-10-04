@@ -98,6 +98,9 @@ pub fn render_bgp_peer_group(group: &BgpPeerGroup, local_asn: u32) -> String {
     if group.route_server_client {
         line.push_str(", route-server-client");
     }
+    if group.announce_rpki_state {
+        line.push_str(", announce-rpki-state");
+    }
     line
 }
 
@@ -2191,6 +2194,7 @@ mod tests {
             export_policy: None,
             shutdown: None,
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+            announce_rpki_state: false,
         }
     }
 

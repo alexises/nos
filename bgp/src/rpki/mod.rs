@@ -1,6 +1,7 @@
 //! RPKI origin validation (RFC 6811) fed by an RFC 8210 RTR client running
 //! inside this `nos-bgpd`, one session per instance, inside its VRF.
 
+pub mod community;
 pub mod rtr;
 pub mod vrp;
 
