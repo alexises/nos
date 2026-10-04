@@ -455,3 +455,29 @@ fn rpki_cache_list() {
         }]
     );
 }
+
+/// #78: aggregates, keyed by prefix, with their two flags.
+#[test]
+fn aggregate_address_list() {
+    let mut doc = serde_json::to_value(populated()).unwrap();
+    for line in [
+        "set bgp instance R1 aggregate-address 198.51.0.0/16",
+        "set bgp instance R1 aggregate-address 198.51.0.0/16 summary-only",
+        "set bgp instance R1 aggregate-address 10.0.0.0/8 as-set",
+        "delete bgp instance R1 aggregate-address 10.0.0.0/8",
+    ] {
+        let edit = config_grammar::parse(line, &[], &doc).unwrap_or_else(|| panic!("{line}"));
+        for (path, value) in edit.writes {
+            config_path::set(&mut doc, &path, value).unwrap();
+        }
+    }
+    let cfg: Config = serde_json::from_value(doc).unwrap();
+    assert_eq!(
+        cfg.bgp_instances[0].aggregates,
+        vec![nos_proto::BgpAggregate {
+            prefix: "198.51.0.0/16".parse().unwrap(),
+            as_set: false,
+            summary_only: true,
+        }]
+    );
+}

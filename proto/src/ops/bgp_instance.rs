@@ -2,7 +2,9 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{BgpInstance, Config, RpkiCache};
+use ipnet::IpNet;
+
+use crate::schema::{BgpAggregate, BgpInstance, Config, RpkiCache};
 
 use super::OpError;
 
@@ -70,6 +72,16 @@ pub enum BgpInstanceOp {
     ClearMaximumPaths {
         name: String,
     },
+    /// RFC 4271 §9.2.2.2: adds an aggregate, or replaces the one with that
+    /// prefix.
+    SetAggregate {
+        name: String,
+        aggregate: BgpAggregate,
+    },
+    RemoveAggregate {
+        name: String,
+        prefix: IpNet,
+    },
 }
 
 impl BgpInstanceOp {
@@ -87,6 +99,7 @@ impl BgpInstanceOp {
                         maximum_paths: None,
                         confederation: crate::schema::BgpConfederation::default(),
                         rpki_caches: Vec::new(),
+                        aggregates: Vec::new(),
                         routing_table: None,
                         redistribute_policy: None,
                     });
@@ -157,6 +170,20 @@ impl BgpInstanceOp {
                     .retain(|c| c.address != *address);
                 Ok(())
             }
+            BgpInstanceOp::SetAggregate { name, aggregate } => {
+                let aggregates = &mut find_instance_mut(config, name)?.aggregates;
+                match aggregates.iter_mut().find(|a| a.prefix == aggregate.prefix) {
+                    Some(a) => *a = aggregate.clone(),
+                    None => aggregates.push(aggregate.clone()),
+                }
+                Ok(())
+            }
+            BgpInstanceOp::RemoveAggregate { name, prefix } => {
+                find_instance_mut(config, name)?
+                    .aggregates
+                    .retain(|a| a.prefix != *prefix);
+                Ok(())
+            }
             BgpInstanceOp::Delete { name } => {
                 let before = config.bgp_instances.len();
                 config.bgp_instances.retain(|i| &i.name != name);
@@ -195,6 +222,7 @@ mod tests {
             maximum_paths: None,
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
+            aggregates: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -345,6 +373,35 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].rpki_caches, []);
+    }
+
+    #[test]
+    fn aggregate_ops_upsert_by_prefix() {
+        let mut cfg = Config {
+            bgp_instances: vec![instance("r1", 65000)],
+            ..Default::default()
+        };
+        let agg = |summary_only| BgpAggregate {
+            prefix: "198.51.0.0/16".parse().unwrap(),
+            as_set: false,
+            summary_only,
+        };
+        for summary_only in [false, true] {
+            BgpInstanceOp::SetAggregate {
+                name: "r1".into(),
+                aggregate: agg(summary_only),
+            }
+            .apply(&mut cfg)
+            .unwrap();
+        }
+        assert_eq!(cfg.bgp_instances[0].aggregates, vec![agg(true)]);
+        BgpInstanceOp::RemoveAggregate {
+            name: "r1".into(),
+            prefix: "198.51.0.0/16".parse().unwrap(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].aggregates, []);
     }
 
     #[test]

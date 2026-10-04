@@ -283,6 +283,12 @@ topics! {
     BgpInstanceRpkiCachePort,
     /// `RpkiCache.preference`
     BgpInstanceRpkiCachePreference,
+    /// `BgpInstance.aggregates`
+    BgpInstanceAggregate,
+    /// `BgpAggregate.as_set`
+    BgpInstanceAggregateAsSet,
+    /// `BgpAggregate.summary_only`
+    BgpInstanceAggregateSummaryOnly,
     /// `OspfArea.area_type`
     OspfAreaType,
     /// `OspfArea.stub_default_cost`

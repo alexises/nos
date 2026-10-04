@@ -223,6 +223,10 @@ pub const RID_C: &str = "3.3.3.3";
 /// TEST-NET-2 — a fake redistributed prefix.
 pub const REDISTRIBUTE_PREFIX: &str = "198.51.100.0/24";
 pub const REDISTRIBUTE_GATEWAY: &str = "10.50.0.99";
+/// `aggregate`: router-a's aggregate, covering `REDISTRIBUTE_PREFIX` and the
+/// static router-b redistributes for the phase.
+pub const AGGREGATE_PREFIX: &str = "198.51.0.0/16";
+pub const AGGREGATE_CONTRIBUTOR_B: &str = "198.51.200.0/24";
 /// TEST-NET-3 — the loopback scenario's address.
 pub const LOOPBACK_ADDRESS: &str = "203.0.113.1/32";
 /// TEST-NET-3 — `port-aggregate`'s bond address (tag 0, in rt1), and the

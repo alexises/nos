@@ -1,6 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use garde::Validate;
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 use crate::validators::unique_in;
@@ -80,6 +81,13 @@ pub struct BgpInstance {
     #[cli(topic = BgpInstanceRpkiCache, words = "rpki-cache")]
     pub rpki_caches: Vec<RpkiCache>,
 
+    /// RFC 4271 §9.2.2.2 aggregates this instance originates while some
+    /// more specific route is in its Loc-RIB.
+    #[serde(default)]
+    #[garde(custom(|a: &Vec<BgpAggregate>, _ctx: &Config| valid_aggregates(a)))]
+    #[cli(topic = BgpInstanceAggregate, words = "aggregate-address")]
+    pub aggregates: Vec<BgpAggregate>,
+
     /// The name of the `RoutingTable` that claims this instance (i.e. the
     /// VRF it belongs to), mirrored from that table's `bgp_instance` field.
     /// Derived and read-only: never set by any `BgpInstanceOp`, recomputed
@@ -152,6 +160,46 @@ fn valid_rpki_caches(caches: &[RpkiCache]) -> garde::Result {
     Ok(())
 }
 
+/// One aggregate (RFC 4271 §9.2.2.2), keyed by its prefix.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
+pub struct BgpAggregate {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(key)]
+    pub prefix: IpNet,
+    /// Carry the contributors' ASNs as an `AS_SET` instead of setting
+    /// `ATOMIC_AGGREGATE`.
+    #[serde(default)]
+    #[cli(topic = BgpInstanceAggregateAsSet)]
+    pub as_set: bool,
+    /// Withdraw the contributing more-specifics from every peer while the
+    /// aggregate is active.
+    #[serde(default)]
+    #[cli(topic = BgpInstanceAggregateSummaryOnly)]
+    pub summary_only: bool,
+}
+
+fn valid_aggregates(aggregates: &[BgpAggregate]) -> garde::Result {
+    for (i, a) in aggregates.iter().enumerate() {
+        if a.prefix != a.prefix.trunc() {
+            return Err(garde::Error::new(
+                "an aggregate-address must be a network address (no host bits set)",
+            ));
+        }
+        if a.prefix.prefix_len() == a.prefix.max_prefix_len() {
+            return Err(garde::Error::new(
+                "an aggregate-address can't be a host route: nothing is more specific",
+            ));
+        }
+        if aggregates[..i].iter().any(|o| o.prefix == a.prefix) {
+            return Err(garde::Error::new(
+                "aggregate-address prefixes must be unique",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// RFC 5065 §2: the confederation identifier (`None`: not in a
 /// confederation) and the other member ASes (`peers`) — a peer-group whose
 /// `remote_as` is one of them is a confederation-external peer, not an
@@ -213,6 +261,7 @@ impl Default for BgpInstance {
             maximum_paths: None,
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
+            aggregates: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -297,6 +346,7 @@ mod tests {
             maximum_paths: None,
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
+            aggregates: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -515,6 +565,28 @@ mod tests {
         inst.confederation.peers = vec![65102];
         let cfg = config_with(vec![inst]);
         assert!(cfg.validate_with(&cfg).is_err(), "peers without identifier");
+    }
+
+    #[test]
+    fn aggregates_are_checked() {
+        use super::BgpAggregate;
+        let check = |prefixes: &[&str]| {
+            let mut inst = instance("r1", 65000);
+            inst.aggregates = prefixes
+                .iter()
+                .map(|p| BgpAggregate {
+                    prefix: p.parse().unwrap(),
+                    ..Default::default()
+                })
+                .collect();
+            let cfg = config_with(vec![inst]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(check(&["198.51.0.0/16", "2001:db8::/32"]));
+        assert!(!check(&["198.51.1.0/16"]), "host bits set");
+        assert!(!check(&["198.51.0.1/32"]), "host route");
+        assert!(!check(&["2001:db8::1/128"]), "v6 host route");
+        assert!(!check(&["198.51.0.0/16", "198.51.0.0/16"]), "duplicate");
     }
 
     #[test]

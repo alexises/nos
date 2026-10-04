@@ -37,6 +37,7 @@ pub const ELEMENT_KEYS: &[&str] = &[
     "send_id",
     "address",
     "tag",
+    "prefix",
 ];
 
 #[derive(Debug, Error, PartialEq, Eq)]

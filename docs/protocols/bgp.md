@@ -375,6 +375,30 @@ edge-1> show route rt1 198.51.100.1
   * via 10.50.0.3, 10.50.0.4 [bgp]
 ```
 
+### Aggregation (RFC 4271 §9.2.2.2)
+
+`set aggregate-address <prefix>` on the instance makes the router originate `<prefix>` itself while at least one more specific route of it is in its best paths (learned, redistributed, or another aggregate). The aggregate is withdrawn when the last of these routes goes.
+
+```
+edge-1(t9/bgp-instance:r1)> set aggregate-address 198.51.0.0/16
+edge-1(t9/bgp-instance:r1)> set aggregate-address 198.51.0.0/16 summary-only
+```
+
+```sh
+$C -X PUT -H 'Content-Type: application/json' \
+  -d '{"prefix":"198.51.0.0/16","as_set":false,"summary_only":true}' \
+  $B/v1/transactions/t9/bgp-instance/r1/aggregate-address/198.51.0.0%2F16
+```
+
+- The aggregate's `ORIGIN` is the worst of its more specific routes' (incomplete, then EGP, then IGP). It carries no `MED` and no communities, and its next hop is this router.
+- `AGGREGATOR` is the instance's `asn` and router ID. A peer without four-octet AS support gets `AS_TRANS` and `AS4_AGGREGATOR`.
+- Without `as-set`, the `AS_PATH` is empty, and `ATOMIC_AGGREGATE` is set as soon as one of the more specific routes had a non-empty `AS_PATH` (or carried `ATOMIC_AGGREGATE` itself).
+- With `as-set`, the `AS_PATH` is the longest leading `AS_SEQUENCE` all the more specific routes share, then one `AS_SET` of every other AS (RFC 4271 Appendix F.6). A peer whose AS is in the set drops the aggregate as a loop.
+- `summary-only` withdraws the more specific routes from every peer, and never sends new ones, while the aggregate is active. They are still installed in the routing table.
+- Routes with different `MED`s are aggregated too, unlike RFC 4271 §9.2.2.2's rule.
+- No discard (blackhole) route is installed for the aggregate: traffic to a part of it that no more specific route covers follows the routing table's other routes.
+- The router logs `bgp: aggregate activated`, `bgp: aggregate updated` and `bgp: aggregate withdrawn`, with the prefix and the number of more specific routes.
+
 ### Communities
 
 Standard (RFC 1997), extended (RFC 4360) and large (RFC 8092) communities are passed on unchanged to every peer, with one exception: a non-transitive extended community (its type has bit `0x40` set) is never sent to an eBGP peer, route-server clients included. The well-known communities (`NO_EXPORT`, `NO_ADVERTISE`, `NO_EXPORT_SUBCONFED`) have no built-in effect: write an export policy that acts on them if you need it. Policies can match, add and remove communities; see [Routing policy](routing-policy.md).
@@ -613,7 +637,7 @@ At an exchange point, a route server passes routes between its clients without a
 These are known gaps, so plan around them:
 
 - A route's attributes cannot be displayed. `show route` shows the chosen next hop, and the log records each learned route.
-- There is no route aggregation (`aggregate-address`), no maximum-prefix limit, and no soft reconfiguration: changing a peer-group or its policies resets its sessions.
+- There is no soft reconfiguration: changing a peer-group or its policies resets its sessions.
 - The well-known communities have no built-in effect (see [Communities](#communities)).
 
 ## Configuration reference
@@ -633,6 +657,9 @@ Created with `edit bgp instance <name>`; deleted with `delete bgp instance <name
 | maximum-paths | `set bgp instance <i> maximum-paths <n>` / `set maximum-paths <n>`; `delete bgp instance <i> maximum-paths` / `delete maximum-paths` | `…/maximum-paths`, number or `null` | 1 to 64; default: unset (1) | 1 to 64 | How many equal paths' next hops a prefix installs; see [Multipath](#multipath) | `show route` |
 | confederation identifier | `set bgp instance <i> confederation identifier <n>` / `set confederation identifier <n>`; `delete … confederation identifier` | `…/confederation/identifier`, number or `null` | 1 to 4294967294; default: none (not in a confederation) | differs from `asn` | The AS peers outside the confederation see; `asn` becomes the member AS | `show config`; `remote_asn` in the outside peer's `GET /v1/bgp/summary` |
 | confederation peer | `set bgp instance <i> confederation peer <n>` / `set confederation peer <n>`; `delete … confederation peer <n>` | `…/confederation/peer`, list of numbers | ASNs; default: none | distinct, not `asn` nor the identifier, needs an identifier; a route-server-client peer-group can't be one | Peer-groups with this `remote-as` are confederation eBGP | `show config` |
+| aggregate-address | `set bgp instance <i> aggregate-address <prefix>` / `set aggregate-address <prefix>`; `delete aggregate-address <prefix>` | `…/aggregate-address/<prefix with %2F>`, `{"prefix":"198.51.0.0/16","as_set":false,"summary_only":false}` | list, keyed by prefix; default: none | network address (no host bits), not a /32 or /128, unique | Originates the aggregate; see [Aggregation](#aggregation-rfc-4271-9222) | `show log nos-bgpd[<i>]` |
+| aggregate-address as-set | `… aggregate-address <prefix> as-set` / `set aggregate-address <prefix> as-set`; `delete aggregate-address <prefix> as-set` | `as_set` in the aggregate | boolean; default `false` | none | Keeps the more specific routes' ASes in an `AS_SET` | `show log nos-bgpd[<i>]` (`as_path`) |
+| aggregate-address summary-only | `… aggregate-address <prefix> summary-only` / `set aggregate-address <prefix> summary-only`; `delete aggregate-address <prefix> summary-only` | `summary_only` in the aggregate | boolean; default `false` | none | Withdraws the more specific routes from peers | `show log nos-bgpd[<i>]` |
 | routing table | `set routing-table <t> bgp-instance <i>`; `delete routing-table <t> bgp-instance` | `routing-table/<t>/bgp-instance`, `"r1"` | name; default: none | instance must exist; one table per instance | Runs the instance in that table's VRF. Without it, the instance opens no session | `show bgp brief` |
 
 `bgp-instance/<name>/routing-table` and `bgp-instance/<name>/redistribute-policy` also appear in the REST tree. They are read-only copies of the routing table's settings, recomputed at every commit; set the routing table's fields instead.

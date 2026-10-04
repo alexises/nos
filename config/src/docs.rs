@@ -1098,6 +1098,30 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Lower is preferred (RFC 8210 §10); defaults to 0. A cache is used only while every \
              more preferred one is unreachable.",
         ),
+        Topic::BgpInstanceAggregate => (
+            "Originate an aggregate route covering more specific BGP routes.",
+            concat!(
+                "`aggregate-address <prefix>`: while at least one more specific route is in the \
+             instance's Loc-RIB, nos-bgpd originates the prefix itself (RFC 4271 §9.2.2.2) with \
+             the worst ORIGIN of its contributors, an AGGREGATOR of this instance's asn and \
+             router-id, and ATOMIC_AGGREGATE when contributors' AS paths are dropped. It's \
+             withdrawn when the last contributor goes. No discard route is installed in the \
+             kernel.",
+                " ",
+                "Stop originating this aggregate.",
+            ),
+        ),
+        Topic::BgpInstanceAggregateAsSet => (
+            "Keep the contributors' AS numbers in the aggregate's AS_PATH.",
+            "The path becomes the contributors' common leading AS_SEQUENCE followed by one AS_SET \
+             of every other ASN (RFC 4271 Appendix F.6), instead of an empty path with \
+             ATOMIC_AGGREGATE. A peer whose ASN is in the set rejects the aggregate as a loop.",
+        ),
+        Topic::BgpInstanceAggregateSummaryOnly => (
+            "Advertise only the aggregate, not its more specific routes.",
+            "While the aggregate is active, every route it covers is withdrawn from (or never \
+             sent to) every peer. They're still installed in the kernel.",
+        ),
         Topic::OspfAreaType => (
             "Make an OSPF area a stub, totally-stubby or not-so-stubby area.",
             concat!(
