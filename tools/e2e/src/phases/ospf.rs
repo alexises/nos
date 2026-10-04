@@ -1391,6 +1391,61 @@ pub async fn ospfv3_auth(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await
 }
 
+/// RFC 5340 §A.3.1 Instance ID: instance-id 1 on router-a alone gets its
+/// packets dropped by router-b (logged at debug) and no new Full forms; 1 on
+/// both reaches Full with a non-zero id on the wire both ways. Requires
+/// `ospfv3` to have run; leaves both back at 0 for `ospfv3-dr`'s router-c.
+pub async fn ospfv3_instance_id(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let full =
+        |neighbor: &str| format!("ospfv3 neighbor reached full link=eth0.0 neighbor={neighbor}");
+    let with_id = |id: &str, addr: &str, rid: &str| {
+        let mut f = ospfv3(addr, rid);
+        f.extend(strings(&["--ospfv3-instance-id", id]));
+        f
+    };
+    let mismatch =
+        "ospfv3 packet instance id mismatch, dropping link=eth0.0.*received=1 expected=0";
+    let (a_full, drops) = (a.count(&full(OSPFV3_ROUTER_ID_B)), b.count(mismatch));
+    log("setting instance-id 1 on router-a only");
+    a.provision_flags(&with_base(
+        A,
+        with_id("1", OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+    ))
+    .await?;
+    b.wait_new(mismatch, drops, 30).await?;
+    log("waiting 8s to confirm no new ospfv3 full adjacency forms with mismatched instance ids");
+    a.assert_quiet(&full(OSPFV3_ROUTER_ID_B), a_full, 8).await?;
+
+    log("setting instance-id 1 on router-b too");
+    let b_full = b.count(&full(OSPFV3_ROUTER_ID));
+    b.provision_flags(&with_base(
+        B,
+        with_id("1", OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B),
+    ))
+    .await?;
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 60).await?;
+    b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await?;
+
+    log("resetting instance-id to 0 on both routers");
+    let (a_full, b_full) = (
+        a.count(&full(OSPFV3_ROUTER_ID_B)),
+        b.count(&full(OSPFV3_ROUTER_ID)),
+    );
+    a.provision_flags(&with_base(
+        A,
+        with_id("0", OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+    ))
+    .await?;
+    b.provision_flags(&with_base(
+        B,
+        with_id("0", OSPFV3_ADDRESS_B, OSPFV3_ROUTER_ID_B),
+    ))
+    .await?;
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 60).await?;
+    b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await
+}
+
 pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     a.provision_flags(&with_base(A, ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID)))

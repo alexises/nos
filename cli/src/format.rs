@@ -325,16 +325,20 @@ pub fn render_ospfv3_area(area: &Ospfv3Area) -> String {
     lines.join("\n")
 }
 
-/// Render one `Ospfv3Profile` as human-readable text — no `auth` field to
-/// render (no authentication in this NOS build's `OSPFv3` support), unlike
-/// `render_ospf_profile`.
+/// Render one `Ospfv3Profile` as human-readable text — its RFC 7166 keys
+/// rendered like `render_ospf_profile`'s crypto auth, plus a non-zero
+/// instance id.
 pub fn render_ospfv3_profile(profile: &Ospfv3Profile) -> String {
     let auth = profile
         .auth
         .as_ref()
         .map(|keys| OspfAuth::Crypto { keys: keys.clone() });
+    let instance_id = match profile.instance_id {
+        Some(id) if id != 0 => format!(" instance-id {id}"),
+        _ => String::new(),
+    };
     format!(
-        "profile {}: auth {}",
+        "profile {}: auth {}{instance_id}",
         profile.name,
         render_ospf_auth(auth.as_ref())
     )
@@ -3051,6 +3055,7 @@ mod tests {
                     profiles: vec![Ospfv3Profile {
                         name: "p3".to_string(),
                         auth: Some(vec![crypto_key(300, OspfCryptoAlgorithm::HmacSha256, true)]),
+                        instance_id: Some(5),
                         ..Default::default()
                     }],
                 }],
@@ -3183,7 +3188,7 @@ mod tests {
              [key-id 1 md5 k, key-id 2 hmac-sha1 k, key-id 3 hmac-sha384 k, key-id 4 hmac-sha512 k (current)] \
              extended-sequence-numbers",
             "ospfv3 instance v3: router-id 2.2.2.2, extended-lsa, graceful-restart grace-period 120\n  \
-             area 0.0.0.1\n    profile p3: auth crypto-keys [key-id 300 hmac-sha256 k (current)]",
+             area 0.0.0.1\n    profile p3: auth crypto-keys [key-id 300 hmac-sha256 k (current)] instance-id 5",
             "static-routing-instance s1\n  route 203.0.113.0/24: gateway 10.0.0.2",
             "  subinterface 0: address [10.0.0.1/24 (label peering)], routing-table unset, ospf-profile unset",
             "community-alias blackhole: value 65535:666",

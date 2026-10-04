@@ -239,6 +239,8 @@ topics! {
     Ospfv3ProfileAuth,
     /// `crypto-key` sugar on `Ospfv3Profile.auth`
     Ospfv3ProfileCryptoKey,
+    /// `Ospfv3Profile.instance_id`
+    Ospfv3ProfileInstanceId,
     /// `Config.policy_definitions`
     PolicyDefinition,
     /// `PolicyDefinition.source`

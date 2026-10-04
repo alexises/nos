@@ -70,6 +70,23 @@ pub struct Ospfv3Profile {
     #[serde(default)]
     #[cli(topic = Ospfv3ProfileAuth, sugar(word = "crypto-key", with = sugar::ospfv3_crypto_key, topic = Ospfv3ProfileCryptoKey))]
     pub auth: Option<Vec<OspfCryptoKey>>,
+
+    /// RFC 5340 §A.3.1 Instance ID (header byte 14) this profile's links send
+    /// and accept: a received packet carrying any other value is dropped.
+    /// `None` means 0. Limited to 0-31, RFC 5838 §2.1's IPv6-unicast range.
+    #[garde(custom(|i: &Option<u8>, _ctx: &Config| valid_instance_id(*i)))]
+    #[serde(default)]
+    #[cli(topic = Ospfv3ProfileInstanceId)]
+    pub instance_id: Option<u8>,
+}
+
+fn valid_instance_id(id: Option<u8>) -> garde::Result {
+    match id {
+        Some(i) if i > 31 => Err(garde::Error::new(
+            "instance-id must be between 0 and 31 (RFC 5838 IPv6 unicast)",
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn valid_auth(keys: Option<&[OspfCryptoKey]>) -> garde::Result {
@@ -140,6 +157,7 @@ mod tests {
             mtu: None,
             network_type: None,
             auth: None,
+            instance_id: None,
         }
     }
 
@@ -258,6 +276,7 @@ mod tests {
             mtu: None,
             network_type: None,
             auth: None,
+            instance_id: None,
         }
     }
 
@@ -291,6 +310,16 @@ mod tests {
         p.cost = Some(0);
         let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn instance_id_range() {
+        for (id, ok) in [(0, true), (31, true), (32, false)] {
+            let mut p = profile("p1");
+            p.instance_id = Some(id);
+            let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+            assert_eq!(cfg.validate_with(&cfg).is_ok(), ok, "instance-id {id}");
+        }
     }
 
     #[test]

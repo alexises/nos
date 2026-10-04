@@ -117,6 +117,13 @@ pub enum Ospfv3ProfileOp {
         area_id: Ipv4Addr,
         name: String,
     },
+    /// Sets (`Some`) or clears (`None`, meaning 0) the RFC 5340 Instance ID.
+    SetInstanceId {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        instance_id: Option<u8>,
+    },
 }
 
 impl Ospfv3ProfileOp {
@@ -138,6 +145,7 @@ impl Ospfv3ProfileOp {
                         mtu: None,
                         network_type: None,
                         auth: None,
+                        instance_id: None,
                     });
                 }
                 Ok(())
@@ -322,6 +330,15 @@ impl Ospfv3ProfileOp {
                 find_profile_mut(config, instance, *area_id, name)?.auth = None;
                 Ok(())
             }
+            Ospfv3ProfileOp::SetInstanceId {
+                instance,
+                area_id,
+                name,
+                instance_id,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.instance_id = *instance_id;
+                Ok(())
+            }
         }
     }
 }
@@ -380,6 +397,7 @@ mod tests {
             mtu: None,
             network_type: None,
             auth: None,
+            instance_id: None,
         }
     }
 
