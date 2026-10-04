@@ -876,8 +876,9 @@ pub async fn aggregate(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&loc_rib(REDISTRIBUTE_PREFIX), b_loc, 30).await?;
 
     log("router-a: aggregate-address, with ATOMIC_AGGREGATE and AGGREGATOR");
-    let activated =
-        format!("aggregate \\(activated\\|updated\\) aggregate={AGGREGATE_PREFIX} contributors=2 ");
+    // Both contributors are already in the Loc-RIB: the config change's seed
+    // scan activates it with two at once.
+    let activated = format!("aggregate activated aggregate={AGGREGATE_PREFIX} contributors=2 ");
     let (act, learned) = (a.count(&activated), b.count(&learned_agg));
     a.provision(&a_flags(&[])).await?;
     a.wait_new(&activated, act, 30).await?;
