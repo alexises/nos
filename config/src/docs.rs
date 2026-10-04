@@ -422,6 +422,43 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Serve the REST API on an address inside this routing table.",
             "Makes nos-watchdogd run nos-restd for this routing table, listening on the given address (and port, default 8080) inside the table's VRF over mutual TLS. `delete` stops it.",
         ),
+        Topic::RoutingTableEvpn => (
+            "Make this routing table an EVPN IP-VRF with an L3 VNI.",
+            "nos-ribd creates a VXLAN device for the l3-vni on a bridge in the table's VRF, \
+             originates every best route of the table as an EVPN Type-5 (IP prefix) route into \
+             the underlay bgp-instance, and installs the Type-5 routes it receives with an \
+             import route-target through the VXLAN. Needs an l3-vni, rd, an export \
+             route-target, a vtep-source and a bgp-instance. `delete` removes it all.",
+        ),
+        Topic::RoutingTableEvpnL3Vni => (
+            "Set the table's L3 VNI.",
+            "1-16777215, unique across every routing table's l3-vni and every broadcast \
+             domain's vni. Carried as the label of every Type-5 route; a received one must \
+             carry the same value.",
+        ),
+        Topic::RoutingTableEvpnRd => (
+            "Set the Route Distinguisher of the table's Type-5 routes.",
+            "Written asn:nn or a.b.c.d:nn.",
+        ),
+        Topic::RoutingTableEvpnRouteTarget => (
+            "Add an EVPN Route Target to the table's import or export list.",
+            "`import`: a received Type-5 route is installed only if it carries one of these. \
+             `export`: attached to every Type-5 route the table originates (at least one is \
+             required). Written asn:nn or a.b.c.d:nn.",
+        ),
+        Topic::RoutingTableEvpnVtepSource => (
+            "Set the address the table's VXLAN tunnels are sourced from.",
+            "Names an interface (and optionally the label of one of its addresses) or \
+             `loopback` — the loopback of the routing table owning the evpn bgp-instance. \
+             Resolved at runtime by nos-ribd; it is the next hop of every Type-5 route the \
+             table originates.",
+        ),
+        Topic::RoutingTableEvpnBgpInstance => (
+            "Name the underlay BGP instance the table's Type-5 routes are exchanged over.",
+            "Must exist and must not be the table's own bgp-instance: the routes are carried \
+             by the instance of the underlay VRF, which needs `address-family l2vpn-evpn` on \
+             its peer-groups.",
+        ),
         Topic::StaticRoutingInstance => (
             "Create a static routing instance in the transaction if it doesn't already exist.",
             concat!(

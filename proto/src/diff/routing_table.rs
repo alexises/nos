@@ -86,6 +86,22 @@ fn rest_api_str(t: &RoutingTable) -> String {
     }
 }
 
+fn evpn_str(t: &RoutingTable) -> String {
+    let e = &t.evpn;
+    let opt = |v: Option<String>| v.unwrap_or_else(|| "unset".to_string());
+    match e.l3_vni {
+        None => "unset".to_string(),
+        Some(vni) => format!(
+            "l3-vni {vni} rd {} import [{}] export [{}] vtep-source {} bgp-instance {}",
+            opt(e.rd.clone()),
+            e.route_targets_import.join(", "),
+            e.route_targets_export.join(", "),
+            opt(e.vtep_source.as_ref().map(ToString::to_string)),
+            opt(e.bgp_instance.clone())
+        ),
+    }
+}
+
 fn changed_fields(base: &RoutingTable, candidate: &RoutingTable) -> Vec<FieldDiff> {
     let mut fields = Vec::new();
     if base.bgp_instance != candidate.bgp_instance {
@@ -130,6 +146,13 @@ fn changed_fields(base: &RoutingTable, candidate: &RoutingTable) -> Vec<FieldDif
             new: Some(rest_api_str(candidate)),
         });
     }
+    if base.evpn != candidate.evpn {
+        fields.push(FieldDiff {
+            label: "evpn".to_string(),
+            old: Some(evpn_str(base)),
+            new: Some(evpn_str(candidate)),
+        });
+    }
     fields
 }
 
@@ -167,6 +190,11 @@ fn removed_section(table: &RoutingTable) -> SectionDiff {
             FieldDiff {
                 label: REST_API_LABEL.to_string(),
                 old: Some(rest_api_str(table)),
+                new: None,
+            },
+            FieldDiff {
+                label: "evpn".to_string(),
+                old: Some(evpn_str(table)),
                 new: None,
             },
         ],
@@ -210,6 +238,11 @@ fn added_section(table: &RoutingTable) -> SectionDiff {
                 old: None,
                 new: Some(rest_api_str(table)),
             },
+            FieldDiff {
+                label: "evpn".to_string(),
+                old: None,
+                new: Some(evpn_str(table)),
+            },
         ],
         subsections: Vec::new(),
     }
@@ -222,6 +255,7 @@ mod tests {
     fn table(name: &str, bgp_instance: Option<&str>, sri: Option<&str>) -> RoutingTable {
         RoutingTable {
             rest_api: None,
+            evpn: crate::schema::RoutingTableEvpn::default(),
             ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),

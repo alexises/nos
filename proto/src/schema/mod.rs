@@ -51,7 +51,7 @@ pub use policy_definition::PolicyDefinition;
 pub use port_aggregate::{DfAlgorithm, EsRedundancy, LacpRate, PortAggregate, PortAggregateMode};
 pub use prefix_list::{PrefixList, PrefixListEntry};
 pub use routing_table::{
-    Redistribute, RedistributeSource, RedistributeTarget, RestApi, RoutingTable,
+    Redistribute, RedistributeSource, RedistributeTarget, RestApi, RoutingTable, RoutingTableEvpn,
     REST_API_PORT_DEFAULT,
 };
 pub use static_route::StaticRoute;

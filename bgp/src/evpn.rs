@@ -430,7 +430,8 @@ pub fn encode_nlri(nlri: &EvpnNlri, out: &mut Vec<u8>) {
 /// as `encap:8`, ES-Import as `ES-Import:…`, an ESI Label as
 /// `esi-label:single-active|all-active`, the §7.8 Default Gateway flag as
 /// `default-gw`, an RFC 8584 DF Election as `df-election:modulo|hrw|alg<N>`
-/// (`,ac-df` when that capability is set); anything else as raw hex.
+/// (`,ac-df` when that capability is set), an RFC 9135 Router's MAC as
+/// `rmac:aa:bb:cc:dd:ee:ff`; anything else as raw hex.
 #[must_use]
 pub fn format_ext_community(c: u64) -> String {
     let b = c.to_be_bytes();
@@ -468,6 +469,11 @@ pub fn format_ext_community(c: u64) -> String {
             } else {
                 "all-active"
             }
+        ),
+        // RFC 9135 §8.1 Router's MAC.
+        (0x06, _) if b[1] == 0x03 => format!(
+            "rmac:{}",
+            nos_proto::evpn_id::format_mac(&[b[2], b[3], b[4], b[5], b[6], b[7]])
         ),
         (0x06, _) if b[1] == 0x06 => {
             let alg = match b[2] & 0x1f {
@@ -637,6 +643,10 @@ mod tests {
         assert_eq!(format_ext_community(0x0203_0001_0000_0009), "RO:65536:9");
         assert_eq!(format_ext_community(0x030c_0000_0000_0008), "encap:8");
         assert_eq!(format_ext_community(0x030d_0000_0000_0000), "default-gw");
+        assert_eq!(
+            format_ext_community(0x0603_0211_2233_4455),
+            "rmac:02:11:22:33:44:55"
+        );
         assert_eq!(
             format_ext_community(0x0600_0000_0000_0001),
             "0x0600000000000001"

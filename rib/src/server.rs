@@ -5,8 +5,8 @@ use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
 use nos_pki::{Identity, Incoming, Listener};
 use nos_proto::{
-    BgpRouteUpdate, IpNet, IpcCodec, OspfRoute, OspfRouteUpdate, PrefixRoutes, RibEvent,
-    RibRequest, Role, RouteEntry, RouteSourceKind,
+    BgpRouteUpdate, EvpnRouteInfo, EvpnUpdate, IpNet, IpcCodec, OspfRoute, OspfRouteUpdate,
+    PrefixRoutes, RibEvent, RibRequest, Role, RouteEntry, RouteSourceKind,
 };
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -14,6 +14,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::driver::RibDriver;
+use crate::evpn::EvpnState;
 use crate::rib::{BestPathChange, Rib, RibEntry, RouteSource};
 
 /// Shared, read-only context every connection dispatches against: the
@@ -52,11 +53,20 @@ fn allowed(role: Role, req: &RibRequest) -> bool {
         RibRequest::GetRoutes | RibRequest::Lookup { .. } => {
             matches!(role, Role::User | Role::Restd)
         }
+        // `ribd`/`fdbd` name a loopback VTEP's device (`lo<table id>`) of
+        // the underlay table.
         RibRequest::GetVrfName | RibRequest::GetTableId => matches!(
             role,
-            Role::User | Role::Restd | Role::Interfaced | Role::Bgpd | Role::Ospfd | Role::Ospfv3d
+            Role::User
+                | Role::Restd
+                | Role::Interfaced
+                | Role::Bgpd
+                | Role::Ospfd
+                | Role::Ospfv3d
+                | Role::Ribd
+                | Role::Fdbd
         ),
-        RibRequest::PushBgpRoutes(_) => role == Role::Bgpd,
+        RibRequest::PushBgpRoutes(_) | RibRequest::PushEvpnRoutes(_) => role == Role::Bgpd,
         // `nos-ospfv3d` shares the OSPF route source: its SPF results are
         // pushed with the same request.
         RibRequest::PushOspfRoutes(_) => matches!(role, Role::Ospfd | Role::Ospfv3d),
@@ -122,7 +132,7 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
                 guard
                     .all_routes()
                     .into_iter()
-                    .map(|(prefix, candidates)| to_prefix_routes(prefix, &candidates))
+                    .map(|(prefix, candidates)| to_prefix_routes(prefix, &candidates, &guard.evpn))
                     .collect(),
             ))
         }
@@ -130,7 +140,7 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
             let guard = ctx.rib.read().await;
             Some(match guard.lookup(addr) {
                 Some((prefix, candidates)) => {
-                    RibEvent::Match(to_prefix_routes(prefix, &candidates))
+                    RibEvent::Match(to_prefix_routes(prefix, &candidates, &guard.evpn))
                 }
                 None => RibEvent::NoMatch,
             })
@@ -146,7 +156,35 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
             None
         }
         RibRequest::IgpCosts => Some(RibEvent::IgpCosts(ctx.rib.read().await.igp_costs())),
+        RibRequest::PushEvpnRoutes(update) => {
+            apply_evpn_route_update(ctx, update).await;
+            None
+        }
     }
+}
+
+/// Applies one push of received Type-5 routes: the raw set is kept
+/// (`EvpnState.received`), filtered into the `Evpn` candidates
+/// (`Rib::refresh_evpn`), then the L3 VNI's remote VTEPs and the routes are
+/// brought in line — the same two driver calls `reconcile::resync` ends with.
+async fn apply_evpn_route_update(ctx: &Context, update: EvpnUpdate) {
+    {
+        let mut guard = ctx.rib.write().await;
+        let received = &mut guard.evpn.received;
+        match update {
+            EvpnUpdate::Full(routes) => {
+                *received = routes.into_iter().map(|r| (r.key.clone(), r)).collect();
+            }
+            EvpnUpdate::Add(r) => {
+                received.insert(r.key.clone(), r);
+            }
+            EvpnUpdate::Remove(key) => {
+                received.remove(&key);
+            }
+        }
+        guard.refresh_evpn();
+    }
+    crate::reconcile::apply_to_kernel(&ctx.table, &ctx.rib, ctx.driver.as_ref()).await;
 }
 
 /// Applies one batch of BGP-pushed route updates (one poll tick's worth,
@@ -306,7 +344,11 @@ fn ospf_entry(r: OspfRoute) -> RibEntry {
     }
 }
 
-fn to_prefix_routes(prefix: nos_proto::IpNet, candidates: &[RibEntry]) -> PrefixRoutes {
+fn to_prefix_routes(
+    prefix: nos_proto::IpNet,
+    candidates: &[RibEntry],
+    evpn: &EvpnState,
+) -> PrefixRoutes {
     PrefixRoutes {
         prefix,
         candidates: candidates
@@ -316,9 +358,25 @@ fn to_prefix_routes(prefix: nos_proto::IpNet, candidates: &[RibEntry]) -> Prefix
                 source: to_source_kind(e.source),
                 backup: e.backup,
                 discard: e.is_discard(),
+                evpn: evpn_info(e, evpn),
             })
             .collect(),
     }
+}
+
+/// `show route`'s view of an `Evpn` candidate: its VTEP, that PE's Router's
+/// MAC and the L3 VNI.
+fn evpn_info(e: &RibEntry, evpn: &EvpnState) -> Option<EvpnRouteInfo> {
+    let vtep = e.next_hops.first()?.0;
+    (e.source == RouteSource::Evpn).then(|| EvpnRouteInfo {
+        vtep,
+        router_mac: evpn
+            .remotes
+            .get(&vtep)
+            .map(nos_proto::evpn_id::format_mac)
+            .unwrap_or_default(),
+        vni: evpn.local.as_ref().map_or(0, |l| l.vni),
+    })
 }
 
 fn to_source_kind(source: RouteSource) -> RouteSourceKind {
@@ -327,6 +385,7 @@ fn to_source_kind(source: RouteSource) -> RouteSourceKind {
         RouteSource::Bgp => RouteSourceKind::Bgp,
         RouteSource::Ospf => RouteSourceKind::Ospf,
         RouteSource::Connected => RouteSourceKind::Connected,
+        RouteSource::Evpn => RouteSourceKind::Evpn,
     }
 }
 
@@ -347,12 +406,37 @@ mod authz_tests {
         let entry = ospf_entry(route.clone());
         assert!(entry.is_discard());
         assert_eq!(entry.backup, None);
-        assert!(to_prefix_routes(entry.prefix, &[entry]).candidates[0].discard);
+        assert!(
+            to_prefix_routes(entry.prefix, &[entry], &EvpnState::default()).candidates[0].discard
+        );
         assert!(!ospf_entry(OspfRoute {
             discard: false,
             ..route
         })
         .is_discard());
+    }
+
+    #[test]
+    fn an_evpn_candidate_shows_its_router_mac_and_vni() {
+        let vtep: std::net::IpAddr = "10.50.0.3".parse().unwrap();
+        let entry = RibEntry {
+            prefix: "10.2.0.0/24".parse().unwrap(),
+            next_hops: vec![(vtep, None)],
+            source: RouteSource::Evpn,
+            backup: None,
+            backup_interface_id: None,
+        };
+        let evpn = EvpnState {
+            remotes: [(vtep, [2, 0, 0, 0, 0, 3])].into(),
+            ..EvpnState::default()
+        };
+        let shown = to_prefix_routes(entry.prefix, &[entry], &evpn);
+        let info = shown.candidates[0].evpn.as_ref().unwrap();
+        assert_eq!(shown.candidates[0].source, RouteSourceKind::Evpn);
+        assert_eq!(
+            (info.vtep, info.router_mac.as_str()),
+            (vtep, "02:00:00:00:00:03")
+        );
     }
 
     #[test]
@@ -366,6 +450,10 @@ mod authz_tests {
                 allowed(role, &RibRequest::PushOspfRoutes(vec![])),
                 matches!(role, Role::Ospfd | Role::Ospfv3d)
             );
+            assert_eq!(
+                allowed(role, &RibRequest::PushEvpnRoutes(EvpnUpdate::Full(vec![]))),
+                role == Role::Bgpd
+            );
         }
     }
 
@@ -375,8 +463,15 @@ mod authz_tests {
             let expected = matches!(role, Role::User | Role::Restd);
             assert_eq!(allowed(role, &RibRequest::GetRoutes), expected, "{role:?}");
         }
-        // The daemons that resolve a VRF through this instance.
-        for role in [Role::Interfaced, Role::Bgpd, Role::Ospfd, Role::Ospfv3d] {
+        // The daemons that resolve a VRF (or a loopback VTEP) through this instance.
+        for role in [
+            Role::Interfaced,
+            Role::Bgpd,
+            Role::Ospfd,
+            Role::Ospfv3d,
+            Role::Ribd,
+            Role::Fdbd,
+        ] {
             assert!(allowed(role, &RibRequest::GetVrfName), "{role:?}");
         }
         assert!(!allowed(Role::Lacpd, &RibRequest::GetVrfName));

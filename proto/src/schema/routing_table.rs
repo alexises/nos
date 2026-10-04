@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::validators::unique_in;
 
-use super::Config;
+use super::{Config, SourceAddress};
 use nos_proto_derive::Cli;
 
 /// The source side of a `Redistribute` rule. Only `Static` exists today —
@@ -124,6 +124,44 @@ fn rest_api_valid(rest_api: Option<&RestApi>) -> garde::Result {
     Ok(())
 }
 
+/// An IP-VRF's EVPN L3 VNI (RFC 9136 Type-5 routes, RFC 9135 symmetric
+/// IRB in its "interface-less" form): `nos-ribd` creates `vx<l3_vni>` on a
+/// bridge `brv<l3_vni>` in this table's VRF, originates every best route of
+/// the table as a Type-5 into `bgp_instance` (the underlay instance, never
+/// the table's own) and installs the Type-5 routes it receives back.
+///
+/// A plain struct with optional fields rather than an `Option<…>` (like
+/// `Config.lldp`): the CLI then reaches every field on its own (`set
+/// routing-table t evpn l3-vni 5000`, `… evpn route-target import <rt>`),
+/// which an optional struct, set in one line, can't do for its lists.
+/// Setting `l3_vni` turns it on; every other field requires it — see
+/// `valid_table_evpn`.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
+pub struct RoutingTableEvpn {
+    /// The L3 VNI (1-16777215), unique across every table and broadcast domain.
+    #[cli(topic = RoutingTableEvpnL3Vni)]
+    pub l3_vni: Option<u32>,
+    /// Route Distinguisher of every Type-5 route this table originates.
+    #[cli(topic = RoutingTableEvpnRd)]
+    pub rd: Option<String>,
+    /// A received Type-5 route must carry one of these to be installed.
+    #[serde(default)]
+    #[cli(topic = RoutingTableEvpnRouteTarget, words = "route-target import")]
+    pub route_targets_import: Vec<String>,
+    /// Attached to every Type-5 route this table originates.
+    #[serde(default)]
+    #[cli(topic = RoutingTableEvpnRouteTarget, words = "route-target export")]
+    pub route_targets_export: Vec<String>,
+    /// The VTEP address, resolved at runtime by `nos-ribd`. `Loopback` is the
+    /// loopback of the routing table owning `bgp_instance`.
+    #[cli(topic = RoutingTableEvpnVtepSource)]
+    pub vtep_source: Option<SourceAddress>,
+    /// The underlay BGP instance the Type-5 routes are exchanged over.
+    #[cli(topic = RoutingTableEvpnBgpInstance)]
+    pub bgp_instance: Option<String>,
+}
+
 /// A named routing table, optionally associated with one BGP instance and
 /// one static routing instance. The reference lives only on the table —
 /// `BgpInstance`/`StaticRoutingInstance` have no notion of which table(s)
@@ -177,6 +215,14 @@ pub struct RoutingTable {
     #[garde(custom(|r: &Option<RestApi>, _ctx: &Config| rest_api_valid(r.as_ref())))]
     #[cli(topic = RoutingTableRestApi)]
     pub rest_api: Option<RestApi>,
+
+    /// EVPN IP-VRF: this table's L3 VNI. `serde(default)` like `rest_api`.
+    /// `#[garde(skip)]`: checked by `valid_table_evpn` (it needs the other
+    /// tables and the broadcast domains).
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = RoutingTableEvpn)]
+    pub evpn: RoutingTableEvpn,
 }
 
 /// If set, `bgp_instance` must name an existing `BgpInstance` (cf.
@@ -316,6 +362,65 @@ pub(crate) fn valid_redistribute_rules(tables: &[RoutingTable], ctx: &Config) ->
         }
         redistribute_policy_reference_valid(redistribute.policy.as_ref(), ctx)?;
     }
+    for table in tables {
+        valid_table_evpn(table, ctx)?;
+    }
+    Ok(())
+}
+
+/// A table's `evpn`: nothing but an L3 VNI turns it on, and with one it
+/// needs well-formed RD/RTs (an RD and an export RT at least: every best route
+/// is originated), a VTEP source, and an existing underlay `bgp_instance`
+/// that isn't the table's own (the overlay's VRF must differ from the
+/// underlay's); the L3 VNI is used by no other table or broadcast domain
+/// (`vx<vni>` is one device per network namespace, shared with `nos-fdbd`).
+fn valid_table_evpn(table: &RoutingTable, ctx: &Config) -> garde::Result {
+    let err = |m: &str| Err(garde::Error::new(m.to_string()));
+    let e = &table.evpn;
+    let Some(vni) = e.l3_vni else {
+        if *e != RoutingTableEvpn::default() {
+            return err("evpn rd, route-targets, vtep-source and bgp-instance require an l3-vni");
+        }
+        return Ok(());
+    };
+    if !(1..=0x00ff_ffff).contains(&vni) {
+        return err("evpn l3-vni must be between 1 and 16777215");
+    }
+    if e.rd.as_deref().and_then(crate::evpn_id::parse_rd).is_none() {
+        return err("evpn needs an rd, asn:nn or a.b.c.d:nn");
+    }
+    let mut rts = e.route_targets_import.iter().chain(&e.route_targets_export);
+    if rts.any(|r| crate::evpn_id::parse_rt(r).is_none()) {
+        return err("evpn route-target must be asn:nn or a.b.c.d:nn");
+    }
+    if e.route_targets_export.is_empty() {
+        return err("evpn needs at least one export route-target");
+    }
+    if e.vtep_source.is_none() {
+        return err("evpn needs a vtep-source");
+    }
+    let Some(instance) = &e.bgp_instance else {
+        return err("evpn needs a bgp-instance");
+    };
+    if !ctx.bgp_instances.iter().any(|i| &i.name == instance) {
+        return err("evpn bgp-instance does not exist");
+    }
+    if table.bgp_instance.as_ref() == Some(instance) {
+        return err("evpn bgp-instance must be the underlay's, not this table's own");
+    }
+    let tables = ctx
+        .routing_tables
+        .iter()
+        .filter(|t| t.evpn.l3_vni == Some(vni))
+        .count();
+    let domains = ctx
+        .broadcast_domains
+        .iter()
+        .filter(|d| d.vni == Some(vni))
+        .count();
+    if tables + domains > 1 {
+        return err("evpn l3-vni is already used by another routing table or broadcast domain");
+    }
     Ok(())
 }
 
@@ -345,6 +450,7 @@ mod tests {
     fn table(name: &str, bgp_instance: Option<&str>, sri: Option<&str>) -> RoutingTable {
         RoutingTable {
             rest_api: None,
+            evpn: crate::schema::RoutingTableEvpn::default(),
             ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: bgp_instance.map(str::to_string),
@@ -620,6 +726,74 @@ mod tests {
         });
         let cfg = config_with_policy(rt, vec![]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    fn evpn() -> RoutingTableEvpn {
+        RoutingTableEvpn {
+            l3_vni: Some(5000),
+            rd: Some("65000:5000".to_string()),
+            route_targets_import: vec!["65000:5000".to_string()],
+            route_targets_export: vec!["65000:5000".to_string()],
+            vtep_source: Some(SourceAddress::Interface {
+                interface: "eth0".to_string(),
+                label: None,
+            }),
+            bgp_instance: Some("r1".to_string()),
+        }
+    }
+
+    #[test]
+    fn evpn_table_validation() {
+        let tenant = |e: RoutingTableEvpn| {
+            let mut t = table("tenant", None, None);
+            t.evpn = e;
+            t
+        };
+        let cfg = config_with(
+            vec![table("rt1", Some("r1"), None), tenant(evpn())],
+            vec![instance("r1")],
+            vec![],
+        );
+        cfg.validate_with(&cfg).unwrap();
+
+        for mutate in [
+            (|e: &mut RoutingTableEvpn| e.l3_vni = Some(0)) as fn(&mut RoutingTableEvpn),
+            |e| e.l3_vni = Some(1 << 24),
+            |e| e.l3_vni = None,
+            |e| e.rd = Some("junk".to_string()),
+            |e| e.rd = None,
+            |e| e.route_targets_import = vec!["65000".to_string()],
+            |e| e.route_targets_export.clear(),
+            |e| e.vtep_source = None,
+            |e| e.bgp_instance = Some("nope".to_string()),
+            |e| e.bgp_instance = None,
+        ] {
+            let mut e = evpn();
+            mutate(&mut e);
+            let mut bad = cfg.clone();
+            bad.routing_tables[1] = tenant(e);
+            assert!(bad.validate_with(&bad).is_err());
+        }
+
+        // The table's own instance can't be its underlay.
+        let mut own = cfg.clone();
+        own.routing_tables[0].evpn = evpn();
+        own.routing_tables.pop();
+        assert!(own.validate_with(&own).is_err());
+
+        // An L3 VNI colliding with another table's or a domain's VNI.
+        let mut twice = cfg.clone();
+        let mut second = tenant(evpn());
+        second.name = "tenant2".to_string();
+        twice.routing_tables.push(second);
+        assert!(twice.validate_with(&twice).is_err());
+        let mut with_domain = cfg.clone();
+        with_domain.broadcast_domains = vec![crate::schema::BroadcastDomain {
+            name: "bd1".to_string(),
+            vni: Some(5000),
+            ..Default::default()
+        }];
+        assert!(with_domain.validate_with(&with_domain).is_err());
     }
 
     #[test]

@@ -15,6 +15,8 @@ use tracing::{debug, error, info, trace, warn};
 use crate::bgp_client;
 use crate::config_client;
 use crate::driver::RibDriver;
+use crate::evpn::{self, L3Vni};
+use crate::evpn_client::EvpnTarget;
 use crate::interface_client;
 use crate::ospf_client;
 use crate::rib::{build_from_config, Rib, RibEntry, RouteSource};
@@ -64,6 +66,7 @@ pub async fn run(
     driver: Arc<dyn RibDriver>,
     redistribute_tx: watch::Sender<bgp_client::RedistributeTarget>,
     ospf_redistribute_tx: watch::Sender<ospf_client::RedistributeTarget>,
+    evpn_tx: watch::Sender<EvpnTarget>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     while !*shutdown.borrow() {
@@ -84,7 +87,7 @@ pub async fn run(
                     tokio::select! {
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(_))) => {
-                                resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx).await;
+                                resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -97,7 +100,7 @@ pub async fn run(
                             }
                         },
                         _ = reapply.tick() => {
-                            resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx).await;
+                            resync(&config_socket, &watchdog_socket, &table, &rib, driver.as_ref(), &redistribute_tx, &ospf_redistribute_tx, &evpn_tx).await;
                         }
                         _ = shutdown.changed() => break,
                     }
@@ -126,6 +129,7 @@ pub async fn run(
     info!(table = %table, "reconciliation loop stopped");
 }
 
+#[allow(clippy::too_many_arguments)] // one channel per push target
 async fn resync(
     config_socket: &Path,
     watchdog_socket: &Path,
@@ -134,6 +138,7 @@ async fn resync(
     driver: &dyn RibDriver,
     redistribute_tx: &watch::Sender<bgp_client::RedistributeTarget>,
     ospf_redistribute_tx: &watch::Sender<ospf_client::RedistributeTarget>,
+    evpn_tx: &watch::Sender<EvpnTarget>,
 ) {
     match config_client::fetch_config(config_socket).await {
         Ok(cfg) => {
@@ -151,6 +156,7 @@ async fn resync(
                 Vec::new()
             };
             let connected = fetch_connected(watchdog_socket, &cfg, table).await;
+            let l3 = resolve_l3vni(watchdog_socket, &cfg, table).await;
 
             let mut guard = rib.write().await;
             guard.replace_source(RouteSource::Static, static_entries);
@@ -165,6 +171,10 @@ async fn resync(
                     debug!(table = %table, "nos-interfaced unreachable, keeping previous connected prefixes");
                 }
             }
+            if let Some(l3) = l3 {
+                guard.evpn.local = l3;
+            }
+            guard.refresh_evpn();
             let routes = guard.best_routes_for_kernel();
             drop(guard);
 
@@ -178,16 +188,94 @@ async fn resync(
                     "best route"
                 );
             }
-            if let Err(e) = driver.apply(table, &routes).await {
-                error!(table = %table, error = %e, "failed to apply routes to kernel");
-            }
+            apply_to_kernel(table, rib, driver).await;
             let _ = redistribute_tx.send(compute_redistribute_target(&cfg, table, &routes));
             let _ =
                 ospf_redistribute_tx.send(compute_redistribute_target_ospf(&cfg, table, &routes));
+            let _ = evpn_tx.send(evpn_target(&*rib.read().await));
         }
         Err(e) => {
             warn!(table = %table, error = %e, "failed to fetch running config, keeping previous RIB");
         }
+    }
+}
+
+/// Brings the kernel in line with `rib`: the L3 VNI devices and remote VTEPs
+/// first (`Evpn` routes leave through that bridge, and it gives our Router's
+/// MAC), then every best route. Shared with `server.rs`'s Type-5 push.
+pub(crate) async fn apply_to_kernel(table: &str, rib: &RwLock<Rib>, driver: &dyn RibDriver) {
+    let (l3, remotes) = {
+        let guard = rib.read().await;
+        (guard.evpn.local.clone(), guard.evpn.remotes.clone())
+    };
+    match driver.sync_l3vni(table, l3.as_ref(), &remotes).await {
+        Ok(rmac) => rib.write().await.evpn.rmac = rmac,
+        Err(e) => warn!(table = %table, error = %e, "failed to build the l3 vni devices"),
+    }
+    let routes = rib.read().await.best_routes_for_kernel();
+    if let Err(e) = driver.apply(table, &routes).await {
+        error!(table = %table, error = %e, "failed to apply routes to kernel");
+    }
+}
+
+/// This table's `evpn`, resolved: `Some(None)` without one, `None` while its
+/// VTEP isn't resolvable (the caller keeps what it had, so a transient
+/// `nos-interfaced` failure doesn't tear the devices down).
+async fn resolve_l3vni(watchdog_socket: &Path, cfg: &Config, table: &str) -> Option<Option<L3Vni>> {
+    let Some(e) = cfg
+        .routing_tables
+        .iter()
+        .find(|t| t.name == table)
+        .map(|t| &t.evpn)
+    else {
+        return Some(None);
+    };
+    // Commit-time validation guarantees the rest once there is an L3 VNI.
+    let (Some(vni), Some(bgp_instance), Some(source)) =
+        (e.l3_vni, e.bgp_instance.as_ref(), e.vtep_source.as_ref())
+    else {
+        return Some(None);
+    };
+    let underlay_table = cfg
+        .bgp_instances
+        .iter()
+        .find(|i| &i.name == bgp_instance)
+        .and_then(|i| i.routing_table.as_deref());
+    let Some((vtep, underlay)) =
+        interface_client::resolve_vtep(watchdog_socket, underlay_table, source).await
+    else {
+        debug!(table = %table, "evpn vtep-source not resolvable yet");
+        return None;
+    };
+    let rts = |list: &[String]| {
+        list.iter()
+            .filter_map(|r| nos_proto::evpn_id::parse_rt(r))
+            .collect()
+    };
+    Some(Some(L3Vni {
+        vni,
+        rd: e
+            .rd
+            .as_deref()
+            .and_then(nos_proto::evpn_id::parse_rd)
+            .unwrap_or_default(),
+        import: rts(&e.route_targets_import),
+        export: rts(&e.route_targets_export),
+        bgp_instance: bgp_instance.clone(),
+        vtep,
+        underlay,
+    }))
+}
+
+/// What `evpn_client` originates: every best route but the `Evpn` ones, once
+/// the table has an L3 VNI and the driver gave its Router's MAC.
+fn evpn_target(rib: &Rib) -> EvpnTarget {
+    match (&rib.evpn.local, rib.evpn.rmac) {
+        (Some(l3), Some(rmac)) => EvpnTarget {
+            bgp_instance: Some(l3.bgp_instance.clone()),
+            routes: evpn::originated(&rib.best_routes(), l3, rmac),
+        },
+        _ => EvpnTarget::default(),
     }
 }
 
@@ -517,6 +605,7 @@ mod tests {
     fn no_redistribute_rule_publishes_bgp_instance_with_empty_routes() {
         let table = RoutingTable {
             rest_api: None,
+            evpn: nos_proto::RoutingTableEvpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
@@ -538,6 +627,7 @@ mod tests {
     fn active_rule_redistributes_static_ipv4_routes() {
         let table = RoutingTable {
             rest_api: None,
+            evpn: nos_proto::RoutingTableEvpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
@@ -568,6 +658,7 @@ mod tests {
     fn active_rule_skips_bgp_sourced_routes() {
         let table = RoutingTable {
             rest_api: None,
+            evpn: nos_proto::RoutingTableEvpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
@@ -601,6 +692,7 @@ mod tests {
     fn active_rule_redistributes_static_ipv6_routes_too() {
         let table = RoutingTable {
             rest_api: None,
+            evpn: nos_proto::RoutingTableEvpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),
@@ -644,6 +736,7 @@ mod tests {
     fn ospf_no_redistribute_rule_publishes_ospf_instance_with_empty_routes() {
         let table = RoutingTable {
             rest_api: None,
+            evpn: nos_proto::RoutingTableEvpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,
@@ -665,6 +758,7 @@ mod tests {
     fn ospf_active_rule_redistributes_static_ipv4_routes() {
         let table = RoutingTable {
             rest_api: None,
+            evpn: nos_proto::RoutingTableEvpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,
@@ -691,6 +785,7 @@ mod tests {
     fn ospf_active_rule_skips_bgp_sourced_routes() {
         let table = RoutingTable {
             rest_api: None,
+            evpn: nos_proto::RoutingTableEvpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,
@@ -724,6 +819,7 @@ mod tests {
     fn ospf_rule_does_not_redistribute_when_target_is_bgp() {
         let table = RoutingTable {
             rest_api: None,
+            evpn: nos_proto::RoutingTableEvpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: Some("bgp1".into()),

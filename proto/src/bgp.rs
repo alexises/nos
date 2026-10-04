@@ -168,6 +168,15 @@ pub enum BgpRequest {
     ClearPeer { peer: IpAddr },
     /// One-shot: every configured RPKI cache's RTR session (`show bgp rpki`).
     GetRpkiSummary,
+    /// Fire-and-forget, no reply, `nos-ribd` only: one IP-VRF's best routes
+    /// as EVPN Type-5 routes (`EvpnKey::IpPrefix`), originated into this
+    /// (underlay) instance. `table` scopes a `Full`, like `RedistributeMacs`'s
+    /// `domain`. A variant of its own, not `RedistributeMacs`, since only
+    /// `ribd` may send it.
+    RedistributeEvpnPrefixes {
+        table: String,
+        update: crate::fdb::EvpnUpdate,
+    },
 }
 
 /// Messages sent from `nos-bgpd` to a query client.

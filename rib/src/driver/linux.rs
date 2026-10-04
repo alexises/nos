@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
@@ -6,22 +6,130 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use futures::{stream, StreamExt as _, TryStreamExt as _};
-use nos_proto::IpNet;
-use rtnetlink::packet_route::link::LinkMessage;
-use rtnetlink::packet_route::route::{
-    RouteAddress, RouteAttribute, RouteMessage, RouteProtocol, RouteType,
+use netlink_packet_core::{
+    NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_REPLACE, NLM_F_REQUEST,
 };
-use rtnetlink::packet_route::AddressFamily;
-use rtnetlink::{Handle, LinkUnspec, LinkVrf, RouteMessageBuilder, RouteNextHopBuilder};
+use nos_proto::evpn_id::{format_mac, vxlan_name};
+use nos_proto::IpNet;
+use rtnetlink::packet_route::link::{InfoData, InfoVxlan, LinkAttribute, LinkInfo, LinkMessage};
+use rtnetlink::packet_route::neighbour::{
+    NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
+};
+use rtnetlink::packet_route::route::{
+    RouteAddress, RouteAttribute, RouteFlags, RouteMessage, RouteProtocol, RouteType,
+};
+use rtnetlink::packet_route::{AddressFamily, RouteNetlinkMessage};
+use rtnetlink::{
+    Handle, LinkBridge, LinkUnspec, LinkVrf, LinkVxlan, RouteMessageBuilder, RouteNextHopBuilder,
+};
 use tracing::{debug, info, trace, warn};
 
 use super::route_channel::RouteChannel;
 use super::{table_registry, DriverError, RibDriver};
+use crate::evpn::{L3Vni, Mac};
 use crate::rib::{RibEntry, RouteSource};
 
 /// errno(3) `ENODEV` — the kernel's reply to a targeted `RTM_GETLINK`
 /// lookup (`match_name`/`match_index`) for a link that doesn't exist.
 const ENODEV: i32 = 19;
+/// errno(3) `ENOENT`: deleting a neighbour/FDB entry that is already gone.
+const ENOENT: i32 = 2;
+/// RFC 7348's IANA VXLAN port, as `nos-fdbd`'s devices use.
+const VXLAN_PORT: u16 = 4789;
+
+/// The L3 VNI devices this process built for one table (by table id).
+#[derive(Debug, Clone)]
+struct L3State {
+    vni: u32,
+    bridge: u32,
+    /// The underlay's master (its VRF) when the VXLAN device was brought up:
+    /// the kernel binds the tunnel's socket to the VRF only on open, so a
+    /// change means a reopen — `nos-fdbd`'s `bound_master` rule.
+    bound_master: Option<u32>,
+    remotes: BTreeMap<IpAddr, Mac>,
+}
+
+/// The L3 VNI's bridge: `brv16777215` is 11 chars, under `IFNAMSIZ`.
+fn bridge_name(vni: u32) -> String {
+    format!("brv{vni}")
+}
+
+fn master_of(link: &LinkMessage) -> Option<u32> {
+    link.attributes.iter().find_map(|a| match a {
+        LinkAttribute::Controller(i) => Some(*i),
+        _ => None,
+    })
+}
+
+fn link_mac(link: &LinkMessage) -> Option<Mac> {
+    link.attributes.iter().find_map(|a| match a {
+        LinkAttribute::Address(b) => Mac::try_from(b.as_slice()).ok(),
+        _ => None,
+    })
+}
+
+fn vxlan_matches(link: &LinkMessage, vni: u32, vtep: IpAddr, underlay: u32) -> bool {
+    let local = match vtep {
+        IpAddr::V4(a) => InfoVxlan::Local(a),
+        IpAddr::V6(a) => InfoVxlan::Local6(a),
+    };
+    link.attributes.iter().any(|a| match a {
+        LinkAttribute::LinkInfo(infos) => infos.iter().any(|i| match i {
+            LinkInfo::Data(InfoData::Vxlan(v)) => {
+                v.contains(&InfoVxlan::Id(vni))
+                    && v.contains(&local)
+                    && v.contains(&InfoVxlan::Link(underlay))
+            }
+            _ => false,
+        }),
+        _ => false,
+    })
+}
+
+/// `<vtep> lladdr <rmac>` on the L3 bridge: permanent and `extern_learn`, so
+/// the kernel neither ages nor probes it.
+fn remote_neigh_msg(bridge: u32, vtep: IpAddr, rmac: Mac) -> NeighbourMessage {
+    let mut m = NeighbourMessage::default();
+    m.header.family = match vtep {
+        IpAddr::V4(_) => AddressFamily::Inet,
+        IpAddr::V6(_) => AddressFamily::Inet6,
+    };
+    m.header.ifindex = bridge;
+    m.header.state = NeighbourState::Permanent;
+    m.header.flags = NeighbourFlags::ExtLearned;
+    m.attributes = vec![
+        NeighbourAttribute::LinkLayerAddress(rmac.to_vec()),
+        NeighbourAttribute::Destination(NeighbourAddress::from(vtep)),
+    ];
+    m
+}
+
+/// `<rmac> dst <vtep> vni <vni> via <underlay>` on the VXLAN device, also
+/// filed in the bridge's table (`self master extern_learn`, as `nos-fdbd`'s
+/// remote MACs). `via` is required with the underlay in a VRF, else the kernel
+/// looks the VTEP up in the main table.
+fn remote_fdb_msg(
+    vxlan: u32,
+    underlay: u32,
+    rmac: Mac,
+    vtep: IpAddr,
+    vni: u32,
+) -> NeighbourMessage {
+    let mut m = NeighbourMessage::default();
+    m.header.family = AddressFamily::Bridge;
+    m.header.ifindex = vxlan;
+    m.header.state = NeighbourState::Permanent;
+    m.header.flags = NeighbourFlags::Own
+        .union(NeighbourFlags::Controller)
+        .union(NeighbourFlags::ExtLearned);
+    m.attributes = vec![
+        NeighbourAttribute::LinkLayerAddress(rmac.to_vec()),
+        NeighbourAttribute::Destination(NeighbourAddress::from(vtep)),
+        NeighbourAttribute::Vni(vni),
+        NeighbourAttribute::IfIndex(underlay),
+    ];
+    m
+}
 
 // ponytail: fixed fan-out bound rather than a `--driver` flag — nothing in
 // the bench-bgp kernel-install report suggests 64 is the wrong number.
@@ -106,6 +214,8 @@ pub struct LinuxRibDriver {
     /// reconstruct a matching `RTM_DELROUTE` for a link-local IPv6 gateway
     /// on the `apply_delta` removal path (see `add_route`'s doc comment).
     installed: Mutex<HashMap<u32, HashMap<Slot, Hops>>>,
+    /// Per table id: the L3 VNI devices `sync_l3vni` built.
+    l3: Mutex<HashMap<u32, L3State>>,
 }
 
 impl LinuxRibDriver {
@@ -118,6 +228,7 @@ impl LinuxRibDriver {
             route_channel,
             registry_path,
             installed: Mutex::new(HashMap::new()),
+            l3: Mutex::new(HashMap::new()),
         })
     }
 
@@ -138,6 +249,178 @@ impl LinuxRibDriver {
             Err(rtnetlink::Error::NetlinkError(e)) if e.raw_code() == -ENODEV => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Sends one raw `RTM_NEWNEIGH`/`RTM_DELNEIGH` (an FDB entry needs flags
+    /// `NeighbourAddRequest` doesn't offer). A delete of an absent entry
+    /// (`ENOENT`) counts as done.
+    async fn neigh(&self, msg: NeighbourMessage, delete: bool) -> Result<(), DriverError> {
+        let (payload, flags) = if delete {
+            (RouteNetlinkMessage::DelNeighbour(msg), 0)
+        } else {
+            (
+                RouteNetlinkMessage::NewNeighbour(msg),
+                NLM_F_CREATE | NLM_F_REPLACE,
+            )
+        };
+        let mut req = NetlinkMessage::from(payload);
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK | flags;
+        let mut response = self.handle.clone().request(req)?;
+        while let Some(m) = response.next().await {
+            if let NetlinkPayload::Error(e) = m.payload {
+                if e.raw_code() == 0 || (delete && e.raw_code() == -ENOENT) {
+                    continue;
+                }
+                return Err(rtnetlink::Error::NetlinkError(e).into());
+            }
+        }
+        Ok(())
+    }
+
+    /// The bridge, the VXLAN device on it, and the per-VTEP entries of
+    /// `l3` — see `RibDriver::sync_l3vni`. `prev` is what was built last.
+    async fn build_l3vni(
+        &self,
+        vrf: u32,
+        l3: &L3Vni,
+        remotes: &BTreeMap<IpAddr, Mac>,
+        prev: Option<&L3State>,
+    ) -> Result<(Mac, L3State), DriverError> {
+        let missing = |what: String| DriverError::Other(format!("{what} does not exist (yet)"));
+        let (br_name, vx_name) = (bridge_name(l3.vni), vxlan_name(l3.vni));
+
+        let bridge = if let Some(l) = self.find_link(&br_name).await? {
+            l
+        } else {
+            self.handle
+                .link()
+                .add(LinkBridge::new(&br_name).build())
+                .execute()
+                .await?;
+            info!(bridge = %br_name, vni = l3.vni, "created l3 vni bridge");
+            self.find_link(&br_name)
+                .await?
+                .ok_or_else(|| missing(br_name.clone()))?
+        };
+        let br = bridge.header.index;
+        if master_of(&bridge) != Some(vrf) {
+            self.handle
+                .link()
+                .set(LinkUnspec::new_with_index(br).controller(vrf).build())
+                .execute()
+                .await?;
+        }
+        self.handle
+            .link()
+            .set(LinkUnspec::new_with_index(br).up().build())
+            .execute()
+            .await?;
+
+        let underlay = self
+            .find_link(&l3.underlay)
+            .await?
+            .ok_or_else(|| missing(format!("underlay {}", l3.underlay)))?;
+        let (underlay_idx, underlay_master) = (underlay.header.index, master_of(&underlay));
+        let mut vx = self.find_link(&vx_name).await?;
+        if let Some(l) = &vx {
+            if !vxlan_matches(l, l3.vni, l3.vtep, underlay_idx) {
+                info!(vxlan = %vx_name, vni = l3.vni, "l3 vni vxlan device drifted, recreating");
+                self.handle.link().del(l.header.index).execute().await?;
+                vx = None;
+            } else if prev.map(|p| p.bound_master) != Some(underlay_master) {
+                self.handle
+                    .link()
+                    .set(LinkUnspec::new_with_index(l.header.index).down().build())
+                    .execute()
+                    .await?;
+                info!(vxlan = %vx_name, vni = l3.vni, "l3 vni vxlan device reopened in its underlay's vrf");
+            }
+        }
+        let vx = if let Some(l) = vx {
+            l
+        } else {
+            let b = LinkVxlan::new(&vx_name, l3.vni)
+                .dev(underlay_idx)
+                .port(VXLAN_PORT)
+                .learning(false);
+            let b = match l3.vtep {
+                IpAddr::V4(a) => b.local(a),
+                IpAddr::V6(a) => b.local6(a),
+            };
+            self.handle.link().add(b.build()).execute().await?;
+            info!(vxlan = %vx_name, vni = l3.vni, vtep = %l3.vtep, underlay = %l3.underlay, "created l3 vni vxlan device");
+            self.find_link(&vx_name)
+                .await?
+                .ok_or_else(|| missing(vx_name.clone()))?
+        };
+        let vx_idx = vx.header.index;
+        if master_of(&vx) != Some(br) {
+            self.handle
+                .link()
+                .set(LinkUnspec::new_with_index(vx_idx).controller(br).build())
+                .execute()
+                .await?;
+        }
+        self.handle
+            .link()
+            .set(LinkUnspec::new_with_index(vx_idx).up().build())
+            .execute()
+            .await?;
+        // Read after enslaving: a bridge without an assigned address takes
+        // its lowest port's.
+        let rmac = self
+            .find_link(&br_name)
+            .await?
+            .as_ref()
+            .and_then(link_mac)
+            .ok_or_else(|| missing(format!("{br_name}'s address")))?;
+
+        let old = prev.map(|p| p.remotes.clone()).unwrap_or_default();
+        for (vtep, mac) in &old {
+            if remotes.get(vtep) != Some(mac) {
+                self.neigh(remote_neigh_msg(br, *vtep, *mac), true).await?;
+                self.neigh(
+                    remote_fdb_msg(vx_idx, underlay_idx, *mac, *vtep, l3.vni),
+                    true,
+                )
+                .await?;
+                info!(vni = l3.vni, vtep = %vtep, rmac = %format_mac(mac), "evpn remote vtep removed");
+            }
+        }
+        // Re-asserted every pass (cheap, a handful of VTEPs), so a recreated
+        // device is healed.
+        for (vtep, mac) in remotes {
+            self.neigh(remote_neigh_msg(br, *vtep, *mac), false).await?;
+            self.neigh(
+                remote_fdb_msg(vx_idx, underlay_idx, *mac, *vtep, l3.vni),
+                false,
+            )
+            .await?;
+            if old.get(vtep) != Some(mac) {
+                info!(vni = l3.vni, vtep = %vtep, rmac = %format_mac(mac), "evpn remote vtep installed");
+            }
+        }
+        Ok((
+            rmac,
+            L3State {
+                vni: l3.vni,
+                bridge: br,
+                bound_master: underlay_master,
+                remotes: remotes.clone(),
+            },
+        ))
+    }
+
+    /// Deletes an L3 VNI's VXLAN device and bridge (their neighbours, FDB
+    /// entries and the routes through the bridge go with them).
+    async fn remove_l3vni(&self, vni: u32) -> Result<(), DriverError> {
+        for name in [vxlan_name(vni), bridge_name(vni)] {
+            if let Some(l) = self.find_link(&name).await? {
+                self.handle.link().del(l.header.index).execute().await?;
+            }
+        }
+        info!(vni, bridge = %bridge_name(vni), vxlan = %vxlan_name(vni), "deleted l3 vni devices");
+        Ok(())
     }
 
     /// Ensures the VRF device for `table_id` exists and is up, returning
@@ -232,10 +515,25 @@ impl LinuxRibDriver {
         backup: bool,
     ) -> Result<(), DriverError> {
         let gateway = show_gateways(&gateways(hops));
-        let Some(route) = build_route(prefix, hops, table_id, backup) else {
+        // An `Evpn` route leaves `onlink` through the L3 VNI's bridge: its
+        // gateway is the remote VTEP, resolved by `sync_l3vni`'s neighbour.
+        let evpn = source == Some(RouteSource::Evpn);
+        let hops = if evpn {
+            let Some(bridge) = self.l3.lock().unwrap().get(&table_id).map(|s| s.bridge) else {
+                debug!(%prefix, table_id, "l3 vni bridge not built yet, evpn route deferred");
+                return Ok(());
+            };
+            hops.iter().map(|(gw, _)| (*gw, Some(bridge))).collect()
+        } else {
+            hops.clone()
+        };
+        let Some(mut route) = build_route(prefix, &hops, table_id, backup) else {
             warn!(%prefix, %gateway, table_id, "route prefix/gateway address family mismatch, skipping");
             return Ok(());
         };
+        if evpn {
+            route.header.flags.insert(RouteFlags::Onlink);
+        }
         self.route_channel.add(route).await.inspect_err(|e| {
             warn!(%prefix, %gateway, table_id, backup, error = %e, "failed to add route");
         })?;
@@ -481,6 +779,10 @@ impl RibDriver for LinuxRibDriver {
             return Ok(());
         };
         self.reconcile_routes(table_id, &HashMap::new()).await?;
+        let l3 = self.l3.lock().unwrap().remove(&table_id);
+        if let Some(l3) = l3 {
+            self.remove_l3vni(l3.vni).await?;
+        }
 
         let vrf_ifname = table_registry::vrf_ifname(table_id);
         if let Some(link) = self.find_link(&vrf_ifname).await? {
@@ -497,6 +799,30 @@ impl RibDriver for LinuxRibDriver {
 
     async fn table_id(&self, table_name: &str) -> Option<u32> {
         table_registry::lookup_table_id(&self.registry_path, table_name)
+    }
+
+    async fn sync_l3vni(
+        &self,
+        table_name: &str,
+        l3: Option<&L3Vni>,
+        remotes: &BTreeMap<IpAddr, Mac>,
+    ) -> Result<Option<Mac>, DriverError> {
+        let table_id = table_registry::ensure_table_id(&self.registry_path, table_name)?;
+        let mut prev = self.l3.lock().unwrap().get(&table_id).cloned();
+        // Gone, or now another VNI: the old devices go first.
+        if let Some(p) = prev.take_if(|p| l3.is_none_or(|l| l.vni != p.vni)) {
+            self.l3.lock().unwrap().remove(&table_id);
+            self.remove_l3vni(p.vni).await?;
+        }
+        let Some(l3) = l3 else {
+            return Ok(None);
+        };
+        let vrf = self
+            .ensure_vrf(&table_registry::vrf_ifname(table_id), table_id)
+            .await?;
+        let (rmac, state) = self.build_l3vni(vrf, l3, remotes, prev.as_ref()).await?;
+        self.l3.lock().unwrap().insert(table_id, state);
+        Ok(Some(rmac))
     }
 }
 

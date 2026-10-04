@@ -71,6 +71,7 @@ impl Router {
                 peers,
                 Arc::new(nos_rpl::ACCEPT_ALL.clone()),
                 Vec::new(),
+                Vec::new(),
                 rpki_caches,
             )
             .await;
@@ -163,7 +164,11 @@ async fn two_instances_peer_exchange_a_route_and_follow_config_changes() {
         [] as [nos_proto::EvpnRouteSummary; 0]
     );
     assert_eq!(
-        b.manager.fdb_push_snapshot().await.0,
+        b.manager.evpn_feed_snapshot(false).await.0,
+        [] as [std::string::String; 0]
+    );
+    assert_eq!(
+        b.manager.evpn_feed_snapshot(true).await.0,
         [] as [std::string::String; 0]
     );
 
