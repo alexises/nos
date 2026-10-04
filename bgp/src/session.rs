@@ -82,6 +82,8 @@ pub struct ResolvedPeer {
     pub connect_retry_time: Duration,
     /// RFC 4271 §9.2.1.1; zero disables pacing (see `crate::mrai`).
     pub mrai: Duration,
+    /// RFC 7313 §4 stale-route bound after a `BoRR`; zero disables it.
+    pub route_refresh_stale_time: Duration,
     /// RFC 2439 flap damping of routes received from this peer.
     pub damping: Option<nos_proto::BgpDamping>,
     /// RFC 5082 GTSM hop count (see `tcp::apply_max_hops`); `None` = off.
@@ -680,6 +682,7 @@ impl SessionManager {
         let local = *self.local.borrow();
         let remote_as = slot.peer.remote_as;
         let mrai = slot.peer.mrai;
+        let route_refresh_stale_time = slot.peer.route_refresh_stale_time;
         let damping = slot.peer.damping;
         let local_hold_time = slot.peer.hold_time;
         let keepalive_override = slot.peer.keepalive_interval;
@@ -702,6 +705,7 @@ impl SessionManager {
                     local_hold_time,
                     keepalive_override,
                     mrai,
+                    route_refresh_stale_time,
                     damping,
                     next_hop,
                     address_families,
@@ -1033,6 +1037,7 @@ async fn active_connect_loop(
                                 local_hold_time: slot.peer.hold_time,
                                 keepalive_override: slot.peer.keepalive_interval,
                                 mrai: slot.peer.mrai,
+                                route_refresh_stale_time: slot.peer.route_refresh_stale_time,
                                 damping: slot.peer.damping,
                                 next_hop: slot.peer.next_hop,
                                 address_families: slot.peer.address_families.clone(),
@@ -1099,6 +1104,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: fsm::CONNECT_RETRY_TIME,
             mrai: Duration::ZERO,
+            route_refresh_stale_time: Duration::ZERO,
             damping: None,
             max_hops: None,
             auth: None,

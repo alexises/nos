@@ -322,6 +322,11 @@ pub struct Args {
     #[arg(long)]
     pub mrai: Option<u16>,
 
+    /// If set, sets `--peer-group`'s RFC 7313 route refresh stale time in
+    /// seconds (`BgpPeerGroupOp::SetRouteRefreshStaleTime`).
+    #[arg(long)]
+    pub route_refresh_stale_time: Option<u16>,
+
     /// If any is set, enables `--peer-group`'s RFC 2439 flap damping
     /// (`BgpPeerGroupOp::SetDamping`); the ones left out keep RFC 7196's defaults.
     #[arg(long)]
@@ -1469,6 +1474,16 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }));
     }
 
+    if let Some(seconds) = args.route_refresh_stale_time {
+        ops.push(ConfigOp::BgpPeerGroup(
+            BgpPeerGroupOp::SetRouteRefreshStaleTime {
+                instance: args.bgp_instance.clone(),
+                name: args.peer_group.clone(),
+                seconds,
+            },
+        ));
+    }
+
     if let Some(max_hops) = args.max_hops {
         ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetMaxHops {
             instance: args.bgp_instance.clone(),
@@ -2456,6 +2471,8 @@ mod tests {
             "3",
             "--mrai",
             "30",
+            "--route-refresh-stale-time",
+            "5",
             "--max-hops",
             "1",
             "--shutdown-peer-group",

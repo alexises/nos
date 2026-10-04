@@ -205,6 +205,11 @@ async fn resync(
                     Duration::from_secs(u64::from(s))
                 }),
             mrai: Duration::from_secs(u64::from(group.mrai.unwrap_or(0))),
+            route_refresh_stale_time: Duration::from_secs(u64::from(
+                group
+                    .route_refresh_stale_time
+                    .unwrap_or(nos_proto::ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS),
+            )),
             damping: group.damping,
             max_hops: group.max_hops,
             auth: group.auth.as_ref().map(ResolvedAuth::from),

@@ -1225,6 +1225,82 @@ pub async fn malformed_update(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// RFC 7313 §4 (#80): a scripted speaker (`borr.py`, router-g) sends a BoRR,
+/// re-announces only one of its two prefixes and never sends the EoRR. With
+/// `route-refresh-stale-time 5`, router-a purges the other one when the timer
+/// expires, keeps the session, and a later complete BoRR/EoRR cancels it.
+pub async fn route_refresh_stale(w: &mut World) -> anyhow::Result<()> {
+    let flags = strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--remote-as",
+        &ASN_G.to_string(),
+        "--peer",
+        IP_G,
+        "--route-refresh-stale-time",
+        "5",
+    ]);
+    w.start(A, Some(flags), &[]).await?;
+    w.dock
+        .ensure_image(
+            PY_SPEAKER_IMAGE,
+            &format!(
+                "FROM ghcr.io/exa-networks/exabgp:{EXABGP_VERSION}\n\
+                 ENTRYPOINT [\"python3\", \"-u\"]\n"
+            ),
+        )
+        .await?;
+    let script = include_str!("borr.py")
+        .replace("@IP_A@", IP_A)
+        .replace("@IP_G@", IP_G)
+        .replace("@ASN@", &ASN_G.to_string())
+        .replace("@RID@", RID_G)
+        .replace("@KEPT@", RR_STALE_KEPT)
+        .replace("@PURGED@", RR_STALE_PURGED);
+    w.dock
+        .start_plain(
+            "router-g",
+            PY_SPEAKER_IMAGE,
+            NET,
+            IP_G,
+            &["/etc/borr.py"],
+            ("/etc", "borr.py", script.as_bytes()),
+        )
+        .await?;
+    let a = w.a()?;
+    a.established().await?;
+    let established = a.count("bgp session established");
+    let expired = "bgp: route refresh stale timer expired";
+    a.wait(&format!("loc-rib best path for {RR_STALE_PURGED} updated"))
+        .await?;
+    a.wait(&format!("bgp: received BoRR peer={IP_G}")).await?;
+
+    log("no EoRR: the stale timer purges the prefix the refresh left out");
+    a.wait_new(&format!("{expired}.* peer={IP_G} afi=1"), 0, 15)
+        .await?;
+    a.wait(&format!(
+        "purged stale route at end of route refresh peer={IP_G} prefix={RR_STALE_PURGED}"
+    ))
+    .await?;
+    anyhow::ensure!(
+        a.count(&format!("purged stale route.*prefix={RR_STALE_KEPT}")) == 0,
+        "router-a purged {RR_STALE_KEPT}, which the refresh re-announced"
+    );
+    anyhow::ensure!(
+        a.count("bgp session established") == established,
+        "the stale timer reset the session"
+    );
+
+    log("a complete refresh: EoRR cancels the timer");
+    a.wait(&format!("bgp: received EoRR peer={IP_G}")).await?;
+    a.assert_quiet(expired, a.count(expired), 10).await?;
+    Ok(())
+}
+
 /// RFC 5065 confederation (#15): router-a (member AS `CONFED_ASN_A`) and
 /// router-b (`CONFED_ASN_B`) form confederation `CONFED_ID` and peer as
 /// confederation-external; ExaBGP (router-g) is outside it and peers router-a

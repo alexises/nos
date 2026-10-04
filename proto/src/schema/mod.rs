@@ -31,7 +31,7 @@ pub use bgp_peer::BgpPeer;
 pub use bgp_peer_group::{
     AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpDamping, BgpMaximumPrefix, BgpPeerGroup,
     BgpPrefixLimit, BgpShutdown, NextHopMode, SourceAddress, CONNECT_RETRY_TIME_DEFAULT_SECS,
-    HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR,
+    HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS,
 };
 pub use broadcast_domain::BroadcastDomain;
 pub use community_alias::CommunityAlias;
