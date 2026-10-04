@@ -444,6 +444,11 @@ impl SessionManager {
         self.bgp_rib.lock().await.set_igp(igp);
     }
 
+    /// `BgpInstance.maximum_paths`, for the RIB's multipath selection.
+    pub async fn set_maximum_paths(&self, maximum_paths: Option<u8>) {
+        self.bgp_rib.lock().await.set_maximum_paths(maximum_paths);
+    }
+
     /// This instance's owning routing table name and current best-path
     /// snapshot, for `rib_push_client`'s poll loop.
     pub async fn bgp_push_snapshot(&self) -> (Option<String>, HashMap<IpNet, crate::rib::Hops>) {

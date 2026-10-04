@@ -1940,6 +1940,7 @@ mod tests {
             peer_groups: Vec::new(),
             peers: Vec::new(),
             cluster_id: None,
+            maximum_paths: None,
             confederation: nos_proto::BgpConfederation::default(),
             rpki_caches: Vec::new(),
             routing_table: None,
@@ -3183,6 +3184,7 @@ mod tests {
                     ..Default::default()
                 }],
                 cluster_id: Some(Ipv4Addr::new(9, 9, 9, 9)),
+                maximum_paths: None,
                 confederation: nos_proto::BgpConfederation::default(),
                 rpki_caches: Vec::new(),
                 ..instance("r1", 65001)

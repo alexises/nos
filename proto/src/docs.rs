@@ -297,6 +297,8 @@ topics! {
     OspfAreaNssaDefaultOriginate,
     /// `BgpPeerGroup.announce_rpki_state`
     BgpPeerGroupAnnounceRpkiState,
+    /// `BgpInstance.maximum_paths`
+    BgpInstanceMaximumPaths,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

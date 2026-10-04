@@ -1101,6 +1101,17 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_ecmp_route_round_trips_through_multipath() {
+        let p = net("2001:db8:80::/48");
+        let hops = vec![(addr("2001:db8::9"), None), (addr("2001:db8::2"), None)];
+        let route = build_route(p, &hops, 100, false).unwrap();
+        assert_eq!(
+            extract_route(&route),
+            Some(((p, false), vec![addr("2001:db8::2"), addr("2001:db8::9")]))
+        );
+    }
+
+    #[test]
     fn single_hop_route_uses_rta_gateway() {
         let p = net("10.0.0.0/24");
         let route = build_route(p, &vec![(addr("10.0.0.1"), None)], 100, true).unwrap();

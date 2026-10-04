@@ -596,6 +596,12 @@ pub struct BgpRib {
     /// Per prefix, the runner-up path's next hop (a different next hop from
     /// the winner's), pushed to `nos-ribd` as the kernel backup route.
     backups: HashMap<IpNet, IpAddr>,
+    /// Per prefix, the multipath next-hop set (`multipath_next_hops`) when
+    /// it holds two or more — absent means the winner's own next hop alone.
+    multipaths: HashMap<IpNet, Vec<IpAddr>>,
+    /// `BgpInstance.maximum_paths` (1 when unset): how many next hops a
+    /// prefix may install.
+    maximum_paths: usize,
     /// What we've last told each peer, for correct withdrawals.
     adj_rib_out: HashMap<IpAddr, HashSet<IpNet>>,
     peer_outboxes: HashMap<IpAddr, PeerOutbox>,
@@ -664,6 +670,8 @@ impl BgpRib {
             igp: HashMap::new(),
             igp_ready: false,
             backups: HashMap::new(),
+            multipaths: HashMap::new(),
+            maximum_paths: 1,
             adj_rib_out: HashMap::new(),
             peer_outboxes: HashMap::new(),
             peer_asns: HashMap::new(),
@@ -738,6 +746,25 @@ impl BgpRib {
         self.cluster_id = cluster_id;
     }
 
+    /// Sets `BgpInstance.maximum_paths` (`None`: 1) and, on a change,
+    /// re-decides every received prefix's multipath set.
+    pub fn set_maximum_paths(&mut self, maximum_paths: Option<u8>) {
+        let max = usize::from(maximum_paths.unwrap_or(1).max(1));
+        if max == self.maximum_paths {
+            return;
+        }
+        self.maximum_paths = max;
+        let prefixes: HashSet<IpNet> = self
+            .adj_rib_in
+            .values()
+            .flat_map(HashMap::keys)
+            .copied()
+            .collect();
+        for prefix in prefixes {
+            self.recompute_and_propagate(prefix);
+        }
+    }
+
     /// Sets the RFC 5065 confederation identifier (`None`: not confederated).
     pub fn set_confederation(&mut self, confed_id: Option<u32>) {
         self.confed_id = confed_id;
@@ -797,9 +824,14 @@ impl BgpRib {
             .loc_rib
             .iter()
             .filter_map(|(prefix, route)| {
-                route
-                    .next_hop
-                    .map(|next_hop| (*prefix, (next_hop, self.backups.get(prefix).copied())))
+                route.next_hop.map(|next_hop| {
+                    let hops = self
+                        .multipaths
+                        .get(prefix)
+                        .cloned()
+                        .unwrap_or_else(|| vec![next_hop]);
+                    (*prefix, (hops, self.backups.get(prefix).copied()))
+                })
             })
             .collect();
         (self.owning_routing_table.clone(), routes)
@@ -1537,9 +1569,30 @@ impl BgpRib {
         });
 
         let best = best_path(&candidates, &self.igp);
+        // Install-only: the multipath set never changes what is advertised
+        // (still `best` alone), so it's updated before the `unchanged`
+        // return below, like the backup — `rib_push_client`'s poll picks
+        // up a sibling joining or leaving on its own.
+        let multipath = best.as_ref().map_or_else(Vec::new, |b| {
+            multipath_next_hops(&candidates, b, &self.igp, self.maximum_paths)
+        });
+        if multipath.len() > 1 {
+            if self.multipaths.get(&prefix) != Some(&multipath) {
+                debug!(
+                    next_hops = multipath.len(),
+                    "bgp: multipath set for {prefix} updated"
+                );
+                self.multipaths.insert(prefix, multipath.clone());
+            }
+        } else if self.multipaths.remove(&prefix).is_some() {
+            debug!(
+                next_hops = multipath.len(),
+                "bgp: multipath set for {prefix} updated"
+            );
+        }
         match best
             .as_ref()
-            .and_then(|b| runner_up_next_hop(&candidates, b, &self.igp))
+            .and_then(|_| runner_up_next_hop(&candidates, &multipath, &self.igp))
         {
             Some(nh) => {
                 self.backups.insert(prefix, nh);
@@ -1779,17 +1832,17 @@ fn peer_rank(route: &RibRoute) -> u8 {
     }
 }
 
-/// A route's next hop plus its backup (runner-up path's next hop), as pushed
-/// to `nos-ribd`.
-pub type Hops = (IpAddr, Option<IpAddr>);
+/// A route's next hops (its multipath set, sorted, at least one) plus its
+/// backup (runner-up path's next hop), as pushed to `nos-ribd`.
+pub type Hops = (Vec<IpAddr>, Option<IpAddr>);
 
-/// The next hop of the best candidate other than `best` that has a real
-/// next hop different from `best`'s — the backup path. `None` when there is
-/// no such candidate (a single path, or every other path shares the winner's
-/// next hop, which a backup route couldn't protect against anyway).
+/// The next hop of the best candidate whose real next hop is none of
+/// `primary` (the winner's multipath set) — the backup path. `None` when
+/// there is no such candidate (a single path, or every other path shares a
+/// primary next hop, which a backup route couldn't protect against anyway).
 fn runner_up_next_hop(
     candidates: &[(RibRoute, Option<IpAddr>)],
-    best: &RibRoute,
+    primary: &[IpAddr],
     igp: &HashMap<IpNet, u32>,
 ) -> Option<IpAddr> {
     if candidates.len() < 2 {
@@ -1797,7 +1850,7 @@ fn runner_up_next_hop(
     }
     let others: Vec<(RibRoute, Option<IpAddr>)> = candidates
         .iter()
-        .filter(|(r, _)| r.next_hop.is_some() && r.next_hop != best.next_hop)
+        .filter(|(r, _)| r.next_hop.is_some_and(|nh| !primary.contains(&nh)))
         .cloned()
         .collect();
     best_path(&others, igp)?.next_hop
@@ -1833,53 +1886,107 @@ fn best_path(
 ) -> Option<RibRoute> {
     candidates
         .iter()
-        .max_by(|(a, a_peer), (b, b_peer)| {
-            a.local_pref
-                .cmp(&b.local_pref)
-                .then_with(|| {
-                    // Step 2 (not an RFC step): a Local route beats any
-                    // Peer(_) route.
-                    let a_is_local = matches!(a.origin, RouteOrigin::Local);
-                    let b_is_local = matches!(b.origin, RouteOrigin::Local);
-                    a_is_local.cmp(&b_is_local)
-                })
-                .then_with(|| b.as_path.selection_len().cmp(&a.as_path.selection_len())) // step 3
-                .then_with(|| origin_rank(b.bgp_origin).cmp(&origin_rank(a.bgp_origin))) // step 4
-                .then_with(|| compare_med(a, b)) // step 5
-                // Step 6: eBGP beats confederation-eBGP beats iBGP (RFC 5065 §5.3).
-                .then_with(|| peer_rank(a).cmp(&peer_rank(b)))
-                // Step 7: lower IGP cost to the next hop wins (evaluated
-                // lazily — only reached when steps 1-6 tie).
-                .then_with(|| igp_cost(igp, b.next_hop).cmp(&igp_cost(igp, a.next_hop)))
-                .then_with(|| {
-                    // Step 8: oldest route wins, only between two
-                    // eBGP-learned candidates (RFC 4271's anti-flap rule).
-                    if peer_rank(a) == 2 && peer_rank(b) == 2 {
-                        b.received_at.cmp(&a.received_at)
-                    } else {
-                        std::cmp::Ordering::Equal
-                    }
-                })
-                .then_with(|| {
-                    // Step 9: lowest advertising peer's BGP Identifier.
-                    match (a.router_id, b.router_id) {
-                        (Some(a_id), Some(b_id)) => b_id.cmp(&a_id),
-                        _ => std::cmp::Ordering::Equal,
-                    }
-                })
-                .then_with(|| {
-                    // Step 10: lowest peer address, the final deterministic
-                    // tiebreak — reverse the comparison since `max_by`
-                    // favors the greater element, and `None` (a local
-                    // route) never reaches this arm (already decided by
-                    // step 2).
-                    match (a_peer, b_peer) {
-                        (Some(a_addr), Some(b_addr)) => b_addr.cmp(a_addr),
-                        _ => std::cmp::Ordering::Equal,
-                    }
-                })
-        })
+        .max_by(|a, b| decision_cmp(a, b, igp))
         .map(|(route, _)| route.clone())
+}
+
+/// `best_path`'s comparator over two `(route, source_peer)` candidates:
+/// `Greater` means `a` is preferred.
+fn decision_cmp(
+    (a, a_peer): &(RibRoute, Option<IpAddr>),
+    (b, b_peer): &(RibRoute, Option<IpAddr>),
+    igp: &HashMap<IpNet, u32>,
+) -> std::cmp::Ordering {
+    multipath_cmp(a, b, igp)
+        .then_with(|| {
+            // Step 8: oldest route wins, only between two
+            // eBGP-learned candidates (RFC 4271's anti-flap rule).
+            if peer_rank(a) == 2 && peer_rank(b) == 2 {
+                b.received_at.cmp(&a.received_at)
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .then_with(|| {
+            // Step 9: lowest advertising peer's BGP Identifier.
+            match (a.router_id, b.router_id) {
+                (Some(a_id), Some(b_id)) => b_id.cmp(&a_id),
+                _ => std::cmp::Ordering::Equal,
+            }
+        })
+        .then_with(|| {
+            // Step 10: lowest peer address, the final deterministic
+            // tiebreak — reverse the comparison since `max_by`
+            // favors the greater element, and `None` (a local
+            // route) never reaches this arm (already decided by
+            // step 2).
+            match (a_peer, b_peer) {
+                (Some(a_addr), Some(b_addr)) => b_addr.cmp(a_addr),
+                _ => std::cmp::Ordering::Equal,
+            }
+        })
+}
+
+/// Decision steps 1–7 — the ones two paths must tie on to be installed
+/// together as multipath (`multipath_next_hops`); `Greater` means `a` wins.
+fn multipath_cmp(a: &RibRoute, b: &RibRoute, igp: &HashMap<IpNet, u32>) -> std::cmp::Ordering {
+    a.local_pref
+        .cmp(&b.local_pref)
+        .then_with(|| {
+            // Step 2 (not an RFC step): a Local route beats any
+            // Peer(_) route.
+            let a_is_local = matches!(a.origin, RouteOrigin::Local);
+            let b_is_local = matches!(b.origin, RouteOrigin::Local);
+            a_is_local.cmp(&b_is_local)
+        })
+        .then_with(|| b.as_path.selection_len().cmp(&a.as_path.selection_len())) // step 3
+        .then_with(|| origin_rank(b.bgp_origin).cmp(&origin_rank(a.bgp_origin))) // step 4
+        .then_with(|| compare_med(a, b)) // step 5
+        // Step 6: eBGP beats confederation-eBGP beats iBGP (RFC 5065 §5.3).
+        .then_with(|| peer_rank(a).cmp(&peer_rank(b)))
+        // Step 7: lower IGP cost to the next hop wins (evaluated
+        // lazily — only reached when steps 1-6 tie).
+        .then_with(|| igp_cost(igp, b.next_hop).cmp(&igp_cost(igp, a.next_hop)))
+}
+
+/// The next hops installed for `best`'s prefix: `best`'s own, plus those of
+/// every other peer-learned candidate tying with it on decision steps 1–7
+/// (`multipath_cmp`) and learned from the same neighbouring AS (the usual
+/// non-relaxed vendor rule — no RFC defines multipath selection; RFC 2991/
+/// 2992 only cover forwarding). Deduplicated, picked in decision order
+/// (steps 8–10 between the ties), capped at `max`, then sorted so the push
+/// diff is stable. Empty when `best` has no next hop (a `Local` route).
+fn multipath_next_hops(
+    candidates: &[(RibRoute, Option<IpAddr>)],
+    best: &RibRoute,
+    igp: &HashMap<IpNet, u32>,
+    max: usize,
+) -> Vec<IpAddr> {
+    let Some(best_hop) = best.next_hop else {
+        return Vec::new();
+    };
+    let mut ties: Vec<&(RibRoute, Option<IpAddr>)> = candidates
+        .iter()
+        .filter(|(r, _)| {
+            r.next_hop.is_some()
+                && !matches!(r.origin, RouteOrigin::Local)
+                && neighboring_as(r) == neighboring_as(best)
+                && multipath_cmp(r, best, igp).is_eq()
+        })
+        .collect();
+    ties.sort_by(|a, b| decision_cmp(b, a, igp));
+    let mut hops = vec![best_hop];
+    for (r, _) in ties {
+        if hops.len() >= max {
+            break;
+        }
+        let hop = r.next_hop.expect("filtered");
+        if !hops.contains(&hop) {
+            hops.push(hop);
+        }
+    }
+    hops.sort_unstable();
+    hops
 }
 
 /// Decides whether `best` should be advertised to `peer` and, if so, rewrites
@@ -4641,7 +4748,7 @@ mod tests {
                 &nos_rpl::ACCEPT_ALL,
             );
         }
-        let best = |rib: &BgpRib| rib.push_snapshot().1[&prefix("9.9.9.0/24")].0;
+        let best = |rib: &BgpRib| rib.push_snapshot().1[&prefix("9.9.9.0/24")].0[0];
         assert_eq!(best(&rib), addr("10.1.0.1"));
 
         let igp = |a: u32, b: u32| {
@@ -4700,7 +4807,7 @@ mod tests {
             (prefix("10.1.0.0/16"), 20),
         ]));
         assert_eq!(
-            rib.push_snapshot().1[&prefix("9.9.9.0/24")].0,
+            rib.push_snapshot().1[&prefix("9.9.9.0/24")].0[0],
             addr("10.1.0.1")
         );
 
@@ -4718,7 +4825,7 @@ mod tests {
 
         learn_one(&mut rib, peer, "10.1.0.1");
         assert_eq!(
-            rib.push_snapshot().1[&prefix("9.9.9.0/24")].0,
+            rib.push_snapshot().1[&prefix("9.9.9.0/24")].0[0],
             addr("10.1.0.1")
         );
 
@@ -4797,7 +4904,7 @@ mod tests {
         }
         assert_eq!(
             rib.push_snapshot().1[&prefix("9.9.9.0/24")],
-            (addr("10.1.0.1"), None)
+            (vec![addr("10.1.0.1")], None)
         );
 
         // Once peer_b's resolves too, it becomes the backup.
@@ -4807,7 +4914,7 @@ mod tests {
         ]));
         assert_eq!(
             rib.push_snapshot().1[&prefix("9.9.9.0/24")],
-            (addr("10.1.0.1"), Some(addr("10.2.0.1")))
+            (vec![addr("10.1.0.1")], Some(addr("10.2.0.1")))
         );
     }
 
@@ -5287,7 +5394,7 @@ mod tests {
         let (_, routes) = rib.push_snapshot();
         assert_eq!(
             routes.get(&prefix("1.2.3.0/24")),
-            Some(&(addr("10.0.0.9"), None))
+            Some(&(vec![addr("10.0.0.9")], None))
         );
     }
 
@@ -5321,7 +5428,7 @@ mod tests {
         let (_, routes) = rib.push_snapshot();
         assert_eq!(
             routes.get(&prefix("1.2.3.0/24")),
-            Some(&(addr("10.0.0.9"), Some(addr("10.0.0.8"))))
+            Some(&(vec![addr("10.0.0.9")], Some(addr("10.0.0.8"))))
         );
 
         // Losing the runner-up drops the backup.
@@ -5329,8 +5436,135 @@ mod tests {
         let (_, routes) = rib.push_snapshot();
         assert_eq!(
             routes.get(&prefix("1.2.3.0/24")),
-            Some(&(addr("10.0.0.9"), None))
+            Some(&(vec![addr("10.0.0.9")], None))
         );
+    }
+
+    // --- BGP multipath (`maximum_paths`) ---
+
+    /// Learns `1.2.3.0/24` from `peer` (`ibgp` session) with `as_path`, `nh`
+    /// and `med`.
+    fn learn_mp(
+        rib: &mut BgpRib,
+        peer: &str,
+        ibgp: bool,
+        as_path: Vec<u32>,
+        nh: &str,
+        med: Option<u32>,
+    ) {
+        rib.handle_update(
+            addr(peer),
+            ibgp,
+            v4("192.0.2.1"),
+            &update_with("1.2.3.0/24", as_path, nh, message::Origin::Igp, med),
+            &nos_rpl::ACCEPT_ALL,
+        );
+    }
+
+    fn mp_hops(rib: &BgpRib) -> Hops {
+        rib.push_snapshot().1[&prefix("1.2.3.0/24")].clone()
+    }
+
+    #[test]
+    fn multipath_installs_equal_paths_from_the_same_neighbour_as() {
+        let mut rib = new_rib(65000);
+        rib.set_maximum_paths(Some(2));
+        learn_mp(&mut rib, "10.0.0.2", false, vec![65001], "10.0.0.20", None);
+        learn_mp(&mut rib, "10.0.0.1", false, vec![65001], "10.0.0.10", None);
+        assert_eq!(
+            mp_hops(&rib),
+            (vec![addr("10.0.0.10"), addr("10.0.0.20")], None)
+        );
+
+        // Back to 1: the winner alone, the sibling becomes the backup.
+        rib.set_maximum_paths(Some(1));
+        let (hops, backup) = mp_hops(&rib);
+        assert_eq!(hops.len(), 1);
+        assert!(backup.is_some() && !hops.contains(&backup.unwrap()));
+    }
+
+    #[test]
+    fn multipath_unset_installs_the_winner_alone() {
+        let mut rib = new_rib(65000);
+        learn_mp(&mut rib, "10.0.0.1", false, vec![65001], "10.0.0.10", None);
+        learn_mp(&mut rib, "10.0.0.2", false, vec![65001], "10.0.0.20", None);
+        assert_eq!(mp_hops(&rib).0.len(), 1);
+    }
+
+    #[test]
+    fn multipath_excludes_paths_that_differ_before_step_8() {
+        // (as_path, med, ibgp) of the second path, each losing to
+        // ([65001], None, eBGP) or not sharing its neighbour AS.
+        for (as_path, med, ibgp) in [
+            (vec![65001, 65009], None, false), // longer AS_PATH
+            (vec![65001], Some(5), false),     // higher MED
+            (vec![65001], None, true),         // iBGP vs eBGP
+            (vec![65002], None, false),        // other neighbour AS
+        ] {
+            let mut rib = new_rib(65000);
+            rib.set_maximum_paths(Some(4));
+            learn_mp(&mut rib, "10.0.0.1", false, vec![65001], "10.0.0.10", None);
+            learn_mp(
+                &mut rib,
+                "10.0.0.2",
+                ibgp,
+                as_path.clone(),
+                "10.0.0.20",
+                med,
+            );
+            assert_eq!(
+                mp_hops(&rib),
+                (vec![addr("10.0.0.10")], Some(addr("10.0.0.20"))),
+                "{as_path:?} {med:?} ibgp={ibgp}"
+            );
+        }
+
+        // A higher IGP cost to the next hop (step 7) too.
+        let mut rib = new_rib(65000);
+        rib.set_maximum_paths(Some(4));
+        rib.set_igp(HashMap::from([
+            (prefix("10.0.0.0/28"), 1),
+            (prefix("10.0.0.16/28"), 9),
+        ]));
+        learn_mp(&mut rib, "10.0.0.1", false, vec![65001], "10.0.0.10", None);
+        learn_mp(&mut rib, "10.0.0.2", false, vec![65001], "10.0.0.20", None);
+        assert_eq!(mp_hops(&rib).0, vec![addr("10.0.0.10")]);
+    }
+
+    #[test]
+    fn multipath_caps_at_maximum_paths_and_backs_up_outside_the_set() {
+        let mut rib = new_rib(65000);
+        rib.set_maximum_paths(Some(2));
+        // Equal on steps 1–7; step 10 (lowest peer address) orders them.
+        learn_mp(&mut rib, "10.0.0.3", false, vec![65001], "10.0.0.30", None);
+        learn_mp(&mut rib, "10.0.0.2", false, vec![65001], "10.0.0.20", None);
+        learn_mp(&mut rib, "10.0.0.1", false, vec![65001], "10.0.0.10", None);
+        // Step 8 (oldest eBGP route) comes before step 10, so the first
+        // learned wins and the next oldest joins.
+        assert_eq!(
+            mp_hops(&rib),
+            (
+                vec![addr("10.0.0.20"), addr("10.0.0.30")],
+                Some(addr("10.0.0.10"))
+            )
+        );
+    }
+
+    #[test]
+    fn multipath_sibling_leaving_changes_the_push_not_the_loc_rib() {
+        let mut rib = new_rib(65000);
+        rib.set_maximum_paths(Some(2));
+        let peer = addr("10.0.0.9");
+        let mut rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        learn_mp(&mut rib, "10.0.0.1", false, vec![65001], "10.0.0.10", None);
+        learn_mp(&mut rib, "10.0.0.2", false, vec![65001], "10.0.0.20", None);
+        let best = rib.loc_rib[&prefix("1.2.3.0/24")].clone();
+        recv_all(&mut rx);
+
+        rib.peer_disconnected(addr("10.0.0.2"));
+        assert_eq!(mp_hops(&rib), (vec![addr("10.0.0.10")], None));
+        assert_eq!(rib.loc_rib[&prefix("1.2.3.0/24")], best);
+        assert!(recv_all(&mut rx).is_empty(), "advertisement must not move");
     }
 
     #[test]

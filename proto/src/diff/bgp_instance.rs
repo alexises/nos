@@ -80,6 +80,13 @@ fn changed_fields(base: &BgpInstance, candidate: &BgpInstance) -> Vec<FieldDiff>
             new: render(candidate),
         });
     }
+    if base.maximum_paths != candidate.maximum_paths {
+        fields.push(FieldDiff {
+            label: "maximum-paths".to_string(),
+            old: base.maximum_paths.map(|n| n.to_string()),
+            new: candidate.maximum_paths.map(|n| n.to_string()),
+        });
+    }
     if base.confederation != candidate.confederation {
         fields.push(FieldDiff {
             label: "confederation".to_string(),
@@ -128,7 +135,12 @@ fn removed_section(instance: &BgpInstance) -> SectionDiff {
 
 fn added_section(instance: &BgpInstance) -> SectionDiff {
     let mut fields = changed_fields(&BgpInstance::default(), instance);
-    fields.retain(|f| f.label == "confederation" || f.label == "rpki-cache");
+    fields.retain(|f| {
+        matches!(
+            f.label.as_str(),
+            "confederation" | "rpki-cache" | "maximum-paths"
+        )
+    });
     SectionDiff {
         header: header_for(&instance.name),
         name: instance.name.clone(),
@@ -171,6 +183,7 @@ mod tests {
             peer_groups: Vec::new(),
             peers: Vec::new(),
             cluster_id: None,
+            maximum_paths: None,
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
             routing_table: None,

@@ -62,6 +62,14 @@ pub enum BgpInstanceOp {
         name: String,
         address: IpAddr,
     },
+    /// BGP multipath: how many equal paths' next hops to install.
+    SetMaximumPaths {
+        name: String,
+        maximum_paths: u8,
+    },
+    ClearMaximumPaths {
+        name: String,
+    },
 }
 
 impl BgpInstanceOp {
@@ -76,6 +84,7 @@ impl BgpInstanceOp {
                         peer_groups: Vec::new(),
                         peers: Vec::new(),
                         cluster_id: None,
+                        maximum_paths: None,
                         confederation: crate::schema::BgpConfederation::default(),
                         rpki_caches: Vec::new(),
                         routing_table: None,
@@ -98,6 +107,17 @@ impl BgpInstanceOp {
             }
             BgpInstanceOp::ClearClusterId { name } => {
                 find_instance_mut(config, name)?.cluster_id = None;
+                Ok(())
+            }
+            BgpInstanceOp::SetMaximumPaths {
+                name,
+                maximum_paths,
+            } => {
+                find_instance_mut(config, name)?.maximum_paths = Some(*maximum_paths);
+                Ok(())
+            }
+            BgpInstanceOp::ClearMaximumPaths { name } => {
+                find_instance_mut(config, name)?.maximum_paths = None;
                 Ok(())
             }
             BgpInstanceOp::SetConfederationIdentifier { name, identifier } => {
@@ -172,6 +192,7 @@ mod tests {
             peer_groups: Vec::new(),
             peers: Vec::new(),
             cluster_id: None,
+            maximum_paths: None,
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
             routing_table: None,

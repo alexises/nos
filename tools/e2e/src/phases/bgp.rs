@@ -442,6 +442,116 @@ pub async fn route_server(w: &mut World) -> anyhow::Result<()> {
     c.wait(&format!("{} .*med=Some({MED})", loc_rib())).await
 }
 
+/// BGP multipath (#70): router-b and router-c, both in `ASN_B`, redistribute
+/// the same prefix to router-a (`maximum-paths 2`), whose nos-ribd installs
+/// one kernel route over both; a sibling leaving shrinks it without moving
+/// the best path, and `maximum-paths 1` turns the sibling into the backup.
+pub async fn bgp_multipath(w: &mut World) -> anyhow::Result<()> {
+    let hub = |pg: &str, peer: &str, max: &str| {
+        strings(&[
+            "--address",
+            &format!("{IP_A}/24"),
+            "--asn",
+            &ASN_A.to_string(),
+            "--router-id",
+            RID_A,
+            "--peer-group",
+            pg,
+            "--remote-as",
+            &ASN_B.to_string(),
+            "--peer",
+            peer,
+            "--maximum-paths",
+            max,
+        ])
+    };
+    // Same neighbouring AS on both: the strict (non-relaxed) multipath rule.
+    let spoke = |ip: &str, rid: &str| {
+        strings(&[
+            "--address",
+            &format!("{ip}/24"),
+            "--asn",
+            &ASN_B.to_string(),
+            "--router-id",
+            rid,
+            "--remote-as",
+            &ASN_A.to_string(),
+            "--peer",
+            IP_A,
+        ])
+    };
+    let advertising = |ip: &str, rid: &str| {
+        let mut f = spoke(ip, rid);
+        f.extend(strings(&redistribute()));
+        f
+    };
+    w.start(A, Some(hub("pg-b", IP_B, "2")), &[]).await?;
+    w.start(B, Some(spoke(IP_B, RID_B)), &[]).await?;
+    w.start(C, Some(spoke(IP_C, RID_C)), &[]).await?;
+    w.a()?.provision_flags(&hub("pg-c", IP_C, "2")).await?;
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    for r in [b, c] {
+        r.established().await?;
+    }
+
+    // router-b first, so its path is the older one (decision step 8) and
+    // stays best while router-c's comes and goes as the sibling.
+    b.provision_flags(&advertising(IP_B, RID_B)).await?;
+    a.wait(&loc_rib()).await?;
+    let best_moves = a.count(&loc_rib());
+    c.provision_flags(&advertising(IP_C, RID_C)).await?;
+    let both =
+        format!("added route prefix={REDISTRIBUTE_PREFIX} gateway={IP_B},{IP_C} next_hops=2 ");
+    log("waiting for router-a to install one kernel route over both next hops");
+    a.wait(&both).await?;
+    let body = a
+        .rest_expect(Method::GET, "/v1/routes/rt1", None, 200)
+        .await?;
+    let table: serde_json::Value = serde_json::from_str(&body)?;
+    let gateways = table
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["prefix"] == REDISTRIBUTE_PREFIX)
+        .map(|p| p["candidates"][0]["gateways"].clone());
+    if gateways != Some(serde_json::json!([IP_B, IP_C])) {
+        bail!("GET /v1/routes/rt1: expected gateways [{IP_B}, {IP_C}], got {gateways:?}");
+    }
+
+    log("router-c withdraws: the route shrinks to router-b alone");
+    let reject = policy_file("multipath-reject", "reject\n")?;
+    let mut withdrawn = advertising(IP_C, RID_C);
+    withdrawn.extend(strings(&[
+        "--policy-name",
+        "multipath-reject",
+        "--policy-source-file",
+        &reject,
+        "--redistribute-policy",
+        "multipath-reject",
+    ]));
+    let one = format!("added route prefix={REDISTRIBUTE_PREFIX} gateway={IP_B} next_hops=1 ");
+    let base = a.count(&one);
+    c.provision_flags(&withdrawn).await?;
+    a.wait_new(&one, base, 60).await?;
+
+    log("router-c advertises again: both next hops are back");
+    let base = a.count(&both);
+    c.provision_flags(&advertising(IP_C, RID_C)).await?;
+    a.wait_new(&both, base, 60).await?;
+    if a.count(&loc_rib()) != best_moves {
+        bail!("router-a's best path moved while only the multipath sibling changed");
+    }
+
+    log("maximum-paths 1: router-b's next hop alone, router-c's as the backup");
+    let backup = format!(
+        "added route prefix={REDISTRIBUTE_PREFIX} gateway={IP_C} next_hops=1 .*backup=true"
+    );
+    let (base_one, base_backup) = (a.count(&one), a.count(&backup));
+    a.provision_flags(&hub("pg-c", IP_C, "1")).await?;
+    a.wait_new(&one, base_one, 60).await?;
+    a.wait_new(&backup, base_backup, 60).await
+}
+
 /// An import policy on router-b rejecting the redistributed prefix, then reverted.
 pub async fn policy(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
