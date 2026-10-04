@@ -21,9 +21,9 @@ Each frame NOS sends carries:
 - the time to live: how long the neighbour should keep this information, 120 seconds by default;
 - the system name, which is the router's `hostname`, and the system description `nos <version>`;
 - the capabilities: supported "Router, Bridge"; enabled "Router", plus "Bridge" on an interface that has a switching profile;
-- a management address, if one is configured.
+- up to four management addresses, if configured, each with the ifIndex of the interface that carries it.
 
-Three settings apply to all interfaces at once: the transmit interval, the hold multiplier, and the management address. One more is per interface: the destination group.
+Three settings apply to all interfaces at once: the transmit interval, the hold multiplier, and the management addresses. One more is per interface: the destination group.
 
 ## Common operations
 
@@ -47,7 +47,7 @@ router-a> show lldp neighbors
 eth1: neighbor router-b, chassis 02:e1:8b:33:6b:4c, port eth1, capabilities router, ttl 112s
 ```
 
-Each line gives the local interface, the neighbour's system name, chassis ID and port ID, the capabilities it has enabled, its management address if it sends one, and how many seconds are left before the entry expires.
+Each line gives the local interface, the neighbour's system name, chassis ID and port ID, the capabilities it has enabled, its management addresses if it sends any, and how many seconds are left before the entry expires.
 
 The absolute forms are `set interface eth1 lldp transmit` and `set interface eth1 lldp receive`. `delete interface eth1 lldp transmit` (or `receive`) turns one direction off again.
 
@@ -79,34 +79,35 @@ $ $C $B/v1/lldp/neighbors | jq .
 
 This assumes `eth1` is already in the configuration. If it is not, create it whole: `PUT …/interface/eth1` with body `{"name":"eth1","addresses":[],"subinterfaces":[],"lldp_transmit":true,"lldp_receive":true}`.
 
-### Tune the timers and advertise a management address
+### Tune the timers and advertise management addresses
 
 ```
 router-a> configure lldp2
 router-a(lldp2)> set lldp tx-interval 5
 router-a(lldp2)> set lldp tx-hold 3
 router-a(lldp2)> set lldp management-address 10.50.0.2
+router-a(lldp2)> set lldp management-address 192.0.2.1
 router-a(lldp2)> commit
 transaction 'lldp2' committed
 ```
 
-Router-b now keeps router-a's entry for 5 × 3 = 15 seconds and shows its management address:
+Router-b now keeps router-a's entry for 5 × 3 = 15 seconds and shows both management addresses. 10.50.0.2 is on router-a's `eth0`, so it comes with that interface's ifIndex; 192.0.2.1 is on no interface, so it comes without one:
 
 ```
 router-b> show lldp neighbors
-eth1: neighbor router-a, chassis 02:47:33:45:65:f2, port eth1, capabilities router, management 10.50.0.2, ttl 10s
+eth1: neighbor router-a, chassis 02:47:33:45:65:f2, port eth1, capabilities router, management 10.50.0.2 (ifindex 2),192.0.2.1, ttl 10s
 ```
 
 REST: the three settings are the `lldp` section of the configuration.
 
 ```sh
 $ $C -X PUT -H 'Content-Type: application/json' \
-    -d '{"tx_interval_secs":5,"tx_hold":3,"management_address":"10.50.0.2"}' \
+    -d '{"tx_interval_secs":5,"tx_hold":3,"management_addresses":["10.50.0.2","192.0.2.1"]}' \
     $B/v1/transactions/lldp2/lldp
 $ $C -X POST $B/v1/transactions/lldp2/commit
 ```
 
-Each can also be set on its own, for example `PUT …/lldp/tx-interval-secs` with body `5`. `delete lldp tx-interval` (REST: `DELETE …/lldp/tx-interval-secs`) goes back to the default.
+Each can also be set on its own, for example `PUT …/lldp/tx-interval-secs` with body `5`. `delete lldp tx-interval` (REST: `DELETE …/lldp/tx-interval-secs`) goes back to the default. `delete lldp management-address 192.0.2.1` stops advertising that one address.
 
 ### Change the destination group
 
@@ -168,9 +169,9 @@ $ $C $B/v1/lldp/statistics | jq .
 
 **Fast start.** When LLDP starts on an interface (including any restart after a settings change) and whenever NOS hears a neighbour it did not know, it sends 4 frames one second apart before going back to `tx-interval`. Two routers learn each other within seconds of the link coming up, even if the first frame is lost. At most 5 frames go out back to back, with one more allowed per second, so a flapping neighbour cannot make NOS flood the link. These numbers are the IEEE 802.1AB defaults and cannot be changed.
 
-**Timers.** `tx-interval` is the time between frames (1-3600 seconds, default 30). `tx-hold` is how many intervals a neighbour keeps our information (1-100, default 4); the time to live we advertise is `tx-interval × tx-hold`, which must not exceed 65535 seconds. Changing either, or the management address, restarts LLDP on every enabled interface: a shutdown frame, then a fresh one, so neighbours briefly drop and relearn this router.
+**Timers.** `tx-interval` is the time between frames (1-3600 seconds, default 30). `tx-hold` is how many intervals a neighbour keeps our information (1-100, default 4); the time to live we advertise is `tx-interval × tx-hold`, which must not exceed 65535 seconds. Changing either, or the management addresses, restarts LLDP on every enabled interface: a shutdown frame, then a fresh one, so neighbours briefly drop and relearn this router.
 
-**Management address.** One IPv4 or IPv6 unicast address, advertised on every interface. NOS sends it as configured; it does not check that the address is on any interface.
+**Management addresses.** Up to four IPv4 or IPv6 unicast addresses, each sent in its own field on every interface. NOS sends them as configured and does not check them at commit. When it sends a frame, it looks up the interface that carries each address. If it finds one, the field carries that interface's ifIndex. If not, the field says the interface is unknown. So an address added to an interface later gets its ifIndex on the next frame, with no restart. NOS also keeps at most four management addresses from each neighbour frame.
 
 **Destination groups.** LLDP frames go to one of three reserved multicast addresses, which decide how far a frame travels through intermediate bridges:
 
@@ -195,7 +196,7 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI forms are
 | destination | `set interface <if> lldp destination nearest-bridge\|non-tpmr\|customer-bridge` / `set lldp destination …`; `delete … lldp destination` | `interface/<if>/lldp-destination`, body `"NearestBridge"`, `"NonTpmr"` or `"CustomerBridge"` | default `nearest-bridge` | physical interface only | the multicast group sent to and listened on | `show config` |
 | tx-interval | `set lldp tx-interval <secs>`; `delete lldp tx-interval` | `lldp/tx-interval-secs` | 1-3600 seconds, default 30 | range; `tx-interval × tx-hold` ≤ 65535 | time between frames, on every interface | the neighbour's `show lldp neighbors` (`ttl`) |
 | tx-hold | `set lldp tx-hold <n>`; `delete lldp tx-hold` | `lldp/tx-hold` | 1-100, default 4 | range; as above | advertised time to live = `tx-interval × tx-hold` | the neighbour's `show lldp neighbors` (`ttl`) |
-| management-address | `set lldp management-address <ip>`; `delete lldp management-address` | `lldp/management-address` | IPv4 or IPv6 address, default none | unicast (not unspecified, not multicast) | advertised on every interface | the neighbour's `show lldp neighbors` (`management`) |
+| management-address | `set lldp management-address <ip>` adds one; `delete lldp management-address <ip>` removes one | `lldp/management-address`, a list | up to 4 IPv4 or IPv6 addresses, default none | unicast (not unspecified, not multicast), no duplicates, at most 4 | each advertised on every interface, with its interface's ifIndex when one carries it | the neighbour's `show lldp neighbors` (`management`) |
 
 `tx-interval`, `tx-hold` and `management-address` are system-wide: they are typed the same way from anywhere in configuration mode.
 

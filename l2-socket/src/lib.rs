@@ -12,7 +12,9 @@
 //! # `unsafe` scope
 //! `AF_PACKET` needs a `sockaddr_ll` (interface index, not a name) for both
 //! `bind` and multicast-group membership, which `socket2` doesn't wrap — this
-//! crate is where that raw `libc` socket work lives.
+//! crate is where that raw `libc` socket work lives. So is
+//! `ifindex_of_address` (`getifaddrs`), which LLDP's Management Address TLV
+//! needs.
 
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;
@@ -213,6 +215,57 @@ pub fn if_index(interface: &str) -> io::Result<i32> {
     Ok(i32::try_from(index).expect("kernel ifindex always fits i32"))
 }
 
+/// The ifindex of the interface carrying `addr` in this network namespace
+/// (`getifaddrs(3)`), the lowest one if several do; `None` if none does or the
+/// call fails. Used for LLDP's Management Address TLV.
+pub fn ifindex_of_address(addr: std::net::IpAddr) -> Option<u32> {
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `head` is a valid out-pointer; on success the list is freed below.
+    #[allow(unsafe_code)]
+    if unsafe { libc::getifaddrs(&raw mut head) } != 0 {
+        return None;
+    }
+    let mut best: Option<u32> = None;
+    let mut cur = head;
+    while !cur.is_null() {
+        // SAFETY: `cur` is a node of the list `getifaddrs` returned, not yet freed;
+        // `ifa_addr` (when non-null) points at a sockaddr of the family it names,
+        // and `ifa_name` is a NUL-terminated string.
+        #[allow(unsafe_code)]
+        let (found, name, next) = unsafe {
+            let ifa = &*cur;
+            let found = match ifa.ifa_addr.as_ref().map(|sa| i32::from(sa.sa_family)) {
+                Some(libc::AF_INET) => {
+                    let sin = &*ifa.ifa_addr.cast::<libc::sockaddr_in>();
+                    // Network byte order in memory: its bytes are the octets.
+                    Some(std::net::IpAddr::from(sin.sin_addr.s_addr.to_ne_bytes()))
+                }
+                Some(libc::AF_INET6) => {
+                    let sin6 = &*ifa.ifa_addr.cast::<libc::sockaddr_in6>();
+                    Some(std::net::IpAddr::from(sin6.sin6_addr.s6_addr))
+                }
+                _ => None,
+            };
+            (found, ifa.ifa_name, ifa.ifa_next)
+        };
+        if found == Some(addr) {
+            // SAFETY: `name` is the node's NUL-terminated interface name.
+            #[allow(unsafe_code)]
+            let index = unsafe { libc::if_nametoindex(name) };
+            if index != 0 && best.is_none_or(|b| index < b) {
+                best = Some(index);
+            }
+        }
+        cur = next;
+    }
+    // SAFETY: `head` came from a successful `getifaddrs` and is freed once.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::freeifaddrs(head);
+    };
+    best
+}
+
 /// Joins `group` via `PACKET_ADD_MEMBERSHIP` — without this most NIC drivers
 /// never pass an arbitrary multicast destination up to userspace.
 fn join_multicast(socket: &Socket, ifindex: i32, group: [u8; 6]) -> io::Result<()> {
@@ -305,6 +358,13 @@ mod tests {
             None
         );
         assert_eq!(payload_of_foreign_frame(&[0; 5], own, GROUP), None);
+    }
+
+    #[test]
+    fn ifindex_of_address_finds_loopback_only() {
+        let lo = u32::try_from(if_index("lo").unwrap()).unwrap();
+        assert_eq!(ifindex_of_address([127, 0, 0, 1].into()), Some(lo));
+        assert_eq!(ifindex_of_address([192, 0, 2, 1].into()), None);
     }
 
     #[test]

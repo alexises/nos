@@ -1586,12 +1586,12 @@
       "LldpSettings": {
         "description": "System-wide LLDP settings. `None` for a timer means the 802.1AB default.",
         "properties": {
-          "management_address": {
-            "description": "Advertised in the Management Address TLV on every LLDP-enabled link.\nTaken as configured — not checked against any interface's addresses.",
-            "type": [
-              "string",
-              "null"
-            ]
+          "management_addresses": {
+            "description": "Each advertised in its own Management Address TLV on every\nLLDP-enabled link (at most 4). Taken as configured: an address on a\nkernel interface carries that interface's ifIndex, any other is still\nsent, with the interface numbering \"unknown\".",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "tx_hold": {
             "description": "`msgTxHold`: the advertised TTL is this × the interval.",
@@ -18489,7 +18489,7 @@
             "description": "no such transaction or config path"
           }
         },
-        "summary": "Remove: The `management-address` setting.",
+        "summary": "Remove: Every `management-address` entry.",
         "tags": [
           "transactions"
         ]
@@ -18500,11 +18500,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Advertised in the Management Address TLV on every LLDP-enabled link.\nTaken as configured — not checked against any interface's addresses.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "description": "Each advertised in its own Management Address TLV on every\nLLDP-enabled link (at most 4). Taken as configured: an address on a\nkernel interface carries that interface's ifIndex, any other is still\nsent, with the interface numbering \"unknown\".",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -18521,7 +18521,7 @@
             "description": "no such transaction or config path"
           }
         },
-        "summary": "Read: The `management-address` setting.",
+        "summary": "Read: Every `management-address` entry.",
         "tags": [
           "transactions"
         ]
@@ -18543,11 +18543,11 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "Advertised in the Management Address TLV on every LLDP-enabled link.\nTaken as configured — not checked against any interface's addresses.",
-                "type": [
-                  "string",
-                  "null"
-                ]
+                "description": "Each advertised in its own Management Address TLV on every\nLLDP-enabled link (at most 4). Taken as configured: an address on a\nkernel interface carries that interface's ifIndex, any other is still\nsent, with the interface numbering \"unknown\".",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             }
           },
@@ -18558,11 +18558,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "description": "Advertised in the Management Address TLV on every LLDP-enabled link.\nTaken as configured — not checked against any interface's addresses.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "description": "Each advertised in its own Management Address TLV on every\nLLDP-enabled link (at most 4). Taken as configured: an address on a\nkernel interface carries that interface's ifIndex, any other is still\nsent, with the interface numbering \"unknown\".",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
                 }
               }
             },
@@ -18582,7 +18582,120 @@
             "description": "no such transaction or config path"
           }
         },
-        "summary": "Set: The `management-address` setting.",
+        "summary": "Set: Every `management-address` entry.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/lldp/management-address/{management_address}": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: One `management-address`, addressed by its value.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: One `management-address`, addressed by its value.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "management_address",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: One `management-address`, addressed by its value.",
         "tags": [
           "transactions"
         ]

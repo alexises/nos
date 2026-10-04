@@ -18,7 +18,7 @@ use nos_proto::LldpLinkStats;
 
 use crate::neighbor::{NeighborTable, Update, MAX_NEIGHBORS_PER_LINK};
 use crate::packet::{
-    self, Capabilities, Id, Lldpdu, CAP_BRIDGE, CAP_ROUTER, CHASSIS_SUBTYPE_MAC,
+    self, Capabilities, Id, Lldpdu, ManagementAddress, CAP_BRIDGE, CAP_ROUTER, CHASSIS_SUBTYPE_MAC,
     PORT_SUBTYPE_IF_NAME,
 };
 use crate::socket::{self, LldpSocket};
@@ -51,8 +51,8 @@ pub struct LinkConfig {
     pub tx_interval: Duration,
     /// The TTL advertised in every LLDPDU (`msgTxHold × msgTxInterval`).
     pub ttl_secs: u16,
-    /// Advertised in the Management Address TLV, if set.
-    pub management_address: Option<IpAddr>,
+    /// Each advertised in its own Management Address TLV.
+    pub management_addresses: Vec<IpAddr>,
     /// Whether the interface is a bridge port (has a switching profile), which
     /// sets the Bridge bit in *enabled* capabilities.
     pub bridge: bool,
@@ -82,8 +82,10 @@ fn chassis_id(cfg: &LinkConfig) -> Id {
     }
 }
 
-/// The LLDPDU this link advertises.
-pub fn local_pdu(cfg: &LinkConfig) -> Lldpdu {
+/// The LLDPDU this link advertises. `resolve` gives the ifIndex of the
+/// interface carrying a management address, if any — looked up per transmit
+/// so an address applied or moved after the link started is picked up.
+pub fn local_pdu(cfg: &LinkConfig, resolve: impl Fn(IpAddr) -> Option<u32>) -> Lldpdu {
     Lldpdu {
         chassis_id: chassis_id(cfg),
         port_id: Id {
@@ -98,7 +100,14 @@ pub fn local_pdu(cfg: &LinkConfig) -> Lldpdu {
             supported: CAP_ROUTER | CAP_BRIDGE,
             enabled: CAP_ROUTER | if cfg.bridge { CAP_BRIDGE } else { 0 },
         }),
-        management_addresses: cfg.management_address.into_iter().collect(),
+        management_addresses: cfg
+            .management_addresses
+            .iter()
+            .map(|&address| ManagementAddress {
+                address,
+                if_index: resolve(address),
+            })
+            .collect(),
     }
 }
 
@@ -112,7 +121,7 @@ fn shutdown_pdu(cfg: &LinkConfig) -> Lldpdu {
         system_description: None,
         capabilities: None,
         management_addresses: Vec::new(),
-        ..local_pdu(cfg)
+        ..local_pdu(cfg, |_| None)
     }
 }
 
@@ -315,7 +324,7 @@ pub async fn run(
                 // Out of credit, or the link is down: nothing spent, retry in
                 // a second (credit comes back at that rate too).
                 next_tx = now + LINK_DOWN_RETRY;
-                if tx_credit > 0 && send(&socket, &cfg.interface, &ports, &local_pdu(&cfg)) {
+                if tx_credit > 0 && send(&socket, &cfg.interface, &ports, &local_pdu(&cfg, nos_l2_socket::ifindex_of_address)) {
                     if tx_fast > 0 {
                         debug!(interface = %cfg.interface, remaining = tx_fast - 1, "lldp fast-start tx");
                     }
@@ -362,7 +371,7 @@ mod tests {
             chassis_mac: [2, 0, 0, 0, 0, mac_last],
             tx_interval: Duration::from_secs(30),
             ttl_secs: 120,
-            management_address: None,
+            management_addresses: Vec::new(),
             bridge: false,
             destination: nos_proto::LldpDestination::default().mac(),
         }
@@ -373,7 +382,7 @@ mod tests {
     }
 
     fn frame_from(peer: &LinkConfig, ttl: u16) -> Vec<u8> {
-        let mut pdu = local_pdu(peer);
+        let mut pdu = local_pdu(peer, |_| None);
         pdu.ttl = ttl;
         packet::encode(&pdu)
     }
@@ -381,7 +390,7 @@ mod tests {
     #[test]
     fn local_pdu_round_trips_and_carries_our_identity() {
         let c = cfg(1);
-        let pdu = packet::decode(&packet::encode(&local_pdu(&c))).unwrap();
+        let pdu = packet::decode(&packet::encode(&local_pdu(&c, |_| None))).unwrap();
         assert_eq!(pdu.chassis_display(), "02:00:00:00:00:01");
         assert_eq!(pdu.port_display(), "eth1");
         assert_eq!(pdu.system_name.as_deref(), Some("router-1"));
@@ -392,28 +401,41 @@ mod tests {
     fn timers_management_address_and_bridge_bit_reach_the_wire() {
         let mut c = cfg(1);
         c.ttl_secs = 15;
-        c.management_address = Some("10.0.0.1".parse().unwrap());
-        let pdu = packet::decode(&packet::encode(&local_pdu(&c))).unwrap();
+        let (on_if, nowhere): (IpAddr, IpAddr) =
+            ("10.0.0.1".parse().unwrap(), "192.0.2.1".parse().unwrap());
+        c.management_addresses = vec![on_if, nowhere];
+        // Only the first is on an interface (ifIndex 7).
+        let resolve = |a| (a == on_if).then_some(7);
+        let pdu = packet::decode(&packet::encode(&local_pdu(&c, resolve))).unwrap();
         assert_eq!(pdu.ttl, 15);
         assert_eq!(
             pdu.management_addresses,
-            vec!["10.0.0.1".parse::<IpAddr>().unwrap()]
+            [
+                ManagementAddress {
+                    address: on_if,
+                    if_index: Some(7)
+                },
+                ManagementAddress {
+                    address: nowhere,
+                    if_index: None
+                },
+            ]
         );
         // Router only, until the interface is a bridge port.
         assert_eq!(pdu.enabled_capability_names(), ["router"]);
         assert_eq!(pdu.capabilities.unwrap().supported, CAP_ROUTER | CAP_BRIDGE);
         c.bridge = true;
-        let pdu = packet::decode(&packet::encode(&local_pdu(&c))).unwrap();
+        let pdu = packet::decode(&packet::encode(&local_pdu(&c, resolve))).unwrap();
         assert_eq!(pdu.enabled_capability_names(), ["bridge", "router"]);
     }
 
     #[test]
     fn shutdown_pdu_has_ttl_zero_and_only_mandatory_tlvs() {
         let mut c = cfg(1);
-        c.management_address = Some("10.0.0.1".parse().unwrap());
+        c.management_addresses = vec!["10.0.0.1".parse().unwrap()];
         let pdu = packet::decode(&packet::encode(&shutdown_pdu(&c))).unwrap();
         assert_eq!(pdu.ttl, 0);
-        assert_eq!(pdu.management_addresses, [] as [std::net::IpAddr; 0]);
+        assert_eq!(pdu.management_addresses, []);
         assert_eq!(pdu.system_name, None);
         assert_eq!(pdu.chassis_display(), "02:00:00:00:00:01");
     }

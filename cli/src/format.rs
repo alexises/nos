@@ -1095,9 +1095,15 @@ fn render_lldp_settings(lldp: &nos_proto::LldpSettings) -> String {
     let hold = lldp
         .tx_hold
         .map_or_else(|| "default".to_string(), |v| v.to_string());
-    let address = lldp
-        .management_address
-        .map_or_else(|| "unset".to_string(), |a| a.to_string());
+    let address = if lldp.management_addresses.is_empty() {
+        "unset".to_string()
+    } else {
+        lldp.management_addresses
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     format!("lldp: tx-interval {secs}, tx-hold {hold}, management-address {address}")
 }
 
@@ -2826,9 +2832,11 @@ mod tests {
         let mut cfg = Config::default();
         assert!(!render_config(&cfg).contains("lldp"));
         cfg.lldp.tx_interval_secs = Some(5);
-        cfg.lldp.management_address = Some("10.0.0.1".parse().unwrap());
-        assert!(render_config(&cfg)
-            .contains("lldp: tx-interval 5, tx-hold default, management-address 10.0.0.1"));
+        cfg.lldp.management_addresses =
+            vec!["10.0.0.1".parse().unwrap(), "2001:db8::1".parse().unwrap()];
+        assert!(render_config(&cfg).contains(
+            "lldp: tx-interval 5, tx-hold default, management-address 10.0.0.1,2001:db8::1"
+        ));
 
         let mut iface = nos_proto::Interface {
             name: "eth1".to_string(),

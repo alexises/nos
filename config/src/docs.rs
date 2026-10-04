@@ -86,11 +86,12 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              every LLDP-enabled interface. `delete` restores the default.",
         ),
         Topic::LldpManagementAddress => (
-            "Set the LLDP management address.",
-            "Sets the IPv4 or IPv6 unicast address advertised in the Management Address TLV \
-             of every LLDPDU this system sends, so neighbors can show how to reach it. It is \
-             advertised as configured — it is not checked against any interface's addresses. \
-             `delete` stops advertising one.",
+            "Add an LLDP management address.",
+            "Adds an IPv4 or IPv6 unicast address to advertise, each in its own Management \
+             Address TLV of every LLDPDU this system sends (at most 4), so neighbors can show \
+             how to reach it. An address on an interface is sent with that interface's \
+             ifIndex; any other is still advertised as configured. `delete` stops advertising \
+             one.",
         ),
         Topic::BgpInstance => (
             "Create a BGP instance in the transaction if it doesn't already exist.",

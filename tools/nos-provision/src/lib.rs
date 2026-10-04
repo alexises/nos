@@ -721,10 +721,15 @@ pub struct Args {
     #[arg(long)]
     pub lldp_tx_hold: Option<u8>,
 
-    /// If set, the LLDP management address advertised in the Management
-    /// Address TLV (`LldpOp::SetManagementAddress`).
-    #[arg(long)]
-    pub lldp_management_address: Option<IpAddr>,
+    /// One LLDP management address per repetition, each advertised in its
+    /// own Management Address TLV (`LldpOp::AddManagementAddress`).
+    #[arg(long = "lldp-management-address")]
+    pub lldp_management_addresses: Vec<IpAddr>,
+
+    /// One LLDP management address per repetition to stop advertising
+    /// (`LldpOp::RemoveManagementAddress`).
+    #[arg(long = "no-lldp-management-address")]
+    pub no_lldp_management_addresses: Vec<IpAddr>,
 
     /// One `<interface>=<group>` per repetition (group is `nearest-bridge`,
     /// `non-tpmr` or `customer-bridge`): sets that interface's LLDP
@@ -1893,8 +1898,11 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     if let Some(hold) = args.lldp_tx_hold {
         ops.push(ConfigOp::Lldp(LldpOp::SetTxHold { hold }));
     }
-    if let Some(address) = args.lldp_management_address {
-        ops.push(ConfigOp::Lldp(LldpOp::SetManagementAddress { address }));
+    for &address in &args.lldp_management_addresses {
+        ops.push(ConfigOp::Lldp(LldpOp::AddManagementAddress { address }));
+    }
+    for &address in &args.no_lldp_management_addresses {
+        ops.push(ConfigOp::Lldp(LldpOp::RemoveManagementAddress { address }));
     }
     for spec in &args.lldp_destination_interfaces {
         let (name, group) = spec
@@ -2574,6 +2582,10 @@ mod tests {
             "3",
             "--lldp-management-address",
             "10.0.0.1",
+            "--lldp-management-address",
+            "10.0.0.2",
+            "--no-lldp-management-address",
+            "10.0.0.3",
             "--lldp-destination-interface",
             "eth1=customer-bridge",
         ])
@@ -2605,6 +2617,18 @@ mod tests {
             &ConfigOp::Interface(InterfaceOp::SetLldpDestination {
                 name: "eth1".into(),
                 destination: LldpDestination::CustomerBridge,
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Lldp(LldpOp::AddManagementAddress {
+                address: "10.0.0.2".parse().unwrap(),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Lldp(LldpOp::RemoveManagementAddress {
+                address: "10.0.0.3".parse().unwrap(),
             }),
         );
         has(

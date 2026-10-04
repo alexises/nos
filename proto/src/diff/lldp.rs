@@ -13,8 +13,14 @@ fn hold_str(s: &LldpSettings) -> String {
 }
 
 fn address_str(s: &LldpSettings) -> String {
-    s.management_address
-        .map_or_else(|| "unset".to_string(), |v| v.to_string())
+    if s.management_addresses.is_empty() {
+        return "unset".to_string();
+    }
+    s.management_addresses
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Field-level diff of the singleton `Config.lldp` section.

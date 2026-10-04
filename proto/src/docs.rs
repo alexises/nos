@@ -47,7 +47,7 @@ topics! {
     LldpTxInterval,
     /// `LldpSettings.tx_hold`
     LldpTxHold,
-    /// `LldpSettings.management_address`
+    /// `LldpSettings.management_addresses`
     LldpManagementAddress,
     /// `Config.bgp_instances`
     BgpInstance,
