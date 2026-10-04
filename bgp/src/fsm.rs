@@ -10,7 +10,7 @@
 //! actions), kept separate from the async orchestrator (`run`) so it can be
 //! unit-tested directly without any I/O.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
@@ -213,6 +213,8 @@ pub struct PeerContext {
     pub keepalive_override: Option<u16>,
     /// The peer-group's MRAI; zero means unpaced (see `crate::mrai`).
     pub mrai: Duration,
+    /// The peer-group's RFC 7313 §4 stale-route bound; zero disables it.
+    pub route_refresh_stale_time: Duration,
     /// The peer-group's RFC 2439 flap damping, if enabled (see `crate::damping`).
     pub damping: Option<nos_proto::BgpDamping>,
     /// The peer-group's configured next-hop override, if any — `None` lets
@@ -520,6 +522,7 @@ async fn classify_inbound(
     remote_is_ibgp: bool,
     bgp_rib: &Mutex<BgpRib>,
     slot: &PeerSlot,
+    stale_until: &mut HashMap<AddressFamily, Instant>,
 ) -> Option<Event> {
     match msg {
         BgpMessage::Open(open) => Some(Event::OpenReceived(open)),
@@ -561,7 +564,7 @@ async fn classify_inbound(
             None
         }
         BgpMessage::RouteRefresh(rr) => {
-            resend_loc_rib(rr, state, peer, bgp_rib).await;
+            resend_loc_rib(rr, state, peer, bgp_rib, stale_until).await;
             None
         }
         BgpMessage::Unhandled { message_type, .. } => {
@@ -575,11 +578,13 @@ async fn classify_inbound(
 }
 
 /// RFC 2918 inbound: re-send the Loc-RIB for the requested address family.
+/// RFC 7313 `BoRR`/`EoRR` arm/cancel the family's stale timer in `stale_until`.
 async fn resend_loc_rib(
     rr: RouteRefreshMessage,
     state: &State,
     peer: &PeerContext,
     bgp_rib: &Mutex<BgpRib>,
+    stale_until: &mut HashMap<AddressFamily, Instant>,
 ) {
     if !matches!(state, State::Established(_)) {
         debug!(
@@ -610,10 +615,16 @@ async fn resend_loc_rib(
         }
         message::REFRESH_BORR if remote.enhanced_refresh => {
             rib.begin_refresh_in(peer.remote_address, family);
+            // RFC 7313 §4: bound how long the marks may wait for an EoRR; a
+            // repeated BoRR restarts the timer.
+            if !peer.route_refresh_stale_time.is_zero() {
+                stale_until.insert(family, Instant::now() + peer.route_refresh_stale_time);
+            }
             debug!(peer = %peer.remote_address, afi = rr.afi, "bgp: received BoRR");
         }
         message::REFRESH_EORR if remote.enhanced_refresh => {
             rib.end_refresh_in(peer.remote_address, family);
+            stale_until.remove(&family);
             debug!(peer = %peer.remote_address, afi = rr.afi, "bgp: received EoRR");
         }
         subtype => debug!(
@@ -750,6 +761,8 @@ pub async fn run(
     let remote_is_ibgp = kind == PeerKind::Internal;
     let (outbox_tx, mut outbox_rx) = mpsc::unbounded_channel::<OutboundUpdate>();
     let mut mrai = crate::mrai::Mrai::new(peer.mrai);
+    // RFC 7313 §4 stale-route deadlines, per family; die with the session.
+    let mut stale_until: HashMap<AddressFamily, Instant> = HashMap::new();
 
     let (read_half, write_half) = stream.into_split();
     let mut reader = FramedRead::new(read_half, BgpCodec::default());
@@ -854,7 +867,7 @@ pub async fn run(
                         if let Some(period) = hold_period {
                             hold_deadline = Some(Instant::now() + period);
                         }
-                        match classify_inbound(bgp_msg, &state, &peer, remote_is_ibgp, &bgp_rib, &slot).await {
+                        match classify_inbound(bgp_msg, &state, &peer, remote_is_ibgp, &bgp_rib, &slot, &mut stale_until).await {
                             Some(event) => event,
                             None => continue,
                         }
@@ -885,6 +898,21 @@ pub async fn run(
                         if let Err(e) = writer.send(outbound_update_to_message(update)).await {
                             warn!(error = %e, "could not send update");
                         }
+                    }
+                    continue;
+                }
+                () = sleep_until_opt(stale_until.values().min().copied()) => {
+                    let now = Instant::now();
+                    let expired: Vec<AddressFamily> =
+                        stale_until.iter().filter(|(_, d)| **d <= now).map(|(f, _)| *f).collect();
+                    let mut rib = bgp_rib.lock().await;
+                    for family in expired {
+                        stale_until.remove(&family);
+                        warn!(
+                            peer = %peer.remote_address, afi = afi_of(family),
+                            "bgp: route refresh stale timer expired, purging stale routes"
+                        );
+                        rib.end_refresh_in(peer.remote_address, family);
                     }
                     continue;
                 }

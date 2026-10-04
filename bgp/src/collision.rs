@@ -407,6 +407,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: std::time::Duration::from_secs(120),
             mrai: std::time::Duration::ZERO,
+            route_refresh_stale_time: std::time::Duration::ZERO,
             damping: None,
             max_hops: None,
             auth: None,

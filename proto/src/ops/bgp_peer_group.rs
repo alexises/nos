@@ -87,6 +87,15 @@ pub enum BgpPeerGroupOp {
         instance: String,
         name: String,
     },
+    SetRouteRefreshStaleTime {
+        instance: String,
+        name: String,
+        seconds: u16,
+    },
+    ClearRouteRefreshStaleTime {
+        instance: String,
+        name: String,
+    },
     SetDamping {
         instance: String,
         name: String,
@@ -237,6 +246,7 @@ impl BgpPeerGroupOp {
                         keepalive_interval: None,
                         connect_retry_time: None,
                         mrai: None,
+                        route_refresh_stale_time: None,
                         damping: None,
                         max_hops: None,
                         auth: None,
@@ -380,6 +390,18 @@ impl BgpPeerGroupOp {
             }
             BgpPeerGroupOp::ClearMrai { instance, name } => {
                 find_group_mut(config, instance, name)?.mrai = None;
+                Ok(())
+            }
+            BgpPeerGroupOp::SetRouteRefreshStaleTime {
+                instance,
+                name,
+                seconds,
+            } => {
+                find_group_mut(config, instance, name)?.route_refresh_stale_time = Some(*seconds);
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearRouteRefreshStaleTime { instance, name } => {
+                find_group_mut(config, instance, name)?.route_refresh_stale_time = None;
                 Ok(())
             }
             BgpPeerGroupOp::SetDamping {
@@ -614,6 +636,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             mrai: None,
+            route_refresh_stale_time: None,
             damping: None,
             max_hops: None,
             auth: None,
@@ -984,6 +1007,27 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].peer_groups[0].mrai, None);
+    }
+
+    #[test]
+    fn set_and_clear_route_refresh_stale_time() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetRouteRefreshStaleTime {
+            instance: "r1".into(),
+            name: "pg1".into(),
+            seconds: 5,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        let pg = |cfg: &Config| cfg.bgp_instances[0].peer_groups[0].route_refresh_stale_time;
+        assert_eq!(pg(&cfg), Some(5));
+        BgpPeerGroupOp::ClearRouteRefreshStaleTime {
+            instance: "r1".into(),
+            name: "pg1".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(pg(&cfg), None);
     }
 
     #[test]

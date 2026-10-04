@@ -82,6 +82,7 @@ async fn two_real_instances_establish_a_session() {
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
         mrai: Duration::ZERO,
+        route_refresh_stale_time: Duration::ZERO,
         damping: None,
         max_hops: None,
         auth: None,
@@ -106,6 +107,7 @@ async fn two_real_instances_establish_a_session() {
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
         mrai: Duration::ZERO,
+        route_refresh_stale_time: Duration::ZERO,
         damping: None,
         max_hops: None,
         auth: None,
@@ -137,6 +139,7 @@ async fn two_real_instances_establish_a_session() {
             local_hold_time: 90,
             keepalive_override: None,
             mrai: Duration::ZERO,
+            route_refresh_stale_time: Duration::ZERO,
             damping: None,
             next_hop: None,
             address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
@@ -163,6 +166,7 @@ async fn two_real_instances_establish_a_session() {
             local_hold_time: 90,
             keepalive_override: None,
             mrai: Duration::ZERO,
+            route_refresh_stale_time: Duration::ZERO,
             damping: None,
             next_hop: None,
             address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
@@ -213,6 +217,7 @@ async fn established_session_honors_configured_non_default_hold_time() {
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
         mrai: Duration::ZERO,
+        route_refresh_stale_time: Duration::ZERO,
         damping: None,
         max_hops: None,
         auth: None,
@@ -244,6 +249,7 @@ async fn established_session_honors_configured_non_default_hold_time() {
             local_hold_time: 30,
             keepalive_override: None,
             mrai: Duration::ZERO,
+            route_refresh_stale_time: Duration::ZERO,
             damping: None,
             next_hop: None,
             address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
@@ -292,6 +298,7 @@ async fn established_session_reports_status_via_peer_slot() {
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
         mrai: Duration::ZERO,
+        route_refresh_stale_time: Duration::ZERO,
         damping: None,
         max_hops: None,
         auth: None,
@@ -324,6 +331,7 @@ async fn established_session_reports_status_via_peer_slot() {
             local_hold_time: 90,
             keepalive_override: None,
             mrai: Duration::ZERO,
+            route_refresh_stale_time: Duration::ZERO,
             damping: None,
             next_hop: None,
             address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
@@ -396,6 +404,7 @@ async fn collision_leaves_exactly_one_side_running() {
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
         mrai: Duration::ZERO,
+        route_refresh_stale_time: Duration::ZERO,
         damping: None,
         max_hops: None,
         auth: None,
@@ -418,6 +427,7 @@ async fn collision_leaves_exactly_one_side_running() {
         local_hold_time: 90,
         keepalive_override: None,
         mrai: Duration::ZERO,
+        route_refresh_stale_time: Duration::ZERO,
         damping: None,
         next_hop: None,
         address_families: vec![nos_proto::AddressFamily::Ipv4Unicast],
@@ -595,6 +605,7 @@ async fn evpn_routes_from_a_real_session_are_stored_and_cleared_on_close() {
         keepalive_interval: None,
         connect_retry_time: Duration::from_secs(120),
         mrai: Duration::ZERO,
+        route_refresh_stale_time: Duration::ZERO,
         damping: None,
         max_hops: None,
         auth: None,
@@ -630,6 +641,7 @@ async fn evpn_routes_from_a_real_session_are_stored_and_cleared_on_close() {
             local_hold_time: 90,
             keepalive_override: None,
             mrai: Duration::ZERO,
+            route_refresh_stale_time: Duration::ZERO,
             damping: None,
             next_hop: None,
             address_families: families,
@@ -687,4 +699,176 @@ async fn evpn_routes_from_a_real_session_are_stored_and_cleared_on_close() {
             &nos_bgp::rib::EvpnRoute
         ); 0]
     );
+}
+
+/// A peer negotiating RFC 7313 enhanced route refresh that announces P1 and
+/// P2, sends `BoRR`, re-announces only P1, then — if `eorr` — sends `EoRR` and
+/// re-announces P2 again.
+async fn fake_refresh_peer(stream: TcpStream, asn: u32, eorr: bool) {
+    let (r, w) = stream.into_split();
+    let mut reader = FramedRead::new(r, BgpCodec::default());
+    let mut writer = FramedWrite::new(w, BgpCodec::default());
+
+    let mut open = message::build_open(asn, Ipv4Addr::new(2, 2, 2, 2), 90);
+    open.capabilities.extend([
+        message::Capability::MultiProtocol { afi: 1, safi: 1 },
+        message::Capability::RouteRefresh,
+        message::Capability::EnhancedRouteRefresh,
+    ]);
+    let _ = writer.send(BgpMessage::Open(open)).await;
+    loop {
+        match reader.next().await {
+            Some(Ok(BgpMessage::Open(_))) => {
+                let _ = writer.send(BgpMessage::Keepalive).await;
+                break;
+            }
+            Some(Ok(_)) => {}
+            _ => return,
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let update = |prefixes: &[&str]| {
+        BgpMessage::Update(message::UpdateMessage {
+            withdrawn_routes: vec![],
+            withdrawn_path_ids: vec![],
+            nlri: prefixes.iter().map(|p| p.parse().unwrap()).collect(),
+            nlri_path_ids: vec![],
+            attributes: Some(message::PathAttributes {
+                origin: message::Origin::Igp,
+                as_path: vec![asn].into(),
+                next_hop: Ipv4Addr::new(10, 0, 0, 2),
+                local_pref: None,
+                med: None,
+                originator_id: None,
+                atomic_aggregate: false,
+                aggregator: None,
+                cluster_list: vec![],
+                communities: vec![],
+                extended_communities: vec![],
+                large_communities: vec![],
+                pmsi: None,
+            }),
+            mp_reach: vec![],
+            mp_unreach: vec![],
+        })
+    };
+    let marker = |subtype| {
+        BgpMessage::RouteRefresh(message::RouteRefreshMessage {
+            afi: 1,
+            subtype,
+            safi: 1,
+        })
+    };
+    let _ = writer
+        .send(update(&["192.0.2.0/24", "198.51.100.0/24"]))
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _ = writer.send(marker(message::REFRESH_BORR)).await;
+    let _ = writer.send(update(&["192.0.2.0/24"])).await;
+    if eorr {
+        let _ = writer.send(marker(message::REFRESH_EORR)).await;
+        let _ = writer.send(update(&["198.51.100.0/24"])).await;
+    }
+    while reader.next().await.is_some() {}
+}
+
+/// Runs `fake_refresh_peer` against a real session with `stale_time` and
+/// returns the accepted IPv4 prefix count from it after 2s, asserting the
+/// session survived.
+async fn refresh_case(stale_time: Duration, eorr: bool) -> u32 {
+    let (a_stream, b_stream) = loopback_pair().await;
+    let (a_asn, b_asn) = (65001, 65002);
+    let a_router_id = Ipv4Addr::new(1, 1, 1, 1);
+    let peer_addr: std::net::IpAddr = "10.0.0.2".parse().unwrap();
+    let families = vec![nos_proto::AddressFamily::Ipv4Unicast];
+    let slot_a = PeerSlot::new(ResolvedPeer {
+        remote_address: peer_addr,
+        source_address: None,
+        remote_as: b_asn,
+        peer_group: "pg1".to_string(),
+        hold_time: 90,
+        keepalive_interval: None,
+        connect_retry_time: Duration::from_secs(120),
+        mrai: Duration::ZERO,
+        route_refresh_stale_time: stale_time,
+        damping: None,
+        max_hops: None,
+        auth: None,
+        next_hop: None,
+        address_families: families.clone(),
+        route_reflector_client: false,
+        route_server_client: false,
+        import_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+        export_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+        shutdown: None,
+        maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
+        announce_rpki_state: false,
+        confed_id: None,
+        confed_member: false,
+    });
+    let rib = new_bgp_rib();
+    rib.lock()
+        .await
+        .set_local_identity(a_asn, a_router_id, a_router_id);
+    let a = tokio::spawn(fsm::run(
+        a_stream,
+        Role::Active,
+        LocalIdentity {
+            asn: a_asn,
+            router_id: a_router_id,
+            cluster_id: a_router_id,
+            confed_id: None,
+        },
+        PeerContext {
+            remote_address: peer_addr,
+            expected_remote_as: b_asn,
+            local_hold_time: 90,
+            keepalive_override: None,
+            mrai: Duration::ZERO,
+            route_refresh_stale_time: stale_time,
+            damping: None,
+            next_hop: None,
+            address_families: families,
+            is_rr_client: false,
+            is_rs_client: false,
+            import_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+            export_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+        },
+        slot_a,
+        rib.clone(),
+    ));
+    let fake_b = tokio::spawn(fake_refresh_peer(b_stream, b_asn, eorr));
+
+    let mut held = 0;
+    for _ in 0..100 {
+        held = rib.lock().await.accepted_prefixes(peer_addr)[0];
+        if held == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(held, 2, "both prefixes should be learned before the BoRR");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!a.is_finished(), "the session must survive the stale timer");
+    let held = rib.lock().await.accepted_prefixes(peer_addr)[0];
+    fake_b.abort();
+    a.abort();
+    held
+}
+
+#[tokio::test]
+async fn route_refresh_stale_timer_purges_when_no_eorr_arrives() {
+    assert_eq!(refresh_case(Duration::from_secs(1), false).await, 1);
+}
+
+#[tokio::test]
+async fn route_refresh_stale_timer_is_cancelled_by_eorr() {
+    // EoRR purged P2, then P2 was re-learned; nothing purges it afterwards.
+    assert_eq!(refresh_case(Duration::from_secs(1), true).await, 2);
+}
+
+#[tokio::test]
+async fn zero_route_refresh_stale_time_keeps_stale_routes() {
+    assert_eq!(refresh_case(Duration::ZERO, false).await, 2);
 }

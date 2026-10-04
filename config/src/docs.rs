@@ -228,6 +228,17 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Clear a peer-group's BGP MinRouteAdvertisementInterval.",
             ),
         ),
+        Topic::BgpPeerGroupRouteRefreshStaleTime => (
+            "Set how long a peer-group's routes stay stale during an enhanced route refresh.",
+            concat!(
+                "Sets route-refresh-stale-time on a peer-group (RFC 7313 §4) — after a peer sends \
+             a Beginning-of-Route-Refresh, its routes it hasn't re-announced are purged this many \
+             seconds later even if its End-of-Route-Refresh never arrives. Unset defaults to 360 \
+             seconds; 0 keeps stale routes until the End-of-Route-Refresh or the session ends.",
+                " ",
+                "Clear a peer-group's route refresh stale time (back to 360 seconds).",
+            ),
+        ),
         Topic::BgpPeerGroupMaxHops => (
             "Set how many router hops away a peer-group's peers may be.",
             concat!(

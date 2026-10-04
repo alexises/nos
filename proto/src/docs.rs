@@ -305,6 +305,8 @@ topics! {
     BgpPeerGroupAnnounceRpkiState,
     /// `BgpInstance.maximum_paths`
     BgpInstanceMaximumPaths,
+    /// `BgpPeerGroup.route_refresh_stale_time`
+    BgpPeerGroupRouteRefreshStaleTime,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

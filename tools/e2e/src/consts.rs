@@ -89,6 +89,13 @@ pub const STAYRTR_IMAGE: &str = "rpki/stayrtr:v0.6.4";
 pub const EXABGP_IMAGE: &str = "nos-e2e-exabgp:local";
 /// Same release `tools/bench-bgp.sh` pins.
 pub const EXABGP_VERSION: &str = "5.0.13";
+/// `route-refresh-stale`: the ExaBGP image's own python3, running the scripted
+/// speaker `phases/borr.py` instead of ExaBGP.
+pub const PY_SPEAKER_IMAGE: &str = "nos-e2e-pyspeaker:local";
+/// `route-refresh-stale`: the prefix the scripted speaker re-announces inside
+/// its unterminated refresh, and the one it doesn't.
+pub const RR_STALE_KEPT: &str = "203.0.130.0/24";
+pub const RR_STALE_PURGED: &str = "203.0.131.0/24";
 /// `evpn-fdb`: router-a's broadcast domain and its EVPN identity. The import
 /// Route Target is the one GoBGP tags its routes with (`65010:10000`); the
 /// export one is router-a's own. `EVPN_LOCAL_MAC` is what the helper pins on

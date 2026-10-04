@@ -106,6 +106,11 @@ pub const HOLD_TIME_DEFAULT: u16 = 90;
 /// peer-group leaves `connect_retry_time` unset.
 pub const CONNECT_RETRY_TIME_DEFAULT_SECS: u16 = 120;
 
+/// RFC 7313 §4 default upper bound on how long routes stay stale after a
+/// `BoRR` with no `EoRR` (`BgpPeerGroup.route_refresh_stale_time`): the
+/// stale-path default FRR and Cisco use for graceful restart.
+pub const ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS: u16 = 360;
+
 /// Controls the `NEXT_HOP` path attribute this instance writes into every
 /// UPDATE it advertises to a peer-group's sessions. `SelfAddress` rewrites it
 /// to the session's own local address ("next-hop-self"); `Unchanged`
@@ -301,6 +306,13 @@ pub struct BgpPeerGroup {
     #[garde(skip)]
     #[cli(topic = BgpPeerGroupMrai)]
     pub mrai: Option<u16>,
+
+    /// RFC 7313 §4: seconds routes from a peer stay stale after its `BoRR`
+    /// before they're purged as if its `EoRR` had arrived. `None` defaults to
+    /// `ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS` (360s); 0 disables the timer.
+    #[garde(skip)]
+    #[cli(topic = BgpPeerGroupRouteRefreshStaleTime)]
+    pub route_refresh_stale_time: Option<u16>,
 
     /// RFC 2439 flap damping of routes received from this group; `None`
     /// disables it. See `BgpDamping`.
@@ -638,6 +650,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             mrai: None,
+            route_refresh_stale_time: None,
             damping: None,
             max_hops: None,
             auth: None,

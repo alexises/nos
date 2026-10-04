@@ -300,6 +300,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             mrai: None,
+            route_refresh_stale_time: None,
             damping: None,
             max_hops: None,
             auth: None,

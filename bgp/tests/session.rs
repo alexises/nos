@@ -35,6 +35,7 @@ fn peer(remote: Ipv4Addr, source: Ipv4Addr, remote_as: u32) -> ResolvedPeer {
         keepalive_interval: None,
         connect_retry_time: Duration::from_millis(300),
         mrai: Duration::ZERO,
+        route_refresh_stale_time: Duration::ZERO,
         damping: None,
         max_hops: None,
         auth: None,

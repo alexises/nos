@@ -70,6 +70,11 @@ pub fn render_bgp_peer_group(group: &BgpPeerGroup, local_asn: u32) -> String {
     );
     line.push_str(
         &group
+            .route_refresh_stale_time
+            .map_or_else(String::new, |s| format!(", route-refresh-stale-time {s}")),
+    );
+    line.push_str(
+        &group
             .max_hops
             .map_or_else(String::new, |h| format!(", max-hops {h}")),
     );
@@ -2333,6 +2338,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             mrai: None,
+            route_refresh_stale_time: None,
             damping: None,
             max_hops: None,
             auth: None,

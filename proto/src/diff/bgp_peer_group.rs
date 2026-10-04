@@ -89,6 +89,18 @@ fn mrai_str(pg: &BgpPeerGroup) -> String {
         .map_or_else(|| "default (0s, unpaced)".to_string(), |m| m.to_string())
 }
 
+fn route_refresh_stale_time_str(pg: &BgpPeerGroup) -> String {
+    pg.route_refresh_stale_time.map_or_else(
+        || {
+            format!(
+                "default ({}s)",
+                crate::schema::ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS
+            )
+        },
+        |s| s.to_string(),
+    )
+}
+
 fn damping_str(pg: &BgpPeerGroup) -> String {
     pg.damping.map_or_else(
         || "unset".to_string(),
@@ -217,6 +229,13 @@ fn changed_fields(base: &BgpPeerGroup, candidate: &BgpPeerGroup) -> Vec<FieldDif
             new: Some(mrai_str(candidate)),
         });
     }
+    if base.route_refresh_stale_time != candidate.route_refresh_stale_time {
+        fields.push(FieldDiff {
+            label: "route-refresh-stale-time".to_string(),
+            old: Some(route_refresh_stale_time_str(base)),
+            new: Some(route_refresh_stale_time_str(candidate)),
+        });
+    }
     if base.damping != candidate.damping {
         fields.push(FieldDiff {
             label: "damping".to_string(),
@@ -325,6 +344,11 @@ fn removed_section(pg: &BgpPeerGroup) -> SectionDiff {
                 new: None,
             },
             FieldDiff {
+                label: "route-refresh-stale-time".to_string(),
+                old: Some(route_refresh_stale_time_str(pg)),
+                new: None,
+            },
+            FieldDiff {
                 label: "damping".to_string(),
                 old: Some(damping_str(pg)),
                 new: None,
@@ -396,6 +420,11 @@ fn added_section(pg: &BgpPeerGroup) -> SectionDiff {
                 new: Some(mrai_str(pg)),
             },
             FieldDiff {
+                label: "route-refresh-stale-time".to_string(),
+                old: None,
+                new: Some(route_refresh_stale_time_str(pg)),
+            },
+            FieldDiff {
                 label: "damping".to_string(),
                 old: None,
                 new: Some(damping_str(pg)),
@@ -441,6 +470,7 @@ mod tests {
             keepalive_interval: None,
             connect_retry_time: None,
             mrai: None,
+            route_refresh_stale_time: None,
             damping: None,
             max_hops: None,
             auth: None,
@@ -517,6 +547,7 @@ mod tests {
             keepalive_interval: Some(10),
             connect_retry_time: Some(3),
             mrai: Some(5),
+            route_refresh_stale_time: Some(0),
             damping: Some(crate::schema::BgpDamping {
                 half_life: 900,
                 reuse: 750,
@@ -571,6 +602,7 @@ mod tests {
                 ("keepalive-interval", "default (hold-time / 3)", "10"),
                 ("connect-retry-time", "default (120s)", "3"),
                 ("mrai", "default (0s, unpaced)", "5"),
+                ("route-refresh-stale-time", "default (360s)", "0"),
                 ("damping", "unset", "half-life 900 reuse 750 suppress 2000 max-suppress 3600"),
                 ("max-hops", "unset", "1"),
                 (

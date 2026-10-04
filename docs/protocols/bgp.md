@@ -476,6 +476,20 @@ See [Shutting a session down](#shutting-a-session-down). While a peer is shut do
 
 When a peer asks for a route refresh, NOS resends its routes for that address family. If both sides support enhanced route refresh, the resent routes are framed by begin and end markers, and routes the peer no longer sends are removed at the end. `clear bgp … soft-in` asks the peer to do the same (see [Asking a peer to resend its routes](#asking-a-peer-to-resend-its-routes)). A peer that did not advertise the route refresh capability is never sent a request: the router logs `route refresh not sent` instead.
 
+If a peer starts an enhanced route refresh and never sends the end marker, NOS still removes the routes it did not resend once `route-refresh-stale-time` has passed (RFC 7313 §4). The router logs `route refresh stale timer expired` and the session stays up.
+
+- the default is 360 seconds;
+- `0` keeps the routes until the end marker arrives or the session ends;
+- changing the value restarts the peer-group's sessions.
+
+```
+edge-1(t6/bgp-instance:r1/peer-group:pg1)> set route-refresh-stale-time 120
+```
+
+```sh
+$C -X PUT -H 'Content-Type: application/json' -d '120' $B/v1/transactions/t6/bgp-instance/r1/peer-group/pg1/route-refresh-stale-time
+```
+
 ### MRAI (RFC 4271 §9.2.1.1)
 
 `set mrai <seconds>` sets the MinRouteAdvertisementInterval: the minimum time between two advertisements of the same prefix to the same peer. The first advertisement of a prefix is sent at once, and so is every withdrawal. A change within the interval is held back until the interval ends, and several changes collapse into the last one. Unset or `0` sends every change at once. EVPN routes are not paced.
