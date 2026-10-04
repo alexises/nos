@@ -11,7 +11,20 @@ One `nos-ospfv3d --instance <name>` process per `Ospfv3Instance`, spawned by `no
 - RFC 7166 authentication trailer (`Ospfv3Profile.auth`) — see "Authentication" below. Verified by `nos-e2e ospfv3-auth`.
 - RFC 5187 graceful restart — see "Graceful restart" below. Verified by `nos-e2e ospfv3-graceful-restart`.
 - RFC 5340 §A.3.1 Instance ID (header byte 14, after the kernel-filled checksum at 12 — stamping 12 corrupts the checksum): `Ospfv3Profile.instance_id` (0-31, `None` = 0) → `LinkConfig.instance_id`. `encode_*` write 0; the socket (`OspfSocket::signed`, and the in-memory wire) stamps the link's value with `packet::set_instance_id` before signing (the RFC 7166 digest covers the header). `link::run` drops a mismatch (`debug!`, `"ospfv3 packet instance id mismatch, dropping"`) **before** `verify_trailer`, so another instance's packets never count as auth failures. Verified by `nos-e2e ospfv3-instance-id`.
-- **Not yet** (OSPFv2-only for now): ABR, ASBR/redistribution, RFC 5838 multi-AF (AF-bit, several instances on one link).
+- ABR and ASBR (#50) — see "ABR, ASBR and the AS-scope LSDB" below. Verified by `nos-e2e ospfv3-asbr`/`ospfv3-abr`.
+- **Not yet** (OSPFv2-only for now): stub areas/NSSA, area ranges, virtual links; RFC 5838 multi-AF (AF-bit, several instances on one link).
+
+## ABR, ASBR and the AS-scope LSDB
+
+A port of `ospf/CLAUDE.md`'s "ASBR" and "ABR" sections; only the differences are listed.
+
+- **LSAs** (`lsa.rs`): Inter-Area-Prefix `0x2003`, Inter-Area-Router `0x2004`, AS-External `0x4005` (§A.4.5-§A.4.7, `LsaBody::InterAreaPrefix`/`InterAreaRouter`/`AsExternal`) and their RFC 8362 forms `0xA023`/`0xA024`/`0xC025` (one TLV each, no fixed part; the external's forwarding address and tag are sub-TLVs, and it has no referenced LSA). Decoded faithfully; originated Type-1, metric `spf::EXTERNAL_METRIC` (20), no forwarding address/tag/referenced LSA. `LsaTypes` picks the flavor, and `OWNED_TYPES` lists all fourteen, so `withdraw_undesired` flushes either.
+- **AS-scope store** (`LinkManager.as_lsdb`, `lsa::is_as_scope`): one store for the router, not one copy per area as in v2. `exchange::on_lsu_received` routes S2/S1 = `10` there; every link's DBD summary, LSR answer and flood read it (`link::Stores`), `age_lsdbs` ages it, `database_summaries` lists it under area `0.0.0.0` with `link: None`, and `compute_routes` adds it to every area's SPF input. So an ASBR's LSA learned in one area reaches the others with no ABR code.
+- **ASBR**: `nos-ribd`'s `ospf_client` (one task per family, `Peer` `OSPFV2`/`OSPFV3`) pushes the table's IPv6 statics when `redistribute … to ospfv3` (`Ospfv3Request::RedistributeRoutes`, `ribd` only — `server::allowed`). `apply_redistribute_update`/`set_redistribute_policy` re-filter at once (v2 waits for the 10s resync). `reconcile::resolve_redistribute_policy` is a copy of v2's (`ponytail:`). E-bit on the Router-LSA while the filtered set is non-empty.
+- **ABR** = links or loopbacks in 2+ areas (`attached_areas`); B-bit on the Router-LSA. `originate_inter_area_lsas` summarizes `spf::intra_area_routes` (distance-only Dijkstra over Intra-Area-Prefix-LSAs, root's own included — v2 skips transit networks — plus E-bit routers) into every other attached area. Never re-summarizes an inter-area or external route.
+- **Link State IDs** of prefix-keyed LSAs are opaque in v3: `LinkManager::lsid` hands one out per `(type, prefix)` from a counter for the process's life; a restart's new IDs make `withdraw_undesired` flush the old ones. An Inter-Area-Router-LSA's ID is the ASBR's router ID.
+- **SPF** (`spf.rs`): inter-area via the ABR's distance + LSA metric; external via an intra-area E-bit Router-LSA or the cheapest Inter-Area-Router-LSA, + the **LSA's own metric** (v2 adds a constant). Own LSAs never route. `ponytail:` metric-only precedence (no §16.4 classes), Type-2 treated as Type-1, forwarding address ignored, an ABR uses every area's summaries (no §16.2 backbone-only rule).
+- **Options**: `link::OWN_OPTIONS` sets E in every Hello/DBD and self-originated LSA (every area is normal, §A.2); a received E-bit is not checked (no stub areas yet).
 
 ## Authentication (RFC 7166)
 
@@ -33,7 +46,7 @@ Wire mechanics, all in `packet.rs` (`TrailerAuth::sign`/`verify_trailer`, pinned
 - Routes need nothing: `nos-ribd` keeps OSPF routes of a disconnected push client, and the helper's SPF still sees the held LSAs.
 
 ## Layout
-`socket` (raw socket) · `packet` (wire codec) · `lsa`/`lsdb` (LSAs, per-area database, aging) · `exchange` (DBD/LSR/LSU state, pure) · `link` (per-link driver task + `LinkManager`) · `reconcile` (config → `LinkConfig`) · `server` (IPC queries) · `rib_push_client`.
+`socket` (raw socket) · `packet` (wire codec) · `lsa`/`lsdb` (LSAs, per-area database, aging) · `exchange` (DBD/LSR/LSU state, pure) · `link` (per-link driver task + `LinkManager`) · `reconcile` (config → `LinkConfig`, redistribute policy) · `server` (IPC queries + `nos-ribd`'s redistribution feed) · `rib_push_client`.
 
 **LSDB scope** (RFC 5340 §4.5.1, #46): `LinkManager` holds one `Lsdb` per *area* (`lsdbs`, Router/Network/Intra-Area-Prefix and their E- forms) and one per *link* (`link_local_lsdbs`, keyed by attach point: Link-LSA/E-Link-LSA only, `lsa::is_link_local_scope`). A link's DBD summary, LSR answer and periodic flood read its area store plus its *own* link store, so a Link-LSA is never offered on a link other than the one it was received/originated on — `nos-ospfd` doesn't need this since OSPFv2 has no link-local scope. SPF (`compute_routes`) and `show ospfv3 database` (`Ospfv3LsaSummary.link = Some(attach_point)`) merge every same-area link store back in. `Lsdb` itself is scope-oblivious; `exchange::on_lsu_received` routes each received LSA by its S2/S1 bits.
 
@@ -47,4 +60,6 @@ Wire mechanics, all in `packet.rs` (`TrailerAuth::sign`/`verify_trailer`, pinned
 ## Verification
 `link::LinkSocket`/`LinkManager::with_opener` are the same test seam as `nos-ospfd`'s (see `ospf/CLAUDE.md`'s "Testing without raw sockets"); the in-memory wire signs RFC 7166 trailers like `OspfSocket`, and `link::tests` covers p2p/broadcast adjacency, SPF, extended LSAs, graceful-restart helping and trailer auth.
 
-`nos-e2e ospfv3`, `ospfv3-graceful-restart`, `ospfv3-auth`, `ospfv3-instance-id`, `ospfv3-dr`, `ospfv3-lfa`, `ospfv3-flush`, `ospfv3-mtu-pagination` (see root `CLAUDE.md`).
+`link::tests::abr_and_asbr_reach_across_areas` runs three routers over two areas on the in-memory wire.
+
+`nos-e2e ospfv3`, `ospfv3-asbr`, `ospfv3-abr`, `ospfv3-graceful-restart`, `ospfv3-auth`, `ospfv3-instance-id`, `ospfv3-dr`, `ospfv3-lfa`, `ospfv3-flush`, `ospfv3-mtu-pagination` (see root `CLAUDE.md`).

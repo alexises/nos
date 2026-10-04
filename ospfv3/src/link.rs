@@ -16,10 +16,12 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ipnet::Ipv6Net;
+use ipnet::{IpNet, Ipv6Net};
 use nos_proto::{
     LinkInterfaceState, NetworkType, OspfNeighborState, Ospfv3LsaSummary, Ospfv3NeighborSummary,
+    RedistributeUpdate,
 };
+use nos_rpl::CompiledPolicy;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -28,9 +30,10 @@ use tracing::{debug, info, warn};
 use crate::election;
 use crate::exchange::{self, AdjacencyData};
 use crate::lsa::{
-    self, GraceLsaBody, IntraAreaPrefixEntry, IntraAreaPrefixLsaBody, LinkLsaBody, LinkPrefixEntry,
-    Lsa, LsaBody, LsaHeader, LsaKey, NetworkLsaBody, RouterLsaBody, RouterLsaLink,
-    LINK_TYPE_POINT_TO_POINT, LINK_TYPE_TRANSIT_NETWORK,
+    self, AsExternalLsaBody, GraceLsaBody, InterAreaPrefixLsaBody, InterAreaRouterLsaBody,
+    IntraAreaPrefixEntry, IntraAreaPrefixLsaBody, LinkLsaBody, LinkPrefixEntry, Lsa, LsaBody,
+    LsaHeader, LsaKey, NetworkLsaBody, RouterLsaBody, RouterLsaLink, LINK_TYPE_POINT_TO_POINT,
+    LINK_TYPE_TRANSIT_NETWORK,
 };
 use crate::lsdb::Lsdb;
 use crate::neighbor::{self, NeighborState};
@@ -139,7 +142,13 @@ pub struct LinkConfig {
     pub instance_id: u8,
 }
 
-/// Hello/DBD Options for this link — `V6`/`R` always, plus RFC 7166 §2.1's
+/// The Options every self-originated LSA and packet carries: `V6`/`R`, and
+/// `E` since every area is a normal area (RFC 5340 §A.2 — no stub areas or
+/// NSSA in `OSPFv3` yet; an FRR neighbor treats a clear E-bit in a normal
+/// area as a mismatch).
+const OWN_OPTIONS: u32 = lsa::OPTION_V6 | lsa::OPTION_E | lsa::OPTION_R;
+
+/// Hello/DBD Options for this link — `OWN_OPTIONS`, plus RFC 7166 §2.1's
 /// AT-bit when the link is authenticated.
 fn link_options(cfg: &LinkConfig) -> u32 {
     let at = if cfg.auth.is_some() {
@@ -147,7 +156,7 @@ fn link_options(cfg: &LinkConfig) -> u32 {
     } else {
         0
     };
-    lsa::OPTION_V6 | lsa::OPTION_R | at
+    OWN_OPTIONS | at
 }
 
 /// RFC 7166 §4.1's anti-replay check, mirroring
@@ -293,10 +302,16 @@ pub async fn run(
     local_router_id: Ipv4Addr,
     lsdb: Arc<Mutex<Lsdb>>,
     link_local_lsdb: Arc<Mutex<Lsdb>>,
+    as_lsdb: Arc<Mutex<Lsdb>>,
     status: StatusHandle,
     dbd_max_headers: Option<usize>,
     mut grace_rx: mpsc::UnboundedReceiver<u32>,
 ) {
+    let stores = Stores {
+        area: &lsdb,
+        link: &link_local_lsdb,
+        as_scope: &as_lsdb,
+    };
     let dbd_max_headers =
         dbd_max_headers.unwrap_or_else(|| exchange::mtu_based_max_headers(cfg.mtu));
     let socket = match socket {
@@ -374,7 +389,7 @@ pub async fn run(
                             }
                             Ok(OspfPacket::Dbd(dbd)) => {
                                 if let Some(actions) = handle_dbd(
-                                    &cfg, local_router_id, &status, &lsdb, &link_local_lsdb, &dbd, dbd_max_headers,
+                                    &cfg, local_router_id, &status, &stores, &dbd, dbd_max_headers,
                                 )
                                 .await
                                 {
@@ -383,14 +398,14 @@ pub async fn run(
                             }
                             Ok(OspfPacket::Lsr(lsr)) => {
                                 if let Some(actions) =
-                                    handle_lsr(&cfg, local_router_id, &status, &lsdb, &link_local_lsdb, &lsr).await
+                                    handle_lsr(&cfg, local_router_id, &status, &stores, &lsr).await
                                 {
                                     execute_actions(&socket, &cfg, local_router_id, &status, lsr.router_id, actions);
                                 }
                             }
                             Ok(OspfPacket::Lsu(lsu)) => {
                                 if let Some(actions) =
-                                    handle_lsu(&cfg, local_router_id, &status, &lsdb, &link_local_lsdb, &lsu).await
+                                    handle_lsu(&cfg, local_router_id, &status, &stores, &lsu).await
                                 {
                                     execute_actions(&socket, &cfg, local_router_id, &status, lsu.router_id, actions);
                                 }
@@ -428,12 +443,37 @@ pub async fn run(
             }
             _ = rxmt_sweep.tick() => {
                 retransmit_pending(&socket, &cfg, local_router_id, &status);
-                flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &link_local_lsdb, &status).await;
+                flood_full_neighbors(&socket, &cfg, local_router_id, &stores, &status).await;
             }
             Some(grace_period) = grace_rx.recv() => {
                 send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period);
             }
         }
+    }
+}
+
+/// The three stores one link reads and writes (RFC 5340 §4.5.1): its area's,
+/// its own link-local one and the AS-wide one.
+struct Stores<'a> {
+    area: &'a Mutex<Lsdb>,
+    link: &'a Mutex<Lsdb>,
+    as_scope: &'a Mutex<Lsdb>,
+}
+
+impl Stores<'_> {
+    /// Every LSA this link may summarize/flood.
+    async fn all(&self) -> Vec<Arc<Lsa>> {
+        let mut lsas = self.area.lock().await.all();
+        lsas.extend(self.link.lock().await.all());
+        lsas.extend(self.as_scope.lock().await.all());
+        lsas
+    }
+
+    async fn headers(&self) -> Vec<LsaHeader> {
+        let mut headers = self.area.lock().await.headers();
+        headers.extend(self.link.lock().await.headers());
+        headers.extend(self.as_scope.lock().await.headers());
+        headers
     }
 }
 
@@ -619,8 +659,7 @@ async fn handle_dbd(
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
-    lsdb: &Mutex<Lsdb>,
-    link_local_lsdb: &Mutex<Lsdb>,
+    stores: &Stores<'_>,
     dbd: &DbdPacket,
     dbd_max_headers: usize,
 ) -> Option<Vec<exchange::Action>> {
@@ -632,8 +671,7 @@ async fn handle_dbd(
 
     // A MaxAge entry is only held to be flooded out; summarizing it would
     // invite an LSR that fails (BadLSReq) once it's evicted.
-    let mut local_lsdb_headers = lsdb.lock().await.headers();
-    local_lsdb_headers.extend(link_local_lsdb.lock().await.headers());
+    let mut local_lsdb_headers = stores.headers().await;
     local_lsdb_headers.retain(|h| h.age < lsa::MAX_AGE);
     let actions = exchange::on_dbd_received(
         &mut adj,
@@ -661,8 +699,7 @@ async fn handle_lsr(
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
-    lsdb: &Mutex<Lsdb>,
-    link_local_lsdb: &Mutex<Lsdb>,
+    stores: &Stores<'_>,
     lsr: &LsrPacket,
 ) -> Option<Vec<exchange::Action>> {
     let (old_state, mut adj) = {
@@ -672,9 +709,10 @@ async fn handle_lsr(
     };
 
     let actions = {
-        let lsdb = lsdb.lock().await;
-        let link_local_lsdb = link_local_lsdb.lock().await;
-        exchange::on_lsr_received(&mut adj, &lsdb, &link_local_lsdb, lsr)
+        let lsdb = stores.area.lock().await;
+        let link_local_lsdb = stores.link.lock().await;
+        let as_lsdb = stores.as_scope.lock().await;
+        exchange::on_lsr_received(&mut adj, &lsdb, &link_local_lsdb, &as_lsdb, lsr)
     };
 
     Some(finish_neighbor_event(
@@ -692,8 +730,7 @@ async fn handle_lsu(
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
     status: &StatusHandle,
-    lsdb: &Mutex<Lsdb>,
-    link_local_lsdb: &Mutex<Lsdb>,
+    stores: &Stores<'_>,
     lsu: &LsuPacket,
 ) -> Option<Vec<exchange::Action>> {
     let (old_state, mut adj) = {
@@ -703,9 +740,10 @@ async fn handle_lsu(
     };
 
     let (actions, newly_installed) = {
-        let mut lsdb = lsdb.lock().await;
-        let mut link_local_lsdb = link_local_lsdb.lock().await;
-        exchange::on_lsu_received(&mut adj, &mut lsdb, &mut link_local_lsdb, lsu)
+        let mut lsdb = stores.area.lock().await;
+        let mut link_local_lsdb = stores.link.lock().await;
+        let mut as_lsdb = stores.as_scope.lock().await;
+        exchange::on_lsu_received(&mut adj, &mut lsdb, &mut link_local_lsdb, &mut as_lsdb, lsu)
     };
     for header in &newly_installed {
         info!(
@@ -725,7 +763,7 @@ async fn handle_lsu(
         };
         // Acted on at once, never held: a copy left in the LSDB would be
         // offered back to the restarted router and flooded to us again.
-        link_local_lsdb.lock().await.remove(&grace.header.key());
+        stores.link.lock().await.remove(&grace.header.key());
         on_grace_lsa(cfg, status, &grace.header, body);
     }
 
@@ -949,8 +987,7 @@ async fn flood_full_neighbors(
     socket: &LinkSocket,
     cfg: &LinkConfig,
     local_router_id: Ipv4Addr,
-    lsdb: &Mutex<Lsdb>,
-    link_local_lsdb: &Mutex<Lsdb>,
+    stores: &Stores<'_>,
     status: &StatusHandle,
 ) {
     let full_neighbors: Vec<(Ipv4Addr, Ipv6Addr)> = status
@@ -963,8 +1000,7 @@ async fn flood_full_neighbors(
     if full_neighbors.is_empty() {
         return;
     }
-    let mut lsas = lsdb.lock().await.all();
-    lsas.extend(link_local_lsdb.lock().await.all());
+    let lsas = stores.all().await;
     if lsas.is_empty() {
         return;
     }
@@ -1251,9 +1287,9 @@ struct LinkEntry {
 }
 
 /// Owns every `OSPFv3` link's driver task for one `nos-ospfv3d` process, plus
-/// its per-area LSDBs — mirrors `ospf::link::LinkManager`, minus every
-/// ASBR/ABR/redistribute field (out of scope for Phase 1) — and, unlike v2,
-/// a second store per *link* for RFC 5340 §4.5.1's link-local-scoped LSAs.
+/// its per-area LSDBs — mirrors `ospf::link::LinkManager` — and, unlike v2,
+/// a store per *link* for RFC 5340 §4.5.1's link-local-scoped LSAs and one
+/// AS-wide store for its AS-scoped ones.
 pub struct LinkManager {
     links: Mutex<HashMap<String, LinkEntry>>,
     /// Area-scoped LSAs (Router/Network/Intra-Area-Prefix and their RFC
@@ -1264,6 +1300,24 @@ pub struct LinkManager {
     /// offer another link's Link-LSAs (RFC 5340 §4.5.1). SPF still merges
     /// every same-area link's store back in (`compute_routes`).
     link_local_lsdbs: Mutex<HashMap<String, Arc<Mutex<Lsdb>>>>,
+    /// AS-scoped LSAs (AS-External-LSA/E-AS-External-LSA, `lsa::is_as_scope`)
+    /// — one store for the whole router, read by every link whatever its
+    /// area, so an ASBR's LSA learned in one area floods on into the others
+    /// with no ABR code (v2 copies each Type-5 into every area instead).
+    as_lsdb: Arc<Mutex<Lsdb>>,
+    /// Raw (pre-policy) redistributed IPv6 prefixes from
+    /// `Ospfv3Request::RedistributeRoutes`, and what passes
+    /// `redistribute_policy` (re-derived on every update and resync). A
+    /// non-empty filtered set makes this router an ASBR.
+    redistribute_raw: Mutex<HashSet<Ipv6Net>>,
+    redistribute_filtered: Mutex<HashSet<Ipv6Net>>,
+    redistribute_policy: Mutex<Arc<CompiledPolicy>>,
+    /// Link State IDs of prefix-keyed LSAs (Inter-Area-Prefix,
+    /// AS-External), which are opaque in v3 (RFC 5340 §4.4.3.3/§4.4.3.5):
+    /// one per `(legacy LS type, prefix)`, handed out from a counter and
+    /// kept for the process's life. A restart may hand out other IDs; the
+    /// stateless `withdraw_undesired` then flushes the old incarnation's.
+    lsids: Mutex<HashMap<(u16, Ipv6Net), Ipv4Addr>>,
     router_id: Mutex<Option<Ipv4Addr>>,
     /// Loopback (`Interface.ospfv3_profile`) attach points' own prefixes,
     /// per area — no live `LinkConfig`/socket for these (see
@@ -1287,15 +1341,21 @@ pub struct LinkManager {
 
 /// Every LS type this router originates in either RFC 8362 mode — the only
 /// ones `withdraw_undesired` ever flushes (never a Grace-LSA).
-const OWNED_TYPES: [u16; 8] = [
+const OWNED_TYPES: [u16; 14] = [
     lsa::LSA_TYPE_ROUTER,
     lsa::LSA_TYPE_NETWORK,
     lsa::LSA_TYPE_LINK,
     lsa::LSA_TYPE_INTRA_AREA_PREFIX,
+    lsa::LSA_TYPE_INTER_AREA_PREFIX,
+    lsa::LSA_TYPE_INTER_AREA_ROUTER,
+    lsa::LSA_TYPE_AS_EXTERNAL,
     lsa::LSA_TYPE_E_ROUTER,
     lsa::LSA_TYPE_E_NETWORK,
     lsa::LSA_TYPE_E_LINK,
     lsa::LSA_TYPE_E_INTRA_AREA_PREFIX,
+    lsa::LSA_TYPE_E_INTER_AREA_PREFIX,
+    lsa::LSA_TYPE_E_INTER_AREA_ROUTER,
+    lsa::LSA_TYPE_E_AS_EXTERNAL,
 ];
 
 /// The keys one origination tick originated, per store.
@@ -1303,14 +1363,18 @@ const OWNED_TYPES: [u16; 8] = [
 struct Originated {
     areas: HashMap<Ipv4Addr, HashSet<LsaKey>>,
     links: HashMap<String, HashSet<LsaKey>>,
+    as_scope: HashSet<LsaKey>,
 }
 
-/// The four LS types this router originates, per RFC 8362 mode.
+/// The LS types this router originates, per RFC 8362 mode.
 struct LsaTypes {
     router: u16,
     network: u16,
     link: u16,
     intra_area_prefix: u16,
+    inter_area_prefix: u16,
+    inter_area_router: u16,
+    as_external: u16,
 }
 
 impl LsaTypes {
@@ -1321,6 +1385,9 @@ impl LsaTypes {
                 network: lsa::LSA_TYPE_E_NETWORK,
                 link: lsa::LSA_TYPE_E_LINK,
                 intra_area_prefix: lsa::LSA_TYPE_E_INTRA_AREA_PREFIX,
+                inter_area_prefix: lsa::LSA_TYPE_E_INTER_AREA_PREFIX,
+                inter_area_router: lsa::LSA_TYPE_E_INTER_AREA_ROUTER,
+                as_external: lsa::LSA_TYPE_E_AS_EXTERNAL,
             }
         } else {
             Self {
@@ -1328,6 +1395,9 @@ impl LsaTypes {
                 network: lsa::LSA_TYPE_NETWORK,
                 link: lsa::LSA_TYPE_LINK,
                 intra_area_prefix: lsa::LSA_TYPE_INTRA_AREA_PREFIX,
+                inter_area_prefix: lsa::LSA_TYPE_INTER_AREA_PREFIX,
+                inter_area_router: lsa::LSA_TYPE_INTER_AREA_ROUTER,
+                as_external: lsa::LSA_TYPE_AS_EXTERNAL,
             }
         }
     }
@@ -1377,6 +1447,11 @@ impl LinkManager {
             links: Mutex::new(HashMap::new()),
             lsdbs: Mutex::new(HashMap::new()),
             link_local_lsdbs: Mutex::new(HashMap::new()),
+            as_lsdb: Arc::new(Mutex::new(Lsdb::new())),
+            redistribute_raw: Mutex::new(HashSet::new()),
+            redistribute_filtered: Mutex::new(HashSet::new()),
+            redistribute_policy: Mutex::new(Arc::new(nos_rpl::ACCEPT_ALL.clone())),
+            lsids: Mutex::new(HashMap::new()),
             router_id: Mutex::new(None),
             loopback_prefixes: Mutex::new(HashMap::new()),
             age_multiplier,
@@ -1496,6 +1571,42 @@ impl LinkManager {
                 );
             }
         }
+        let evicted = self
+            .as_lsdb
+            .lock()
+            .await
+            .age_and_evict(self.age_multiplier, &hold);
+        for key in evicted {
+            info!(
+                scope = "as", lsa_type = key.lsa_type, link_state_id = %key.link_state_id,
+                advertising_router = %key.advertising_router,
+                "ospfv3 lsa maxage flushed"
+            );
+        }
+    }
+
+    /// The areas this router has a live link or loopback in.
+    async fn attached_areas(&self) -> HashSet<Ipv4Addr> {
+        let mut areas: HashSet<Ipv4Addr> = self
+            .links
+            .lock()
+            .await
+            .values()
+            .map(|e| e.config.area_id)
+            .collect();
+        areas.extend(self.loopback_prefixes.lock().await.keys().copied());
+        areas
+    }
+
+    /// The Link State ID for a prefix-keyed LSA — see `lsids`.
+    async fn lsid(&self, lsa_type: u16, prefix: Ipv6Net) -> Ipv4Addr {
+        let mut lsids = self.lsids.lock().await;
+        let next = u32::try_from(lsids.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        *lsids
+            .entry((lsa_type, prefix))
+            .or_insert_with(|| lsa::interface_id_key(next))
     }
 
     /// Recomputes and (re)installs this router's own Router-LSA per area —
@@ -1522,6 +1633,17 @@ impl LinkManager {
             .collect();
         let area_ids: HashSet<Ipv4Addr> = by_area.keys().copied().chain(loopback_areas).collect();
 
+        // RFC 5340 §A.4.3: B while attached to 2+ areas (not `lsdbs.len()`,
+        // which never shrinks), E while originating AS-External-LSAs — the
+        // same set `originate_as_external_lsas` reads, so the bit and the
+        // LSAs come and go in the same tick.
+        let mut flags = 0;
+        if self.attached_areas().await.len() >= 2 {
+            flags |= lsa::ROUTER_FLAG_B;
+        }
+        if !self.redistribute_filtered.lock().await.is_empty() {
+            flags |= lsa::ROUTER_FLAG_E;
+        }
         let types = self.lsa_types();
         debug_assert!(!lsa::is_link_local_scope(types.router));
         debug_assert!(!lsa::is_link_local_scope(types.network));
@@ -1538,8 +1660,8 @@ impl LinkManager {
                 types.router,
                 local_router_id,
                 LsaBody::Router(RouterLsaBody {
-                    flags: 0,
-                    options: lsa::OPTION_V6 | lsa::OPTION_R,
+                    flags,
+                    options: OWN_OPTIONS,
                     links: router_links,
                 }),
             ));
@@ -1568,7 +1690,7 @@ impl LinkManager {
                     types.network,
                     lsa::interface_id_key(cfg.interface_id),
                     LsaBody::Network(NetworkLsaBody {
-                        options: lsa::OPTION_V6 | lsa::OPTION_R,
+                        options: OWN_OPTIONS,
                         attached_routers: attached,
                     }),
                 ));
@@ -1600,7 +1722,7 @@ impl LinkManager {
                 lsa::interface_id_key(cfg.interface_id),
                 LsaBody::Link(LinkLsaBody {
                     priority: cfg.priority,
-                    options: lsa::OPTION_V6 | lsa::OPTION_R,
+                    options: OWN_OPTIONS,
                     link_local_address: cfg.link_local_address,
                     prefixes: vec![LinkPrefixEntry {
                         options: 0,
@@ -1713,6 +1835,165 @@ impl LinkManager {
         }
     }
 
+    /// RFC 5340 §4.4.3.3/§4.4.3.4 (port of `ospf::link::
+    /// originate_summary_lsas`): as an ABR, into every attached area, one
+    /// Inter-Area-Prefix-LSA per prefix intra-area in another attached area
+    /// and one Inter-Area-Router-LSA per ASBR reachable in one. Never an
+    /// inter-area or external route (`spf::intra_area_routes`). Run after the
+    /// intra-area passes, so this tick's own prefixes are summarized.
+    /// `ponytail:` no area ranges, no backbone check (ABR = 2+ areas), no
+    /// up/down-bit loop prevention — `ospf/CLAUDE.md`'s ABR ceilings.
+    async fn originate_inter_area_lsas(&self, local_router_id: Ipv4Addr, done: &mut Originated) {
+        let attached = self.attached_areas().await;
+        if attached.len() < 2 {
+            return;
+        }
+        let areas: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
+            .lsdbs
+            .lock()
+            .await
+            .iter()
+            .filter(|(id, _)| attached.contains(id))
+            .map(|(id, lsdb)| (*id, Arc::clone(lsdb)))
+            .collect();
+        let mut views = Vec::new();
+        for (area_id, lsdb) in &areas {
+            let lsas = lsdb.lock().await.all();
+            views.push((*area_id, spf::intra_area_routes(local_router_id, &lsas)));
+        }
+        let types = self.lsa_types();
+        for (dest, lsdb) in &areas {
+            // Cheapest over every other area; 24-bit metrics (LSInfinity
+            // excluded).
+            let mut prefixes: HashMap<Ipv6Net, u32> = HashMap::new();
+            let mut asbrs: HashMap<Ipv4Addr, (u32, u32)> = HashMap::new();
+            for (_, view) in views.iter().filter(|(src, _)| src != dest) {
+                for &(prefix, cost) in &view.prefixes {
+                    let e = prefixes.entry(prefix).or_insert(cost);
+                    *e = (*e).min(cost);
+                }
+                for &(asbr, cost, options) in &view.asbrs {
+                    let e = asbrs.entry(asbr).or_insert((cost, options));
+                    if cost < e.0 {
+                        *e = (cost, options);
+                    }
+                }
+            }
+            let mut desired = Vec::new();
+            for (prefix, metric) in prefixes.into_iter().filter(|(_, m)| *m < 0x00FF_FFFF) {
+                let lsid = self.lsid(lsa::LSA_TYPE_INTER_AREA_PREFIX, prefix).await;
+                desired.push((
+                    types.inter_area_prefix,
+                    lsid,
+                    LsaBody::InterAreaPrefix(InterAreaPrefixLsaBody {
+                        metric,
+                        prefix_options: 0,
+                        prefix,
+                    }),
+                ));
+            }
+            for (asbr, (metric, options)) in
+                asbrs.into_iter().filter(|(_, (m, _))| *m < 0x00FF_FFFF)
+            {
+                desired.push((
+                    types.inter_area_router,
+                    asbr,
+                    LsaBody::InterAreaRouter(InterAreaRouterLsaBody {
+                        options,
+                        metric,
+                        destination_router_id: asbr,
+                    }),
+                ));
+            }
+            let mut lsdb = lsdb.lock().await;
+            let done = done.areas.entry(*dest).or_default();
+            for (lsa_type, lsid, body) in desired {
+                done.insert(install_self_originated(
+                    &mut lsdb,
+                    local_router_id,
+                    lsa_type,
+                    lsid,
+                    body,
+                ));
+            }
+        }
+    }
+
+    /// RFC 5340 §4.4.3.5: one AS-External-LSA per redistributed IPv6 prefix,
+    /// into the AS-scope store — Type-1, metric `spf::EXTERNAL_METRIC`, no
+    /// forwarding address or tag.
+    async fn originate_as_external_lsas(&self, local_router_id: Ipv4Addr, done: &mut Originated) {
+        let prefixes: Vec<Ipv6Net> = self
+            .redistribute_filtered
+            .lock()
+            .await
+            .iter()
+            .copied()
+            .collect();
+        let types = self.lsa_types();
+        for prefix in prefixes {
+            let lsid = self.lsid(lsa::LSA_TYPE_AS_EXTERNAL, prefix).await;
+            done.as_scope.insert(install_self_originated(
+                &mut *self.as_lsdb.lock().await,
+                local_router_id,
+                types.as_external,
+                lsid,
+                LsaBody::AsExternal(AsExternalLsaBody {
+                    type2: false,
+                    metric: spf::EXTERNAL_METRIC,
+                    prefix_options: 0,
+                    prefix,
+                    forwarding_address: None,
+                    route_tag: None,
+                    referenced_ls_type: 0,
+                    referenced_link_state_id: None,
+                }),
+            ));
+        }
+    }
+
+    /// Applies one `Ospfv3Request::RedistributeRoutes` update (pushed by the
+    /// owning `nos-ribd`) to the raw set and re-filters it. `OSPFv3` routes
+    /// IPv6 only: `nos-ribd` sends no IPv4 prefix, and one is ignored.
+    pub async fn apply_redistribute_update(&self, update: RedistributeUpdate) {
+        {
+            let mut raw = self.redistribute_raw.lock().await;
+            let v6 = |prefix: IpNet| match prefix {
+                IpNet::V6(p) => Some(p.trunc()),
+                IpNet::V4(_) => None,
+            };
+            match update {
+                RedistributeUpdate::Full(routes) => {
+                    *raw = routes.into_iter().filter_map(|r| v6(r.prefix)).collect();
+                }
+                RedistributeUpdate::Add(route) => raw.extend(v6(route.prefix)),
+                RedistributeUpdate::Remove(prefix) => {
+                    if let Some(p) = v6(prefix) {
+                        raw.remove(&p);
+                    }
+                }
+            }
+        }
+        self.refilter_redistributed().await;
+    }
+
+    /// Sets the redistribute policy (every `reconcile.rs` resync) and
+    /// re-filters, so a policy edit takes effect without waiting for a route
+    /// change — `ospf::link::LinkManager::set_redistribute_policy`.
+    pub async fn set_redistribute_policy(&self, policy: Arc<CompiledPolicy>) {
+        *self.redistribute_policy.lock().await = policy;
+        self.refilter_redistributed().await;
+    }
+
+    async fn refilter_redistributed(&self) {
+        let policy = Arc::clone(&*self.redistribute_policy.lock().await);
+        let raw = self.redistribute_raw.lock().await.clone();
+        *self.redistribute_filtered.lock().await = raw
+            .into_iter()
+            .filter(|&p| passes_redistribute_policy(p, &policy))
+            .collect();
+    }
+
     /// One origination tick: every pass, then RFC 2328 §13.4/§14.1 — every
     /// live LSA of ours this tick did not originate is prematurely aged
     /// (`withdraw_undesired`), like `ospf::link`'s pass. Stateless, so it
@@ -1726,6 +2007,10 @@ impl LinkManager {
         self.originate_router_lsas(local_router_id, &mut done).await;
         self.originate_link_lsas(local_router_id, &mut done).await;
         self.originate_intra_area_prefix_lsas(local_router_id, &mut done)
+            .await;
+        self.originate_inter_area_lsas(local_router_id, &mut done)
+            .await;
+        self.originate_as_external_lsas(local_router_id, &mut done)
             .await;
         let areas: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
             .lsdbs
@@ -1743,6 +2028,11 @@ impl LinkManager {
             let lsdb = self.link_local_lsdb_for(attach_point).await;
             withdraw_undesired(&mut *lsdb.lock().await, local_router_id, desired);
         }
+        withdraw_undesired(
+            &mut *self.as_lsdb.lock().await,
+            local_router_id,
+            &done.as_scope,
+        );
     }
 
     /// Diffs `desired` against currently-running links — mirrors
@@ -1786,6 +2076,7 @@ impl LinkManager {
                 local_router_id,
                 lsdb,
                 link_local_lsdb,
+                Arc::clone(&self.as_lsdb),
                 status_tx,
                 self.dbd_max_headers,
                 grace_rx,
@@ -1812,7 +2103,8 @@ impl LinkManager {
     }
 
     /// Every installed LSA's header: the area stores' rows carry
-    /// `link: None`, each link's own store's rows carry its attach point.
+    /// `link: None`, each link's own store's rows carry its attach point, and
+    /// the AS-scope store's rows carry area `0.0.0.0` and `link: None`.
     pub async fn database_summaries(&self) -> Vec<Ospfv3LsaSummary> {
         let mut result = Vec::new();
         let areas: Vec<(Ipv4Addr, Arc<Mutex<Lsdb>>)> = self
@@ -1840,6 +2132,9 @@ impl LinkManager {
                 result.push(to_lsa_summary(area_id, Some(attach_point.clone()), &header));
             }
         }
+        for header in self.as_lsdb.lock().await.headers() {
+            result.push(to_lsa_summary(Ipv4Addr::UNSPECIFIED, None, &header));
+        }
         result
     }
 
@@ -1865,6 +2160,10 @@ impl LinkManager {
             for (_, link_lsdb) in self.link_local_lsdbs_in(area_id).await {
                 lsas.extend(link_lsdb.lock().await.all());
             }
+            // AS-External-LSAs are routed from every area (through an
+            // intra-area ASBR or an Inter-Area-Router-LSA there); the cheapest
+            // wins in the merge below.
+            lsas.extend(self.as_lsdb.lock().await.all());
             for entry in spf::compute(router_id, &lsas) {
                 merged
                     .entry(entry.prefix)
@@ -2133,6 +2432,36 @@ fn withdraw_undesired(lsdb: &mut Lsdb, local_router_id: Ipv4Addr, desired: &Hash
     for key in stale {
         withdraw_self_originated(lsdb, &key);
     }
+}
+
+/// Evaluates `prefix` against a redistribute `policy` —
+/// `ospf::link::passes_redistribute_policy` with an IPv6 prefix: a
+/// redistribute policy has no `this.bgp.*` to read, so those are empty.
+fn passes_redistribute_policy(prefix: Ipv6Net, policy: &CompiledPolicy) -> bool {
+    let input = nos_rpl::Input {
+        prefix: IpNet::V6(prefix),
+        bgp: nos_rpl::BgpInput {
+            origin: nos_rpl::Origin::Igp,
+            as_path: &[],
+            local_pref: 0,
+            med: None,
+            next_hop: None,
+            learned_via_ibgp: false,
+            router_id: None,
+            originator_id: None,
+            cluster_list: &[],
+            peer: None,
+            peer_as: 0,
+            communities: &[],
+            extended_communities: &[],
+            large_communities: &[],
+            validation_state: nos_rpl::ValidationState::default(),
+        },
+    };
+    matches!(
+        nos_rpl::vm::run(policy, &input),
+        nos_rpl::Verdict::Accept { .. }
+    )
 }
 
 fn diff_links(
@@ -3085,6 +3414,112 @@ mod tests {
             OspfNeighborState::Down
         );
         a.shutdown().await;
+    }
+
+    /// The Router-LSA `of` holds for `router` in `area`, if any.
+    async fn router_flags(of: &LinkManager, area: Ipv4Addr, router: Ipv4Addr) -> Option<u8> {
+        let lsdb = of.lsdb_for(area).await;
+        let lsdb = lsdb.lock().await;
+        lsdb.all().iter().find_map(|l| match &l.body {
+            LsaBody::Router(r)
+                if l.header.advertising_router == router && l.header.age < lsa::MAX_AGE =>
+            {
+                Some(r.flags)
+            }
+            _ => None,
+        })
+    }
+
+    /// a (area 0) — b (areas 0 and 1, an ABR) — c (area 1, an ASBR): c's
+    /// loopback reaches a as an inter-area route, its redistributed prefix as
+    /// an external one through b's Inter-Area-Router-LSA (the AS-External-LSA
+    /// crossing areas from the AS-scope store), B/E follow the roles, and
+    /// both routes go once c stops advertising them.
+    #[tokio::test(start_paused = true)]
+    async fn abr_and_asbr_reach_across_areas() {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b, c) = (router(&wire), router(&wire), router(&wire));
+        let (area0, area1) = (Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(0, 0, 0, 1));
+        let seg = |n: u8, net: u8, area_id: Ipv4Addr| LinkConfig {
+            area_id,
+            prefix: format!("2001:db8:{net}::{n}/64").parse().unwrap(),
+            ..wired_link(n, NetworkType::PointToPoint)
+        };
+        let loopback: Ipv6Net = "2001:db8:ff::3/128".parse().unwrap();
+        let external: Ipv6Net = "2001:db8:e::/48".parse().unwrap();
+        a.reconcile(vec![seg(1, 1, area0)], HashMap::new(), id(1))
+            .await;
+        b.reconcile(
+            vec![seg(2, 1, area0), seg(3, 2, area1)],
+            HashMap::new(),
+            id(2),
+        )
+        .await;
+        let c_link = vec![seg(4, 2, area1)];
+        c.reconcile(
+            c_link.clone(),
+            HashMap::from([(area1, vec![(loopback, 1)])]),
+            id(3),
+        )
+        .await;
+        c.apply_redistribute_update(RedistributeUpdate::Full(vec![
+            nos_proto::RedistributedRoute {
+                prefix: IpNet::V6(external),
+                gateway: "2001:db8:2::99".parse().unwrap(),
+            },
+            // OSPFv3 routes IPv6 only.
+            nos_proto::RedistributedRoute {
+                prefix: "192.0.2.0/24".parse().unwrap(),
+                gateway: "10.0.0.1".parse().unwrap(),
+            },
+        ]))
+        .await;
+        settle(60).await;
+
+        let routes = a.compute_routes().await;
+        let route = |p: Ipv6Net| routes.iter().find(|r| r.prefix == p);
+        let inter = route(loopback).unwrap_or_else(|| panic!("{routes:?}"));
+        assert_eq!(inter.next_hop, "fe80::2".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(inter.metric, 3);
+        let ext = route(external).unwrap_or_else(|| panic!("{routes:?}"));
+        assert_eq!(ext.metric, 2 + spf::EXTERNAL_METRIC);
+        assert_eq!(
+            routes.len(),
+            3,
+            "the b–c link, the loopback, the external: {routes:?}"
+        );
+        assert_eq!(
+            router_flags(&a, area0, id(2)).await,
+            Some(lsa::ROUTER_FLAG_B)
+        );
+        assert_eq!(
+            router_flags(&b, area1, id(3)).await,
+            Some(lsa::ROUTER_FLAG_E)
+        );
+        assert_eq!(router_flags(&a, area0, id(1)).await, Some(0));
+        let db = a.database_summaries().await;
+        assert!(db.iter().any(|l| l.lsa_type == lsa::LSA_TYPE_AS_EXTERNAL
+            && l.advertising_router == id(3)
+            && l.area_id == area0
+            && l.link.is_none()));
+        assert!(db
+            .iter()
+            .any(|l| l.lsa_type == lsa::LSA_TYPE_INTER_AREA_ROUTER
+                && l.advertising_router == id(2)
+                && l.link_state_id == id(3)));
+
+        c.reconcile(c_link, HashMap::new(), id(3)).await;
+        c.apply_redistribute_update(RedistributeUpdate::Full(Vec::new()))
+            .await;
+        settle(30).await;
+        let routes = a.compute_routes().await;
+        assert!(
+            routes
+                .iter()
+                .all(|r| r.prefix != loopback && r.prefix != external),
+            "{routes:?}"
+        );
+        assert_eq!(router_flags(&b, area1, id(3)).await, Some(0));
     }
 
     fn trailer(key: &[u8]) -> packet::TrailerAuth {

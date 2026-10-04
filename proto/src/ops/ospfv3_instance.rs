@@ -45,6 +45,7 @@ impl Ospfv3InstanceOp {
                         router_id: Ipv4Addr::UNSPECIFIED,
                         areas: Vec::new(),
                         routing_table: None,
+                        redistribute_policy: None,
                         extended_lsa: false,
                         graceful_restart_grace_period: None,
                     });
@@ -96,6 +97,7 @@ mod tests {
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             areas: Vec::new(),
             routing_table: None,
+            redistribute_policy: None,
             extended_lsa: false,
             graceful_restart_grace_period: None,
         }

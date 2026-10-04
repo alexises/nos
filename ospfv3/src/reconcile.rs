@@ -6,6 +6,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use ipnet::{IpNet, Ipv6Net};
 use nos_proto::{DiffScope, Event, NetworkType, OspfCryptoAlgorithm, ServiceRef};
+use nos_rpl::CompiledPolicy;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -121,6 +122,7 @@ async fn resync(
         area_count = own.areas.len(),
         extended_lsa = own.extended_lsa,
         graceful_restart_grace_period = ?own.graceful_restart_grace_period,
+        redistribute_policy = ?own.redistribute_policy,
         "ospfv3 instance config resolved"
     );
     links.set_extended_lsa(own.extended_lsa);
@@ -263,8 +265,126 @@ async fn resync(
     }
 
     links
+        .set_redistribute_policy(resolve_redistribute_policy(
+            &cfg,
+            own.redistribute_policy.as_deref(),
+        ))
+        .await;
+    links
         .reconcile(desired_links, desired_loopback_prefixes, own.router_id)
         .await;
+}
+
+/// Compiles the mirrored `Ospfv3Instance.redistribute_policy` (`None` =
+/// `accept-all`) — a copy of `ospf::reconcile::resolve_redistribute_policy`.
+/// `ponytail:` the third copy (`nos-ospfd` and `nos-bgpd` hold the others,
+/// per the star-dependency rule); move it into a shared crate if a fourth
+/// appears.
+fn resolve_redistribute_policy(
+    cfg: &nos_proto::Config,
+    redistribute_policy_name: Option<&str>,
+) -> Arc<CompiledPolicy> {
+    let Some(name) = redistribute_policy_name else {
+        return Arc::new(nos_rpl::ACCEPT_ALL.clone());
+    };
+    if name == nos_rpl::ACCEPT_ALL_NAME {
+        return Arc::new(nos_rpl::ACCEPT_ALL.clone());
+    }
+    if name == nos_rpl::DENY_ALL_NAME {
+        return Arc::new(nos_rpl::DENY_ALL.clone());
+    }
+    let Some(def) = cfg.policy_definitions.iter().find(|p| p.name == name) else {
+        // Can't happen in practice — commit-time validation already
+        // guarantees this reference exists — but the field is still a plain
+        // `Option<String>` on the wire.
+        return Arc::new(nos_rpl::DENY_ALL.clone());
+    };
+
+    let alias_parts: Vec<(&str, Vec<i64>)> = cfg
+        .community_aliases
+        .iter()
+        .filter_map(|a| {
+            nos_rpl::parse_colon_literal(&a.value).map(|parts| (a.name.as_str(), parts))
+        })
+        .collect();
+    let alias_refs: Vec<(&str, &[i64])> = alias_parts
+        .iter()
+        .map(|(n, p)| (*n, p.as_slice()))
+        .collect();
+
+    let resolve_member = |m: &str| -> Option<Vec<i64>> {
+        cfg.community_aliases
+            .iter()
+            .find(|a| a.name == m)
+            .and_then(|a| nos_rpl::parse_colon_literal(&a.value))
+            .or_else(|| nos_rpl::parse_colon_literal(m))
+    };
+    let group_parts: Vec<(&str, Vec<Vec<i64>>)> = cfg
+        .community_groups
+        .iter()
+        .map(|g| {
+            (
+                g.name.as_str(),
+                g.members.iter().filter_map(|m| resolve_member(m)).collect(),
+            )
+        })
+        .collect();
+    let group_member_slices: Vec<Vec<&[i64]>> = group_parts
+        .iter()
+        .map(|(_, members)| members.iter().map(Vec::as_slice).collect())
+        .collect();
+    let group_refs: Vec<(&str, &[&[i64]])> = group_parts
+        .iter()
+        .zip(&group_member_slices)
+        .map(|((name, _), slices)| (*name, slices.as_slice()))
+        .collect();
+
+    let prefix_list_entries: Vec<(&str, Vec<nos_rpl::PrefixListEntry>)> = cfg
+        .prefix_lists
+        .iter()
+        .map(|pl| {
+            let entries = pl
+                .entries
+                .iter()
+                .map(|e| nos_rpl::PrefixListEntry {
+                    cidr: e.cidr,
+                    range: e.range,
+                })
+                .collect();
+            (pl.name.as_str(), entries)
+        })
+        .collect();
+    let prefix_list_refs: Vec<(&str, &[nos_rpl::PrefixListEntry])> = prefix_list_entries
+        .iter()
+        .map(|(n, e)| (*n, e.as_slice()))
+        .collect();
+
+    let as_path_lists: Vec<(&str, Vec<&str>)> = cfg
+        .as_path_lists
+        .iter()
+        .map(|l| {
+            (
+                l.name.as_str(),
+                l.patterns.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    let as_path_list_refs: Vec<(&str, &[&str])> = as_path_lists
+        .iter()
+        .map(|(n, p)| (*n, p.as_slice()))
+        .collect();
+
+    let symbols = nos_rpl::Symbols {
+        aliases: &alias_refs,
+        groups: &group_refs,
+        prefix_lists: &prefix_list_refs,
+        as_path_lists: &as_path_list_refs,
+    };
+
+    match nos_rpl::compile(&def.source, &symbols) {
+        Ok(compiled) => Arc::new(compiled),
+        Err(_) => Arc::new(nos_rpl::DENY_ALL.clone()), // unreachable post-commit-validation
+    }
 }
 
 /// Every L3 attach point referencing `profile` by name — mirrors

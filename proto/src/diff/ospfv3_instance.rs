@@ -110,6 +110,7 @@ mod tests {
             router_id,
             areas: Vec::new(),
             routing_table: None,
+            redistribute_policy: None,
             extended_lsa: false,
             graceful_restart_grace_period: None,
         }

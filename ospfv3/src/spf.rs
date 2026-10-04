@@ -33,6 +33,16 @@
 //! filter for a point-to-point link's shared prefix (both ends indepenently
 //! advertise the identical prefix via their own router reference, mirroring
 //! `ospf::spf`'s own `root_advertises_stub` filter).
+//!
+//! # Inter-area and external routes (RFC 5340 §4.8.3-§4.8.5)
+//! Ported from `ospf::spf`: an Inter-Area-Prefix-LSA is reached through its
+//! advertising ABR (its distance plus the LSA metric), an AS-External-LSA
+//! through its ASBR — an intra-area Router-LSA vertex with the E-bit, else the
+//! cheapest Inter-Area-Router-LSA for it — plus the LSA's own metric.
+//! `ponytail:` a Type-2 metric is routed as Type-1, there is no §16.4
+//! intra→inter→external class precedence (`insert_best` is metric-only), a
+//! forwarding address is ignored, and an ABR doesn't restrict itself to the
+//! backbone's summaries (§16.2) — the same ceilings `ospf::spf` documents.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -41,10 +51,16 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use ipnet::Ipv6Net;
 
 use crate::lsa::{
-    self, IntraAreaPrefixLsaBody, Lsa, LsaBody, NetworkLsaBody, RouterLsaBody,
-    LINK_TYPE_POINT_TO_POINT, LINK_TYPE_TRANSIT_NETWORK, LSA_TYPE_E_NETWORK, LSA_TYPE_E_ROUTER,
-    LSA_TYPE_NETWORK, LSA_TYPE_ROUTER,
+    self, AsExternalLsaBody, InterAreaPrefixLsaBody, InterAreaRouterLsaBody,
+    IntraAreaPrefixLsaBody, Lsa, LsaBody, NetworkLsaBody, RouterLsaBody, LINK_TYPE_POINT_TO_POINT,
+    LINK_TYPE_TRANSIT_NETWORK, LSA_TYPE_E_NETWORK, LSA_TYPE_E_ROUTER, LSA_TYPE_NETWORK,
+    LSA_TYPE_ROUTER,
 };
+
+/// The metric this router originates its AS-External-LSAs with (Type-1) —
+/// `ospf::spf::EXTERNAL_METRIC_CONSTANT`'s value, but here it's the LSA's own
+/// metric, which receivers add (what an FRR ASBR expects too).
+pub const EXTERNAL_METRIC: u32 = 20;
 
 /// One SPF vertex — a router (keyed by its router-id) or a transit network
 /// (keyed by its Network-LSA's `link_state_id`, the DR's own interface id
@@ -143,35 +159,127 @@ fn routers_networks_links(
                     link.link_local_address,
                 );
             }
-            LsaBody::IntraAreaPrefix(_) | LsaBody::Grace(_) => {}
+            LsaBody::IntraAreaPrefix(_)
+            | LsaBody::Grace(_)
+            | LsaBody::InterAreaPrefix(_)
+            | LsaBody::InterAreaRouter(_)
+            | LsaBody::AsExternal(_) => {}
         }
     }
     (routers, networks, links)
+}
+
+/// RFC 2328 §16: a `MaxAge` LSA is being flushed, never a vertex or prefix.
+fn live_lsas(lsas: &[std::sync::Arc<Lsa>]) -> Vec<std::sync::Arc<Lsa>> {
+    lsas.iter()
+        .filter(|l| l.header.age < crate::lsa::MAX_AGE)
+        .cloned()
+        .collect()
+}
+
+/// Every LSA of one body kind, with its advertising router.
+fn bodies<'a, T>(
+    lsas: &'a [std::sync::Arc<Lsa>],
+    pick: impl Fn(&'a LsaBody) -> Option<&'a T>,
+) -> Vec<(Ipv4Addr, &'a T)> {
+    lsas.iter()
+        .filter_map(|l| pick(&l.body).map(|b| (l.header.advertising_router, b)))
+        .collect()
+}
+
+/// One area's intra-area view, for an ABR to summarize into its other areas
+/// (`link::LinkManager::originate_inter_area_lsas`): every prefix of every
+/// reachable Intra-Area-Prefix-LSA — root's own included, unlike `compute`,
+/// since an ABR summarizes its own loopback too — and every ASBR reachable in
+/// the area. Never an inter-area or external route: those are never
+/// re-summarized (RFC 2328 §12.4.3), which is what keeps two areas from
+/// looping a prefix between them.
+pub struct IntraAreaView {
+    /// `(prefix, cost from root)`, one per prefix (the cheapest).
+    pub prefixes: Vec<(Ipv6Net, u32)>,
+    /// `(router id, cost from root, its Router-LSA options)` of every
+    /// router other than root whose Router-LSA has the E-bit.
+    pub asbrs: Vec<(Ipv4Addr, u32, u32)>,
+}
+
+pub fn intra_area_routes(root: Ipv4Addr, lsas: &[std::sync::Arc<Lsa>]) -> IntraAreaView {
+    let live = live_lsas(lsas);
+    let (routers, networks, _) = routers_networks_links(&live);
+    // Distance only: summarizing needs no next hop.
+    let (dist, _) = run_dijkstra(root, &routers, &networks, None);
+    let mut prefixes: HashMap<Ipv6Net, u32> = HashMap::new();
+    for (_, body) in bodies(&live, |b| match b {
+        LsaBody::IntraAreaPrefix(p) => Some(p),
+        _ => None,
+    }) {
+        let vertex = match body.referenced_ls_type {
+            LSA_TYPE_ROUTER | LSA_TYPE_E_ROUTER => {
+                Vertex::Router(body.referenced_advertising_router)
+            }
+            LSA_TYPE_NETWORK | LSA_TYPE_E_NETWORK => Vertex::Network(body.referenced_link_state_id),
+            _ => continue,
+        };
+        let Some(&d) = dist.get(&vertex) else {
+            continue;
+        };
+        for entry in &body.prefixes {
+            let cost = d.saturating_add(u32::from(entry.metric));
+            prefixes
+                .entry(entry.prefix.trunc())
+                .and_modify(|c| *c = (*c).min(cost))
+                .or_insert(cost);
+        }
+    }
+    let asbrs = routers
+        .iter()
+        .filter(|&(&id, r)| id != root && r.flags & lsa::ROUTER_FLAG_E != 0)
+        .filter_map(|(&id, r)| dist.get(&Vertex::Router(id)).map(|&d| (id, d, r.options)))
+        .collect();
+    IntraAreaView {
+        prefixes: prefixes.into_iter().collect(),
+        asbrs,
+    }
 }
 
 /// Runs RFC 5340 §4.8 SPF from `root` over `lsas` (one area's worth),
 /// returning every non-directly-connected destination reachable via
 /// Intra-Area-Prefix-LSAs.
 pub fn compute(root: Ipv4Addr, lsas: &[std::sync::Arc<Lsa>]) -> Vec<RouteEntry> {
-    // RFC 2328 §16: a MaxAge LSA is being flushed, never a vertex or prefix.
-    let live: Vec<std::sync::Arc<Lsa>> = lsas
-        .iter()
-        .filter(|l| l.header.age < crate::lsa::MAX_AGE)
-        .cloned()
-        .collect();
+    let live = live_lsas(lsas);
     let lsas = live.as_slice();
     let (routers, networks, links) = routers_networks_links(lsas);
-    let prefix_lsas: Vec<&IntraAreaPrefixLsaBody> = lsas
-        .iter()
-        .filter_map(|l| match &l.body {
-            LsaBody::IntraAreaPrefix(p) => Some(p),
-            LsaBody::Router(_) | LsaBody::Network(_) | LsaBody::Link(_) | LsaBody::Grace(_) => None,
-        })
-        .collect();
+    let prefix_lsas: Vec<&IntraAreaPrefixLsaBody> = bodies(lsas, |b| match b {
+        LsaBody::IntraAreaPrefix(p) => Some(p),
+        _ => None,
+    })
+    .into_iter()
+    .map(|(_, b)| b)
+    .collect();
 
     let (dist, next_hop) = run_dijkstra(root, &routers, &networks, Some(&links));
     let mut out: HashMap<(Ipv6Addr, u8), RouteEntry> = HashMap::new();
     collect_prefix_routes(root, &routers, &prefix_lsas, &dist, &next_hop, &mut out);
+    let graph = Reach {
+        root,
+        dist: &dist,
+        next_hop: &next_hop,
+    };
+    let inter_area_routers = bodies(lsas, |b| match b {
+        LsaBody::InterAreaRouter(r) => Some(r),
+        _ => None,
+    });
+    for (abr, p) in bodies(lsas, |b| match b {
+        LsaBody::InterAreaPrefix(p) => Some(p),
+        _ => None,
+    }) {
+        collect_inter_area_route(&graph, abr, p, &mut out);
+    }
+    for (asbr, e) in bodies(lsas, |b| match b {
+        LsaBody::AsExternal(e) => Some(e),
+        _ => None,
+    }) {
+        collect_external_route(&graph, &routers, &inter_area_routers, asbr, e, &mut out);
+    }
 
     let alternates = alternates(root, &routers, &networks, &links);
     for route in out.values_mut() {
@@ -537,6 +645,106 @@ fn collect_prefix_routes(
     }
 }
 
+/// What the inter-area/external passes read from root's Dijkstra.
+struct Reach<'a> {
+    root: Ipv4Addr,
+    dist: &'a HashMap<Vertex, u32>,
+    next_hop: &'a HashMap<Vertex, NextHop>,
+}
+
+impl Reach<'_> {
+    /// `router`'s distance and first hop, if it's a reachable router other
+    /// than root.
+    fn router(&self, router: Ipv4Addr) -> Option<(u32, Ipv6Addr, u32)> {
+        if router == self.root {
+            return None;
+        }
+        let v = Vertex::Router(router);
+        let NextHop::Router(nh, ifid) = *self.next_hop.get(&v)? else {
+            return None;
+        };
+        Some((*self.dist.get(&v)?, nh, ifid))
+    }
+}
+
+fn route_via(
+    prefix: Ipv6Net,
+    (d, next_hop, interface_id): (u32, Ipv6Addr, u32),
+    metric: u32,
+    egress: Ipv4Addr,
+) -> RouteEntry {
+    RouteEntry {
+        prefix: prefix.trunc(),
+        next_hop,
+        interface_id,
+        metric: d.saturating_add(metric),
+        backup_next_hop: None,
+        backup_interface_id: None,
+        egress: Vertex::Router(egress),
+    }
+}
+
+/// RFC 5340 §4.8.3 (RFC 2328 §16.2): an Inter-Area-Prefix-LSA's prefix via
+/// its advertising ABR. Our own (`abr == root`) is skipped by `Reach::router`.
+fn collect_inter_area_route(
+    graph: &Reach,
+    abr: Ipv4Addr,
+    p: &InterAreaPrefixLsaBody,
+    out: &mut HashMap<(Ipv6Addr, u8), RouteEntry>,
+) {
+    if let Some(via) = graph.router(abr) {
+        let route = route_via(p.prefix, via, p.metric, abr);
+        insert_best(out, prefix_key(p.prefix), route);
+    }
+}
+
+/// RFC 5340 §4.8.5 (RFC 2328 §16.4): the ASBR's distance — an intra-area
+/// Router-LSA vertex with the E-bit, else the cheapest Inter-Area-Router-LSA
+/// for it (its ABR's distance plus that LSA's metric, through the ABR) — and
+/// the vertex the path leaves through, for LFA.
+fn asbr_distance(
+    graph: &Reach,
+    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    inter_area_routers: &[(Ipv4Addr, &InterAreaRouterLsaBody)],
+    asbr: Ipv4Addr,
+) -> Option<((u32, Ipv6Addr, u32), Ipv4Addr)> {
+    if routers
+        .get(&asbr)
+        .is_some_and(|r| r.flags & lsa::ROUTER_FLAG_E != 0)
+    {
+        if let Some(via) = graph.router(asbr) {
+            return Some((via, asbr));
+        }
+    }
+    inter_area_routers
+        .iter()
+        .filter(|(_, r)| r.destination_router_id == asbr)
+        .filter_map(|&(abr, r)| {
+            let (d, nh, ifid) = graph.router(abr)?;
+            Some(((d.saturating_add(r.metric), nh, ifid), abr))
+        })
+        .min_by_key(|&((d, nh, _), abr)| (d, nh, abr))
+}
+
+/// An AS-External-LSA's prefix via its ASBR, at the ASBR's distance plus the
+/// LSA's own metric. Our own (`asbr == root`) never routes.
+fn collect_external_route(
+    graph: &Reach,
+    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    inter_area_routers: &[(Ipv4Addr, &InterAreaRouterLsaBody)],
+    asbr: Ipv4Addr,
+    e: &AsExternalLsaBody,
+    out: &mut HashMap<(Ipv6Addr, u8), RouteEntry>,
+) {
+    if asbr == graph.root {
+        return;
+    }
+    if let Some((via, egress)) = asbr_distance(graph, routers, inter_area_routers, asbr) {
+        let route = route_via(e.prefix, via, e.metric, egress);
+        insert_best(out, prefix_key(e.prefix), route);
+    }
+}
+
 fn prefix_key(prefix: Ipv6Net) -> (Ipv6Addr, u8) {
     let t = prefix.trunc();
     (t.addr(), t.prefix_len())
@@ -696,6 +904,162 @@ mod tests {
         ]
     }
 
+    fn with_flags(l: &Arc<Lsa>, flags: u8) -> Arc<Lsa> {
+        let mut l = (**l).clone();
+        if let LsaBody::Router(r) = &mut l.body {
+            r.flags = flags;
+        }
+        Arc::new(l)
+    }
+
+    fn lsa_of(lsa_type: u16, id: u32, adv: Ipv4Addr, body: LsaBody) -> Arc<Lsa> {
+        Arc::new(Lsa {
+            header: header(lsa_type, lsa::interface_id_key(id), adv),
+            body,
+        })
+    }
+
+    fn inter_area_prefix(abr: Ipv4Addr, prefix: &str, metric: u32) -> Arc<Lsa> {
+        lsa_of(
+            lsa::LSA_TYPE_INTER_AREA_PREFIX,
+            1,
+            abr,
+            LsaBody::InterAreaPrefix(InterAreaPrefixLsaBody {
+                metric,
+                prefix_options: 0,
+                prefix: prefix.parse().unwrap(),
+            }),
+        )
+    }
+
+    fn inter_area_router(via: Ipv4Addr, target: Ipv4Addr, metric: u32) -> Arc<Lsa> {
+        lsa_of(
+            lsa::LSA_TYPE_INTER_AREA_ROUTER,
+            2,
+            via,
+            LsaBody::InterAreaRouter(InterAreaRouterLsaBody {
+                options: 0,
+                metric,
+                destination_router_id: target,
+            }),
+        )
+    }
+
+    fn external(asbr: Ipv4Addr, prefix: &str) -> Arc<Lsa> {
+        lsa_of(
+            lsa::LSA_TYPE_AS_EXTERNAL,
+            3,
+            asbr,
+            LsaBody::AsExternal(AsExternalLsaBody {
+                type2: false,
+                metric: EXTERNAL_METRIC,
+                prefix_options: 0,
+                prefix: prefix.parse().unwrap(),
+                forwarding_address: None,
+                route_tag: None,
+                referenced_ls_type: 0,
+                referenced_link_state_id: None,
+            }),
+        )
+    }
+
+    /// root(1) —5— abr(2): the area every inter-area test runs in.
+    fn root_and_abr() -> Vec<Arc<Lsa>> {
+        let (r1, r2) = (router_id(1), router_id(2));
+        vec![
+            router_lsa(r1, vec![p2p(r2, 1, 2, 5)]),
+            with_flags(&router_lsa(r2, vec![p2p(r1, 2, 1, 5)]), lsa::ROUTER_FLAG_B),
+            link_lsa(r2, 2, "fe80::2".parse().unwrap()),
+        ]
+    }
+
+    fn only(routes: &[RouteEntry]) -> (u32, Ipv6Addr) {
+        assert_eq!(routes.len(), 1, "{routes:?}");
+        let r = &routes[0];
+        assert_eq!(r.interface_id, 1);
+        (r.metric, r.next_hop)
+    }
+
+    #[test]
+    fn inter_area_prefix_is_routed_through_its_abr() {
+        let mut lsas = root_and_abr();
+        lsas.push(inter_area_prefix(router_id(2), "2001:db8:9::/64", 7));
+        let routes = compute(router_id(1), &lsas);
+        assert_eq!(only(&routes), (12, "fe80::2".parse().unwrap()));
+        assert_eq!(
+            routes[0].prefix,
+            "2001:db8:9::/64".parse::<Ipv6Net>().unwrap()
+        );
+    }
+
+    #[test]
+    fn external_route_through_an_intra_area_asbr_needs_its_e_bit() {
+        let (r1, r2) = (router_id(1), router_id(2));
+        let mut lsas = root_and_abr();
+        lsas.push(external(r2, "2001:db8:e::/48"));
+        // B-bit only: not an ASBR.
+        assert_eq!(compute(r1, &lsas), []);
+        lsas[1] = with_flags(&lsas[1], lsa::ROUTER_FLAG_E);
+        let routes = compute(r1, &lsas);
+        assert_eq!(
+            only(&routes),
+            (5 + EXTERNAL_METRIC, "fe80::2".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn external_route_through_an_inter_area_router_lsa() {
+        let (r1, r2, asbr) = (router_id(1), router_id(2), router_id(9));
+        let mut lsas = root_and_abr();
+        lsas.push(external(asbr, "2001:db8:e::/48"));
+        assert_eq!(compute(r1, &lsas), []);
+        lsas.push(inter_area_router(r2, asbr, 3));
+        let routes = compute(r1, &lsas);
+        assert_eq!(
+            only(&routes),
+            (5 + 3 + EXTERNAL_METRIC, "fe80::2".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn own_inter_area_and_external_lsas_never_route() {
+        let r1 = router_id(1);
+        let mut lsas = root_and_abr();
+        lsas[0] = with_flags(&lsas[0], lsa::ROUTER_FLAG_E | lsa::ROUTER_FLAG_B);
+        lsas.push(inter_area_prefix(r1, "2001:db8:9::/64", 7));
+        lsas.push(external(r1, "2001:db8:e::/48"));
+        lsas.push(inter_area_router(r1, r1, 0));
+        assert_eq!(compute(r1, &lsas), []);
+    }
+
+    #[test]
+    fn intra_area_view_has_own_and_reachable_prefixes_and_asbrs_only() {
+        let (r1, r2) = (router_id(1), router_id(2));
+        let mut lsas = root_and_abr();
+        lsas[1] = with_flags(&lsas[1], lsa::ROUTER_FLAG_E);
+        lsas.push(router_prefix_lsa(
+            r1,
+            vec![("2001:db8:1::/128".parse().unwrap(), 1)],
+        ));
+        lsas.push(router_prefix_lsa(
+            r2,
+            vec![("2001:db8:2::/128".parse().unwrap(), 2)],
+        ));
+        lsas.push(inter_area_prefix(r2, "2001:db8:9::/64", 7));
+        lsas.push(external(r2, "2001:db8:e::/48"));
+        let view = intra_area_routes(r1, &lsas);
+        let mut prefixes = view.prefixes;
+        prefixes.sort();
+        assert_eq!(
+            prefixes,
+            vec![
+                ("2001:db8:1::/128".parse().unwrap(), 1),
+                ("2001:db8:2::/128".parse().unwrap(), 7),
+            ]
+        );
+        assert_eq!(view.asbrs, vec![(r2, 5, 0)]);
+    }
+
     #[test]
     fn triangle_gets_loop_free_alternate_with_its_own_interface() {
         let routes = compute(router_id(1), &triangle(1));
@@ -793,6 +1157,9 @@ mod tests {
             l.header.lsa_type = match l.header.lsa_type {
                 LSA_TYPE_ROUTER => lsa::LSA_TYPE_E_ROUTER,
                 LSA_TYPE_LINK => lsa::LSA_TYPE_E_LINK,
+                lsa::LSA_TYPE_INTER_AREA_PREFIX => lsa::LSA_TYPE_E_INTER_AREA_PREFIX,
+                lsa::LSA_TYPE_INTER_AREA_ROUTER => lsa::LSA_TYPE_E_INTER_AREA_ROUTER,
+                lsa::LSA_TYPE_AS_EXTERNAL => lsa::LSA_TYPE_E_AS_EXTERNAL,
                 _ => lsa::LSA_TYPE_E_INTRA_AREA_PREFIX,
             };
             if let LsaBody::IntraAreaPrefix(p) = &mut l.body {
@@ -805,14 +1172,24 @@ mod tests {
             router_lsa(w, vec![p2p(root, 2, 1, 5)]),
             link_lsa(w, 2, "fe80::2".parse().unwrap()),
             router_prefix_lsa(w, vec![(stub, 10)]),
+            inter_area_prefix(w, "2001:db8:9::/64", 7),
+            inter_area_router(w, router_id(9), 3),
+            external(router_id(9), "2001:db8:e::/48"),
         ];
         let extended: Vec<_> = legacy.iter().cloned().map(as_extended).collect();
 
-        let routes = compute(root, &extended);
-        assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].prefix, stub);
-        assert_eq!(routes[0].metric, 15);
-        assert_eq!(routes[0].next_hop, compute(root, &legacy)[0].next_hop);
+        let sorted = |lsas: &[Arc<Lsa>]| {
+            let mut routes: Vec<(Ipv6Net, u32, Ipv6Addr)> = compute(root, lsas)
+                .into_iter()
+                .map(|r| (r.prefix, r.metric, r.next_hop))
+                .collect();
+            routes.sort();
+            routes
+        };
+        let routes = sorted(&extended);
+        assert_eq!(routes.len(), 3);
+        assert!(routes.contains(&(stub, 15, "fe80::2".parse().unwrap())));
+        assert_eq!(routes, sorted(&legacy));
     }
 
     /// A flushed (`MaxAge`) Router-LSA of w's other flavor — here with no link

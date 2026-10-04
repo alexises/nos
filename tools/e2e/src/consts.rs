@@ -303,6 +303,23 @@ pub const OSPFV3_LOOPBACK_ADDRESS: &str = "2001:db8:2::1/128";
 pub const OSPFV3_LFA_LOOPBACK_ADDRESS: &str = "2001:db8:4::1/128";
 /// 0xA021 (E-Router-LSA) as `lsa_type` prints in the logs.
 pub const LSA_TYPE_E_ROUTER: u16 = 0xA021;
+/// RFC 5340 AS-External-LSA (0x4005) and RFC 8362 E-AS-External-LSA (0xC025),
+/// as `lsa_type` prints in the logs — `ospfv3-asbr` matches either, since
+/// `ospfv3` leaves both routers in extended mode.
+pub const LSA_TYPE_AS_EXTERNAL_V3: u16 = 0x4005;
+pub const LSA_TYPE_E_AS_EXTERNAL: u16 = 0xC025;
+/// RFC 5340 Inter-Area-Prefix-LSA (0x2003) and E-Inter-Area-Prefix (0xA023).
+pub const LSA_TYPE_INTER_AREA_PREFIX_V3: u16 = 0x2003;
+pub const LSA_TYPE_E_INTER_AREA_PREFIX: u16 = 0xA023;
+/// `ospfv3-asbr`'s redistributed IPv6 static: via router-b's eth0 address,
+/// so router-a's kernel can install it too.
+pub const OSPFV3_ASBR_PREFIX: &str = "2001:db8:77::/48";
+pub const OSPFV3_ASBR_GATEWAY: &str = "2001:db8:1::2";
+/// `ospfv3-abr`'s second area, its profile and router-b's loopback in it (a
+/// prefix no other phase uses, so `nos-ribd` logs a fresh install).
+pub const OSPFV3_AREA_1: &str = "0.0.0.1";
+pub const OSPFV3_PROFILE_AREA1: &str = "ospfv3-profile-area1";
+pub const OSPFV3_ABR_LOOPBACK_ADDRESS: &str = "2001:db8:5::1/128";
 pub const OSPFV3_BROADCAST_ADDRESS_A: &str = "2001:db8:3::1/64";
 pub const OSPFV3_BROADCAST_ADDRESS_B: &str = "2001:db8:3::2/64";
 pub const OSPFV3_BROADCAST_ADDRESS_C: &str = "2001:db8:3::3/64";

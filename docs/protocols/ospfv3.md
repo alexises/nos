@@ -11,6 +11,8 @@ OSPFv3 (RFC 5340) is OSPF for IPv6. It works like [OSPFv2](ospf.md) and is confi
   - [Set the instance ID](#set-the-instance-id)
   - [Use extended LSAs (RFC 8362)](#use-extended-lsas-rfc-8362)
   - [Restart without dropping routes (RFC 5187)](#restart-without-dropping-routes-rfc-5187)
+  - [Redistribute static routes (ASBR)](#redistribute-static-routes-asbr)
+  - [Add a second area (ABR)](#add-a-second-area-abr)
 - [Features and behaviour](#features-and-behaviour)
 - [Not supported yet](#not-supported-yet)
 - [Configuration reference](#configuration-reference)
@@ -74,7 +76,7 @@ show ospfv3 neigh
 show ospfv3 database
 ```
 
-The `type` column holds OSPFv3's LS type codes (RFC 5340 and RFC 8362): `0x2001` router, `0x2002` network, `0x2003` inter-area prefix, `0x0008` link, `0x2009` intra-area prefix, and, in extended mode, `0xa021` E-Router, `0x8028` E-Link and `0xa029` E-Intra-Area-Prefix. Link LSAs are only valid on their own link, so the database also shows which link each one belongs to.
+The `type` column holds OSPFv3's LS type codes (RFC 5340 and RFC 8362): `0x2001` router, `0x2002` network, `0x2003` inter-area prefix, `0x2004` inter-area router, `0x4005` AS-external, `0x0008` link, `0x2009` intra-area prefix, and, in extended mode, `0xa021` E-Router, `0xa022` E-Network, `0xa023` E-Inter-Area-Prefix, `0xa024` E-Inter-Area-Router, `0xc025` E-AS-External, `0x8028` E-Link and `0xa029` E-Intra-Area-Prefix. Link LSAs are only valid on their own link, so the database also shows which link each one belongs to. AS-external LSAs belong to no area; they are listed under area `0.0.0.0`.
 
 ### Advertise a loopback
 
@@ -196,6 +198,47 @@ How it behaves:
 - **End of the grace period.** When the restarted router's adjacency is Full again, the helper logs `ospfv3 helper: neighbor reformed, exiting grace early`. If it never comes back, the helper logs `ospfv3 helper: grace period expired` and the ordinary dead interval applies from then on.
 - `delete ospfv3 instance v3 graceful-restart grace-period` turns it off.
 
+### Redistribute static routes (ASBR)
+
+`redistribute from static to ospfv3` advertises the routing table's IPv6 static routes into its OSPFv3 instance, which makes this router an AS boundary router (ASBR). The table needs a static routing instance and an OSPFv3 instance:
+
+```
+configure v3asbr
+edit static-routing-instance s1
+set route 2001:db8:77::/48 gateway 2001:db8:1::2
+top
+set routing-table rt1 static-routing-instance s1
+set routing-table rt1 redistribute from static to ospfv3
+commit
+```
+
+```sh
+$C -X PUT -H 'Content-Type: application/json' -d '{"from":"Static","to":"Ospfv3","policy":null}' \
+  $B/v1/transactions/v3asbr/routing-table/rt1/redistribute
+```
+
+- Each static IPv6 route becomes one AS-external LSA (`0x4005`, or `0xc025` in extended mode), with metric 20. IPv4 static routes are ignored.
+- The other routers install it at their distance to this router plus 20, through an area border router if this router is in another area.
+- `policy <name>` filters what is redistributed, as in [OSPF](ospf.md#redistribute-static-routes-asbr).
+- Deleting the rule flushes the LSAs within a few seconds (log `ospfv3 lsa prematurely aged`).
+- A routing table has only one `redistribute` rule, so it redistributes static routes into BGP, OSPF or OSPFv3, only one of them.
+
+### Add a second area (ABR)
+
+As in [OSPF](ospf.md#add-a-second-area-abr), a router with links or loopbacks in two or more areas is an area border router; there is no switch. Here router-a's loopback goes into area 0.0.0.1 while `eth0.0` stays in the backbone:
+
+```
+configure v3abr
+edit ospfv3 instance v3 area 0.0.0.1 profile p6-area1
+top
+set interface loopback-rt1 ospfv3 p6-area1
+commit
+```
+
+- Into each of its areas, the ABR advertises every prefix of its other areas as an inter-area prefix LSA (`0x2003`, or `0xa023`), and every AS boundary router of its other areas as an inter-area router LSA (`0x2004`, or `0xa024`).
+- Router-b, in the backbone only, then has the loopback in `show route rt1`, through router-a.
+- Moving the loopback back, or deleting the area, flushes those LSAs within a few seconds.
+
 ## Features and behaviour
 
 Neighbour discovery, DR/BDR election, timers, costs, network types, the MTU override and database exchange, LSA ageing and withdrawal, and loop-free alternates behave as in [OSPF](ospf.md#features-and-behaviour). The differences:
@@ -204,14 +247,14 @@ Neighbour discovery, DR/BDR election, timers, costs, network types, the MTU over
 - **Loop-free alternates.** The backup next hop is a link-local address too, and may leave through a different interface from the primary; it is installed with its own interface, at a worse metric than the primary.
 - **Authentication** is RFC 7166's authentication trailer, with HMAC-SHA-1, -256, -384 or -512 only. A packet that fails is dropped and logged (`ospfv3 packet authentication failed`).
 - **Link-local flooding scope.** A link LSA is only ever sent on the link it belongs to (RFC 5340 §4.5.1).
+- **Areas and AS boundary.** As in OSPFv2, an inter-area or external route is chosen by cost alone, and an external route is always type 1 (the LSA's metric plus the distance to the ASBR). Unlike OSPFv2, an external LSA's own metric counts, and an ABR passes another router's external LSAs on into all its areas. Every area is a normal area, so Hellos and LSAs set the E option bit.
 - **Withdrawal.** An LSA the router stops originating is flushed within about 2 seconds (log `ospfv3 lsa prematurely aged`): for example its network LSA after it stops being DR or loses its last Full neighbour on the link, or its LSAs in an area it has left. Unlike OSPFv2, a clean stop of `nos-ospfv3d` flushes nothing; neighbours drop the router when the dead interval runs out.
 
 ## Not supported yet
 
 These work in OSPFv2 but not yet in OSPFv3:
 
-- **More than one area.** An OSPFv3 router does not act as an area border router, so there are no inter-area routes: keep each OSPFv3 instance in one area.
-- **Redistribution.** `redistribute from static to ospf` targets OSPFv2 only; nothing can be redistributed into OSPFv3, and a router cannot be an OSPFv3 ASBR.
+- **Area ranges** (summarizing an area into one prefix) and their discard routes.
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
 Also not supported: several OSPFv3 instances on one link (the RFC 5838 address families; one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), RFC 8362's sparse mode, NSSA and stub areas, virtual links, graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and the non-broadcast network types.
@@ -227,7 +270,8 @@ Fields, types, defaults and validation are those of [OSPF](ospf.md#configuration
 | extended LSAs | `set ospfv3 instance <name> extended-lsa`; `delete ospfv3 instance <name> extended-lsa` (absolute only) | `ospfv3-instance/<name>/extended-lsa` | boolean; default `false` | | originate RFC 8362 extended LSAs | `show ospfv3 database` |
 | graceful restart | `set ospfv3 instance <name> graceful-restart grace-period <seconds>`; `delete ospfv3 instance <name> graceful-restart grace-period` | `ospfv3-instance/<name>/graceful-restart-grace-period` | seconds, 1 to 1800; unset by default | | on SIGTERM, ask Full neighbours to keep the adjacency and routes this long (RFC 5187) | `ospfv3 helper: grace period entered` in the neighbour's log |
 | routing table | `set routing-table <table> ospfv3-instance <name>`; `delete routing-table <table> ospfv3-instance` | `routing-table/<table>/ospfv3-instance` | instance name | the instance must exist; one table per instance | runs the instance in that table | `show ospfv3 neigh` |
-| area | `edit ospfv3 instance <name> area <area-id>`; `delete ospfv3 instance <name> area <area-id>` | `ospfv3-instance/<name>/area/<area-id>` | dotted quad | unique within the instance; use one area only (see above) | | |
+| area | `edit ospfv3 instance <name> area <area-id>`; `delete ospfv3 instance <name> area <area-id>` | `ospfv3-instance/<name>/area/<area-id>` | dotted quad | unique within the instance | links/loopbacks in 2+ areas make an ABR | `show ospfv3 database` |
+| redistribute | `set routing-table <table> redistribute from static to ospfv3 [policy <p>]`; `delete routing-table <table> redistribute` | `routing-table/<table>/redistribute`, `{"from":"Static","to":"Ospfv3","policy":null}` | one rule per table | needs `static-routing-instance` and `ospfv3-instance` | IPv6 static routes become AS-external LSAs | `show ospfv3 database` on a neighbour |
 | profile | `edit ospfv3 instance <name> area <area-id> profile <p>`; `delete ospfv3 instance <name> area <area-id> profile <p>` | `…/area/<area-id>/profile/<p>` | string, 1 to 64 characters | unique among OSPFv3 profiles | | |
 | hello interval, dead interval, cost, priority, MTU, network type | `set ospfv3 instance <name> area <area-id> profile <p> <field> <value>`; relative forms as in OSPF | `…/profile/<p>/hello-interval`, `dead-interval`, `cost`, `priority`, `mtu`, `network-type` | as in OSPF | as in OSPF | as in OSPF | `show ospfv3 neigh` |
 | crypto key | `set ospfv3 instance <name> area <area-id> profile <p> crypto-key <id> <algorithm> <key>`; relative `set crypto-key …` / `delete crypto-key <id>` *(relative only)* | `…/profile/<p>/auth`, `[{"key_id":300,"algorithm":"HmacSha256","key":"…","is_current":true}]` | ID 0 to 65535; `hmac-sha1`, `hmac-sha256`, `hmac-sha384`, `hmac-sha512`; key 1 to 80 bytes; unset by default | at least one key, IDs unique, exactly one current, no `md5` | RFC 7166 authentication trailer | `show this` in the profile |
@@ -237,4 +281,4 @@ Fields, types, defaults and validation are those of [OSPF](ospf.md#configuration
 | subinterface / loopback | `set interface <if>[.<tag>] ospfv3 <p>`, `set interface loopback-<table> ospfv3 <p>`; `delete interface <if> ospfv3` | `interface/<if>/subinterface/<tag>/ospfv3-profile`, `interface/loopback-<table>/ospfv3-profile` | | the attach point needs `routing-table` | runs OSPFv3 on the link | `show ospfv3 neigh` |
 | broadcast domain | relative only: `set ospfv3 <p>` / `delete ospfv3` inside `edit broadcast domain <name>` | `broadcast-domain/<name>/ospfv3-profile` | | the domain needs `routing-table` | runs OSPFv3 on the domain's SVI | `show ospfv3 neigh` |
 
-OSPFv3 profiles have no `simple-password` and no `extended-sequence-numbers`. The instance's `routing_table` JSON field is filled in by the router and is read-only.
+OSPFv3 profiles have no `simple-password` and no `extended-sequence-numbers`. The instance's `routing_table` and `redistribute_policy` JSON fields are filled in by the router and are read-only.

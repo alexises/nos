@@ -1608,6 +1608,123 @@ async fn assert_no_legacy_lsas(router: &Router, router_id: &str) -> anyhow::Resu
     bail!("legacy lsas from {router_id} still held: {left:?}")
 }
 
+/// `pat(legacy)\|pat(extended)`: an `OSPFv3` LSA in either RFC 8362 form —
+/// `ospfv3` leaves both routers in extended mode, but a phase that runs on its
+/// own may find them in legacy mode (`logs::bre` has top-level `\|` only).
+fn either_form(legacy: u16, extended: u16, pat: impl Fn(u16) -> String) -> String {
+    format!(r"{}\|{}", pat(legacy), pat(extended))
+}
+
+/// RFC 5340 ASBR (requires `ospfv3`): an IPv6 static route plus `redistribute
+/// from static to ospfv3` on router-a makes it originate an AS-External-LSA
+/// (0x4005, or E-AS-External 0xC025), router-b installs it over the real
+/// adjacency and its SPF pushes a real kernel route; dropping the rule
+/// prematurely ages the LSA, router-b flushes it and removes the route within
+/// seconds. Restores the table's redistribute rule to none.
+pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let (legacy, extended) = (LSA_TYPE_AS_EXTERNAL_V3, LSA_TYPE_E_AS_EXTERNAL);
+    let originated = either_form(legacy, extended, |t| {
+        format!("ospfv3 lsa originated lsa_type={t} ")
+    });
+    let installed = either_form(legacy, extended, |t| {
+        format!("ospfv3 lsa installed.*lsa_type={t} .*advertising_router={OSPFV3_ROUTER_ID}")
+    });
+    let route = format!("added route prefix={OSPFV3_ASBR_PREFIX}.*source=Some(Ospf)");
+    let (o0, i0, r0) = (a.count(&originated), b.count(&installed), b.count(&route));
+    a.provision_flags(&with_base(
+        A,
+        [
+            ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID),
+            strings(&[
+                "--static-route",
+                OSPFV3_ASBR_PREFIX,
+                "--static-gateway",
+                OSPFV3_ASBR_GATEWAY,
+                "--redistribute-to-ospfv3",
+            ]),
+        ]
+        .concat(),
+    ))
+    .await?;
+    a.wait_new(&originated, o0, 60).await?;
+    b.wait_new(&installed, i0, 60).await?;
+    b.wait_new(&route, r0, 60).await?;
+
+    let aged = either_form(legacy, extended, |t| {
+        format!("ospfv3 lsa prematurely aged lsa_type={t} ")
+    });
+    let flushed = either_form(legacy, extended, |t| {
+        format!("ospfv3 lsa maxage flushed .*lsa_type={t} .*advertising_router={OSPFV3_ROUTER_ID}")
+    });
+    let removed = format!("removed route prefix={OSPFV3_ASBR_PREFIX}");
+    let (aged0, flushed0, removed0) = (a.count(&aged), b.count(&flushed), b.count(&removed));
+    log("removing the redistribute rule on router-a; its as-external-lsa must be flushed");
+    a.provision(&["--clear-redistribute-to-ospfv3"]).await?;
+    a.wait_new(&aged, aged0, 30).await?;
+    b.wait_new(&flushed, flushed0, 30).await?;
+    b.wait_new(&removed, removed0, 30).await
+}
+
+/// RFC 5340 ABR (requires `ospfv3`): router-b's IPv6 loopback joins a second
+/// area, making router-b an ABR; it originates an Inter-Area-Prefix-LSA
+/// (0x2003, or E-Inter-Area-Prefix 0xA023) for it into the backbone, router-a
+/// installs it and its SPF pushes a real kernel route to a prefix outside its
+/// own area. Then the loopback leaves: the LSA is prematurely aged, flushed on
+/// router-a and the route removed. Removes the address again, so
+/// `ospfv3-lfa`'s loopback address is the first IPv6 one there.
+pub async fn ospfv3_abr(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let (legacy, extended) = (LSA_TYPE_INTER_AREA_PREFIX_V3, LSA_TYPE_E_INTER_AREA_PREFIX);
+    let originated = either_form(legacy, extended, |t| {
+        format!("ospfv3 lsa originated lsa_type={t} ")
+    });
+    let installed = either_form(legacy, extended, |t| {
+        format!("ospfv3 lsa installed.*lsa_type={t} .*advertising_router={OSPFV3_ROUTER_ID_B}")
+    });
+    let route = format!("added route prefix={OSPFV3_ABR_LOOPBACK_ADDRESS}.*source=Some(Ospf)");
+    let (o0, i0, r0) = (b.count(&originated), a.count(&installed), a.count(&route));
+    b.provision(&[
+        "--ospfv3-instance",
+        OSPFV3_INSTANCE,
+        "--ospfv3-router-id",
+        OSPFV3_ROUTER_ID_B,
+        "--ospfv3-area",
+        OSPFV3_AREA_1,
+        "--ospfv3-profile",
+        OSPFV3_PROFILE_AREA1,
+        "--ospfv3-loopback-address",
+        OSPFV3_ABR_LOOPBACK_ADDRESS,
+        "--ospfv3-loopback-profile",
+        OSPFV3_PROFILE_AREA1,
+    ])
+    .await?;
+    b.wait_new(&originated, o0, 60).await?;
+    a.wait_new(&installed, i0, 60).await?;
+    a.wait_new(&route, r0, 60).await?;
+
+    let aged = either_form(legacy, extended, |t| {
+        format!("ospfv3 lsa prematurely aged lsa_type={t} ")
+    });
+    let flushed = either_form(legacy, extended, |t| {
+        format!(
+            "ospfv3 lsa maxage flushed .*lsa_type={t} .*advertising_router={OSPFV3_ROUTER_ID_B}"
+        )
+    });
+    let removed = format!("removed route prefix={OSPFV3_ABR_LOOPBACK_ADDRESS}");
+    let (aged0, flushed0, removed0) = (b.count(&aged), a.count(&flushed), a.count(&removed));
+    log("removing router-b's area-1 loopback; its inter-area-prefix-lsa must be flushed");
+    b.provision(&[
+        "--loopback-remove-address",
+        OSPFV3_ABR_LOOPBACK_ADDRESS,
+        "--clear-ospfv3-loopback-profile",
+    ])
+    .await?;
+    b.wait_new(&aged, aged0, 30).await?;
+    a.wait_new(&flushed, flushed0, 30).await?;
+    a.wait_new(&removed, removed0, 30).await
+}
+
 /// RFC 5187 graceful restart (requires `ospfv3`): router-a, with a grace
 /// period configured, is restarted with SIGTERM. It must send a Grace-LSA
 /// before exiting, and router-b must help: hold the adjacency and keep

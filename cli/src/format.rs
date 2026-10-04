@@ -3060,6 +3060,7 @@ mod tests {
                     }],
                 }],
                 routing_table: None,
+                redistribute_policy: None,
                 extended_lsa: true,
                 graceful_restart_grace_period: Some(120),
             }],

@@ -136,8 +136,24 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let redistribute_tx = bgp_client::spawn(args.watchdog_socket.clone(), shutdown_rx.clone());
-    let ospf_redistribute_tx =
-        ospf_client::spawn(args.watchdog_socket.clone(), shutdown_rx.clone());
+    let ospf_redistribute_tx = vec![
+        (
+            nos_proto::RedistributeTarget::Ospf,
+            ospf_client::spawn(
+                args.watchdog_socket.clone(),
+                shutdown_rx.clone(),
+                ospf_client::OSPFV2,
+            ),
+        ),
+        (
+            nos_proto::RedistributeTarget::Ospfv3,
+            ospf_client::spawn(
+                args.watchdog_socket.clone(),
+                shutdown_rx.clone(),
+                ospf_client::OSPFV3,
+            ),
+        ),
+    ];
     let evpn_tx = evpn_client::spawn(
         args.watchdog_socket.clone(),
         args.table.clone(),

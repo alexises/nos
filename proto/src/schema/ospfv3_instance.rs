@@ -40,12 +40,17 @@ pub struct Ospfv3Instance {
     /// The name of the `RoutingTable` that claims this instance (i.e. the
     /// VRF it belongs to), mirrored from that table's `ospfv3_instance`
     /// field — same derived/read-only pattern as `OspfInstance.routing_table`
-    /// (`crate::derive::sync_routing_table_refs`). No `redistribute_policy`
-    /// counterpart: Phase 1 has no ASBR support, so there's nothing to
-    /// redistribute into an `OSPFv3` instance yet.
+    /// (`crate::derive::sync_routing_table_refs`).
     #[garde(skip)]
     #[cli(hidden)]
     pub routing_table: Option<String>,
+
+    /// The policy of the owning table's `redistribute … to ospfv3` rule,
+    /// mirrored like `OspfInstance.redistribute_policy` (derived, read-only).
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(hidden)]
+    pub redistribute_policy: Option<String>,
 
     /// RFC 8362 Full mode: originate/consume the TLV-based extended LSAs
     /// (E-Router, E-Network, E-Link, E-Intra-Area-Prefix) instead of the
@@ -76,6 +81,7 @@ impl Default for Ospfv3Instance {
             router_id: Ipv4Addr::UNSPECIFIED,
             areas: Vec::new(),
             routing_table: None,
+            redistribute_policy: None,
             extended_lsa: false,
             graceful_restart_grace_period: None,
         }
@@ -113,6 +119,7 @@ mod tests {
             router_id: Ipv4Addr::new(1, 1, 1, 1),
             areas: Vec::new(),
             routing_table: None,
+            redistribute_policy: None,
             extended_lsa: false,
             graceful_restart_grace_period: None,
         }

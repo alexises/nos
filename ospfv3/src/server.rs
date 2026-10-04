@@ -10,9 +10,11 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::link::LinkManager;
 
-/// Binds `listen_socket` and spawns the IPC accept loop for neighbor/LSDB
-/// summaries — mirrors `ospf::server::start`, minus `RedistributeRoutes`
-/// (no ASBR in Phase 1).
+/// Binds `listen_socket` and spawns the IPC accept loop for neighbor
+/// summaries plus `nos-ribd`'s redistribution feed — mirrors
+/// `ospf::server::start`.
+///
+/// Returns a `JoinHandle` the caller must keep alive for the server to run.
 pub fn start(
     listen_socket: &Path,
     instance: String,
@@ -24,22 +26,14 @@ pub fn start(
     Ok(tokio::spawn(accept_loop(listener, instance, links)))
 }
 
-/// Every request here is a read-only query: for people, and `Restd` on their
-/// behalf. Nothing else has a reason to ask, so nothing else gets in.
-fn may_query(role: Role) -> bool {
-    matches!(role, Role::User | Role::Restd)
-}
-
-async fn serve(incoming: Incoming, instance: String, links: Arc<LinkManager>) {
-    match incoming.handshake_as(Role::parse).await {
-        Ok((stream, role, _)) if may_query(role) => {
-            handle_connection(stream, instance, links).await;
+/// Neighbor and database queries are for people (and `Restd` on their behalf);
+/// the redistribution feed is `nos-ribd`'s alone. No wildcard arm.
+fn allowed(role: Role, req: &Ospfv3Request) -> bool {
+    match req {
+        Ospfv3Request::GetNeighbors | Ospfv3Request::GetDatabase => {
+            matches!(role, Role::User | Role::Restd)
         }
-        Ok((_, role, name)) => warn!(
-            instance = %instance, role = role.as_str(), name = %name,
-            "OSPFv3 query refused: this role may not send it"
-        ),
-        Err(e) => debug!(instance = %instance, error = %e, "OSPFv3 IPC handshake refused"),
+        Ospfv3Request::RedistributeRoutes(_) => role == Role::Ribd,
     }
 }
 
@@ -57,7 +51,20 @@ async fn accept_loop(listener: Listener, instance: String, links: Arc<LinkManage
     }
 }
 
-async fn handle_connection(stream: Stream, instance: String, links: Arc<LinkManager>) {
+async fn serve(incoming: Incoming, instance: String, links: Arc<LinkManager>) {
+    match incoming.handshake_as(Role::parse).await {
+        Ok((stream, role, name)) => handle_connection(stream, role, name, instance, links).await,
+        Err(e) => debug!(instance = %instance, error = %e, "OSPFv3 IPC handshake refused"),
+    }
+}
+
+async fn handle_connection(
+    stream: Stream,
+    role: Role,
+    name: String,
+    instance: String,
+    links: Arc<LinkManager>,
+) {
     let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = FramedRead::new(read_half, IpcCodec::<Ospfv3Request>::default());
     let mut writer = FramedWrite::new(write_half, IpcCodec::<Ospfv3Event>::default());
@@ -70,7 +77,14 @@ async fn handle_connection(stream: Stream, instance: String, links: Arc<LinkMana
                 break;
             }
         };
-        trace!(instance = %instance, request = ?req, "serving OSPFv3 query");
+        if !allowed(role, &req) {
+            warn!(
+                instance = %instance, role = role.as_str(), name = %name,
+                "OSPFv3 request refused: this role may not send it"
+            );
+            break;
+        }
+        trace!(instance = %instance, request = ?req, "serving OSPF query");
         match req {
             Ospfv3Request::GetNeighbors => {
                 let event = Ospfv3Event::Neighbors(links.neighbor_summaries().await);
@@ -84,6 +98,27 @@ async fn handle_connection(stream: Stream, instance: String, links: Arc<LinkMana
                     break;
                 }
             }
+            Ospfv3Request::RedistributeRoutes(update) => {
+                links.apply_redistribute_update(update).await;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod authz_tests {
+    use super::*;
+
+    #[test]
+    fn only_ribd_feeds_redistribution_and_only_people_query() {
+        let feed = Ospfv3Request::RedistributeRoutes(nos_proto::RedistributeUpdate::Full(vec![]));
+        for role in Role::ALL {
+            assert_eq!(allowed(role, &feed), role == Role::Ribd, "{role:?} feed");
+            assert_eq!(
+                allowed(role, &Ospfv3Request::GetNeighbors),
+                matches!(role, Role::User | Role::Restd),
+                "{role:?} query"
+            );
         }
     }
 }

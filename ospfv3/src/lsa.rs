@@ -5,9 +5,9 @@
 //! `ospf::lsa` (RFC 2328's counterpart) — but the two crates' body shapes
 //! diverge completely: v3 restructures prefix-carrying entirely out of
 //! Router-/Network-LSA (which in v3 carry pure topology, no addresses at
-//! all) and into the two new LSA types here. Out of scope for Phase 1:
-//! Inter-Area-Prefix-LSA/Inter-Area-Router-LSA (ABR), AS-External-LSA
-//! (ASBR), NSSA.
+//! all) and into the two new LSA types here. ABR/ASBR add Inter-Area-
+//! Prefix-LSA (§A.4.5), Inter-Area-Router-LSA (§A.4.6) and AS-External-LSA
+//! (§A.4.7). Out of scope: NSSA.
 //!
 //! The 20-byte common header (§A.4.2.1) is the same total length as v2's,
 //! but its shape differs: v3 has no separate `options` byte in the header at
@@ -32,7 +32,9 @@ use crate::packet::{read_ipv4, PacketError};
 /// router participates in IPv6 topology); `R` must always be set on
 /// self-origination (clearing it silently excludes this router from other
 /// routers' SPF — RFC 5340 §4.8.1 — a real correctness trap if forgotten).
-/// `E` (ASBR-capable) stays clear: no ASBR support in Phase 1.
+/// `E` (§A.2: AS-external-LSAs are flooded here) is set on every
+/// self-originated Options word, since every area is a normal area (no stub
+/// areas or NSSA in `OSPFv3` yet).
 pub const OPTION_V6: u32 = 0x01;
 pub const OPTION_E: u32 = 0x02;
 pub const OPTION_R: u32 = 0x10;
@@ -49,6 +51,14 @@ pub const OPTION_AT: u32 = 0x00_0400;
 const SCOPE_AREA: u16 = 0x2000;
 /// S2/S1 scope bits: `00` = link-local scope.
 const SCOPE_LINK_LOCAL: u16 = 0x0000;
+/// S2/S1 scope bits: `10` = AS scope (flooded through every area).
+const SCOPE_AS: u16 = 0x4000;
+
+/// RFC 5340 §4.5.1: whether `lsa_type`'s S2/S1 bits say AS scope — such an
+/// LSA lives in `link.rs`'s one AS-wide store, not an area's.
+pub fn is_as_scope(lsa_type: u16) -> bool {
+    lsa_type & (SCOPE_AREA | SCOPE_AS) == SCOPE_AS
+}
 
 /// RFC 5340 §4.5.1 / §A.4.2.1: whether `lsa_type`'s S2/S1 bits say
 /// link-local scope — such an LSA lives in its link's own store and is
@@ -61,6 +71,20 @@ pub fn is_link_local_scope(lsa_type: u16) -> bool {
 pub const LSA_TYPE_ROUTER: u16 = SCOPE_AREA | 1;
 /// RFC 5340 §A.4.4 Network-LSA — area-scoped, function code 2.
 pub const LSA_TYPE_NETWORK: u16 = SCOPE_AREA | 2;
+/// RFC 5340 §A.4.5 Inter-Area-Prefix-LSA — area-scoped, function code 3.
+pub const LSA_TYPE_INTER_AREA_PREFIX: u16 = SCOPE_AREA | 3;
+/// RFC 5340 §A.4.6 Inter-Area-Router-LSA — area-scoped, function code 4.
+pub const LSA_TYPE_INTER_AREA_ROUTER: u16 = SCOPE_AREA | 4;
+/// RFC 5340 §A.4.7 AS-External-LSA — AS-scoped, function code 5.
+pub const LSA_TYPE_AS_EXTERNAL: u16 = SCOPE_AS | 5;
+/// RFC 5340 §A.4.3 Router-LSA flags: B (area border router) and E (AS
+/// boundary router).
+pub const ROUTER_FLAG_B: u8 = 0x01;
+pub const ROUTER_FLAG_E: u8 = 0x02;
+/// RFC 5340 §A.4.7 AS-External-LSA flag bits (first byte).
+const EXTERNAL_FLAG_E: u8 = 0x04;
+const EXTERNAL_FLAG_F: u8 = 0x02;
+const EXTERNAL_FLAG_T: u8 = 0x01;
 /// RFC 5340 §A.4.9 Link-LSA — link-local scoped (never flooded past the
 /// originating link), function code 8.
 pub const LSA_TYPE_LINK: u16 = SCOPE_LINK_LOCAL | 8;
@@ -85,10 +109,22 @@ pub const LSA_TYPE_E_ROUTER: u16 = 0x8000 | SCOPE_AREA | 0x21;
 pub const LSA_TYPE_E_NETWORK: u16 = 0x8000 | SCOPE_AREA | 0x22;
 pub const LSA_TYPE_E_LINK: u16 = 0x8000 | SCOPE_LINK_LOCAL | 0x28;
 pub const LSA_TYPE_E_INTRA_AREA_PREFIX: u16 = 0x8000 | SCOPE_AREA | 0x29;
+/// RFC 8362 §4.5-4.7: the inter-area and AS-external E-LSAs. Their bodies are
+/// TLVs only (no fixed part), one top-level TLV each.
+pub const LSA_TYPE_E_INTER_AREA_PREFIX: u16 = 0x8000 | SCOPE_AREA | 0x23;
+pub const LSA_TYPE_E_INTER_AREA_ROUTER: u16 = 0x8000 | SCOPE_AREA | 0x24;
+pub const LSA_TYPE_E_AS_EXTERNAL: u16 = 0x8000 | SCOPE_AS | 0x25;
 
 /// RFC 8362 §3.2's top-level TLV types (the only ones this crate uses).
 const TLV_ROUTER_LINK: u16 = 1;
 const TLV_ATTACHED_ROUTERS: u16 = 2;
+const TLV_INTER_AREA_PREFIX: u16 = 3;
+const TLV_INTER_AREA_ROUTER: u16 = 4;
+const TLV_EXTERNAL_PREFIX: u16 = 5;
+/// RFC 8362 §3.10's External-Prefix sub-TLVs (the IPv4 forwarding address,
+/// type 2, is never decoded: IPv6-only routing).
+const SUB_TLV_IPV6_FORWARDING_ADDRESS: u16 = 1;
+const SUB_TLV_ROUTE_TAG: u16 = 3;
 const TLV_INTRA_AREA_PREFIX: u16 = 6;
 const TLV_IPV6_LINK_LOCAL: u16 = 7;
 
@@ -181,7 +217,8 @@ pub struct RouterLsaLink {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouterLsaBody {
     /// Top byte of the header word (RFC 5340 §A.4.3's Nt/x/V/E/B bits) —
-    /// always `0` in Phase 1 (no virtual links, no ABR, no ASBR).
+    /// B (`ROUTER_FLAG_B`) while an ABR, E (`ROUTER_FLAG_E`) while an ASBR;
+    /// no virtual links (V) or NSSA (Nt).
     pub flags: u8,
     /// Low 24 bits only.
     pub options: u32,
@@ -243,6 +280,44 @@ pub struct GraceLsaBody {
     pub restart_reason: u8,
 }
 
+/// RFC 5340 §A.4.5 Inter-Area-Prefix-LSA: one prefix an ABR summarizes into
+/// another area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterAreaPrefixLsaBody {
+    /// 24 bits.
+    pub metric: u32,
+    pub prefix_options: u8,
+    pub prefix: Ipv6Net,
+}
+
+/// RFC 5340 §A.4.6 Inter-Area-Router-LSA: an ASBR an ABR makes reachable in
+/// another area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterAreaRouterLsaBody {
+    /// The ASBR's own Options, 24 bits.
+    pub options: u32,
+    /// 24 bits.
+    pub metric: u32,
+    pub destination_router_id: Ipv4Addr,
+}
+
+/// RFC 5340 §A.4.7 AS-External-LSA. Decoded faithfully; this router
+/// originates Type-1 (`type2` clear) with no forwarding address, tag or
+/// referenced LSA. In the RFC 8362 form there is no referenced LSA at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AsExternalLsaBody {
+    /// The E-bit: a Type-2 metric.
+    pub type2: bool,
+    /// 24 bits.
+    pub metric: u32,
+    pub prefix_options: u8,
+    pub prefix: Ipv6Net,
+    pub forwarding_address: Option<Ipv6Addr>,
+    pub route_tag: Option<u32>,
+    pub referenced_ls_type: u16,
+    pub referenced_link_state_id: Option<Ipv4Addr>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LsaBody {
     Router(RouterLsaBody),
@@ -250,6 +325,9 @@ pub enum LsaBody {
     Link(LinkLsaBody),
     IntraAreaPrefix(IntraAreaPrefixLsaBody),
     Grace(GraceLsaBody),
+    InterAreaPrefix(InterAreaPrefixLsaBody),
+    InterAreaRouter(InterAreaRouterLsaBody),
+    AsExternal(AsExternalLsaBody),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -385,8 +463,139 @@ fn parse_prefix_tlv(v: &[u8]) -> Result<(u16, u8, Ipv6Net), PacketError> {
 fn is_extended(lsa_type: u16) -> bool {
     matches!(
         lsa_type,
-        LSA_TYPE_E_ROUTER | LSA_TYPE_E_NETWORK | LSA_TYPE_E_LINK | LSA_TYPE_E_INTRA_AREA_PREFIX
+        LSA_TYPE_E_ROUTER
+            | LSA_TYPE_E_NETWORK
+            | LSA_TYPE_E_LINK
+            | LSA_TYPE_E_INTRA_AREA_PREFIX
+            | LSA_TYPE_E_INTER_AREA_PREFIX
+            | LSA_TYPE_E_INTER_AREA_ROUTER
+            | LSA_TYPE_E_AS_EXTERNAL
     )
+}
+
+fn u24(word: u32) -> [u8; 3] {
+    let b = (word & 0x00FF_FFFF).to_be_bytes();
+    [b[1], b[2], b[3]]
+}
+
+fn read_u24(data: &[u8]) -> u32 {
+    u32::from(data[0]) << 16 | u32::from(data[1]) << 8 | u32::from(data[2])
+}
+
+/// The shared `[flags, metric(24)][PrefixLength, PrefixOptions, word16]
+/// [prefix]` layout of the Inter-Area-Prefix and AS-External bodies (§A.4.5,
+/// §A.4.7) and of their RFC 8362 TLVs.
+fn encode_metric_prefix(
+    buf: &mut Vec<u8>,
+    flags: u8,
+    metric: u32,
+    options: u8,
+    word: u16,
+    prefix: &Ipv6Net,
+) {
+    buf.push(flags);
+    buf.extend_from_slice(&u24(metric));
+    buf.extend_from_slice(&[prefix.trunc().prefix_len(), options]);
+    buf.extend_from_slice(&word.to_be_bytes());
+    encode_prefix(buf, prefix);
+}
+
+/// Inverse of `encode_metric_prefix`.
+struct MetricPrefix {
+    flags: u8,
+    metric: u32,
+    options: u8,
+    word: u16,
+    prefix: Ipv6Net,
+    /// Bytes consumed.
+    len: usize,
+}
+
+fn decode_metric_prefix(data: &[u8]) -> Result<MetricPrefix, PacketError> {
+    if data.len() < 8 {
+        return Err(PacketError::TruncatedBody);
+    }
+    let (prefix, len) = decode_prefix(&data[8..], data[4])?;
+    Ok(MetricPrefix {
+        flags: data[0],
+        metric: read_u24(&data[1..4]),
+        options: data[5],
+        word: u16::from_be_bytes([data[6], data[7]]),
+        prefix,
+        len: 8 + len,
+    })
+}
+
+fn inter_area_prefix(m: &MetricPrefix) -> LsaBody {
+    LsaBody::InterAreaPrefix(InterAreaPrefixLsaBody {
+        metric: m.metric,
+        prefix_options: m.options,
+        prefix: m.prefix,
+    })
+}
+
+fn encode_inter_area_router(buf: &mut Vec<u8>, r: &InterAreaRouterLsaBody) {
+    buf.push(0);
+    buf.extend_from_slice(&u24(r.options));
+    buf.push(0);
+    buf.extend_from_slice(&u24(r.metric));
+    buf.extend_from_slice(&r.destination_router_id.octets());
+}
+
+fn decode_inter_area_router(data: &[u8]) -> Result<LsaBody, PacketError> {
+    if data.len() < 12 {
+        return Err(PacketError::TruncatedBody);
+    }
+    Ok(LsaBody::InterAreaRouter(InterAreaRouterLsaBody {
+        options: read_u24(&data[1..4]),
+        metric: read_u24(&data[5..8]),
+        destination_router_id: read_ipv4(data, 8),
+    }))
+}
+
+fn read_ipv6(data: &[u8]) -> Ipv6Addr {
+    let mut o = [0u8; 16];
+    o.copy_from_slice(&data[..16]);
+    Ipv6Addr::from(o)
+}
+
+/// The first `want` TLV of an RFC 8362 inter-area/external E-LSA body.
+fn single_tlv(data: &[u8], want: u16) -> Result<&[u8], PacketError> {
+    split_tlvs(data)?
+        .into_iter()
+        .find_map(|(t, v)| (t == want).then_some(v))
+        .ok_or(PacketError::TruncatedBody)
+}
+
+fn decode_ext_external(data: &[u8]) -> Result<LsaBody, PacketError> {
+    let v = single_tlv(data, TLV_EXTERNAL_PREFIX)?;
+    let m = decode_metric_prefix(v)?;
+    let mut forwarding_address = None;
+    let mut route_tag = None;
+    for (t, sv) in split_tlvs(&v[m.len..])? {
+        match t {
+            SUB_TLV_IPV6_FORWARDING_ADDRESS if sv.len() >= 16 => {
+                forwarding_address = Some(read_ipv6(sv));
+            }
+            SUB_TLV_ROUTE_TAG if sv.len() >= 4 => {
+                route_tag = Some(u32::from_be_bytes([sv[0], sv[1], sv[2], sv[3]]));
+            }
+            SUB_TLV_IPV6_FORWARDING_ADDRESS | SUB_TLV_ROUTE_TAG => {
+                return Err(PacketError::TruncatedBody)
+            }
+            _ => {}
+        }
+    }
+    Ok(LsaBody::AsExternal(AsExternalLsaBody {
+        type2: m.flags & EXTERNAL_FLAG_E != 0,
+        metric: m.metric,
+        prefix_options: m.options,
+        prefix: m.prefix,
+        forwarding_address,
+        route_tag,
+        referenced_ls_type: 0,
+        referenced_link_state_id: None,
+    }))
 }
 
 fn encode_ext_body(body: &LsaBody) -> Vec<u8> {
@@ -443,6 +652,28 @@ fn encode_ext_body(body: &LsaBody) -> Vec<u8> {
             }
         }
         LsaBody::Grace(g) => encode_grace(&mut buf, *g),
+        LsaBody::InterAreaPrefix(p) => {
+            let mut v = Vec::new();
+            encode_metric_prefix(&mut v, 0, p.metric, p.prefix_options, 0, &p.prefix);
+            put_tlv(&mut buf, TLV_INTER_AREA_PREFIX, &v);
+        }
+        LsaBody::InterAreaRouter(r) => {
+            let mut v = Vec::new();
+            encode_inter_area_router(&mut v, r);
+            put_tlv(&mut buf, TLV_INTER_AREA_ROUTER, &v);
+        }
+        LsaBody::AsExternal(e) => {
+            let flags = if e.type2 { EXTERNAL_FLAG_E } else { 0 };
+            let mut v = Vec::new();
+            encode_metric_prefix(&mut v, flags, e.metric, e.prefix_options, 0, &e.prefix);
+            if let Some(fa) = e.forwarding_address {
+                put_tlv(&mut v, SUB_TLV_IPV6_FORWARDING_ADDRESS, &fa.octets());
+            }
+            if let Some(tag) = e.route_tag {
+                put_tlv(&mut v, SUB_TLV_ROUTE_TAG, &tag.to_be_bytes());
+            }
+            put_tlv(&mut buf, TLV_EXTERNAL_PREFIX, &v);
+        }
     }
     buf
 }
@@ -472,6 +703,17 @@ fn decode_grace(data: &[u8]) -> Result<LsaBody, PacketError> {
 }
 
 fn decode_ext_body(lsa_type: u16, data: &[u8]) -> Result<LsaBody, PacketError> {
+    match lsa_type {
+        LSA_TYPE_E_INTER_AREA_PREFIX => {
+            let v = single_tlv(data, TLV_INTER_AREA_PREFIX)?;
+            return Ok(inter_area_prefix(&decode_metric_prefix(v)?));
+        }
+        LSA_TYPE_E_INTER_AREA_ROUTER => {
+            return decode_inter_area_router(single_tlv(data, TLV_INTER_AREA_ROUTER)?);
+        }
+        LSA_TYPE_E_AS_EXTERNAL => return decode_ext_external(data),
+        _ => {}
+    }
     let fixed_len = if lsa_type == LSA_TYPE_E_INTRA_AREA_PREFIX {
         12
     } else {
@@ -639,6 +881,48 @@ fn encode_body(lsa_type: u16, body: &LsaBody) -> Vec<u8> {
             encode_grace(&mut buf, *g);
             buf
         }
+        LsaBody::InterAreaPrefix(p) => {
+            let mut buf = Vec::new();
+            encode_metric_prefix(&mut buf, 0, p.metric, p.prefix_options, 0, &p.prefix);
+            buf
+        }
+        LsaBody::InterAreaRouter(r) => {
+            let mut buf = Vec::new();
+            encode_inter_area_router(&mut buf, r);
+            buf
+        }
+        LsaBody::AsExternal(e) => {
+            let mut flags = 0;
+            if e.type2 {
+                flags |= EXTERNAL_FLAG_E;
+            }
+            if e.forwarding_address.is_some() {
+                flags |= EXTERNAL_FLAG_F;
+            }
+            if e.route_tag.is_some() {
+                flags |= EXTERNAL_FLAG_T;
+            }
+            let mut buf = Vec::new();
+            encode_metric_prefix(
+                &mut buf,
+                flags,
+                e.metric,
+                e.prefix_options,
+                e.referenced_ls_type,
+                &e.prefix,
+            );
+            if let Some(fa) = e.forwarding_address {
+                buf.extend_from_slice(&fa.octets());
+            }
+            if let Some(tag) = e.route_tag {
+                buf.extend_from_slice(&tag.to_be_bytes());
+            }
+            if e.referenced_ls_type != 0 {
+                let id = e.referenced_link_state_id.unwrap_or(Ipv4Addr::UNSPECIFIED);
+                buf.extend_from_slice(&id.octets());
+            }
+            buf
+        }
     }
 }
 
@@ -753,8 +1037,49 @@ fn decode_body(lsa_type: u16, data: &[u8]) -> Result<LsaBody, PacketError> {
             }))
         }
         LSA_TYPE_GRACE => decode_grace(data),
+        LSA_TYPE_INTER_AREA_PREFIX => Ok(inter_area_prefix(&decode_metric_prefix(data)?)),
+        LSA_TYPE_INTER_AREA_ROUTER => decode_inter_area_router(data),
+        LSA_TYPE_AS_EXTERNAL => decode_as_external(data),
         other => Err(PacketError::UnknownLsaType(other)),
     }
+}
+
+/// RFC 5340 §A.4.7: the optional fields follow the prefix in F, T,
+/// referenced-LS-type order.
+fn decode_as_external(data: &[u8]) -> Result<LsaBody, PacketError> {
+    let m = decode_metric_prefix(data)?;
+    let mut at = m.len;
+    let mut take = |n: usize| -> Result<&[u8], PacketError> {
+        let field = data.get(at..at + n).ok_or(PacketError::TruncatedBody)?;
+        at += n;
+        Ok(field)
+    };
+    let forwarding_address = if m.flags & EXTERNAL_FLAG_F != 0 {
+        Some(read_ipv6(take(16)?))
+    } else {
+        None
+    };
+    let route_tag = if m.flags & EXTERNAL_FLAG_T != 0 {
+        let t = take(4)?;
+        Some(u32::from_be_bytes([t[0], t[1], t[2], t[3]]))
+    } else {
+        None
+    };
+    let referenced_link_state_id = if m.word != 0 {
+        Some(read_ipv4(take(4)?, 0))
+    } else {
+        None
+    };
+    Ok(LsaBody::AsExternal(AsExternalLsaBody {
+        type2: m.flags & EXTERNAL_FLAG_E != 0,
+        metric: m.metric,
+        prefix_options: m.options,
+        prefix: m.prefix,
+        forwarding_address,
+        route_tag,
+        referenced_ls_type: m.word,
+        referenced_link_state_id,
+    }))
 }
 
 /// Encodes `lsa`, overwriting `length`/`checksum` with freshly-computed
@@ -1014,6 +1339,108 @@ mod tests {
         let checksum = lsa_checksum(&wire[2..]);
         wire[16..18].copy_from_slice(&checksum.to_be_bytes());
         assert_eq!(decode_lsa(&wire).unwrap().body, lsa.body);
+    }
+
+    fn with_body(lsa_type: u16, body: LsaBody) -> Lsa {
+        let mut lsa = router_lsa();
+        lsa.header.lsa_type = lsa_type;
+        lsa.body = body;
+        lsa
+    }
+
+    #[allow(clippy::fn_params_excessive_bools)]
+    fn external(type2: bool, fa: bool, tag: bool, referenced: bool) -> LsaBody {
+        LsaBody::AsExternal(AsExternalLsaBody {
+            type2,
+            metric: 0x01_0203,
+            prefix_options: 0,
+            prefix: "2001:db8:5::/48".parse().unwrap(),
+            forwarding_address: fa.then(|| "2001:db8::1".parse().unwrap()),
+            route_tag: tag.then_some(0xdead_beef),
+            referenced_ls_type: if referenced { LSA_TYPE_ROUTER } else { 0 },
+            referenced_link_state_id: referenced.then_some(Ipv4Addr::new(0, 0, 0, 7)),
+        })
+    }
+
+    #[test]
+    fn inter_area_and_external_lsas_round_trip_in_both_forms() {
+        let iap = LsaBody::InterAreaPrefix(InterAreaPrefixLsaBody {
+            metric: 0x01_0000,
+            prefix_options: 0,
+            prefix: "2001:db8:9::/64".parse().unwrap(),
+        });
+        let iar = LsaBody::InterAreaRouter(InterAreaRouterLsaBody {
+            options: OPTION_V6 | OPTION_E | OPTION_R,
+            metric: 12,
+            destination_router_id: Ipv4Addr::new(3, 3, 3, 3),
+        });
+        for (legacy, e_type, body) in [
+            (
+                LSA_TYPE_INTER_AREA_PREFIX,
+                LSA_TYPE_E_INTER_AREA_PREFIX,
+                iap,
+            ),
+            (
+                LSA_TYPE_INTER_AREA_ROUTER,
+                LSA_TYPE_E_INTER_AREA_ROUTER,
+                iar,
+            ),
+            (
+                LSA_TYPE_AS_EXTERNAL,
+                LSA_TYPE_E_AS_EXTERNAL,
+                external(true, true, true, false),
+            ),
+            (
+                LSA_TYPE_AS_EXTERNAL,
+                LSA_TYPE_E_AS_EXTERNAL,
+                external(false, false, false, false),
+            ),
+        ] {
+            for t in [legacy, e_type] {
+                let wire = encode_lsa(&with_body(t, body.clone()));
+                assert_eq!(wire.len() % 4, 0, "{t:#06x}");
+                assert_eq!(decode_lsa(&wire).unwrap().body, body, "{t:#06x}");
+            }
+        }
+        // Only the legacy form carries a referenced LSA.
+        let body = external(false, false, true, true);
+        let wire = encode_lsa(&with_body(LSA_TYPE_AS_EXTERNAL, body.clone()));
+        assert_eq!(decode_lsa(&wire).unwrap().body, body);
+    }
+
+    #[test]
+    fn scopes_of_the_new_types() {
+        assert_eq!(LSA_TYPE_INTER_AREA_PREFIX, 0x2003);
+        assert_eq!(LSA_TYPE_INTER_AREA_ROUTER, 0x2004);
+        assert_eq!(LSA_TYPE_AS_EXTERNAL, 0x4005);
+        assert_eq!(LSA_TYPE_E_INTER_AREA_PREFIX, 0xA023);
+        assert_eq!(LSA_TYPE_E_INTER_AREA_ROUTER, 0xA024);
+        assert_eq!(LSA_TYPE_E_AS_EXTERNAL, 0xC025);
+        for t in [LSA_TYPE_AS_EXTERNAL, LSA_TYPE_E_AS_EXTERNAL] {
+            assert!(is_as_scope(t) && !is_link_local_scope(t));
+        }
+        for t in [
+            LSA_TYPE_INTER_AREA_PREFIX,
+            LSA_TYPE_E_INTER_AREA_ROUTER,
+            LSA_TYPE_ROUTER,
+            LSA_TYPE_LINK,
+        ] {
+            assert!(!is_as_scope(t), "{t:#06x}");
+        }
+    }
+
+    /// RFC 5340 §A.4.7's layout, pinned byte by byte with F and T set.
+    #[test]
+    fn as_external_wire_layout() {
+        let wire = encode_lsa(&with_body(
+            LSA_TYPE_AS_EXTERNAL,
+            external(true, true, true, false),
+        ));
+        let mut want = vec![0x07, 0x01, 0x02, 0x03, 48, 0, 0, 0];
+        want.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 5, 0, 0]);
+        want.extend_from_slice(&"2001:db8::1".parse::<Ipv6Addr>().unwrap().octets());
+        want.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(&wire[LSA_HEADER_LEN..], &want[..]);
     }
 
     #[test]

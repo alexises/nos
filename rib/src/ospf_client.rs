@@ -1,14 +1,11 @@
 //! Forwards this table's redistributable routes to the owning `nos-ospfd`
-//! instance over one long-lived connection — the OSPF-redistribution
-//! analogue of `bgp_client.rs`, near line-for-line: same single-connection,
-//! fixed-delay-reconnect, fire-and-forget-with-no-reply shape
-//! (`OspfRequest::RedistributeRoutes` gets no reply, like
-//! `BgpRequest::RedistributeRoutes`).
-//!
-//! `ponytail:` this is a near line-for-line duplicate of `bgp_client.rs`
-//! rather than a generic `redistribute_client<Req>` — two call sites with
-//! slightly different `Request`/`ServiceRef` wiring don't justify a generic
-//! abstraction; factor if a third protocol target ever redistributes.
+//! or `nos-ospfv3d` instance over one long-lived connection — the
+//! OSPF-redistribution analogue of `bgp_client.rs`, near line-for-line: same
+//! single-connection, fixed-delay-reconnect, fire-and-forget-with-no-reply
+//! shape (`OspfRequest`/`Ospfv3Request::RedistributeRoutes` get no reply,
+//! like `BgpRequest::RedistributeRoutes`). One task per daemon family, told
+//! apart by a `Peer` (`OSPFV2`/`OSPFV3`); `bgp_client.rs` stays its own copy
+//! (its request shape differs).
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -17,7 +14,10 @@ use std::time::Duration;
 
 use futures::SinkExt;
 use ipnet::IpNet;
-use nos_proto::{IpcCodec, OspfRequest, RedistributeUpdate, RedistributedRoute, Role, ServiceRef};
+use nos_proto::{
+    IpcCodec, OspfRequest, Ospfv3Request, RedistributeUpdate, RedistributedRoute, Role, ServiceRef,
+};
+use serde::Serialize;
 use tokio::sync::watch;
 use tokio_util::codec::FramedWrite;
 use tracing::{debug, warn};
@@ -29,6 +29,31 @@ use crate::watchdog_client::resolve_once;
 /// `bgp_client::RETRY_DELAY`).
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
+/// What differs between the two OSPF daemon families this client feeds.
+#[derive(Clone, Copy)]
+pub struct Peer<R> {
+    /// How the broker names an instance of it.
+    pub service: fn(String) -> ServiceRef,
+    /// Its request carrying one update.
+    pub wrap: fn(RedistributeUpdate) -> R,
+    /// The role its certificate must prove (`nos_pki::connect`).
+    pub role: Role,
+}
+
+/// `nos-ospfd` (`redistribute … to ospf`).
+pub const OSPFV2: Peer<OspfRequest> = Peer {
+    service: ServiceRef::OspfInstance,
+    wrap: OspfRequest::RedistributeRoutes,
+    role: Role::Ospfd,
+};
+
+/// `nos-ospfv3d` (`redistribute … to ospfv3`).
+pub const OSPFV3: Peer<Ospfv3Request> = Peer {
+    service: ServiceRef::Ospfv3Instance,
+    wrap: Ospfv3Request::RedistributeRoutes,
+    role: Role::Ospfv3d,
+};
+
 /// The desired redistribution state for this table, published by
 /// `crate::reconcile::resync` on every resync (diff-triggered or timer
 /// alike) regardless of whether anything actually changed — mirrors
@@ -36,40 +61,43 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 /// redundant publish a no-op.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RedistributeTarget {
-    /// Which `nos-ospfd` instance (by `OspfInstance` name) this table's
-    /// routes should be pushed into. `None` when the table has no owning
-    /// `OspfInstance`, or doesn't exist in the running config at all.
-    pub ospf_instance: Option<String>,
+    /// Which instance (by `OspfInstance`/`Ospfv3Instance` name) this
+    /// table's routes should be pushed into. `None` when the table has no
+    /// owning instance, or doesn't exist in the running config at all.
+    pub instance: Option<String>,
     /// The routes to redistribute — already filtered to whatever rule is
-    /// active (e.g. `redistribute from static to ospf`), v4 and v6 alike
-    /// (`OSPFv2` itself only ever consumes the v4 ones — see `ospf::link::
-    /// LinkManager::apply_redistribute_update`).
+    /// active (e.g. `redistribute from static to ospf`): v4 and v6 alike for
+    /// `OSPFv2` (which consumes only the v4 ones — see `ospf::link::
+    /// LinkManager::apply_redistribute_update`), v6 only for `OSPFv3`.
     pub routes: Vec<RedistributedRoute>,
 }
 
 /// Spawns the background task that owns the redistribution-push connection
 /// for this table's lifetime and returns the `watch::Sender` `resync` uses
 /// to publish the current desired state. Seeded with an empty target
-/// (`ospf_instance: None`) — the task starts idle until the first resync.
-pub fn spawn(
+/// (`instance: None`) — the task starts idle until the first resync.
+pub fn spawn<R: Serialize + Send + 'static>(
     watchdog_socket: PathBuf,
     shutdown: watch::Receiver<bool>,
+    peer: Peer<R>,
 ) -> watch::Sender<RedistributeTarget> {
     let (tx, rx) = watch::channel(RedistributeTarget::default());
-    tokio::spawn(run(watchdog_socket, rx, shutdown));
+    tokio::spawn(run(watchdog_socket, rx, shutdown, peer));
     tx
 }
 
-/// Owns the connection to this table's `nos-ospfd` instance for the whole
+/// Owns the connection to this table's `peer` instance for the whole
 /// process lifetime. See the module doc comment for the overall shape.
-async fn run(
+async fn run<R: Serialize>(
     watchdog_socket: PathBuf,
     mut target_rx: watch::Receiver<RedistributeTarget>,
     mut shutdown: watch::Receiver<bool>,
+    peer: Peer<R>,
 ) {
+    let daemon = peer.role.as_str();
     while !*shutdown.borrow() {
         let target = target_rx.borrow_and_update().clone();
-        let Some(name) = target.ospf_instance.clone() else {
+        let Some(name) = target.instance.clone() else {
             // Nothing to connect to yet — idle until the target changes.
             if wait_idle(&mut target_rx, &mut shutdown).await {
                 break;
@@ -77,24 +105,24 @@ async fn run(
             continue;
         };
 
-        let Some(ospf_socket) =
-            resolve_once(&watchdog_socket, &ServiceRef::OspfInstance(name.clone())).await
+        let Some(ospf_socket) = resolve_once(&watchdog_socket, &(peer.service)(name.clone())).await
         else {
-            debug!(ospf_instance = %name, "failed to resolve nos-ospfd instance via nos-watchdogd, retrying");
+            debug!(daemon, instance = %name, "failed to resolve redistribution target via nos-watchdogd, retrying");
             if wait_retry(RETRY_DELAY, &mut target_rx, &mut shutdown).await {
                 break;
             }
             continue;
         };
 
-        let stream = match nos_pki::connect(&ospf_socket, Role::Ospfd, &name).await {
+        let stream = match nos_pki::connect(&ospf_socket, peer.role, &name).await {
             Ok(stream) => stream,
             Err(e) => {
                 warn!(
-                    ospf_instance = %name,
+                    daemon,
+                    instance = %name,
                     socket = %ospf_socket.display(),
                     error = %e,
-                    "failed to connect to nos-ospfd, retrying"
+                    "failed to connect to redistribution target, retrying"
                 );
                 if wait_retry(RETRY_DELAY, &mut target_rx, &mut shutdown).await {
                     break;
@@ -103,7 +131,7 @@ async fn run(
             }
         };
 
-        let mut writer = FramedWrite::new(stream, IpcCodec::<OspfRequest>::default());
+        let mut writer = FramedWrite::new(stream, IpcCodec::<R>::default());
 
         // Re-read the target once more: it may have changed while we were
         // resolving/connecting. If it no longer names the instance we just
@@ -111,18 +139,18 @@ async fn run(
         // re-evaluate from scratch — nothing was sent on it, so there is
         // nothing to withdraw.
         let current = target_rx.borrow_and_update().clone();
-        if current.ospf_instance != target.ospf_instance {
+        if current.instance != target.instance {
             continue;
         }
 
         if writer
-            .send(OspfRequest::RedistributeRoutes(RedistributeUpdate::Full(
+            .send((peer.wrap)(RedistributeUpdate::Full(
                 current.routes.clone(),
             )))
             .await
             .is_err()
         {
-            warn!(ospf_instance = %name, "failed to send initial redistribution snapshot to nos-ospfd, retrying");
+            warn!(daemon, instance = %name, "failed to send initial redistribution snapshot, retrying");
             if wait_retry(RETRY_DELAY, &mut target_rx, &mut shutdown).await {
                 break;
             }
@@ -130,9 +158,10 @@ async fn run(
         }
         let mut last_sent = build_last_sent(&current.routes);
         debug!(
-            ospf_instance = %name,
+            daemon,
+            instance = %name,
             routes = last_sent.len(),
-            "sent initial redistribution snapshot to nos-ospfd"
+            "sent initial redistribution snapshot"
         );
 
         // Inner loop: same connection, same target instance, until the
@@ -145,25 +174,25 @@ async fn run(
                         return;
                     }
                     let new_target = target_rx.borrow_and_update().clone();
-                    if new_target.ospf_instance != Some(name.clone()) {
+                    if new_target.instance != Some(name.clone()) {
                         // Withdraw everything from this connection before
                         // switching away — best-effort, we're tearing this
                         // connection down regardless of the outcome.
                         let _ = writer
-                            .send(OspfRequest::RedistributeRoutes(RedistributeUpdate::Full(Vec::new())))
+                            .send((peer.wrap)(RedistributeUpdate::Full(Vec::new())))
                             .await;
                         break;
                     }
                     let updates = diff_routes(&last_sent, &new_target.routes);
                     let mut write_failed = false;
                     for update in updates {
-                        if writer.send(OspfRequest::RedistributeRoutes(update)).await.is_err() {
+                        if writer.send((peer.wrap)(update)).await.is_err() {
                             write_failed = true;
                             break;
                         }
                     }
                     if write_failed {
-                        warn!(ospf_instance = %name, "write failure sending redistribution update, reconnecting");
+                        warn!(daemon, instance = %name, "write failure sending redistribution update, reconnecting");
                         break;
                     }
                     last_sent = build_last_sent(&new_target.routes);
@@ -322,7 +351,7 @@ mod tests {
     #[test]
     fn default_target_is_idle() {
         let target = RedistributeTarget::default();
-        assert_eq!(target.ospf_instance, None);
+        assert_eq!(target.instance, None);
         assert_eq!(target.routes, [] as [nos_proto::RedistributedRoute; 0]);
     }
 }

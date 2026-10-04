@@ -1990,6 +1990,7 @@ dependencies = [
  "nos-ospf-common",
  "nos-pki",
  "nos-proto",
+ "nos-rpl",
  "nos-tcp-auth",
  "serde",
  "sha1",

@@ -72,6 +72,10 @@ pub enum Ospfv3Request {
     GetNeighbors,
     /// One-shot: every installed LSA's header, across every area.
     GetDatabase,
+    /// Fire-and-forget, no reply — `OspfRequest::RedistributeRoutes`'s
+    /// `OSPFv3` twin, sent by the owning table's `nos-ribd`: the IPv6 routes
+    /// to originate as RFC 5340 AS-External-LSAs.
+    RedistributeRoutes(crate::bgp::RedistributeUpdate),
 }
 
 /// Messages sent from `nos-ospfv3d` to a query client.

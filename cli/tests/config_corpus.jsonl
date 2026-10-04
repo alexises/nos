@@ -155,6 +155,7 @@
 {"at":["routing-table","rt1"],"fixture":"populated","line":"set redistribute from static to ospf","navigate":null,"writes":[[["routing-table","rt1","redistribute"],{"from":"Static","policy":null,"to":"Ospf"}]]}
 {"at":[],"fixture":"populated","line":"set routing-table rt1 redistribute from static to ospf policy p1","navigate":null,"writes":[[["routing-table","rt1","redistribute"],{"from":"Static","policy":"p1","to":"Ospf"}]]}
 {"at":["routing-table","rt1"],"fixture":"populated","line":"set redistribute from static to ospf policy p1","navigate":null,"writes":[[["routing-table","rt1","redistribute"],{"from":"Static","policy":"p1","to":"Ospf"}]]}
+{"at":[],"fixture":"populated","line":"set routing-table rt1 redistribute from static to ospfv3 policy p1","navigate":null,"writes":[[["routing-table","rt1","redistribute"],{"from":"Static","policy":"p1","to":"Ospfv3"}]]}
 {"at":[],"fixture":"populated","line":"set static-routing-instance sri1 route 10.0.0.0/24 gateway 10.0.0.1","navigate":null,"writes":[[["static-routing-instance","sri1","route","10.0.0.0/24","gateway"],"10.0.0.1"]]}
 {"at":["static-routing-instance","sri1"],"fixture":"populated","line":"set route 10.0.0.0/24 gateway 10.0.0.1","navigate":null,"writes":[[["static-routing-instance","sri1","route","10.0.0.0/24","gateway"],"10.0.0.1"]]}
 {"line":"set route not-a-subnet gateway 10.0.0.1","rejected":true}
@@ -242,7 +243,7 @@
 {"at":[],"fixture":"populated","line":"set ospfv3 instance o1 area 0.0.0.0 profile p1 crypto-key 300 hmac-sha256 secret","navigate":null,"writes":[[["ospfv3-instance","o1","area","0.0.0.0","profile","p1","auth"],[{"algorithm":"HmacSha256","is_current":false,"key":"secret","key_id":300}]]]}
 {"line":"delete crypto-key 65536","rejected":true}
 {"at":[],"fixture":"populated","line":"edit ospfv3 instance o1","navigate":["ospfv3-instance","o1"],"writes":[]}
-{"at":[],"fixture":"empty","line":"edit ospfv3 instance o1","navigate":["ospfv3-instance","o1"],"writes":[[["ospfv3-instance"],[{"areas":[],"extended_lsa":false,"graceful_restart_grace_period":null,"name":"o1","router_id":"0.0.0.0","routing_table":null}]]]}
+{"at":[],"fixture":"empty","line":"edit ospfv3 instance o1","navigate":["ospfv3-instance","o1"],"writes":[[["ospfv3-instance"],[{"areas":[],"extended_lsa":false,"graceful_restart_grace_period":null,"name":"o1","redistribute_policy":null,"router_id":"0.0.0.0","routing_table":null}]]]}
 {"at":[],"fixture":"populated","line":"edit ospfv3 instance o1 area 0.0.0.0","navigate":["ospfv3-instance","o1","area","0.0.0.0"],"writes":[]}
 {"at":[],"fixture":"populated","line":"edit ospfv3 instance o1 area 0.0.0.0 profile p1","navigate":["ospfv3-instance","o1","area","0.0.0.0","profile","p1"],"writes":[]}
 {"at":[],"fixture":"populated","line":"set ospfv3 instance o1 extended-lsa","navigate":null,"writes":[[["ospfv3-instance","o1","extended-lsa"],true]]}
