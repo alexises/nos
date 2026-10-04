@@ -71,7 +71,7 @@ pub struct Ospfv3Profile {
     #[cli(topic = Ospfv3ProfileAuth, sugar(word = "crypto-key", with = sugar::ospfv3_crypto_key, topic = Ospfv3ProfileCryptoKey))]
     pub auth: Option<Vec<OspfCryptoKey>>,
 
-    /// RFC 5340 §A.3.1 Instance ID (header byte 12) this profile's links send
+    /// RFC 5340 §A.3.1 Instance ID (header byte 14) this profile's links send
     /// and accept: a received packet carrying any other value is dropped.
     /// `None` means 0. Limited to 0-31, RFC 5838 §2.1's IPv6-unicast range.
     #[garde(custom(|i: &Option<u8>, _ctx: &Config| valid_instance_id(*i)))]

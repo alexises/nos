@@ -50,8 +50,9 @@ pub const TYPE_LSU: u8 = 4;
 pub const TYPE_LSACK: u8 = 5;
 
 const HEADER_LEN: usize = 16;
-/// Offset of the §A.3.1 Instance ID in the common header.
-const INSTANCE_ID_OFFSET: usize = 12;
+/// Offset of the §A.3.1 Instance ID in the common header, right after the
+/// checksum (offset 12, kernel-filled).
+const INSTANCE_ID_OFFSET: usize = 14;
 
 /// The Instance ID of an encoded packet, `None` if it is shorter than a
 /// header. The receiver drops a packet whose Instance ID isn't its link's
@@ -944,6 +945,11 @@ mod tests {
         assert_eq!(instance_id(&encoded), Some(0));
         set_instance_id(&mut encoded, 31);
         assert_eq!(instance_id(&encoded), Some(31));
+        assert_eq!(
+            encoded[12..16],
+            [0, 0, 31, 0],
+            "checksum, instance id, reserved"
+        );
         assert_eq!(decode(&encoded).unwrap(), OspfPacket::Hello(sample()));
         assert_eq!(instance_id(&encoded[..HEADER_LEN - 1]), None);
     }
