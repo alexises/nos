@@ -216,6 +216,7 @@ async fn resync(
             export_policy: policy_cache.resolve(group.export_policy.as_deref()),
             shutdown: peer.shutdown.clone().or_else(|| group.shutdown.clone()),
             maximum_prefix: group.maximum_prefix,
+            announce_rpki_state: group.announce_rpki_state,
             confed_id: own.confederation.identifier,
             confed_member: own.confederation.is_member(group.remote_as),
         });

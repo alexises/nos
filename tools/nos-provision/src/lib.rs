@@ -280,6 +280,11 @@ pub struct Args {
     #[arg(long)]
     pub route_server_client: bool,
 
+    /// If set, `--peer-group` exchanges RFC 8097 RPKI validation states
+    /// (requires an iBGP peer-group).
+    #[arg(long)]
+    pub announce_rpki_state: bool,
+
     /// If set, adds `address-family l2vpn-evpn` (RFC 7432, AFI 25 / SAFI 70)
     /// to `--peer-group`, alongside the default IPv4 unicast.
     #[arg(long)]
@@ -1288,6 +1293,15 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             BgpPeerGroupOp::SetRouteReflectorClient {
                 instance: args.bgp_instance.clone(),
                 name: args.peer_group.clone(),
+            },
+        ));
+    }
+    if args.announce_rpki_state {
+        ops.push(ConfigOp::BgpPeerGroup(
+            BgpPeerGroupOp::SetAnnounceRpkiState {
+                instance: args.bgp_instance.clone(),
+                name: args.peer_group.clone(),
+                enabled: true,
             },
         ));
     }

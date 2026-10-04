@@ -1157,6 +1157,18 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              with an established session is closed with Cease/Administrative Reset (RFC 4486) \
              and reconnects. Changes no configuration.",
         ),
+        Topic::BgpPeerGroupAnnounceRpkiState => (
+            "Exchange RPKI origin validation state with a peer-group's iBGP peers (RFC 8097).",
+            concat!(
+                "Every route advertised to these peers carries its validation state (valid, \
+             not-found, invalid) as a non-transitive extended community, and a route received \
+             from them takes its state from that community while this instance has no RPKI \
+             data of its own (no rpki-cache, none synced yet, or expired). Requires an iBGP \
+             peer-group, checked at commit time. Changing it restarts the peer-group's sessions.",
+                " ",
+                "Stop exchanging RPKI validation state with the peer-group's peers.",
+            ),
+        ),
     };
     CommandDoc {
         topic,

@@ -892,16 +892,7 @@ pub async fn as4(w: &mut World) -> anyhow::Result<()> {
     w.start(A, Some(flags), &[]).await?;
 
     log("building/starting the 2-byte-AS ExaBGP speaker (router-g)");
-    w.dock
-        .ensure_image(
-            EXABGP_IMAGE,
-            &format!(
-                "FROM ghcr.io/exa-networks/exabgp:{EXABGP_VERSION}\n\
-                 ENV exabgp_daemon_daemonize=false exabgp_log_destination=stdout \\\n    \
-                 exabgp_log_level=DEBUG exabgp_log_all=true\n"
-            ),
-        )
-        .await?;
+    ensure_exabgp(w).await?;
     // AS4_PATH (type 17, optional transitive): one AS_SEQUENCE of one ASN.
     let as4_value = format!("0201{AS4_HIDDEN_ASN:08X}");
     // AGGREGATOR (type 7, 2-byte AS = AS_TRANS) + AS4_AGGREGATOR (type 18), and
@@ -987,16 +978,7 @@ pub async fn malformed_update(w: &mut World) -> anyhow::Result<()> {
         IP_G,
     ]);
     w.start(A, Some(flags), &[]).await?;
-    w.dock
-        .ensure_image(
-            EXABGP_IMAGE,
-            &format!(
-                "FROM ghcr.io/exa-networks/exabgp:{EXABGP_VERSION}\n\
-                 ENV exabgp_daemon_daemonize=false exabgp_log_destination=stdout \\\n    \
-                 exabgp_log_level=DEBUG exabgp_log_all=true\n"
-            ),
-        )
-        .await?;
+    ensure_exabgp(w).await?;
     let conf = format!(
         "neighbor {IP_A} {{\n    router-id {RID_G};\n    local-address {IP_G};\n    \
          local-as {ASN_G};\n    peer-as {ASN_A};\n    family {{ ipv4 unicast; }}\n    \
@@ -1096,16 +1078,7 @@ pub async fn confederation(w: &mut World) -> anyhow::Result<()> {
     g_flags.extend(confed(CONFED_ASN_A, CONFED_ASN_B));
     w.a()?.provision_flags(&g_flags).await?;
 
-    w.dock
-        .ensure_image(
-            EXABGP_IMAGE,
-            &format!(
-                "FROM ghcr.io/exa-networks/exabgp:{EXABGP_VERSION}\n\
-                 ENV exabgp_daemon_daemonize=false exabgp_log_destination=stdout \\\n    \
-                 exabgp_log_level=DEBUG exabgp_log_all=true\n"
-            ),
-        )
-        .await?;
+    ensure_exabgp(w).await?;
     // ExaBGP's config syntax has no way to write a confed segment (`{` opens
     // a block), so the bad route carries a raw AS_PATH: AS_CONFED_SEQUENCE
     // [65109] then AS_SEQUENCE [ASN_G].
@@ -1227,16 +1200,7 @@ pub async fn maximum_prefix(w: &mut World) -> anyhow::Result<()> {
     };
     w.start(A, Some(with(&["--maximum-prefix", "ipv4=2"])), &[])
         .await?;
-    w.dock
-        .ensure_image(
-            EXABGP_IMAGE,
-            &format!(
-                "FROM ghcr.io/exa-networks/exabgp:{EXABGP_VERSION}\n\
-                 ENV exabgp_daemon_daemonize=false exabgp_log_destination=stdout \\\n    \
-                 exabgp_log_level=DEBUG exabgp_log_all=true\n"
-            ),
-        )
-        .await?;
+    ensure_exabgp(w).await?;
     let routes = MAX_PREFIX_ROUTES
         .map(|p| format!("        route {p} next-hop {IP_G} as-path [ {ASN_G} ];\n"))
         .concat();
@@ -1340,11 +1304,28 @@ pub async fn maximum_prefix(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// StayRTR's VRP file (`-cache`): one VRP for `REDISTRIBUTE_PREFIX`.
+/// StayRTR's VRP file (`-cache`): one VRP for `REDISTRIBUTE_PREFIX`, and
+/// one making ExaBGP's `RPKI_INVALID_PREFIX` invalid.
 fn rpki_vrps(asn: u32) -> String {
     format!(
-        "{{\"roas\":[{{\"prefix\":\"{REDISTRIBUTE_PREFIX}\",\"maxLength\":24,\"asn\":\"AS{asn}\"}}]}}\n"
+        "{{\"roas\":[{{\"prefix\":\"{REDISTRIBUTE_PREFIX}\",\"maxLength\":24,\"asn\":\"AS{asn}\"}},\
+         {{\"prefix\":\"{RPKI_INVALID_PREFIX}\",\"maxLength\":24,\"asn\":\"AS{RPKI_WRONG_ASN}\"}}]}}\n"
     )
+}
+
+/// The ExaBGP image every ExaBGP phase runs as `router-g`, with its parser's
+/// debug log on stdout.
+async fn ensure_exabgp(w: &World) -> anyhow::Result<()> {
+    w.dock
+        .ensure_image(
+            EXABGP_IMAGE,
+            &format!(
+                "FROM ghcr.io/exa-networks/exabgp:{EXABGP_VERSION}\n\
+                 ENV exabgp_daemon_daemonize=false exabgp_log_destination=stdout \\\n    \
+                 exabgp_log_level=DEBUG exabgp_log_all=true\n"
+            ),
+        )
+        .await
 }
 
 /// RFC 6811 origin validation fed over RFC 8210 by a real cache (StayRTR,
@@ -1355,6 +1336,10 @@ fn rpki_vrps(asn: u32) -> String {
 /// - the VRP set authorizes another AS: the prefix is invalid, not learned;
 /// - the VRP file changes: StayRTR's Serial Notify brings the new set, router-a
 ///   asks router-b for a route refresh and learns it as valid — no session reset;
+/// - RFC 8097 (#162): router-c, an iBGP peer of router-a with no cache, takes
+///   each route's state from router-a's `announce-rpki-state` community
+///   (valid, invalid, not-found); ExaBGP (eBGP, `router-g`) gets no
+///   non-transitive extended community, and its own RFC 8097 tag is ignored;
 /// - StayRTR goes away: after its 10s expire interval the VRPs are dropped and
 ///   the prefix is not-found (still accepted).
 pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
@@ -1407,7 +1392,76 @@ pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
     b_flags.extend(strings(&redistribute()));
     w.start(A, Some(a_flags), &[]).await?;
     w.start(B, Some(b_flags), &[]).await?;
-    let (a, b) = (w.a()?, w.b()?);
+    // RFC 8097: router-c is an iBGP peer with no cache of its own; ExaBGP is
+    // an eBGP peer whose export policy carries one non-transitive (the RFC
+    // 8097 type) and one transitive (a route target) extended community.
+    let ibgp = |ip: &str, rid: &str, peer: &str| {
+        strings(&[
+            "--address",
+            &format!("{ip}/24"),
+            "--asn",
+            &ASN_A.to_string(),
+            "--router-id",
+            rid,
+            "--remote-as",
+            &ASN_A.to_string(),
+            "--peer",
+            peer,
+            "--announce-rpki-state",
+        ])
+    };
+    w.start(C, Some(ibgp(IP_C, RID_C, IP_A)), &[]).await?;
+    let mut pg_c = ibgp(IP_A, RID_A, IP_C);
+    pg_c.extend(strings(&["--peer-group", "pg-c"]));
+    w.a()?.provision_flags(&pg_c).await?;
+    let tag_out = policy_file(
+        "rpki-tag-out",
+        "this.bgp.extended_communities.add(67:0:0)\n\
+         this.bgp.extended_communities.add(0:2:279172874340)\naccept\n",
+    )?;
+    w.a()?
+        .provision_flags(&strings(&[
+            "--address",
+            &format!("{IP_A}/24"),
+            "--asn",
+            &ASN_A.to_string(),
+            "--router-id",
+            RID_A,
+            "--peer-group",
+            "pg-g",
+            "--remote-as",
+            &ASN_G.to_string(),
+            "--peer",
+            IP_G,
+            "--policy-name",
+            "rpki-tag-out",
+            "--policy-source-file",
+            &tag_out,
+            "--export-policy",
+            "rpki-tag-out",
+        ]))
+        .await?;
+    ensure_exabgp(w).await?;
+    let conf = format!(
+        "process rx {{\n    run /bin/sh -c \"cat > /tmp/rx.json\";\n    encoder json;\n}}\n\
+         neighbor {IP_A} {{\n    router-id {RID_G};\n    local-address {IP_G};\n    \
+         local-as {ASN_G};\n    peer-as {ASN_A};\n    family {{ ipv4 unicast; }}\n    \
+         api {{ processes [ rx ]; receive {{ parsed; update; }} }}\n    \
+         static {{\n        route {RPKI_INVALID_PREFIX} next-hop {IP_G} as-path [ {ASN_G} ];\n        \
+         route {RPKI_TAGGED_PREFIX} next-hop {IP_G} as-path [ {ASN_G} ] \
+         attribute [ 0x10 0xc0 0x4300000000000002 ];\n    }}\n}}\n"
+    );
+    w.dock
+        .start_plain(
+            "router-g",
+            EXABGP_IMAGE,
+            NET,
+            IP_G,
+            &["/etc/exabgp.conf"],
+            ("/etc", "exabgp.conf", conf.as_bytes()),
+        )
+        .await?;
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
     let cache = format!("cache={IP_RPKI}:323");
 
     log("the preferred cache never answers: router-a fails over to StayRTR");
@@ -1415,7 +1469,7 @@ pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
         .await?;
     a.wait(&format!("rpki cache connected {cache} version=1"))
         .await?;
-    a.wait(&format!("rpki end of data {cache} .*vrps=1"))
+    a.wait(&format!("rpki end of data {cache} .*vrps=2"))
         .await?;
     a.established().await?;
     let summary = a
@@ -1424,7 +1478,7 @@ pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
     anyhow::ensure!(
         summary.contains(&format!(
             "\"address\":\"{IP_RPKI}\",\"port\":323,\"preference\":1,\"state\":\"Established\",\"active\":true,\"version\":1"
-        )) && summary.contains("\"vrp_count\":1"),
+        )) && summary.contains("\"vrp_count\":2"),
         "GET /v1/bgp/rpki does not show the StayRTR session in use: {summary}"
     );
 
@@ -1452,6 +1506,9 @@ pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
     ));
     // From here on the session must never reset (the start-up one may have
     // flapped once already: that is router-b provisioning, not RPKI).
+    c.established().await?;
+    a.wait(&format!("bgp session established peer={IP_G}"))
+        .await?;
     let mut peers = String::new();
     for _ in 0..30 {
         peers = a
@@ -1473,7 +1530,7 @@ pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
     w.dock
         .upload(RPKI_CACHE, "/", "vrps.json", rpki_vrps(ASN_B).as_bytes())
         .await?;
-    a.wait(&format!("rpki end of data {cache} .*serial=1 vrps=1"))
+    a.wait(&format!("rpki end of data {cache} .*serial=1 vrps=2"))
         .await?;
     a.wait_new(
         &format!("rpki change: requesting route refresh .*peer={IP_B}"),
@@ -1482,6 +1539,43 @@ pub async fn rpki(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
     a.wait_new(&valid, valid_before, 30).await?;
+
+    log("RFC 8097: router-c (no cache) takes each state from router-a's community");
+    let learned_as = |prefix: &str, state: &str| {
+        format!("learned route for {prefix} into adj-rib-in .*validation_state={state}")
+    };
+    c.wait(&learned_as(REDISTRIBUTE_PREFIX, "Valid")).await?;
+    c.wait(&learned_as(RPKI_INVALID_PREFIX, "Invalid")).await?;
+    log("RFC 8097: ExaBGP's own \"invalid\" tag is ignored over eBGP");
+    a.wait(&learned_as(RPKI_TAGGED_PREFIX, "NotFound")).await?;
+    c.wait(&learned_as(RPKI_TAGGED_PREFIX, "NotFound")).await?;
+    anyhow::ensure!(
+        c.count(&learned_as(RPKI_TAGGED_PREFIX, "Invalid")) == 0,
+        "ExaBGP's RFC 8097 tag reached router-c"
+    );
+    log("RFC 4360: toward eBGP only the transitive extended community is left");
+    // ExaBGP prints the payload in 4-hex-digit groups: target 65:100.
+    let rt_wire = "extended-community .* payload 0002 0041 0000 0064";
+    let mut last = String::new();
+    let mut seen_rt = false;
+    for _ in 0..30 {
+        last = w.dock.logs("router-g").await?;
+        seen_rt = last.lines().any(|l| bre(rt_wire).is_match(l));
+        if seen_rt {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    anyhow::ensure!(
+        seen_rt,
+        "ExaBGP never parsed router-a's route target: {last}"
+    );
+    anyhow::ensure!(
+        !last
+            .lines()
+            .any(|l| bre("extended-community .* payload .*4300 0000 0000 000").is_match(l)),
+        "a non-transitive extended community reached ExaBGP: {last}"
+    );
 
     log("StayRTR goes away: its VRPs expire after 10s and the prefix is not-found");
     let not_found = format!("{} .*validation_state=NotFound", learned());

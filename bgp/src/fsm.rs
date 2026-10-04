@@ -1035,6 +1035,10 @@ pub async fn run(
                         rib.set_peer_max_prefix(peer.remote_address, slot.peer.maximum_prefix);
                         rib.set_peer_asn(peer.remote_address, *remote_asn);
                         rib.set_peer_confed(peer.remote_address, kind == PeerKind::ConfedExternal);
+                        rib.set_peer_rpki_state(
+                            peer.remote_address,
+                            slot.peer.announce_rpki_state && remote_is_ibgp,
+                        );
                         rib.peer_established(
                             peer.remote_address,
                             remote_is_ibgp,

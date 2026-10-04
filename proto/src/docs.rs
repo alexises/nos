@@ -293,6 +293,8 @@ topics! {
     OspfAreaNssaTranslateAlways,
     /// `OspfArea.nssa_default_originate`
     OspfAreaNssaDefaultOriginate,
+    /// `BgpPeerGroup.announce_rpki_state`
+    BgpPeerGroupAnnounceRpkiState,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

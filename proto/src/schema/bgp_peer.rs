@@ -115,6 +115,7 @@ mod tests {
             export_policy: None,
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
+            announce_rpki_state: false,
         }
     }
 
