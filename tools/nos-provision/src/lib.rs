@@ -227,6 +227,21 @@ pub struct Args {
     #[arg(long)]
     pub clear_redistribute_to_ospf: bool,
 
+    /// `--redistribute-to-ospf`'s `OSPFv3` twin: `redistribute from static to
+    /// ospfv3` on `--routing-table` (an RFC 5340 ASBR; IPv6 statics only).
+    /// Requires `--static-route` and `--ospfv3-instance`.
+    #[arg(long)]
+    pub redistribute_to_ospfv3: bool,
+
+    /// The RPL policy for `--redistribute-to-ospfv3`.
+    #[arg(long)]
+    pub redistribute_to_ospfv3_policy: Option<String>,
+
+    /// `--clear-redistribute-to-ospf`'s twin: removes the table's redistribute
+    /// rule, so the AS-External-LSAs are flushed.
+    #[arg(long)]
+    pub clear_redistribute_to_ospfv3: bool,
+
     /// If set, configures an RFC 2385 TCP MD5 password on `--peer-group`
     /// (`BgpPeerGroupOp::SetMd5Auth`) — for verifying session authentication
     /// end to end (matching passwords on both routers establish; a
@@ -1208,10 +1223,10 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 static_routing_instance: args.static_routing_instance.clone(),
             },
         ));
-    } else if args.redistribute || args.redistribute_to_ospf {
+    } else if args.redistribute || args.redistribute_to_ospf || args.redistribute_to_ospfv3 {
         bail!(
-            "--redistribute/--redistribute-to-ospf require --static-route (and \
-             --static-gateway) to also be set"
+            "--redistribute/--redistribute-to-ospf/--redistribute-to-ospfv3 require \
+             --static-route (and --static-gateway) to also be set"
         );
     }
 
@@ -1236,6 +1251,27 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 to: RedistributeTarget::Ospf,
                 policy: args.redistribute_to_ospf_policy.clone(),
             },
+        }));
+    }
+    if args.redistribute_to_ospfv3 {
+        if args.ospfv3_instance.is_none() {
+            bail!("--redistribute-to-ospfv3 requires --ospfv3-instance to also be set");
+        }
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
+            name: args.routing_table.clone(),
+            redistribute: Redistribute {
+                from: RedistributeSource::Static,
+                to: RedistributeTarget::Ospfv3,
+                policy: args.redistribute_to_ospfv3_policy.clone(),
+            },
+        }));
+    }
+    if args.clear_redistribute_to_ospfv3 {
+        if args.redistribute_to_ospfv3 {
+            bail!("--clear-redistribute-to-ospfv3 is mutually exclusive with --redistribute-to-ospfv3");
+        }
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
+            name: args.routing_table.clone(),
         }));
     }
     if args.clear_redistribute_to_ospf {
@@ -2675,6 +2711,51 @@ mod tests {
                 },
             }),
         );
+    }
+
+    #[test]
+    fn redistribute_to_ospfv3_flags() {
+        let base = [
+            "--static-route",
+            "2001:db8:77::/48",
+            "--static-gateway",
+            "2001:db8::1",
+            "--ospfv3-instance",
+            "o3",
+            "--ospfv3-router-id",
+            "1.1.1.1",
+        ];
+        let set = ops(&[
+            &base[..],
+            &["--redistribute-to-ospfv3-policy", "p"],
+            &["--redistribute-to-ospfv3"],
+        ]
+        .concat())
+        .unwrap();
+        has(
+            &set,
+            &ConfigOp::RoutingTable(RoutingTableOp::SetRedistribute {
+                name: "rt1".into(),
+                redistribute: Redistribute {
+                    from: RedistributeSource::Static,
+                    to: RedistributeTarget::Ospfv3,
+                    policy: Some("p".into()),
+                },
+            }),
+        );
+        has(
+            &ops(&["--clear-redistribute-to-ospfv3"]).unwrap(),
+            &ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute { name: "rt1".into() }),
+        );
+        assert!(err(&["--redistribute-to-ospfv3"]).contains("--static-route"));
+        assert!(err(&[
+            "--static-route",
+            "2001:db8:77::/48",
+            "--static-gateway",
+            "2001:db8::1",
+            "--redistribute-to-ospfv3"
+        ])
+        .contains("--ospfv3-instance"));
     }
 
     #[test]

@@ -356,19 +356,24 @@ fn on_dbd_in_exchange(
 }
 
 /// Handles one received LSR: looks up every requested LSA in the link's
-/// area store or its own link-local store (a key only ever lives in one —
-/// see `on_lsu_received`). If any requested LSA isn't held, that's RFC 2328
+/// area store, its own link-local store or the AS-scope store (a key only
+/// ever lives in one — see `on_lsu_received`). If any requested LSA isn't held, that's RFC 2328
 /// §10.7's `BadLSReq` — negotiation restarts from scratch rather than
 /// sending a partial/wrong answer.
 pub fn on_lsr_received(
     adj: &mut AdjacencyData,
     area_lsdb: &Lsdb,
     link_local_lsdb: &Lsdb,
+    as_lsdb: &Lsdb,
     lsr: &LsrPacket,
 ) -> Vec<Action> {
     let mut found = Vec::with_capacity(lsr.requests.len());
     for key in &lsr.requests {
-        match area_lsdb.get(key).or_else(|| link_local_lsdb.get(key)) {
+        let held = area_lsdb
+            .get(key)
+            .or_else(|| link_local_lsdb.get(key))
+            .or_else(|| as_lsdb.get(key));
+        match held {
             Some(l) => found.push(l),
             None => return vec![Action::NeighborEvent(Event::SeqNumberMismatch)],
         }
@@ -384,8 +389,9 @@ pub fn on_lsr_received(
 
 /// Handles one received LSU: installs every carried LSA — a link-local-scoped
 /// one (RFC 5340 §4.5.1, Link-LSA/E-Link-LSA) into this link's own
-/// `link_local_lsdb`, anything else into the area's `area_lsdb`; one LSU
-/// legitimately mixes both — clears any now-satisfied entries from the
+/// `link_local_lsdb`, an AS-scoped one (AS-External-LSA) into `as_lsdb`,
+/// anything else into the area's `area_lsdb`; one LSU legitimately mixes
+/// them — clears any now-satisfied entries from the
 /// request list, and acks every LSA. Fires `LoadingDone` once the request
 /// list is fully drained. Returns the actions to carry out alongside the
 /// headers that were *actually* installed/superseded (excluding rejected
@@ -394,6 +400,7 @@ pub fn on_lsu_received(
     adj: &mut AdjacencyData,
     area_lsdb: &mut Lsdb,
     link_local_lsdb: &mut Lsdb,
+    as_lsdb: &mut Lsdb,
     lsu: &LsuPacket,
 ) -> (Vec<Action>, Vec<LsaHeader>) {
     let mut acked = Vec::with_capacity(lsu.lsas.len());
@@ -401,6 +408,8 @@ pub fn on_lsu_received(
     for l in &lsu.lsas {
         let store = if lsa::is_link_local_scope(l.header.lsa_type) {
             &mut *link_local_lsdb
+        } else if lsa::is_as_scope(l.header.lsa_type) {
+            &mut *as_lsdb
         } else {
             &mut *area_lsdb
         };
@@ -1004,7 +1013,7 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             requests: vec![l.header.key()],
         };
-        let actions = on_lsr_received(&mut adj, &lsdb, &Lsdb::new(), &lsr);
+        let actions = on_lsr_received(&mut adj, &lsdb, &Lsdb::new(), &Lsdb::new(), &lsr);
         assert_eq!(actions.len(), 1);
         assert!(matches!(&actions[0], Action::SendLsu(lsas) if lsas.len() == 1));
         assert!(adj.retransmission_list.contains_key(&l.header.key()));
@@ -1037,11 +1046,11 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             requests: vec![router.header.key(), link.header.key()],
         };
-        let actions = on_lsr_received(&mut adj, &area, &link_local, &lsr);
+        let actions = on_lsr_received(&mut adj, &area, &link_local, &Lsdb::new(), &lsr);
         assert!(matches!(&actions[0], Action::SendLsu(lsas) if lsas.len() == 2));
         // A Link-LSA held only by a *different* link's store is not servable
         // here — that is exactly the RFC 5340 §4.5.1 leak this guards.
-        let actions = on_lsr_received(&mut adj, &area, &Lsdb::new(), &lsr);
+        let actions = on_lsr_received(&mut adj, &area, &Lsdb::new(), &Lsdb::new(), &lsr);
         assert_eq!(
             actions,
             vec![Action::NeighborEvent(Event::SeqNumberMismatch)]
@@ -1057,7 +1066,7 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             requests: vec![header("1.1.1.1", 1).key()],
         };
-        let actions = on_lsr_received(&mut adj, &lsdb, &Lsdb::new(), &lsr);
+        let actions = on_lsr_received(&mut adj, &lsdb, &Lsdb::new(), &Lsdb::new(), &lsr);
         assert_eq!(
             actions,
             vec![Action::NeighborEvent(Event::SeqNumberMismatch)]
@@ -1077,8 +1086,13 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![l.clone()],
         };
-        let (actions, newly_installed) =
-            on_lsu_received(&mut adj, &mut lsdb, &mut Lsdb::new(), &lsu);
+        let (actions, newly_installed) = on_lsu_received(
+            &mut adj,
+            &mut lsdb,
+            &mut Lsdb::new(),
+            &mut Lsdb::new(),
+            &lsu,
+        );
         assert_eq!(adj.request_list, []);
         assert!(lsdb.get(&l.header.key()).is_some());
         assert_eq!(
@@ -1105,14 +1119,25 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![flushed.clone()],
         };
-        let (actions, newly_installed) =
-            on_lsu_received(&mut adj, &mut lsdb, &mut Lsdb::new(), &lsu);
+        let (actions, newly_installed) = on_lsu_received(
+            &mut adj,
+            &mut lsdb,
+            &mut Lsdb::new(),
+            &mut Lsdb::new(),
+            &lsu,
+        );
         assert_eq!(newly_installed, []);
         assert!(lsdb.get(&flushed.header.key()).is_none());
         assert!(actions.contains(&Action::SendLsAck(vec![flushed.header])));
 
         lsdb.install(live);
-        let (_, newly_installed) = on_lsu_received(&mut adj, &mut lsdb, &mut Lsdb::new(), &lsu);
+        let (_, newly_installed) = on_lsu_received(
+            &mut adj,
+            &mut lsdb,
+            &mut Lsdb::new(),
+            &mut Lsdb::new(),
+            &lsu,
+        );
         assert_eq!(newly_installed, vec![flushed.header]);
         assert_eq!(
             lsdb.get(&flushed.header.key()).unwrap().header.age,
@@ -1132,8 +1157,16 @@ mod tests {
             area_id: Ipv4Addr::UNSPECIFIED,
             lsas: vec![router.clone(), link.clone()],
         };
-        let (_, newly_installed) = on_lsu_received(&mut adj, &mut area, &mut link_local, &lsu);
-        assert_eq!(newly_installed.len(), 2);
+        let mut external = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
+        external.header.lsa_type = lsa::LSA_TYPE_AS_EXTERNAL;
+        let mut lsu = lsu;
+        lsu.lsas.push(external.clone());
+        let mut as_scope = Lsdb::new();
+        let (_, newly_installed) =
+            on_lsu_received(&mut adj, &mut area, &mut link_local, &mut as_scope, &lsu);
+        assert_eq!(newly_installed.len(), 3);
+        assert!(as_scope.get(&external.header.key()).is_some());
+        assert!(area.get(&external.header.key()).is_none());
         assert!(area.get(&router.header.key()).is_some());
         assert!(area.get(&link.header.key()).is_none());
         assert!(link_local.get(&link.header.key()).is_some());

@@ -60,6 +60,7 @@ mod tests {
             router_id: "1.1.1.1".parse().unwrap(),
             areas,
             routing_table: None,
+            redistribute_policy: None,
             extended_lsa: false,
             graceful_restart_grace_period: None,
         }

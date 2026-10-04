@@ -32,7 +32,7 @@ impl std::fmt::Display for RedistributeSource {
     }
 }
 
-/// The target side of a `Redistribute` rule — `Bgp` or `Ospf`. See
+/// The target side of a `Redistribute` rule — `Bgp`, `Ospf` or `Ospfv3`. See
 /// `Redistribute`'s doc comment.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
@@ -40,6 +40,8 @@ pub enum RedistributeTarget {
     #[default]
     Bgp,
     Ospf,
+    /// Appended last: postcard encodes variants by index.
+    Ospfv3,
 }
 
 impl RedistributeTarget {
@@ -47,6 +49,7 @@ impl RedistributeTarget {
         match self {
             RedistributeTarget::Bgp => "bgp",
             RedistributeTarget::Ospf => "ospf",
+            RedistributeTarget::Ospfv3 => "ospfv3",
         }
     }
 }
@@ -358,6 +361,11 @@ pub(crate) fn valid_redistribute_rules(tables: &[RoutingTable], ctx: &Config) ->
         if redistribute.to == RedistributeTarget::Ospf && table.ospf_instance.is_none() {
             return Err(garde::Error::new(
                 "redistribute to ospf requires ospf-instance to be set",
+            ));
+        }
+        if redistribute.to == RedistributeTarget::Ospfv3 && table.ospfv3_instance.is_none() {
+            return Err(garde::Error::new(
+                "redistribute to ospfv3 requires ospfv3-instance to be set",
             ));
         }
         redistribute_policy_reference_valid(redistribute.policy.as_ref(), ctx)?;
@@ -676,6 +684,24 @@ mod tests {
         });
         let mut cfg = config_with(vec![rt], vec![], vec![static_instance("sri1")]);
         cfg.ospf_instances = vec![ospf_instance("o1")];
+        cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn redistribute_to_ospfv3_requires_ospfv3_instance() {
+        let mut rt = table("rt1", None, Some("sri1"));
+        rt.redistribute = Some(Redistribute {
+            to: RedistributeTarget::Ospfv3,
+            ..redistribute()
+        });
+        let cfg = config_with(vec![rt.clone()], vec![], vec![static_instance("sri1")]);
+        assert!(cfg.validate_with(&cfg).is_err());
+        rt.ospfv3_instance = Some("o1".to_string());
+        let mut cfg = config_with(vec![rt], vec![], vec![static_instance("sri1")]);
+        cfg.ospfv3_instances = vec![crate::schema::Ospfv3Instance {
+            name: "o1".to_string(),
+            ..Default::default()
+        }];
         cfg.validate_with(&cfg).unwrap();
     }
 
