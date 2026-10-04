@@ -56,7 +56,7 @@ use nix::sys::socket::{recvfrom, SockaddrIn6};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::io::unix::AsyncFd;
 
-use crate::packet::TrailerAuth;
+use crate::packet::{self, TrailerAuth};
 
 pub const OSPF_IP_PROTO: i32 = 89;
 pub const ALL_SPF_ROUTERS: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 5);
@@ -78,6 +78,8 @@ pub struct OspfSocket {
     /// packets leave from (bound into the digest via `Apad`), and the
     /// outgoing sequence number.
     auth: Option<(TrailerAuth, Ipv6Addr, AtomicU64)>,
+    /// RFC 5340 §A.3.1 Instance ID stamped into every packet sent.
+    instance_id: u8,
 }
 
 /// Wall-clock floor for the outgoing sequence number — mirrors
@@ -93,11 +95,12 @@ impl OspfSocket {
     /// device), and joins `FF02::5` on it. `auth` (keys plus the link's own
     /// link-local source address) makes it sign every packet it sends — and
     /// skips the kernel checksum, per RFC 7166 §2.2/§4.2 (see the module
-    /// doc comment).
+    /// doc comment). Every packet sent carries `instance_id`.
     pub fn open(
         interface: &str,
         ifindex: u32,
         auth: Option<(TrailerAuth, Ipv6Addr)>,
+        instance_id: u8,
     ) -> io::Result<Self> {
         let socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::from(OSPF_IP_PROTO)))?;
         socket.bind_device(Some(interface.as_bytes()))?;
@@ -116,23 +119,28 @@ impl OspfSocket {
         Ok(Self {
             inner: AsyncFd::new(socket)?,
             auth: auth.map(|(keys, source)| (keys, source, AtomicU64::new(unix_secs()))),
+            instance_id,
         })
     }
 
-    /// `payload` with the RFC 7166 trailer appended when authenticated — the
-    /// sequence number is one past the previous send or the current
-    /// wall-clock second, whichever is larger.
+    /// `payload` with the link's Instance ID stamped in and, when
+    /// authenticated, the RFC 7166 trailer appended (after the stamp: the
+    /// digest covers the header) — the sequence number is one past the
+    /// previous send or the current wall-clock second, whichever is larger.
     fn signed<'a>(&self, payload: &'a [u8]) -> Cow<'a, [u8]> {
-        let Some((keys, source, seq)) = &self.auth else {
+        if self.auth.is_none() && self.instance_id == 0 {
             return Cow::Borrowed(payload);
-        };
-        let floor = unix_secs();
-        let next = |prev: u64| prev.saturating_add(1).max(floor);
-        let prev = seq
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |p| Some(next(p)))
-            .unwrap_or(0);
+        }
         let mut packet = payload.to_vec();
-        keys.sign(&mut packet, next(prev), *source);
+        packet::set_instance_id(&mut packet, self.instance_id);
+        if let Some((keys, source, seq)) = &self.auth {
+            let floor = unix_secs();
+            let next = |prev: u64| prev.saturating_add(1).max(floor);
+            let prev = seq
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |p| Some(next(p)))
+                .unwrap_or(0);
+            keys.sign(&mut packet, next(prev), *source);
+        }
         Cow::Owned(packet)
     }
 

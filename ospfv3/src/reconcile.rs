@@ -198,6 +198,7 @@ async fn resync(
                     priority,
                     mtu: resolve_effective_mtu(profile, Some(resolved.mtu)),
                     auth: resolve_auth(profile),
+                    instance_id: profile.instance_id.unwrap_or(0),
                 });
             }
 
@@ -255,6 +256,7 @@ async fn resync(
                     priority,
                     mtu: resolve_effective_mtu(profile, None),
                     auth: resolve_auth(profile),
+                    instance_id: profile.instance_id.unwrap_or(0),
                 });
             }
         }

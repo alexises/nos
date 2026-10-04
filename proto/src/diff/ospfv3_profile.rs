@@ -157,6 +157,13 @@ fn changed_fields(base: &Ospfv3Profile, candidate: &Ospfv3Profile) -> Vec<FieldD
             new: Some(network_type_str(candidate)),
         });
     }
+    if base.instance_id != candidate.instance_id {
+        fields.push(FieldDiff {
+            label: "instance-id".to_string(),
+            old: Some(base.instance_id.unwrap_or(0).to_string()),
+            new: Some(candidate.instance_id.unwrap_or(0).to_string()),
+        });
+    }
     if base.auth != candidate.auth {
         fields.push(FieldDiff {
             label: "auth".to_string(),
@@ -181,6 +188,7 @@ mod tests {
             mtu: None,
             network_type: None,
             auth: None,
+            instance_id: None,
         }
     }
 

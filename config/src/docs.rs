@@ -934,6 +934,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Add, remove or select an RFC 7166 authentication-trailer key.",
             "`crypto-key <sa-id> <algorithm> <key>` adds or replaces a key (SA ID 1-65535, an HMAC-SHA algorithm; md5 is not allowed); `crypto-key <sa-id> current` makes it the key that signs outgoing packets; `delete crypto-key <sa-id>` removes it.",
         ),
+        Topic::Ospfv3ProfileInstanceId => (
+            "Set an OSPFv3 profile's instance id.",
+            "The RFC 5340 Instance ID (0-31) this profile's links put in every packet header; packets carrying another Instance ID are dropped, so both ends of a link must agree. `delete instance-id` resets it to 0.",
+        ),
         Topic::PolicyDefinition => (
             "Create or delete a routing policy.",
             "A named RPL script that BGP peer-groups and redistribution rules reference as their import, export or redistribution policy. `edit` creates it (empty) if missing and navigates into it, where its source is edited; `delete` removes it.",

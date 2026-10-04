@@ -815,6 +815,10 @@ pub struct Args {
     /// believes the profile's links have (`Ospfv3ProfileOp::SetMtu`).
     #[arg(long)]
     pub ospfv3_profile_mtu: Option<u16>,
+    /// If set (requires `--ospfv3-profile`), the profile's RFC 5340 Instance
+    /// ID (`Ospfv3ProfileOp::SetInstanceId`); `0` clears it.
+    #[arg(long)]
+    pub ospfv3_instance_id: Option<u8>,
     /// If set (requires `--ospfv3-profile`), configures a single RFC 7166
     /// authentication-trailer key on it (`Ospfv3ProfileOp::SetCryptoKey`,
     /// marked current) — `<key-id>:<algorithm>:<key>`, key-id 0-65535 (the
@@ -2025,6 +2029,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     mtu,
                 }));
             }
+            if let Some(id) = args.ospfv3_instance_id {
+                ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetInstanceId {
+                    instance: instance.clone(),
+                    area_id,
+                    name: name.clone(),
+                    instance_id: (id != 0).then_some(id),
+                }));
+            }
             if let Some(spec) = args.ospfv3_crypto_key.clone() {
                 let key = parse_ospf_crypto_key(&spec)?;
                 if key.algorithm == OspfCryptoAlgorithm::Md5 {
@@ -2037,9 +2049,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     key,
                 }));
             }
-        } else if args.ospfv3_profile_mtu.is_some() || args.ospfv3_crypto_key.is_some() {
+        } else if args.ospfv3_profile_mtu.is_some()
+            || args.ospfv3_crypto_key.is_some()
+            || args.ospfv3_instance_id.is_some()
+        {
             bail!(
-                "--ospfv3-profile-mtu/--ospfv3-crypto-key require --ospfv3-profile to also be set"
+                "--ospfv3-profile-mtu/--ospfv3-crypto-key/--ospfv3-instance-id require --ospfv3-profile to also be set"
             );
         }
     } else if args.ospfv3_profile.is_some() {
@@ -2531,6 +2546,8 @@ mod tests {
             "p6",
             "--ospfv3-profile-mtu",
             "1280",
+            "--ospfv3-instance-id",
+            "7",
             "--ospfv3-crypto-key",
             "300:hmac-sha512:k",
             "--ospfv3-interface-profile",
@@ -2551,6 +2568,15 @@ mod tests {
                     key: "k".into(),
                     is_current: true,
                 },
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetInstanceId {
+                instance: "o3".into(),
+                area_id: Ipv4Addr::UNSPECIFIED,
+                name: "p6".into(),
+                instance_id: Some(7),
             }),
         );
         has(

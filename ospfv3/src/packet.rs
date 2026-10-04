@@ -49,11 +49,22 @@ pub const TYPE_LSR: u8 = 3;
 pub const TYPE_LSU: u8 = 4;
 pub const TYPE_LSACK: u8 = 5;
 
-/// RFC 5838 multi-instance is out of scope for Phase 1 — every packet this
-/// crate sends/expects carries Instance ID `0`.
-const INSTANCE_ID: u8 = 0;
-
 const HEADER_LEN: usize = 16;
+/// Offset of the §A.3.1 Instance ID in the common header.
+const INSTANCE_ID_OFFSET: usize = 12;
+
+/// The Instance ID of an encoded packet, `None` if it is shorter than a
+/// header. The receiver drops a packet whose Instance ID isn't its link's
+/// (RFC 5340 §A.3.1); `decode` leaves it alone, since it has no link.
+pub fn instance_id(data: &[u8]) -> Option<u8> {
+    (data.len() >= HEADER_LEN).then(|| data[INSTANCE_ID_OFFSET])
+}
+
+/// Stamps `id` into an encoded packet's header — `encode_*` always writes 0,
+/// and `socket.rs` sets the link's own value just before sending.
+pub fn set_instance_id(buf: &mut [u8], id: u8) {
+    buf[INSTANCE_ID_OFFSET] = id;
+}
 /// Hello body length excluding the trailing neighbor list: Interface ID(4) +
 /// Rtr Priority(1) + Options(3) + `HelloInterval`(2) + `RouterDeadInterval`(2)
 /// + Designated Router(4) + Backup Designated Router(4).
@@ -659,7 +670,7 @@ fn encode_packet(packet_type: u8, router_id: Ipv4Addr, area_id: Ipv4Addr, body: 
     buf.extend_from_slice(&router_id.octets());
     buf.extend_from_slice(&area_id.octets());
     buf.extend_from_slice(&0u16.to_be_bytes()); // checksum, kernel-filled
-    buf.push(INSTANCE_ID);
+    buf.push(0); // instance id, stamped per link by `set_instance_id`
     buf.push(0); // reserved
     buf.extend_from_slice(body);
     debug_assert_eq!(buf.len(), total_len);
@@ -928,9 +939,13 @@ mod tests {
     }
 
     #[test]
-    fn instance_id_is_always_zero() {
-        let encoded = encode_hello(&sample());
-        assert_eq!(encoded[12], 0);
+    fn instance_id_round_trips() {
+        let mut encoded = encode_hello(&sample());
+        assert_eq!(instance_id(&encoded), Some(0));
+        set_instance_id(&mut encoded, 31);
+        assert_eq!(instance_id(&encoded), Some(31));
+        assert_eq!(decode(&encoded).unwrap(), OspfPacket::Hello(sample()));
+        assert_eq!(instance_id(&encoded[..HEADER_LEN - 1]), None);
     }
 
     const SRC: Ipv6Addr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);

@@ -23,7 +23,7 @@ use nos_proto::{
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::election;
 use crate::exchange::{self, AdjacencyData};
@@ -133,6 +133,10 @@ pub struct LinkConfig {
     /// `None` runs unauthenticated. Part of the wholesale-diffed struct, so
     /// a key change restarts the link like any other field.
     pub auth: Option<packet::TrailerAuth>,
+    /// RFC 5340 §A.3.1 Instance ID (`Ospfv3Profile.instance_id`, 0 if
+    /// unset): stamped on every packet sent, and a received packet carrying
+    /// another one is dropped.
+    pub instance_id: u8,
 }
 
 /// Hello/DBD Options for this link — `V6`/`R` always, plus RFC 7166 §2.1's
@@ -333,6 +337,17 @@ pub async fn run(
             result = socket.recv_packet() => {
                 match result {
                     Ok((source, data)) => {
+                        // Before the trailer check: another instance's packets on a
+                        // shared link are routine and may use other keys (RFC 5838).
+                        if let Some(received) =
+                            packet::instance_id(&data).filter(|i| *i != cfg.instance_id)
+                        {
+                            debug!(
+                                link = %cfg.attach_point, source = %source, received,
+                                expected = cfg.instance_id, "ospfv3 packet instance id mismatch, dropping"
+                            );
+                            continue;
+                        }
                         let (data, seq) = match packet::verify_trailer(&data, cfg.auth.as_ref(), source) {
                             Ok(verified) => verified,
                             Err(e) => {
@@ -1340,7 +1355,13 @@ impl LinkManager {
             dbd_max_headers,
             Arc::new(|cfg: &LinkConfig| {
                 let auth = cfg.auth.clone().map(|a| (a, cfg.link_local_address));
-                OspfSocket::open(&cfg.kernel_interface, cfg.interface_id, auth).map(LinkSocket::Os)
+                OspfSocket::open(
+                    &cfg.kernel_interface,
+                    cfg.interface_id,
+                    auth,
+                    cfg.instance_id,
+                )
+                .map(LinkSocket::Os)
             }),
         )
     }
@@ -2160,6 +2181,7 @@ mod tests {
             priority: 1,
             mtu: 1500,
             auth: None,
+            instance_id: 0,
         }
     }
 
@@ -2912,6 +2934,7 @@ mod tests {
                         net,
                         addr: cfg.link_local_address,
                         auth: cfg.auth.clone(),
+                        instance_id: cfg.instance_id,
                         seq: AtomicU64::new(1),
                         rx: tokio::sync::Mutex::new(rx),
                     }))
@@ -2934,6 +2957,7 @@ mod tests {
             net: Ipv6Net,
             addr: Ipv6Addr,
             auth: Option<TrailerAuth>,
+            instance_id: u8,
             seq: AtomicU64,
             rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<(Ipv6Addr, Vec<u8>)>>,
         }
@@ -2944,6 +2968,7 @@ mod tests {
                     return;
                 }
                 let mut packet = payload.to_vec();
+                crate::packet::set_instance_id(&mut packet, self.instance_id);
                 if let Some(auth) = &self.auth {
                     auth.sign(
                         &mut packet,
@@ -3089,6 +3114,25 @@ mod tests {
             a.neighbor_summaries().await[0].state,
             OspfNeighborState::Down
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn instance_id_must_match_to_reach_full() {
+        for (ia, ib, want) in [
+            (5, 5, OspfNeighborState::Full),
+            (1, 0, OspfNeighborState::Down),
+        ] {
+            let wire = Arc::new(wire::Wire::default());
+            let (a, b) = (router(&wire), router(&wire));
+            let mut la = wired_link(1, NetworkType::PointToPoint);
+            la.instance_id = ia;
+            let mut lb = wired_link(2, NetworkType::PointToPoint);
+            lb.instance_id = ib;
+            a.reconcile(vec![la], HashMap::new(), id(1)).await;
+            b.reconcile(vec![lb], loopback(2), id(2)).await;
+            settle(60).await;
+            assert_eq!(a.neighbor_summaries().await[0].state, want, "{ia}/{ib}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

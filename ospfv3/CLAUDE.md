@@ -10,7 +10,8 @@ One `nos-ospfv3d --instance <name>` process per `Ospfv3Instance`, spawned by `no
 - RFC 5286 basic loop-free alternates (`spf::alternates`/`pick_backup`, same inequality and `ponytail:` ceiling as `nos-ospfd`: link protection only, one distance-only Dijkstra per neighbor — `run_dijkstra(.., links: None)` skips next-hop derivation, which would otherwise drop vertices from a non-root viewpoint). Differs from v2: the backup is link-local too, so it carries its own `backup_interface_id` (`OspfRoute`/`RibEntry`) and can leave over a different link than the primary; and `nos-ribd` installs an IPv6 backup at 2000, not 1000 (an IPv6 primary is 1024). Verified by `nos-e2e ospfv3-lfa`.
 - RFC 7166 authentication trailer (`Ospfv3Profile.auth`) — see "Authentication" below. Verified by `nos-e2e ospfv3-auth`.
 - RFC 5187 graceful restart — see "Graceful restart" below. Verified by `nos-e2e ospfv3-graceful-restart`.
-- **Not yet** (OSPFv2-only for now): ABR, ASBR/redistribution, RFC 5838 multi-instance.
+- RFC 5340 §A.3.1 Instance ID: `Ospfv3Profile.instance_id` (0-31, `None` = 0) → `LinkConfig.instance_id`. `encode_*` write 0; the socket (`OspfSocket::signed`, and the in-memory wire) stamps the link's value with `packet::set_instance_id` before signing (the RFC 7166 digest covers the header). `link::run` drops a mismatch (`debug!`, `"ospfv3 packet instance id mismatch, dropping"`) **before** `verify_trailer`, so another instance's packets never count as auth failures. Verified by `nos-e2e ospfv3-instance-id`.
+- **Not yet** (OSPFv2-only for now): ABR, ASBR/redistribution, RFC 5838 multi-AF (AF-bit, several instances on one link).
 
 ## Authentication (RFC 7166)
 
@@ -46,4 +47,4 @@ Wire mechanics, all in `packet.rs` (`TrailerAuth::sign`/`verify_trailer`, pinned
 ## Verification
 `link::LinkSocket`/`LinkManager::with_opener` are the same test seam as `nos-ospfd`'s (see `ospf/CLAUDE.md`'s "Testing without raw sockets"); the in-memory wire signs RFC 7166 trailers like `OspfSocket`, and `link::tests` covers p2p/broadcast adjacency, SPF, extended LSAs, graceful-restart helping and trailer auth.
 
-`nos-e2e ospfv3`, `ospfv3-graceful-restart`, `ospfv3-auth`, `ospfv3-dr`, `ospfv3-lfa`, `ospfv3-flush`, `ospfv3-mtu-pagination` (see root `CLAUDE.md`).
+`nos-e2e ospfv3`, `ospfv3-graceful-restart`, `ospfv3-auth`, `ospfv3-instance-id`, `ospfv3-dr`, `ospfv3-lfa`, `ospfv3-flush`, `ospfv3-mtu-pagination` (see root `CLAUDE.md`).
