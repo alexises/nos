@@ -1461,6 +1461,119 @@ pub async fn confederation(w: &mut World) -> anyhow::Result<()> {
     bail!("ExaBGP never parsed AS_PATH [{CONFED_ID}]: {last}")
 }
 
+/// Vendor `local-as` (#166): router-a (`ASN_A`) presents `LOCAL_AS` to
+/// ExaBGP (router-g), configured with `peer-as LOCAL_AS`, so the session
+/// coming up proves the OPEN carries it. ExaBGP's route is stored as
+/// `[LOCAL_AS, ASN_G]`, a path holding `LOCAL_AS` is a loop, and router-a's
+/// redistributed route reaches ExaBGP as `[LOCAL_AS, ASN_A]` (ExaBGP's parser
+/// log, like `as4`). Then `no-prepend` + `replace-as`: the route is stored as
+/// `[ASN_G]` and ExaBGP sees `[LOCAL_AS]` alone, `ASN_A` nowhere.
+pub async fn local_as(w: &mut World) -> anyhow::Result<()> {
+    let mut base = strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--remote-as",
+        &ASN_G.to_string(),
+        "--peer",
+        IP_G,
+        "--local-as",
+        &LOCAL_AS.to_string(),
+    ]);
+    base.extend(strings(&redistribute()));
+    let with = |extra: &[&str]| {
+        let mut f = base.clone();
+        f.extend(strings(extra));
+        f
+    };
+    w.start(A, Some(base.clone()), &[]).await?;
+    ensure_exabgp(w).await?;
+    let conf = format!(
+        "neighbor {IP_A} {{\n    router-id {RID_G};\n    local-address {IP_G};\n    \
+         local-as {ASN_G};\n    peer-as {LOCAL_AS};\n    family {{ ipv4 unicast; }}\n    \
+         static {{\n        route {LOCAL_AS_LEARNED_PREFIX} next-hop {IP_G} as-path [ {ASN_G} ];\n        \
+         route {LOCAL_AS_LOOP_PREFIX} next-hop {IP_G} as-path [ {ASN_G} {LOCAL_AS} ];\n    }}\n}}\n"
+    );
+    w.dock
+        .start_plain(
+            "router-g",
+            EXABGP_IMAGE,
+            NET,
+            IP_G,
+            &["/etc/exabgp.conf"],
+            ("/etc", "exabgp.conf", conf.as_bytes()),
+        )
+        .await?;
+    let a = w.a()?;
+    let est = format!("bgp session established peer={IP_G} remote_asn={ASN_G}");
+    log("ExaBGP expects peer-as LOCAL_AS: the session coming up proves the OPEN carries it");
+    a.wait(&est).await?;
+
+    log("inbound: LOCAL_AS is prepended to ExaBGP's path");
+    a.wait(&format!(
+        "loc-rib best path for {LOCAL_AS_LEARNED_PREFIX} updated .*as_path=\\[{LOCAL_AS}, {ASN_G}\\]"
+    ))
+    .await?;
+    log("a path holding LOCAL_AS from this peer is a loop");
+    a.wait(&format!(
+        "dropping bgp update: as_path already contains our own asn .*peer={IP_G} as_path=\\[{ASN_G}, {LOCAL_AS}\\]"
+    ))
+    .await?;
+    anyhow::ensure!(
+        a.count(&format!("loc-rib best path for {LOCAL_AS_LOOP_PREFIX}")) == 0,
+        "router-a installed {LOCAL_AS_LOOP_PREFIX}"
+    );
+
+    log("outbound: ExaBGP parses router-a's route as AS_SEQUENCE [LOCAL_AS, ASN_A]");
+    let both = format!("as-path .* len 0x0a payload 0202 0000 {LOCAL_AS:04X} 0000 {ASN_A:04X}");
+    exabgp_parsed(w, &both, 0, None).await?;
+
+    log("no-prepend + replace-as: a new session, ExaBGP's path stored unchanged");
+    let seen = w.dock.logs("router-g").await?.lines().count();
+    let est_before = a.count(&est);
+    a.provision_flags(&with(&["--local-as-no-prepend", "--local-as-replace-as"]))
+        .await?;
+    a.wait_new(&est, est_before, 60).await?;
+    let unchanged =
+        format!("loc-rib best path for {LOCAL_AS_LEARNED_PREFIX} updated .*as_path=\\[{ASN_G}\\]");
+    a.wait_new(&unchanged, 0, 30).await?;
+
+    log("replace-as: ExaBGP parses [LOCAL_AS] alone, ASN_A nowhere");
+    let only = format!("as-path .* len 0x06 payload 0201 0000 {LOCAL_AS:04X}");
+    exabgp_parsed(w, &only, seen, Some(&format!("{ASN_A:04X}"))).await
+}
+
+/// Waits for ExaBGP's parser log (router-g) to show a line matching `want`
+/// among the lines after the first `skip`; with `leak`, fails if any
+/// `as-path` line there contains it.
+async fn exabgp_parsed(
+    w: &World,
+    want: &str,
+    skip: usize,
+    leak: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..30 {
+        last = w.dock.logs("router-g").await?;
+        let as_paths: Vec<&str> = last
+            .lines()
+            .skip(skip)
+            .filter(|l| bre("as-path .* payload").is_match(l))
+            .collect();
+        if as_paths.iter().any(|l| bre(want).is_match(l)) {
+            if let Some(l) = leak.and_then(|x| as_paths.iter().find(|l| l.contains(x))) {
+                bail!("router-a leaked an AS to ExaBGP: {l}");
+            }
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("ExaBGP never parsed `{want}`: {last}")
+}
+
 /// RFC 4486 §4 maximum-prefix (#79): ExaBGP (router-g) announces
 /// `MAX_PREFIX_ROUTES` (3) IPv4 routes to router-a, whose peer-group allows
 /// fewer. A trip closes the session with Cease subcode 1 and holds the peer

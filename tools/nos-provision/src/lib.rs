@@ -342,6 +342,15 @@ pub struct Args {
     #[arg(long)]
     pub clear_damping: bool,
 
+    /// If set, sets `--peer-group`'s vendor local-as
+    /// (`BgpPeerGroupOp::SetLocalAs`), with the two flags below.
+    #[arg(long)]
+    pub local_as: Option<u32>,
+    #[arg(long)]
+    pub local_as_no_prepend: bool,
+    #[arg(long)]
+    pub local_as_replace_as: bool,
+
     /// One `<family>=<limit>` per repetition (`ipv4`, `ipv6`, `l2vpn-evpn`):
     /// sets `--peer-group`'s RFC 4486 maximum-prefix for that family
     /// (`BgpPeerGroupOp::SetMaximumPrefix`), with the two flags below.
@@ -1541,6 +1550,17 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             },
         }));
     }
+    if let Some(asn) = args.local_as {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetLocalAs {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            local_as: nos_proto::BgpLocalAs {
+                asn,
+                no_prepend: args.local_as_no_prepend,
+                replace_as: args.local_as_replace_as,
+            },
+        }));
+    }
     if args.clear_damping {
         ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearDamping {
             instance: args.bgp_instance.clone(),
@@ -2484,6 +2504,9 @@ mod tests {
             "--damping-half-life",
             "20",
             "--clear-damping",
+            "--local-as",
+            "65009",
+            "--local-as-replace-as",
             "--maximum-prefix",
             "ipv4=2",
             "--maximum-prefix-warning-only",
@@ -2544,6 +2567,18 @@ mod tests {
                 damping: nos_proto::BgpDamping {
                     half_life: 20,
                     ..Default::default()
+                },
+            }),
+        );
+        has(
+            &ops,
+            &pg(BgpPeerGroupOp::SetLocalAs {
+                instance: "r1".into(),
+                name: "pg1".into(),
+                local_as: nos_proto::BgpLocalAs {
+                    asn: 65009,
+                    no_prepend: false,
+                    replace_as: true,
                 },
             }),
         );

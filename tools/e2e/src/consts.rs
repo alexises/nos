@@ -72,6 +72,13 @@ pub const CONFED_ASN_B: u32 = 65102;
 pub const CONFED_LEARNED_PREFIX: &str = "203.0.117.0/24";
 pub const CONFED_LOOP_PREFIX: &str = "203.0.118.0/24";
 pub const CONFED_BAD_PREFIX: &str = "203.0.119.0/24";
+/// `local-as`: the AS router-a (`ASN_A`) presents to ExaBGP (router-g,
+/// `ASN_G`, configured with `peer-as LOCAL_AS`). ExaBGP announces
+/// `LOCAL_AS_LEARNED_PREFIX` normally and `LOCAL_AS_LOOP_PREFIX` with
+/// `LOCAL_AS` in its path.
+pub const LOCAL_AS: u32 = 65020;
+pub const LOCAL_AS_LEARNED_PREFIX: &str = "203.0.122.0/24";
+pub const LOCAL_AS_LOOP_PREFIX: &str = "203.0.123.0/24";
 /// `rpki`: the StayRTR cache (RFC 8210) router-a validates against, and an
 /// address nothing answers on, configured as the more preferred cache so the
 /// phase sees the failover. The ASN the first VRP set wrongly authorizes for

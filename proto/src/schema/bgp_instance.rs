@@ -320,7 +320,37 @@ pub(crate) fn valid_route_reflection_and_server(instances: &[BgpInstance]) -> ga
                     "route-server-client requires a peer-group outside the confederation (remote-as must not be a confederation peer)",
                 ));
             }
+            if let Some(l) = group.local_as {
+                valid_local_as(instance, group.remote_as, group.route_server_client, l.asn)?;
+            }
         }
+    }
+    Ok(())
+}
+
+/// `local-as` only means something toward a peer outside our AS (and
+/// confederation), and must be an AS that is neither ours nor the peer's.
+fn valid_local_as(
+    instance: &BgpInstance,
+    remote_as: u32,
+    route_server_client: bool,
+    asn: u32,
+) -> garde::Result {
+    let err = |m: &str| Err(garde::Error::new(format!("local-as {m}")));
+    if asn == 0 || asn == u32::MAX {
+        return err("must be in 1..=4294967294");
+    }
+    if remote_as == instance.asn || instance.confederation.is_member(remote_as) {
+        return err("requires an eBGP peer-group outside the confederation");
+    }
+    if asn == instance.asn || instance.confederation.identifier == Some(asn) {
+        return err("must differ from this instance's asn and confederation identifier");
+    }
+    if asn == remote_as {
+        return err("must differ from the peer-group's remote-as");
+    }
+    if route_server_client {
+        return err("and route-server-client are mutually exclusive");
     }
     Ok(())
 }
@@ -430,6 +460,7 @@ mod tests {
                 shutdown: None,
                 maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
                 announce_rpki_state: false,
+                local_as: None,
             },
             BgpPeerGroup {
                 name: "invalid".to_string(),
@@ -452,6 +483,7 @@ mod tests {
                 shutdown: None,
                 maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
                 announce_rpki_state: false,
+                local_as: None,
             },
         ];
         let cfg = config_with(vec![inst]);
@@ -486,6 +518,7 @@ mod tests {
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
+            local_as: None,
         }
     }
 
@@ -626,6 +659,36 @@ mod tests {
         );
         let c: RpkiCache = serde_json::from_str(r#"{"address":"192.0.2.1"}"#).unwrap();
         assert_eq!((c.port, c.preference), (323, 0));
+    }
+
+    #[test]
+    fn local_as_is_checked() {
+        let check = |remote_as: u32, asn: u32, rs: bool, confed: bool| {
+            let mut inst = instance("r1", 65000);
+            if confed {
+                inst.confederation = crate::schema::BgpConfederation {
+                    identifier: Some(65100),
+                    peers: vec![65002],
+                };
+            }
+            let mut g = group_with_flags("pg1", remote_as, false, rs);
+            g.local_as = Some(crate::schema::BgpLocalAs {
+                asn,
+                ..Default::default()
+            });
+            inst.peer_groups = vec![g];
+            let cfg = config_with(vec![inst]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(check(65001, 65009, false, false));
+        assert!(check(65001, 65009, false, true), "external, confederated");
+        assert!(!check(65000, 65009, false, false), "iBGP group");
+        assert!(!check(65002, 65009, false, true), "confed member group");
+        assert!(!check(65001, 65000, false, false), "== asn");
+        assert!(!check(65001, 65100, false, true), "== identifier");
+        assert!(!check(65001, 65001, false, false), "== remote-as");
+        assert!(!check(65001, 0, false, false), "asn 0");
+        assert!(!check(65001, 65009, true, false), "route-server-client");
     }
 
     #[test]

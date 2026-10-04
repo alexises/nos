@@ -573,6 +573,29 @@ set bgp instance r1 confederation peer 65102
 
 A peer-group whose `remote-as` is a confederation peer is confederation eBGP. Toward it NOS sends its member AS in the OPEN, prepends it in an `AS_CONFED_SEQUENCE`, and keeps the next hop, `MED` and `LOCAL_PREF` as for iBGP. Toward a peer outside the confederation it sends the identifier in the OPEN, removes the confederation segments from the AS path and prepends the identifier, so that peer configures `remote-as 65100`. A path that already holds the identifier, or that holds the member AS in a confederation segment, is a loop and is dropped. A peer outside the confederation never sends confederation segments: a route that has them is treated as withdrawn, and so is any such route when no confederation is configured. Changing the confederation resets the instance's sessions. `delete confederation peer <asn>` and `delete confederation identifier` undo it.
 
+### Local AS (local-as)
+
+`local-as` makes a peer-group's peers see another AS than the instance's own, for example while moving a router to a new AS without reconfiguring every neighbour at once. It is a vendor feature (IOS, Junos), not an RFC. Call G the AS those peers would see otherwise: the instance's `asn`, or the confederation identifier.
+
+- the OPEN carries the local AS, so the peers configure `remote-as <local-as>`;
+- routes sent to the peers carry `local-as G …`; with `replace-as`, `local-as …` and G is never sent;
+- routes received from the peers get the local AS prepended, so the import policy and every other peer see it as a real hop; `no-prepend` stores them unchanged;
+- a route from these peers that already holds the local AS is a loop and is dropped; the same path from another peer is accepted.
+
+IOS's `local-as <n> no-prepend replace-as` is `local-as asn <n> no-prepend replace-as`. Changing it resets the peer-group's sessions.
+
+```
+edge-1(t9/bgp-instance:r1/peer-group:pg1)> set local-as asn 65020 no-prepend replace-as
+```
+
+```sh
+$C -X PUT -H 'Content-Type: application/json' \
+  -d '{"asn":65020,"no_prepend":true,"replace_as":true}' \
+  $B/v1/transactions/t9/bgp-instance/r1/peer-group/pg1/local-as
+```
+
+The commit refuses `local-as` on an iBGP or confederation peer-group, together with `route-server-client`, and equal to the instance's `asn`, its confederation identifier or the group's `remote-as`. `delete local-as` removes it. Not supported: `dual-as` (accepting the peer with either AS).
+
 ### RPKI origin validation (RFC 6811, RFC 8210)
 
 NOS checks each route's origin AS against the Validated ROA Payloads (VRPs) of an RPKI cache, such as Routinator or StayRTR. Give the instance one or more caches:
@@ -693,6 +716,7 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 | connect-retry-time | `… connect-retry-time <s>` / `set connect-retry-time <s>`; `delete connect-retry-time` | `…/connect-retry-time`, number or `null` | 1 to 65535 seconds; default 120 | ≥ 1 | Wait between two connection attempts | `show config` |
 | mrai | `… mrai <s>` / `set mrai <s>`; `delete mrai` | `…/mrai`, number or `null` | 0 to 65535 seconds; default: unset (no pacing) | none | Minimum interval between advertisements of one prefix to one peer | `show config` |
 | damping | `… damping [half-life <s>] [reuse <n>] [suppress <n>] [max-suppress <s>]` / `set damping …`; `delete damping` | `…/damping`, `{"half_life":900,"reuse":750,"suppress":6000,"max_suppress":3600}` or `null` | default: off; parameters default to 900 / 750 / 6000 / 3600 | eBGP peer-group only; half-life > 0, reuse > 0, suppress > reuse, max-suppress ≥ half-life | Flap damping of received routes | `show log nos-bgpd[<i>]` |
+| local-as | `… local-as asn <n> [no-prepend] [replace-as]` / `set local-as …`; `delete local-as` | `…/local-as`, `{"asn":65020,"no_prepend":false,"replace_as":false}` or `null` | ASN 1 to 4294967294; default: off | eBGP peer-group outside the confederation; not the instance's asn, identifier or remote-as; not with route-server-client | AS presented to the peers; see [Local AS](#local-as-local-as) | `remote_asn` in the peer's `GET /v1/bgp/summary` |
 | max-hops | `… max-hops <n>` / `set max-hops <n>`; `delete max-hops` | `…/max-hops`, number or `null` | 1 to 254; default: off | 1 to 254 | GTSM: TTL 255 out, minimum TTL `256 - n` in | `show config` |
 | md5-password | `… md5-password <pw>` / `set md5-password <pw>`; `delete auth` | `…/auth`, `{"Md5":{"password":"…"}}` | 1 to 80 bytes; default: no authentication | 1 to 80 bytes | TCP MD5 signature; replaces any TCP-AO keys | `show bgp brief` (session up) |
 | ao-key | `… ao-key <send-id> <recv-id> hmac-sha1\|aes-cmac <secret>` / `set ao-key …`; `delete ao-key <send-id>`; `delete auth` | `…/auth`, `{"Ao":{"keys":[{"send_id":1,"recv_id":1,"algorithm":"HmacSha1_96","key":"…","is_current":true,"is_rnext":false,"exclude_options":false}]}}` | IDs 0 to 255; secret 1 to 80 bytes | at least one key; send IDs unique; exactly one current; at most one rnext | TCP-AO; replaces an MD5 password | `show bgp brief` (`ao-current`, `ao-rnext`, counters) |

@@ -86,6 +86,15 @@ pub fn render_bgp_peer_group(group: &BgpPeerGroup, local_asn: u32) -> String {
             d.half_life, d.reuse, d.suppress, d.max_suppress
         );
     }
+    if let Some(l) = group.local_as {
+        let _ = write!(line, ", local-as asn {}", l.asn);
+        if l.no_prepend {
+            line.push_str(" no-prepend");
+        }
+        if l.replace_as {
+            line.push_str(" replace-as");
+        }
+    }
     for af in nos_proto::AddressFamily::ALL {
         if let Some(l) = group.maximum_prefix.get(af) {
             let _ = write!(line, ", maximum-prefix {af} limit {}", l.limit);
@@ -2350,6 +2359,7 @@ mod tests {
             shutdown: None,
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
+            local_as: None,
         }
     }
 

@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{
-    AddressFamily, BgpAoKey, BgpAuth, BgpDamping, BgpPeerGroup, BgpPrefixLimit, BgpShutdown,
-    Config, NextHopMode, SourceAddress,
+    AddressFamily, BgpAoKey, BgpAuth, BgpDamping, BgpLocalAs, BgpPeerGroup, BgpPrefixLimit,
+    BgpShutdown, Config, NextHopMode, SourceAddress,
 };
 
 use super::bgp_instance::find_instance_mut;
@@ -229,6 +229,16 @@ pub enum BgpPeerGroupOp {
         name: String,
         family: AddressFamily,
     },
+    /// Sets the vendor `local-as` (see `BgpLocalAs`).
+    SetLocalAs {
+        instance: String,
+        name: String,
+        local_as: BgpLocalAs,
+    },
+    ClearLocalAs {
+        instance: String,
+        name: String,
+    },
 }
 
 impl BgpPeerGroupOp {
@@ -258,6 +268,7 @@ impl BgpPeerGroupOp {
                         shutdown: None,
                         maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
                         announce_rpki_state: false,
+                        local_as: None,
                     });
                 }
                 Ok(())
@@ -414,6 +425,18 @@ impl BgpPeerGroupOp {
             }
             BgpPeerGroupOp::ClearDamping { instance, name } => {
                 find_group_mut(config, instance, name)?.damping = None;
+                Ok(())
+            }
+            BgpPeerGroupOp::SetLocalAs {
+                instance,
+                name,
+                local_as,
+            } => {
+                find_group_mut(config, instance, name)?.local_as = Some(*local_as);
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearLocalAs { instance, name } => {
+                find_group_mut(config, instance, name)?.local_as = None;
                 Ok(())
             }
             BgpPeerGroupOp::SetMaxHops {
@@ -648,6 +671,7 @@ mod tests {
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
+            local_as: None,
         }
     }
 
@@ -936,6 +960,31 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].peer_groups[0].damping, None);
+    }
+
+    #[test]
+    fn set_and_clear_local_as() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        let local_as = BgpLocalAs {
+            asn: 65009,
+            no_prepend: true,
+            replace_as: false,
+        };
+        BgpPeerGroupOp::SetLocalAs {
+            instance: "r1".into(),
+            name: "pg1".into(),
+            local_as,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].local_as, Some(local_as));
+        BgpPeerGroupOp::ClearLocalAs {
+            instance: "r1".into(),
+            name: "pg1".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].local_as, None);
     }
 
     #[test]

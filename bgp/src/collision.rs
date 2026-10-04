@@ -420,6 +420,7 @@ mod tests {
             shutdown: None,
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
+            local_as: None,
             confed_id: None,
             confed_member: false,
         })

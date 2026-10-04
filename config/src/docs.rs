@@ -239,6 +239,19 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Clear a peer-group's route refresh stale time (back to 360 seconds).",
             ),
         ),
+        Topic::BgpPeerGroupLocalAs => (
+            "Set the AS a peer-group's peers see instead of this instance's own.",
+            concat!(
+                "Sets local-as on an eBGP peer-group (`asn <n>`, optional `no-prepend` and `replace-as`; vendor local-as, no RFC) — the OPEN carries \
+             this AS, routes sent to the peers get it prepended in front of this instance's own AS \
+             (only it with replace-as), and routes received from them get it prepended to their \
+             AS_PATH unless no-prepend is set. A route from these peers that already holds it is \
+             dropped as a loop. Used to migrate a router to a new AS without reconfiguring every \
+             neighbour at once.",
+                " ",
+                "Clear a peer-group's local-as (its peers see this instance's own AS again).",
+            ),
+        ),
         Topic::BgpPeerGroupMaxHops => (
             "Set how many router hops away a peer-group's peers may be.",
             concat!(

@@ -307,6 +307,8 @@ topics! {
     BgpInstanceMaximumPaths,
     /// `BgpPeerGroup.route_refresh_stale_time`
     BgpPeerGroupRouteRefreshStaleTime,
+    /// `BgpPeerGroup.local_as`
+    BgpPeerGroupLocalAs,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

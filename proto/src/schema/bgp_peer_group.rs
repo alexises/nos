@@ -177,6 +177,26 @@ pub(super) fn valid_damping(d: Option<&BgpDamping>) -> garde::Result {
     Ok(())
 }
 
+/// Vendor `local-as` (IOS/Junos; no RFC): the AS this group's peers see
+/// instead of the instance's own (its `asn`, or the confederation
+/// identifier). The OPEN carries `asn`; outbound `AS_PATH` gets `[asn, own]`
+/// (`[asn]` with `replace_as`); a received path gets `asn` prepended unless
+/// `no_prepend`, and holding `asn` counts as a loop for this group's routes.
+/// External (non-confederation eBGP) peer-groups only
+/// (`bgp_instance::valid_route_reflection_and_server`).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
+pub struct BgpLocalAs {
+    #[cli(topic = BgpPeerGroupLocalAs)]
+    pub asn: u32,
+    #[serde(default)]
+    #[cli(topic = BgpPeerGroupLocalAs)]
+    pub no_prepend: bool,
+    #[serde(default)]
+    #[cli(topic = BgpPeerGroupLocalAs)]
+    pub replace_as: bool,
+}
+
 /// One address family's RFC 4486 §4 maximum-prefix limit: more than `limit`
 /// accepted (post-import-policy) prefixes from one peer closes the session
 /// with Cease/Maximum Number of Prefixes Reached, unless `warning_only`.
@@ -398,6 +418,12 @@ pub struct BgpPeerGroup {
     #[garde(skip)]
     #[cli(topic = BgpPeerGroupAnnounceRpkiState)]
     pub announce_rpki_state: bool,
+
+    /// See `BgpLocalAs`; `None` presents the instance's own AS.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BgpPeerGroupLocalAs)]
+    pub local_as: Option<BgpLocalAs>,
 }
 
 /// `"accept-all"`/`"deny-all"` are always valid regardless of what's
@@ -662,6 +688,7 @@ mod tests {
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
+            local_as: None,
         }
     }
 

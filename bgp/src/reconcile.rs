@@ -222,6 +222,7 @@ async fn resync(
             shutdown: peer.shutdown.clone().or_else(|| group.shutdown.clone()),
             maximum_prefix: group.maximum_prefix,
             announce_rpki_state: group.announce_rpki_state,
+            local_as: group.local_as,
             confed_id: own.confederation.identifier,
             confed_member: own.confederation.is_member(group.remote_as),
         });

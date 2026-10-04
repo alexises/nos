@@ -113,6 +113,8 @@ pub struct ResolvedPeer {
     pub maximum_prefix: nos_proto::BgpMaximumPrefix,
     /// The peer-group's RFC 8097 `announce_rpki_state` (see `BgpRib::set_peer_rpki_state`).
     pub announce_rpki_state: bool,
+    /// The peer-group's vendor `local-as` (see `BgpRib::set_peer_local_as`).
+    pub local_as: Option<nos_proto::BgpLocalAs>,
     /// RFC 5065: this instance's confederation identifier (what an
     /// external peer's OPEN carries), and whether `remote_as` is another
     /// member AS. Here rather than read from `LocalIdentity` so a change
@@ -143,10 +145,13 @@ impl ResolvedPeer {
     }
 
     /// The AS this instance presents in its OPEN to this peer (RFC 5065
-    /// §4): the confederation identifier to an external peer, else `asn`.
+    /// §4): the confederation identifier to an external peer, else `asn` —
+    /// or the peer-group's `local-as`, for an external peer.
     pub fn open_as(&self, local_asn: u32) -> u32 {
         match self.kind(local_asn) {
-            PeerKind::External => self.confed_id.unwrap_or(local_asn),
+            PeerKind::External => self
+                .local_as
+                .map_or(self.confed_id.unwrap_or(local_asn), |l| l.asn),
             PeerKind::Internal | PeerKind::ConfedExternal => local_asn,
         }
     }
@@ -1117,6 +1122,7 @@ mod tests {
             shutdown: None,
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
+            local_as: None,
             confed_id: None,
             confed_member: false,
         }
@@ -1143,6 +1149,24 @@ mod tests {
             ..peer("10.0.0.1")
         };
         assert_eq!(plain.open_as(65101), 65101);
+        // local-as wins toward an external peer only.
+        let local_as = Some(nos_proto::BgpLocalAs {
+            asn: 65009,
+            ..Default::default()
+        });
+        let l = |remote_as, confed_member| ResolvedPeer {
+            local_as,
+            ..p(remote_as, confed_member)
+        };
+        assert_eq!(l(65003, false).open_as(65101), 65009);
+        assert_eq!(l(65101, false).open_as(65101), 65101);
+        assert_eq!(l(65102, true).open_as(65101), 65101);
+        let plain = ResolvedPeer {
+            remote_as: 65003,
+            local_as,
+            ..peer("10.0.0.1")
+        };
+        assert_eq!(plain.open_as(65101), 65009);
     }
 
     #[test]

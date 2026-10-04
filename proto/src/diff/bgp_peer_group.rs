@@ -113,6 +113,22 @@ fn damping_str(pg: &BgpPeerGroup) -> String {
     )
 }
 
+fn local_as_str(pg: &BgpPeerGroup) -> String {
+    pg.local_as.map_or_else(
+        || "unset".to_string(),
+        |l| {
+            let mut s = l.asn.to_string();
+            if l.no_prepend {
+                s.push_str(" no-prepend");
+            }
+            if l.replace_as {
+                s.push_str(" replace-as");
+            }
+            s
+        },
+    )
+}
+
 fn prefix_limit_str(l: Option<crate::schema::BgpPrefixLimit>) -> String {
     l.map_or_else(
         || "unset".to_string(),
@@ -284,6 +300,13 @@ fn changed_fields(base: &BgpPeerGroup, candidate: &BgpPeerGroup) -> Vec<FieldDif
             label: "announce-rpki-state".to_string(),
             old: Some(yes_no(base.announce_rpki_state)),
             new: Some(yes_no(candidate.announce_rpki_state)),
+        });
+    }
+    if base.local_as != candidate.local_as {
+        fields.push(FieldDiff {
+            label: "local-as".to_string(),
+            old: Some(local_as_str(base)),
+            new: Some(local_as_str(candidate)),
         });
     }
     for af in crate::schema::AddressFamily::ALL {
@@ -482,6 +505,7 @@ mod tests {
             shutdown: None,
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
+            local_as: None,
         }
     }
 
@@ -567,6 +591,11 @@ mod tests {
             export_policy: Some("out".to_string()),
             shutdown: Some(BgpShutdown { message: None }),
             announce_rpki_state: true,
+            local_as: Some(crate::schema::BgpLocalAs {
+                asn: 65009,
+                no_prepend: true,
+                replace_as: true,
+            }),
             maximum_prefix: crate::schema::BgpMaximumPrefix {
                 ipv4: Some(crate::schema::BgpPrefixLimit {
                     limit: 2,
@@ -615,6 +644,7 @@ mod tests {
                 ("export-policy", nos_rpl::DENY_ALL_NAME, "out"),
                 ("shutdown", "no", "yes"),
                 ("announce-rpki-state", "no", "yes"),
+                ("local-as", "unset", "65009 no-prepend replace-as"),
                 (
                     "maximum-prefix ipv4",
                     "unset",
