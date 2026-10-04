@@ -161,6 +161,29 @@ pub const H_HOST: &str = "e2e-h";
 pub const CE_IP: &str = "192.168.10.10";
 pub const H_IP: &str = "192.168.10.20";
 pub const ESI_MAC: &str = "02:00:00:00:00:0e";
+/// `evpn-l3`: each PE's IP-VRF (`L3_TABLE`, one shared Route Target, its own
+/// RD) with a host on its own docker network behind it. The subnets differ
+/// (RFC 2544 benchmarking blocks, so no other docker network on the host
+/// collides), so only a Type-5 route can join them.
+pub const L3_TABLE: &str = "tenant";
+pub const L3_VNI: u32 = 5000;
+pub const L3_RT: &str = "65000:5000";
+pub const L3_RD_A: &str = "65001:5000";
+pub const L3_RD_B: &str = "65002:5000";
+pub const NET_L3_A: &str = "nos-verify-net-l3-a";
+pub const NET_L3_B: &str = "nos-verify-net-l3-b";
+pub const L3_SUBNET_A: &str = "198.18.1.0/24";
+pub const L3_SUBNET_B: &str = "198.18.2.0/24";
+/// Each PE's address on its host's network (docker assigns it, nos configures
+/// the same one), and the host's own.
+pub const L3_GW_A: &str = "198.18.1.2";
+pub const L3_GW_B: &str = "198.18.2.2";
+pub const L3_HOST_IP_A: &str = "198.18.1.10";
+pub const L3_HOST_IP_B: &str = "198.18.2.10";
+/// `evpn`'s interop check: the Type-5 GoBGP announces into router-a's IP-VRF.
+pub const L3_GOBGP_PREFIX: &str = "198.18.9.0/24";
+pub const L3_GOBGP_RT: &str = "65010:5000";
+pub const L3_GOBGP_RMAC: &str = "aa:bb:cc:00:00:50";
 /// `evpn-v6`: each PE's IPv6 VTEP/BGP address on eth0 (in `SUBNET6`, above
 /// the low addresses docker hands out — nos-interfaced removes docker's own
 /// anyway), selected as the VTEP by its label.

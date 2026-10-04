@@ -96,7 +96,7 @@ use crate::mac_mobility::MacMobility;
 use crate::message::{self, UpdateMessage};
 
 mod evpn_out;
-pub use evpn_out::AdvertisedEvpn;
+pub use evpn_out::{AdvertisedEvpn, EvpnSource};
 
 /// Adapts a `RibRoute` into `nos_rpl`'s input shape — see root `CLAUDE.md`'s
 /// "Execution model". A plain function, not an adapter trait: there is
@@ -545,11 +545,14 @@ pub struct BgpRib {
     stale: HashMap<IpAddr, HashSet<IpNet>>,
     /// EVPN routes originated by each `nos-fdbd` (keyed by broadcast domain),
     /// and what was last announced to each peer — see `evpn_out`.
-    evpn_local: HashMap<String, HashMap<nos_proto::EvpnKey, nos_proto::EvpnRoute>>,
+    evpn_local: HashMap<evpn_out::EvpnSource, HashMap<nos_proto::EvpnKey, nos_proto::EvpnRoute>>,
     evpn_adj_rib_out: HashMap<IpAddr, HashMap<EvpnNlri, AdvertisedEvpn>>,
     /// Broadcast domains whose `redistribute from mac to bgp` names this
     /// instance — the ones `fdb_push_client` feeds received EVPN routes to.
     fdb_domains: Vec<String>,
+    /// Routing tables whose `evpn.bgp_instance` names this instance — the
+    /// ones `fdb_push_client` feeds received Type-5 routes to.
+    evpn_tables: Vec<String>,
     /// The unfiltered prefix set as told by `nos-ribd`'s
     /// `RedistributeUpdate` — the raw truth `redistributed` below is
     /// filtered from (see `apply_redistribute_update`/`set_redistribute_policy`).
@@ -631,6 +634,7 @@ impl BgpRib {
             evpn_local: HashMap::new(),
             evpn_adj_rib_out: HashMap::new(),
             fdb_domains: Vec::new(),
+            evpn_tables: Vec::new(),
             redistribute_raw: HashSet::new(),
             redistributed: HashMap::new(),
             redistribute_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
@@ -731,6 +735,15 @@ impl BgpRib {
 
     pub fn fdb_domains(&self) -> &[String] {
         &self.fdb_domains
+    }
+
+    /// Sets the IP-VRFs (routing tables) fed received Type-5 routes.
+    pub fn set_evpn_tables(&mut self, tables: Vec<String>) {
+        self.evpn_tables = tables;
+    }
+
+    pub fn evpn_tables(&self) -> &[String] {
+        &self.evpn_tables
     }
 
     /// Sets this instance's owning `RoutingTable` name (`BgpInstance.routing_table`).
@@ -2424,6 +2437,124 @@ mod tests {
         let r = snap.values().next().unwrap();
         assert_eq!(r.next_hop, addr("192.0.2.1"));
         assert_eq!(r.ext_communities, vec![0x0002_fde8_0000_2710]);
+    }
+
+    fn type5(prefix: &str) -> nos_proto::EvpnRoute {
+        nos_proto::EvpnRoute {
+            key: nos_proto::EvpnKey::IpPrefix {
+                rd: [0, 0, 0xfd, 0xe8, 0, 0, 0x13, 0x88],
+                prefix: prefix.parse().unwrap(),
+            },
+            vni: 5000,
+            next_hop: addr("192.0.2.9"),
+            ext_communities: vec![nos_proto::evpn_id::router_mac_ext([2, 0, 0, 0, 0, 9])],
+            esi: [0; 10],
+        }
+    }
+
+    #[test]
+    fn type5_routes_are_originated_per_table_apart_from_a_same_named_domain() {
+        let mut rib = new_rib(65000);
+        let mut rx = register_mp_peer(
+            &mut rib,
+            addr("10.0.0.1"),
+            false,
+            addr("10.0.0.254"),
+            evpn_afs(),
+        );
+        rib.apply_evpn_local("x", nos_proto::EvpnUpdate::Add(mac_route(1)));
+        for p in ["10.1.0.0/24", "2001:db8:1::/64"] {
+            rib.apply_evpn_source(
+                EvpnSource::Table("x".to_string()),
+                nos_proto::EvpnUpdate::Add(type5(p)),
+            );
+        }
+        let updates = recv_all(&mut rx);
+        assert_eq!(updates.len(), 3, "{updates:?}");
+        // RFC 9136 §4.4.1: no ESI, a zero gateway of the prefix's family, the
+        // L3 VNI as the label — and it survives the wire both ways.
+        for u in &updates[1..] {
+            let OutboundUpdate::AnnounceEvpn(a) = u else {
+                panic!("expected a Type-5 announcement, got {u:?}");
+            };
+            let EvpnNlri::IpPrefix {
+                gateway,
+                label,
+                esi,
+                prefix,
+                ..
+            } = &a.nlri
+            else {
+                panic!("expected a Type-5 NLRI, got {:?}", a.nlri);
+            };
+            assert!(gateway.is_unspecified() && gateway.is_ipv4() == prefix.addr().is_ipv4());
+            assert_eq!((*label, *esi), (5000, [0; 10]));
+            let mut wire = Vec::new();
+            crate::evpn::encode_nlri(&a.nlri, &mut wire);
+            assert_eq!(wire.len(), if prefix.addr().is_ipv4() { 36 } else { 60 });
+            assert_eq!(
+                crate::evpn::decode_nlris(&wire).unwrap(),
+                vec![a.nlri.clone()]
+            );
+        }
+
+        // A table's Full replaces only the table's routes, not the domain's.
+        rib.apply_evpn_source(
+            EvpnSource::Table("x".to_string()),
+            nos_proto::EvpnUpdate::Full(vec![]),
+        );
+        let updates = recv_all(&mut rx);
+        assert_eq!(updates.len(), 2, "{updates:?}");
+        assert!(updates
+            .iter()
+            .all(|u| matches!(u, OutboundUpdate::WithdrawEvpn(EvpnNlri::IpPrefix { .. }))));
+    }
+
+    #[test]
+    fn received_type5_reaches_the_feed_only_without_an_overlay_index() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        let rd = [0, 0, 0xfd, 0xe8, 0, 0, 0, 1];
+        let nlri = |p: &str, gateway: &str, esi: [u8; 10]| EvpnNlri::IpPrefix {
+            rd,
+            esi,
+            tag: 0,
+            prefix: p.parse().unwrap(),
+            gateway: addr(gateway),
+            label: 5000,
+        };
+        rib.handle_update(
+            peer,
+            false,
+            v4("192.0.2.1"),
+            &evpn_reach(
+                vec![
+                    nlri("10.1.0.0/24", "0.0.0.0", [0; 10]),
+                    nlri("10.2.0.0/24", "10.9.9.9", [0; 10]),
+                    nlri("10.3.0.0/24", "0.0.0.0", [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+                    evpn_nlri(1),
+                ],
+                vec![65001],
+            ),
+            &deny_all_policy(),
+        );
+        let snap = rib.evpn_push_snapshot();
+        let type5: Vec<_> = snap
+            .values()
+            .filter(|r| matches!(r.key, nos_proto::EvpnKey::IpPrefix { .. }))
+            .collect();
+        assert_eq!(type5.len(), 1, "{snap:?}");
+        assert_eq!(
+            type5[0].key,
+            nos_proto::EvpnKey::IpPrefix {
+                rd,
+                prefix: "10.1.0.0/24".parse().unwrap()
+            }
+        );
+        assert_eq!((type5[0].vni, type5[0].next_hop), (5000, addr("192.0.2.1")));
+        // The Type-2 is still there for nos-fdbd.
+        assert_eq!(snap.len(), 2);
     }
 
     #[test]

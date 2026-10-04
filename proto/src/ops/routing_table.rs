@@ -2,7 +2,7 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Config, Redistribute, RestApi, RoutingTable};
+use crate::schema::{Config, Redistribute, RestApi, RoutingTable, RoutingTableEvpn};
 
 use super::OpError;
 
@@ -64,6 +64,14 @@ pub enum RoutingTableOp {
     ClearRestApi {
         name: String,
     },
+    /// Sets (replaces) the table's whole EVPN L3 VNI config.
+    SetEvpn {
+        name: String,
+        evpn: RoutingTableEvpn,
+    },
+    ClearEvpn {
+        name: String,
+    },
 }
 
 impl RoutingTableOp {
@@ -73,6 +81,7 @@ impl RoutingTableOp {
                 if !config.routing_tables.iter().any(|t| &t.name == name) {
                     config.routing_tables.push(RoutingTable {
                         rest_api: None,
+                        evpn: crate::schema::RoutingTableEvpn::default(),
                         name: name.clone(),
                         bgp_instance: None,
                         ospf_instance: None,
@@ -156,6 +165,14 @@ impl RoutingTableOp {
                 find_table_mut(config, name)?.rest_api = None;
                 Ok(())
             }
+            RoutingTableOp::SetEvpn { name, evpn } => {
+                find_table_mut(config, name)?.evpn = evpn.clone();
+                Ok(())
+            }
+            RoutingTableOp::ClearEvpn { name } => {
+                find_table_mut(config, name)?.evpn = RoutingTableEvpn::default();
+                Ok(())
+            }
         }
     }
 }
@@ -178,6 +195,7 @@ mod tests {
     fn table(name: &str) -> RoutingTable {
         RoutingTable {
             rest_api: None,
+            evpn: crate::schema::RoutingTableEvpn::default(),
             ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: None,
@@ -205,6 +223,7 @@ mod tests {
         let mut cfg = Config {
             routing_tables: vec![RoutingTable {
                 rest_api: None,
+                evpn: crate::schema::RoutingTableEvpn::default(),
                 ospfv3_instance: None,
                 name: "rt1".to_string(),
                 bgp_instance: Some("r1".to_string()),
@@ -319,6 +338,31 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.routing_tables[0].rest_api, None);
+    }
+
+    #[test]
+    fn set_and_clear_evpn() {
+        let mut cfg = Config {
+            routing_tables: vec![table("rt1")],
+            ..Default::default()
+        };
+        let evpn = RoutingTableEvpn {
+            l3_vni: Some(5000),
+            ..Default::default()
+        };
+        RoutingTableOp::SetEvpn {
+            name: "rt1".to_string(),
+            evpn: evpn.clone(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.routing_tables[0].evpn, evpn);
+        RoutingTableOp::ClearEvpn {
+            name: "rt1".to_string(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.routing_tables[0].evpn, RoutingTableEvpn::default());
     }
 
     #[test]

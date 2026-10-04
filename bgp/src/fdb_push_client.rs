@@ -1,21 +1,32 @@
-//! Pushes every EVPN route this instance received to the `nos-fdbd` of each
-//! broadcast domain whose `redistribute from mac to bgp` names it — the
-//! reverse direction of `nos-fdb`'s own push of local MACs to `nos-bgpd`, and
-//! the EVPN twin of `rib_push_client` (one persistent connection per domain,
-//! `Full` on connect, diffed `Add`/`Remove` after).
+//! Pushes every EVPN route this instance received to its consumers — the
+//! reverse direction of their own pushes of local routes to `nos-bgpd`, and
+//! the EVPN twin of `rib_push_client` (one persistent connection per
+//! consumer, `Full` on connect, diffed `Add`/`Remove` after). Two feeds:
+//!
+//! - `Feed::Domains`: the `nos-fdbd` of each broadcast domain whose
+//!   `redistribute from mac to bgp` names this instance — every route but
+//!   Type-5 (`FdbRequest::PushEvpnRoutes`).
+//! - `Feed::Tables`: the `nos-ribd` of each routing table whose
+//!   `evpn.bgp_instance` names this instance — every Type-5 route
+//!   (`RibRequest::PushEvpnRoutes`).
 //!
 //! Same fixed-poll design and the same ceiling as `rib_push_client`: a
 //! `ponytail:` upgrade to a `Notify` from `BgpRib::handle_update` if
 //! sub-second propagation is ever needed. Route-Target filtering is the
-//! receiving `nos-fdbd`'s job, so every attached domain gets every route.
+//! receiver's job, so every consumer of a feed gets every route of it. The
+//! write-only connection is also read for EOF each tick, so a restarted
+//! consumer (which lost what it was told) gets a fresh `Full` at once.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::SinkExt;
-use nos_proto::{EvpnKey, EvpnRoute, EvpnUpdate, FdbRequest, IpcCodec, Role, ServiceRef};
+use futures::{FutureExt, SinkExt};
+use nos_proto::{
+    EvpnKey, EvpnRoute, EvpnUpdate, FdbRequest, IpcCodec, RibRequest, Role, ServiceRef,
+};
+use tokio::io::{AsyncReadExt, ReadHalf};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::codec::FramedWrite;
@@ -28,55 +39,107 @@ use crate::watchdog_client::resolve_once;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 type Routes = HashMap<EvpnKey, EvpnRoute>;
-type Writer = FramedWrite<nos_pki::Stream, IpcCodec<FdbRequest>>;
+
+/// Which consumers a feed task serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feed {
+    Domains,
+    Tables,
+}
+
+impl Feed {
+    fn service(self, name: &str) -> ServiceRef {
+        match self {
+            Feed::Domains => ServiceRef::FdbDomain(name.to_string()),
+            Feed::Tables => ServiceRef::RibTable(name.to_string()),
+        }
+    }
+
+    fn role(self) -> Role {
+        match self {
+            Feed::Domains => Role::Fdbd,
+            Feed::Tables => Role::Ribd,
+        }
+    }
+
+    fn peer(self) -> &'static str {
+        match self {
+            Feed::Domains => "nos-fdbd",
+            Feed::Tables => "nos-ribd",
+        }
+    }
+}
+
+enum Writer {
+    Fdb(FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<FdbRequest>>),
+    Rib(FramedWrite<tokio::io::WriteHalf<nos_pki::Stream>, IpcCodec<RibRequest>>),
+}
+
+impl Writer {
+    async fn send(&mut self, update: EvpnUpdate) -> bool {
+        match self {
+            Writer::Fdb(w) => w.send(FdbRequest::PushEvpnRoutes(update)).await.is_ok(),
+            Writer::Rib(w) => w.send(RibRequest::PushEvpnRoutes(update)).await.is_ok(),
+        }
+    }
+}
 
 pub fn spawn(
     watchdog_socket: PathBuf,
     sessions: Arc<SessionManager>,
+    feed: Feed,
     shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
-    tokio::spawn(run(watchdog_socket, sessions, shutdown))
+    tokio::spawn(run(watchdog_socket, sessions, feed, shutdown))
 }
 
 struct Conn {
     writer: Writer,
+    reader: ReadHalf<nos_pki::Stream>,
     last_sent: Routes,
+}
+
+impl Conn {
+    /// Whether the consumer closed the connection (it never writes to it).
+    fn closed(&mut self) -> bool {
+        let mut buf = [0u8; 64];
+        matches!(
+            self.reader.read(&mut buf).now_or_never(),
+            Some(Ok(0) | Err(_))
+        )
+    }
 }
 
 async fn run(
     watchdog_socket: PathBuf,
     sessions: Arc<SessionManager>,
+    feed: Feed,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut conns: HashMap<String, Conn> = HashMap::new();
     while !*shutdown.borrow() {
-        let (domains, routes) = sessions.fdb_push_snapshot().await;
-        // A domain no longer attached (or whose fdbd write failed last tick)
-        // just loses its connection; the next tick reconnects with a `Full`.
-        conns.retain(|d, _| domains.contains(d));
-        for domain in domains {
-            if let Some(conn) = conns.get_mut(&domain) {
-                let updates = diff(&conn.last_sent, &routes);
+        let (targets, routes) = sessions.evpn_feed_snapshot(feed == Feed::Tables).await;
+        // A consumer no longer attached (or whose write failed, or that
+        // closed the connection) just loses it; the next tick reconnects
+        // with a `Full`.
+        conns.retain(|t, c| targets.contains(t) && !c.closed());
+        for target in targets {
+            if let Some(conn) = conns.get_mut(&target) {
                 let mut failed = false;
-                for u in updates {
-                    if conn
-                        .writer
-                        .send(FdbRequest::PushEvpnRoutes(u))
-                        .await
-                        .is_err()
-                    {
-                        warn!(domain = %domain, "write failure pushing evpn routes to nos-fdbd, reconnecting");
+                for u in diff(&conn.last_sent, &routes) {
+                    if !conn.writer.send(u).await {
+                        warn!(target = %target, peer = feed.peer(), "write failure pushing evpn routes, reconnecting");
                         failed = true;
                         break;
                     }
                 }
                 if failed {
-                    conns.remove(&domain);
+                    conns.remove(&target);
                 } else {
                     conn.last_sent.clone_from(&routes);
                 }
-            } else if let Some(conn) = connect(&watchdog_socket, &domain, &routes).await {
-                conns.insert(domain, conn);
+            } else if let Some(conn) = connect(&watchdog_socket, feed, &target, &routes).await {
+                conns.insert(target, conn);
             }
         }
         tokio::select! {
@@ -86,24 +149,43 @@ async fn run(
     }
 }
 
-async fn connect(watchdog_socket: &Path, domain: &str, routes: &Routes) -> Option<Conn> {
-    let socket = resolve_once(watchdog_socket, &ServiceRef::FdbDomain(domain.to_string())).await?;
-    let stream = match nos_pki::connect(&socket, Role::Fdbd, domain).await {
+async fn connect(
+    watchdog_socket: &Path,
+    feed: Feed,
+    target: &str,
+    routes: &Routes,
+) -> Option<Conn> {
+    let socket = resolve_once(watchdog_socket, &feed.service(target)).await?;
+    let stream = match nos_pki::connect(&socket, feed.role(), target).await {
         Ok(s) => s,
         Err(e) => {
-            debug!(domain = %domain, error = %e, "nos-fdbd not reachable yet, retrying");
+            debug!(target = %target, peer = feed.peer(), error = %e, "evpn consumer not reachable yet, retrying");
             return None;
         }
     };
-    let mut writer = FramedWrite::new(stream, IpcCodec::<FdbRequest>::default());
-    let full = EvpnUpdate::Full(routes.values().cloned().collect());
-    if writer.send(FdbRequest::PushEvpnRoutes(full)).await.is_err() {
-        warn!(domain = %domain, "failed to send the initial evpn snapshot to nos-fdbd, retrying");
+    let (reader, write_half) = tokio::io::split(stream);
+    let mut writer = match feed {
+        Feed::Domains => Writer::Fdb(FramedWrite::new(write_half, IpcCodec::default())),
+        Feed::Tables => Writer::Rib(FramedWrite::new(write_half, IpcCodec::default())),
+    };
+    if !writer
+        .send(EvpnUpdate::Full(routes.values().cloned().collect()))
+        .await
+    {
+        warn!(target = %target, peer = feed.peer(), "failed to send the initial evpn snapshot, retrying");
         return None;
     }
-    info!(domain = %domain, routes = routes.len(), "sent initial evpn snapshot to nos-fdbd");
+    match feed {
+        Feed::Domains => {
+            info!(domain = %target, routes = routes.len(), "sent initial evpn snapshot to nos-fdbd");
+        }
+        Feed::Tables => {
+            info!(table = %target, routes = routes.len(), "sent initial evpn snapshot to nos-ribd");
+        }
+    }
     Some(Conn {
         writer,
+        reader,
         last_sent: routes.clone(),
     })
 }
@@ -163,5 +245,19 @@ mod tests {
                 EvpnUpdate::Remove(route(3, 0).0)
             ]
         );
+    }
+
+    #[test]
+    fn feeds_name_their_consumers() {
+        assert_eq!(
+            Feed::Tables.service("tenant"),
+            ServiceRef::RibTable("tenant".to_string())
+        );
+        assert_eq!(Feed::Tables.role(), Role::Ribd);
+        assert_eq!(
+            Feed::Domains.service("bd1"),
+            ServiceRef::FdbDomain("bd1".to_string())
+        );
+        assert_eq!(Feed::Domains.role(), Role::Fdbd);
     }
 }

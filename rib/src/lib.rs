@@ -1,6 +1,8 @@
 pub mod bgp_client;
 pub mod config_client;
 pub mod driver;
+pub mod evpn;
+pub mod evpn_client;
 pub mod interface_client;
 pub mod ospf_client;
 pub mod reconcile;

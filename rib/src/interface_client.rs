@@ -1,9 +1,10 @@
+use std::net::IpAddr;
 use std::path::Path;
 
 use futures::{SinkExt, StreamExt};
 use nos_proto::{
     BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, InterfaceStatus, IpcCodec,
-    PortAggregateStatus, Role,
+    PortAggregateStatus, RibEvent, RibRequest, Role, ServiceRef, SourceAddress, LOOPBACK_PREFIX,
 };
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::trace;
@@ -53,6 +54,74 @@ pub async fn get_broadcast_domain(
         InterfaceEvent::BroadcastDomain(status) => Some(status),
         _ => None,
     }
+}
+
+/// The kernel name of routing table `table`'s loopback device: `lo<table
+/// id>`, the id being that table's own `nos-ribd`'s (`RibRequest::GetTableId`).
+async fn loopback_device(watchdog_socket: &Path, table: &str) -> Option<String> {
+    let sock = crate::watchdog_client::resolve_once(
+        watchdog_socket,
+        &ServiceRef::RibTable(table.to_string()),
+    )
+    .await?;
+    let stream = nos_pki::connect(&sock, Role::Ribd, table).await.ok()?;
+    let (r, w) = tokio::io::split(stream);
+    let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
+    let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
+    writer.send(RibRequest::GetTableId).await.ok()?;
+    match reader.next().await? {
+        Ok(RibEvent::TableId(Some(id))) => Some(format!("lo{id}")),
+        _ => None,
+    }
+}
+
+/// An L3 VNI's VTEP: the address `source` names (IPv4 preferred) and the
+/// kernel device carrying it — the VXLAN device's underlay, which it must be
+/// bound through when the address sits in a VRF. `underlay_table` is the
+/// routing table owning the underlay BGP instance (a `Loopback` source is
+/// `loopback-<underlay_table>`). Reimplemented from `nos-fdbd`'s, per the
+/// star dependency graph.
+pub async fn resolve_vtep(
+    watchdog_socket: &Path,
+    underlay_table: Option<&str>,
+    source: &SourceAddress,
+) -> Option<(IpAddr, String)> {
+    let (interface, label, loopback) = match source {
+        SourceAddress::Interface { interface, label } => (interface.clone(), label, false),
+        SourceAddress::Loopback { label } => {
+            (format!("{LOOPBACK_PREFIX}{}", underlay_table?), label, true)
+        }
+    };
+    let device = if loopback {
+        loopback_device(watchdog_socket, underlay_table?).await?
+    } else {
+        interface.clone()
+    };
+    let sock =
+        crate::watchdog_client::resolve_once(watchdog_socket, &ServiceRef::Interfaces).await?;
+    let InterfaceEvent::Interface(status) =
+        query(&sock, InterfaceRequest::GetInterface { name: interface }).await?
+    else {
+        return None;
+    };
+    // A loopback carries its addresses flat; any other interface's live under
+    // its untagged (tag 0) subinterface.
+    let addresses = if loopback {
+        status.addresses
+    } else {
+        status
+            .subinterfaces
+            .into_iter()
+            .find(|s| s.tag == 0)?
+            .addresses
+    };
+    let mut ips: Vec<IpAddr> = addresses
+        .into_iter()
+        .filter(|a| label.is_none() || a.label == *label)
+        .map(|a| a.address.addr())
+        .collect();
+    ips.sort_by_key(IpAddr::is_ipv6);
+    ips.into_iter().next().map(|ip| (ip, device))
 }
 
 #[cfg(test)]

@@ -30,19 +30,26 @@ pub enum RouteSource {
     /// `igp_costs` can tell "directly connected" (cost 0) from "unresolvable"
     /// (absent) — RFC 4271 §9.1.2's next-hop feasibility check in `nos-bgpd`.
     Connected,
+    /// An EVPN Type-5 route received over this table's L3 VNI (pushed by
+    /// the underlay `nos-bgpd` over `RibRequest::PushEvpnRoutes`, filtered by
+    /// `crate::evpn::desired`). Its one next hop is the remote VTEP, installed
+    /// `onlink` through the L3 VNI's bridge (`RibDriver::sync_l3vni`).
+    Evpn,
 }
 
 impl RouteSource {
     /// Lower wins, like an administrative distance. Connected beats Static
     /// beats Bgp beats Ospf, matching conventional (Cisco-style) router
     /// defaults: a directly-connected prefix beats an explicit operator
-    /// override beats eBGP beats an interior IGP route.
+    /// override beats eBGP beats an interior IGP route beats a route learned over the
+    /// overlay (EVPN, at iBGP's conventional distance).
     fn preference(self) -> u8 {
         match self {
             RouteSource::Connected => 0,
             RouteSource::Static => 1,
             RouteSource::Bgp => 20,
             RouteSource::Ospf => 110,
+            RouteSource::Evpn => 200,
         }
     }
 }
@@ -117,6 +124,8 @@ pub struct Rib {
     /// SPF cost per `Ospf`-sourced prefix, kept beside `entries` (not in
     /// `RibEntry`) since the kernel diff must not see a metric-only change.
     ospf_metrics: HashMap<IpNet, u32>,
+    /// The table's EVPN IP-VRF state, beside `entries` like `ospf_metrics`.
+    pub evpn: crate::evpn::EvpnState,
 }
 
 impl Rib {
@@ -269,8 +278,20 @@ impl Rib {
         };
     }
 
+    /// Rebuilds the `Evpn` candidates from `evpn.received` and `evpn.local`
+    /// (none without a local L3 VNI), and the remote VTEPs they need.
+    pub fn refresh_evpn(&mut self) {
+        let (entries, remotes) = match &self.evpn.local {
+            Some(l3) => crate::evpn::desired(&self.evpn.received, l3),
+            None => (Vec::new(), std::collections::BTreeMap::new()),
+        };
+        self.evpn.remotes = remotes;
+        self.replace_source(RouteSource::Evpn, entries);
+    }
+
     /// IGP cost per prefix: its best non-BGP candidate's cost (`Connected`/
-    /// `Static` 0, `Ospf` its SPF metric). `Bgp` candidates never count, nor
+    /// `Static` 0, `Ospf` its SPF metric). `Bgp`/`Evpn` candidates never
+    /// count (a next hop never resolves through the overlay), nor
     /// a discard route: a next hop only reachable through an area range's
     /// blackhole is unresolvable (RFC 4271 §9.1.2), not selectable-then-dropped.
     pub fn igp_costs(&self) -> Vec<(IpNet, u32)> {
@@ -279,7 +300,9 @@ impl Rib {
             .filter_map(|(prefix, candidates)| {
                 let best = candidates
                     .iter()
-                    .filter(|e| e.source != RouteSource::Bgp && !e.is_discard())
+                    .filter(|e| {
+                        !matches!(e.source, RouteSource::Bgp | RouteSource::Evpn) && !e.is_discard()
+                    })
                     .min_by_key(|e| e.source.preference())?;
                 let cost = match best.source {
                     RouteSource::Ospf => self.ospf_metrics.get(prefix).copied().unwrap_or(0),
@@ -365,6 +388,7 @@ mod tests {
         rib.insert(entry("10.1.0.0/16", RouteSource::Ospf));
         rib.insert(entry("10.2.0.0/16", RouteSource::Static));
         rib.insert(entry("10.3.0.0/16", RouteSource::Bgp));
+        rib.insert(entry("10.5.0.0/16", RouteSource::Evpn));
         // An area range's discard route is no IGP cost.
         rib.insert(RibEntry {
             next_hops: Vec::new(),
@@ -380,6 +404,51 @@ mod tests {
                 ("10.2.0.0/16".parse().unwrap(), 0)
             ]
         );
+    }
+
+    #[test]
+    fn evpn_ranks_last_and_refresh_follows_the_local_l3vni() {
+        let mut rib = Rib::new();
+        let prefix: IpNet = "10.2.0.0/24".parse().unwrap();
+        let rt = 0x0002_fde8_0000_1388;
+        let key = nos_proto::EvpnKey::IpPrefix { rd: [0; 8], prefix };
+        rib.evpn.received.insert(
+            key.clone(),
+            nos_proto::EvpnRoute {
+                key,
+                vni: 5000,
+                next_hop: "10.50.0.3".parse().unwrap(),
+                ext_communities: vec![rt, nos_proto::evpn_id::router_mac_ext([2; 6])],
+                esi: [0; 10],
+            },
+        );
+        // No local L3 VNI: nothing is installed.
+        rib.refresh_evpn();
+        assert!(rib.best_route(&prefix).is_none());
+        rib.evpn.local = Some(crate::evpn::L3Vni {
+            vni: 5000,
+            rd: [0; 8],
+            import: vec![rt],
+            export: vec![rt],
+            bgp_instance: "r1".into(),
+            vtep: "10.50.0.2".parse().unwrap(),
+            underlay: "eth0".into(),
+        });
+        rib.refresh_evpn();
+        assert_eq!(rib.best_route(&prefix).unwrap().source, RouteSource::Evpn);
+        assert_eq!(rib.evpn.remotes.len(), 1);
+        // An OSPF route for the same prefix wins over the overlay's.
+        rib.insert(RibEntry {
+            prefix,
+            next_hops: vec![("10.0.0.1".parse().unwrap(), None)],
+            source: RouteSource::Ospf,
+            backup: None,
+            backup_interface_id: None,
+        });
+        assert_eq!(rib.best_route(&prefix).unwrap().source, RouteSource::Ospf);
+        rib.evpn.local = None;
+        rib.refresh_evpn();
+        assert_eq!(rib.all_routes()[0].1.len(), 1);
     }
 
     #[test]
@@ -581,6 +650,7 @@ mod tests {
     fn build_from_config_table_without_static_instance_is_empty() {
         let tables = vec![RoutingTable {
             rest_api: None,
+            evpn: nos_proto::RoutingTableEvpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,
@@ -863,6 +933,7 @@ mod tests {
     fn build_from_config_resolves_static_routes() {
         let tables = vec![RoutingTable {
             rest_api: None,
+            evpn: nos_proto::RoutingTableEvpn::default(),
             ospfv3_instance: None,
             name: "rt1".into(),
             bgp_instance: None,

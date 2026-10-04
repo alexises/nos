@@ -247,6 +247,14 @@ async fn resync(
         .filter(|d| d.vni.is_some() && d.mac_redistribute.as_deref() == Some(instance))
         .map(|d| d.name.clone())
         .collect();
+    // The IP-VRFs whose `evpn` rides this (underlay) instance — fed every
+    // received Type-5 route.
+    let evpn_tables = cfg
+        .routing_tables
+        .iter()
+        .filter(|t| t.evpn.l3_vni.is_some() && t.evpn.bgp_instance.as_deref() == Some(instance))
+        .map(|t| t.name.clone())
+        .collect();
 
     sessions
         .reconcile(
@@ -256,6 +264,7 @@ async fn resync(
             peers,
             redistribute_policy,
             fdb_domains,
+            evpn_tables,
             &own.rpki_caches,
         )
         .await;

@@ -16,12 +16,12 @@
 //! (`with_local_mobility`/`mac_mobility_recheck`, below).
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Instant;
 
 use nos_proto::fdb::AD_TAG_ES;
 use nos_proto::{AddressFamily, EvpnKey, EvpnRoute as WireRoute, EvpnUpdate};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::{BgpRib, OutboundUpdate, PeerOutbox};
 use crate::as_path::AsPath;
@@ -46,6 +46,15 @@ pub struct AdvertisedEvpn {
 
 /// RFC 4271 §5.1.5's default, as `rib.rs`'s `DEFAULT_LOCAL_PREF`.
 const LOCAL_PREF: u32 = 100;
+
+/// Who pushed a set of local EVPN routes: one `nos-fdbd` (a broadcast domain's
+/// MAC-VRF) or one `nos-ribd` (a routing table's IP-VRF). A domain and a table
+/// may share a name, so they never share a slot.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum EvpnSource {
+    Domain(String),
+    Table(String),
+}
 
 fn nlri_of(r: &WireRoute) -> EvpnNlri {
     match &r.key {
@@ -83,6 +92,20 @@ fn nlri_of(r: &WireRoute) -> EvpnNlri {
             // RFC 8365 §5.1.3: a per-EVI route's label field carries the VNI.
             label: if *tag == AD_TAG_ES { 0 } else { r.vni },
         },
+        // RFC 9136 §4.4.1 "interface-less": no ESI, no gateway IP (zero of
+        // the prefix's family), the L3 VNI as the label.
+        EvpnKey::IpPrefix { rd, prefix } => EvpnNlri::IpPrefix {
+            rd: *rd,
+            esi: [0; 10],
+            tag: 0,
+            prefix: *prefix,
+            gateway: if prefix.addr().is_ipv4() {
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+            } else {
+                IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+            },
+            label: r.vni,
+        },
     }
 }
 
@@ -113,7 +136,8 @@ fn advertise(outbox: &PeerOutbox, local_asn: u32, r: &WireRoute) -> Option<Adver
             EvpnKey::Mac { .. }
             | EvpnKey::MacIp { .. }
             | EvpnKey::EthernetSegment { .. }
-            | EvpnKey::EthernetAd { .. } => None,
+            | EvpnKey::EthernetAd { .. }
+            | EvpnKey::IpPrefix { .. } => None,
         },
     })
 }
@@ -121,6 +145,13 @@ fn advertise(outbox: &PeerOutbox, local_asn: u32, r: &WireRoute) -> Option<Adver
 impl BgpRib {
     /// Applies one `RedistributeMacs` push from `nos-fdbd`'s `domain`.
     pub fn apply_evpn_local(&mut self, domain: &str, update: EvpnUpdate) {
+        self.apply_evpn_source(EvpnSource::Domain(domain.to_string()), update);
+    }
+
+    /// Applies one push of local EVPN routes — `RedistributeMacs` from a
+    /// domain's `nos-fdbd` or `RedistributeEvpnPrefixes` from a table's
+    /// `nos-ribd` (MAC mobility is a no-op for its Type-5 routes).
+    pub fn apply_evpn_source(&mut self, source: EvpnSource, update: EvpnUpdate) {
         let now = Instant::now();
         match update {
             EvpnUpdate::Full(routes) => {
@@ -134,7 +165,7 @@ impl BgpRib {
                     .collect();
                 let old = self
                     .evpn_local
-                    .insert(domain.to_string(), new.clone())
+                    .insert(source, new.clone())
                     .unwrap_or_default();
                 for (key, r) in &old {
                     // The ESI is part of a Type-2's wire identity, so a route
@@ -153,7 +184,7 @@ impl BgpRib {
                 let (r, wins) = self.with_local_mobility(r, now);
                 let old = self
                     .evpn_local
-                    .entry(domain.to_string())
+                    .entry(source)
                     .or_default()
                     .insert(r.key.clone(), r.clone());
                 if let Some(old) = old.filter(|o| nlri_of(o) != nlri_of(&r)) {
@@ -164,7 +195,10 @@ impl BgpRib {
                 }
             }
             EvpnUpdate::Remove(key) => {
-                let old = self.evpn_local.get_mut(domain).and_then(|t| t.remove(&key));
+                let old = self
+                    .evpn_local
+                    .get_mut(&source)
+                    .and_then(|t| t.remove(&key));
                 if let Some(r) = old {
                     self.withdraw_evpn(&nlri_of(&r));
                 }
@@ -275,6 +309,9 @@ impl BgpRib {
     /// RFC 7432 §15 mobility winner for its `(VNI, MAC)`, not an arbitrary
     /// iteration order — since `nos-fdbd`'s own `EvpnKey` keeps different RDs
     /// apart (see `mac_mobility`).
+    ///
+    /// Type-5 (`EvpnKey::IpPrefix`) routes are in it too; `fdb_push_snapshot`
+    /// and `rib_evpn_push_snapshot` split it per consumer.
     pub fn evpn_push_snapshot(&self) -> HashMap<EvpnKey, WireRoute> {
         let mut out = HashMap::new();
         for (nlri, route) in self.evpn_adj_rib_in.values().flatten() {
@@ -339,7 +376,31 @@ impl BgpRib {
                     if *tag == AD_TAG_ES { 0 } else { *label },
                     *esi,
                 ),
-                _ => continue,
+                // ponytail: only the RFC 9136 §4.4.1 interface-less form; the
+                // gateway-IP and ESI overlay indexes (§4.3, §4.4.2) need a
+                // recursive resolution nos-ribd doesn't do.
+                EvpnNlri::IpPrefix {
+                    rd,
+                    esi,
+                    prefix,
+                    gateway,
+                    label,
+                    ..
+                } => {
+                    if !gateway.is_unspecified() || esi.iter().any(|b| *b != 0) {
+                        debug!(route = %nlri, "evpn type-5 with an overlay index skipped");
+                        continue;
+                    }
+                    (
+                        EvpnKey::IpPrefix {
+                            rd: *rd,
+                            prefix: *prefix,
+                        },
+                        *label,
+                        [0; 10],
+                    )
+                }
+                EvpnNlri::Unknown { .. } => continue,
             };
             out.insert(
                 key.clone(),

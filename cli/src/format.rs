@@ -741,6 +741,7 @@ fn render_route_source(source: RouteSourceKind) -> &'static str {
         RouteSourceKind::Bgp => "bgp",
         RouteSourceKind::Ospf => "ospf",
         RouteSourceKind::Connected => "connected",
+        RouteSourceKind::Evpn => "evpn",
     }
 }
 
@@ -768,7 +769,10 @@ pub fn render_prefix_routes(entries: &[PrefixRoutes]) -> String {
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("via {gateways}")
+                let evpn = candidate.evpn.as_ref().map_or_else(String::new, |e| {
+                    format!(" rmac {} vni {}", e.router_mac, e.vni)
+                });
+                format!("via {gateways}{evpn}")
             };
             lines.push(format!(
                 "  {marker} {via} [{}]{backup}",
@@ -1738,6 +1742,7 @@ mod tests {
                 source: nos_proto::RouteSourceKind::Ospf,
                 backup: None,
                 discard: true,
+                evpn: None,
             }],
         }];
         assert_eq!(
@@ -1776,6 +1781,28 @@ mod tests {
     }
 
     #[test]
+    fn evpn_route_renders_its_router_mac_and_vni() {
+        let routes = [PrefixRoutes {
+            prefix: "10.2.0.0/24".parse().unwrap(),
+            candidates: vec![nos_proto::RouteEntry {
+                gateways: vec!["10.50.0.3".parse().unwrap()],
+                source: nos_proto::RouteSourceKind::Evpn,
+                backup: None,
+                discard: false,
+                evpn: Some(nos_proto::EvpnRouteInfo {
+                    vtep: "10.50.0.3".parse().unwrap(),
+                    router_mac: "02:00:00:00:00:03".to_string(),
+                    vni: 5000,
+                }),
+            }],
+        }];
+        assert_eq!(
+            render_prefix_routes(&routes),
+            "10.2.0.0/24\n  * via 10.50.0.3 rmac 02:00:00:00:00:03 vni 5000 [evpn]"
+        );
+    }
+
+    #[test]
     fn ecmp_route_renders_every_gateway_on_one_line() {
         let routes = [PrefixRoutes {
             prefix: "203.0.113.80/32".parse().unwrap(),
@@ -1784,6 +1811,7 @@ mod tests {
                 source: nos_proto::RouteSourceKind::Ospf,
                 backup: Some("10.0.1.3".parse().unwrap()),
                 discard: false,
+                evpn: None,
             }],
         }];
         assert_eq!(
@@ -3407,6 +3435,7 @@ mod tests {
             (RouteSourceKind::Static, "static"),
             (RouteSourceKind::Bgp, "bgp"),
             (RouteSourceKind::Connected, "connected"),
+            (RouteSourceKind::Evpn, "evpn"),
         ] {
             assert_eq!(render_route_source(s), want);
         }

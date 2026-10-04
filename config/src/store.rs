@@ -459,6 +459,7 @@ mod tests {
                 bgp_instances: vec![instance("r1", 65000)],
                 routing_tables: vec![nos_proto::RoutingTable {
                     rest_api: None,
+                    evpn: nos_proto::RoutingTableEvpn::default(),
                     ospfv3_instance: None,
                     name: "rt1".to_string(),
                     bgp_instance: Some("r1".to_string()),

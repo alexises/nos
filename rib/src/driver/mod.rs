@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::net::IpAddr;
 
 use async_trait::async_trait;
 use nos_proto::IpNet;
 use thiserror::Error;
 
+use crate::evpn::{L3Vni, Mac};
 use crate::rib::RibEntry;
 
 pub mod linux;
@@ -24,6 +26,8 @@ pub enum DriverError {
     Netlink(#[from] rtnetlink::Error),
     #[error("table-id registry error: {0}")]
     Registry(#[from] std::io::Error),
+    #[error("{0}")]
+    Other(String),
 }
 
 /// Applies one routing table's computed best-path state to the OS (or a
@@ -80,4 +84,21 @@ pub trait RibDriver: Send + Sync {
     /// `NoopRibDriver`, or if `apply` hasn't successfully run yet.
     /// Read-only — never allocates.
     async fn table_id(&self, table_name: &str) -> Option<u32>;
+
+    /// Brings `table_name`'s EVPN L3 VNI devices in line with `l3`: a bridge
+    /// `brv<vni>` in the table's VRF holding `vx<vni>` (`None` deletes both),
+    /// and, per remote VTEP in `remotes`, the permanent neighbour (`<vtep>
+    /// lladdr <rmac>` on the bridge) and FDB entry (`<rmac> dst <vtep>` on the
+    /// VXLAN device) its `Evpn` routes are reached through. Returns our
+    /// Router's MAC (the bridge's address), `None` when there is no L3 VNI.
+    /// Must run before `apply` installs the table's `Evpn` routes, which
+    /// leave through the bridge. The default builds nothing.
+    async fn sync_l3vni(
+        &self,
+        _table_name: &str,
+        _l3: Option<&L3Vni>,
+        _remotes: &BTreeMap<IpAddr, Mac>,
+    ) -> Result<Option<Mac>, DriverError> {
+        Ok(None)
+    }
 }

@@ -501,6 +501,7 @@ mod tests {
     fn table(name: &str) -> RoutingTable {
         RoutingTable {
             rest_api: None,
+            evpn: crate::schema::RoutingTableEvpn::default(),
             ospfv3_instance: None,
             name: name.to_string(),
             bgp_instance: None,

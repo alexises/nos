@@ -10,6 +10,7 @@ EVPN (RFC 7432) extends a layer-2 broadcast domain across a routed network. Each
   - [Also advertise IP addresses](#also-advertise-ip-addresses)
   - [Check what was learned](#check-what-was-learned)
   - [Multi-home a customer device (Ethernet Segments)](#multi-home-a-customer-device-ethernet-segments)
+  - [Route between subnets over EVPN (IP-VRF, Type 5)](#route-between-subnets-over-evpn-ip-vrf-type-5)
   - [Turn EVPN off](#turn-evpn-off)
 - [How EVPN behaves](#how-evpn-behaves)
 - [Configuration reference](#configuration-reference)
@@ -262,6 +263,63 @@ switching-profile sp-evpn: members [bd100: untagged]
 port-aggregate bond1: mode Xor, switching-profile sp-evpn, mtu unset, esi 00:11:22:33:44:55:66:77:88:99, redundancy-mode single-active
 ``` The blocked port keeps its link up, so the CE cannot see which router to use from the link state: it needs a bond that checks the path end to end, such as a Linux `active-backup` bond with an ARP monitor.
 
+### Route between subnets over EVPN (IP-VRF, Type 5)
+
+A routing table can be an **IP-VRF** stretched over EVPN: each router advertises the table's routes as IP prefix routes (Type 5, RFC 9136) and installs the ones the others advertise, routing the traffic over one VXLAN tunnel per table, its **L3 VNI**. This is the "interface-less" symmetric model of RFC 9135 §4.4.1: no broadcast domain is needed, and the subnets behind each router can all differ.
+
+Before you start:
+
+- The routers already peer with `address-family l2vpn-evpn` (above), in the **underlay** routing table (`rt1`, BGP instance `r1`).
+- The IP-VRF is another routing table (`tenant` below) with the interfaces of its subnets in it. Its own `bgp-instance`, if any, is not used for EVPN.
+- `net.ipv4.udp_l3mdev_accept=1` is set (see [Before you start](#before-you-start)), and so is `net.ipv4.ip_forward=1`, since the router now routes the tenant's traffic.
+
+On router-a, with the tenant subnet `198.18.1.0/24` on `eth1`:
+
+```
+lab-1> configure l3
+lab-1(l3)> set interface eth1 address 198.18.1.2/24
+lab-1(l3)> set interface eth1 routing-table tenant
+lab-1(l3)> edit routing-table tenant
+lab-1(l3/routing-table:tenant)> set evpn l3-vni 5000
+lab-1(l3/routing-table:tenant)> set evpn rd 65001:5000
+lab-1(l3/routing-table:tenant)> set evpn route-target import 65000:5000
+lab-1(l3/routing-table:tenant)> set evpn route-target export 65000:5000
+lab-1(l3/routing-table:tenant)> set evpn vtep-source interface eth0
+lab-1(l3/routing-table:tenant)> set evpn bgp-instance r1
+lab-1(l3/routing-table:tenant)> commit
+```
+
+On router-b, the same with its own subnet and `rd 65002:5000`. Over REST, write the table's `evpn` object in one `PUT`:
+
+```sh
+$C -X PUT -H 'Content-Type: application/json' -d '{
+  "l3_vni": 5000, "rd": "65001:5000",
+  "route_targets_import": ["65000:5000"], "route_targets_export": ["65000:5000"],
+  "vtep_source": {"Interface": {"interface": "eth0", "label": null}},
+  "bgp_instance": "r1"
+}' $B/v1/transactions/l3/routing-table/tenant/evpn
+```
+
+What happens:
+
+- The table's `nos-ribd` creates a bridge `brv<l3-vni>` in the table's VRF and a VXLAN device `vx<l3-vni>` on it. The bridge's MAC address is the router's **Router's MAC**.
+- Every best route of the table (connected subnets included, EVPN-learned ones excluded) is advertised into `bgp-instance` as a Type 5 route carrying the RD, the export route targets, the VXLAN encapsulation and the Router's MAC (`rmac:` in `show bgp evpn`). The next hop is the `vtep-source` address.
+- A received Type 5 route is installed when it carries an import route target, names the table's L3 VNI and carries a Router's MAC. It becomes a route `via <remote VTEP> dev brv<l3-vni> onlink`, with a neighbour entry for the VTEP at its Router's MAC and a forwarding entry sending that MAC into the tunnel.
+
+Check it with `show route`:
+
+```
+lab-1> show route tenant
+198.18.1.0/24
+  * via 198.18.1.2 [connected]
+198.18.2.0/24
+  * via 10.50.0.3 rmac 0a:1b:2c:3d:4e:5f vni 5000 [evpn]
+```
+
+EVPN routes rank below static, BGP and OSPF routes for the same prefix. To remove the IP-VRF, delete its `evpn` fields in one transaction (validation happens at commit): `delete routing-table tenant evpn l3-vni`, `… evpn rd`, `… evpn vtep-source`, `… evpn bgp-instance` and `… evpn route-target import|export <rt>`, or `DELETE` the same paths over REST. Its routes are withdrawn and the two devices deleted.
+
+The **asymmetric** model (RFC 9135 §4.1) needs nothing of this: give each router an address in the same broadcast domain (an SVI) and `redistribute from arp|connected`, and routing happens on the ingress router into the stretched domain.
+
 ### Turn EVPN off
 
 - `delete broadcast domain <domain> vni` stops EVPN for the domain and removes its tunnel. The other EVPN settings must be removed first (or in the same transaction, since validation happens at commit): `delete broadcast domain <domain> redistribute from mac` (also `from arp`, `from connected`), `delete broadcast domain <domain> vtep-source`, `delete broadcast domain <domain> rd` and `delete broadcast domain <domain> route-target import|export <rt>`.
@@ -309,7 +367,8 @@ For a segment that is attached to other routers, not this one:
 ### Limits
 
 - There is no local bias (RFC 8365 §8.3.1). In an all-active segment, a non-DF router does not deliver flooded traffic to the CE even when it came from a host on the same router; it reaches the CE through the DF instead.
-- Only MAC-VRF services over VXLAN: no IP prefix routes (Type 5), no symmetric IRB, no MPLS.
+- Over VXLAN only, no MPLS. IP prefix routes (Type 5) work through a routing table's L3 VNI; symmetric IRB host routes (a MAC+IP route carrying the L3 VNI and Router's MAC) are not generated or installed.
+- A Type 5 route is installed only in its interface-less form: one with a gateway IP or an ESI as overlay index (RFC 9136 §4.3) is ignored. Its prefix must be of the same family as the tunnel addresses, and when several routers advertise one prefix the one with the lowest tunnel address is used (no ECMP).
 - Routing policies do not apply to EVPN routes.
 - ARP suppression is not enabled: received MAC+IP routes are installed as neighbour entries, but ARP requests are still flooded.
 
@@ -345,5 +404,16 @@ BGP peer-group address family:
 | Field | CLI | REST path and body | Type, default | Validation | Effect | Check with |
 |---|---|---|---|---|---|---|
 | address-family l2vpn-evpn | `set bgp instance <i> peer-group <g> address-family l2vpn-evpn` / `delete … address-family l2vpn-evpn` (relative: `set address-family l2vpn-evpn`) | `bgp-instance/{i}/peer-group/{g}/address-family/L2vpnEvpn`, `"L2vpnEvpn"` | list, `[ipv4]` | at least one family | Negotiates EVPN (AFI 25, SAFI 70) on the group's sessions | `show bgp evpn` |
+
+Routing table EVPN (IP-VRF) fields. REST paths are relative to `/v1/transactions/{tx}/routing-table/{table}/evpn/`; the CLI forms are `set routing-table <t> evpn <field> …`, or `set evpn <field> …` after `edit routing-table <t>`.
+
+| Field | CLI | REST path and body | Type, default | Validation | Effect | Check with |
+|---|---|---|---|---|---|---|
+| l3-vni | `set routing-table <t> evpn l3-vni <n>` / `delete … evpn l3-vni` | `l3-vni`, `5000` | 1-16777215, unset | not used by another table or broadcast domain; every field below needs it | Creates the L3 VNI devices and turns the table into an IP-VRF | `show route <t>` |
+| rd | `set routing-table <t> evpn rd <rd>` | `rd`, `"65001:5000"` | `<asn>:<n>` or `<ipv4>:<n>`, unset | required with `l3-vni` | Route distinguisher of the table's Type 5 routes | `show bgp evpn` on the peer |
+| route-target import | `set routing-table <t> evpn route-target import <rt>` | `route-targets-import/{rt}`, `"65000:5000"` | list, empty | valid format | Received Type 5 routes must carry one of these | `show route <t>` |
+| route-target export | `set routing-table <t> evpn route-target export <rt>` | `route-targets-export/{rt}`, `"65000:5000"` | list, empty | at least one with `l3-vni` | Attached to every Type 5 route the table advertises | `show bgp evpn` on the peer |
+| vtep-source | `set routing-table <t> evpn vtep-source interface <if> [label <l>]` or `… loopback [label <l>]` | `vtep-source`, `{"Interface":{"interface":"eth0","label":null}}` | unset | required with `l3-vni`; resolved at run time | Tunnel source and next hop; `loopback` is the loopback of the table owning `bgp-instance` | `show bgp evpn` on the peer |
+| bgp-instance | `set routing-table <t> evpn bgp-instance <i>` | `bgp-instance`, `"r1"` | BGP instance, unset | exists; not the table's own `bgp-instance` | The underlay instance that carries the Type 5 routes | `show bgp evpn` |
 
 The designated-forwarder wait (`--df-wait`, default 3 seconds) is a start-up option, described in [System](system.md#start-up-options).

@@ -12,6 +12,7 @@ fn sample_prefix_routes() -> PrefixRoutes {
             source: RouteSourceKind::Static,
             backup: None,
             discard: false,
+            evpn: None,
         }],
     }
 }

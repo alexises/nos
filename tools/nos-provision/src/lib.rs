@@ -23,8 +23,8 @@ use nos_proto::{
     OspfAreaOp, OspfAreaType, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstanceOp, OspfProfileOp,
     Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp, PortAggregateMode,
     PortAggregateOp, PortAggregateSubinterfaceOp, Redistribute, RedistributeSource,
-    RedistributeTarget, RoutingTableOp, SourceAddress, StaticRouteOp, StaticRoutingInstanceOp,
-    SubinterfaceOp, SwitchingProfileOp, UserOp, VlanTag,
+    RedistributeTarget, RoutingTableEvpn, RoutingTableOp, SourceAddress, StaticRouteOp,
+    StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, UserOp, VlanTag,
 };
 
 /// Clap-facing mirror of `nos_proto::PortAggregateMode` — `clap::ValueEnum`
@@ -500,6 +500,38 @@ pub struct Args {
     /// sets it, `false` clears it.
     #[arg(long)]
     pub evpn_neigh_suppress: Option<bool>,
+
+    /// EVPN IP-VRF: the routing table (ensured) `--l3vni*` apply to, with
+    /// `--bgp-instance` as its underlay instance.
+    #[arg(long, default_value = "tenant")]
+    pub l3vni_table: String,
+
+    /// The L3 VNI of `--l3vni-table` (`RoutingTableOp::SetEvpn`); requires
+    /// `--l3vni-rd`, `--l3vni-rt` and `--l3vni-vtep-source-interface`.
+    #[arg(long)]
+    pub l3vni: Option<u32>,
+
+    #[arg(long)]
+    pub l3vni_rd: Option<String>,
+
+    /// Route Target both imported and exported by `--l3vni-table`.
+    #[arg(long)]
+    pub l3vni_rt: Option<String>,
+
+    #[arg(long)]
+    pub l3vni_vtep_source_interface: Option<String>,
+
+    /// Puts this interface's untagged subinterface, with `--l3vni-address`,
+    /// in `--l3vni-table` (the tenant's attached subnet).
+    #[arg(long)]
+    pub l3vni_interface: Option<String>,
+
+    #[arg(long)]
+    pub l3vni_address: Option<IpNet>,
+
+    /// Clears `--l3vni-table`'s EVPN config (`RoutingTableOp::ClearEvpn`).
+    #[arg(long)]
+    pub l3vni_clear: bool,
 
     /// If set, undoes the EVPN config of `--broadcast-domain`: clears
     /// redistribute, vtep-source, rd and vni (in that order, so validation
@@ -997,6 +1029,58 @@ fn evpn_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     Ok(ops)
 }
 
+/// The `--l3vni*` flags -> ops on `--l3vni-table` (and its attached subnet).
+fn l3vni_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
+    let name = || args.l3vni_table.clone();
+    let mut ops = Vec::new();
+    if args.l3vni.is_some() || args.l3vni_clear || args.l3vni_interface.is_some() {
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::Ensure {
+            name: name(),
+        }));
+    }
+    if let (Some(interface), Some(address)) = (&args.l3vni_interface, args.l3vni_address) {
+        ops.push(ConfigOp::Subinterface(SubinterfaceOp::AddAddress {
+            interface: interface.clone(),
+            tag: 0,
+            address,
+            label: None,
+        }));
+        ops.push(ConfigOp::Subinterface(SubinterfaceOp::SetRoutingTable {
+            interface: interface.clone(),
+            tag: 0,
+            routing_table: name(),
+        }));
+    }
+    if args.l3vni_clear {
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::ClearEvpn {
+            name: name(),
+        }));
+    } else if let Some(vni) = args.l3vni {
+        let (Some(rd), Some(rt), Some(interface)) = (
+            &args.l3vni_rd,
+            &args.l3vni_rt,
+            &args.l3vni_vtep_source_interface,
+        ) else {
+            bail!("--l3vni needs --l3vni-rd, --l3vni-rt and --l3vni-vtep-source-interface");
+        };
+        ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetEvpn {
+            name: name(),
+            evpn: RoutingTableEvpn {
+                l3_vni: Some(vni),
+                rd: Some(rd.clone()),
+                route_targets_import: vec![rt.clone()],
+                route_targets_export: vec![rt.clone()],
+                vtep_source: Some(SourceAddress::Interface {
+                    interface: interface.clone(),
+                    label: None,
+                }),
+                bgp_instance: Some(args.bgp_instance.clone()),
+            },
+        }));
+    }
+    Ok(ops)
+}
+
 pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     let mut ops = vec![ConfigOp::Interface(InterfaceOp::Ensure {
         name: args.interface.clone(),
@@ -1479,6 +1563,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     }
 
     ops.extend(evpn_ops(args)?);
+    ops.extend(l3vni_ops(args)?);
 
     // Adds a second (IPv6) address to `--broadcast-domain`'s SVI alongside
     // `--broadcast-domain-svi-address` — same dual-stack rationale as

@@ -1,10 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::net::IpAddr;
 
 use async_trait::async_trait;
 use nos_proto::IpNet;
 use tracing::debug;
 
 use super::{DriverError, RibDriver};
+use crate::evpn::{L3Vni, Mac};
 use crate::rib::RibEntry;
 
 /// Placeholder driver, matching the original (pre-driver) behavior of this
@@ -55,5 +57,21 @@ impl RibDriver for NoopRibDriver {
 
     async fn table_id(&self, _table_name: &str) -> Option<u32> {
         None
+    }
+
+    async fn sync_l3vni(
+        &self,
+        table_name: &str,
+        l3: Option<&L3Vni>,
+        remotes: &BTreeMap<IpAddr, Mac>,
+    ) -> Result<Option<Mac>, DriverError> {
+        if l3.is_some() {
+            debug!(
+                table = %table_name,
+                remotes = remotes.len(),
+                "would build the l3 vni devices (noop driver — no OS effect)"
+            );
+        }
+        Ok(None)
     }
 }

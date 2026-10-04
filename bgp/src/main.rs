@@ -117,6 +117,13 @@ async fn main() -> anyhow::Result<()> {
     let fdb_push_task = fdb_push_client::spawn(
         args.watchdog_socket.clone(),
         sessions.clone(),
+        fdb_push_client::Feed::Domains,
+        shutdown_rx.clone(),
+    );
+    let ip_vrf_push_task = fdb_push_client::spawn(
+        args.watchdog_socket.clone(),
+        sessions.clone(),
+        fdb_push_client::Feed::Tables,
         shutdown_rx.clone(),
     );
     let damping_task = tokio::spawn({
@@ -157,6 +164,9 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Err(e) = fdb_push_task.await {
         warn!(instance = %args.instance, error = %e, "fdb push task ended abnormally");
+    }
+    if let Err(e) = ip_vrf_push_task.await {
+        warn!(instance = %args.instance, error = %e, "ip-vrf push task ended abnormally");
     }
     if let Err(e) = igp_task.await {
         warn!(instance = %args.instance, error = %e, "igp task ended abnormally");

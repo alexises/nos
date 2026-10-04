@@ -244,6 +244,42 @@ fn ospf_area_type_and_range() {
     );
 }
 
+/// #25: a routing table's EVPN L3 VNI is reachable from the CLI.
+#[test]
+fn routing_table_evpn() {
+    let mut doc = serde_json::to_value(populated()).unwrap();
+    let rt = "set routing-table rt1 evpn";
+    for line in [
+        format!("{rt} l3-vni 5000"),
+        format!("{rt} rd 65000:5000"),
+        format!("{rt} route-target import 65000:5000"),
+        format!("{rt} route-target export 65000:5000"),
+        format!("{rt} vtep-source interface eth0"),
+        format!("{rt} bgp-instance r1"),
+    ] {
+        let w = writes(&line, &doc).unwrap_or_else(|| panic!("rejected: {line}"));
+        for pair in w.as_array().unwrap() {
+            let path: Vec<String> = serde_json::from_value(pair[0].clone()).unwrap();
+            config_path::set(&mut doc, &path, pair[1].clone()).unwrap();
+        }
+    }
+    let cfg: Config = serde_json::from_value(doc).unwrap();
+    assert_eq!(
+        cfg.routing_tables[0].evpn,
+        RoutingTableEvpn {
+            l3_vni: Some(5000),
+            rd: Some("65000:5000".into()),
+            route_targets_import: vec!["65000:5000".into()],
+            route_targets_export: vec!["65000:5000".into()],
+            vtep_source: Some(SourceAddress::Interface {
+                interface: "eth0".into(),
+                label: None
+            }),
+            bgp_instance: Some("r1".into()),
+        }
+    );
+}
+
 /// #120: absolute forms that #109 made work; pinned so they stay.
 #[test]
 fn absolute_peer_group_field_and_policy_definition_deletes() {
