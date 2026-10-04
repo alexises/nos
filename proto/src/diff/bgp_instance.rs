@@ -80,6 +80,31 @@ fn changed_fields(base: &BgpInstance, candidate: &BgpInstance) -> Vec<FieldDiff>
             new: render(candidate),
         });
     }
+    if base.aggregates != candidate.aggregates {
+        let render = |i: &BgpInstance| {
+            (!i.aggregates.is_empty()).then(|| {
+                i.aggregates
+                    .iter()
+                    .map(|a| {
+                        let mut s = a.prefix.to_string();
+                        if a.as_set {
+                            s.push_str(" as-set");
+                        }
+                        if a.summary_only {
+                            s.push_str(" summary-only");
+                        }
+                        s
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+        };
+        fields.push(FieldDiff {
+            label: "aggregate-address".to_string(),
+            old: render(base),
+            new: render(candidate),
+        });
+    }
     if base.maximum_paths != candidate.maximum_paths {
         fields.push(FieldDiff {
             label: "maximum-paths".to_string(),
@@ -138,7 +163,7 @@ fn added_section(instance: &BgpInstance) -> SectionDiff {
     fields.retain(|f| {
         matches!(
             f.label.as_str(),
-            "confederation" | "rpki-cache" | "maximum-paths"
+            "confederation" | "rpki-cache" | "maximum-paths" | "aggregate-address"
         )
     });
     SectionDiff {
@@ -186,6 +211,7 @@ mod tests {
             maximum_paths: None,
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
+            aggregates: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
         }

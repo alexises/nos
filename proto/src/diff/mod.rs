@@ -324,6 +324,7 @@ mod tests {
             maximum_paths: None,
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
+            aggregates: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
         }

@@ -840,6 +840,106 @@ pub async fn damping(w: &mut World) -> anyhow::Result<()> {
     reestablished(a, est).await
 }
 
+/// RFC 4271 §9.2.2.2 aggregation on router-a over its own redistributed
+/// `REDISTRIBUTE_PREFIX` and a static router-b redistributes for the phase
+/// (router-b stops redistributing `REDISTRIBUTE_PREFIX` meanwhile, so the
+/// only copy it has is router-a's): the aggregate with ATOMIC_AGGREGATE +
+/// AGGREGATOR, then `as-set` (router-b sees its own ASN and drops the route
+/// as a loop, which withdraws the earlier copy), then `summary-only` (router-b
+/// loses router-a's /24), then removal. Restores router-b's state after.
+pub async fn aggregate(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let loc_rib = |p: &str| format!("loc-rib best path for {p} updated");
+    let withdrawn = |p: &str| format!("loc-rib route for {p} withdrawn");
+    let learned_b = format!("learned route for {AGGREGATE_CONTRIBUTOR_B} into adj-rib-in");
+    let learned_agg = format!("learned route for {AGGREGATE_PREFIX} into adj-rib-in");
+    let a_flags = |extra: &[&'static str]| {
+        let mut f = redistribute();
+        f.extend(["--aggregate-address", AGGREGATE_PREFIX]);
+        f.extend(extra);
+        f
+    };
+
+    log("router-b: redistribute a second /24, stop redistributing its own copy of router-a's");
+    let (a_learned, b_loc) = (a.count(&learned_b), b.count(&loc_rib(REDISTRIBUTE_PREFIX)));
+    b.provision(&[
+        "--static-route",
+        AGGREGATE_CONTRIBUTOR_B,
+        "--static-gateway",
+        REDISTRIBUTE_GATEWAY,
+        "--redistribute",
+        "--remove-static-route",
+        REDISTRIBUTE_PREFIX,
+    ])
+    .await?;
+    a.wait_new(&learned_b, a_learned, 30).await?;
+    b.wait_new(&loc_rib(REDISTRIBUTE_PREFIX), b_loc, 30).await?;
+
+    log("router-a: aggregate-address, with ATOMIC_AGGREGATE and AGGREGATOR");
+    // Both contributors are already in the Loc-RIB: the config change's seed
+    // scan activates it with two at once.
+    let activated = format!("aggregate activated aggregate={AGGREGATE_PREFIX} contributors=2 ");
+    let (act, learned) = (a.count(&activated), b.count(&learned_agg));
+    a.provision(&a_flags(&[])).await?;
+    a.wait_new(&activated, act, 30).await?;
+    b.wait_new(
+        &format!(
+            "{learned_agg} peer={IP_A} atomic_aggregate=true aggregator=Some(({ASN_A}, {RID_A}))"
+        ),
+        learned,
+        30,
+    )
+    .await?;
+
+    log("as-set: router-b sees its own ASN in the AS_SET and drops (withdraws) the aggregate");
+    let a_set = format!(
+        "{} origin=Local as_path=\\[{{{ASN_B}}}\\]",
+        loc_rib(AGGREGATE_PREFIX)
+    );
+    let looped = "dropping bgp update: as_path already contains our own asn";
+    let (set_before, loop_before, wd_before) = (
+        a.count(&a_set),
+        b.count(looped),
+        b.count(&withdrawn(AGGREGATE_PREFIX)),
+    );
+    a.provision(&a_flags(&["--aggregate-as-set"])).await?;
+    a.wait_new(&a_set, set_before, 30).await?;
+    b.wait_new(looped, loop_before, 30).await?;
+    b.wait_new(&withdrawn(AGGREGATE_PREFIX), wd_before, 30)
+        .await?;
+
+    log("summary-only: router-b gets the aggregate back and loses the /24 under it");
+    let (learned, wd_before) = (
+        b.count(&learned_agg),
+        b.count(&withdrawn(REDISTRIBUTE_PREFIX)),
+    );
+    a.provision(&a_flags(&["--aggregate-summary-only"])).await?;
+    b.wait_new(&learned_agg, learned, 30).await?;
+    b.wait_new(&withdrawn(REDISTRIBUTE_PREFIX), wd_before, 30)
+        .await?;
+
+    log("removing the aggregate: router-b loses it and learns the /24 again");
+    let (wd_before, loc_before) = (
+        b.count(&withdrawn(AGGREGATE_PREFIX)),
+        b.count(&loc_rib(REDISTRIBUTE_PREFIX)),
+    );
+    let mut remove = redistribute();
+    remove.extend(["--remove-aggregate-address", AGGREGATE_PREFIX]);
+    a.provision(&remove).await?;
+    b.wait_new(&withdrawn(AGGREGATE_PREFIX), wd_before, 30)
+        .await?;
+    b.wait_new(&loc_rib(REDISTRIBUTE_PREFIX), loc_before, 30)
+        .await?;
+
+    log("router-b: back to redistributing its own copy of the /24 alone");
+    let gone = withdrawn(AGGREGATE_CONTRIBUTOR_B);
+    let gone_before = a.count(&gone);
+    let mut restore = redistribute();
+    restore.extend(["--remove-static-route", AGGREGATE_CONTRIBUTOR_B]);
+    b.provision(&restore).await?;
+    a.wait_new(&gone, gone_before, 30).await
+}
+
 /// RFC 4486 / RFC 9003 administrative shutdown: shutting router-a's peer-group,
 /// then its one peer alone, must send router-b a Cease/Administrative Shutdown
 /// carrying the operator's message, and keep the session down (router-b keeps

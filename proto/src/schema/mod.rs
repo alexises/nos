@@ -24,7 +24,9 @@ pub mod switching_profile;
 pub mod user;
 
 pub use as_path_list::AsPathList;
-pub use bgp_instance::{BgpConfederation, BgpInstance, RpkiCache, RPKI_RTR_PORT_DEFAULT};
+pub use bgp_instance::{
+    BgpAggregate, BgpConfederation, BgpInstance, RpkiCache, RPKI_RTR_PORT_DEFAULT,
+};
 pub use bgp_peer::BgpPeer;
 pub use bgp_peer_group::{
     AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpDamping, BgpMaximumPrefix, BgpPeerGroup,

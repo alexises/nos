@@ -213,6 +213,7 @@ fn bgp_instance(name: &str, asn: u32) -> Value {
         maximum_paths: None,
         confederation: nos_proto::BgpConfederation::default(),
         rpki_caches: Vec::new(),
+        aggregates: Vec::new(),
         routing_table: None,
         redistribute_policy: None,
     })

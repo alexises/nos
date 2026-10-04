@@ -403,6 +403,23 @@ pub struct Args {
     #[arg(long)]
     pub rpki_cache: Vec<std::net::SocketAddr>,
 
+    /// An RFC 4271 §9.2.2.2 aggregate on `--bgp-instance`, repeatable
+    /// (`BgpInstanceOp::SetAggregate`, with the two flags below).
+    #[arg(long)]
+    pub aggregate_address: Vec<IpNet>,
+    #[arg(long)]
+    pub aggregate_as_set: bool,
+    #[arg(long)]
+    pub aggregate_summary_only: bool,
+    /// Removes an aggregate, repeatable (`BgpInstanceOp::RemoveAggregate`).
+    #[arg(long)]
+    pub remove_aggregate_address: Vec<IpNet>,
+
+    /// Removes a static route from `--static-routing-instance`, repeatable
+    /// (`StaticRouteOp::Delete`).
+    #[arg(long)]
+    pub remove_static_route: Vec<IpNet>,
+
     #[arg(long)]
     pub save: bool,
 
@@ -1409,6 +1426,28 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 port: cache.port(),
                 preference: u8::try_from(preference).unwrap_or(u8::MAX),
             },
+        }));
+    }
+    for &prefix in &args.aggregate_address {
+        ops.push(ConfigOp::BgpInstance(BgpInstanceOp::SetAggregate {
+            name: args.bgp_instance.clone(),
+            aggregate: nos_proto::BgpAggregate {
+                prefix,
+                as_set: args.aggregate_as_set,
+                summary_only: args.aggregate_summary_only,
+            },
+        }));
+    }
+    for &prefix in &args.remove_aggregate_address {
+        ops.push(ConfigOp::BgpInstance(BgpInstanceOp::RemoveAggregate {
+            name: args.bgp_instance.clone(),
+            prefix,
+        }));
+    }
+    for &subnet in &args.remove_static_route {
+        ops.push(ConfigOp::StaticRoute(StaticRouteOp::Delete {
+            instance: args.static_routing_instance.clone(),
+            subnet,
         }));
     }
 

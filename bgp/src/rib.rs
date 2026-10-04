@@ -95,6 +95,7 @@ use crate::evpn::EvpnNlri;
 use crate::mac_mobility::MacMobility;
 use crate::message::{self, UpdateMessage};
 
+mod aggregate;
 mod evpn_out;
 pub use evpn_out::{AdvertisedEvpn, EvpnSource};
 
@@ -380,7 +381,8 @@ pub struct RibRoute {
     /// RFC 8092 `LARGE_COMMUNITY` values, possibly rewritten by import
     /// policy. Empty for a fresh `Local` route.
     pub large_communities: Vec<(u32, u32, u32)>,
-    /// RFC 4271 §5.1.6/§5.1.7, preserved in transit (never set locally).
+    /// RFC 4271 §5.1.6/§5.1.7: preserved in transit, generated for an
+    /// aggregate (`aggregate::build_aggregate`).
     pub atomic_aggregate: bool,
     pub aggregator: Option<message::Aggregator>,
     /// RFC 6811 origin validation against the instance's current VRP set,
@@ -586,6 +588,10 @@ pub struct BgpRib {
     /// (`None` there means accept-all, unlike peer import/export's
     /// deny-all default — see `proto`'s `Redistribute.policy` doc comment).
     redistribute_policy: Arc<CompiledPolicy>,
+    /// `BgpInstance.aggregates` and each one's contributors — see `aggregate`.
+    aggregates: Vec<aggregate::AggregateState>,
+    /// Active aggregate routes: a local candidate source like `redistributed`.
+    aggregated: HashMap<IpNet, RibRoute>,
     loc_rib: HashMap<IpNet, RibRoute>,
     /// IGP cost per prefix, as last polled from `nos-ribd` — decision step (d).
     igp: HashMap<IpNet, u32>,
@@ -666,6 +672,8 @@ impl BgpRib {
             redistribute_raw: HashSet::new(),
             redistributed: HashMap::new(),
             redistribute_policy: Arc::new(nos_rpl::ACCEPT_ALL.clone()),
+            aggregates: Vec::new(),
+            aggregated: HashMap::new(),
             loc_rib: HashMap::new(),
             igp: HashMap::new(),
             igp_ready: false,
@@ -879,6 +887,9 @@ impl BgpRib {
         let outbox = self.peer_outboxes.get(&peer).expect("just inserted");
         let mut advertised = HashSet::new();
         for (prefix, best) in &self.loc_rib {
+            if self.suppressed_by_aggregate(*prefix) {
+                continue;
+            }
             let source_is_rr_client = self.source_is_rr_client(best);
             if let Some(adv) = build_advertisement(
                 *prefix,
@@ -919,7 +930,7 @@ impl BgpRib {
             let _ = outbox.tx.send(marker(message::REFRESH_BORR));
         }
         for (prefix, best) in &self.loc_rib {
-            if family_of(*prefix) != family {
+            if family_of(*prefix) != family || self.suppressed_by_aggregate(*prefix) {
                 continue;
             }
             let source_is_rr_client = self.source_is_rr_client(best);
@@ -1277,20 +1288,25 @@ impl BgpRib {
                 );
                 self.withdraw_announced(from, update, &mut touched);
             } else if looped {
+                // RFC 4271 §9.1.2: a looped route is unfeasible, so it
+                // replaces (implicitly withdraws) an earlier one.
                 warn!(
                     peer = %from, as_path = ?attrs.as_path,
                     "dropping bgp update: as_path already contains our own asn (loop prevention)"
                 );
+                self.withdraw_announced(from, update, &mut touched);
             } else if attrs.cluster_list.contains(&self.cluster_id) {
                 warn!(
                     peer = %from, cluster_list = ?attrs.cluster_list,
                     "dropping bgp update: cluster_list already contains our own cluster-id (rfc 4456 reflection loop prevention)"
                 );
+                self.withdraw_announced(from, update, &mut touched);
             } else if attrs.originator_id == Some(self.local_router_id) {
                 warn!(
                     peer = %from, originator_id = ?attrs.originator_id,
                     "dropping bgp update: originator_id is our own router-id (rfc 4456 reflection loop prevention)"
                 );
+                self.withdraw_announced(from, update, &mut touched);
             } else {
                 let mut evpn_recheck: Vec<(u32, [u8; 6])> = Vec::new();
                 let table = self.adj_rib_in.entry(from).or_default();
@@ -1550,6 +1566,9 @@ impl BgpRib {
         if let Some(route) = self.redistributed.get(&prefix) {
             candidates.push((route.clone(), None));
         }
+        if let Some(route) = self.aggregated.get(&prefix) {
+            candidates.push((route.clone(), None));
+        }
         for (peer, table) in &self.adj_rib_in {
             if self.damping.is_suppressed(*peer, &prefix) {
                 continue;
@@ -1617,8 +1636,23 @@ impl BgpRib {
             info!("bgp: loc-rib route for {prefix} withdrawn");
             self.loc_rib.remove(&prefix);
         }
+        // Before the fan-out, so a `summary-only` aggregate this prefix
+        // activates already suppresses it.
+        if !self.aggregates.is_empty() {
+            self.update_aggregates_for(prefix);
+        }
+        self.fan_out(prefix);
+    }
 
-        let source_is_rr_client = best.as_ref().is_some_and(|r| self.source_is_rr_client(r));
+    /// Sends `prefix`'s current Loc-RIB entry (or its withdrawal) to every
+    /// peer, diffed against `adj_rib_out`.
+    fn fan_out(&mut self, prefix: IpNet) {
+        let suppressed = self.suppressed_by_aggregate(prefix);
+        let source_is_rr_client = self
+            .loc_rib
+            .get(&prefix)
+            .is_some_and(|r| self.source_is_rr_client(r));
+        let best = self.loc_rib.get(&prefix);
         // Reused across calls (see `peer_scratch`'s doc comment) instead of
         // collecting a fresh Vec on every touched prefix.
         let mut peers = std::mem::take(&mut self.peer_scratch);
@@ -1626,7 +1660,7 @@ impl BgpRib {
         peers.extend(self.peer_outboxes.keys().copied());
         for &peer in &peers {
             let outbox = self.peer_outboxes.get(&peer).expect("just listed");
-            let advertisement = best.as_ref().and_then(|route| {
+            let advertisement = best.filter(|_| !suppressed).and_then(|route| {
                 build_advertisement(
                     prefix,
                     route,
@@ -6007,5 +6041,208 @@ mod tests {
             },
         );
         assert_eq!(rib.check_max_prefix(peer), None, "warning-only never trips");
+    }
+
+    fn agg(p: &str, as_set: bool, summary_only: bool) -> nos_proto::BgpAggregate {
+        nos_proto::BgpAggregate {
+            prefix: prefix(p),
+            as_set,
+            summary_only,
+        }
+    }
+
+    /// `(announced, withdrawn)` prefixes in `rx`, in order.
+    fn sent(rx: &mut mpsc::UnboundedReceiver<OutboundUpdate>) -> (Vec<IpNet>, Vec<IpNet>) {
+        let mut out = (Vec::new(), Vec::new());
+        for u in recv_all(rx) {
+            match u {
+                OutboundUpdate::Announce(a) => out.0.push(a.prefix),
+                OutboundUpdate::Withdraw(p, _, _) => out.1.push(p),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn agg_rib() -> (BgpRib, mpsc::UnboundedReceiver<OutboundUpdate>) {
+        let mut rib = new_rib_with_identity(65000, v4("1.1.1.1"), v4("1.1.1.1"));
+        rib.set_peer_asn(addr("10.0.0.1"), 65001);
+        let _src = register_peer(&mut rib, addr("10.0.0.1"), false, addr("10.0.0.9"));
+        let rx = register_peer(&mut rib, addr("10.0.0.2"), false, addr("10.0.0.9"));
+        (rib, rx)
+    }
+
+    fn learn(rib: &mut BgpRib, update: &UpdateMessage) {
+        rib.handle_update(
+            addr("10.0.0.1"),
+            false,
+            v4("2.2.2.2"),
+            update,
+            &accept_all_policy(),
+        );
+    }
+
+    fn withdraw(nlri: &str) -> UpdateMessage {
+        UpdateMessage {
+            withdrawn_routes: vec![nlri.parse().unwrap()],
+            ..empty_update()
+        }
+    }
+
+    #[test]
+    fn aggregate_follows_its_contributors() {
+        let (mut rib, mut rx) = agg_rib();
+        rib.set_aggregates(vec![agg("198.51.0.0/16", false, false)]);
+        assert!(
+            !rib.loc_rib.contains_key(&prefix("198.51.0.0/16")),
+            "no contributor"
+        );
+
+        learn(
+            &mut rib,
+            &ebgp_update(vec!["198.51.1.0/24"], vec![65001], "10.0.0.1"),
+        );
+        let a = rib.loc_rib[&prefix("198.51.0.0/16")].clone();
+        assert_eq!(a.origin, RouteOrigin::Local);
+        assert!(a.as_path.is_empty());
+        assert_eq!(a.bgp_origin, message::Origin::Igp);
+        assert!(a.atomic_aggregate, "the contributor's path was dropped");
+        assert_eq!(
+            a.aggregator,
+            Some(message::Aggregator {
+                asn: 65000,
+                router_id: v4("1.1.1.1")
+            })
+        );
+        assert_eq!(
+            sent(&mut rx).0,
+            [prefix("198.51.0.0/16"), prefix("198.51.1.0/24")]
+        );
+
+        // ORIGIN is the worst among the contributors.
+        let mut incomplete = ebgp_update(vec!["198.51.2.0/24"], vec![65001], "10.0.0.1");
+        incomplete.attributes.as_mut().unwrap().origin = message::Origin::Incomplete;
+        learn(&mut rib, &incomplete);
+        assert_eq!(
+            rib.loc_rib[&prefix("198.51.0.0/16")].bgp_origin,
+            message::Origin::Incomplete
+        );
+
+        learn(&mut rib, &withdraw("198.51.1.0/24"));
+        assert!(
+            rib.loc_rib.contains_key(&prefix("198.51.0.0/16")),
+            "one left"
+        );
+        let _ = sent(&mut rx);
+        learn(&mut rib, &withdraw("198.51.2.0/24"));
+        assert!(!rib.loc_rib.contains_key(&prefix("198.51.0.0/16")));
+        let (_, withdrawn) = sent(&mut rx);
+        assert!(withdrawn.contains(&prefix("198.51.0.0/16")));
+    }
+
+    #[test]
+    fn local_contributor_alone_sets_no_atomic_aggregate() {
+        let (mut rib, _rx) = agg_rib();
+        rib.set_aggregates(vec![agg("198.51.0.0/16", false, false)]);
+        rib.apply_redistribute_update(full_update(vec![("198.51.100.0/24", "10.0.0.254")]));
+        assert!(!rib.loc_rib[&prefix("198.51.0.0/16")].atomic_aggregate);
+        // Inherited from a contributor that carries it, with as-set too.
+        rib.set_aggregates(vec![agg("198.51.0.0/16", true, false)]);
+        let mut atomic = ebgp_update(vec!["198.51.1.0/24"], vec![65001], "10.0.0.1");
+        atomic.attributes.as_mut().unwrap().atomic_aggregate = true;
+        learn(&mut rib, &atomic);
+        assert!(rib.loc_rib[&prefix("198.51.0.0/16")].atomic_aggregate);
+    }
+
+    #[test]
+    fn as_set_aggregate_keeps_the_contributors_asns() {
+        let (mut rib, _rx) = agg_rib();
+        rib.set_aggregates(vec![agg("198.51.0.0/16", true, false)]);
+        rib.apply_redistribute_update(full_update(vec![("198.51.100.0/24", "10.0.0.254")]));
+        learn(
+            &mut rib,
+            &ebgp_update(vec!["198.51.1.0/24"], vec![65001, 65005], "10.0.0.1"),
+        );
+        let a = &rib.loc_rib[&prefix("198.51.0.0/16")];
+        assert_eq!(format!("{:?}", a.as_path), "[{65001, 65005}]");
+        assert!(!a.atomic_aggregate);
+    }
+
+    #[test]
+    fn summary_only_suppresses_the_contributors_toward_peers_only() {
+        let (mut rib, mut rx) = agg_rib();
+        rib.set_aggregates(vec![agg("198.51.0.0/16", false, true)]);
+        learn(
+            &mut rib,
+            &ebgp_update(vec!["198.51.1.0/24"], vec![65001], "10.0.0.1"),
+        );
+        assert_eq!(sent(&mut rx), (vec![prefix("198.51.0.0/16")], vec![]));
+        assert!(
+            rib.push_snapshot().1.contains_key(&prefix("198.51.1.0/24")),
+            "still installed"
+        );
+
+        // A new peer and a route refresh get the aggregate alone too.
+        let mut late = register_peer(&mut rib, addr("10.0.0.3"), false, addr("10.0.0.9"));
+        rib.resend_all(addr("10.0.0.3"), AddressFamily::Ipv4Unicast, false);
+        let (announced, _) = sent(&mut late);
+        assert!(announced.iter().all(|p| *p == prefix("198.51.0.0/16")));
+
+        rib.set_aggregates(vec![agg("198.51.0.0/16", false, false)]);
+        assert_eq!(sent(&mut rx).0, [prefix("198.51.1.0/24")]);
+        rib.set_aggregates(vec![agg("198.51.0.0/16", false, true)]);
+        assert_eq!(sent(&mut rx).1, [prefix("198.51.1.0/24")]);
+        rib.set_aggregates(vec![]);
+        let (announced, withdrawn) = sent(&mut rx);
+        assert_eq!(withdrawn, [prefix("198.51.0.0/16")]);
+        assert_eq!(announced, [prefix("198.51.1.0/24")]);
+    }
+
+    #[test]
+    fn summary_only_withdraws_contributors_already_sent() {
+        let (mut rib, mut rx) = agg_rib();
+        learn(
+            &mut rib,
+            &ebgp_update(vec!["198.51.1.0/24"], vec![65001], "10.0.0.1"),
+        );
+        assert_eq!(sent(&mut rx).0, [prefix("198.51.1.0/24")]);
+        rib.set_aggregates(vec![agg("198.51.0.0/16", false, true)]);
+        assert_eq!(
+            sent(&mut rx),
+            (vec![prefix("198.51.0.0/16")], vec![prefix("198.51.1.0/24")])
+        );
+    }
+
+    #[test]
+    fn nested_aggregates_and_the_seed_scan() {
+        let (mut rib, _rx) = agg_rib();
+        learn(
+            &mut rib,
+            &ebgp_update(vec!["198.51.1.0/24"], vec![65001], "10.0.0.1"),
+        );
+        rib.set_aggregates(vec![
+            agg("198.0.0.0/8", false, false),
+            agg("198.51.0.0/16", false, false),
+        ]);
+        assert!(rib.loc_rib.contains_key(&prefix("198.51.0.0/16")));
+        assert!(rib.loc_rib.contains_key(&prefix("198.0.0.0/8")));
+        learn(&mut rib, &withdraw("198.51.1.0/24"));
+        assert!(!rib.loc_rib.contains_key(&prefix("198.51.0.0/16")));
+        assert!(!rib.loc_rib.contains_key(&prefix("198.0.0.0/8")));
+    }
+
+    #[test]
+    fn a_looped_route_implicitly_withdraws_the_earlier_one() {
+        let (mut rib, _rx) = agg_rib();
+        learn(
+            &mut rib,
+            &ebgp_update(vec!["198.51.1.0/24"], vec![65001], "10.0.0.1"),
+        );
+        assert!(rib.loc_rib.contains_key(&prefix("198.51.1.0/24")));
+        learn(
+            &mut rib,
+            &ebgp_update(vec!["198.51.1.0/24"], vec![65001, 65000], "10.0.0.1"),
+        );
+        assert!(!rib.loc_rib.contains_key(&prefix("198.51.1.0/24")));
     }
 }

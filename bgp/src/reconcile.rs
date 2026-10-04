@@ -270,6 +270,9 @@ async fn resync(
             &own.rpki_caches,
         )
         .await;
+    // After `reconcile`, which sets the local ASN/router-id the AGGREGATOR
+    // attribute carries.
+    sessions.set_aggregates(own.aggregates.clone()).await;
 }
 
 /// Resolves `table`'s Linux VRF interface name by asking the owning

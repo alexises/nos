@@ -188,6 +188,16 @@ pub fn render_bgp_instance(instance: &BgpInstance) -> String {
             c.address, c.port, c.preference
         ));
     }
+    for a in &instance.aggregates {
+        let mut line = format!("  aggregate-address {}", a.prefix);
+        if a.as_set {
+            line.push_str(" as-set");
+        }
+        if a.summary_only {
+            line.push_str(" summary-only");
+        }
+        lines.push(line);
+    }
     lines.join("\n")
 }
 
@@ -1943,6 +1953,7 @@ mod tests {
             maximum_paths: None,
             confederation: nos_proto::BgpConfederation::default(),
             rpki_caches: Vec::new(),
+            aggregates: Vec::new(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -3187,6 +3198,7 @@ mod tests {
                 maximum_paths: None,
                 confederation: nos_proto::BgpConfederation::default(),
                 rpki_caches: Vec::new(),
+                aggregates: Vec::new(),
                 ..instance("r1", 65001)
             }],
             routing_tables: vec![RoutingTable {
