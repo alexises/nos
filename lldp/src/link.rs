@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -18,8 +19,8 @@ use nos_proto::LldpLinkStats;
 
 use crate::neighbor::{NeighborTable, Update, MAX_NEIGHBORS_PER_LINK};
 use crate::packet::{
-    self, Capabilities, Id, Lldpdu, ManagementAddress, CAP_BRIDGE, CAP_ROUTER, CHASSIS_SUBTYPE_MAC,
-    PORT_SUBTYPE_IF_NAME,
+    self, Capabilities, Id, LinkAggregation, Lldpdu, ManagementAddress, OrgTlvs, CAP_BRIDGE,
+    CAP_ROUTER, CHASSIS_SUBTYPE_MAC, PORT_SUBTYPE_IF_NAME,
 };
 use crate::socket::{self, LldpSocket};
 
@@ -36,9 +37,12 @@ const MSG_FAST_TX: Duration = Duration::from_secs(1);
 /// comes back per second.
 const TX_CREDIT_MAX: u8 = 5;
 
+const SYS_CLASS_NET: &str = "/sys/class/net";
+
 /// Everything a link task needs; also what `reconcile` compares to decide
 /// whether a running link must be restarted.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // independent per-link knobs, compared as a whole
 pub struct LinkConfig {
     pub interface: String,
     pub transmit: bool,
@@ -58,6 +62,15 @@ pub struct LinkConfig {
     pub bridge: bool,
     /// The 802.1AB destination group this link speaks on.
     pub destination: [u8; 6],
+    /// 802.1 VLAN Name TLVs: each `Dot1q` switching-profile member's tag and
+    /// broadcast domain, by tag.
+    pub vlan_names: Vec<(u16, String)>,
+    /// Whether the interface is a port-aggregate member, so it sends a Link
+    /// Aggregation TLV (its state is read from the kernel per transmit).
+    pub aggregated: bool,
+    /// 802.3 Maximum Frame Size: the effective MTU plus the Ethernet header
+    /// and FCS.
+    pub max_frame_size: u16,
 }
 
 /// One LLDP-enabled interface's live state: its neighbors and its 802.1AB
@@ -82,10 +95,31 @@ fn chassis_id(cfg: &LinkConfig) -> Id {
     }
 }
 
+/// The Link Aggregation TLV of a port-aggregate member: capable, and enabled
+/// with the bond's ifIndex while the kernel has it enslaved (`<sys>/<if>/master`
+/// is then a symlink to the bond's sysfs directory). For a `Lacp` aggregate
+/// `nos-interfaced` only enslaves negotiated members, so "has a master" is
+/// "aggregated now". `sys` is `/sys/class/net` outside tests.
+pub fn read_aggregation(sys: &Path, interface: &str) -> LinkAggregation {
+    let bond = std::fs::read_to_string(sys.join(interface).join("master/ifindex"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    LinkAggregation {
+        capable: true,
+        enabled: bond.is_some(),
+        port_id: bond.unwrap_or(0),
+    }
+}
+
 /// The LLDPDU this link advertises. `resolve` gives the ifIndex of the
 /// interface carrying a management address, if any — looked up per transmit
-/// so an address applied or moved after the link started is picked up.
-pub fn local_pdu(cfg: &LinkConfig, resolve: impl Fn(IpAddr) -> Option<u32>) -> Lldpdu {
+/// so an address applied or moved after the link started is picked up, like
+/// `aggregation` (`read_aggregation`, `None` for a non-member).
+pub fn local_pdu(
+    cfg: &LinkConfig,
+    resolve: impl Fn(IpAddr) -> Option<u32>,
+    aggregation: Option<LinkAggregation>,
+) -> Lldpdu {
     Lldpdu {
         chassis_id: chassis_id(cfg),
         port_id: Id {
@@ -108,6 +142,12 @@ pub fn local_pdu(cfg: &LinkConfig, resolve: impl Fn(IpAddr) -> Option<u32>) -> L
                 if_index: resolve(address),
             })
             .collect(),
+        org: OrgTlvs {
+            vlan_names: cfg.vlan_names.clone(),
+            link_aggregation: aggregation,
+            max_frame_size: Some(cfg.max_frame_size),
+            ..OrgTlvs::default()
+        },
     }
 }
 
@@ -121,7 +161,8 @@ fn shutdown_pdu(cfg: &LinkConfig) -> Lldpdu {
         system_description: None,
         capabilities: None,
         management_addresses: Vec::new(),
-        ..local_pdu(cfg, |_| None)
+        org: OrgTlvs::default(),
+        ..local_pdu(cfg, |_| None, None)
     }
 }
 
@@ -190,6 +231,19 @@ fn handle_rx(cfg: &LinkConfig, ports: &SharedPorts, payload: &[u8], now: Instant
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(",");
+    let capabilities = pdu.enabled_capability_names().join(",");
+    let max_frame_size = pdu
+        .org
+        .max_frame_size
+        .map_or_else(|| "-".to_string(), |s| s.to_string());
+    let vlans = pdu
+        .org
+        .vlan_names
+        .iter()
+        .map(|(vid, name)| format!("{vid}:{name}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let aggregation = aggregation_display(pdu.org.link_aggregation);
     let update = entry.neighbors.apply(pdu, now);
     if let Update::TableFull { .. } = update {
         entry.stats.too_many_neighbors += 1;
@@ -201,7 +255,8 @@ fn handle_rx(cfg: &LinkConfig, ports: &SharedPorts, payload: &[u8], now: Instant
             info!(
                 interface = %cfg.interface, chassis_id = %chassis, port_id = %port,
                 system_name = %system_name, ttl, management_addresses = %management_addresses,
-                "lldp neighbor learned"
+                capabilities = %capabilities, max_frame_size = %max_frame_size,
+                vlans = %vlans, aggregation = %aggregation, "lldp neighbor learned"
             );
             true
         }
@@ -229,6 +284,15 @@ fn handle_rx(cfg: &LinkConfig, ports: &SharedPorts, payload: &[u8], now: Instant
             false
         }
         Update::Refreshed | Update::Ignored => false,
+    }
+}
+
+/// A Link Aggregation TLV for logs: `enabled/<port id>`, `capable`, or `-`.
+fn aggregation_display(agg: Option<LinkAggregation>) -> String {
+    match agg {
+        Some(a) if a.enabled => format!("enabled/{}", a.port_id),
+        Some(a) if a.capable => "capable".to_string(),
+        _ => "-".to_string(),
     }
 }
 
@@ -324,7 +388,11 @@ pub async fn run(
                 // Out of credit, or the link is down: nothing spent, retry in
                 // a second (credit comes back at that rate too).
                 next_tx = now + LINK_DOWN_RETRY;
-                if tx_credit > 0 && send(&socket, &cfg.interface, &ports, &local_pdu(&cfg, nos_l2_socket::ifindex_of_address)) {
+                // ponytail: a LACP membership change is advertised on the next
+                // transmit (<= tx-interval), not as somethingChangedLocal; watch
+                // the master link if anyone needs it faster.
+                let aggregation = cfg.aggregated.then(|| read_aggregation(Path::new(SYS_CLASS_NET), &cfg.interface));
+                if tx_credit > 0 && send(&socket, &cfg.interface, &ports, &local_pdu(&cfg, nos_l2_socket::ifindex_of_address, aggregation)) {
                     if tx_fast > 0 {
                         debug!(interface = %cfg.interface, remaining = tx_fast - 1, "lldp fast-start tx");
                     }
@@ -374,6 +442,9 @@ mod tests {
             management_addresses: Vec::new(),
             bridge: false,
             destination: nos_proto::LldpDestination::default().mac(),
+            vlan_names: Vec::new(),
+            aggregated: false,
+            max_frame_size: 1518,
         }
     }
 
@@ -382,7 +453,7 @@ mod tests {
     }
 
     fn frame_from(peer: &LinkConfig, ttl: u16) -> Vec<u8> {
-        let mut pdu = local_pdu(peer, |_| None);
+        let mut pdu = local_pdu(peer, |_| None, None);
         pdu.ttl = ttl;
         packet::encode(&pdu)
     }
@@ -390,7 +461,7 @@ mod tests {
     #[test]
     fn local_pdu_round_trips_and_carries_our_identity() {
         let c = cfg(1);
-        let pdu = packet::decode(&packet::encode(&local_pdu(&c, |_| None))).unwrap();
+        let pdu = packet::decode(&packet::encode(&local_pdu(&c, |_| None, None))).unwrap();
         assert_eq!(pdu.chassis_display(), "02:00:00:00:00:01");
         assert_eq!(pdu.port_display(), "eth1");
         assert_eq!(pdu.system_name.as_deref(), Some("router-1"));
@@ -406,7 +477,7 @@ mod tests {
         c.management_addresses = vec![on_if, nowhere];
         // Only the first is on an interface (ifIndex 7).
         let resolve = |a| (a == on_if).then_some(7);
-        let pdu = packet::decode(&packet::encode(&local_pdu(&c, resolve))).unwrap();
+        let pdu = packet::decode(&packet::encode(&local_pdu(&c, resolve, None))).unwrap();
         assert_eq!(pdu.ttl, 15);
         assert_eq!(
             pdu.management_addresses,
@@ -425,8 +496,63 @@ mod tests {
         assert_eq!(pdu.enabled_capability_names(), ["router"]);
         assert_eq!(pdu.capabilities.unwrap().supported, CAP_ROUTER | CAP_BRIDGE);
         c.bridge = true;
-        let pdu = packet::decode(&packet::encode(&local_pdu(&c, resolve))).unwrap();
+        let pdu = packet::decode(&packet::encode(&local_pdu(&c, resolve, None))).unwrap();
         assert_eq!(pdu.enabled_capability_names(), ["bridge", "router"]);
+    }
+
+    #[test]
+    fn org_tlvs_reach_the_wire() {
+        let mut c = cfg(1);
+        let pdu = packet::decode(&packet::encode(&local_pdu(&c, |_| None, None))).unwrap();
+        assert_eq!(
+            pdu.org,
+            OrgTlvs {
+                max_frame_size: Some(1518),
+                ..OrgTlvs::default()
+            }
+        );
+        c.vlan_names = vec![(100, "bd-x".to_string())];
+        c.max_frame_size = 9018;
+        let agg = LinkAggregation {
+            capable: true,
+            enabled: true,
+            port_id: 12,
+        };
+        let pdu = packet::decode(&packet::encode(&local_pdu(&c, |_| None, Some(agg)))).unwrap();
+        assert_eq!(pdu.org.vlan_names, c.vlan_names);
+        assert_eq!(pdu.org.max_frame_size, Some(9018));
+        assert_eq!(pdu.org.link_aggregation, Some(agg));
+        assert_eq!(aggregation_display(Some(agg)), "enabled/12");
+        assert_eq!(aggregation_display(None), "-");
+    }
+
+    #[test]
+    fn aggregation_is_read_from_the_master_link() {
+        let sys = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(sys.path().join("eth2")).unwrap();
+        let not_enslaved = read_aggregation(sys.path(), "eth2");
+        assert_eq!(
+            not_enslaved,
+            LinkAggregation {
+                capable: true,
+                enabled: false,
+                port_id: 0
+            }
+        );
+        assert_eq!(aggregation_display(Some(not_enslaved)), "capable");
+        // The kernel's `master` is a symlink to the bond's directory.
+        std::fs::create_dir_all(sys.path().join("bond1")).unwrap();
+        std::fs::write(sys.path().join("bond1/ifindex"), "7\n").unwrap();
+        std::os::unix::fs::symlink(sys.path().join("bond1"), sys.path().join("eth2/master"))
+            .unwrap();
+        assert_eq!(
+            read_aggregation(sys.path(), "eth2"),
+            LinkAggregation {
+                capable: true,
+                enabled: true,
+                port_id: 7
+            }
+        );
     }
 
     #[test]
@@ -436,6 +562,7 @@ mod tests {
         let pdu = packet::decode(&packet::encode(&shutdown_pdu(&c))).unwrap();
         assert_eq!(pdu.ttl, 0);
         assert_eq!(pdu.management_addresses, []);
+        assert_eq!(pdu.org, OrgTlvs::default());
         assert_eq!(pdu.system_name, None);
         assert_eq!(pdu.chassis_display(), "02:00:00:00:00:01");
     }

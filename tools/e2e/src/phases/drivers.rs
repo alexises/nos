@@ -346,10 +346,13 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
     // one LLDPDU.
     let on_if = |ip: &str| format!("{ip} (ifindex [1-9][0-9]*)");
     let mgmt_a = learned_a(&format!(
-        " ttl=15 management_addresses={},{MGMT_NOWHERE}$",
+        " ttl=15 management_addresses={},{MGMT_NOWHERE} capabilities=",
         on_if(IP_B)
     ));
-    let mgmt_b = learned_b(&format!(" ttl=15 management_addresses={}$", on_if(IP_A)));
+    let mgmt_b = learned_b(&format!(
+        " ttl=15 management_addresses={} capabilities=",
+        on_if(IP_A)
+    ));
     let (base_ma, base_mb) = (a.count(&mgmt_a), b.count(&mgmt_b));
     a.provision(&host(
         "router-a",
@@ -382,7 +385,10 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
 
     // Removing one address restarts router-b's link; router-a relearns it
     // with only the other.
-    let only_b = learned_a(&format!(" ttl=15 management_addresses={}$", on_if(IP_B)));
+    let only_b = learned_a(&format!(
+        " ttl=15 management_addresses={} capabilities=",
+        on_if(IP_B)
+    ));
     let base_ob = a.count(&only_b);
     b.provision(&host(
         "router-b",
@@ -390,6 +396,8 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
     a.wait_new(&only_b, base_ob, 60).await?;
+
+    lldp_org_tlvs(w).await?;
 
     // 802.1AB counters over REST: both sides sent and received real frames,
     // none of them bad, and nos sends only TLVs nos recognizes.
@@ -495,6 +503,90 @@ pub async fn lldp(w: &mut World) -> anyhow::Result<()> {
 
     w.unlink_veths().await;
     Ok(())
+}
+
+/// 802.1/802.3 org TLVs (#63), router-a sending, router-b receiving. The
+/// domain and profile are `switching`'s own `bd1`/`sp1`: bridge ids are
+/// allocated once per name and never freed, so a new domain here would take
+/// the `br1` that phase expects for `bd1`.
+async fn lldp_org_tlvs(w: &World) -> anyhow::Result<()> {
+    let host = |name: &str, extra: &[&str]| {
+        let mut f = vec!["--hostname", name];
+        f.extend_from_slice(extra);
+        strings(&f)
+    };
+    let (a, b) = (w.a()?, w.b()?);
+    let learned = |iface: &str, extra: &str| {
+        format!("lldp neighbor learned interface={iface} .* system_name=router-a .*{extra}$")
+    };
+    // A switching-profile port with a jumbo MTU: the Bridge bit, Maximum
+    // Frame Size (MTU + 18) and one VLAN Name per dot1q member. The link
+    // restarts on the change (shutdown frame, then a fresh "learned").
+    let trunk = learned(
+        "eth1",
+        " capabilities=bridge,router max_frame_size=9018 vlans=100:bd1 aggregation=-",
+    );
+    let base = b.count(&trunk);
+    a.provision(&host(
+        "router-a",
+        &[
+            "--link-interface",
+            "eth1",
+            "--mtu",
+            "9000",
+            "--switching-profile",
+            "sp1",
+            "--switching-profile-member",
+            "bd1:100",
+        ],
+    ))
+    .await?;
+    b.wait_new(&trunk, base, 60).await?;
+
+    // A port-aggregate member, enslaved first so the very first LLDPDU
+    // already carries the bond's ifIndex (only non-zero is checked: it
+    // depends on how many links the container created before).
+    let bond = [
+        "--port-aggregate",
+        "po-lldp",
+        "--enslave-interface-into-port-aggregate",
+        "eth2",
+    ];
+    let enslaved = "enslaved interface to bond interface=eth2 bond=";
+    let base = a.count(enslaved);
+    a.provision(&host("router-a", &bond)).await?;
+    a.wait_new(enslaved, base, 60).await?;
+    let member = learned(
+        "eth2",
+        " max_frame_size=1518 vlans= aggregation=enabled/[1-9][0-9]*",
+    );
+    let base = b.count(&member);
+    a.provision(&host("router-a", &["--lldp-transmit-interface", "eth2"]))
+        .await?;
+    b.provision(&host("router-b", &["--lldp-receive-interface", "eth2"]))
+        .await?;
+    b.wait_new(&member, base, 60).await?;
+
+    // Back to the base state the rest of the phase expects.
+    let plain = learned(
+        "eth1",
+        " capabilities=router max_frame_size=1518 vlans= aggregation=-",
+    );
+    let base = b.count(&plain);
+    let mut undo = bond.to_vec();
+    undo.extend([
+        "--delete-port-aggregate",
+        "--no-lldp-transmit-interface",
+        "eth2",
+        "--link-interface",
+        "eth1",
+        "--clear-mtu",
+        "--delete-switching-profile",
+    ]);
+    a.provision(&host("router-a", &undo)).await?;
+    b.provision(&host("router-b", &["--no-lldp-receive-interface", "eth2"]))
+        .await?;
+    b.wait_new(&plain, base, 60).await
 }
 
 /// `eth1`'s row of `GET /v1/lldp/statistics`.

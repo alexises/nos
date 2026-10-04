@@ -1454,6 +1454,31 @@
         ],
         "type": "string"
       },
+      "LldpLinkAggregation": {
+        "description": "A neighbor port's link aggregation state.",
+        "properties": {
+          "capable": {
+            "description": "The port can be aggregated.",
+            "type": "boolean"
+          },
+          "enabled": {
+            "description": "The port is in an aggregation now.",
+            "type": "boolean"
+          },
+          "port_id": {
+            "description": "The aggregated port id (the sender's aggregate ifIndex), 0 when not\naggregated.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "capable",
+          "enabled",
+          "port_id"
+        ],
+        "type": "object"
+      },
       "LldpLinkStats": {
         "description": "One LLDP-enabled interface's IEEE 802.1AB §9.2.6 statistics (the\nLLDP-MIB `lldpStatsTxPortTable`/`lldpStatsRxPortTable` counters), for\n`show lldp statistics`. Every counter resets only when `nos-lldpd`\nrestarts or LLDP is turned off on that interface.",
         "properties": {
@@ -1491,13 +1516,13 @@
             "type": "string"
           },
           "tlvs_discarded": {
-            "description": "`statsTLVsDiscardedTotal`: optional TLVs dropped (a malformed or non-IP\nManagement Address, or one past the per-LLDPDU cap).",
+            "description": "`statsTLVsDiscardedTotal`: optional TLVs dropped (a malformed or non-IP\nManagement Address, or one past the per-LLDPDU cap; a malformed or\nrepeated 802.1/802.3 TLV nos decodes, or a VLAN Name past the cap).",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "tlvs_unrecognized": {
-            "description": "`statsTLVsUnrecognizedTotal`: reserved TLV types and every\norganizationally-specific TLV.",
+            "description": "`statsTLVsUnrecognizedTotal`: reserved TLV types and every\norganizationally-specific TLV nos doesn't decode (LLDP-MED, DCBX, …).",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -1522,6 +1547,36 @@
         ],
         "type": "object"
       },
+      "LldpMacPhy": {
+        "description": "A neighbor port's IEEE 802.3 auto-negotiation and MAU type.",
+        "properties": {
+          "advertised": {
+            "description": "PMD auto-negotiation advertised capability bits (IANA-MAU-MIB\n`IANAifMauAutoNegCapBits`).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "autoneg_enabled": {
+            "type": "boolean"
+          },
+          "autoneg_supported": {
+            "type": "boolean"
+          },
+          "mau_type": {
+            "description": "Operational MAU type (IANA-MAU-MIB `IANAifMauTypeListBits` index).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "autoneg_supported",
+          "autoneg_enabled",
+          "advertised",
+          "mau_type"
+        ],
+        "type": "object"
+      },
       "LldpNeighbor": {
         "description": "One remote system heard on one local interface, for `show lldp neighbors`.\n\nChassis/Port IDs are already formatted for display by `nos-lldpd` (a MAC\nsubtype as `aa:bb:..`, an interface-name subtype as its text, anything\nelse as hex) — this type is deliberately not a faithful copy of the\n802.1AB subtype/value pair, since nothing downstream needs to interpret it.",
         "properties": {
@@ -1535,8 +1590,30 @@
           "chassis_id": {
             "type": "string"
           },
+          "link_aggregation": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LldpLinkAggregation",
+                "description": "IEEE 802.1 (or the deprecated 802.3) Link Aggregation TLV."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "local_interface": {
             "type": "string"
+          },
+          "mac_phy": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LldpMacPhy",
+                "description": "IEEE 802.3 MAC/PHY Configuration/Status TLV."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "management_addresses": {
             "description": "Management addresses the neighbor advertised (already formatted).",
@@ -1544,6 +1621,15 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "max_frame_size": {
+            "description": "IEEE 802.3 Maximum Frame Size, in bytes.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "port_description": {
             "type": [
@@ -1553,6 +1639,15 @@
           },
           "port_id": {
             "type": "string"
+          },
+          "port_vlan_id": {
+            "description": "IEEE 802.1 Port VLAN ID (0: the port has none).",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "system_description": {
             "type": [
@@ -1571,6 +1666,13 @@
             "format": "int32",
             "minimum": 0,
             "type": "integer"
+          },
+          "vlan_names": {
+            "description": "IEEE 802.1 VLAN Name TLVs, in the order received.",
+            "items": {
+              "$ref": "#/components/schemas/LldpVlanName"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -1579,7 +1681,8 @@
           "port_id",
           "capabilities",
           "management_addresses",
-          "ttl_remaining_secs"
+          "ttl_remaining_secs",
+          "vlan_names"
         ],
         "type": "object"
       },
@@ -1612,6 +1715,24 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "LldpVlanName": {
+        "description": "One VLAN a neighbor's port carries, with its name.",
+        "properties": {
+          "id": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
         "type": "object"
       },
       "LogEntry": {

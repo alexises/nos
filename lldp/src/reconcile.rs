@@ -1,4 +1,4 @@
-//! Steady-state loop: subscribes to `Interfaces`/`Hostname`/`Lldp` diffs purely
+//! Steady-state loop: subscribes to `Interfaces`/`Hostname`/`Lldp`/`SwitchingProfiles`/`PortAggregates` diffs purely
 //! as a resync trigger, always re-fetching the whole config — same shape as
 //! `nos-lacp`'s `reconcile::run`. Runs one `link::run` task per interface with
 //! `lldp transmit` and/or `lldp receive` set, restarting a link whose flags, timers,
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::StreamExt;
-use nos_proto::{Config, DiffScope, Event};
+use nos_proto::{Config, DiffScope, Event, Interface, VlanTag};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -17,6 +17,7 @@ use tracing::{debug, info, warn};
 
 use crate::config_client;
 use crate::link::{self, LinkConfig, SharedPorts};
+use crate::packet;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
@@ -117,12 +118,65 @@ fn desired_links(cfg: &Config, chassis_mac: [u8; 6]) -> Vec<LinkConfig> {
             management_addresses: cfg.lldp.management_addresses.clone(),
             bridge: i.switching_profile.is_some(),
             destination: i.lldp_destination.mac(),
+            vlan_names: vlan_names(cfg, i),
+            aggregated: i.port_aggregate.is_some(),
+            max_frame_size: max_frame_size(cfg, i),
         })
         .collect()
 }
 
+/// One (tag, broadcast domain) per `Dot1q` member of the interface's switching
+/// profile, by tag. An `Untagged` member has no VLAN id in this model (a
+/// bridge per domain, not a VLAN-aware one), so it gets no VLAN Name TLV.
+fn vlan_names(cfg: &Config, i: &Interface) -> Vec<(u16, String)> {
+    let Some(profile) = i
+        .switching_profile
+        .as_ref()
+        .and_then(|name| cfg.switching_profiles.iter().find(|p| &p.name == name))
+    else {
+        return Vec::new();
+    };
+    let mut names: Vec<(u16, String)> = profile
+        .members
+        .iter()
+        .filter_map(|m| match m.tag {
+            VlanTag::Dot1q(tag) => Some((
+                tag,
+                packet::truncate_at_char(&m.broadcast_domain, packet::MAX_VLAN_NAME).to_string(),
+            )),
+            VlanTag::Untagged => None,
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// The effective MTU plus the Ethernet header and FCS (18). A bond member's
+/// MTU is its bond's (the bonding driver sets it); unset means Linux's 1500,
+/// which `nos-interfaced` enforces.
+fn max_frame_size(cfg: &Config, i: &Interface) -> u16 {
+    const DEFAULT_MTU: u32 = 1500;
+    let mtu = match &i.port_aggregate {
+        Some(name) => cfg
+            .port_aggregates
+            .iter()
+            .find(|a| &a.name == name)
+            .and_then(|a| a.mtu),
+        None => i.mtu,
+    };
+    u16::try_from(mtu.unwrap_or(DEFAULT_MTU) + 18).unwrap_or(u16::MAX)
+}
+
 pub async fn run(config_socket: PathBuf, ports: SharedPorts, mut shutdown: watch::Receiver<bool>) {
-    let scopes = vec![DiffScope::Interfaces, DiffScope::Hostname, DiffScope::Lldp];
+    // Switching profiles (VLAN names) and port aggregates (a member's MTU)
+    // feed the org TLVs.
+    let scopes = vec![
+        DiffScope::Interfaces,
+        DiffScope::Hostname,
+        DiffScope::Lldp,
+        DiffScope::SwitchingProfiles,
+        DiffScope::PortAggregates,
+    ];
     let chassis_mac = local_system_id();
     let mut links = Links {
         ports,
@@ -308,6 +362,53 @@ mod tests {
         // Any of them changing restarts the link.
         cfg.lldp.tx_hold = None;
         assert_ne!(before, desired_links(&cfg, [2, 0, 0, 0, 0, 1]));
+    }
+
+    #[test]
+    fn vlan_names_aggregation_and_max_frame_size_flow_into_the_link() {
+        use nos_proto::{PortAggregate, SwitchingProfile, SwitchingProfileMember};
+        let member = |bd: &str, tag| SwitchingProfileMember {
+            broadcast_domain: bd.to_string(),
+            tag,
+        };
+        let mut trunk = iface("eth1", true, true);
+        trunk.switching_profile = Some("sp1".to_string());
+        trunk.mtu = Some(9000);
+        let mut bonded = iface("eth2", true, true);
+        bonded.port_aggregate = Some("po1".to_string());
+        let mut cfg = Config {
+            interfaces: vec![trunk, bonded, iface("eth3", true, true)],
+            switching_profiles: vec![SwitchingProfile {
+                name: "sp1".to_string(),
+                members: vec![
+                    member(&"z".repeat(40), VlanTag::Dot1q(300)),
+                    member("bd-x", VlanTag::Dot1q(100)),
+                    member("bd-native", VlanTag::Untagged),
+                ],
+            }],
+            port_aggregates: vec![PortAggregate {
+                name: "po1".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let links = desired_links(&cfg, [2, 0, 0, 0, 0, 1]);
+        // By tag, untagged skipped, names cut at 32 bytes.
+        assert_eq!(
+            links[0].vlan_names,
+            [(100, "bd-x".to_string()), (300, "z".repeat(32))]
+        );
+        assert_eq!(links[0].max_frame_size, 9018);
+        assert!(!links[0].aggregated && links[1].aggregated);
+        // A member's MTU is its bond's, 1500 by default.
+        assert_eq!(links[1].max_frame_size, 1518);
+        assert_eq!(links[2].max_frame_size, 1518);
+        assert_eq!(links[2].vlan_names, Vec::<(u16, String)>::new());
+        cfg.port_aggregates[0].mtu = Some(2000);
+        assert_eq!(
+            desired_links(&cfg, [2, 0, 0, 0, 0, 1])[1].max_frame_size,
+            2018
+        );
     }
 
     #[test]

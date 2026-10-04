@@ -422,7 +422,17 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
                      until its entry ages out.",
         },
         Always,
-        Command::ShowLldpNeighbors),
+        Command::ShowLldpNeighbors { detail: false }),
+    cmd!(["show" "lldp" "neighbors" "detail"],
+        Doc::Local {
+            summary: "Show every LLDP neighbor in full, one block each.",
+            detail: "Like show lldp neighbors, plus what the neighbor advertised in its IEEE \
+                     802.1/802.3 TLVs: its VLANs and port VLAN id, link aggregation state, \
+                     maximum frame size and auto-negotiation/MAU type. Only the lines the \
+                     neighbor sent are printed.",
+        },
+        Always,
+        Command::ShowLldpNeighbors { detail: true }),
     cmd!(["show" "lldp" "statistics"],
         Doc::Local {
             summary: "Show every LLDP-enabled interface's counters.",

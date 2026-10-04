@@ -135,6 +135,12 @@ pub struct Args {
     #[arg(long)]
     pub delete_subinterface: bool,
 
+    /// The interface `--mtu`/`--clear-mtu`/`--switching-profile`/
+    /// `--delete-switching-profile` act on, if not `--interface` — so a
+    /// phase can change another link without moving the base address.
+    #[arg(long)]
+    pub link_interface: Option<String>,
+
     /// If set, sets `--interface`'s own mtu (`InterfaceOp::SetMtu`) — for
     /// verifying `nos-interfaced`'s Linux driver actually applies it to the
     /// real kernel link.
@@ -1111,18 +1117,24 @@ fn l3vni_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
 }
 
 pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
+    let link = args.link_interface.as_ref().unwrap_or(&args.interface);
     let mut ops = vec![ConfigOp::Interface(InterfaceOp::Ensure {
         name: args.interface.clone(),
     })];
+    if link != &args.interface {
+        ops.push(ConfigOp::Interface(InterfaceOp::Ensure {
+            name: link.clone(),
+        }));
+    }
     if let Some(mtu) = args.mtu {
         ops.push(ConfigOp::Interface(InterfaceOp::SetMtu {
-            name: args.interface.clone(),
+            name: link.clone(),
             mtu,
         }));
     }
     if args.clear_mtu {
         ops.push(ConfigOp::Interface(InterfaceOp::ClearMtu {
-            name: args.interface.clone(),
+            name: link.clone(),
         }));
     }
     if args.delete_subinterface {
@@ -1701,7 +1713,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             }));
         }
         ops.push(ConfigOp::Interface(InterfaceOp::SetSwitchingProfile {
-            name: args.interface.clone(),
+            name: link.clone(),
             switching_profile: profile,
         }));
     } else if !args.switching_profile_members.is_empty() {
@@ -1709,7 +1721,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     }
     if args.delete_switching_profile {
         ops.push(ConfigOp::Interface(InterfaceOp::ClearSwitchingProfile {
-            name: args.interface.clone(),
+            name: link.clone(),
         }));
     }
 

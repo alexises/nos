@@ -654,6 +654,79 @@ pub fn render_lldp_neighbors(neighbors: &[nos_proto::LldpNeighbor]) -> String {
         .join("\n")
 }
 
+/// Render `nos-lldpd`'s neighbor table one block per neighbor, for `show lldp
+/// neighbors detail`: every field, the optional ones only when sent.
+pub fn render_lldp_neighbors_detail(neighbors: &[nos_proto::LldpNeighbor]) -> String {
+    if neighbors.is_empty() {
+        return "no lldp neighbors".to_string();
+    }
+    let yes_no = |b: bool| if b { "yes" } else { "no" };
+    neighbors
+        .iter()
+        .map(|n| {
+            let mut lines = vec![
+                format!(
+                    "{}: neighbor {}",
+                    n.local_interface,
+                    n.system_name.as_deref().unwrap_or("unnamed")
+                ),
+                format!("  chassis {}", n.chassis_id),
+                format!("  port {}", n.port_id),
+            ];
+            let mut opt = |label: &str, value: Option<String>| {
+                if let Some(v) = value {
+                    lines.push(format!("  {label} {v}"));
+                }
+            };
+            opt("port-description", n.port_description.clone());
+            opt("system-description", n.system_description.clone());
+            opt(
+                "capabilities",
+                (!n.capabilities.is_empty()).then(|| n.capabilities.join(",")),
+            );
+            opt(
+                "management",
+                (!n.management_addresses.is_empty()).then(|| n.management_addresses.join(",")),
+            );
+            opt(
+                "vlans",
+                (!n.vlan_names.is_empty()).then(|| {
+                    n.vlan_names
+                        .iter()
+                        .map(|v| format!("{} ({})", v.id, v.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }),
+            );
+            opt("port-vlan-id", n.port_vlan_id.map(|v| v.to_string()));
+            opt(
+                "aggregation",
+                n.link_aggregation.map(|a| match (a.enabled, a.capable) {
+                    (true, _) => format!("aggregated, port id {}", a.port_id),
+                    (false, true) => "capable, not aggregated".to_string(),
+                    (false, false) => "not capable".to_string(),
+                }),
+            );
+            opt("max-frame-size", n.max_frame_size.map(|s| s.to_string()));
+            opt(
+                "mac/phy",
+                n.mac_phy.map(|m| {
+                    format!(
+                        "autoneg supported {}, enabled {}, advertised 0x{:04x}, mau-type {}",
+                        yes_no(m.autoneg_supported),
+                        yes_no(m.autoneg_enabled),
+                        m.advertised,
+                        m.mau_type
+                    )
+                }),
+            );
+            lines.push(format!("  ttl {}s", n.ttl_remaining_secs));
+            lines.join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Render `nos-lldpd`'s per-interface counters, for `show lldp statistics`.
 pub fn render_lldp_statistics(stats: &[nos_proto::LldpLinkStats]) -> String {
     if stats.is_empty() {
@@ -2793,6 +2866,7 @@ mod tests {
             capabilities: vec!["router".to_string()],
             management_addresses: Vec::new(),
             ttl_remaining_secs: 117,
+            ..Default::default()
         };
         assert_eq!(
             render_lldp_neighbors(std::slice::from_ref(&neighbor)),
@@ -2804,6 +2878,59 @@ mod tests {
         };
         assert!(render_lldp_neighbors(&[with_mgmt])
             .contains("capabilities router, management 10.0.0.2,2001:db8::2, ttl 117s"));
+    }
+
+    #[test]
+    fn render_lldp_neighbors_detail_prints_only_what_was_sent() {
+        assert_eq!(render_lldp_neighbors_detail(&[]), "no lldp neighbors");
+        let bare = nos_proto::LldpNeighbor {
+            local_interface: "eth1".to_string(),
+            chassis_id: "02:00:00:00:00:02".to_string(),
+            port_id: "eth1".to_string(),
+            ttl_remaining_secs: 117,
+            ..Default::default()
+        };
+        assert_eq!(
+            render_lldp_neighbors_detail(std::slice::from_ref(&bare)),
+            "eth1: neighbor unnamed\n  chassis 02:00:00:00:00:02\n  port eth1\n  ttl 117s"
+        );
+        let full = nos_proto::LldpNeighbor {
+            system_name: Some("router-b".to_string()),
+            capabilities: vec!["bridge".to_string(), "router".to_string()],
+            vlan_names: vec![nos_proto::lldp::LldpVlanName {
+                id: 100,
+                name: "bd-x".to_string(),
+            }],
+            port_vlan_id: Some(1),
+            link_aggregation: Some(nos_proto::lldp::LldpLinkAggregation {
+                capable: true,
+                enabled: true,
+                port_id: 7,
+            }),
+            max_frame_size: Some(9018),
+            mac_phy: Some(nos_proto::lldp::LldpMacPhy {
+                autoneg_supported: true,
+                autoneg_enabled: false,
+                advertised: 0x6c01,
+                mau_type: 30,
+            }),
+            ..bare
+        };
+        let out = render_lldp_neighbors_detail(&[full]);
+        for line in [
+            "eth1: neighbor router-b",
+            "  capabilities bridge,router",
+            "  vlans 100 (bd-x)",
+            "  port-vlan-id 1",
+            "  aggregation aggregated, port id 7",
+            "  max-frame-size 9018",
+            "  mac/phy autoneg supported yes, enabled no, advertised 0x6c01, mau-type 30",
+        ] {
+            assert!(
+                out.lines().any(|l| l == line),
+                "{line:?} missing from:\n{out}"
+            );
+        }
     }
 
     #[test]

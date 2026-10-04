@@ -224,7 +224,7 @@ These work in both modes. Only `clear` acts on anything, and it never changes co
 - `show route <table>`: every prefix in a routing table, with every candidate route best first; `*` marks the one in use. `show route <table> <address>` looks up the longest-prefix match for one address.
 - `show interface [<name>]`: what is actually applied to each interface and subinterface: addresses, routing table, MTU.
 - `show port-aggregate [<name>]` and `show lacp [<name>]`: bonds, their members, and LACP negotiation state.
-- `show lldp neighbors`: every LLDP neighbour heard, on every interface. `show lldp statistics`: frames sent, received, in error and discarded, TLVs skipped, ageouts and table-full drops, per LLDP-enabled interface.
+- `show lldp neighbors`: every LLDP neighbour heard, on every interface; `show lldp neighbors detail` adds its VLANs, link aggregation, maximum frame size and MAC/PHY fields. `show lldp statistics`: frames sent, received, in error and discarded, TLVs skipped, ageouts and table-full drops, per LLDP-enabled interface.
 - `show bgp brief`: one line per BGP peer across every instance, with state, remote AS, uptime and hold time. `show bgp evpn` lists received EVPN routes, `show bgp rpki` the RPKI cache sessions.
 - `show ospf neigh` and `show ospf database`, and their `ospfv3` counterparts: neighbours and their state, and the LSA headers in each LSDB.
 - `show fdb <domain>`: an EVPN broadcast domain's MAC table and flood list.

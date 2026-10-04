@@ -2,7 +2,9 @@ use std::time::Instant;
 
 use futures::{SinkExt, StreamExt};
 use nos_lldp::link::{Port, SharedPorts};
-use nos_lldp::packet::{Id, Lldpdu, CHASSIS_SUBTYPE_MAC, PORT_SUBTYPE_IF_NAME};
+use nos_lldp::packet::{
+    Id, LinkAggregation, Lldpdu, MacPhy, OrgTlvs, CHASSIS_SUBTYPE_MAC, PORT_SUBTYPE_IF_NAME,
+};
 use nos_lldp::server;
 use nos_pki::testing::shared;
 use nos_proto::{IpcCodec, LldpEvent, LldpLinkStats, LldpNeighbor, LldpRequest};
@@ -75,6 +77,22 @@ fn pdu(chassis: u8, port: &str, name: &str) -> Lldpdu {
         system_description: None,
         capabilities: None,
         management_addresses: Vec::new(),
+        org: OrgTlvs {
+            port_vlan_id: Some(1),
+            vlan_names: vec![(100, "bd-x".to_string())],
+            link_aggregation: Some(LinkAggregation {
+                capable: true,
+                enabled: true,
+                port_id: 9,
+            }),
+            max_frame_size: Some(9018),
+            mac_phy: Some(MacPhy {
+                autoneg_supported: true,
+                autoneg_enabled: true,
+                advertised: 1,
+                mau_type: 30,
+            }),
+        },
     }
 }
 
@@ -98,6 +116,18 @@ async fn get_neighbors_lists_every_interface_sorted() {
     assert_eq!(all[0].chassis_id, "02:00:00:00:00:02");
     assert_eq!(all[0].port_id, "eth0");
     assert!(all[0].ttl_remaining_secs > 100);
+    // The org TLVs survive the IPC round trip.
+    assert_eq!(all[0].port_vlan_id, Some(1));
+    assert_eq!(
+        all[0].vlan_names,
+        [nos_proto::lldp::LldpVlanName {
+            id: 100,
+            name: "bd-x".to_string()
+        }]
+    );
+    assert_eq!(all[0].link_aggregation.map(|a| a.port_id), Some(9));
+    assert_eq!(all[0].max_frame_size, Some(9018));
+    assert_eq!(all[0].mac_phy.map(|m| m.mau_type), Some(30));
     assert_eq!(all[1].local_interface, "eth2");
 }
 

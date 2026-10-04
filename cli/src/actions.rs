@@ -206,8 +206,8 @@ pub async fn handle_action(
             show_lacp(watchdog_socket, name.as_deref()).await;
             Outcome::Continue(mode)
         }
-        Resolved::ShowLldpNeighbors => {
-            show_lldp_neighbors(watchdog_socket).await;
+        Resolved::ShowLldpNeighbors { detail } => {
+            show_lldp_neighbors(watchdog_socket, detail).await;
             Outcome::Continue(mode)
         }
         Resolved::ShowLldpStatistics => {
@@ -533,11 +533,14 @@ async fn resolve_lldp(watchdog_socket: &Path) -> Option<std::path::PathBuf> {
 
 /// Same resolution and shape as `show_lacp`, against `nos-lldpd`'s neighbor
 /// query.
-async fn show_lldp_neighbors(watchdog_socket: &Path) {
+async fn show_lldp_neighbors(watchdog_socket: &Path, detail: bool) {
     let Some(lldp_socket) = resolve_lldp(watchdog_socket).await else {
         return;
     };
     match lldp_client::get_neighbors(&lldp_socket).await {
+        Ok(neighbors) if detail => {
+            println!("{}", format::render_lldp_neighbors_detail(&neighbors));
+        }
         Ok(neighbors) => println!("{}", format::render_lldp_neighbors(&neighbors)),
         Err(e) => eprintln!("error: {e}"),
     }

@@ -32,8 +32,11 @@ pub enum Command {
     ShowLacp {
         name: Option<String>,
     },
-    /// `show lldp neighbors` — every LLDP neighbor heard on any interface.
-    ShowLldpNeighbors,
+    /// `show lldp neighbors [detail]` — every LLDP neighbor heard on any
+    /// interface, one line each or (`detail`) one block each.
+    ShowLldpNeighbors {
+        detail: bool,
+    },
     /// `show lldp statistics` — every LLDP-enabled interface's counters.
     ShowLldpStatistics,
     /// `show log [<source>] [--follow]` — a one-shot buffer snapshot,
@@ -193,7 +196,11 @@ mod tests {
     fn show_lldp_neighbors() {
         assert_eq!(
             Command::parse("show lldp neighbors"),
-            Command::ShowLldpNeighbors
+            Command::ShowLldpNeighbors { detail: false }
+        );
+        assert_eq!(
+            Command::parse("show lldp neighbors detail"),
+            Command::ShowLldpNeighbors { detail: true }
         );
         assert_eq!(
             Command::parse("show lldp statistics"),
