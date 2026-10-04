@@ -18,6 +18,30 @@ const TLV_SYSTEM_NAME: u8 = 5;
 const TLV_SYSTEM_DESCRIPTION: u8 = 6;
 const TLV_SYSTEM_CAPABILITIES: u8 = 7;
 const TLV_MANAGEMENT_ADDRESS: u8 = 8;
+const TLV_ORG_SPECIFIC: u8 = 127;
+
+/// IEEE 802.1 organizationally-specific TLVs (802.1Q Annex D, formerly
+/// 802.1AB-2005 Annex F): OUI and the subtypes decoded/sent here.
+const OUI_8021: [u8; 3] = [0x00, 0x80, 0xc2];
+const DOT1_PORT_VLAN_ID: u8 = 1;
+const DOT1_VLAN_NAME: u8 = 3;
+const DOT1_LINK_AGGREGATION: u8 = 7;
+/// IEEE 802.3 organizationally-specific TLVs (802.3 Clause 79).
+const OUI_8023: [u8; 3] = [0x00, 0x12, 0x0f];
+const DOT3_MAC_PHY: u8 = 1;
+/// Deprecated in favor of the 802.1 one (same layout); decoded only.
+const DOT3_LINK_AGGREGATION: u8 = 3;
+const DOT3_MAX_FRAME_SIZE: u8 = 4;
+/// Link Aggregation status bits (802.1Q D.2.7.1, 802.3 79.3.3.1).
+const AGG_CAPABLE: u8 = 0x01;
+const AGG_ENABLED: u8 = 0x02;
+/// A VLAN Name TLV's name is at most 32 octets.
+pub const MAX_VLAN_NAME: usize = 32;
+/// At most this many VLAN Name TLVs are kept per received LLDPDU (each one
+/// is stored and printed; the input is untrusted).
+pub const MAX_VLAN_NAMES: usize = 32;
+/// An LLDPDU fits one untagged Ethernet payload.
+const MAX_LLDPDU: usize = 1500;
 
 /// Chassis ID subtype 4: a MAC address.
 pub const CHASSIS_SUBTYPE_MAC: u8 = 4;
@@ -74,6 +98,41 @@ impl std::fmt::Display for ManagementAddress {
     }
 }
 
+/// The 802.1/802.3 Link Aggregation TLV's content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkAggregation {
+    pub capable: bool,
+    /// Currently in an aggregation.
+    pub enabled: bool,
+    /// The aggregate's ifIndex while `enabled`, else 0.
+    pub port_id: u32,
+}
+
+/// The 802.3 MAC/PHY Configuration/Status TLV's content (decode only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MacPhy {
+    pub autoneg_supported: bool,
+    pub autoneg_enabled: bool,
+    /// PMD auto-negotiation advertised capability bits.
+    pub advertised: u16,
+    /// Operational MAU type (IANA-MAU-MIB).
+    pub mau_type: u16,
+}
+
+/// The organizationally-specific TLVs nos understands.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OrgTlvs {
+    /// 802.1 Port VLAN ID (decode only).
+    pub port_vlan_id: Option<u16>,
+    /// 802.1 VLAN Name: (VLAN id, name), in wire order.
+    pub vlan_names: Vec<(u16, String)>,
+    pub link_aggregation: Option<LinkAggregation>,
+    /// 802.3 Maximum Frame Size.
+    pub max_frame_size: Option<u16>,
+    /// 802.3 MAC/PHY Configuration/Status (decode only).
+    pub mac_phy: Option<MacPhy>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lldpdu {
     pub chassis_id: Id,
@@ -90,6 +149,7 @@ pub struct Lldpdu {
     /// every one is stored and printed) — the same cap the config puts on
     /// how many we send.
     pub management_addresses: Vec<ManagementAddress>,
+    pub org: OrgTlvs,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -213,18 +273,145 @@ pub fn encode(pdu: &Lldpdu) -> Vec<u8> {
             &encode_management_address(addr),
         );
     }
+    encode_org(&mut out, &pdu.org);
     push_tlv(&mut out, TLV_END, &[]);
     out
+}
+
+fn push_org(out: &mut Vec<u8>, oui: [u8; 3], subtype: u8, info: &[u8]) {
+    let mut value = oui.to_vec();
+    value.push(subtype);
+    value.extend_from_slice(info);
+    push_tlv(out, TLV_ORG_SPECIFIC, &value);
+}
+
+/// The org TLVs, VLAN names last: they are the only ones that can be many,
+/// so they are what gets cut when the LLDPDU would outgrow `MAX_LLDPDU` (an
+/// 802.1Q trunk can carry 4094 VLANs, 41 bytes each).
+fn encode_org(out: &mut Vec<u8>, org: &OrgTlvs) {
+    if let Some(pvid) = org.port_vlan_id {
+        push_org(out, OUI_8021, DOT1_PORT_VLAN_ID, &pvid.to_be_bytes());
+    }
+    if let Some(agg) = org.link_aggregation {
+        let mut info = vec![
+            if agg.capable { AGG_CAPABLE } else { 0 } | if agg.enabled { AGG_ENABLED } else { 0 },
+        ];
+        info.extend_from_slice(&agg.port_id.to_be_bytes());
+        push_org(out, OUI_8021, DOT1_LINK_AGGREGATION, &info);
+    }
+    if let Some(m) = org.mac_phy {
+        let mut info = vec![u8::from(m.autoneg_supported) | (u8::from(m.autoneg_enabled) << 1)];
+        info.extend_from_slice(&m.advertised.to_be_bytes());
+        info.extend_from_slice(&m.mau_type.to_be_bytes());
+        push_org(out, OUI_8023, DOT3_MAC_PHY, &info);
+    }
+    if let Some(size) = org.max_frame_size {
+        push_org(out, OUI_8023, DOT3_MAX_FRAME_SIZE, &size.to_be_bytes());
+    }
+    for (i, (vid, name)) in org.vlan_names.iter().enumerate() {
+        let name = truncate_at_char(name, MAX_VLAN_NAME);
+        // Header (2) + OUI/subtype (4) + VID (2) + length (1) + name, with
+        // the End TLV (2) still to come.
+        if out.len() + 9 + name.len() + 2 > MAX_LLDPDU {
+            // ponytail: logged per transmit (debug only); once per link if it's ever noisy.
+            tracing::debug!(
+                sent = i,
+                dropped = org.vlan_names.len() - i,
+                "lldpdu full, not advertising every vlan name"
+            );
+            break;
+        }
+        let mut info = vid.to_be_bytes().to_vec();
+        info.push(u8::try_from(name.len()).expect("<= 32"));
+        info.extend_from_slice(name.as_bytes());
+        push_org(out, OUI_8021, DOT1_VLAN_NAME, &info);
+    }
+}
+
+/// The longest prefix of `s` of at most `max` bytes ending on a char boundary.
+pub fn truncate_at_char(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// What `decode_org` did with one org-specific TLV.
+enum OrgOutcome {
+    Kept,
+    /// Malformed, a repeat of a single-instance TLV, or past the cap.
+    Discarded,
+    /// An OUI/subtype nos doesn't decode.
+    Unrecognized,
+}
+
+/// Decodes one org-specific TLV value into `org`. Optional and untrusted: a
+/// malformed one is dropped, never fatal; a repeat of a single-instance TLV
+/// keeps the first.
+fn decode_org(value: &[u8], org: &mut OrgTlvs) -> OrgOutcome {
+    fn once<T>(slot: &mut Option<T>, v: Option<T>) -> OrgOutcome {
+        match v {
+            Some(v) if slot.is_none() => {
+                *slot = Some(v);
+                OrgOutcome::Kept
+            }
+            _ => OrgOutcome::Discarded,
+        }
+    }
+    let Some((head, info)) = value.split_at_checked(4) else {
+        return OrgOutcome::Discarded;
+    };
+    // Only called after a length check.
+    let u16_at = |i: usize| u16::from_be_bytes([info[i], info[i + 1]]);
+    match ([head[0], head[1], head[2]], head[3]) {
+        (OUI_8021, DOT1_PORT_VLAN_ID) => {
+            once(&mut org.port_vlan_id, (info.len() == 2).then(|| u16_at(0)))
+        }
+        (OUI_8021, DOT1_VLAN_NAME) => {
+            let well_formed = info.len() >= 3
+                && usize::from(info[2]) <= MAX_VLAN_NAME
+                && info.len() == 3 + usize::from(info[2]);
+            if !well_formed || org.vlan_names.len() >= MAX_VLAN_NAMES {
+                return OrgOutcome::Discarded;
+            }
+            org.vlan_names.push((u16_at(0), lossy(&info[3..])));
+            OrgOutcome::Kept
+        }
+        (OUI_8021, DOT1_LINK_AGGREGATION) | (OUI_8023, DOT3_LINK_AGGREGATION) => once(
+            &mut org.link_aggregation,
+            (info.len() == 5).then(|| LinkAggregation {
+                capable: info[0] & AGG_CAPABLE != 0,
+                enabled: info[0] & AGG_ENABLED != 0,
+                port_id: u32::from_be_bytes([info[1], info[2], info[3], info[4]]),
+            }),
+        ),
+        (OUI_8023, DOT3_MAC_PHY) => once(
+            &mut org.mac_phy,
+            (info.len() == 5).then(|| MacPhy {
+                autoneg_supported: info[0] & 0x01 != 0,
+                autoneg_enabled: info[0] & 0x02 != 0,
+                advertised: u16_at(1),
+                mau_type: u16_at(3),
+            }),
+        ),
+        (OUI_8023, DOT3_MAX_FRAME_SIZE) => once(
+            &mut org.max_frame_size,
+            (info.len() == 2).then(|| u16_at(0)),
+        ),
+        _ => OrgOutcome::Unrecognized,
+    }
 }
 
 /// Optional TLVs `decode_counted` dropped, for 802.1AB §9.2.6's
 /// `statsTLVsDiscardedTotal`/`statsTLVsUnrecognizedTotal`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TlvCounts {
-    /// A malformed/non-IP Management Address, or one past the cap.
+    /// A malformed/non-IP Management Address, or one past the cap; a known
+    /// org-specific TLV that is malformed, repeated, or past the cap.
     pub discarded: u64,
-    /// A reserved TLV type (9–126) or an organizationally-specific one (127):
-    /// we recognize no OUI.
+    /// A reserved TLV type (9–126), or an organizationally-specific one (127)
+    /// whose OUI/subtype nos doesn't decode.
     pub unrecognized: u64,
 }
 
@@ -256,6 +443,7 @@ pub fn decode_counted(mut data: &[u8]) -> Result<(Lldpdu, TlvCounts), DecodeErro
         system_description: None,
         capabilities: None,
         management_addresses: Vec::new(),
+        org: OrgTlvs::default(),
     };
 
     while !data.is_empty() {
@@ -319,7 +507,12 @@ pub fn decode_counted(mut data: &[u8]) -> Result<(Lldpdu, TlvCounts), DecodeErro
                 }
                 _ => counts.discarded += 1,
             },
-            _ => counts.unrecognized += 1, // reserved / organizationally specific: skip
+            TLV_ORG_SPECIFIC => match decode_org(value, &mut pdu.org) {
+                OrgOutcome::Kept => {}
+                OrgOutcome::Discarded => counts.discarded += 1,
+                OrgOutcome::Unrecognized => counts.unrecognized += 1,
+            },
+            _ => counts.unrecognized += 1, // reserved: skip
         }
     }
 
@@ -420,6 +613,7 @@ mod tests {
                 enabled: CAP_ROUTER,
             }),
             management_addresses: Vec::new(),
+            org: OrgTlvs::default(),
         }
     }
 
@@ -568,7 +762,8 @@ mod tests {
         let mut bytes = encode(&sample());
         bytes.truncate(bytes.len() - 2);
         push_tlv(&mut bytes, 42, &[1, 2]); // reserved type
-        push_tlv(&mut bytes, 127, &[0x00, 0x80, 0xc2, 0x01]); // org-specific
+        push_tlv(&mut bytes, 127, &[0x00, 0x80, 0xc2, 0x63]); // unknown 802.1 subtype
+        push_tlv(&mut bytes, 127, &[0x00, 0x12, 0x0f, 0x04, 1]); // short max frame size
         push_tlv(&mut bytes, TLV_MANAGEMENT_ADDRESS, &[5, AF_IPV4, 10]); // truncated
         for i in 1..=5 {
             let addr = ManagementAddress {
@@ -584,11 +779,12 @@ mod tests {
         push_tlv(&mut bytes, TLV_END, &[]);
         let (pdu, counts) = decode_counted(&bytes).unwrap();
         assert_eq!(pdu.management_addresses.len(), MAX_MANAGEMENT_ADDRESSES);
-        // The truncated one, and the fifth valid one past the cap.
+        // The short org TLV, the truncated address, and the fifth valid one
+        // past the cap.
         assert_eq!(
             counts,
             TlvCounts {
-                discarded: 2,
+                discarded: 3,
                 unrecognized: 2
             }
         );
@@ -596,6 +792,123 @@ mod tests {
             decode_counted(&encode(&sample())).unwrap().1,
             TlvCounts::default()
         );
+    }
+
+    fn full_org() -> OrgTlvs {
+        OrgTlvs {
+            port_vlan_id: Some(10),
+            vlan_names: vec![(100, "bd-x".to_string()), (200, "bd-y".to_string())],
+            link_aggregation: Some(LinkAggregation {
+                capable: true,
+                enabled: true,
+                port_id: 9,
+            }),
+            max_frame_size: Some(1518),
+            mac_phy: Some(MacPhy {
+                autoneg_supported: true,
+                autoneg_enabled: false,
+                advertised: 0x6c01,
+                mau_type: 30,
+            }),
+        }
+    }
+
+    #[test]
+    fn org_tlvs_round_trip_and_match_the_wire_layout() {
+        let mut pdu = sample();
+        pdu.org = full_org();
+        let bytes = encode(&pdu);
+        let (decoded, counts) = decode_counted(&bytes).unwrap();
+        assert_eq!(decoded, pdu);
+        assert_eq!(counts, TlvCounts::default());
+        // Link Aggregation: 802.1 OUI, subtype 7, status 0b11, ifIndex 9.
+        let mut agg = Vec::new();
+        push_org(&mut agg, OUI_8021, DOT1_LINK_AGGREGATION, &[3, 0, 0, 0, 9]);
+        assert!(bytes.windows(agg.len()).any(|w| w == agg));
+        // Max Frame Size: 802.3 OUI, subtype 4, 1518.
+        let mut mfs = Vec::new();
+        push_org(
+            &mut mfs,
+            OUI_8023,
+            DOT3_MAX_FRAME_SIZE,
+            &1518u16.to_be_bytes(),
+        );
+        assert_eq!(mfs, [0xfe, 6, 0x00, 0x12, 0x0f, 4, 0x05, 0xee]);
+        assert!(bytes.windows(mfs.len()).any(|w| w == mfs));
+        // VLAN Name: VID, name length, name.
+        let mut vn = Vec::new();
+        push_org(&mut vn, OUI_8021, DOT1_VLAN_NAME, b"\x00\x64\x04bd-x");
+        assert!(bytes.windows(vn.len()).any(|w| w == vn));
+    }
+
+    /// `sample()` with hand-built org TLVs before the End TLV.
+    fn with_org(tlvs: &[&[u8]]) -> Vec<u8> {
+        let mut bytes = encode(&sample());
+        bytes.truncate(bytes.len() - 2);
+        for v in tlvs {
+            push_tlv(&mut bytes, TLV_ORG_SPECIFIC, v);
+        }
+        push_tlv(&mut bytes, TLV_END, &[]);
+        bytes
+    }
+
+    #[test]
+    fn bad_org_tlvs_are_skipped_not_fatal() {
+        let (pdu, counts) = decode_counted(&with_org(&[
+            &[0x00, 0x80, 0xc2],                              // shorter than OUI + subtype
+            &[0xaa, 0xbb, 0xcc, 0x01, 0, 1],                  // unknown OUI
+            &[0x00, 0x80, 0xc2, 0x03, 0, 100, 5, b'x'],       // name length overruns
+            &[0x00, 0x12, 0x0f, 0x04, 0x05, 0xee],            // max frame size 1518
+            &[0x00, 0x12, 0x0f, 0x04, 0x23, 0x46],            // a repeat: the first wins
+            &[0x00, 0x80, 0xc2, 0x03, 0, 100, 2, 0x1b, b'['], // control character
+            &[0x00, 0x12, 0x0f, 0x03, 0x01, 0, 0, 0, 0],      // deprecated 802.3 link aggregation
+        ]))
+        .unwrap();
+        assert_eq!(
+            pdu.org,
+            OrgTlvs {
+                vlan_names: vec![(100, "\u{fffd}[".to_string())],
+                link_aggregation: Some(LinkAggregation {
+                    capable: true,
+                    enabled: false,
+                    port_id: 0
+                }),
+                max_frame_size: Some(1518),
+                ..OrgTlvs::default()
+            }
+        );
+        assert_eq!(
+            counts,
+            TlvCounts {
+                discarded: 3,
+                unrecognized: 1
+            }
+        );
+    }
+
+    #[test]
+    fn received_vlan_names_are_capped() {
+        let tlvs: Vec<Vec<u8>> = (0..40u8)
+            .map(|i| vec![0x00, 0x80, 0xc2, 0x03, 0, i, 1, b'a'])
+            .collect();
+        let refs: Vec<&[u8]> = tlvs.iter().map(Vec::as_slice).collect();
+        let (pdu, counts) = decode_counted(&with_org(&refs)).unwrap();
+        assert_eq!(pdu.org.vlan_names.len(), MAX_VLAN_NAMES);
+        assert_eq!(counts.discarded, 8);
+    }
+
+    #[test]
+    fn a_huge_trunk_still_fits_one_lldpdu() {
+        let mut pdu = sample();
+        pdu.org.vlan_names = (1..=4094)
+            .map(|vid| (vid, format!("broadcast-domain-{vid:0>20}")))
+            .collect();
+        let bytes = encode(&pdu);
+        assert!(bytes.len() <= MAX_LLDPDU, "{}", bytes.len());
+        assert_eq!(decode(&bytes).unwrap().org.vlan_names[0].0, 1);
+        // Names past 32 bytes are cut on a char boundary.
+        assert_eq!(truncate_at_char("ééé", 3), "é");
+        assert_eq!(truncate_at_char("abc", 32), "abc");
     }
 
     #[test]

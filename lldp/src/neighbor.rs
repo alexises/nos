@@ -5,6 +5,7 @@
 use std::collections::{hash_map, HashMap};
 use std::time::{Duration, Instant};
 
+use nos_proto::lldp::{LldpLinkAggregation, LldpMacPhy, LldpVlanName};
 use nos_proto::LldpNeighbor;
 
 use crate::packet::{Id, Lldpdu};
@@ -115,6 +116,29 @@ impl NeighborTable {
                     e.expires_at.saturating_duration_since(now).as_secs(),
                 )
                 .unwrap_or(u32::MAX),
+                port_vlan_id: e.pdu.org.port_vlan_id,
+                vlan_names: e
+                    .pdu
+                    .org
+                    .vlan_names
+                    .iter()
+                    .map(|(id, name)| LldpVlanName {
+                        id: *id,
+                        name: name.clone(),
+                    })
+                    .collect(),
+                link_aggregation: e.pdu.org.link_aggregation.map(|a| LldpLinkAggregation {
+                    capable: a.capable,
+                    enabled: a.enabled,
+                    port_id: a.port_id,
+                }),
+                max_frame_size: e.pdu.org.max_frame_size,
+                mac_phy: e.pdu.org.mac_phy.map(|m| LldpMacPhy {
+                    autoneg_supported: m.autoneg_supported,
+                    autoneg_enabled: m.autoneg_enabled,
+                    advertised: m.advertised,
+                    mau_type: m.mau_type,
+                }),
             })
             .collect()
     }
@@ -141,6 +165,7 @@ mod tests {
             system_description: None,
             capabilities: None,
             management_addresses: Vec::new(),
+            org: crate::packet::OrgTlvs::default(),
         }
     }
 

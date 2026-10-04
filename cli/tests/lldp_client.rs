@@ -15,6 +15,8 @@ fn sample() -> LldpNeighbor {
         capabilities: vec!["router".to_string()],
         management_addresses: vec!["10.0.0.2".to_string()],
         ttl_remaining_secs: 117,
+        max_frame_size: Some(1518),
+        ..LldpNeighbor::default()
     }
 }
 

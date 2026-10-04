@@ -21,7 +21,12 @@ Each frame NOS sends carries:
 - the time to live: how long the neighbour should keep this information, 120 seconds by default;
 - the system name, which is the router's `hostname`, and the system description `nos <version>`;
 - the capabilities: supported "Router, Bridge"; enabled "Router", plus "Bridge" on an interface that has a switching profile;
-- up to four management addresses, if configured, each with the ifIndex of the interface that carries it.
+- up to four management addresses, if configured, each with the ifIndex of the interface that carries it;
+- the maximum frame size (IEEE 802.3): the interface's MTU plus 18 bytes of Ethernet header and FCS, 1518 by default. A port-aggregate member uses its aggregate's MTU;
+- on an interface with a switching profile, one VLAN name (IEEE 802.1) per `dot1q` member: the tag and the broadcast domain's name, cut to 32 bytes. An `untagged` member has no VLAN number in NOS, so it is not sent;
+- on a port-aggregate member, the link aggregation state (IEEE 802.1): always "capable", and "aggregated" with the bond's ifIndex while the member is enslaved. For an LACP aggregate that is while LACP has the member in the bond. A change shows up in the next frame, so within `tx-interval`.
+
+NOS does not send a port VLAN ID or the 802.3 MAC/PHY field. It decodes and shows both when a neighbour sends them.
 
 Three settings apply to all interfaces at once: the transmit interval, the hold multiplier, and the management addresses. One more is per interface: the destination group.
 
@@ -77,7 +82,39 @@ $ $C $B/v1/lldp/neighbors | jq .
 ]
 ```
 
+The REST answer also carries the IEEE 802.1/802.3 fields (`vlan_names`, `port_vlan_id`, `link_aggregation`, `max_frame_size`, `mac_phy`), `null` or empty when the neighbour did not send them.
+
 This assumes `eth1` is already in the configuration. If it is not, create it whole: `PUT …/interface/eth1` with body `{"name":"eth1","addresses":[],"subinterfaces":[],"lldp_transmit":true,"lldp_receive":true}`.
+
+### See everything a neighbour sent
+
+`show lldp neighbors detail` prints one block per neighbour, with a line for each field it sent:
+
+```
+router-b> show lldp neighbors detail
+eth1: neighbor router-a
+  chassis 02:47:33:45:65:f2
+  port eth1
+  port-description eth1
+  system-description nos 0.1.0
+  capabilities bridge,router
+  vlans 100 (bd1)
+  max-frame-size 9018
+  ttl 108s
+eth2: neighbor router-a
+  chassis 02:47:33:45:65:f2
+  port eth2
+  port-description eth2
+  system-description nos 0.1.0
+  capabilities router
+  aggregation aggregated, port id 9
+  max-frame-size 1518
+  ttl 112s
+```
+
+Here router-a's `eth1` has `mtu 9000` and a switching profile trunking it into `bd1` at `dot1q 100`, and its `eth2` is a member of a port aggregate. A neighbour that sends them also gets `port-vlan-id` and `mac/phy` lines (auto-negotiation, advertised capabilities, MAU type).
+
+REST: the same fields are in `GET /v1/lldp/neighbors`.
 
 ### Tune the timers and advertise management addresses
 
@@ -133,8 +170,8 @@ One line per LLDP-enabled interface, with the IEEE 802.1AB counters:
 - `rx`: valid frames received. Our own frames looped back are not counted.
 - `rx errors`: frames that failed validation (a missing, misordered or malformed mandatory field).
 - `rx discarded`: every frame in error, plus every frame from a new neighbour refused because the table was full.
-- `tlvs discarded`: optional fields dropped: a malformed or non-IP management address, or one past the fourth in a frame.
-- `tlvs unrecognized`: fields NOS does not decode: reserved types and every organization-specific field (LLDP-MED, DCBX, …).
+- `tlvs discarded`: optional fields dropped: a malformed or non-IP management address, or one past the fourth in a frame; a malformed or repeated IEEE 802.1/802.3 field, or a VLAN name past the 32nd.
+- `tlvs unrecognized`: fields NOS does not decode: reserved types and the organization-specific fields other than the IEEE 802.1/802.3 ones above (LLDP-MED, DCBX, …).
 - `ageouts`: neighbours removed because their time to live ran out (not those that sent a shutdown frame).
 - `too many neighbors`: new neighbours refused because the interface already had 32.
 
