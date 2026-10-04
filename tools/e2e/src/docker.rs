@@ -389,6 +389,17 @@ impl Dock {
             .with_context(|| format!("no pid for {container}"))
     }
 
+    /// The MAC address docker gave `container`'s interface on `network`.
+    pub async fn mac(&self, container: &str, network: &str) -> anyhow::Result<String> {
+        let info = self.docker.inspect_container(container, None).await?;
+        info.network_settings
+            .and_then(|s| s.networks)
+            .and_then(|mut n| n.remove(network))
+            .and_then(|e| e.mac_address)
+            .filter(|m| !m.is_empty())
+            .with_context(|| format!("{container} has no MAC address on {network}"))
+    }
+
     /// Whole stdout+stderr of a container (only used where REST itself is what
     /// the check kills, so its own log stream is gone).
     pub async fn logs(&self, container: &str) -> anyhow::Result<String> {
