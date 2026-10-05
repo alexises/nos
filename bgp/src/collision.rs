@@ -522,6 +522,7 @@ mod tests {
             announce_rpki_state: false,
             local_as: None,
             add_path: None,
+            add_path_send_count: None,
             confed_id: None,
             confed_member: false,
             graceful_restart: None,

@@ -243,10 +243,14 @@ fn learn_evpn(
 /// without ADD-PATH pays no extra allocation per prefix.
 type Paths = SmallVec<[(u32, RibRoute); 1]>;
 
-/// What `propagate_rs_view` last sent one route-server client for one
-/// prefix: per source path (origin, received path id), the id it was sent
-/// under and the route.
-type RsSent = HashMap<(RouteOrigin, u32), (u32, RibRoute)>;
+/// What `propagate_add_path` last sent one ADD-PATH peer for one prefix:
+/// per source path (`PathKey`), the id it was sent under and the route.
+type AddPathSent = HashMap<PathKey, (u32, RibRoute)>;
+
+/// A path's identity: its origin and its received RFC 7911 path id (0
+/// without ADD-PATH). A `Local` origin is 0 for the redistributed route and
+/// 1 for the aggregate, which can coexist on one prefix.
+type PathKey = (RouteOrigin, u32);
 
 /// One peer's Adj-RIB-In.
 type PeerTable = HashMap<IpNet, Paths>;
@@ -581,9 +585,8 @@ pub struct AdvertisedRoute {
     pub atomic_aggregate: bool,
     pub aggregator: Option<message::Aggregator>,
     /// RFC 7911 ADD-PATH identifier — `Some` exactly toward a peer we send
-    /// ADD-PATH to for this family: one of a route-server client's paths
-    /// (`BgpRib::propagate_rs_view`), or 1 for the best path toward any
-    /// other such peer (`best_path_id`). `None` without ADD-PATH.
+    /// ADD-PATH to for this family (`BgpRib::propagate_add_path`). `None`
+    /// without ADD-PATH.
     pub path_id: Option<u32>,
 }
 
@@ -623,7 +626,7 @@ struct PeerOutbox {
     /// reflection eligibility check.
     is_rr_client: bool,
     /// RFC 7947 route-server client — see `build_advertisement`'s `AS_PATH`
-    /// exception and `BgpRib::propagate_rs_view`.
+    /// exception and `BgpRib::propagate_add_path`.
     is_rs_client: bool,
     /// RFC 8097: attach the route's validation state (`set_peer_rpki_state`).
     announce_rpki_state: bool,
@@ -631,9 +634,12 @@ struct PeerOutbox {
     remote_asn: u32,
     /// Address families we send RFC 7911 ADD-PATH ids to this peer for
     /// (`fsm::negotiate_add_path`). Every NLRI of such a family must carry
-    /// one, so the plain fan-out (`best_path_id`) gives the best path id 1,
-    /// or leaves a route-server client to `propagate_rs_view`.
+    /// one, so the plain fan-out skips them and `propagate_add_path` sends
+    /// them their paths.
     add_path_tx: HashSet<AddressFamily>,
+    /// How many paths per prefix `propagate_add_path` sends this peer
+    /// (`set_peer_add_path_send_count`); `None` is every path.
+    add_path_send_count: Option<usize>,
     /// This peer-group's resolved export policy — always present, `deny-all`
     /// by default (see root `CLAUDE.md`'s "Default-deny rollout impact"),
     /// consulted by `build_advertisement`.
@@ -764,14 +770,16 @@ pub struct BgpRib {
     /// Each peer's negotiated remote ASN (see `set_peer_asn`), for RPL's
     /// `this.bgp.peer_as`. Kept across resets like damping params.
     peer_asns: HashMap<IpAddr, u32>,
-    /// Per `route_server_client` peer, per prefix, the path id and last-sent
-    /// snapshot of every source path (origin, received path id) currently
-    /// advertised to it — see `propagate_rs_view`.
-    rs_sent: HashMap<(IpAddr, IpNet), RsSent>,
-    /// Per `route_server_client` peer, per prefix, the next path id to
-    /// allocate — monotonic, never recycled (see `propagate_rs_view`'s doc
-    /// comment).
-    rs_next_id: HashMap<(IpAddr, IpNet), u32>,
+    /// Per ADD-PATH send peer, per prefix, the path id and last-sent
+    /// snapshot of every path currently advertised to it — see
+    /// `propagate_add_path`.
+    add_path_sent: HashMap<(IpAddr, IpNet), AddPathSent>,
+    /// Per ADD-PATH send peer, per prefix, the next fresh path id —
+    /// monotonic, never recycled once withdrawn (see `send_add_paths`).
+    add_path_next_id: HashMap<(IpAddr, IpNet), u32>,
+    /// Each peer's resolved `add_path_send_count` (`None`: every path), set
+    /// before `peer_established` like `set_peer_local_as`.
+    add_path_counts: HashMap<IpAddr, Option<usize>>,
     /// Reusable scratch buffer for `recompute_and_propagate`'s peer list —
     /// swapped out via `mem::take` and refilled each call instead of
     /// collecting a fresh `Vec` on every touched prefix, so its capacity is
@@ -841,8 +849,9 @@ impl BgpRib {
             adj_rib_out: HashMap::new(),
             peer_outboxes: HashMap::new(),
             peer_asns: HashMap::new(),
-            rs_sent: HashMap::new(),
-            rs_next_id: HashMap::new(),
+            add_path_sent: HashMap::new(),
+            add_path_next_id: HashMap::new(),
+            add_path_counts: HashMap::new(),
             peer_scratch: Vec::new(),
             damping: Damping::default(),
             mac_mobility: MacMobility::default(),
@@ -957,6 +966,14 @@ impl BgpRib {
         };
     }
 
+    /// Records how many paths per prefix `peer` is sent over ADD-PATH
+    /// (`ResolvedPeer::add_path_send_count`; `None`: every path). Call before
+    /// `peer_established`, like `set_peer_local_as`. Never set: the
+    /// unconfigured default.
+    pub fn set_peer_add_path_send_count(&mut self, peer: IpAddr, count: Option<usize>) {
+        self.add_path_counts.insert(peer, count);
+    }
+
     /// Records whether `peer` exchanges RFC 8097 validation states (an
     /// opted-in iBGP peer). Call before `peer_established`, like `set_peer_asn`.
     pub fn set_peer_rpki_state(&mut self, peer: IpAddr, on: bool) {
@@ -1057,6 +1074,9 @@ impl BgpRib {
                 is_rs_client,
                 remote_asn,
                 add_path_tx,
+                add_path_send_count: self.add_path_counts.get(&peer).copied().unwrap_or(
+                    nos_proto::BgpPeerGroup::default_add_path_send_count(is_rs_client),
+                ),
                 export_policy,
             },
         );
@@ -1078,13 +1098,12 @@ impl BgpRib {
         let Some(outbox) = self.peer_outboxes.get(&peer) else {
             return;
         };
-        let is_rs_client = outbox.is_rs_client;
+        let add_path = !outbox.add_path_tx.is_empty();
         let mut advertised = HashSet::new();
         for (prefix, best) in &self.loc_rib {
-            let Some(path_id) = best_path_id(outbox, *prefix) else {
-                continue;
-            };
-            if self.suppressed_by_aggregate(*prefix) {
+            if outbox.add_path_tx.contains(&family_of(*prefix))
+                || self.suppressed_by_aggregate(*prefix)
+            {
                 continue;
             }
             let source_is_rr_client = self.source_is_rr_client(best);
@@ -1097,18 +1116,16 @@ impl BgpRib {
                 source_is_rr_client,
                 self.cluster_id,
             ) {
-                let _ = outbox
-                    .tx
-                    .send(OutboundUpdate::Announce(AdvertisedRoute { path_id, ..adv }));
+                let _ = outbox.tx.send(OutboundUpdate::Announce(adv));
                 advertised.insert(*prefix);
             }
         }
         self.adj_rib_out.insert(peer, advertised);
         self.announce_evpn_to(peer);
-        if is_rs_client {
+        if add_path {
             let prefixes: Vec<IpNet> = self.loc_rib.keys().copied().collect();
             for prefix in prefixes {
-                self.propagate_rs_view(prefix);
+                self.propagate_add_path(prefix, Some(peer));
             }
         }
         if self.gr.contains_key(&peer) {
@@ -1182,59 +1199,48 @@ impl BgpRib {
         if enhanced {
             let _ = outbox.tx.send(marker(message::REFRESH_BORR));
         }
-        for (prefix, best) in &self.loc_rib {
-            if family_of(*prefix) != family || self.suppressed_by_aggregate(*prefix) {
-                continue;
+        if outbox.add_path_tx.contains(&family) {
+            // The same top N again, under the same ids (a path the export
+            // policy now refuses gives its id up), plus every prefix still
+            // holding an id toward this peer.
+            let mut prefixes: HashSet<IpNet> = self
+                .loc_rib
+                .keys()
+                .copied()
+                .filter(|p| family_of(*p) == family)
+                .collect();
+            prefixes.extend(
+                self.add_path_sent
+                    .keys()
+                    .filter(|(p, n)| *p == peer && family_of(*n) == family)
+                    .map(|(_, n)| *n),
+            );
+            for prefix in prefixes {
+                self.propagate_add_path(prefix, Some(peer));
             }
-            let Some(path_id) = best_path_id(outbox, *prefix) else {
-                continue;
-            };
-            let source_is_rr_client = self.source_is_rr_client(best);
-            if let Some(adv) = build_advertisement(
-                *prefix,
-                best,
-                peer,
-                outbox,
-                self.local_asn,
-                source_is_rr_client,
-                self.cluster_id,
-            ) {
-                let _ = outbox
-                    .tx
-                    .send(OutboundUpdate::Announce(AdvertisedRoute { path_id, ..adv }));
-            }
-        }
-        // A route-server client's ADD-PATH view: what `propagate_rs_view`
-        // last sent, under the same ids.
-        for ((p, prefix), sent) in &self.rs_sent {
-            if *p != peer || family_of(*prefix) != family {
-                continue;
-            }
-            for ((origin, _), (id, route)) in sent {
-                let source_is_rr_client = match origin {
-                    RouteOrigin::Peer(addr) => {
-                        self.peer_outboxes.get(addr).is_some_and(|o| o.is_rr_client)
-                    }
-                    RouteOrigin::Local => false,
-                };
+        } else {
+            for (prefix, best) in &self.loc_rib {
+                if family_of(*prefix) != family || self.suppressed_by_aggregate(*prefix) {
+                    continue;
+                }
+                let source_is_rr_client = self.source_is_rr_client(best);
                 if let Some(adv) = build_advertisement(
                     *prefix,
-                    route,
+                    best,
                     peer,
                     outbox,
                     self.local_asn,
                     source_is_rr_client,
                     self.cluster_id,
                 ) {
-                    let _ = outbox.tx.send(OutboundUpdate::Announce(AdvertisedRoute {
-                        path_id: Some(*id),
-                        ..adv
-                    }));
+                    let _ = outbox.tx.send(OutboundUpdate::Announce(adv));
                 }
             }
         }
         if enhanced {
-            let _ = outbox.tx.send(marker(message::REFRESH_EORR));
+            let _ = self.peer_outboxes[&peer]
+                .tx
+                .send(marker(message::REFRESH_EORR));
         }
     }
 
@@ -1616,8 +1622,8 @@ impl BgpRib {
         self.damping.clear_peer(peer);
         self.adj_rib_out.remove(&peer);
         self.evpn_adj_rib_out.remove(&peer);
-        self.rs_sent.retain(|(p, _), _| *p != peer);
-        self.rs_next_id.retain(|(p, _), _| *p != peer);
+        self.add_path_sent.retain(|(p, _), _| *p != peer);
+        self.add_path_next_id.retain(|(p, _), _| *p != peer);
         if let (false, Some(gr)) = (retained.is_empty(), gr) {
             self.retain_as_stale(peer, gr, &retained);
             return;
@@ -2065,47 +2071,53 @@ impl BgpRib {
         }
     }
 
-    /// The shared core: re-decides `prefix`'s winner from every current
-    /// candidate (redistributed + every peer's Adj-RIB-In), and if the
-    /// winner actually changed, pushes `Announce`/`Withdraw` to every
-    /// registered peer as appropriate.
-    fn recompute_and_propagate(&mut self, prefix: IpNet) {
-        // Runs independently of the single-elected-best-path logic below —
-        // a route-server-client's view covers every source for a prefix,
-        // not just the one instance-wide winner, so a change to a
-        // non-winning source must still be reflected here even when
-        // `best_path`'s pick doesn't change.
-        self.propagate_rs_view(prefix);
-
+    /// Every best-path candidate for `prefix`: the redistributed route (path
+    /// id 0), the aggregate (1) and every peer path not damped, minus the
+    /// unfeasible ones (logged when `log`).
+    fn candidates(&self, prefix: IpNet, log: bool) -> Vec<Candidate> {
         // Sized for one redistributed candidate plus one path per peer —
         // avoids the reallocate-on-every-push churn this always-tiny,
         // rebuilt-per-touched-prefix scratch Vec used to pay. ADD-PATH
         // peers add every path they sent.
         let mut candidates: Vec<Candidate> = Vec::with_capacity(1 + self.adj_rib_in.len());
         if let Some(route) = self.redistributed.get(&prefix) {
-            candidates.push((route.clone(), None));
+            candidates.push((route.clone(), 0));
         }
         if let Some(route) = self.aggregated.get(&prefix) {
-            candidates.push((route.clone(), None));
+            candidates.push((route.clone(), 1));
         }
         for (peer, table) in &self.adj_rib_in {
             if self.damping.is_suppressed(*peer, &prefix) {
                 continue;
             }
             for (id, route) in table.get(&prefix).into_iter().flatten() {
-                candidates.push((route.clone(), Some((*peer, *id))));
+                candidates.push((route.clone(), *id));
             }
         }
         // RFC 4271 §9.1.2: an unresolvable next hop is unfeasible — out of
-        // the decision process (and the backup pick below) entirely.
-        candidates.retain(|(route, peer)| {
+        // the decision process (and the backup pick) entirely.
+        candidates.retain(|(route, _)| {
             let feasible = self.next_hop_feasible(route.next_hop);
-            if !feasible {
-                debug!(peer = ?peer, %prefix, next_hop = ?route.next_hop, "bgp: candidate excluded, next hop unresolvable");
+            if !feasible && log {
+                debug!(origin = ?route.origin, %prefix, next_hop = ?route.next_hop, "bgp: candidate excluded, next hop unresolvable");
             }
             feasible
         });
+        candidates
+    }
 
+    /// The shared core: re-decides `prefix`'s winner from every current
+    /// candidate (redistributed + every peer's Adj-RIB-In), and if the
+    /// winner actually changed, pushes `Announce`/`Withdraw` to every
+    /// registered peer as appropriate.
+    fn recompute_and_propagate(&mut self, prefix: IpNet) {
+        // Runs independently of the single-elected-best-path logic below —
+        // an ADD-PATH peer's view covers more than the one instance-wide
+        // winner, so a change to a non-winning path must still be reflected
+        // here even when `best_path`'s pick doesn't change.
+        self.propagate_add_path(prefix, None);
+
+        let candidates = self.candidates(prefix, true);
         let best = best_path(&candidates, &self.igp);
         // Install-only: the multipath set never changes what is advertised
         // (still `best` alone), so it's updated before the `unchanged`
@@ -2182,9 +2194,9 @@ impl BgpRib {
         peers.extend(self.peer_outboxes.keys().copied());
         for &peer in &peers {
             let outbox = self.peer_outboxes.get(&peer).expect("just listed");
-            let Some(path_id) = best_path_id(outbox, prefix) else {
-                continue;
-            };
+            if outbox.add_path_tx.contains(&family_of(prefix)) {
+                continue; // `propagate_add_path`'s, every NLRI needs an id
+            }
             let advertisement = best.filter(|_| !suppressed).and_then(|route| {
                 build_advertisement(
                     prefix,
@@ -2200,9 +2212,7 @@ impl BgpRib {
             match advertisement {
                 Some(adv) => {
                     let outbox = self.peer_outboxes.get(&peer).expect("just listed");
-                    let _ = outbox
-                        .tx
-                        .send(OutboundUpdate::Announce(AdvertisedRoute { path_id, ..adv }));
+                    let _ = outbox.tx.send(OutboundUpdate::Announce(adv));
                     self.adj_rib_out.entry(peer).or_default().insert(prefix);
                 }
                 None => {
@@ -2212,7 +2222,7 @@ impl BgpRib {
                             let _ = outbox.tx.send(OutboundUpdate::Withdraw(
                                 prefix,
                                 outbox.mp_bgp_negotiated,
-                                path_id,
+                                None,
                             ));
                         }
                     }
@@ -2222,122 +2232,141 @@ impl BgpRib {
         self.peer_scratch = peers;
     }
 
-    /// RFC 7947 route-server multi-path fan-out: for every `route_server_client`
-    /// peer that negotiated RFC 7911 ADD-PATH for `prefix`'s family, sends
-    /// every *other* peer's (and any locally-redistributed) contribution for
-    /// `prefix` as a separate path, each with its own stable ADD-PATH
-    /// identifier — not just the one instance-wide elected best path every
-    /// other peer gets. Reuses `build_advertisement` per source unchanged
-    /// (a route-server-client is always eBGP, so the iBGP reflection branch
-    /// never triggers) and only overrides the resulting `path_id`.
+    /// RFC 7911 ADD-PATH fan-out of `prefix` to every peer we send ADD-PATH
+    /// to for its family (only `only`, re-sending even unchanged paths, for a
+    /// new session or a route refresh): the best `add_path_send_count` paths
+    /// by the decision process (`decision_cmp`), counted after this peer's
+    /// own filtering (`build_advertisement`: split horizon, RR rules, export
+    /// policy, never echoing a peer's own path) — a refused path doesn't use
+    /// up a slot. The best path is rank 1, so it's sent unless refused (§5).
     ///
-    /// A source is one path of one peer (several when that peer sends
-    /// ADD-PATH itself), so a client submitting several paths has each
-    /// passed on under its own id. A path that stops being advertisable (an
-    /// export policy now rejects it) has its id withdrawn.
-    ///
-    /// Deliberately *not* filtered by `next_hop_feasible`: RFC 7947 §2.2.2
-    /// transparency means a client sees every other client's path as
-    /// submitted, and whether *this* instance can resolve a next hop says
-    /// nothing about whether the client can.
-    fn propagate_rs_view(&mut self, prefix: IpNet) {
+    /// An ordinary peer ranks the Loc-RIB's candidates (`candidates`); a
+    /// summary-only-suppressed prefix sends none. A route-server client
+    /// ranks every source's paths, deliberately *not* filtered by
+    /// `next_hop_feasible` nor aggregates (RFC 7947 §2.2.2 transparency:
+    /// whether *this* instance can resolve a next hop says nothing about
+    /// whether the client can). Ids: see `send_add_paths`.
+    fn propagate_add_path(&mut self, prefix: IpNet, only: Option<IpAddr>) {
         if self.deferring() {
             return;
         }
-        let rs_peers: Vec<IpAddr> = self
+        let family = family_of(prefix);
+        let peers: Vec<IpAddr> = self
             .peer_outboxes
             .iter()
-            .filter(|(_, o)| o.is_rs_client && o.add_path_tx.contains(&family_of(prefix)))
+            .filter(|(addr, o)| o.add_path_tx.contains(&family) && only.is_none_or(|p| p == **addr))
             .map(|(addr, _)| *addr)
             .collect();
-        if rs_peers.is_empty() {
+        if peers.is_empty() {
             return;
         }
+        let suppressed = self.suppressed_by_aggregate(prefix);
+        // Ranked once per prefix, best first, shared by every peer.
+        let (mut ranked, mut rs_ranked) = (None, None);
+        for peer in peers {
+            let list: &[Candidate] = if self.peer_outboxes[&peer].is_rs_client {
+                rs_ranked.get_or_insert_with(|| self.ranked(self.rs_candidates(prefix)))
+            } else if suppressed {
+                &[]
+            } else {
+                ranked.get_or_insert_with(|| self.ranked(self.candidates(prefix, false)))
+            };
+            self.send_add_paths(prefix, peer, list, only.is_some());
+        }
+    }
 
-        for peer in rs_peers {
-            let mut current: HashMap<(RouteOrigin, u32), RibRoute> = HashMap::new();
-            if let Some(route) = self.redistributed.get(&prefix) {
-                current.insert((RouteOrigin::Local, 0), route.clone());
-            }
-            for (src, table) in &self.adj_rib_in {
-                if *src == peer || self.damping.is_suppressed(*src, &prefix) {
-                    continue; // never echo the destination's own contribution
-                }
-                for (id, route) in table.get(&prefix).into_iter().flatten() {
-                    current.insert((RouteOrigin::Peer(*src), *id), route.clone());
-                }
-            }
-
-            // Owned working copy — avoids holding a live borrow of
-            // `self.rs_sent` across the loop below, which also needs to
-            // borrow `self.peer_outboxes`/`self.rs_next_id`.
-            let mut sent = self.rs_sent.entry((peer, prefix)).or_default().clone();
-            let outbox_tx = self.peer_outboxes[&peer].tx.clone();
-            let mp_bgp_negotiated = self.peer_outboxes[&peer].mp_bgp_negotiated;
-
-            let stale: Vec<(RouteOrigin, u32)> = sent
-                .keys()
-                .filter(|origin| !current.contains_key(origin))
-                .copied()
-                .collect();
-            for origin in stale {
-                let (id, _) = sent.remove(&origin).expect("just found");
-                let _ = outbox_tx.send(OutboundUpdate::Withdraw(
-                    prefix,
-                    mp_bgp_negotiated,
-                    Some(id),
-                ));
-            }
-
-            for (origin, route) in current {
-                if sent.get(&origin).is_some_and(|(_, last)| *last == route) {
-                    continue; // unchanged since last sent to this peer
-                }
-                let source_is_rr_client = match origin.0 {
-                    RouteOrigin::Peer(addr) => self
-                        .peer_outboxes
-                        .get(&addr)
-                        .is_some_and(|o| o.is_rr_client),
-                    RouteOrigin::Local => false,
-                };
-                let outbox = self.peer_outboxes.get(&peer).expect("just listed");
-                let Some(adv) = build_advertisement(
-                    prefix,
-                    &route,
-                    peer,
-                    outbox,
-                    self.local_asn,
-                    source_is_rr_client,
-                    self.cluster_id,
-                ) else {
-                    // No longer advertisable: the client must not keep it.
-                    if let Some((id, _)) = sent.remove(&origin) {
-                        let _ = outbox_tx.send(OutboundUpdate::Withdraw(
-                            prefix,
-                            mp_bgp_negotiated,
-                            Some(id),
-                        ));
-                    }
-                    continue;
-                };
-                let id = sent.get(&origin).map_or_else(
-                    || {
-                        let counter = self.rs_next_id.entry((peer, prefix)).or_insert(1);
-                        let id = *counter;
-                        *counter += 1;
-                        id
-                    },
-                    |(id, _)| *id,
+    /// A route-server client's candidates: the redistributed route and every
+    /// peer path not damped (`propagate_add_path`).
+    fn rs_candidates(&self, prefix: IpNet) -> Vec<Candidate> {
+        let mut candidates: Vec<Candidate> = Vec::new();
+        if let Some(route) = self.redistributed.get(&prefix) {
+            candidates.push((route.clone(), 0));
+        }
+        for (src, table) in &self.adj_rib_in {
+            if !self.damping.is_suppressed(*src, &prefix) {
+                candidates.extend(
+                    table
+                        .get(&prefix)
+                        .into_iter()
+                        .flatten()
+                        .map(|(id, r)| (r.clone(), *id)),
                 );
-                let adv = AdvertisedRoute {
-                    path_id: Some(id),
-                    ..adv
-                };
-                let _ = outbox_tx.send(OutboundUpdate::Announce(adv));
-                sent.insert(origin, (id, route));
             }
+        }
+        candidates
+    }
 
-            self.rs_sent.insert((peer, prefix), sent);
+    /// `candidates` sorted best first.
+    fn ranked(&self, mut candidates: Vec<Candidate>) -> Vec<Candidate> {
+        candidates.sort_by(|a, b| decision_cmp(b, a, &self.igp));
+        candidates
+    }
+
+    /// Sends `peer` the first `add_path_send_count` paths of `ranked` it may
+    /// have, diffed against what it was last sent (`add_path_sent`). A path
+    /// still selected keeps its id, re-announced only if it changed (or
+    /// `force`). A path that left the set frees its id; an entering path
+    /// takes the lowest freed id — an RFC 7911 §3 implicit replace, so the
+    /// receiver never drops to N−1 paths in between — else a fresh one from
+    /// `add_path_next_id`. Ids still free at the end are withdrawn.
+    fn send_add_paths(&mut self, prefix: IpNet, peer: IpAddr, ranked: &[Candidate], force: bool) {
+        let outbox = &self.peer_outboxes[&peer];
+        let limit = outbox.add_path_send_count.unwrap_or(usize::MAX);
+        let mut selected: Vec<(PathKey, &RibRoute, AdvertisedRoute)> = Vec::new();
+        for (route, id) in ranked {
+            if selected.len() >= limit {
+                break;
+            }
+            if let Some(adv) = build_advertisement(
+                prefix,
+                route,
+                peer,
+                outbox,
+                self.local_asn,
+                self.source_is_rr_client(route),
+                self.cluster_id,
+            ) {
+                selected.push(((route.origin, *id), route, adv));
+            }
+        }
+        let (tx, mp) = (outbox.tx.clone(), outbox.mp_bgp_negotiated);
+
+        let mut sent = self
+            .add_path_sent
+            .remove(&(peer, prefix))
+            .unwrap_or_default();
+        let mut freed = Vec::new();
+        sent.retain(|key, (id, _)| {
+            let keep = selected.iter().any(|(k, ..)| k == key);
+            if !keep {
+                freed.push(*id);
+            }
+            keep
+        });
+        freed.sort_unstable_by(|a, b| b.cmp(a)); // `pop` takes the lowest
+        for (key, route, adv) in selected {
+            let id = match sent.get(&key) {
+                Some((_, last)) if !force && last == route => continue,
+                Some((id, _)) => *id,
+                None => freed.pop().unwrap_or_else(|| {
+                    // ponytail: never recycled once withdrawn, a u32 per
+                    // (peer, prefix) is nowhere near exhausted.
+                    let next = self.add_path_next_id.entry((peer, prefix)).or_insert(1);
+                    *next += 1;
+                    *next - 1
+                }),
+            };
+            let _ = tx.send(OutboundUpdate::Announce(AdvertisedRoute {
+                path_id: Some(id),
+                ..adv
+            }));
+            sent.insert(key, (id, route.clone()));
+        }
+        for id in freed.into_iter().rev() {
+            let _ = tx.send(OutboundUpdate::Withdraw(prefix, mp, Some(id)));
+        }
+        if !sent.is_empty() {
+            self.add_path_sent.insert((peer, prefix), sent);
         }
     }
 }
@@ -2447,10 +2476,9 @@ fn igp_cost(igp: &HashMap<IpNet, u32>, next_hop: Option<IpAddr>) -> u32 {
     next_hop.and_then(|addr| igp_lookup(igp, addr)).unwrap_or(0)
 }
 
-/// One best-path candidate: the route and, for a peer-learned one, its
-/// source peer and RFC 7911 path id (0 without ADD-PATH) — `None` for a
-/// locally-redistributed route. Used only for the final tiebreak (step 10).
-type Candidate = (RibRoute, Option<(IpAddr, u32)>);
+/// One best-path candidate: the route and its path id — `(route.origin, id)`
+/// is its `PathKey`. The id breaks the final tie (step 10).
+type Candidate = (RibRoute, u32);
 
 /// The full RFC 4271 §9.1.2.2 decision process — see the module doc
 /// comment for the ten-step order.
@@ -2464,8 +2492,8 @@ fn best_path(candidates: &[Candidate], igp: &HashMap<IpNet, u32>) -> Option<RibR
 /// `best_path`'s comparator over two `(route, source_peer)` candidates:
 /// `Greater` means `a` is preferred.
 fn decision_cmp(
-    (a, a_peer): &Candidate,
-    (b, b_peer): &Candidate,
+    (a, a_id): &Candidate,
+    (b, b_id): &Candidate,
     igp: &HashMap<IpNet, u32>,
 ) -> std::cmp::Ordering {
     multipath_cmp(a, b, igp)
@@ -2489,10 +2517,10 @@ fn decision_cmp(
             // Step 10: lowest peer address, then lowest RFC 7911 path
             // id (two paths of one peer tie on steps 9 and 10), so the
             // order is total — reverse the comparison since `max_by`
-            // favors the greater element, and `None` (a local route)
-            // never reaches this arm (already decided by step 2).
-            match (a_peer, b_peer) {
-                (Some(a_src), Some(b_src)) => b_src.cmp(a_src),
+            // favors the greater element. A local route never reaches
+            // this arm against a peer one (already decided by step 2).
+            match (a.origin, b.origin) {
+                (RouteOrigin::Peer(x), RouteOrigin::Peer(y)) => (y, b_id).cmp(&(x, a_id)),
                 _ => std::cmp::Ordering::Equal,
             }
         })
@@ -2558,22 +2586,6 @@ fn multipath_next_hops(
     }
     hops.sort_unstable();
     hops
-}
-
-/// The RFC 7911 path id the plain single-best-path fan-out sends `prefix`
-/// under toward `outbox`'s peer: `Some(None)` without ADD-PATH send for
-/// that family, `Some(Some(1))` with it (every NLRI must then carry an id),
-/// and `None` for a route-server client, whose ADD-PATH view
-/// (`propagate_rs_view`) already includes the best path.
-#[allow(clippy::option_option)] // skip / no id / id: three distinct cases
-fn best_path_id(outbox: &PeerOutbox, prefix: IpNet) -> Option<Option<u32>> {
-    if !outbox.add_path_tx.contains(&family_of(prefix)) {
-        Some(None)
-    } else if outbox.is_rs_client {
-        None
-    } else {
-        Some(Some(1))
-    }
 }
 
 /// Decides whether `best` should be advertised to `peer` and, if so, rewrites
@@ -4278,7 +4290,7 @@ mod tests {
         };
         // Single best path.
         assert_eq!(meds(recv_all(&mut rs_rx), false), vec![Some(999)]);
-        // ADD-PATH per-source fan-out (propagate_rs_view).
+        // ADD-PATH per-source fan-out (propagate_add_path).
         let ap = meds(recv_all(&mut rs_ap_rx), true);
         assert_ne!(ap, []);
         assert!(ap.iter().all(|m| *m == Some(999)));
@@ -6037,7 +6049,7 @@ mod tests {
     }
 
     #[test]
-    fn propagate_rs_view_sends_distinct_path_ids_and_withdraws_on_source_disconnect() {
+    fn propagate_add_path_sends_distinct_path_ids_and_withdraws_on_source_disconnect() {
         let mut rib = new_rib(65000);
         let peer_a = addr("10.0.0.1");
         let peer_b = addr("10.0.0.2");
@@ -6140,7 +6152,7 @@ mod tests {
 
         let updates = recv_all(&mut rs_rx);
         assert_ne!(updates, []);
-        // No path-id'd traffic at all — propagate_rs_view never runs for a
+        // No path-id'd traffic at all — propagate_add_path never runs for a
         // family this peer didn't negotiate ADD-PATH for.
         assert!(updates.iter().all(|u| match u {
             OutboundUpdate::Announce(r) => r.path_id.is_none(),
@@ -7490,5 +7502,279 @@ mod tests {
             ids(recv_all(&mut plain_rx)),
             [(true, Some(1)), (false, Some(1))]
         );
+    }
+
+    /// Registers an ADD-PATH send (ipv4) peer with `policy` as its export
+    /// policy and `count` as its `add_path_send_count` (`None`: every path).
+    fn add_path_peer(
+        rib: &mut BgpRib,
+        peer: &str,
+        is_ibgp: bool,
+        is_rs_client: bool,
+        count: Option<usize>,
+        policy: Arc<CompiledPolicy>,
+    ) -> mpsc::UnboundedReceiver<OutboundUpdate> {
+        rib.set_peer_add_path_send_count(addr(peer), count);
+        let (tx, rx) = mpsc::unbounded_channel();
+        rib.peer_established(
+            addr(peer),
+            is_ibgp,
+            Some(addr("10.0.0.254")),
+            all_afs(),
+            false,
+            None,
+            false,
+            is_rs_client,
+            HashSet::from([AddressFamily::Ipv4Unicast]),
+            policy,
+            tx,
+        );
+        rx
+    }
+
+    /// `(announce, path id, med)` of every unicast update, in order.
+    fn path_events(
+        rx: &mut mpsc::UnboundedReceiver<OutboundUpdate>,
+    ) -> Vec<(bool, u32, Option<u32>)> {
+        recv_all(rx)
+            .into_iter()
+            .filter_map(|u| match u {
+                OutboundUpdate::Announce(a) => Some((true, a.path_id.expect("an id"), a.med)),
+                OutboundUpdate::Withdraw(_, _, id) => Some((false, id.expect("an id"), None)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const AP_PREFIX: &str = "203.0.113.0/24";
+    const AP_PEERS: [&str; 3] = ["10.0.0.1", "10.0.0.2", "10.0.0.3"];
+
+    /// eBGP peer `i` of `AP_PEERS` announces `AP_PREFIX` (AS 65001, its own
+    /// next hop, `med`) — MED decides between them.
+    fn ap_announce(rib: &mut BgpRib, i: usize, med: u32) {
+        let u = update_with(
+            AP_PREFIX,
+            vec![65001],
+            AP_PEERS[i],
+            message::Origin::Igp,
+            Some(med),
+        );
+        rib.handle_update(
+            addr(AP_PEERS[i]),
+            false,
+            v4(AP_PEERS[i]),
+            &u,
+            &nos_rpl::ACCEPT_ALL,
+        );
+    }
+
+    fn ap_withdraw(rib: &mut BgpRib, i: usize) {
+        let u = UpdateMessage {
+            withdrawn_routes: vec![AP_PREFIX.parse().unwrap()],
+            ..empty_update()
+        };
+        rib.handle_update(
+            addr(AP_PEERS[i]),
+            false,
+            v4(AP_PEERS[i]),
+            &u,
+            &nos_rpl::ACCEPT_ALL,
+        );
+    }
+
+    fn ap_sources(rib: &mut BgpRib) -> Vec<mpsc::UnboundedReceiver<OutboundUpdate>> {
+        AP_PEERS
+            .iter()
+            .map(|p| register_peer(rib, addr(p), false, addr("10.0.0.250")))
+            .collect()
+    }
+
+    #[test]
+    fn add_path_sends_the_best_n_with_stable_ids() {
+        let mut rib = new_rib(65000);
+        let _src = ap_sources(&mut rib);
+        // An iBGP peer with the default count, 2.
+        let mut d = add_path_peer(
+            &mut rib,
+            "10.0.0.9",
+            true,
+            false,
+            Some(2),
+            accept_all_policy(),
+        );
+
+        ap_announce(&mut rib, 0, 10);
+        ap_announce(&mut rib, 1, 30);
+        ap_announce(&mut rib, 2, 50);
+        assert_eq!(
+            path_events(&mut d),
+            [(true, 1, Some(10)), (true, 2, Some(30))]
+        );
+
+        // P2 now ranks below P3: P3 takes P2's id in place, no withdrawal.
+        ap_announce(&mut rib, 1, 60);
+        assert_eq!(path_events(&mut d), [(true, 2, Some(50))]);
+
+        // P1 gone: P2 is back in, under P1's freed id; P3 keeps id 2.
+        ap_withdraw(&mut rib, 0);
+        assert_eq!(path_events(&mut d), [(true, 1, Some(60))]);
+
+        ap_withdraw(&mut rib, 1);
+        ap_withdraw(&mut rib, 2);
+        assert_eq!(path_events(&mut d), [(false, 1, None), (false, 2, None)]);
+
+        // Never recycled once withdrawn: a fresh id.
+        ap_announce(&mut rib, 0, 10);
+        assert_eq!(path_events(&mut d), [(true, 3, Some(10))]);
+    }
+
+    #[test]
+    fn add_path_counts_only_paths_the_export_policy_lets_through() {
+        let mut rib = new_rib(65000);
+        let _src = ap_sources(&mut rib);
+        let policy = nos_rpl::compile(
+            "if this.bgp.next_hop == 10.0.0.1:\n    reject\naccept\n",
+            &nos_rpl::Symbols::EMPTY,
+        )
+        .unwrap();
+        let mut d = add_path_peer(&mut rib, "10.0.0.9", true, false, Some(2), Arc::new(policy));
+        ap_announce(&mut rib, 0, 10);
+        ap_announce(&mut rib, 1, 30);
+        ap_announce(&mut rib, 2, 50);
+        // The rejected best path doesn't use up a slot.
+        assert_eq!(
+            path_events(&mut d),
+            [(true, 1, Some(30)), (true, 2, Some(50))]
+        );
+
+        // P2's new attributes are rejected (fix 4): its id is withdrawn, as
+        // nothing is left to take it.
+        let u = update_with(
+            AP_PREFIX,
+            vec![65001],
+            "10.0.0.1",
+            message::Origin::Igp,
+            Some(30),
+        );
+        rib.handle_update(
+            addr(AP_PEERS[1]),
+            false,
+            v4(AP_PEERS[1]),
+            &u,
+            &nos_rpl::ACCEPT_ALL,
+        );
+        assert_eq!(path_events(&mut d), [(false, 1, None)]);
+    }
+
+    #[test]
+    fn add_path_never_sends_a_peer_its_own_path_nor_ibgp_paths_to_a_non_client() {
+        let mut rib = new_rib(65000);
+        let _src = ap_sources(&mut rib);
+        // An eBGP ADD-PATH peer that itself sends the best path.
+        let mut e = add_path_peer(
+            &mut rib,
+            "10.0.0.8",
+            false,
+            false,
+            Some(2),
+            accept_all_policy(),
+        );
+        // A non-client iBGP ADD-PATH peer.
+        let mut i = add_path_peer(
+            &mut rib,
+            "10.0.0.9",
+            true,
+            false,
+            Some(2),
+            accept_all_policy(),
+        );
+        let ibgp = addr("10.0.0.7");
+        let _ibgp_rx = register_peer(&mut rib, ibgp, true, addr("10.0.0.250"));
+
+        let u = update_with(
+            AP_PREFIX,
+            vec![65001],
+            "10.0.0.8",
+            message::Origin::Igp,
+            Some(5),
+        );
+        rib.handle_update(
+            addr("10.0.0.8"),
+            false,
+            v4("10.0.0.8"),
+            &u,
+            &nos_rpl::ACCEPT_ALL,
+        );
+        let u = update_with(
+            AP_PREFIX,
+            vec![65001],
+            "10.0.0.7",
+            message::Origin::Igp,
+            Some(7),
+        );
+        rib.handle_update(ibgp, true, v4("10.0.0.7"), &u, &nos_rpl::ACCEPT_ALL);
+        ap_announce(&mut rib, 0, 10);
+        ap_announce(&mut rib, 1, 30);
+        let nexthops = |rx: &mut mpsc::UnboundedReceiver<OutboundUpdate>| -> Vec<IpAddr> {
+            let mut hops: Vec<IpAddr> = recv_all(rx)
+                .into_iter()
+                .filter_map(|u| match u {
+                    OutboundUpdate::Announce(a) => Some(a.next_hop),
+                    _ => None,
+                })
+                .collect();
+            hops.dedup();
+            hops
+        };
+        // Its own (best) path never comes back and takes no slot: the iBGP
+        // path and P1 fill both.
+        assert_eq!(path_events(&mut e), [(true, 1, None), (true, 2, None)]);
+        // The non-client iBGP peer never gets the iBGP-learned path (next
+        // hop unchanged toward iBGP): the eBGP peer's path and P1.
+        assert_eq!(nexthops(&mut i), [addr("10.0.0.8"), addr("10.0.0.1")]);
+    }
+
+    #[test]
+    fn add_path_route_server_client_count_caps_its_view() {
+        let mut rib = new_rib(65000);
+        let _src = ap_sources(&mut rib);
+        let mut all = add_path_peer(&mut rib, "10.0.0.8", false, true, None, accept_all_policy());
+        let mut two = add_path_peer(
+            &mut rib,
+            "10.0.0.9",
+            false,
+            true,
+            Some(2),
+            accept_all_policy(),
+        );
+        ap_announce(&mut rib, 0, 10);
+        ap_announce(&mut rib, 1, 30);
+        ap_announce(&mut rib, 2, 50);
+        assert_eq!(path_events(&mut all).len(), 3);
+        assert_eq!(
+            path_events(&mut two),
+            [(true, 1, Some(10)), (true, 2, Some(30))]
+        );
+    }
+
+    #[test]
+    fn add_path_new_session_and_route_refresh_replay_the_top_n() {
+        let mut rib = new_rib(65000);
+        let _src = ap_sources(&mut rib);
+        ap_announce(&mut rib, 0, 10);
+        ap_announce(&mut rib, 1, 30);
+        ap_announce(&mut rib, 2, 50);
+        let mut d = add_path_peer(
+            &mut rib,
+            "10.0.0.9",
+            true,
+            false,
+            Some(2),
+            accept_all_policy(),
+        );
+        let top = [(true, 1, Some(10)), (true, 2, Some(30))];
+        assert_eq!(path_events(&mut d), top);
+        rib.resend_all(addr("10.0.0.9"), AddressFamily::Ipv4Unicast, false);
+        assert_eq!(path_events(&mut d), top);
     }
 }

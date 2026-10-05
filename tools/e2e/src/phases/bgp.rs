@@ -1880,13 +1880,13 @@ async fn exabgp_parsed(
     bail!("ExaBGP never parsed `{want}`: {last}")
 }
 
-/// RFC 7911 ADD-PATH receive (#13): router-a (`add-path receive`) peers
+/// RFC 7911 ADD-PATH (#13). Receive: router-a (`add-path receive`) peers
 /// ExaBGP (router-g, `add-path send`), which announces `ADD_PATH_PREFIX` as
 /// path 1 (MED 50) and path 2 (MED 10) through its API — a command file
 /// `tail -F` feeds it, so a path can be withdrawn without restarting ExaBGP
 /// (which would drop the session and every path with it). router-a keeps
 /// both paths and picks path 2; withdrawing path 2 alone makes path 1 the
-/// best path, and the prefix is never withdrawn.
+/// best path, and the prefix is never withdrawn. Send: `add_path_send`.
 pub async fn add_path(w: &mut World) -> anyhow::Result<()> {
     let flags = strings(&[
         "--address",
@@ -1921,13 +1921,8 @@ pub async fn add_path(w: &mut World) -> anyhow::Result<()> {
             ("/etc", "exabgp.conf", conf.as_bytes()),
         )
         .await?;
-    let announce = |id: u32, med: u32| {
-        format!(
-            "announce route {ADD_PATH_PREFIX} next-hop {IP_G} med {med} as-path [ {ASN_G} ] path-information {id}"
-        )
-    };
-    exabgp_api(w, &announce(1, ADD_PATH_MED_1)).await?;
-    exabgp_api(w, &announce(2, ADD_PATH_MED_2)).await?;
+    exabgp_api(w, &add_path_announce(1, ADD_PATH_MED_1)).await?;
+    exabgp_api(w, &add_path_announce(2, ADD_PATH_MED_2)).await?;
 
     let a = w.a()?;
     a.established().await?;
@@ -1964,6 +1959,113 @@ pub async fn add_path(w: &mut World) -> anyhow::Result<()> {
         a.count("bgp session established") == established,
         "withdrawing one path reset the session"
     );
+    add_path_send(w).await
+}
+
+/// ExaBGP's API line announcing `ADD_PATH_PREFIX` as path `id`.
+fn add_path_announce(id: u32, med: u32) -> String {
+    format!(
+        "announce route {ADD_PATH_PREFIX} next-hop {IP_G} med {med} community [ 65000:{id} ] \
+         as-path [ {ASN_G} ] path-information {id}"
+    )
+}
+
+/// RFC 7911 ADD-PATH send (#13), after `add_path`: ExaBGP's paths 2 and 3
+/// join path 1, router-a ranks them 2, 3, 1 and sends router-b (`add-path
+/// receive`) the best 2 (`add-path send`, `add-path-send-count 2`) — paths
+/// told apart by community. Withdrawing path 2 makes path 1 take its id in
+/// place (no withdrawal on router-b); withdrawing path 1 too leaves one path,
+/// so router-b sees that id withdrawn and keeps the prefix.
+async fn add_path_send(w: &mut World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let learned_3 =
+        format!("learned route for {ADD_PATH_PREFIX} into adj-rib-in peer={IP_G} path_id=3");
+    exabgp_api(w, &add_path_announce(2, ADD_PATH_MED_2)).await?;
+    exabgp_api(w, &add_path_announce(3, ADD_PATH_MED_3)).await?;
+    a.wait(&learned_3).await?;
+
+    let b_flags = strings(&[
+        "--address",
+        &format!("{IP_B}/24"),
+        "--asn",
+        &ASN_B.to_string(),
+        "--router-id",
+        RID_B,
+        "--remote-as",
+        &ASN_A.to_string(),
+        "--peer",
+        IP_A,
+        "--add-path",
+        "receive",
+    ]);
+    w.start(B, Some(b_flags), &[]).await?;
+    w.a()?
+        .provision_flags(&strings(&[
+            "--address",
+            &format!("{IP_A}/24"),
+            "--asn",
+            &ASN_A.to_string(),
+            "--router-id",
+            RID_A,
+            "--peer-group",
+            "pg-b",
+            "--remote-as",
+            &ASN_B.to_string(),
+            "--peer",
+            IP_B,
+            "--add-path",
+            "send",
+            "--add-path-send-count",
+            "2",
+        ]))
+        .await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.wait(&format!("add-path negotiated peer={IP_B} ipv4=\"send\""))
+        .await?;
+
+    let learned = |id: u32, path: u32| {
+        format!(
+            "learned route for {ADD_PATH_PREFIX} into adj-rib-in peer={IP_A} path_id={id} \
+             .*communities=\\[{}\\]",
+            add_path_community(path)
+        )
+    };
+    log("router-b gets router-a's best 2 of 3 paths: path 2 under id 1, path 3 under id 2");
+    b.wait(&learned(1, 2)).await?;
+    b.wait(&learned(2, 3)).await?;
+    let any_learned = format!("learned route for {ADD_PATH_PREFIX} into adj-rib-in peer={IP_A}");
+    let path_1 = format!(
+        "learned route for {ADD_PATH_PREFIX} .*communities=\\[{}\\]",
+        add_path_community(1)
+    );
+    b.assert_quiet(&any_learned, 2, 10).await?;
+    b.assert_quiet(&path_1, 0, 0).await?;
+
+    log("withdrawing path 2: path 1 takes id 1 in place, nothing withdrawn on router-b");
+    let withdrew = format!("withdrew path for {ADD_PATH_PREFIX} from adj-rib-in peer={IP_A}");
+    exabgp_api(
+        w,
+        &format!("withdraw route {ADD_PATH_PREFIX} next-hop {IP_G} path-information 2"),
+    )
+    .await?;
+    b.wait(&learned(1, 1)).await?;
+    b.assert_quiet(&withdrew, 0, 10).await?;
+
+    log("withdrawing path 1: one path left, router-b sees id 1 withdrawn and keeps the prefix");
+    exabgp_api(
+        w,
+        &format!("withdraw route {ADD_PATH_PREFIX} next-hop {IP_G} path-information 1"),
+    )
+    .await?;
+    b.wait(&format!("{withdrew} path_id=1")).await?;
+    b.assert_quiet(
+        &format!("loc-rib route for {ADD_PATH_PREFIX} withdrawn"),
+        0,
+        10,
+    )
+    .await?;
+    b.assert_quiet(&format!("{withdrew} path_id=2"), 0, 0)
+        .await?;
     Ok(())
 }
 

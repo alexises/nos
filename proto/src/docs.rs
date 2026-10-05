@@ -323,6 +323,8 @@ topics! {
     BgpInstanceGracefulRestart,
     /// `BgpPeerGroup.add_path`
     BgpPeerGroupAddPath,
+    /// `BgpPeerGroup.add_path_send_count`
+    BgpPeerGroupAddPathSendCount,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

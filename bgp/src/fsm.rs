@@ -1241,6 +1241,10 @@ pub async fn run(
                             peer.remote_address,
                             slot.peer.local_as.filter(|_| kind == PeerKind::External),
                         );
+                        rib.set_peer_add_path_send_count(
+                            peer.remote_address,
+                            slot.peer.add_path_send_count,
+                        );
                         rib.set_peer_rpki_state(
                             peer.remote_address,
                             slot.peer.announce_rpki_state && remote_is_ibgp,

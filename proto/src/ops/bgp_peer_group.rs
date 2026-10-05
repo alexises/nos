@@ -249,6 +249,16 @@ pub enum BgpPeerGroupOp {
         instance: String,
         name: String,
     },
+    /// Sets RFC 7911 `add_path_send_count`.
+    SetAddPathSendCount {
+        instance: String,
+        name: String,
+        count: u8,
+    },
+    ClearAddPathSendCount {
+        instance: String,
+        name: String,
+    },
 }
 
 impl BgpPeerGroupOp {
@@ -280,6 +290,7 @@ impl BgpPeerGroupOp {
                         announce_rpki_state: false,
                         local_as: None,
                         add_path: None,
+                        add_path_send_count: None,
                     });
                 }
                 Ok(())
@@ -460,6 +471,18 @@ impl BgpPeerGroupOp {
             }
             BgpPeerGroupOp::ClearAddPath { instance, name } => {
                 find_group_mut(config, instance, name)?.add_path = None;
+                Ok(())
+            }
+            BgpPeerGroupOp::SetAddPathSendCount {
+                instance,
+                name,
+                count,
+            } => {
+                find_group_mut(config, instance, name)?.add_path_send_count = Some(*count);
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearAddPathSendCount { instance, name } => {
+                find_group_mut(config, instance, name)?.add_path_send_count = None;
                 Ok(())
             }
             BgpPeerGroupOp::SetMaxHops {
@@ -697,6 +720,7 @@ mod tests {
             announce_rpki_state: false,
             local_as: None,
             add_path: None,
+            add_path_send_count: None,
         }
     }
 
@@ -1033,6 +1057,32 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].peer_groups[0].add_path, None);
+    }
+
+    #[test]
+    fn set_and_clear_add_path_send_count() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetAddPathSendCount {
+            instance: "r1".into(),
+            name: "pg1".into(),
+            count: 3,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].add_path_send_count,
+            Some(3)
+        );
+        BgpPeerGroupOp::ClearAddPathSendCount {
+            instance: "r1".into(),
+            name: "pg1".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].add_path_send_count,
+            None
+        );
     }
 
     #[test]

@@ -109,6 +109,7 @@ impl BgpRib {
         }
         refan.extend(self.summary_covered());
         for prefix in refan {
+            self.propagate_add_path(prefix, None);
             self.fan_out(prefix);
         }
     }
@@ -182,6 +183,7 @@ impl BgpRib {
         };
         self.recompute_and_propagate(prefix);
         for c in refan {
+            self.propagate_add_path(c, None);
             self.fan_out(c);
         }
     }

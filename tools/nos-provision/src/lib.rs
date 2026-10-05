@@ -357,6 +357,11 @@ pub struct Args {
     #[arg(long, value_parser = parse_add_path)]
     pub add_path: Option<nos_proto::BgpAddPath>,
 
+    /// If set, sets `--peer-group`'s RFC 7911 `add_path_send_count`
+    /// (`BgpPeerGroupOp::SetAddPathSendCount`).
+    #[arg(long)]
+    pub add_path_send_count: Option<u8>,
+
     /// One `<family>=<limit>` per repetition (`ipv4`, `ipv6`, `l2vpn-evpn`):
     /// sets `--peer-group`'s RFC 4486 maximum-prefix for that family
     /// (`BgpPeerGroupOp::SetMaximumPrefix`), with the two flags below.
@@ -1644,6 +1649,15 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             mode,
         }));
     }
+    if let Some(count) = args.add_path_send_count {
+        ops.push(ConfigOp::BgpPeerGroup(
+            BgpPeerGroupOp::SetAddPathSendCount {
+                instance: args.bgp_instance.clone(),
+                name: args.peer_group.clone(),
+                count,
+            },
+        ));
+    }
     if args.clear_damping {
         ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearDamping {
             instance: args.bgp_instance.clone(),
@@ -2630,6 +2644,8 @@ mod tests {
             "--local-as-replace-as",
             "--add-path",
             "receive",
+            "--add-path-send-count",
+            "3",
             "--maximum-prefix",
             "ipv4=2",
             "--maximum-prefix-warning-only",
@@ -2711,6 +2727,14 @@ mod tests {
                 instance: "r1".into(),
                 name: "pg1".into(),
                 mode: nos_proto::BgpAddPath::Receive,
+            }),
+        );
+        has(
+            &ops,
+            &pg(BgpPeerGroupOp::SetAddPathSendCount {
+                instance: "r1".into(),
+                name: "pg1".into(),
+                count: 3,
             }),
         );
         has(

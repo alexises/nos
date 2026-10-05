@@ -395,6 +395,16 @@ pub(crate) fn valid_route_reflection_and_server(instances: &[BgpInstance]) -> ga
                     "route-server-client requires a peer-group outside the confederation (remote-as must not be a confederation peer)",
                 ));
             }
+            if group.add_path_send_count.is_some()
+                && !matches!(
+                    group.effective_add_path(),
+                    Some(crate::schema::BgpAddPath::Send | crate::schema::BgpAddPath::Both)
+                )
+            {
+                return Err(garde::Error::new(
+                    "add-path-send-count requires add-path send or both",
+                ));
+            }
             if let Some(l) = group.local_as {
                 valid_local_as(instance, group.remote_as, group.route_server_client, l.asn)?;
             }
@@ -524,6 +534,31 @@ mod tests {
     }
 
     #[test]
+    fn add_path_send_count_range_and_mode() {
+        use crate::schema::BgpAddPath::{Both, Receive, Send};
+        let check = |count: u8, mode: Option<crate::schema::BgpAddPath>, rs: bool| {
+            let mut i = instance("default", 65000);
+            let mut g = group_with_flags("pg1", 65001, false, false);
+            g.add_path = mode;
+            g.route_server_client = rs;
+            g.add_path_send_count = Some(count);
+            i.peer_groups.push(g);
+            let cfg = config_with(vec![i]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        for (n, ok) in [(1, false), (2, true), (64, true), (65, false)] {
+            assert_eq!(check(n, Some(Send), false), ok, "add-path-send-count {n}");
+        }
+        assert!(!check(2, Some(Receive), false));
+        assert!(!check(2, None, false));
+        assert!(check(2, Some(Both), false));
+        assert!(
+            check(2, None, true),
+            "a route-server client is both by default"
+        );
+    }
+
+    #[test]
     fn maximum_paths_range() {
         for (n, ok) in [(0, false), (1, true), (64, true), (65, false)] {
             let mut i = instance("default", 65000);
@@ -578,6 +613,7 @@ mod tests {
                 announce_rpki_state: false,
                 local_as: None,
                 add_path: None,
+                add_path_send_count: None,
             },
             BgpPeerGroup {
                 name: "invalid".to_string(),
@@ -602,6 +638,7 @@ mod tests {
                 announce_rpki_state: false,
                 local_as: None,
                 add_path: None,
+                add_path_send_count: None,
             },
         ];
         let cfg = config_with(vec![inst]);
@@ -638,6 +675,7 @@ mod tests {
             announce_rpki_state: false,
             local_as: None,
             add_path: None,
+            add_path_send_count: None,
         }
     }
 

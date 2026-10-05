@@ -677,17 +677,37 @@ $C -X PUT -H 'Content-Type: application/json' -d '"Receive"' \
 - What a session uses is negotiated per family (RFC 7911 §5): NOS receives path identifiers only when it offered `receive` or `both` and the peer offered to send, and sends them only when it offered `send` or `both` and the peer offered to receive.
 - With receive negotiated, NOS keeps every path the peer sends for a prefix, instead of only the last one. Each path competes in best-path selection on its own, so two paths from one peer can be installed together as [multipath](#multipath). A withdrawal removes only the path it names, and one that names an unknown path is ignored.
 - Each path counts toward the peer's [maximum-prefix](#limiting-the-prefixes-a-peer-sends) limit, and `accepted_prefixes` in `GET /v1/bgp/summary` counts paths.
-- With send negotiated, a route-server client gets every other source's path (see [Route server](#route-server-rfc-7947)). Any other peer gets the best path, under path identifier 1.
+- With send negotiated, a peer gets the best `add-path-send-count` paths for each prefix (see below). A route-server client gets every other source's path by default (see [Route server](#route-server-rfc-7947)).
 - A route-server client defaults to `both`. Any other group defaults to off. An explicit mode replaces the default, so `add-path receive` on a route-server client stops its multi-path view.
 - The capability is in the OPEN, so changing `add-path` resets the peer-group's sessions. `delete add-path` goes back to the default.
 - `bgp: add-path negotiated peer=… ipv4=… ipv6=…` is logged when a session with a configured mode comes up, each value being `none`, `receive`, `send` or `both`.
+
+To choose how many paths a send peer gets, set `add-path-send-count` on its peer-group:
+
+```
+edge-1(t9/bgp-instance:r1/peer-group:pg1)> set add-path send
+edge-1(t9/bgp-instance:r1/peer-group:pg1)> set add-path-send-count 3
+```
+
+```sh
+$C -X PUT -H 'Content-Type: application/json' -d '3' \
+  $B/v1/transactions/t9/bgp-instance/r1/peer-group/pg1/add-path-send-count
+```
+
+- The peer gets the best N paths for each prefix, in decision-process order, so the best path is always first.
+- N counts the paths the peer actually gets. A path the group's own filtering refuses (split horizon, route reflection rules, export policy, or a path learned from that peer) doesn't use up a place: the next one moves up.
+- The range is 2 to 64. Unset, a group gets 2 (the best path plus one backup), and a route-server client every path.
+- It needs `add-path send` or `both` (a route-server client is `both` by default), or the commit is refused.
+- It is independent of the instance's [maximum-paths](#multipath), which only sets what NOS installs. For a receiver to build the same multipath set, set `add-path-send-count` to at least `maximum-paths`.
+- A path keeps its path identifier as long as it stays among the best N, even when its rank changes. A path entering the set takes over the identifier of one that left, in a single UPDATE, so the receiver never holds fewer paths in between. Identifiers left over are withdrawn.
+- Changing it resets the peer-group's sessions.
 
 ### Route server (RFC 7947)
 
 At an exchange point, a route server passes routes between its clients without appearing in their paths. Mark the clients' peer-group with `set route-server-client`; it must be eBGP. For such peers NOS:
 
 - never adds its own AS to the AS path;
-- if the client supports ADD-PATH (RFC 7911), sends it every other client's path for a prefix, not only the single best one: each path a client sends, so a client that itself sends several paths has each of them passed on. A client without ADD-PATH receives the best path only;
+- if the client supports ADD-PATH (RFC 7911), sends it every other client's path for a prefix, not only the single best one: each path a client sends, so a client that itself sends several paths has each of them passed on. `add-path-send-count` caps this to the best N. A client without ADD-PATH receives the best path only;
 - leaves the next hop unchanged by default (RFC 7947 §2.2.1), so clients forward to each other directly. An explicit `set next-hop self` still overrides it;
 - passes a received `MED` through unchanged (RFC 7947 §2.2); a `MED` set by the export policy replaces it.
 
@@ -760,7 +780,6 @@ These are known gaps, so plan around them:
 - A route's attributes cannot be displayed. `show route` shows the chosen next hop, and the log records each learned route.
 - There is no soft reconfiguration: changing a peer-group or its policies resets its sessions.
 - The well-known communities have no built-in effect (see [Communities](#communities)).
-- ADD-PATH send gives a peer other than a route-server client only the best path, not a backup path too.
 
 ## Configuration reference
 
@@ -807,6 +826,7 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 | damping | `… damping [half-life <s>] [reuse <n>] [suppress <n>] [max-suppress <s>]` / `set damping …`; `delete damping` | `…/damping`, `{"half_life":900,"reuse":750,"suppress":6000,"max_suppress":3600}` or `null` | default: off; parameters default to 900 / 750 / 6000 / 3600 | eBGP peer-group only; half-life > 0, reuse > 0, suppress > reuse, max-suppress ≥ half-life | Flap damping of received routes | `show log nos-bgpd[<i>]` |
 | local-as | `… local-as asn <n> [no-prepend] [replace-as]` / `set local-as …`; `delete local-as` | `…/local-as`, `{"asn":65020,"no_prepend":false,"replace_as":false}` or `null` | ASN 1 to 4294967294; default: off | eBGP peer-group outside the confederation; not the instance's asn, identifier or remote-as; not with route-server-client | AS presented to the peers; see [Local AS](#local-as-local-as) | `remote_asn` in the peer's `GET /v1/bgp/summary` |
 | add-path | `… add-path receive\|send\|both` / `set add-path …`; `delete add-path` | `…/add-path`, `"Receive"`, `"Send"`, `"Both"` or `null` | default: `both` for a route-server client, otherwise off | none | RFC 7911 several paths per prefix on ipv4/ipv6; see [ADD-PATH](#add-path-rfc-7911) | `show log nos-bgpd[<i>]` (`add-path negotiated`) |
+| add-path-send-count | `… add-path-send-count <n>` / `set add-path-send-count <n>`; `delete add-path-send-count` | `…/add-path-send-count`, number or `null` | 2 to 64; default: 2, or every path for a route-server client | add-path `send` or `both` | How many paths per prefix an ADD-PATH send peer gets: the best N after the group's own filtering | `show config` |
 | max-hops | `… max-hops <n>` / `set max-hops <n>`; `delete max-hops` | `…/max-hops`, number or `null` | 1 to 254; default: off | 1 to 254 | GTSM: TTL 255 out, minimum TTL `256 - n` in | `show config` |
 | md5-password | `… md5-password <pw>` / `set md5-password <pw>`; `delete auth` | `…/auth`, `{"Md5":{"password":"…"}}` | 1 to 80 bytes; default: no authentication | 1 to 80 bytes | TCP MD5 signature; replaces any TCP-AO keys | `show bgp brief` (session up) |
 | ao-key | `… ao-key <send-id> <recv-id> hmac-sha1\|aes-cmac <secret>` / `set ao-key …`; `delete ao-key <send-id>`; `delete auth` | `…/auth`, `{"Ao":{"keys":[{"send_id":1,"recv_id":1,"algorithm":"HmacSha1_96","key":"…","is_current":true,"is_rnext":false,"exclude_options":false}]}}` | IDs 0 to 255; secret 1 to 80 bytes | at least one key; send IDs unique; exactly one current; at most one rnext | TCP-AO; replaces an MD5 password | `show bgp brief` (`ao-current`, `ao-rnext`, counters) |
