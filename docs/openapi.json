@@ -200,6 +200,43 @@
         ],
         "type": "object"
       },
+      "BgpGracefulRestart": {
+        "description": "RFC 4724 / RFC 8538 graceful restart of one BGP instance. `Default` is\non, with every timer at its default.",
+        "properties": {
+          "disabled": {
+            "description": "Turn graceful restart off: no capability is advertised, and no\npeer's routes are kept across a reset.",
+            "type": "boolean"
+          },
+          "restart_time": {
+            "description": "Seconds a peer may take to come back before its routes are dropped,\nadvertised as our own Restart Time (unset: 120, at most 4095).",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "selection_deferral_time": {
+            "description": "Seconds a restarting instance waits for its peers' End-of-RIB before\nselecting and advertising routes (unset: 360).",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "stale_time": {
+            "description": "Seconds a returned peer's kept routes wait for its End-of-RIB\n(unset: 180).",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "BgpInstance": {
         "properties": {
           "aggregates": {
@@ -224,6 +261,10 @@
           "confederation": {
             "$ref": "#/components/schemas/BgpConfederation",
             "description": "RFC 5065 confederation: once `identifier` is set, `asn` is this\nrouter's member AS and `identifier` the AS the confederation shows\nto the outside. A plain struct (not an `Option`) so the CLI can set\nits two fields one at a time. Checked by\n`valid_route_reflection_and_server`."
+          },
+          "graceful_restart": {
+            "$ref": "#/components/schemas/BgpGracefulRestart",
+            "description": "RFC 4724 graceful restart with RFC 8538's N bit: on unless\n`disabled`. While on, a peer that advertised the capability keeps its\nroutes in use across a session reset, until it sends End-of-RIB or a\ntimer expires. A plain struct (not an `Option`) so each field can be\nset and deleted on its own."
           },
           "maximum_paths": {
             "description": "How many equal paths' next hops a prefix installs in the kernel\n(BGP multipath): the best path plus every path tying with it up to\nthe IGP cost to the next hop and learned from the same neighbouring\nAS. Only the best path is advertised. Unset or 1 installs the best\npath alone.",
@@ -1245,6 +1286,54 @@
         },
         "required": [
           "label"
+        ],
+        "type": "object"
+      },
+      "GrSummary": {
+        "description": "A peer's RFC 4724 / RFC 8538 graceful restart capability.",
+        "properties": {
+          "families": {
+            "description": "The families it keeps forwarding state for, and each one's F bit.",
+            "items": {
+              "items": false,
+              "prefixItems": [
+                {
+                  "description": "Which NLRI (AFI/SAFI) is exchanged over a peer-group's session —\nindependent of whatever address family `source_address` resolves to at\nruntime, or a peer's `remote_address`. RFC 8950's extended next-hop\nencoding allows an IPv6-transport session to carry IPv4 unicast NLRI, so\nthis must never be derived from, or cross-validated against, either\naddress's IP version.",
+                  "enum": [
+                    "Ipv4Unicast",
+                    "Ipv6Unicast",
+                    "L2vpnEvpn"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "boolean"
+                }
+              ],
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "notification": {
+            "description": "RFC 8538 N bit: a NOTIFICATION other than a Hard Reset keeps routes.",
+            "type": "boolean"
+          },
+          "restart_time": {
+            "description": "Its Restart Time, in seconds.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "restarting": {
+            "description": "R bit: the peer has just restarted.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "restart_time",
+          "notification",
+          "restarting",
+          "families"
         ],
         "type": "object"
       },
@@ -6623,6 +6712,631 @@
           }
         },
         "summary": "Set: One `peer`, addressed by its value.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/graceful-restart": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `graceful-restart` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BgpGracefulRestart",
+                  "description": "RFC 4724 graceful restart with RFC 8538's N bit: on unless\n`disabled`. While on, a peer that advertised the capability keeps its\nroutes in use across a session reset, until it sends End-of-RIB or a\ntimer expires. A plain struct (not an `Option`) so each field can be\nset and deleted on its own."
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `graceful-restart` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BgpGracefulRestart",
+                "description": "RFC 4724 graceful restart with RFC 8538's N bit: on unless\n`disabled`. While on, a peer that advertised the capability keeps its\nroutes in use across a session reset, until it sends End-of-RIB or a\ntimer expires. A plain struct (not an `Option`) so each field can be\nset and deleted on its own."
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BgpGracefulRestart",
+                  "description": "RFC 4724 graceful restart with RFC 8538's N bit: on unless\n`disabled`. While on, a peer that advertised the capability keeps its\nroutes in use across a session reset, until it sends End-of-RIB or a\ntimer expires. A plain struct (not an `Option`) so each field can be\nset and deleted on its own."
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `graceful-restart` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/graceful-restart/disabled": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `disabled` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Turn graceful restart off: no capability is advertised, and no\npeer's routes are kept across a reset.",
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `disabled` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Turn graceful restart off: no capability is advertised, and no\npeer's routes are kept across a reset.",
+                "type": "boolean"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Turn graceful restart off: no capability is advertised, and no\npeer's routes are kept across a reset.",
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `disabled` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/graceful-restart/restart-time": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `restart-time` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Seconds a peer may take to come back before its routes are dropped,\nadvertised as our own Restart Time (unset: 120, at most 4095).",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `restart-time` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Seconds a peer may take to come back before its routes are dropped,\nadvertised as our own Restart Time (unset: 120, at most 4095).",
+                "format": "int32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Seconds a peer may take to come back before its routes are dropped,\nadvertised as our own Restart Time (unset: 120, at most 4095).",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `restart-time` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/graceful-restart/selection-deferral-time": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `selection-deferral-time` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Seconds a restarting instance waits for its peers' End-of-RIB before\nselecting and advertising routes (unset: 360).",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `selection-deferral-time` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Seconds a restarting instance waits for its peers' End-of-RIB before\nselecting and advertising routes (unset: 360).",
+                "format": "int32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Seconds a restarting instance waits for its peers' End-of-RIB before\nselecting and advertising routes (unset: 360).",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `selection-deferral-time` setting.",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/v1/transactions/{tx}/bgp-instance/{bgp_instance}/graceful-restart/stale-time": {
+      "delete": {
+        "responses": {
+          "204": {
+            "description": "removed"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Remove: The `stale-time` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Seconds a returned peer's kept routes wait for its End-of-RIB\n(unset: 180).",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the current value"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Read: The `stale-time` setting.",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "transaction name",
+          "in": "path",
+          "name": "tx",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "the element's key field",
+          "in": "path",
+          "name": "bgp_instance",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Creates a list element that does not exist yet. The body's key field must match the URL.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Seconds a returned peer's kept routes wait for its End-of-RIB\n(unset: 180).",
+                "format": "int32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Seconds a returned peer's kept routes wait for its End-of-RIB\n(unset: 180).",
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "description": "the stored value"
+          },
+          "400": {
+            "description": "invalid body"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "no such transaction or config path"
+          }
+        },
+        "summary": "Set: The `stale-time` setting.",
         "tags": [
           "transactions"
         ]

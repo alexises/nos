@@ -83,6 +83,7 @@ mod tests {
                 confederation: nos_proto::BgpConfederation::default(),
                 rpki_caches: Vec::new(),
                 aggregates: Vec::new(),
+                graceful_restart: nos_proto::BgpGracefulRestart::default(),
                 routing_table: None,
                 redistribute_policy: None,
             }],
@@ -97,6 +98,37 @@ mod tests {
 
         let cfg = load_or_default(&path).unwrap();
         assert_eq!(cfg, Config::default());
+    }
+
+    /// #12: a config saved before graceful restart existed loads with it on.
+    #[test]
+    fn config_saved_before_graceful_restart_loads_with_it_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        save_to_disk(&sample_config(), &path).unwrap();
+        let yaml = std::fs::read_to_string(&path).unwrap();
+        let old: String = yaml
+            .lines()
+            .filter(|l| {
+                ![
+                    "graceful_restart",
+                    "disabled:",
+                    "restart_time",
+                    "stale_time",
+                    "selection_deferral_time",
+                ]
+                .iter()
+                .any(|k| l.contains(k))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!old.contains("graceful_restart"));
+        std::fs::write(&path, old).unwrap();
+        let cfg = load_or_default(&path).unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].graceful_restart.enabled_restart_time(),
+            Some(120)
+        );
     }
 
     #[test]

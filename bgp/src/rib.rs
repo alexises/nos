@@ -81,7 +81,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ipnet::IpNet;
 use nos_proto::{AddressFamily, BgpDamping, NextHopMode, RedistributeUpdate};
@@ -92,6 +92,7 @@ use tracing::{debug, info, warn};
 use crate::as_path::AsPath;
 use crate::damping::{Damping, CHANGE_PENALTY, WITHDRAW_PENALTY};
 use crate::evpn::EvpnNlri;
+use crate::gr::{Disconnect, PeerGr};
 use crate::mac_mobility::MacMobility;
 use crate::message::{self, UpdateMessage};
 
@@ -432,6 +433,8 @@ pub enum OutboundUpdate {
         family: AddressFamily,
         subtype: u8,
     },
+    /// RFC 4724 §2 End-of-RIB for one family, after a session's initial dump.
+    EndOfRib(AddressFamily),
 }
 
 /// A route rewritten for advertisement toward one specific peer.
@@ -589,6 +592,20 @@ pub struct BgpRib {
     /// RFC 7313: prefixes in a peer's Adj-RIB-In marked stale by a `BoRR` and
     /// not yet re-announced; purged by the matching `EoRR`.
     stale: HashMap<IpAddr, HashSet<IpNet>>,
+    /// The EVPN twin of `stale`, filled only by a graceful restart.
+    evpn_stale: HashMap<IpAddr, HashSet<EvpnNlri>>,
+    /// RFC 4724: each peer's last graceful restart capability
+    /// (`set_peer_gr`), recorded only while this instance has graceful
+    /// restart on. Kept across the peer's sessions, so its presence also
+    /// means this process already had a session with it — what our F bit
+    /// says (`gr_forwarding`).
+    gr: HashMap<IpAddr, PeerGr>,
+    /// When a peer's retained (stale) routes are purged if no End-of-RIB
+    /// came: its restart time after it went down, `gr_stale_time` after it
+    /// came back. Present exactly while a graceful restart is in progress.
+    gr_deadline: HashMap<IpAddr, Instant>,
+    /// `BgpGracefulRestart.stale_time`.
+    gr_stale_time: Duration,
     /// EVPN routes originated by each `nos-fdbd` (keyed by broadcast domain),
     /// and what was last announced to each peer — see `evpn_out`.
     evpn_local: HashMap<evpn_out::EvpnSource, HashMap<nos_proto::EvpnKey, nos_proto::EvpnRoute>>,
@@ -689,6 +706,10 @@ impl BgpRib {
             max_prefix_warned: HashSet::new(),
             evpn_adj_rib_in: HashMap::new(),
             stale: HashMap::new(),
+            evpn_stale: HashMap::new(),
+            gr: HashMap::new(),
+            gr_deadline: HashMap::new(),
+            gr_stale_time: Duration::from_secs(u64::from(nos_proto::GR_STALE_TIME_DEFAULT)),
             evpn_local: HashMap::new(),
             evpn_adj_rib_out: HashMap::new(),
             fdb_domains: Vec::new(),
@@ -897,6 +918,7 @@ impl BgpRib {
         export_policy: Arc<CompiledPolicy>,
         tx: mpsc::UnboundedSender<OutboundUpdate>,
     ) {
+        self.gr_peer_returned(peer);
         let remote_asn = self.peer_asns.get(&peer).copied().unwrap_or(0);
         self.peer_outboxes.insert(
             peer,
@@ -997,9 +1019,10 @@ impl BgpRib {
 
     /// RFC 7313 `EoRR` received: withdraw every `family` route from `peer`
     /// that the refresh did not re-announce.
-    pub fn end_refresh_in(&mut self, peer: IpAddr, family: AddressFamily) {
+    /// Returns how many routes it purged.
+    pub fn end_refresh_in(&mut self, peer: IpAddr, family: AddressFamily) -> usize {
         let Some(set) = self.stale.get_mut(&peer) else {
-            return;
+            return 0;
         };
         let purge: Vec<IpNet> = set
             .iter()
@@ -1007,6 +1030,7 @@ impl BgpRib {
             .filter(|p| family_of(*p) == family)
             .collect();
         set.retain(|p| family_of(*p) != family);
+        let mut count = 0;
         for prefix in purge {
             if self
                 .adj_rib_in
@@ -1016,8 +1040,147 @@ impl BgpRib {
                 if prefix.addr().is_ipv6() {
                     *self.v6_counts.entry(peer).or_default() -= 1;
                 }
-                info!(peer = %peer, %prefix, "bgp: purged stale route at end of route refresh");
+                count += 1;
+                info!(peer = %peer, %prefix, "bgp: purged stale route");
                 self.recompute_and_propagate(prefix);
+            }
+        }
+        count
+    }
+
+    /// Purges `peer`'s stale EVPN routes (a graceful restart's); returns how
+    /// many.
+    fn purge_stale_evpn(&mut self, peer: IpAddr) -> usize {
+        let Some(set) = self.evpn_stale.remove(&peer) else {
+            return 0;
+        };
+        let Some(table) = self.evpn_adj_rib_in.get_mut(&peer) else {
+            return 0;
+        };
+        let mut count = 0;
+        for nlri in set {
+            if table.remove(&nlri).is_some() {
+                count += 1;
+                info!(peer = %peer, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
+            }
+        }
+        count
+    }
+
+    /// Purges `peer`'s stale routes of `family`; returns how many.
+    fn purge_stale(&mut self, peer: IpAddr, family: AddressFamily) -> usize {
+        match family {
+            AddressFamily::L2vpnEvpn => self.purge_stale_evpn(peer),
+            _ => self.end_refresh_in(peer, family),
+        }
+    }
+
+    /// Whether `peer` still has a route marked stale, of `family` or (with
+    /// `None`) of any family.
+    fn has_stale(&self, peer: IpAddr, family: Option<AddressFamily>) -> bool {
+        let ip = self
+            .stale
+            .get(&peer)
+            .is_some_and(|s| s.iter().any(|p| family.is_none_or(|f| family_of(*p) == f)));
+        let evpn = family.is_none_or(|f| f == AddressFamily::L2vpnEvpn)
+            && self.evpn_stale.get(&peer).is_some_and(|s| !s.is_empty());
+        ip || evpn
+    }
+
+    /// `BgpGracefulRestart.stale_time`.
+    pub fn set_gr_stale_time(&mut self, secs: u16) {
+        self.gr_stale_time = Duration::from_secs(u64::from(secs));
+    }
+
+    /// Records the graceful restart capability `peer` sent (`None`: none, or
+    /// graceful restart is off here). Call before `peer_established`.
+    pub fn set_peer_gr(&mut self, peer: IpAddr, gr: Option<PeerGr>) {
+        match gr {
+            Some(gr) => self.gr.insert(peer, gr),
+            None => self.gr.remove(&peer),
+        };
+    }
+
+    pub fn peer_gr(&self, peer: IpAddr) -> Option<&PeerGr> {
+        self.gr.get(&peer)
+    }
+
+    /// Our F bit toward `peer`: this process already had a session with it,
+    /// so the kernel still holds what that session installed. A fresh
+    /// process says 0 — its first push to `nos-ribd` replaced everything.
+    pub fn gr_forwarding(&self, peer: IpAddr) -> bool {
+        self.gr.contains_key(&peer)
+    }
+
+    /// Routes from `peer` currently marked stale (`PeerSummary.stale_prefixes`).
+    pub fn stale_count(&self, peer: IpAddr) -> u32 {
+        let n = self.stale.get(&peer).map_or(0, HashSet::len)
+            + self.evpn_stale.get(&peer).map_or(0, HashSet::len);
+        u32::try_from(n).unwrap_or(u32::MAX)
+    }
+
+    /// RFC 4724 §4.2, on a retained peer's new session: a family its new
+    /// capability doesn't list, or lists with F = 0, is purged now; the
+    /// rest waits for End-of-RIB, bounded by the stale timer.
+    fn gr_peer_returned(&mut self, peer: IpAddr) {
+        if !self.gr_deadline.contains_key(&peer) {
+            return;
+        }
+        let gr = self.gr.get(&peer).copied();
+        for family in AddressFamily::ALL {
+            if !self.has_stale(peer, Some(family)) {
+                continue;
+            }
+            let reason = match gr {
+                Some(g) if g.has(family) && g.forwarding(family) => continue,
+                Some(g) if g.has(family) => "forwarding-not-preserved",
+                _ => "no-capability",
+            };
+            info!(peer = %peer, family = %family, reason = %reason, "bgp: flushing stale routes");
+            self.purge_stale(peer, family);
+        }
+        if self.has_stale(peer, None) {
+            self.gr_deadline
+                .insert(peer, Instant::now() + self.gr_stale_time);
+        } else {
+            self.gr_deadline.remove(&peer);
+        }
+    }
+
+    /// RFC 4724 §2 End-of-RIB from `peer`: whatever of `family` it hasn't
+    /// re-announced since its restart is gone.
+    pub fn end_of_rib(&mut self, peer: IpAddr, family: AddressFamily) {
+        info!(peer = %peer, family = %family, "received end-of-rib");
+        if !self.gr_deadline.contains_key(&peer) {
+            return;
+        }
+        let count = self.purge_stale(peer, family);
+        info!(peer = %peer, family = %family, count, "bgp: purged stale routes after end-of-rib");
+        if !self.has_stale(peer, None) {
+            self.gr_deadline.remove(&peer);
+        }
+    }
+
+    /// Purges the stale routes of every peer whose restart or stale timer
+    /// expired. Driven by the 5s damping tick.
+    // ponytail: 5s granularity on top of the restart/stale times; a
+    // per-peer timer would make it exact.
+    pub fn gr_tick(&mut self) {
+        self.gr_tick_at(Instant::now());
+    }
+
+    fn gr_tick_at(&mut self, now: Instant) {
+        let expired: Vec<IpAddr> = self
+            .gr_deadline
+            .iter()
+            .filter(|(_, d)| **d <= now)
+            .map(|(p, _)| *p)
+            .collect();
+        for peer in expired {
+            warn!(peer = %peer, "bgp: graceful restart timer expired, purging stale routes");
+            self.gr_deadline.remove(&peer);
+            for family in AddressFamily::ALL {
+                self.purge_stale(peer, family);
             }
         }
     }
@@ -1172,18 +1335,42 @@ impl BgpRib {
         self.mac_mobility.tick(Instant::now());
     }
 
-    pub fn peer_disconnected(&mut self, peer: IpAddr) {
-        self.peer_outboxes.remove(&peer);
-        self.v6_counts.remove(&peer);
+    /// A session with `peer` ended (`kind` says how). Graceful restart
+    /// (RFC 4724 §4.2, RFC 8538 §4): when the peer's capability allows it,
+    /// its routes of every family it listed and negotiated stay in use,
+    /// marked stale, for its restart time; everything else is withdrawn as
+    /// before. Called again for a peer already down and retaining (by
+    /// `reconcile_peers` after an abort), only a `Hard` end changes anything.
+    pub fn peer_disconnected(&mut self, peer: IpAddr, kind: Disconnect) {
+        let outbox = self.peer_outboxes.remove(&peer);
+        if outbox.is_none() && kind != Disconnect::Hard && self.gr_deadline.contains_key(&peer) {
+            return;
+        }
+        let gr = self.gr.get(&peer).copied();
+        let retained: Vec<AddressFamily> = match (&outbox, gr) {
+            (Some(o), Some(g)) if crate::gr::retains(kind, Some(&g)) => g
+                .families()
+                .into_iter()
+                .filter(|f| o.negotiated_afs.contains(f))
+                .collect(),
+            _ => Vec::new(),
+        };
         self.max_prefix_warned.retain(|(p, _)| *p != peer);
         // ponytail: a session reset forgets its flap history (RFC 2439 allows
         // keeping it); keep entries across resets to damp session flaps too.
         self.damping.clear_peer(peer);
-        self.stale.remove(&peer);
         self.adj_rib_out.remove(&peer);
         self.evpn_adj_rib_out.remove(&peer);
         self.rs_sent.retain(|(p, _), _| *p != peer);
         self.rs_next_id.retain(|(p, _), _| *p != peer);
+        if let (false, Some(gr)) = (retained.is_empty(), gr) {
+            self.retain_as_stale(peer, gr, &retained);
+            return;
+        }
+        self.v6_counts.remove(&peer);
+        self.stale.remove(&peer);
+        self.evpn_stale.remove(&peer);
+        self.gr_deadline.remove(&peer);
         if let Some(routes) = self.evpn_adj_rib_in.remove(&peer) {
             // mac_mobility's record of this route's (vni, mac) is
             // deliberately left alone (see its own doc comment): a future
@@ -1198,6 +1385,62 @@ impl BgpRib {
                 self.recompute_and_propagate(prefix);
             }
         }
+    }
+
+    /// The retaining half of `peer_disconnected`: `families` stay, marked
+    /// stale; any other family is withdrawn.
+    fn retain_as_stale(&mut self, peer: IpAddr, gr: PeerGr, families: &[AddressFamily]) {
+        // RFC 4724 §4.2: consecutive restarts without N drop what is still
+        // stale from the previous one; RFC 8538 §4.1 keeps it with N.
+        if !gr.notification {
+            for family in AddressFamily::ALL {
+                self.purge_stale(peer, family);
+            }
+        }
+        let mut dropped = Vec::new();
+        if let Some(table) = self.adj_rib_in.get(&peer) {
+            let stale = self.stale.entry(peer).or_default();
+            for prefix in table.keys() {
+                if families.contains(&family_of(*prefix)) {
+                    stale.insert(*prefix);
+                } else {
+                    dropped.push(*prefix);
+                }
+            }
+        }
+        for prefix in dropped {
+            if self
+                .adj_rib_in
+                .get_mut(&peer)
+                .is_some_and(|t| t.remove(&prefix).is_some())
+            {
+                if prefix.addr().is_ipv6() {
+                    *self.v6_counts.entry(peer).or_default() -= 1;
+                }
+                self.recompute_and_propagate(prefix);
+            }
+        }
+        if families.contains(&AddressFamily::L2vpnEvpn) {
+            if let Some(table) = self.evpn_adj_rib_in.get(&peer) {
+                self.evpn_stale
+                    .entry(peer)
+                    .or_default()
+                    .extend(table.keys().cloned());
+            }
+        } else if let Some(routes) = self.evpn_adj_rib_in.remove(&peer) {
+            for nlri in routes.keys() {
+                info!(peer = %peer, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
+            }
+        }
+        let now = Instant::now();
+        self.gr_deadline
+            .insert(peer, now + Duration::from_secs(u64::from(gr.time)));
+        info!(
+            peer = %peer, families = ?families, restart_time = gr.time,
+            "bgp: peer down, retaining routes as stale"
+        );
+        // A restart time of 0 keeps nothing.
+        self.gr_tick_at(now);
     }
 
     /// Handles one inbound UPDATE from `from`, whose BGP Identifier is
@@ -1236,7 +1479,17 @@ impl BgpRib {
                 .sum::<usize>();
         let mut touched: HashSet<IpNet> = HashSet::with_capacity(touched_capacity);
 
-        // RFC 7313: any prefix the peer mentions again is no longer stale.
+        // RFC 4724: an EVPN route the peer mentions again is no longer stale.
+        if let Some(stale) = self.evpn_stale.get_mut(&from) {
+            for n in update.mp_reach.iter().flat_map(|m| &m.evpn) {
+                stale.remove(n);
+            }
+            for n in update.mp_unreach.iter().flat_map(|m| &m.evpn) {
+                stale.remove(n);
+            }
+        }
+        // RFC 7313 / RFC 4724: any prefix the peer mentions again is no
+        // longer stale.
         if let Some(stale) = self.stale.get_mut(&from) {
             for p in &update.nlri {
                 stale.remove(&IpNet::V4(*p));
@@ -2965,7 +3218,7 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].1, &evpn_nlri(2));
 
-        rib.peer_disconnected(peer);
+        rib.peer_disconnected(peer, Disconnect::Transport);
         assert_eq!(rib.evpn_routes(), []);
     }
 
@@ -3498,7 +3751,7 @@ mod tests {
         );
         let best = |rib: &BgpRib| rib.loc_rib[&prefix(p)].origin;
         assert_eq!(best(&rib), RouteOrigin::Peer(addr("10.0.0.3")));
-        rib.peer_disconnected(addr("10.0.0.3"));
+        rib.peer_disconnected(addr("10.0.0.3"), Disconnect::Transport);
         assert_eq!(best(&rib), RouteOrigin::Peer(addr("10.0.0.2")));
     }
 
@@ -4445,7 +4698,7 @@ mod tests {
         );
         let _ = recv_all(&mut observer_rx);
 
-        rib.peer_disconnected(peer);
+        rib.peer_disconnected(peer, Disconnect::Transport);
 
         let mut updates = recv_all(&mut observer_rx);
         updates.sort_by_key(|u| match u {
@@ -4453,7 +4706,8 @@ mod tests {
             OutboundUpdate::Announce(a) => a.prefix.to_string(),
             OutboundUpdate::AnnounceEvpn(_)
             | OutboundUpdate::WithdrawEvpn(_)
-            | OutboundUpdate::RefreshMarker { .. } => String::new(),
+            | OutboundUpdate::RefreshMarker { .. }
+            | OutboundUpdate::EndOfRib(_) => String::new(),
         });
         assert_eq!(
             updates,
@@ -5586,7 +5840,7 @@ mod tests {
         assert_ne!(id_for_a, id_for_b);
 
         // Disconnecting peer_a withdraws only its path id; peer_b's stays.
-        rib.peer_disconnected(peer_a);
+        rib.peer_disconnected(peer_a, Disconnect::Transport);
         let after = recv_all(&mut rs_rx);
         let withdrawn_ids: Vec<Option<u32>> = after
             .iter()
@@ -5641,7 +5895,8 @@ mod tests {
             OutboundUpdate::Withdraw(_, _, id) => id.is_none(),
             OutboundUpdate::AnnounceEvpn(_)
             | OutboundUpdate::WithdrawEvpn(_)
-            | OutboundUpdate::RefreshMarker { .. } => true,
+            | OutboundUpdate::RefreshMarker { .. }
+            | OutboundUpdate::EndOfRib(_) => true,
         }));
         // Still transparent (no AS_PATH prepend) — that's governed by
         // is_rs_client alone, independent of ADD-PATH negotiation. Only
@@ -5706,7 +5961,7 @@ mod tests {
         );
 
         // Losing the runner-up drops the backup.
-        rib.peer_disconnected(addr("10.0.0.2"));
+        rib.peer_disconnected(addr("10.0.0.2"), Disconnect::Transport);
         let (_, routes) = rib.push_snapshot();
         assert_eq!(
             routes.get(&prefix("1.2.3.0/24")),
@@ -5835,7 +6090,7 @@ mod tests {
         let best = rib.loc_rib[&prefix("1.2.3.0/24")].clone();
         recv_all(&mut rx);
 
-        rib.peer_disconnected(addr("10.0.0.2"));
+        rib.peer_disconnected(addr("10.0.0.2"), Disconnect::Transport);
         assert_eq!(mp_hops(&rib), (vec![addr("10.0.0.10")], None));
         assert_eq!(rib.loc_rib[&prefix("1.2.3.0/24")], best);
         assert!(recv_all(&mut rx).is_empty(), "advertisement must not move");
@@ -6226,7 +6481,226 @@ mod tests {
         rib.end_refresh_in(peer, AddressFamily::Ipv6Unicast);
         assert_eq!(rib.accepted_prefixes(peer), [1, 0, 0]);
         assert_eq!(rib.accepted_prefixes(peer), recount(&rib, peer));
-        rib.peer_disconnected(peer);
+        rib.peer_disconnected(peer, Disconnect::Transport);
+        assert_eq!(rib.accepted_prefixes(peer), [0, 0, 0]);
+    }
+
+    fn gr(notification: bool, families: &[(AddressFamily, bool)]) -> PeerGr {
+        let mut cap = crate::gr::our_cap(120, &[], false, false);
+        cap.notification = notification;
+        cap.families = families
+            .iter()
+            .map(|(f, forwarding)| {
+                let (afi, safi) = crate::gr::afi_safi(*f);
+                message::GrFamily {
+                    afi,
+                    safi,
+                    forwarding: *forwarding,
+                }
+            })
+            .collect();
+        PeerGr::from_cap(&cap)
+    }
+
+    /// A peer with GR (`gr`) and v4+v6+EVPN negotiated, holding 1.0.0.0/24,
+    /// `2.0.0.0/24`, `2001:db8:1::/48` and one EVPN route; plus an observer.
+    fn gr_rib(gr: Option<PeerGr>) -> (BgpRib, IpAddr, mpsc::UnboundedReceiver<OutboundUpdate>) {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        rib.set_peer_gr(peer, gr);
+        register_gr_peer(&mut rib, peer);
+        let observer = register_peer(&mut rib, addr("10.0.0.2"), false, addr("10.0.0.253"));
+        for u in [
+            ebgp_update(vec!["1.0.0.0/24", "2.0.0.0/24"], vec![65001], "10.0.0.1"),
+            v6_update(vec!["2001:db8:1::/48"]),
+            evpn_reach(vec![evpn_nlri(1)], vec![65001]),
+        ] {
+            rib.handle_update(peer, false, v4("192.0.2.1"), &u, &nos_rpl::ACCEPT_ALL);
+        }
+        (rib, peer, observer)
+    }
+
+    fn register_gr_peer(rib: &mut BgpRib, peer: IpAddr) -> mpsc::UnboundedReceiver<OutboundUpdate> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let afs = HashSet::from([
+            AddressFamily::Ipv4Unicast,
+            AddressFamily::Ipv6Unicast,
+            AddressFamily::L2vpnEvpn,
+        ]);
+        rib.peer_established(
+            peer,
+            false,
+            Some(addr("10.0.0.254")),
+            afs,
+            true,
+            None,
+            false,
+            false,
+            HashSet::new(),
+            accept_all_policy(),
+            tx,
+        );
+        rx
+    }
+
+    fn withdrawn(rx: &mut mpsc::UnboundedReceiver<OutboundUpdate>) -> Vec<String> {
+        let mut out: Vec<String> = recv_all(rx)
+            .into_iter()
+            .filter_map(|u| match u {
+                OutboundUpdate::Withdraw(p, _, _) => Some(p.to_string()),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// RFC 4724 §4.2: the families the peer listed (and negotiated) stay in
+    /// use, marked stale — nothing is withdrawn downstream, and the counters
+    /// still match — while an unlisted one is withdrawn. A re-announced
+    /// route loses its mark and End-of-RIB purges the rest.
+    #[test]
+    fn graceful_restart_keeps_listed_families_until_end_of_rib() {
+        let ipv4 = (AddressFamily::Ipv4Unicast, true);
+        let evpn = (AddressFamily::L2vpnEvpn, true);
+        let (mut rib, peer, mut observer) = gr_rib(Some(gr(true, &[ipv4, evpn])));
+        let _ = recv_all(&mut observer);
+
+        rib.peer_disconnected(peer, Disconnect::Transport);
+        assert_eq!(withdrawn(&mut observer), ["2001:db8:1::/48"]);
+        assert_eq!(rib.accepted_prefixes(peer), [2, 0, 1]);
+        assert_eq!(rib.accepted_prefixes(peer), recount(&rib, peer));
+        assert_eq!(rib.stale_count(peer), 3);
+        assert!(rib.push_snapshot().1.contains_key(&prefix("1.0.0.0/24")));
+        // `reconcile_peers` deregistering again after an abort changes nothing.
+        rib.peer_disconnected(peer, Disconnect::Graceful);
+        assert_eq!(rib.stale_count(peer), 3);
+
+        // Back with F=1: kept until End-of-RIB; 1.0.0.0/24 is re-announced.
+        let _rx = register_gr_peer(&mut rib, peer);
+        assert_eq!(rib.stale_count(peer), 3);
+        rib.handle_update(
+            peer,
+            false,
+            v4("192.0.2.1"),
+            &ebgp_update(vec!["1.0.0.0/24"], vec![65001], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
+        );
+        rib.handle_update(
+            peer,
+            false,
+            v4("192.0.2.1"),
+            &evpn_reach(vec![evpn_nlri(1)], vec![65001]),
+            &nos_rpl::ACCEPT_ALL,
+        );
+        assert_eq!(rib.stale_count(peer), 1);
+        rib.end_of_rib(peer, AddressFamily::Ipv4Unicast);
+        assert_eq!(withdrawn(&mut observer), ["2.0.0.0/24"]);
+        assert_eq!(rib.accepted_prefixes(peer), [1, 0, 1]);
+        assert_eq!(rib.accepted_prefixes(peer), recount(&rib, peer));
+        assert!(!rib.gr_deadline.contains_key(&peer));
+    }
+
+    /// No capability, or a Hard end: everything goes at once, as without GR.
+    #[test]
+    fn graceful_restart_needs_the_capability_and_a_soft_end() {
+        let ipv4 = (AddressFamily::Ipv4Unicast, true);
+        for (cap, kind) in [
+            (None, Disconnect::Transport),
+            (Some(gr(true, &[ipv4])), Disconnect::Hard),
+            (Some(gr(false, &[ipv4])), Disconnect::Graceful),
+            (Some(gr(true, &[])), Disconnect::Transport),
+        ] {
+            let (mut rib, peer, mut observer) = gr_rib(cap);
+            let _ = recv_all(&mut observer);
+            rib.peer_disconnected(peer, kind);
+            assert_eq!(
+                withdrawn(&mut observer),
+                ["1.0.0.0/24", "2.0.0.0/24", "2001:db8:1::/48"],
+                "{cap:?} {kind:?}"
+            );
+            assert_eq!(rib.accepted_prefixes(peer), [0, 0, 0]);
+            assert_eq!(rib.stale_count(peer), 0);
+        }
+    }
+
+    /// RFC 4724 §4.2: on the new session, a family with F = 0, missing from
+    /// the capability, or no capability at all is purged at once.
+    #[test]
+    fn graceful_restart_flushes_on_return_without_forwarding_state() {
+        let both = [
+            (AddressFamily::Ipv4Unicast, true),
+            (AddressFamily::Ipv6Unicast, true),
+        ];
+        for (back, want) in [
+            (Some(gr(true, &both)), vec![]),
+            (
+                Some(gr(true, &[(AddressFamily::Ipv4Unicast, false)])),
+                vec!["1.0.0.0/24", "2.0.0.0/24", "2001:db8:1::/48"],
+            ),
+            (
+                Some(gr(true, &[(AddressFamily::Ipv4Unicast, true)])),
+                vec!["2001:db8:1::/48"],
+            ),
+            (None, vec!["1.0.0.0/24", "2.0.0.0/24", "2001:db8:1::/48"]),
+        ] {
+            let (mut rib, peer, mut observer) = gr_rib(Some(gr(true, &both)));
+            rib.peer_disconnected(peer, Disconnect::Transport);
+            let _ = recv_all(&mut observer);
+            rib.set_peer_gr(peer, back);
+            let _rx = register_gr_peer(&mut rib, peer);
+            assert_eq!(withdrawn(&mut observer), want, "{back:?}");
+        }
+    }
+
+    /// RFC 4724 §4.2 vs RFC 8538 §4.1: a second drop before End-of-RIB
+    /// deletes what is still stale without N, keeps it with N.
+    #[test]
+    fn consecutive_restarts_keep_stale_routes_only_with_n() {
+        for n in [false, true] {
+            let cap = gr(n, &[(AddressFamily::Ipv4Unicast, true)]);
+            let (mut rib, peer, mut observer) = gr_rib(Some(cap));
+            rib.peer_disconnected(peer, Disconnect::Transport);
+            let _rx = register_gr_peer(&mut rib, peer);
+            let _ = recv_all(&mut observer);
+            rib.peer_disconnected(peer, Disconnect::Transport);
+            let gone = withdrawn(&mut observer);
+            if n {
+                assert_eq!(gone, [] as [String; 0]);
+                assert_eq!(rib.stale_count(peer), 2);
+            } else {
+                assert_eq!(gone, ["1.0.0.0/24", "2.0.0.0/24"]);
+            }
+        }
+    }
+
+    /// The restart timer while the peer is down, the stale timer once it's
+    /// back; restart time 0 keeps nothing.
+    #[test]
+    fn graceful_restart_timers_purge() {
+        let cap = gr(true, &[(AddressFamily::Ipv4Unicast, true)]);
+        let (mut rib, peer, mut observer) = gr_rib(Some(cap));
+        rib.peer_disconnected(peer, Disconnect::Transport);
+        let _ = recv_all(&mut observer);
+        rib.gr_tick_at(Instant::now() + Duration::from_secs(119));
+        assert_eq!(rib.stale_count(peer), 2);
+        rib.gr_tick_at(Instant::now() + Duration::from_secs(121));
+        assert_eq!(withdrawn(&mut observer), ["1.0.0.0/24", "2.0.0.0/24"]);
+
+        let (mut rib, peer, mut observer) = gr_rib(Some(cap));
+        rib.peer_disconnected(peer, Disconnect::Transport);
+        rib.set_gr_stale_time(10);
+        let _rx = register_gr_peer(&mut rib, peer);
+        let _ = recv_all(&mut observer);
+        rib.gr_tick_at(Instant::now() + Duration::from_secs(11));
+        assert_eq!(withdrawn(&mut observer), ["1.0.0.0/24", "2.0.0.0/24"]);
+
+        let mut zero = cap;
+        zero.time = 0;
+        let (mut rib, peer, mut observer) = gr_rib(Some(zero));
+        let _ = recv_all(&mut observer);
+        rib.peer_disconnected(peer, Disconnect::Transport);
+        assert_eq!(rib.stale_count(peer), 0);
         assert_eq!(rib.accepted_prefixes(peer), [0, 0, 0]);
     }
 

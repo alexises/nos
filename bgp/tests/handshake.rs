@@ -98,6 +98,7 @@ async fn two_real_instances_establish_a_session() {
         local_as: None,
         confed_id: None,
         confed_member: false,
+        graceful_restart: None,
     });
     let slot_b = PeerSlot::new(ResolvedPeer {
         remote_address: "10.0.0.1".parse().unwrap(),
@@ -124,6 +125,7 @@ async fn two_real_instances_establish_a_session() {
         local_as: None,
         confed_id: None,
         confed_member: false,
+        graceful_restart: None,
     });
 
     let a_fut = fsm::run(
@@ -235,6 +237,7 @@ async fn established_session_honors_configured_non_default_hold_time() {
         local_as: None,
         confed_id: None,
         confed_member: false,
+        graceful_restart: None,
     });
 
     let a_fut = fsm::run(
@@ -317,6 +320,7 @@ async fn established_session_reports_status_via_peer_slot() {
         local_as: None,
         confed_id: None,
         confed_member: false,
+        graceful_restart: None,
     });
     let mut status = slot_a.status_receiver();
 
@@ -424,6 +428,7 @@ async fn collision_leaves_exactly_one_side_running() {
         local_as: None,
         confed_id: None,
         confed_member: false,
+        graceful_restart: None,
     });
 
     let peer_ctx = || PeerContext {
@@ -626,6 +631,7 @@ async fn evpn_routes_from_a_real_session_are_stored_and_cleared_on_close() {
         local_as: None,
         confed_id: None,
         confed_member: false,
+        graceful_restart: None,
     });
     let rib = new_bgp_rib();
     rib.lock()
@@ -813,6 +819,7 @@ async fn refresh_case(stale_time: Duration, eorr: bool) -> u32 {
         local_as: None,
         confed_id: None,
         confed_member: false,
+        graceful_restart: None,
     });
     let rib = new_bgp_rib();
     rib.lock()

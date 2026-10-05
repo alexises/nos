@@ -17,6 +17,7 @@ use tracing::{debug, info, warn};
 
 use crate::collision::{FsmCommand, PeerSlot, Role};
 use crate::fsm::{self, PeerContext};
+use crate::gr::Disconnect;
 use crate::message::CeaseSubcode;
 use crate::rib::BgpRib;
 use crate::rpki;
@@ -121,6 +122,10 @@ pub struct ResolvedPeer {
     /// restarts the session (`diff_peers`).
     pub confed_id: Option<u32>,
     pub confed_member: bool,
+    /// RFC 4724 graceful restart: our Restart Time, `None` when the
+    /// instance turned it off. Here because it goes into the OPEN, so a
+    /// change restarts the session (`diff_peers`).
+    pub graceful_restart: Option<u16>,
 }
 
 /// RFC 5065 §2: how a peer relates to this instance.
@@ -435,9 +440,17 @@ impl SessionManager {
         (targets.to_vec(), routes)
     }
 
-    /// Decays flap-damping penalties and re-decides any released prefixes.
+    /// Decays flap-damping penalties and re-decides any released prefixes,
+    /// and purges graceful-restart stale routes whose timer expired.
     pub async fn damping_tick(&self) {
-        self.bgp_rib.lock().await.damping_tick();
+        let mut rib = self.bgp_rib.lock().await;
+        rib.damping_tick();
+        rib.gr_tick();
+    }
+
+    /// `BgpInstance.graceful_restart`'s stale time, for the RIB.
+    pub async fn set_gr_stale_time(&self, secs: u16) {
+        self.bgp_rib.lock().await.set_gr_stale_time(secs);
     }
 
     /// Expires old EVPN MAC-mobility move history and lifts any freeze whose
@@ -531,9 +544,19 @@ impl SessionManager {
             .collect()
     }
 
-    /// Aborts every peer task and the listener, and clears all state.
+    /// Tells every established peer we're going (Cease/Administrative
+    /// Shutdown — a Hard Reset once RFC 8538's N is exchanged, so a
+    /// graceful-restart peer doesn't keep forwarding to us: the watchdog
+    /// only stops this process when the instance is removed or the router
+    /// is stopping, and `nos-ribd` deletes the VRF on the same signal), then
+    /// aborts every peer task and the listener, and clears all state.
     /// Called once when `crate::reconcile::run`'s loop exits on shutdown.
     pub async fn shutdown(&self) {
+        let slots: Vec<Arc<PeerSlot>> = self.peers.read().await.values().cloned().collect();
+        futures::future::join_all(slots.iter().map(|slot| {
+            cease_established(slot, CeaseSubcode::AdministrativeShutdown, Bytes::new())
+        }))
+        .await;
         let mut tasks = self.peer_tasks.lock().await;
         for (_, task) in tasks.drain() {
             if let Some(t) = task.task {
@@ -759,7 +782,7 @@ impl SessionManager {
         }))
         .await;
 
-        for (addr, slot, _, _) in stopped {
+        for (addr, slot, subcode, _) in stopped {
             // Both roles must stop: the active-connect loop owned here, and
             // any passively-accepted session, which is spawned per accepted
             // connection and tracked on the slot. Missing the passive one
@@ -780,7 +803,13 @@ impl SessionManager {
             // (and keep being advertised) until something else happened to
             // evict them, which is exactly what a changed import policy must
             // not do.
-            self.bgp_rib.lock().await.peer_disconnected(addr);
+            // RFC 8538: only Other Configuration Change keeps the routes.
+            let kind = if subcode == CeaseSubcode::OtherConfigurationChange {
+                Disconnect::Graceful
+            } else {
+                Disconnect::Hard
+            };
+            self.bgp_rib.lock().await.peer_disconnected(addr, kind);
         }
         for peer in to_spawn {
             let slot = PeerSlot::new(peer.clone());
@@ -938,6 +967,19 @@ fn to_peer_summary(slot: &PeerSlot, rib: &BgpRib) -> PeerSummary {
         max_prefix_held: slot.max_prefix_held(),
         accepted_prefixes: (status.state == PeerState::Established)
             .then(|| rib.accepted_prefixes(slot.peer.remote_address)),
+        graceful_restart: rib
+            .peer_gr(slot.peer.remote_address)
+            .map(|g| nos_proto::GrSummary {
+                restart_time: g.time,
+                notification: g.notification,
+                restarting: g.restart,
+                families: g
+                    .families()
+                    .into_iter()
+                    .map(|f| (f, g.forwarding(f)))
+                    .collect(),
+            }),
+        stale_prefixes: rib.stale_count(slot.peer.remote_address),
     }
 }
 
@@ -1125,6 +1167,7 @@ mod tests {
             local_as: None,
             confed_id: None,
             confed_member: false,
+            graceful_restart: None,
         }
     }
 

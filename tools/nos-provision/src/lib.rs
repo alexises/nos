@@ -403,6 +403,30 @@ pub struct Args {
     #[arg(long)]
     pub maximum_paths: Option<u8>,
 
+    /// RFC 4724 graceful restart (on by default): turn it off on
+    /// `--bgp-instance`. Any `--*graceful-restart`/`--gr-*` flag replaces
+    /// the whole setting (`BgpInstanceOp::SetGracefulRestart`) with what the
+    /// flags given say; with none, it's left alone.
+    #[arg(long)]
+    pub no_graceful_restart: bool,
+
+    /// Graceful restart restart time, seconds (see `--no-graceful-restart`).
+    #[arg(long)]
+    pub gr_restart_time: Option<u16>,
+
+    /// Graceful restart stale time, seconds (see `--no-graceful-restart`).
+    #[arg(long)]
+    pub gr_stale_time: Option<u16>,
+
+    /// Graceful restart selection deferral time, seconds (see
+    /// `--no-graceful-restart`).
+    #[arg(long)]
+    pub gr_selection_deferral_time: Option<u16>,
+
+    /// Puts graceful restart back to its default: on, default timers.
+    #[arg(long)]
+    pub clear_graceful_restart: bool,
+
     /// RFC 5065: makes `--bgp-instance` a confederation member, with this
     /// identifier (`BgpInstanceOp::SetConfederationIdentifier`).
     #[arg(long)]
@@ -1439,6 +1463,22 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         ops.push(ConfigOp::BgpInstance(BgpInstanceOp::SetMaximumPaths {
             name: args.bgp_instance.clone(),
             maximum_paths,
+        }));
+    }
+    if args.no_graceful_restart
+        || args.clear_graceful_restart
+        || args.gr_restart_time.is_some()
+        || args.gr_stale_time.is_some()
+        || args.gr_selection_deferral_time.is_some()
+    {
+        ops.push(ConfigOp::BgpInstance(BgpInstanceOp::SetGracefulRestart {
+            name: args.bgp_instance.clone(),
+            graceful_restart: nos_proto::BgpGracefulRestart {
+                disabled: args.no_graceful_restart,
+                restart_time: args.gr_restart_time,
+                stale_time: args.gr_stale_time,
+                selection_deferral_time: args.gr_selection_deferral_time,
+            },
         }));
     }
     if let Some(identifier) = args.confederation_id {

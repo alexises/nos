@@ -996,16 +996,41 @@ pub fn render_bgp_summary(instance: &str, peers: &[PeerSummary]) -> String {
         } else {
             format!(" prefixes{counts}")
         };
+        // RFC 4724 / RFC 8538: the peer's restart time, N, and the families
+        // it keeps forwarding state for (F).
+        let gr = match &peer.graceful_restart {
+            Some(g) if peer.state == BgpSessionState::Established => {
+                let f: Vec<&str> = g
+                    .families
+                    .iter()
+                    .filter(|(_, f)| *f)
+                    .map(|(af, _)| af.as_str())
+                    .collect();
+                format!(
+                    " gr {}s{}{}",
+                    g.restart_time,
+                    if g.notification { " N" } else { "" },
+                    if f.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" F:{}", f.join(","))
+                    }
+                )
+            }
+            _ => String::new(),
+        };
         lines.push(format!(
-            "  {} AS {remote_as} peer-group {} {} uptime {uptime} hold-time {hold_time}{ao}{}",
+            "  {} AS {remote_as} peer-group {} {} uptime {uptime} hold-time {hold_time}{ao}{}{gr}",
             peer.remote_address,
             peer.peer_group,
             if peer.shutdown {
-                "Idle (shutdown)"
+                "Idle (shutdown)".to_string()
             } else if peer.max_prefix_held {
-                "Idle (max-prefix)"
+                "Idle (max-prefix)".to_string()
+            } else if peer.stale_prefixes > 0 && peer.state != BgpSessionState::Established {
+                format!("Idle (gr-stale {})", peer.stale_prefixes)
             } else {
-                render_bgp_session_state(peer.state)
+                render_bgp_session_state(peer.state).to_string()
             },
             prefixes,
         ));
@@ -1997,6 +2022,7 @@ mod tests {
             confederation: nos_proto::BgpConfederation::default(),
             rpki_caches: Vec::new(),
             aggregates: Vec::new(),
+            graceful_restart: nos_proto::BgpGracefulRestart::default(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -2687,6 +2713,8 @@ mod tests {
             ao_packets_key_not_found: None,
             max_prefix_held: false,
             accepted_prefixes: None,
+            graceful_restart: None,
+            stale_prefixes: 0,
         }
     }
 
@@ -2701,6 +2729,28 @@ mod tests {
             render_bgp_summary("r1", &[held, up]),
             "bgp instance r1:\n  10.0.0.1 AS - peer-group pg1 Idle (max-prefix) uptime - hold-time -\n  \
              10.0.0.2 AS - peer-group pg1 Established uptime - hold-time - prefixes v4 3 evpn 2"
+        );
+    }
+
+    #[test]
+    fn render_bgp_summary_shows_graceful_restart() {
+        let mut stale = idle_peer("10.0.0.1");
+        stale.stale_prefixes = 4;
+        let mut up = idle_peer("10.0.0.2");
+        up.state = BgpSessionState::Established;
+        up.graceful_restart = Some(nos_proto::GrSummary {
+            restart_time: 120,
+            notification: true,
+            restarting: false,
+            families: vec![
+                (nos_proto::AddressFamily::Ipv4Unicast, true),
+                (nos_proto::AddressFamily::Ipv6Unicast, false),
+            ],
+        });
+        assert_eq!(
+            render_bgp_summary("r1", &[stale, up]),
+            "bgp instance r1:\n  10.0.0.1 AS - peer-group pg1 Idle (gr-stale 4) uptime - hold-time -\n  \
+             10.0.0.2 AS - peer-group pg1 Established uptime - hold-time - gr 120s N F:ipv4"
         );
     }
 
@@ -3244,6 +3294,7 @@ mod tests {
                 confederation: nos_proto::BgpConfederation::default(),
                 rpki_caches: Vec::new(),
                 aggregates: Vec::new(),
+                graceful_restart: nos_proto::BgpGracefulRestart::default(),
                 ..instance("r1", 65001)
             }],
             routing_tables: vec![RoutingTable {

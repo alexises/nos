@@ -62,6 +62,17 @@ pub async fn established(w: &mut World) -> anyhow::Result<()> {
         .await?;
     w.b()?
         .wait("extended message negotiated extended_message=true")
+        .await?;
+    // RFC 4724 / RFC 8538 graceful restart is on by default, with N.
+    w.a()?
+        .wait(&format!(
+            "graceful restart negotiated peer={IP_B} .*notification=true"
+        ))
+        .await?;
+    w.b()?
+        .wait(&format!(
+            "graceful restart negotiated peer={IP_A} .*notification=true"
+        ))
         .await
 }
 
@@ -154,6 +165,253 @@ pub async fn redistribute_phase(w: &mut World) -> anyhow::Result<()> {
     .await?;
     b.wait_new(&eorr, eorr_base, 30).await?;
     b.assert_quiet(&loc_rib(), base, 8).await
+}
+
+/// Whether, among `r`'s log lines matching `first`, `then` or `not`, the one
+/// right after the last `first` is a `then` — i.e. no `not` came between.
+fn followed_by(r: &Router, first: &str, then: &str, not: &str) -> anyhow::Result<()> {
+    let lines = r.logs.tail(&format!("{first}\\|{then}\\|{not}"), 20);
+    let (first_re, then_re) = (bre(first), bre(then));
+    let i = lines
+        .iter()
+        .rposition(|l| first_re.is_match(l))
+        .context("no line matching the first pattern")?;
+    match lines.get(i + 1) {
+        Some(next) if then_re.is_match(next) => Ok(()),
+        next => bail!(
+            "{}: after '{first}' expected '{then}', got {next:?}",
+            r.name()
+        ),
+    }
+}
+
+/// RFC 4724 / RFC 8538 graceful restart, on by default (#12). Needs
+/// `redistribute` (router-a's prefix on router-b). In order: the capability
+/// and End-of-RIB between two nos routers with no config; router-b keeping
+/// router-a's route while router-a's `nos-bgpd` is killed (a new process says
+/// F=0, so it's flushed on return); a Cease/Other Configuration Change kept
+/// graceful by N (same process, F=1: kept until End-of-RIB, never removed); a
+/// `clear` sent as a Hard Reset (flushed); and router-a with graceful restart
+/// disabled (no capability: flushed on return, a kill is a hard flap, and
+/// router-b sends it no End-of-RIB), then back to the default.
+pub async fn bgp_graceful_restart(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let removed = format!("removed route prefix={REDISTRIBUTE_PREFIX}");
+    let added = format!("added route prefix={REDISTRIBUTE_PREFIX}");
+    let retaining = format!("peer down, retaining routes as stale peer={IP_A}");
+    let est = "bgp session established";
+
+    log("default-on: capability with N, and an End-of-RIB each way");
+    b.wait(&format!(
+        "graceful restart negotiated peer={IP_A} .*notification=true"
+    ))
+    .await?;
+    a.wait(&format!(
+        "graceful restart negotiated peer={IP_B} .*notification=true"
+    ))
+    .await?;
+    b.wait(&format!("received end-of-rib peer={IP_A} family=ipv4"))
+        .await?;
+    a.wait(&format!("received end-of-rib peer={IP_B} family=ipv4"))
+        .await?;
+
+    log("killing router-a's nos-bgpd: router-b keeps its route until the new process says F=0");
+    let flushed = format!("flushing stale routes peer={IP_A} .*reason=.*forwarding-not-preserved");
+    let (est_a, est_b, ret_b, flush_b, added_b) = (
+        a.count(est),
+        b.count(est),
+        b.count(&retaining),
+        b.count(&flushed),
+        b.count(&added),
+    );
+    w.dock.kill_process("router-a", "nos-bgpd").await?;
+    b.wait_new(&retaining, ret_b, 30).await?;
+    b.wait_new(&flushed, flush_b, 60).await?;
+    followed_by(b, &retaining, &flushed, &removed)?;
+    reestablished(a, est_a).await?;
+    reestablished(b, est_b).await?;
+    b.wait_new(&added, added_b, 30).await?;
+
+    log("a graceful Cease (other configuration change, N): kept until End-of-RIB, never removed");
+    let purged = format!("purged stale routes after end-of-rib peer={IP_A} family=ipv4 count=0");
+    let config_change = format!("received notification peer={IP_A} code=6 subcode=6 ");
+    for mrai in ["1", "0"] {
+        let (est_b, ret_b, purged_b, removed_b, cease_b) = (
+            b.count(est),
+            b.count(&retaining),
+            b.count(&purged),
+            b.count(&removed),
+            b.count(&config_change),
+        );
+        let mut flags = redistribute();
+        flags.extend(["--mrai", mrai]);
+        a.provision(&flags).await?;
+        b.wait_new(&config_change, cease_b, 30).await?;
+        b.wait_new(&retaining, ret_b, 30).await?;
+        b.wait_new(&purged, purged_b, 60).await?;
+        reestablished(b, est_b).await?;
+        followed_by(b, &retaining, &purged, &removed)?;
+        b.assert_quiet(&removed, removed_b, 3).await?;
+    }
+
+    log("clear: a Hard Reset wrapping Administrative Reset, the route flushed and re-learned");
+    let (removed_b, added_b) = (b.count(&removed), b.count(&added));
+    a.rest_expect(
+        Method::POST,
+        &format!("/v1/bgp/r1/peer/{IP_B}/clear"),
+        None,
+        200,
+    )
+    .await?;
+    b.wait(&format!(
+        "received notification peer={IP_A} code=6 subcode=9 hard_reset_code=6 hard_reset_subcode=4"
+    ))
+    .await?;
+    b.wait_new(&removed, removed_b, 30).await?;
+    b.wait_new(&added, added_b, 60).await?;
+
+    log("graceful restart off on router-a: flushed on return, a kill is a hard flap");
+    let no_cap = format!("flushing stale routes peer={IP_A} .*reason=.*no-capability");
+    let (est_a, est_b, no_cap_b) = (a.count(est), b.count(est), b.count(&no_cap));
+    let mut off = redistribute();
+    off.push("--no-graceful-restart");
+    a.provision(&off).await?;
+    b.wait_new(&no_cap, no_cap_b, 60).await?;
+    reestablished(a, est_a).await?;
+    reestablished(b, est_b).await?;
+    let eor_from_b = format!("received end-of-rib peer={IP_B}");
+    let (est_a, est_b, eor_a, ret_b, removed_b) = (
+        a.count(est),
+        b.count(est),
+        a.count(&eor_from_b),
+        b.count(&retaining),
+        b.count(&removed),
+    );
+    w.dock.kill_process("router-a", "nos-bgpd").await?;
+    b.wait_new(&removed, removed_b, 30).await?;
+    reestablished(a, est_a).await?;
+    reestablished(b, est_b).await?;
+    anyhow::ensure!(
+        b.count(&retaining) == ret_b,
+        "router-b kept routes of a peer without graceful restart"
+    );
+    a.assert_quiet(&eor_from_b, eor_a, 5).await?;
+
+    log("back to the default: graceful restart on again");
+    let negotiated = format!("graceful restart negotiated peer={IP_B} ");
+    let (est_b, neg_a) = (b.count(est), a.count(&negotiated));
+    let mut on = redistribute();
+    on.push("--clear-graceful-restart");
+    a.provision(&on).await?;
+    reestablished(b, est_b).await?;
+    a.wait_new(&negotiated, neg_a, 60).await
+}
+
+/// RFC 4724 against FRR (`router-f`, self-contained), so a symmetric encoding
+/// bug between two nos routers can't hide: FRR's default (helper only) keeps
+/// nothing of its own; with `bgp graceful-restart` router-a decodes its
+/// capability and End-of-RIB, FRR sees ours, and killing FRR's bgpd leaves
+/// router-a retaining its route until FRR's restarted bgpd either flushes it
+/// (F=0) or replaces it and sends End-of-RIB (F=1).
+pub async fn bgp_gr_frr(w: &mut World) -> anyhow::Result<()> {
+    let flags = strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--remote-as",
+        &ASN_G.to_string(),
+        "--peer",
+        IP_G,
+    ]);
+    w.start(A, Some(flags), &[]).await?;
+    w.dock.container_remove("router-g").await;
+    w.dock.ensure_pulled(FRR_IMAGE).await?;
+    let conf = |gr: &str| {
+        format!(
+            "frr defaults traditional\nhostname router-f\n!\n\
+             router bgp {ASN_G}\n bgp router-id {RID_G}\n no bgp ebgp-requires-policy\n \
+             no bgp network import-check\n{gr} neighbor {IP_A} remote-as {ASN_A}\n \
+             address-family ipv4 unicast\n  network {FRR_BGP_PREFIX}\n exit-address-family\nexit\n"
+        )
+    };
+    let dock = &w.dock;
+    let start = move |gr: &'static str| {
+        let conf = conf(gr);
+        async move {
+            dock
+                .start_plain_caps(
+                    "router-f",
+                    FRR_IMAGE,
+                    NET,
+                    IP_G,
+                    &[
+                        "sh",
+                        "-c",
+                        "sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons && exec /usr/lib/frr/docker-start",
+                    ],
+                    ("/etc/frr", "frr.conf", conf.as_bytes()),
+                    &["NET_ADMIN", "NET_RAW", "SYS_ADMIN"],
+                )
+                .await
+        }
+    };
+    let a = w.a()?;
+    let learned = format!("loc-rib best path for {FRR_BGP_PREFIX} updated");
+    let retaining = format!("peer down, retaining routes as stale peer={IP_G}");
+    let negotiated = format!("graceful restart negotiated peer={IP_G} ");
+
+    log("FRR with its default graceful restart (helper only): router-a keeps nothing of it");
+    start("").await?;
+    a.established().await?;
+    a.wait(&learned).await?;
+    let gone = format!("loc-rib route for {FRR_BGP_PREFIX} withdrawn");
+    let (gone_a, neg_a, ret_a) = (a.count(&gone), a.count(&negotiated), a.count(&retaining));
+    if neg_a > 0 {
+        log(format!(
+            "FRR's default capability: {}",
+            a.logs.last(&negotiated).unwrap_or_default()
+        ));
+    }
+    w.dock.kill_process("router-f", "bgpd").await?;
+    a.wait_new(&gone, gone_a, 60).await?;
+    anyhow::ensure!(
+        a.count(&retaining) == ret_a,
+        "router-a kept routes of a helper-only FRR"
+    );
+
+    log("FRR with `bgp graceful-restart`: capability and End-of-RIB both ways");
+    let est = a.count("bgp session established");
+    start(" bgp graceful-restart\n").await?;
+    a.wait_new("bgp session established", est, 90).await?;
+    a.wait_new(&format!("{negotiated}.*families=\\[Ipv4Unicast\\]"), 0, 30)
+        .await?;
+    a.wait(&format!("received end-of-rib peer={IP_G} family=ipv4"))
+        .await?;
+    a.wait(&learned).await?;
+    super::ospf::frr_until(w, &format!("show bgp neighbors {IP_A} json"), 60, |out| {
+        out.contains("\"nBitReceived\":true")
+            && out.contains("\"remoteGrMode\":\"Restart\"")
+            && out.contains("\"endOfRibRecv\":true")
+    })
+    .await?;
+
+    log("killing FRR's bgpd: router-a keeps its route, then flushes (F=0) or purges after End-of-RIB (F=1)");
+    let (ret_a, est) = (a.count(&retaining), a.count("bgp session established"));
+    w.dock.kill_process("router-f", "bgpd").await?;
+    a.wait_new(&retaining, ret_a, 60).await?;
+    a.wait_new("bgp session established", est, 120).await?;
+    a.wait_new(
+        &format!(
+            "flushing stale routes peer={IP_G} .*reason=.*forwarding-not-preserved\\|\
+             purged stale routes after end-of-rib peer={IP_G} family=ipv4"
+        ),
+        0,
+        60,
+    )
+    .await
 }
 
 pub async fn auth(w: &mut World) -> anyhow::Result<()> {
@@ -947,9 +1205,15 @@ pub async fn aggregate(w: &mut World) -> anyhow::Result<()> {
 /// router-a's config must send Cease/Peer De-configured.
 pub async fn shutdown(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
-    let sent = |subcode: u8| format!("sent cease notification peer=.* subcode={subcode}");
+    let sent =
+        |subcode: u8| format!("sent cease notification peer=.* subcode={subcode} hard_reset=true");
+    // RFC 8538: graceful restart (on by default) exchanged N, so each Cease
+    // goes out as a Hard Reset wrapping it (§5.1), logged with the inner one.
     let received = |subcode: u8, msg: &str| {
-        format!("received notification peer=.* code=6 subcode={subcode} shutdown_message=.*{msg}")
+        format!(
+            "received notification peer=.* code=6 subcode=9 hard_reset_code=6 \
+             hard_reset_subcode={subcode} shutdown_message=.*{msg}"
+        )
     };
     let rejected = "rejecting inbound tcp connection from administratively shut peer";
 
@@ -1283,7 +1547,7 @@ pub async fn route_refresh_stale(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&format!("{expired}.* peer={IP_G} afi=1"), 0, 15)
         .await?;
     a.wait(&format!(
-        "purged stale route at end of route refresh peer={IP_G} prefix={RR_STALE_PURGED}"
+        "bgp: purged stale route peer={IP_G} prefix={RR_STALE_PURGED}"
     ))
     .await?;
     anyhow::ensure!(

@@ -74,6 +74,14 @@ const CAP_EXTENDED_NEXT_HOP: u8 = 5;
 /// RFC 7911 §3 ADD-PATH capability: one or more `AFI(2) SAFI(1)
 /// SendReceive(1)` tuples.
 const CAP_ADD_PATH: u8 = 69;
+/// RFC 4724 §3 Graceful Restart capability: `Restart Flags(4 bits) Restart
+/// Time(12 bits)` then `AFI(2) SAFI(1) Flags(1)` tuples.
+const CAP_GRACEFUL_RESTART: u8 = 64;
+/// RFC 4724 R bit / RFC 8538 §2 N bit, in the first 16 bits.
+const GR_FLAG_RESTART: u16 = 0x8000;
+const GR_FLAG_NOTIFICATION: u16 = 0x4000;
+/// RFC 4724 F bit, in a tuple's flags octet.
+const GR_FLAG_FORWARDING: u8 = 0x80;
 
 /// AFI values this crate understands (RFC 4760's registry has many more).
 pub(crate) const AFI_IPV4: u16 = 1;
@@ -202,8 +210,21 @@ pub enum CeaseSubcode {
     AdministrativeShutdown = 2,
     PeerDeconfigured = 3,
     AdministrativeReset = 4,
+    ConnectionRejected = 5,
     OtherConfigurationChange = 6,
     ConnectionCollisionResolution = 7,
+    /// RFC 8538 §3: the data is a whole inner NOTIFICATION `code(1)
+    /// subcode(1) data…` — a reset that keeps nothing, whatever N says.
+    HardReset = 9,
+}
+
+/// RFC 8538 §3: a Hard Reset's data, wrapping Cease/`inner_subcode`.
+pub fn encode_hard_reset(inner_subcode: u8, inner_data: &[u8]) -> Bytes {
+    let mut data = Vec::with_capacity(2 + inner_data.len());
+    data.push(ErrorCode::Cease as u8);
+    data.push(inner_subcode);
+    data.extend_from_slice(inner_data);
+    Bytes::from(data)
 }
 
 /// RFC 9003 §2: the NOTIFICATION data of a Cease/Administrative Shutdown (2)
@@ -266,6 +287,38 @@ pub enum Capability {
     ExtendedMessage,
     /// RFC 7911 code 69: one or more AFI/SAFI ADD-PATH grants.
     AddPath(Vec<AddPathTuple>),
+    /// RFC 4724 code 64 (with RFC 8538's N bit).
+    GracefulRestart(GracefulRestartCap),
+}
+
+/// The RFC 4724 Graceful Restart capability. No tuples means the speaker
+/// only does the receiving side: its own routes aren't to be kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GracefulRestartCap {
+    /// R: the sender has just restarted.
+    pub restart: bool,
+    /// N (RFC 8538): a NOTIFICATION other than a Hard Reset keeps routes.
+    pub notification: bool,
+    /// Restart Time, seconds (12 bits).
+    pub time: u16,
+    pub families: Vec<GrFamily>,
+}
+
+/// One `AFI SAFI Flags` tuple; `forwarding` is the F bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrFamily {
+    pub afi: u16,
+    pub safi: u8,
+    pub forwarding: bool,
+}
+
+/// The peer's Graceful Restart capability — the last one, if it sent more
+/// than one (RFC 4724 §3).
+pub fn graceful_restart(open: &OpenMessage) -> Option<&GracefulRestartCap> {
+    open.capabilities.iter().rev().find_map(|c| match c {
+        Capability::GracefulRestart(gr) => Some(gr),
+        _ => None,
+    })
 }
 
 /// One RFC 7911 ADD-PATH grant: `afi`/`safi` NLRI may carry a 4-byte Path
@@ -449,6 +502,15 @@ pub enum BgpMessage {
     Keepalive,
     Notification(NotificationMessage),
     RouteRefresh(RouteRefreshMessage),
+    /// RFC 4724 §2 End-of-RIB: an UPDATE announcing and withdrawing nothing
+    /// (IPv4 unicast), or carrying only an empty `MP_UNREACH_NLRI` for
+    /// `afi`/`safi`. Decoded from the raw bytes, never from a parsed
+    /// `UpdateMessage`, since an UPDATE whose attributes were discarded
+    /// would look the same once parsed.
+    EndOfRib {
+        afi: u16,
+        safi: u8,
+    },
     /// Any message type this crate doesn't parse a body for (unknown to this
     /// implementation).
     Unhandled {
@@ -556,9 +618,12 @@ impl Decoder for BgpCodec {
 
         let message = match message_type {
             TYPE_OPEN => BgpMessage::Open(parse_open(&body)?),
-            TYPE_UPDATE => {
-                BgpMessage::Update(parse_update(&body, &self.add_path_afis, self.two_octet_as)?)
-            }
+            TYPE_UPDATE => match end_of_rib(&body) {
+                Some((afi, safi)) => BgpMessage::EndOfRib { afi, safi },
+                None => {
+                    BgpMessage::Update(parse_update(&body, &self.add_path_afis, self.two_octet_as)?)
+                }
+            },
             TYPE_KEEPALIVE => {
                 if !body.is_empty() {
                     return Err(WireError::BadLength(length));
@@ -597,6 +662,7 @@ impl Encoder<BgpMessage> for BgpCodec {
             BgpMessage::Keepalive => (TYPE_KEEPALIVE, Vec::new()),
             BgpMessage::Notification(n) => (TYPE_NOTIFICATION, encode_notification(&n)),
             BgpMessage::RouteRefresh(rr) => (TYPE_ROUTE_REFRESH, encode_route_refresh(rr)),
+            BgpMessage::EndOfRib { afi, safi } => (TYPE_UPDATE, encode_end_of_rib(afi, safi)),
             BgpMessage::Unhandled { message_type, body } => (message_type, body.to_vec()),
         };
         let total_len = HEADER_LEN + body.len();
@@ -752,6 +818,49 @@ fn split_update(
     split_update(&second, two_octet_as, max_body, out)
 }
 
+/// RFC 4724 §2: the `(afi, safi)` an UPDATE body is the End-of-RIB of, if
+/// it is one. IPv4 unicast's is the empty UPDATE (`00 00 00 00`), even on an
+/// MP session; any other family's has no withdrawn routes, no NLRI, and
+/// exactly one attribute, an `MP_UNREACH_NLRI` holding only `AFI SAFI` (in
+/// either length form).
+fn end_of_rib(body: &[u8]) -> Option<(u16, u8)> {
+    if body == [0, 0, 0, 0] {
+        return Some((AFI_IPV4, 1));
+    }
+    let (head, attrs) = body.split_at_checked(4)?;
+    if head[..2] != [0, 0] || usize::from(u16::from_be_bytes([head[2], head[3]])) != attrs.len() {
+        return None;
+    }
+    let value = match attrs {
+        [flags, ATTR_MP_UNREACH_NLRI, 3, v @ ..] if flags & ATTR_FLAG_EXTENDED_LENGTH == 0 => v,
+        [flags, ATTR_MP_UNREACH_NLRI, 0, 3, v @ ..] if flags & ATTR_FLAG_EXTENDED_LENGTH != 0 => v,
+        _ => return None,
+    };
+    match value {
+        [a, b, safi] => Some((u16::from_be_bytes([*a, *b]), *safi)),
+        _ => None,
+    }
+}
+
+fn encode_end_of_rib(afi: u16, safi: u8) -> Vec<u8> {
+    if (afi, safi) == (AFI_IPV4, 1) {
+        return vec![0, 0, 0, 0];
+    }
+    let [a, b] = afi.to_be_bytes();
+    vec![
+        0,
+        0,
+        0,
+        6,
+        ATTR_FLAG_OPTIONAL_NON_TRANSITIVE,
+        ATTR_MP_UNREACH_NLRI,
+        3,
+        a,
+        b,
+        safi,
+    ]
+}
+
 fn parse_open(body: &[u8]) -> Result<OpenMessage, WireError> {
     // version(1) + my_as(2) + hold_time(2) + bgp_identifier(4) + opt_param_len(1)
     if body.len() < 10 {
@@ -877,6 +986,24 @@ fn parse_capabilities(mut data: &[u8]) -> Result<Vec<Capability>, WireError> {
                     .collect();
                 capabilities.push(Capability::AddPath(tuples));
             }
+            CAP_GRACEFUL_RESTART if cap_len >= 2 && (cap_len - 2).is_multiple_of(4) => {
+                let head = u16::from_be_bytes([cap_value[0], cap_value[1]]);
+                capabilities.push(Capability::GracefulRestart(GracefulRestartCap {
+                    restart: head & GR_FLAG_RESTART != 0,
+                    notification: head & GR_FLAG_NOTIFICATION != 0,
+                    time: head & 0x0FFF,
+                    families: cap_value[2..]
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|t| GrFamily {
+                            afi: u16::from_be_bytes([t[0], t[1]]),
+                            safi: t[2],
+                            forwarding: t[3] & GR_FLAG_FORWARDING != 0,
+                        })
+                        .collect(),
+                }));
+            }
             // Unknown capability code, or a known one with an unexpected
             // length: skip by declared length, never an error.
             _ => {}
@@ -954,6 +1081,26 @@ fn encode_open(open: &OpenMessage) -> Vec<u8> {
             Capability::ExtendedMessage => {
                 cap_bytes.push(CAP_EXTENDED_MESSAGE);
                 cap_bytes.push(0);
+            }
+            Capability::GracefulRestart(gr) => {
+                // At most 63 tuples fit the one-octet length; this crate
+                // knows three families.
+                let tuples = &gr.families[..gr.families.len().min(63)];
+                cap_bytes.push(CAP_GRACEFUL_RESTART);
+                cap_bytes.push(u8::try_from(2 + 4 * tuples.len()).unwrap_or(u8::MAX));
+                let mut head = gr.time & 0x0FFF;
+                if gr.restart {
+                    head |= GR_FLAG_RESTART;
+                }
+                if gr.notification {
+                    head |= GR_FLAG_NOTIFICATION;
+                }
+                cap_bytes.extend_from_slice(&head.to_be_bytes());
+                for t in tuples {
+                    cap_bytes.extend_from_slice(&t.afi.to_be_bytes());
+                    cap_bytes.push(t.safi);
+                    cap_bytes.push(if t.forwarding { GR_FLAG_FORWARDING } else { 0 });
+                }
             }
             Capability::AddPath(tuples) => {
                 // A capability's length is one octet (RFC 5492), so 63 tuples
@@ -2033,6 +2180,137 @@ mod tests {
             message_type,
             body: Bytes::from(vec![0u8; body_len]),
         }
+    }
+
+    fn encoded(msg: BgpMessage) -> Vec<u8> {
+        let mut buf = BytesMut::new();
+        BgpCodec::default().encode(msg, &mut buf).unwrap();
+        buf.to_vec()
+    }
+
+    fn decoded(bytes: &[u8]) -> BgpMessage {
+        let mut buf = BytesMut::from(bytes);
+        BgpCodec::default().decode(&mut buf).unwrap().unwrap()
+    }
+
+    fn open_with_cap_bytes(cap: &[u8]) -> Vec<u8> {
+        let mut body = vec![4, 0xfd, 0xe9, 0, 90, 1, 1, 1, 1];
+        body.push(u8::try_from(cap.len() + 2).unwrap());
+        body.push(OPT_PARAM_CAPABILITIES);
+        body.push(u8::try_from(cap.len()).unwrap());
+        body.extend_from_slice(cap);
+        let mut msg = MARKER.to_vec();
+        msg.extend_from_slice(
+            &u16::try_from(HEADER_LEN + body.len())
+                .unwrap()
+                .to_be_bytes(),
+        );
+        msg.push(TYPE_OPEN);
+        msg.extend_from_slice(&body);
+        msg
+    }
+
+    /// RFC 4724 §3 / RFC 8538 §2: R=0, N=1, 120s, IPv4 unicast with F=1.
+    #[test]
+    fn graceful_restart_capability_wire_format() {
+        let gr = GracefulRestartCap {
+            restart: false,
+            notification: true,
+            time: 120,
+            families: vec![GrFamily {
+                afi: AFI_IPV4,
+                safi: 1,
+                forwarding: true,
+            }],
+        };
+        let open = OpenMessage {
+            capabilities: vec![Capability::GracefulRestart(gr.clone())],
+            ..build_open(65001, Ipv4Addr::new(1, 1, 1, 1), 90)
+        };
+        let wire = encoded(BgpMessage::Open(open.clone()));
+        assert!(wire.ends_with(&[0x40, 0x06, 0x40, 0x78, 0x00, 0x01, 0x01, 0x80]));
+        assert_eq!(decoded(&wire), BgpMessage::Open(open));
+
+        // R set, no tuples (receiving-speaker only), the 12-bit time.
+        let BgpMessage::Open(o) = decoded(&open_with_cap_bytes(&[64, 2, 0x8F, 0xFF])) else {
+            panic!("expected OPEN");
+        };
+        let gr = graceful_restart(&o).unwrap();
+        assert!(gr.restart && !gr.notification);
+        assert_eq!((gr.time, gr.families.len()), (4095, 0));
+
+        // A bad length is skipped; of two, the last counts.
+        let BgpMessage::Open(o) = decoded(&open_with_cap_bytes(&[
+            64, 3, 0, 1, 2, 64, 2, 0, 30, 64, 6, 0, 60, 0, 2, 1, 0,
+        ])) else {
+            panic!("expected OPEN");
+        };
+        assert_eq!(o.capabilities.len(), 2);
+        let gr = graceful_restart(&o).unwrap();
+        assert_eq!(gr.time, 60);
+        assert!(!gr.families[0].forwarding);
+    }
+
+    /// RFC 4724 §2: IPv4 unicast's End-of-RIB is the 23-byte empty UPDATE;
+    /// any other family's an UPDATE with only an empty `MP_UNREACH_NLRI`,
+    /// accepted in the extended-length form too.
+    #[test]
+    fn end_of_rib_wire_format() {
+        let v4 = encoded(BgpMessage::EndOfRib {
+            afi: AFI_IPV4,
+            safi: 1,
+        });
+        assert_eq!(v4.len(), 23);
+        assert_eq!(v4[HEADER_LEN..], [0, 0, 0, 0]);
+        let v6 = encoded(BgpMessage::EndOfRib {
+            afi: AFI_IPV6,
+            safi: 1,
+        });
+        assert_eq!(v6.len(), 29);
+        assert_eq!(v6[HEADER_LEN..], [0, 0, 0, 6, 0x80, 0x0F, 3, 0, 2, 1]);
+        let evpn = encoded(BgpMessage::EndOfRib {
+            afi: AFI_L2VPN,
+            safi: SAFI_EVPN,
+        });
+        assert_eq!(evpn[HEADER_LEN + 7..], [0, 0x19, 0x46]);
+        for wire in [&v4, &v6, &evpn] {
+            assert!(matches!(decoded(wire), BgpMessage::EndOfRib { .. }));
+        }
+        assert_eq!(
+            end_of_rib(&[0, 0, 0, 7, 0x90, 0x0F, 0, 3, 0, 2, 1]),
+            Some((2, 1))
+        );
+        // An empty MP_UNREACH is an EoR; one withdrawing a prefix is not.
+        assert_eq!(end_of_rib(&[0, 0, 0, 7, 0x80, 0x0F, 4, 0, 2, 1, 0]), None);
+    }
+
+    /// An UPDATE carrying attributes but no NLRI parses to an empty
+    /// `UpdateMessage` — it must not read as IPv4's End-of-RIB, which would
+    /// purge a restarting peer's stale routes.
+    #[test]
+    fn attribute_only_update_is_not_end_of_rib() {
+        let body = [0, 0, 0, 4, 0x40, ATTR_ORIGIN, 1, 0];
+        assert_eq!(end_of_rib(&body), None);
+        let mut msg = MARKER.to_vec();
+        msg.extend_from_slice(
+            &u16::try_from(HEADER_LEN + body.len())
+                .unwrap()
+                .to_be_bytes(),
+        );
+        msg.push(TYPE_UPDATE);
+        msg.extend_from_slice(&body);
+        assert!(matches!(decoded(&msg), BgpMessage::Update(_)));
+    }
+
+    /// RFC 8538 §3: a Hard Reset's data is the whole Cease it wraps.
+    #[test]
+    fn hard_reset_wraps_the_inner_cease() {
+        let data = encode_hard_reset(
+            CeaseSubcode::AdministrativeShutdown as u8,
+            &encode_shutdown_message("bye"),
+        );
+        assert_eq!(data[..], [6, 2, 3, b'b', b'y', b'e']);
+        assert_eq!(decode_shutdown_message(&data[2..]).as_deref(), Some("bye"));
     }
 
     #[test]

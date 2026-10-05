@@ -225,6 +225,7 @@ async fn resync(
             local_as: group.local_as,
             confed_id: own.confederation.identifier,
             confed_member: own.confederation.is_member(group.remote_as),
+            graceful_restart: own.graceful_restart.enabled_restart_time(),
         });
     }
 
@@ -264,6 +265,9 @@ async fn resync(
         .collect();
 
     sessions.set_maximum_paths(own.maximum_paths).await;
+    sessions
+        .set_gr_stale_time(own.graceful_restart.stale_time())
+        .await;
     sessions
         .reconcile(
             vrf,

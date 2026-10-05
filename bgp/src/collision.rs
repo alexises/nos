@@ -20,6 +20,13 @@
 //! The loser is torn down with `NOTIFICATION(Cease, ConnectionCollisionResolution)`,
 //! signaled via its `Notify` handle so its own `fsm::run` task can send that
 //! notification itself before closing — never a bare socket drop.
+//!
+//! RFC 4724 §4.2 overrides the Established-precedence rule for a peer that
+//! advertised graceful restart: a connection started *after* the session
+//! came up means the peer restarted without us seeing the old connection
+//! close, so the new one replaces the old (closed with no NOTIFICATION, its
+//! routes kept as stale). One started before it came up is an ordinary
+//! collision and still loses.
 
 use std::cmp::Ordering;
 use std::net::Ipv4Addr;
@@ -39,6 +46,15 @@ use crate::status::{PeerStatus, StatusHandle};
 pub enum Role {
     Active,
     Passive,
+}
+
+impl Role {
+    fn other(self) -> Role {
+        match self {
+            Role::Active => Role::Passive,
+            Role::Passive => Role::Active,
+        }
+    }
 }
 
 /// An operator-triggered action against a peer's live session, delivered
@@ -67,7 +83,23 @@ struct ConnectionRecord {
     stage: Stage,
     remote_bgp_id: Ipv4Addr,
     cease: Arc<Notify>,
+    /// Set by `mark_established`: when, whether the peer advertised
+    /// graceful restart, and how to tell this connection it was replaced.
+    established: Option<(Instant, bool, Arc<Notify>)>,
 }
+
+impl ConnectionRecord {
+    /// RFC 4724 §4.2: a connection that began at `began` replaces this one.
+    fn replaced_by(&self, began: Option<Instant>) -> Option<Arc<Notify>> {
+        match (&self.established, began) {
+            (Some((at, true, replaced)), Some(began)) if began > *at => Some(replaced.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// How long a replacing connection waits for the one it replaces to end.
+const REPLACE_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 struct RoleState {
@@ -76,6 +108,8 @@ struct RoleState {
     /// whether it has received an OPEN yet — guards the degenerate
     /// double-inbound case, distinct from real active/passive collision.
     occupied: bool,
+    /// When `begin` reserved it.
+    began: Option<Instant>,
     connection: Option<ConnectionRecord>,
 }
 
@@ -229,15 +263,52 @@ impl PeerSlot {
     /// role is already being processed (e.g. a second inbound connection
     /// arriving before the first finished) — the caller must reject the new
     /// connection outright without engaging the FSM.
+    ///
+    /// RFC 4724 §4.2: when that connection is an `Established` session with
+    /// a peer that advertised graceful restart, the new one replaces it
+    /// instead (see the module doc), once it has ended.
     pub async fn begin(&self, role: Role) -> bool {
+        let replaced = {
+            let mut state = self.state.lock().await;
+            let this = role_state_mut(&mut state, role);
+            if !this.occupied {
+                this.occupied = true;
+                this.began = Some(Instant::now());
+                return true;
+            }
+            match this
+                .connection
+                .as_ref()
+                .and_then(|c| c.replaced_by(Some(Instant::now())))
+            {
+                Some(replaced) => replaced,
+                None => return false,
+            }
+        };
+        replaced.notify_one();
+        if !self.wait_cleared(role).await {
+            return false;
+        }
         let mut state = self.state.lock().await;
         let this = role_state_mut(&mut state, role);
         if this.occupied {
-            false
-        } else {
-            this.occupied = true;
-            true
+            return false;
         }
+        this.occupied = true;
+        this.began = Some(Instant::now());
+        true
+    }
+
+    /// Waits (up to `REPLACE_GRACE`) for `role`'s connection to end; `true`
+    /// once it has.
+    async fn wait_cleared(&self, role: Role) -> bool {
+        tokio::time::timeout(REPLACE_GRACE, async {
+            while role_state_mut(&mut *self.state.lock().await, role).occupied {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok()
     }
 
     /// Called once this connection has received a structurally-valid OPEN,
@@ -249,12 +320,19 @@ impl PeerSlot {
     /// config at connect/accept time) rather than stored on the slot, so a
     /// router-id config change is picked up by the next connection attempt
     /// without needing to recreate the slot.
+    ///
+    /// `peer_restarting`: this OPEN's graceful restart capability has the R
+    /// bit — required for it to replace an `Established` session in the
+    /// other role (RFC 4724 §4.2). Without it, a connection in the other role
+    /// is the far side of an ordinary collision race (dialed just before its
+    /// own side came up), which must not tear the session down.
     pub async fn on_open(
         &self,
         role: Role,
         local_router_id: Ipv4Addr,
         remote_bgp_id: Ipv4Addr,
         cease: Arc<Notify>,
+        peer_restarting: bool,
     ) -> Decision {
         let mut state = self.state.lock().await;
         let (this, other) = role_states_mut(&mut state, role);
@@ -262,6 +340,7 @@ impl PeerSlot {
             stage: Stage::PostOpen,
             remote_bgp_id,
             cease,
+            established: None,
         });
 
         let Some(other_conn) = other.connection.take() else {
@@ -269,6 +348,22 @@ impl PeerSlot {
         };
 
         if other_conn.stage == Stage::Established {
+            if let Some(replaced) = other_conn
+                .replaced_by(this.began)
+                .filter(|_| peer_restarting)
+            {
+                // RFC 4724 §4.2: the peer restarted; the old session goes
+                // (its routes kept as stale) before this one registers.
+                other.connection = Some(other_conn);
+                replaced.notify_one();
+                drop(state);
+                if self.wait_cleared(role.other()).await {
+                    return Decision::Proceed;
+                }
+                let mut state = self.state.lock().await;
+                role_state_mut(&mut state, role).connection = None;
+                return Decision::Lose;
+            }
             this.connection = None;
             other.connection = Some(other_conn);
             return Decision::Lose;
@@ -287,10 +382,14 @@ impl PeerSlot {
         }
     }
 
-    pub async fn mark_established(&self, role: Role) {
+    /// `gr_capable`: the peer advertised graceful restart (and it's on
+    /// here), which lets a later connection replace this one (RFC 4724
+    /// §4.2), signalled through `replaced`.
+    pub async fn mark_established(&self, role: Role, gr_capable: bool, replaced: Arc<Notify>) {
         let mut state = self.state.lock().await;
         if let Some(conn) = role_state_mut(&mut state, role).connection.as_mut() {
             conn.stage = Stage::Established;
+            conn.established = Some((Instant::now(), gr_capable, replaced));
         }
     }
 
@@ -298,6 +397,7 @@ impl PeerSlot {
         let mut state = self.state.lock().await;
         let this = role_state_mut(&mut state, role);
         this.occupied = false;
+        this.began = None;
         this.connection = None;
     }
 }
@@ -423,6 +523,7 @@ mod tests {
             local_as: None,
             confed_id: None,
             confed_member: false,
+            graceful_restart: None,
         })
     }
 
@@ -435,6 +536,7 @@ mod tests {
                 addr(1, 1, 1, 1),
                 addr(2, 2, 2, 2),
                 Arc::new(Notify::new()),
+                false,
             )
             .await;
         assert!(matches!(decision, Decision::Proceed));
@@ -448,12 +550,24 @@ mod tests {
 
         let passive_cease = Arc::new(Notify::new());
         let decision = slot
-            .on_open(Role::Passive, local_id, remote_id, passive_cease.clone())
+            .on_open(
+                Role::Passive,
+                local_id,
+                remote_id,
+                passive_cease.clone(),
+                false,
+            )
             .await;
         assert!(matches!(decision, Decision::Proceed));
 
         let decision = slot
-            .on_open(Role::Active, local_id, remote_id, Arc::new(Notify::new()))
+            .on_open(
+                Role::Active,
+                local_id,
+                remote_id,
+                Arc::new(Notify::new()),
+                false,
+            )
             .await;
         assert!(matches!(decision, Decision::Proceed));
 
@@ -474,12 +588,24 @@ mod tests {
 
         let active_cease = Arc::new(Notify::new());
         let decision = slot
-            .on_open(Role::Active, local_id, remote_id, active_cease.clone())
+            .on_open(
+                Role::Active,
+                local_id,
+                remote_id,
+                active_cease.clone(),
+                false,
+            )
             .await;
         assert!(matches!(decision, Decision::Proceed));
 
         let decision = slot
-            .on_open(Role::Passive, local_id, remote_id, Arc::new(Notify::new()))
+            .on_open(
+                Role::Passive,
+                local_id,
+                remote_id,
+                Arc::new(Notify::new()),
+                false,
+            )
             .await;
         assert!(matches!(decision, Decision::Proceed));
 
@@ -498,15 +624,128 @@ mod tests {
         let remote_id = addr(10, 0, 0, 2);
 
         let decision = slot
-            .on_open(Role::Active, local_id, remote_id, Arc::new(Notify::new()))
+            .on_open(
+                Role::Active,
+                local_id,
+                remote_id,
+                Arc::new(Notify::new()),
+                false,
+            )
             .await;
         assert!(matches!(decision, Decision::Proceed));
-        slot.mark_established(Role::Active).await;
+        slot.mark_established(Role::Active, false, Arc::new(Notify::new()))
+            .await;
 
         let decision = slot
-            .on_open(Role::Passive, local_id, remote_id, Arc::new(Notify::new()))
+            .on_open(
+                Role::Passive,
+                local_id,
+                remote_id,
+                Arc::new(Notify::new()),
+                false,
+            )
             .await;
         assert!(matches!(decision, Decision::Lose));
+    }
+
+    /// RFC 4724 §4.2: an Established GR session is replaced by a connection
+    /// begun after it came up — in the other role through `on_open`, in the
+    /// same role through `begin` — once the old one has ended. Without GR,
+    /// or for a connection begun before, today's collision rules apply.
+    #[tokio::test]
+    async fn graceful_restart_new_connection_replaces_the_established_one() {
+        let (local_id, remote_id) = (addr(10, 0, 0, 2), addr(10, 0, 0, 1));
+        for gr in [true, false] {
+            // Other role: established passive, new active.
+            let slot = peer_slot();
+            assert!(slot.begin(Role::Passive).await);
+            slot.on_open(
+                Role::Passive,
+                local_id,
+                remote_id,
+                Arc::new(Notify::new()),
+                false,
+            )
+            .await;
+            let replaced = Arc::new(Notify::new());
+            slot.mark_established(Role::Passive, gr, replaced.clone())
+                .await;
+            // Began before the session came up: an ordinary collision.
+            let early = peer_slot();
+            assert!(early.begin(Role::Active).await);
+            assert!(early.begin(Role::Passive).await);
+            early
+                .on_open(
+                    Role::Passive,
+                    local_id,
+                    remote_id,
+                    Arc::new(Notify::new()),
+                    false,
+                )
+                .await;
+            early
+                .mark_established(Role::Passive, gr, Arc::new(Notify::new()))
+                .await;
+            let decision = early
+                .on_open(
+                    Role::Active,
+                    local_id,
+                    remote_id,
+                    Arc::new(Notify::new()),
+                    false,
+                )
+                .await;
+            assert!(matches!(decision, Decision::Lose), "gr={gr}");
+
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            assert!(slot.begin(Role::Active).await);
+            let old = slot.clone();
+            let waiter = replaced.clone();
+            let ender = tokio::spawn(async move {
+                // The old session's fsm: ends when told it was replaced.
+                waiter.notified().await;
+                old.clear(Role::Passive).await;
+            });
+            // Without the R bit, the other role is an ordinary collision.
+            let decision = slot
+                .on_open(
+                    Role::Active,
+                    local_id,
+                    remote_id,
+                    Arc::new(Notify::new()),
+                    false,
+                )
+                .await;
+            assert!(matches!(decision, Decision::Lose), "gr={gr}");
+            let decision = slot
+                .on_open(
+                    Role::Active,
+                    local_id,
+                    remote_id,
+                    Arc::new(Notify::new()),
+                    true,
+                )
+                .await;
+            assert_eq!(matches!(decision, Decision::Proceed), gr, "gr={gr}");
+            if !gr {
+                ender.abort();
+                continue;
+            }
+            ender.await.unwrap();
+
+            // Same role: established active, a new active `begin`.
+            slot.mark_established(Role::Active, true, replaced.clone())
+                .await;
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            let old = slot.clone();
+            let waiter = replaced.clone();
+            let ender = tokio::spawn(async move {
+                waiter.notified().await;
+                old.clear(Role::Active).await;
+            });
+            assert!(slot.begin(Role::Active).await);
+            ender.await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -545,11 +784,13 @@ mod tests {
             addr(1, 1, 1, 1),
             addr(2, 2, 2, 2),
             Arc::new(Notify::new()),
+            false,
         )
         .await;
         assert!(!slot.is_established().await);
 
-        slot.mark_established(Role::Passive).await;
+        slot.mark_established(Role::Passive, false, Arc::new(Notify::new()))
+            .await;
         assert!(slot.is_established().await);
 
         slot.clear(Role::Passive).await;

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use ipnet::IpNet;
 
-use crate::schema::{BgpAggregate, BgpInstance, Config, RpkiCache};
+use crate::schema::{BgpAggregate, BgpGracefulRestart, BgpInstance, Config, RpkiCache};
 
 use super::OpError;
 
@@ -82,6 +82,12 @@ pub enum BgpInstanceOp {
         name: String,
         prefix: IpNet,
     },
+    /// RFC 4724 / RFC 8538: replaces the whole graceful-restart setting
+    /// (`BgpGracefulRestart::default()` puts it back on with default timers).
+    SetGracefulRestart {
+        name: String,
+        graceful_restart: BgpGracefulRestart,
+    },
 }
 
 impl BgpInstanceOp {
@@ -100,6 +106,7 @@ impl BgpInstanceOp {
                         confederation: crate::schema::BgpConfederation::default(),
                         rpki_caches: Vec::new(),
                         aggregates: Vec::new(),
+                        graceful_restart: crate::schema::BgpGracefulRestart::default(),
                         routing_table: None,
                         redistribute_policy: None,
                     });
@@ -184,6 +191,13 @@ impl BgpInstanceOp {
                     .retain(|a| a.prefix != *prefix);
                 Ok(())
             }
+            BgpInstanceOp::SetGracefulRestart {
+                name,
+                graceful_restart,
+            } => {
+                find_instance_mut(config, name)?.graceful_restart = *graceful_restart;
+                Ok(())
+            }
             BgpInstanceOp::Delete { name } => {
                 let before = config.bgp_instances.len();
                 config.bgp_instances.retain(|i| &i.name != name);
@@ -223,9 +237,33 @@ mod tests {
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
             aggregates: Vec::new(),
+            graceful_restart: crate::schema::BgpGracefulRestart::default(),
             routing_table: None,
             redistribute_policy: None,
         }
+    }
+
+    #[test]
+    fn set_graceful_restart_replaces_and_default_clears() {
+        let mut cfg = Config {
+            bgp_instances: vec![instance("r1", 65000)],
+            ..Default::default()
+        };
+        let off = BgpGracefulRestart {
+            disabled: true,
+            ..Default::default()
+        };
+        let op = |g| BgpInstanceOp::SetGracefulRestart {
+            name: "r1".to_string(),
+            graceful_restart: g,
+        };
+        op(off).apply(&mut cfg).unwrap();
+        assert_eq!(cfg.bgp_instances[0].graceful_restart, off);
+        op(BgpGracefulRestart::default()).apply(&mut cfg).unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].graceful_restart.enabled_restart_time(),
+            Some(120)
+        );
     }
 
     #[test]
