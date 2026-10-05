@@ -126,6 +126,11 @@ fn unique_name(name: &str, ctx: &Config) -> garde::Result {
 /// Mirrors `ospf_profile::valid_profile_timers` exactly.
 pub(crate) fn valid_profile_timers(profiles: &[Ospfv3Profile]) -> garde::Result {
     for p in profiles {
+        if p.network_type == Some(NetworkType::PointToMultipoint) {
+            return Err(garde::Error::new(
+                "point-to-multipoint is not supported for OSPFv3",
+            ));
+        }
         if let (Some(hello), Some(dead)) = (p.hello_interval, p.dead_interval) {
             if dead <= hello {
                 return Err(garde::Error::new(
@@ -331,5 +336,13 @@ mod tests {
             let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
             cfg.validate_with(&cfg).unwrap();
         }
+    }
+
+    #[test]
+    fn point_to_multipoint_is_refused() {
+        let mut p = profile("p1");
+        p.network_type = Some(NetworkType::PointToMultipoint);
+        let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);
+        assert!(cfg.validate_with(&cfg).is_err());
     }
 }

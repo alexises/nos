@@ -257,7 +257,7 @@ These work in OSPFv2 but not yet in OSPFv3:
 - **Area ranges** (summarizing an area into one prefix) and their discard routes.
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
-Also not supported: several OSPFv3 instances on one link (the RFC 5838 address families; one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), RFC 8362's sparse mode, NSSA and stub areas, virtual links, graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and the non-broadcast network types.
+Also not supported: several OSPFv3 instances on one link (the RFC 5838 address families; one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), RFC 8362's sparse mode, NSSA and stub areas, virtual links, graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and the non-broadcast network types (point-to-multipoint is refused at commit).
 
 ## Configuration reference
 

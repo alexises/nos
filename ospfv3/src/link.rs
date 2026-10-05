@@ -233,7 +233,9 @@ impl LinkStatus {
     fn new(network_type: NetworkType) -> Self {
         Self {
             interface_state: match network_type {
-                NetworkType::PointToPoint => InterfaceState::PointToPoint,
+                NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
+                    InterfaceState::PointToPoint
+                }
                 NetworkType::Broadcast => InterfaceState::Waiting,
             },
             neighbors: HashMap::new(),
@@ -503,7 +505,9 @@ fn send_hello(
         .map(|(id, _)| *id)
         .collect();
     let (designated_router, backup_designated_router) = match cfg.network_type {
-        NetworkType::PointToPoint => (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED),
+        NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
+            (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED)
+        }
         NetworkType::Broadcast => (
             current.dr.unwrap_or(Ipv4Addr::UNSPECIFIED),
             current.bdr.unwrap_or(Ipv4Addr::UNSPECIFIED),
@@ -606,7 +610,7 @@ fn handle_hello(
     });
 
     match cfg.network_type {
-        NetworkType::PointToPoint => {
+        NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
             *p2p_dead_deadline =
                 Instant::now() + std::time::Duration::from_secs(u64::from(cfg.dead_interval));
             false
@@ -2349,7 +2353,7 @@ fn router_lsa_links(
     let mut result = Vec::new();
     for (cfg, status) in links {
         match cfg.network_type {
-            NetworkType::PointToPoint => {
+            NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
                 if let Some((neighbor_id, info)) = status
                     .neighbors
                     .iter()
