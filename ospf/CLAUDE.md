@@ -136,6 +136,14 @@ A port of `nos-ospfv3d`'s RFC 5187 work (`ospfv3/CLAUDE.md`), nos↔nos only:
 - Not done: OSPFv3 (RFC 6860 §3).
 - Tests: `link::tests::prefix_suppression_hides_the_p2p_stub_and_the_network_mask`, `spf::tests::hidden_transit_network_carries_transit_but_yields_no_route`; `nos-e2e ospf-prefix-suppression`.
 
+### Hello prioritisation and liveness (RFC 4222, #185)
+
+- **Recommendation 1** (Hellos and LSAcks first): `run()`'s `tokio::select!` is `biased;`, ordered hello ticker, `recv_packet`, p2p dead deadline, `dead_sweep`, `wait_deadline`, `grace_rx`, `rxmt_sweep` — a due Hello never loses a draw to the 5s full-LSDB resend, and a queued packet is read before a dead timer that became ready in the same poll. A received LSAck is already handled inline (`handle_lsack`, no lock, no await). `ponytail:` ceiling on the select: bias doesn't preempt a running arm (a handler waiting on the LSDB lock still delays the next Hello), and a sustained inbound queue runs the timer arms late; upgrade to a separate Hello task or a high/low receive queue if a large LSDB shows Hello starvation. No deterministic test (the starvation is a race).
+- **Recommendation 2** (any packet proves liveness): `NeighborInfo.last_heard` drives the inactivity timer (`sweep_dead_neighbors`, `expire_grace`'s restart); `last_hello_received` is reported only (`last_hello_secs`). `note_alive`, called at the single decode site after the `accept_crypto_sequence` guard for every non-Hello packet, sets `last_heard` (and on p2p pushes `p2p_dead_deadline`) only for a neighbor at `ExStart` or later — the RFC's "over that adjacency". Hellos keep their own refresh in `handle_hello`, after its validity checks, so a dropped Hello never keeps a neighbor alive. `ponytail:` any destination counts, not only unicast / AllSPFRouters on p2p as the RFC words it (`recv_packet` returns no destination; that needs `IP_PKTINFO`).
+- **Not done**: recommendations 3 (exponential retransmission back-off — `RXMT_INTERVAL` stays 5s), 4 (congestion-detection send gaps) and 5 (limit on simultaneous adjacency bring-up); pacing comes from `RXMT_INTERVAL`, `MinLSArrival` and `MinLSInterval` at the scale nos targets.
+- Same in `nos-ospfv3d` (`ospfv3/src/link.rs`).
+- Tests: `link::tests::note_alive_only_refreshes_an_adjacency`, `link::tests::{point_to_point,broadcast}_adjacency_survives_lost_hellos` (in-memory wire with `Wire::drop_hellos`), in both crates. No e2e phase: scheduling and timer bookkeeping only, nothing new on the wire, in the kernel or over IPC; the existing `ospf*`/`ospfv3*` phases cover adjacency and dead detection.
+
 ### Opaque LSAs (RFC 5250)
 
 - **Bodies**: types 9/10/11 decode to `LsaBody::Opaque(Vec<u8>)`, the body bytes kept as received so a re-encode keeps the originator's checksum; the Grace-LSA (type 9, opaque type 3) stays `LsaBody::Grace`. SPF ignores both. `lsa::is_opaque`/`is_link_local_scope`/`opaque_type`.

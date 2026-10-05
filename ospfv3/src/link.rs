@@ -204,7 +204,10 @@ pub struct NeighborInfo {
     /// Router-LSA link's `Neighbor Interface ID` field) and to look up its
     /// own Link-LSA.
     pub interface_id: u32,
+    /// Reported only (`last_hello_secs`): when the last valid Hello arrived.
     pub last_hello_received: Instant,
+    /// RFC 4222 §2 recommendation 2 — see `ospf::link::NeighborInfo::last_heard`.
+    pub last_heard: Instant,
     /// The neighbor's own link-local address, as seen on the last Hello it
     /// sent — DBD/LSR/LSU/LSAck reply unicast to this.
     pub address: Ipv6Addr,
@@ -345,7 +348,9 @@ pub async fn run(
     }
 
     loop {
+        // RFC 4222 prioritisation — see `ospf::link::run`'s note and ceiling.
         tokio::select! {
+            biased;
             _ = hello_ticker.tick() => {
                 send_hello(&socket, &cfg, local_router_id, &status);
             }
@@ -377,41 +382,48 @@ pub async fn run(
                                     "ospfv3 packet crypto sequence number not increasing, dropping"
                                 );
                             }
-                            Ok(OspfPacket::Hello(hello)) => {
-                                let left_waiting = handle_hello(
-                                    &cfg, local_router_id, &status, source, &hello,
-                                    &mut p2p_dead_deadline, waiting,
-                                );
-                                if left_waiting {
-                                    waiting = false;
+                            Ok(pkt) => {
+                                if !matches!(pkt, OspfPacket::Hello(_)) {
+                                    note_alive(&cfg, &status, packet::router_id(&pkt), &mut p2p_dead_deadline);
                                 }
-                                advance_adjacencies(&socket, &cfg, local_router_id, &status);
-                            }
-                            Ok(OspfPacket::Dbd(dbd)) => {
-                                if let Some(actions) = handle_dbd(
-                                    &cfg, local_router_id, &status, &stores, &dbd, dbd_max_headers,
-                                )
-                                .await
-                                {
-                                    execute_actions(&socket, &cfg, local_router_id, &status, dbd.router_id, actions);
+                                match pkt {
+                                    OspfPacket::Hello(hello) => {
+                                        let left_waiting = handle_hello(
+                                            &cfg, local_router_id, &status, source, &hello,
+                                            &mut p2p_dead_deadline, waiting,
+                                        );
+                                        if left_waiting {
+                                            waiting = false;
+                                        }
+                                        advance_adjacencies(&socket, &cfg, local_router_id, &status);
+                                    }
+                                    OspfPacket::Dbd(dbd) => {
+                                        if let Some(actions) = handle_dbd(
+                                            &cfg, local_router_id, &status, &stores, &dbd, dbd_max_headers,
+                                        )
+                                        .await
+                                        {
+                                            execute_actions(&socket, &cfg, local_router_id, &status, dbd.router_id, actions);
+                                        }
+                                    }
+                                    OspfPacket::Lsr(lsr) => {
+                                        if let Some(actions) =
+                                            handle_lsr(&cfg, local_router_id, &status, &stores, &lsr).await
+                                        {
+                                            execute_actions(&socket, &cfg, local_router_id, &status, lsr.router_id, actions);
+                                        }
+                                    }
+                                    OspfPacket::Lsu(lsu) => {
+                                        if let Some(actions) =
+                                            handle_lsu(&cfg, local_router_id, &status, &stores, &lsu).await
+                                        {
+                                            execute_actions(&socket, &cfg, local_router_id, &status, lsu.router_id, actions);
+                                        }
+                                    }
+                                    OspfPacket::LsAck(ack) => {
+                                        handle_lsack(&status, &ack);
+                                    }
                                 }
-                            }
-                            Ok(OspfPacket::Lsr(lsr)) => {
-                                if let Some(actions) =
-                                    handle_lsr(&cfg, local_router_id, &status, &stores, &lsr).await
-                                {
-                                    execute_actions(&socket, &cfg, local_router_id, &status, lsr.router_id, actions);
-                                }
-                            }
-                            Ok(OspfPacket::Lsu(lsu)) => {
-                                if let Some(actions) =
-                                    handle_lsu(&cfg, local_router_id, &status, &stores, &lsu).await
-                                {
-                                    execute_actions(&socket, &cfg, local_router_id, &status, lsu.router_id, actions);
-                                }
-                            }
-                            Ok(OspfPacket::LsAck(ack)) => {
-                                handle_lsack(&status, &ack);
                             }
                             Err(e) => {
                                 warn!(link = %cfg.attach_point, error = %e, "failed to decode ospfv3 packet");
@@ -441,12 +453,12 @@ pub async fn run(
                 run_election(&cfg, local_router_id, &status);
                 advance_adjacencies(&socket, &cfg, local_router_id, &status);
             }
+            Some(grace_period) = grace_rx.recv() => {
+                send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period);
+            }
             _ = rxmt_sweep.tick() => {
                 retransmit_pending(&socket, &cfg, local_router_id, &status);
                 flood_full_neighbors(&socket, &cfg, local_router_id, &stores, &status).await;
-            }
-            Some(grace_period) = grace_rx.recv() => {
-                send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period);
             }
         }
     }
@@ -574,6 +586,7 @@ fn handle_hello(
                 declared_bdr: Ipv4Addr::UNSPECIFIED,
                 interface_id: hello.interface_id,
                 last_hello_received: Instant::now(),
+                last_heard: Instant::now(),
                 address: source,
                 adjacency: None,
                 last_crypto_seq: None,
@@ -585,6 +598,7 @@ fn handle_hello(
         entry.declared_bdr = hello.backup_designated_router;
         entry.interface_id = hello.interface_id;
         entry.last_hello_received = Instant::now();
+        entry.last_heard = Instant::now();
         entry.address = source;
         if matches!(new_state, NeighborState::Down | NeighborState::Init) {
             entry.adjacency = None;
@@ -1041,6 +1055,36 @@ fn apply_dead_timer(cfg: &LinkConfig, status: &StatusHandle) {
     });
 }
 
+/// RFC 4222 §2 recommendation 2 — mirrors `ospf::link::note_alive`.
+fn note_alive(
+    cfg: &LinkConfig,
+    status: &StatusHandle,
+    router_id: Ipv4Addr,
+    p2p_dead_deadline: &mut Instant,
+) {
+    let adjacent = status.borrow().neighbors.get(&router_id).is_some_and(|n| {
+        matches!(
+            n.state,
+            NeighborState::ExStart
+                | NeighborState::Exchange
+                | NeighborState::Loading
+                | NeighborState::Full
+        )
+    });
+    if !adjacent {
+        return;
+    }
+    let now = Instant::now();
+    status.send_modify(|s| {
+        if let Some(n) = s.neighbors.get_mut(&router_id) {
+            n.last_heard = now;
+        }
+    });
+    if cfg.network_type == NetworkType::PointToPoint {
+        *p2p_dead_deadline = now + std::time::Duration::from_secs(u64::from(cfg.dead_interval));
+    }
+}
+
 fn sweep_dead_neighbors(cfg: &LinkConfig, status: &StatusHandle) {
     let now = Instant::now();
     let dead_interval = std::time::Duration::from_secs(u64::from(cfg.dead_interval));
@@ -1051,7 +1095,7 @@ fn sweep_dead_neighbors(cfg: &LinkConfig, status: &StatusHandle) {
         .filter(|(_, info)| {
             info.state != NeighborState::Down
                 && info.grace_deadline.is_none()
-                && now.duration_since(info.last_hello_received) >= dead_interval
+                && now.duration_since(info.last_heard) >= dead_interval
         })
         .map(|(id, _)| *id)
         .collect();
@@ -1141,7 +1185,7 @@ fn expire_grace(cfg: &LinkConfig, status: &StatusHandle) {
             for id in &expired {
                 if let Some(n) = s.neighbors.get_mut(id) {
                     n.grace_deadline = None;
-                    n.last_hello_received = now;
+                    n.last_heard = now;
                 }
             }
         });
@@ -2632,6 +2676,7 @@ mod tests {
             declared_bdr: Ipv4Addr::UNSPECIFIED,
             interface_id,
             last_hello_received: Instant::now(),
+            last_heard: Instant::now(),
             address,
             adjacency: None,
             last_crypto_seq: None,
@@ -3247,6 +3292,8 @@ mod tests {
             ports: Mutex<Vec<(Ipv6Net, Ipv6Addr, Tx)>>,
             /// Addresses whose sends are silently dropped (a dead neighbor).
             pub cut: Mutex<HashSet<Ipv6Addr>>,
+            /// Addresses whose Hellos (type byte 1) alone are dropped.
+            pub drop_hellos: Mutex<HashSet<Ipv6Addr>>,
         }
 
         impl Wire {
@@ -3293,7 +3340,10 @@ mod tests {
 
         impl Port {
             pub fn send(&self, dest: Option<Ipv6Addr>, payload: &[u8]) {
-                if self.wire.cut.lock().unwrap().contains(&self.addr) {
+                if self.wire.cut.lock().unwrap().contains(&self.addr)
+                    || (payload[1] == 1
+                        && self.wire.drop_hellos.lock().unwrap().contains(&self.addr))
+                {
                     return;
                 }
                 let mut packet = payload.to_vec();
@@ -3365,6 +3415,73 @@ mod tests {
         b.reconcile(vec![lb], loopback(2), id(2)).await;
         settle(60).await;
         (a, b)
+    }
+
+    /// RFC 4222 §2 recommendation 2 — mirrors `ospf::link`'s test.
+    async fn adjacency_survives_lost_hellos(network_type: NetworkType) {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b) = (router(&wire), router(&wire));
+        a.reconcile(vec![wired_link(1, network_type)], loopback(1), id(1))
+            .await;
+        b.reconcile(vec![wired_link(2, network_type)], loopback(2), id(2))
+            .await;
+        settle(60).await;
+        assert_eq!(
+            b.neighbor_summaries().await[0].state,
+            OspfNeighborState::Full
+        );
+
+        let a_addr: Ipv6Addr = "fe80::1".parse().unwrap();
+        wire.drop_hellos.lock().unwrap().insert(a_addr);
+        settle(3 * 40).await;
+        let n = b.neighbor_summaries().await;
+        assert_eq!(n[0].state, OspfNeighborState::Full, "{n:?}");
+
+        wire.cut.lock().unwrap().insert(a_addr);
+        settle(40 + 2).await;
+        assert_eq!(
+            b.neighbor_summaries().await[0].state,
+            OspfNeighborState::Down
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn point_to_point_adjacency_survives_lost_hellos() {
+        adjacency_survives_lost_hellos(NetworkType::PointToPoint).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn broadcast_adjacency_survives_lost_hellos() {
+        adjacency_survives_lost_hellos(NetworkType::Broadcast).await;
+    }
+
+    #[test]
+    fn note_alive_only_refreshes_an_adjacency() {
+        let cfg = link("eth0.0", 10);
+        let peer = Ipv4Addr::new(9, 9, 9, 9);
+        for (state, refreshed) in [
+            (NeighborState::Down, false),
+            (NeighborState::Init, false),
+            (NeighborState::TwoWay, false),
+            (NeighborState::ExStart, true),
+            (NeighborState::Full, true),
+        ] {
+            let mut info = neighbor_info(state, "fe80::2".parse().unwrap(), 2);
+            let past = Instant::now()
+                .checked_sub(std::time::Duration::from_secs(30))
+                .unwrap();
+            info.last_heard = past;
+            info.last_hello_received = past;
+            let mut s = LinkStatus::new(NetworkType::PointToPoint);
+            s.neighbors.insert(peer, info);
+            let (status, _rx) = watch::channel(s);
+            let mut deadline = past;
+            note_alive(&cfg, &status, peer, &mut deadline);
+            let n = status.borrow().neighbors[&peer].clone();
+            assert_eq!(n.last_heard > past, refreshed, "{state:?}");
+            assert_eq!(deadline > past, refreshed, "{state:?}");
+            assert_eq!(n.last_hello_received, past, "{state:?}");
+        }
     }
 
     #[tokio::test(start_paused = true)]
