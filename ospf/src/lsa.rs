@@ -59,6 +59,25 @@ const TLV_INTERFACE_ADDRESS: u16 = 3;
 /// RFC 3623 Appendix A: restart reason 1, "software restart".
 pub const RESTART_REASON_SOFTWARE: u8 = 1;
 
+/// RFC 7770 §2: the Router Information LSA's opaque type, so its Link State
+/// ID (opaque ID 0) is `4.0.0.0`. nos originates it as type 10, per area.
+pub const OPAQUE_TYPE_ROUTER_INFO: u8 = 4;
+pub const ROUTER_INFO_LINK_STATE_ID: Ipv4Addr = Ipv4Addr::new(OPAQUE_TYPE_ROUTER_INFO, 0, 0, 0);
+/// RFC 7770 §2.3: the Router Informational Capabilities TLV.
+const TLV_RI_CAPABILITIES: u16 = 1;
+/// RFC 7770 §2.4 capability bits, numbered from the most significant: bit 0
+/// graceful-restart capable, bit 1 graceful-restart helper (RFC 3623).
+pub const RI_CAP_GR_CAPABLE: u32 = 1 << 31;
+pub const RI_CAP_GR_HELPER: u32 = 1 << 30;
+
+/// An RI LSA body carrying only the Informational Capabilities TLV. Held as
+/// `LsaBody::Opaque`, like any other opaque body.
+pub fn encode_router_info(capabilities: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(8);
+    put_tlv(&mut buf, TLV_RI_CAPABILITIES, &capabilities.to_be_bytes());
+    buf
+}
+
 /// RFC 5250 §3: types 9-11. Only sent to a neighbor whose DBD set the O-bit.
 pub fn is_opaque(lsa_type: u8) -> bool {
     matches!(
@@ -928,6 +947,20 @@ mod tests {
         assert!(is_link_local_scope(LSA_TYPE_OPAQUE_LINK));
         assert!(!is_link_local_scope(LSA_TYPE_OPAQUE_AREA));
         assert!(!is_opaque(LSA_TYPE_AS_EXTERNAL));
+    }
+
+    /// RFC 7770 §2.3/§2.4: TLV type 1, length 4, bit 0 the MSB.
+    #[test]
+    fn router_info_body_is_one_capabilities_tlv() {
+        assert_eq!(
+            encode_router_info(RI_CAP_GR_HELPER),
+            [0, 1, 0, 4, 0x40, 0, 0, 0]
+        );
+        assert_eq!(
+            encode_router_info(RI_CAP_GR_CAPABLE | RI_CAP_GR_HELPER),
+            [0, 1, 0, 4, 0xc0, 0, 0, 0]
+        );
+        assert_eq!(ROUTER_INFO_LINK_STATE_ID, Ipv4Addr::new(4, 0, 0, 0));
     }
 
     #[test]

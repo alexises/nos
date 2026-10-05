@@ -436,7 +436,14 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **Transit-only networks (RFC 6860).** Described [above](#hide-transit-only-networks-rfc-6860). With prefix suppression on, an NSSA type-7 LSA's forwarding address is a loopback's address, or `0.0.0.0` if the router has no loopback in the area, never a hidden link's.
 
-**Opaque LSAs (RFC 5250).** NOS sets the O bit in its database description packets and stores and floods opaque LSAs it receives without reading them: type 9 (link-local) only on the link it arrived on, type 10 (area) in its area, type 11 (AS) in the area it arrived in. Opaque LSAs are offered only to neighbours whose database description packets set the O bit. NOS originates none except its own Grace-LSA. `show ospf database` lists a type-9 LSA under its link's area, without naming the link. An ABR does not pass a type-11 LSA on to its other areas. An LSA of a type NOS does not know (6, 7, 8, or above 11) is dropped on its own; the rest of the update is kept.
+**Opaque LSAs (RFC 5250).** NOS sets the O bit in its database description packets and stores and floods opaque LSAs it receives without reading them: type 9 (link-local) only on the link it arrived on, type 10 (area) in its area, type 11 (AS) in the area it arrived in. Opaque LSAs are offered only to neighbours whose database description packets set the O bit. NOS originates two: its own Grace-LSA, and a Router Information LSA (below). `show ospf database` lists a type-9 LSA under its link's area, without naming the link. An ABR does not pass a type-11 LSA on to its other areas. An LSA of a type NOS does not know (6, 7, 8, or above 11) is dropped on its own; the rest of the update is kept.
+
+**Router Information (RFC 7770).** Every router advertises its capabilities in one type-10 opaque LSA per area (opaque type 4, link state ID `4.0.0.0`), with no configuration:
+
+- *Graceful restart helper* is always set.
+- *Graceful restart capable* is set while `graceful-restart grace-period` is configured.
+- `show ospf database` lists it as type 10 from each router; FRR lists it with `show ip ospf database opaque-area`, but FRR 10.7 shows the body only as raw bytes.
+- Router Information LSAs from other routers are stored and flooded but not read.
 
 **LSA ageing and withdrawal (RFC 2328 §14).** Self-originated LSAs are refreshed every 30 minutes and others expire after an hour without refresh. An LSA that is no longer wanted (a removed link, redistribution rule or area) is withdrawn at once by flooding it at maximum age.
 

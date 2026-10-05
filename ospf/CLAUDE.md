@@ -150,8 +150,13 @@ A port of `nos-ospfv3d`'s RFC 5187 work (`ospfv3/CLAUDE.md`), nos↔nos only:
 - **O-bit**: every DBD sends `exchange::DBD_OPTIONS` (E|O); Hellos stay E only (RFC 5250 §3). `exchange::seed_summary` records the peer's O-bit in `AdjacencyData.opaque_capable` at `ExStart` and leaves opaque headers out of a non-capable peer's summary; `flood_full_neighbors` builds one LSU per group (capable or not). FRR originates no opaque LSA until a neighbor's DBD has the O-bit.
 - **Scopes**: type 9 lives in a per-link `Lsdb` (`LinkEntry.link_local_lsdb`, created with the link task, dropped with it), never the area's: `on_lsu_received` picks the store by type, `on_lsr_received` looks in the area store then the link's, `handle_dbd`'s summary and `flood_full_neighbors` add the link's headers/LSAs, `age_lsdbs` ages it and `database_summaries` lists it under the link's area (no link column). Type 10 is the area store. Type 11 goes into the area it arrived in, like a received Type-5 — `ponytail:` an ABR doesn't flood it on to its other areas.
 - **Unknown types**: `packet::decode_lsu` skips an `UnknownLsaType` LSA by its header length (RFC 2328 §13 step 2) and keeps the rest of the LSU — no ack for it, so the sender retransmits it.
-- nos originates no opaque LSA but its Grace-LSA (sent to every `Full` neighbor, O-bit or not, as before #40).
-- Tests: `lsa::tests::opaque_lsas_round_trip_as_raw_bytes`, `packet::tests::lsu_skips_an_unknown_lsa_type_and_keeps_the_rest`, `exchange::tests::opaque_*`, `link::tests::opaque_lsas_are_flooded_by_scope` (in-memory wire); `nos-e2e ospf-opaque` (FRR).
+- nos originates two opaque LSAs: its Grace-LSA (sent to every `Full` neighbor, O-bit or not, as before #40) and the RFC 7770 Router Information LSA below.
+- **Router Information LSA** (RFC 7770, #186):
+  - Type 10, opaque type 4, Link State ID `4.0.0.0` (`lsa::ROUTER_INFO_LINK_STATE_ID`), one per attached area — area scope so stub areas and NSSAs carry it too.
+  - Body: the Informational Capabilities TLV only (`lsa::encode_router_info`), kept as `LsaBody::Opaque`. Bits: GR helper (`RI_CAP_GR_HELPER`, always — helping is always on), GR capable (`RI_CAP_GR_CAPABLE`) while `graceful_restart_grace_period` is set.
+  - Originated by `originate_router_lsas` beside the Router-LSA, so it shares its pacing, refresh, flush on leaving an area, and shutdown flush.
+  - A received RI is not decoded (nothing consumes it yet; RFC 8770's H-bit will).
+- Tests: `lsa::tests::opaque_lsas_round_trip_as_raw_bytes`, `packet::tests::lsu_skips_an_unknown_lsa_type_and_keeps_the_rest`, `exchange::tests::opaque_*`, `link::tests::opaque_lsas_are_flooded_by_scope` (in-memory wire), `lsa::tests::router_info_body_is_one_capabilities_tlv`, `link::tests::originate_router_lsas_originates_router_info_per_area`; `nos-e2e ospf-opaque` (FRR, which also accepts router-a's RI LSA).
 
 ## Modules
 
