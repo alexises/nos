@@ -1629,7 +1629,7 @@ pub fn render_fdb_table(t: &nos_proto::FdbTable) -> String {
         let pes: Vec<String> = e.pes.iter().map(ToString::to_string).collect();
         let ads: Vec<String> = e.ad_pes.iter().map(ToString::to_string).collect();
         lines.push(format!(
-            "  ethernet-segment {} on {}: {} (PEs {}){}{}{}",
+            "  ethernet-segment {} on {}: {} (PEs {}){}{}{}{}",
             e.esi,
             e.port,
             if !e.up {
@@ -1655,7 +1655,8 @@ pub fn render_fdb_table(t: &nos_proto::FdbTable) -> String {
             match e.df_algorithm {
                 nos_proto::DfAlgorithm::Modulo => "",
                 nos_proto::DfAlgorithm::Hrw => ", df-algorithm hrw",
-            }
+            },
+            if e.local_bias { ", local-bias" } else { "" }
         ));
     }
     lines.join("\n")
@@ -3226,6 +3227,7 @@ mod tests {
                 up: true,
                 single_active: false,
                 df_algorithm: nos_proto::DfAlgorithm::Modulo,
+                local_bias: false,
             }],
             neigh_suppress: true,
         };
@@ -3248,6 +3250,10 @@ mod tests {
             "non-designated forwarder, port blocked (PEs 192.0.2.1, 192.0.2.9), \
              per-ES A-D from 192.0.2.9, single-active"
         ));
+        // Local bias in place says so (and the kernel fallback does not).
+        let mut lb = t.clone();
+        lb.segments[0].local_bias = true;
+        assert!(render_fdb_table(&lb).ends_with("per-ES A-D from 192.0.2.9, local-bias"));
         // HRW in effect says so.
         let mut hrw = t.clone();
         hrw.segments[0].df_algorithm = nos_proto::DfAlgorithm::Hrw;
@@ -3819,6 +3825,7 @@ mod tests {
             up: true,
             single_active: false,
             df_algorithm: nos_proto::DfAlgorithm::Modulo,
+            local_bias: false,
         });
         let out = render_fdb_table(&t);
         assert!(out.contains("  no MAC addresses\n"), "{out}");

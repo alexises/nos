@@ -47,6 +47,8 @@ services:
 
 Without it, the control plane works (routes are exchanged and `show fdb` fills in), but frames arriving from other routers are dropped.
 
+A multi-homed segment (see below) also needs these kernel modules on the router's host: `cls_flower`, `cls_fw`, `act_skbedit`, `act_gact` and `sch_ingress` (`modprobe` them if your distribution does not load them on demand). Without them the router cannot set up local bias and falls back to the DF-only behaviour: `show fdb` shows no `local-bias` on the segment and `nos-fdbd` logs `local bias unavailable, df-only flooding`.
+
 ## Common operations
 
 ### Enable EVPN on a BGP session
@@ -350,9 +352,18 @@ A MAC address behind a multi-homed Ethernet Segment is not a move: every router 
 
 ### The designated forwarder
 
-Among the routers attached to one Ethernet Segment, one per domain is the designated forwarder: it alone delivers flooded traffic to the CE, so the CE never receives a copy through each router. The candidates are the routers that advertise the segment. When every one of them announces the AC-DF capability (RFC 8584; NOS always does), only those that also serve the domain are candidates; otherwise every router on the segment is, as in RFC 7432. By default (`df-algorithm modulo`, RFC 7432 §8.5) the candidates are ordered by tunnel address and the DF for a domain is candidate number `VNI mod <number of candidates>`. Two domains on the same segment can therefore have different DFs, which spreads the load.
+Among the routers attached to one Ethernet Segment, one per domain is the designated forwarder: it alone delivers flooded traffic *from other routers* to the CE, so the CE never receives a copy through each router. The candidates are the routers that advertise the segment. When every one of them announces the AC-DF capability (RFC 8584; NOS always does), only those that also serve the domain are candidates; otherwise every router on the segment is, as in RFC 7432. By default (`df-algorithm modulo`, RFC 7432 §8.5) the candidates are ordered by tunnel address and the DF for a domain is candidate number `VNI mod <number of candidates>`. Two domains on the same segment can therefore have different DFs, which spreads the load.
 
 `set port-aggregate <p> df-algorithm hrw` asks for RFC 8584's Highest Random Weight election instead: each candidate gets a pseudo-random weight from its tunnel address, the VNI and the ESI, and the highest weight wins, which spreads domains more evenly and moves fewer of them when a router joins or leaves. The choice is announced in the segment's Type 4 route (`df-election:hrw,ac-df` in `show bgp evpn` on the peer), and HRW is only used when every candidate asks for it; if any router asks for something else or announces nothing (most other implementations), every router falls back to modulo. `show fdb` ends the segment line with `df-algorithm hrw` while HRW is in effect. HRW needs IPv4 tunnel addresses. Changing the algorithm on a live segment re-elects at once, without the wait below.
+
+**Local bias.** In an all-active segment, flooded traffic that a router receives from its own hosts or from the CE goes straight to every segment it is on, whatever its DF role. The other routers on that segment drop their copy of it (RFC 8365 §8.3.1: they recognise it by the tunnel address it came from). Two consequences:
+
+- A CE no longer receives its own broadcast back. The CE sends it on one link; the router it reaches floods it to the other routers, and the DF used to send it back out of the segment.
+- A host behind a non-DF router still reaches the CE with its broadcasts, through that router.
+
+`show fdb` ends the segment line with `local-bias` while it is in place. It does not apply to single-active segments, where the non-DF drops everything and the DF delivers what the other router received locally. NOS does it with Linux `tc` filters and packet marks on the domain's VXLAN device and the segment's bond; there is nothing to configure.
+
+Upgrade both routers of a segment together. A router without local bias neither delivers locally sourced flooded traffic as a non-DF nor gets it delivered for it, so flooded traffic from the hosts behind it is lost until both run the new version.
 
 A router that has just joined a segment, whether it just started, the ESI was just set or the bond just came up, waits 3 seconds before applying the election, blocked as a non-DF meanwhile. This gives it time to hear the other routers, so the CE never receives flooded traffic twice. The delay is a start-up option of the router (`--fdbd-arg=--df-wait=<seconds>` on `nos-watchdogd`), not configuration; see [System](system.md#start-up-options).
 
@@ -377,7 +388,9 @@ For a segment that is attached to other routers, not this one:
 
 ### Limits
 
-- There is no local bias (RFC 8365 §8.3.1). In an all-active segment, a non-DF router does not deliver flooded traffic to the CE even when it came from a host on the same router; it reaches the CE through the DF instead.
+- Local bias covers flooded multicast and broadcast traffic only. Unknown unicast that a CE sends to one router is still flooded back to it by the DF (RFC 8365 §8.3.3), which matters for a CE that is an L2 switch.
+- Local bias is limited to 16 all-active segments per domain; a further one keeps DF-only flooding and `nos-fdbd` logs a warning.
+- The packet mark's top byte (`0xE5`) and its low 16 bits are used for local bias; do not use `fwmark` rules that match them on a router with EVPN segments.
 - A router only notices a segment failure when its own bond loses link. If a link fails only on the CE's side (a switch in between, say), the router keeps sending the CE's traffic into it. Run LACP between the CE and its routers so a dead link takes the bond down.
 - Over VXLAN only, no MPLS. IP prefix routes (Type 5) work through a routing table's L3 VNI; symmetric IRB host routes (a MAC+IP route carrying the L3 VNI and Router's MAC) are not generated or installed.
 - A Type 5 route is installed only in its interface-less form: one with a gateway IP or an ESI as overlay index (RFC 9136 §4.3) is ignored. Its prefix must be of the same family as the tunnel addresses, and when several routers advertise one prefix the one with the lowest tunnel address is used (no ECMP).
