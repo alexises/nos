@@ -68,6 +68,34 @@ fn changed_fields(base: &OspfInstance, candidate: &OspfInstance) -> Vec<FieldDif
             new: Some(candidate.prefix_suppression.to_string()),
         });
     }
+    let render = |p: Option<u32>| p.map_or("unset".to_string(), |p| p.to_string());
+    for (label, old, new) in [
+        (
+            "max-metric router-lsa on-startup",
+            base.max_metric_on_startup,
+            candidate.max_metric_on_startup,
+        ),
+        (
+            "max-metric router-lsa on-shutdown",
+            base.max_metric_on_shutdown.map(u32::from),
+            candidate.max_metric_on_shutdown.map(u32::from),
+        ),
+    ] {
+        if old != new {
+            fields.push(FieldDiff {
+                label: label.to_string(),
+                old: Some(render(old)),
+                new: Some(render(new)),
+            });
+        }
+    }
+    if base.max_metric_administrative != candidate.max_metric_administrative {
+        fields.push(FieldDiff {
+            label: "max-metric router-lsa administrative".to_string(),
+            old: Some(base.max_metric_administrative.to_string()),
+            new: Some(candidate.max_metric_administrative.to_string()),
+        });
+    }
     fields
 }
 
@@ -114,7 +142,33 @@ mod tests {
             redistribute_policy: None,
             graceful_restart_grace_period: None,
             prefix_suppression: false,
+            max_metric_on_startup: None,
+            max_metric_on_shutdown: None,
+            max_metric_administrative: false,
         }
+    }
+
+    #[test]
+    fn max_metric_changes_are_reported() {
+        let base = vec![instance("o1", Ipv4Addr::new(1, 1, 1, 1))];
+        let mut candidate = base.clone();
+        candidate[0].max_metric_on_startup = Some(30);
+        candidate[0].max_metric_on_shutdown = Some(2);
+        candidate[0].max_metric_administrative = true;
+        let diff = diff_ospf_instances(&base, &candidate);
+        let field = |label: &str, old: &str, new: &str| FieldDiff {
+            label: label.to_string(),
+            old: Some(old.to_string()),
+            new: Some(new.to_string()),
+        };
+        assert_eq!(
+            diff[0].fields,
+            vec![
+                field("max-metric router-lsa on-startup", "unset", "30"),
+                field("max-metric router-lsa on-shutdown", "unset", "2"),
+                field("max-metric router-lsa administrative", "false", "true"),
+            ]
+        );
     }
 
     #[test]

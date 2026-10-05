@@ -31,6 +31,21 @@ pub enum OspfInstanceOp {
         name: String,
         enabled: bool,
     },
+    /// Sets (`Some`) or clears (`None`) RFC 6987's on-startup period.
+    SetMaxMetricOnStartup {
+        name: String,
+        seconds: Option<u32>,
+    },
+    /// Sets (`Some`) or clears (`None`) RFC 6987's on-shutdown hold.
+    SetMaxMetricOnShutdown {
+        name: String,
+        seconds: Option<u8>,
+    },
+    /// Turns RFC 6987's administrative max-metric on or off.
+    SetMaxMetricAdministrative {
+        name: String,
+        enabled: bool,
+    },
     Delete {
         name: String,
     },
@@ -49,6 +64,9 @@ impl OspfInstanceOp {
                         redistribute_policy: None,
                         graceful_restart_grace_period: None,
                         prefix_suppression: false,
+                        max_metric_on_startup: None,
+                        max_metric_on_shutdown: None,
+                        max_metric_administrative: false,
                     });
                 }
                 Ok(())
@@ -63,6 +81,18 @@ impl OspfInstanceOp {
             }
             OspfInstanceOp::SetPrefixSuppression { name, enabled } => {
                 find_instance_mut(config, name)?.prefix_suppression = *enabled;
+                Ok(())
+            }
+            OspfInstanceOp::SetMaxMetricOnStartup { name, seconds } => {
+                find_instance_mut(config, name)?.max_metric_on_startup = *seconds;
+                Ok(())
+            }
+            OspfInstanceOp::SetMaxMetricOnShutdown { name, seconds } => {
+                find_instance_mut(config, name)?.max_metric_on_shutdown = *seconds;
+                Ok(())
+            }
+            OspfInstanceOp::SetMaxMetricAdministrative { name, enabled } => {
+                find_instance_mut(config, name)?.max_metric_administrative = *enabled;
                 Ok(())
             }
             OspfInstanceOp::Delete { name } => {
@@ -101,7 +131,58 @@ mod tests {
             redistribute_policy: None,
             graceful_restart_grace_period: None,
             prefix_suppression: false,
+            max_metric_on_startup: None,
+            max_metric_on_shutdown: None,
+            max_metric_administrative: false,
         }
+    }
+
+    #[test]
+    fn set_max_metric_fields() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1")],
+            ..Default::default()
+        };
+        let name = || "o1".to_string();
+        for op in [
+            OspfInstanceOp::SetMaxMetricOnStartup {
+                name: name(),
+                seconds: Some(30),
+            },
+            OspfInstanceOp::SetMaxMetricOnShutdown {
+                name: name(),
+                seconds: Some(3),
+            },
+            OspfInstanceOp::SetMaxMetricAdministrative {
+                name: name(),
+                enabled: true,
+            },
+        ] {
+            op.apply(&mut cfg).unwrap();
+        }
+        let i = &cfg.ospf_instances[0];
+        assert_eq!(
+            (
+                i.max_metric_on_startup,
+                i.max_metric_on_shutdown,
+                i.max_metric_administrative
+            ),
+            (Some(30), Some(3), true)
+        );
+        OspfInstanceOp::SetMaxMetricOnStartup {
+            name: name(),
+            seconds: None,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.ospf_instances[0].max_metric_on_startup, None);
+        let err = OspfInstanceOp::SetMaxMetricAdministrative {
+            name: "nope".to_string(),
+            enabled: true,
+        }
+        .apply(&mut cfg)
+        .unwrap_err();
+        assert!(matches!(err, OpError::OspfInstanceNotFound(n) if n == "nope"));
     }
 
     #[test]

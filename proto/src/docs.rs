@@ -201,6 +201,12 @@ topics! {
     OspfInstanceGracefulRestart,
     /// `OspfInstance.prefix_suppression`
     OspfInstancePrefixSuppression,
+    /// `OspfInstance.max_metric_on_startup`
+    OspfInstanceMaxMetricOnStartup,
+    /// `OspfInstance.max_metric_on_shutdown`
+    OspfInstanceMaxMetricOnShutdown,
+    /// `OspfInstance.max_metric_administrative`
+    OspfInstanceMaxMetricAdministrative,
     /// `OspfInstance.areas`
     OspfArea,
     /// `OspfArea.profiles`

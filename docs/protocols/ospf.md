@@ -401,6 +401,35 @@ How it behaves:
 - **Check it** on another router: `show route rt1` no longer lists the link's subnet with source `ospf`.
 - `delete ospf instance o1 prefix-suppression` turns it off.
 
+### Drain traffic away from a router (RFC 6987 stub router)
+
+Make other routers avoid this one for transit, while its own prefixes stay reachable. Three independent settings:
+
+```
+configure drain
+set ospf instance o1 max-metric router-lsa administrative
+set ospf instance o1 max-metric router-lsa on-startup 300
+set ospf instance o1 max-metric router-lsa on-shutdown 3
+commit
+```
+
+```sh
+$C -X POST $B/v1/transactions/drain
+$C -X PUT -H 'Content-Type: application/json' -d 'true' $B/v1/transactions/drain/ospf-instance/o1/max-metric-administrative
+$C -X PUT -H 'Content-Type: application/json' -d '300' $B/v1/transactions/drain/ospf-instance/o1/max-metric-on-startup
+$C -X PUT -H 'Content-Type: application/json' -d '3' $B/v1/transactions/drain/ospf-instance/o1/max-metric-on-shutdown
+$C -X POST $B/v1/transactions/drain/commit
+```
+
+How it behaves:
+
+- **What changes.** The router's router LSA gives every link to a neighbour or a LAN segment the cost 65535. Its stub links (point-to-point subnets, loopbacks) keep their cost. Other routers send traffic through it only when there is no other path, and never use it as a loop-free alternate.
+- **`administrative`.** On until removed: drain the router before maintenance, `delete ospf instance o1 max-metric router-lsa administrative` to bring it back.
+- **`on-startup <seconds>`** (5 to 86400). For this long after `nos-ospfd` starts, so traffic waits until its routes have converged. It takes effect on the next start, not when set. After a graceful restart it is skipped, since the helpers kept the old topology. `delete` ends a period still running.
+- **`on-shutdown <seconds>`** (1 to 3). When `nos-ospfd` stops (not a graceful restart), it first advertises the max-metric router LSA and waits this long before withdrawing its LSAs, so traffic moves away before the router disappears. It is skipped when the router LSA changed in the last 5 seconds, or when the router is already a stub router. 3 seconds is the most that fits in the watchdog's 10-second stop budget beside the withdrawal; the `watchdog` service in `docker-compose.yml` has `stop_grace_period: 15s` for the same reason.
+- **Check it.** The router logs `ospf stub router max-metric changed active=true reason="administrative"` (or `"on-startup"`, `"on-shutdown"`), then `active=false` with `reason="expired"` or `"cleared"`. On another router, the route through it shows a metric of 65535 or more in `show route`, and its backup next hop through it is gone.
+- **Router Information.** Every router advertises *stub router support* in its Router Information LSA, whatever the setting.
+
 ### Stop running OSPF
 
 - On one link: `delete interface eth0 ospf` (or `delete ospf` inside the interface, subinterface or broadcast domain). Over REST, `DELETE …/interface/eth0/subinterface/0/ospf-profile`.
@@ -419,7 +448,7 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **Equal-cost multipath (RFC 2328 §16.1).** When a destination is reachable over several paths with the same lowest metric, NOS keeps all of their next hops and installs one multipath kernel route; the kernel spreads flows across them. It is automatic, with no configuration. `show route` lists every next hop: `* via 203.0.113.2, 203.0.113.6 [ospf]`. A next hop whose link goes down stays in the multipath route until OSPF reconverges (the kernel keeps it unless `ignore_routes_with_linkdown` is set).
 
-**Loop-free alternates (RFC 5286).** For each OSPF route, NOS also looks for a backup next hop through another neighbour (not one of the route's own next hops) whose own shortest path to the destination does not come back through this router. If there is one, it is installed in the kernel alongside the primary, at a worse metric, so traffic moves to it as soon as the primary next hop is withdrawn. It is computed automatically, with no configuration. `show route` shows it after the primary: `* via 203.0.113.2 [ospf] backup 203.0.113.3`. Only link protection is provided (no node protection and no remote LFA).
+**Loop-free alternates (RFC 5286).** For each OSPF route, NOS also looks for a backup next hop through another neighbour (not one of the route's own next hops) whose own shortest path to the destination does not come back through this router. A link that costs 65535 in either direction (a [stub router](#drain-traffic-away-from-a-router-rfc-6987-stub-router) at either end) is never used for one. If there is one, it is installed in the kernel alongside the primary, at a worse metric, so traffic moves to it as soon as the primary next hop is withdrawn. It is computed automatically, with no configuration. `show route` shows it after the primary: `* via 203.0.113.2 [ospf] backup 203.0.113.3`. Only link protection is provided (no node protection and no remote LFA).
 
 **Authentication (RFC 2328 Appendix D, RFC 5709, RFC 7474).** Described [above](#authenticate-a-link-and-change-its-key). A packet that fails authentication is dropped and logged (`ospf packet authentication failed`). A replayed or out-of-order packet (a sequence number that does not increase) is dropped and logged too.
 
@@ -442,6 +471,7 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 - *Graceful restart helper* is always set.
 - *Graceful restart capable* is set while `graceful-restart grace-period` is configured.
+- *Stub router support* (RFC 6987) is always set.
 - `show ospf database` lists it as type 10 from each router; FRR lists it with `show ip ospf database opaque-area`, but FRR 10.7 shows the body only as raw bytes.
 - Router Information LSAs from other routers are stored and flooded but not read.
 
@@ -467,6 +497,9 @@ All paths are relative to `/v1/transactions/{tx}/`. `delete` forms marked *relat
 | router ID | `set ospf instance <name> router-id <ip>`; relative `set router-id <ip>` | `ospf-instance/<name>/router-id` | IPv4 address; `0.0.0.0` when created by `edit` | set it: it identifies the router in every LSA | router ID in Hellos and LSAs | `show ospf neigh` on the neighbour |
 | graceful restart | `set ospf instance <name> graceful-restart grace-period <seconds>`; `delete ospf instance <name> graceful-restart grace-period` | `ospf-instance/<name>/graceful-restart-grace-period` | seconds, 1 to 1800; unset by default | | on SIGTERM, ask Full neighbours to keep the adjacency and routes this long (RFC 3623) | `ospf helper: grace period entered` in the neighbour's log |
 | prefix suppression | `set ospf instance <name> prefix-suppression`; `delete ospf instance <name> prefix-suppression` | `ospf-instance/<name>/prefix-suppression` | boolean; off by default | | hides point-to-point subnets and, as DR, LAN segments (RFC 6860) | `show route <table>` on another router |
+| max-metric on startup | `set ospf instance <name> max-metric router-lsa on-startup <seconds>`; `delete ospf instance <name> max-metric router-lsa on-startup` | `ospf-instance/<name>/max-metric-on-startup` | seconds, 5 to 86400; unset by default | | stub router (RFC 6987) this long after the next start; skipped after a graceful restart | `ospf stub router max-metric changed` in the log |
+| max-metric on shutdown | `set ospf instance <name> max-metric router-lsa on-shutdown <seconds>`; `delete ospf instance <name> max-metric router-lsa on-shutdown` | `ospf-instance/<name>/max-metric-on-shutdown` | seconds, 1 to 3; unset by default | | stub router this long before withdrawing the LSAs on stop; not on a graceful restart | `reason="on-shutdown"` in the log |
+| max-metric administrative | `set ospf instance <name> max-metric router-lsa administrative`; `delete ospf instance <name> max-metric router-lsa administrative` | `ospf-instance/<name>/max-metric-administrative` | boolean; off by default | | stub router until removed | `show route <table>` on another router |
 | areas | `edit ospf instance <name> area <area-id>`; relative `edit area <area-id>` | `ospf-instance/<name>/area/<area-id>` | list of areas | area IDs unique within the instance | see [Area](#area) | `show config` |
 | routing table | set on the table: `set routing-table <table> ospf-instance <name>`; `delete routing-table <table> ospf-instance` | `routing-table/<table>/ospf-instance` | instance name; unset by default | the instance must exist; one table per instance | runs the instance in that table's VRF and installs its routes there | `show ospf neigh`, `show route <table>` |
 

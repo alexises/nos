@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use nos_log_client::ForwardingLayer;
-use nos_ospf::boot::BootCounter;
+use nos_ospf::boot::{self, BootCounter};
 use nos_ospf::link::LinkManager;
 use nos_ospf::{reconcile, rib_push_client, server, watchdog_client};
 use nos_pki::Identity;
@@ -60,7 +60,8 @@ struct Args {
     dbd_max_headers: Option<usize>,
 
     /// Directory for this daemon's persisted state: the RFC 7474 boot count
-    /// (`<instance>.boot`), which must survive restarts.
+    /// (`<instance>.boot`), which must survive restarts, and the RFC 3623
+    /// graceful-restart marker (`<instance>.gr`, consumed at start).
     #[arg(long, default_value = "/var/lib/nos/ospf")]
     state_dir: PathBuf,
 }
@@ -113,6 +114,8 @@ async fn main() -> anyhow::Result<()> {
         args.dbd_max_headers,
         BootCounter::persistent(args.state_dir.join(format!("{}.boot", args.instance))),
     );
+    let grace_marker = args.state_dir.join(format!("{}.gr", args.instance));
+    links.set_after_graceful_restart(boot::take_grace_marker(&grace_marker, unix_now()));
     let reconcile_task = tokio::spawn(reconcile::run(
         config_socket,
         args.watchdog_socket.clone(),
@@ -146,6 +149,16 @@ async fn main() -> anyhow::Result<()> {
     // running to send the Grace-LSAs, and `LinkManager::shutdown` (run when
     // the reconcile loop exits) then keeps this router's LSAs.
     if planned_restart {
+        let grace_period = links.grace_period();
+        if grace_period != 0 {
+            // Lets the respawned process skip RFC 6987's on-startup period.
+            match boot::write_grace_marker(&grace_marker, unix_now() + u64::from(grace_period)) {
+                Ok(()) => info!(instance = %args.instance, "ospf graceful restart marker written"),
+                Err(e) => {
+                    tracing::warn!(instance = %args.instance, error = %e, "cannot write ospf graceful restart marker")
+                }
+            }
+        }
         links.announce_graceful_restart().await;
     }
 
@@ -159,6 +172,12 @@ async fn main() -> anyhow::Result<()> {
     info!(instance = %args.instance, "shutting down");
     let _ = log_shutdown_tx.send(true);
     Ok(())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Waits for SIGTERM or SIGINT. SIGINT is what `nos-watchdog` sends

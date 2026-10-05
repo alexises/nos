@@ -112,6 +112,9 @@ fn fake_configd(path: &Path) {
             redistribute_policy: None,
             graceful_restart_grace_period: None,
             prefix_suppression: false,
+            max_metric_on_startup: None,
+            max_metric_on_shutdown: None,
+            max_metric_administrative: false,
         }],
         ospfv3_instances: vec![nos_proto::Ospfv3Instance {
             name: "v3".to_string(),

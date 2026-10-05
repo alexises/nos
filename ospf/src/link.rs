@@ -109,9 +109,21 @@ const AGE_TICK_INTERVAL: Duration = Duration::from_secs(1);
 /// prematurely aging every self-originated LSA (RFC 2328 §14.1), so each
 /// link's own `RXMT_INTERVAL` resend actually carries the `MaxAge` copies out
 /// before the process exits: one resend period plus a second of margin.
-/// Well inside `nos-watchdogd`'s 10s SIGINT-to-SIGKILL budget (root
-/// `CLAUDE.md`, "Process supervision") — recheck if `RXMT_INTERVAL` grows.
+/// With `max-metric router-lsa on-shutdown`'s hold (at most
+/// `MAX_METRIC_SHUTDOWN_HOLD_MAX`) it must fit `nos-watchdogd`'s 10s
+/// SIGINT-to-SIGKILL budget (root `CLAUDE.md`, "Process supervision") with a
+/// second to spare for the exit — see the assertion below. The flush is kicked
+/// out at once (`LinkCommand::FloodNow`), so the window buys one `RXMT_INTERVAL`
+/// retransmission on top.
 const PREMATURE_AGE_FLOOD_WINDOW: Duration = Duration::from_secs(6);
+
+/// The longest RFC 6987 on-shutdown hold `OspfInstance.max_metric_on_shutdown`
+/// accepts (its garde range is 1-3).
+const MAX_METRIC_SHUTDOWN_HOLD_MAX: Duration = Duration::from_secs(3);
+const _: () = assert!(
+    MAX_METRIC_SHUTDOWN_HOLD_MAX.as_secs() + PREMATURE_AGE_FLOOD_WINDOW.as_secs() <= 9,
+    "on-shutdown hold + flush window must fit nos-watchdogd's 10s kill budget"
+);
 
 /// How long `LinkManager::announce_graceful_restart` waits after each
 /// Grace-LSA send before the next one (two sends) and before exiting —
@@ -392,7 +404,7 @@ pub async fn run(
     status: StatusHandle,
     dbd_max_headers: Option<usize>,
     boot_count: u32,
-    mut grace_rx: mpsc::UnboundedReceiver<u32>,
+    mut commands: mpsc::UnboundedReceiver<LinkCommand>,
 ) {
     let socket = match socket {
         Ok(s) => s,
@@ -544,9 +556,14 @@ pub async fn run(
                 run_election(&cfg, local_router_id, &status);
                 advance_adjacencies(&socket, &cfg, local_router_id, &status, &mut next_seq);
             }
-            Some(grace_period) = grace_rx.recv() => {
-                send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period, &mut next_seq);
-            }
+            Some(command) = commands.recv() => match command {
+                LinkCommand::Grace(grace_period) => {
+                    send_grace_lsas(&socket, &cfg, local_router_id, &status, grace_period, &mut next_seq);
+                }
+                LinkCommand::FloodNow => {
+                    flood_full_neighbors(&socket, &cfg, local_router_id, &lsdb, &link_local_lsdb, &status, &mut next_seq).await;
+                }
+            },
             _ = rxmt_sweep.tick() => {
                 flush_pending_acks(&socket, &cfg, local_router_id, &status, &mut next_seq);
                 retransmit_pending(&socket, &cfg, local_router_id, &status, &mut next_seq);
@@ -1730,12 +1747,21 @@ fn run_election(cfg: &LinkConfig, local_router_id: Ipv4Addr, status: &StatusHand
     });
 }
 
+/// A request from `LinkManager` to one link task.
+#[derive(Debug, Clone, Copy)]
+pub enum LinkCommand {
+    /// Send Grace-LSAs (the grace period, seconds).
+    Grace(u32),
+    /// Resend the LSDB to every `Full` neighbor now, not on the next
+    /// `RXMT_INTERVAL` — the shutdown path only (`LinkManager::flood_now`).
+    FloodNow,
+}
+
 struct LinkEntry {
     config: LinkConfig,
     task: JoinHandle<()>,
     status: watch::Receiver<LinkStatus>,
-    /// Asks the link task to send Grace-LSAs (the grace period, seconds).
-    grace_tx: mpsc::UnboundedSender<u32>,
+    commands: mpsc::UnboundedSender<LinkCommand>,
     /// RFC 5250 type-9 (link-local) LSAs heard on this link — dropped with
     /// the entry when the link stops or restarts.
     link_local_lsdb: Arc<Mutex<Lsdb>>,
@@ -1805,6 +1831,9 @@ pub struct LinkManager {
     /// Set by `announce_graceful_restart`: `shutdown` then keeps every
     /// self-originated LSA instead of flushing it (RFC 3623 §2).
     restarting: AtomicBool,
+    /// RFC 6987 stub router (`OspfInstance.max_metric_*`), see
+    /// `max_metric_active`.
+    max_metric: std::sync::Mutex<MaxMetric>,
     /// Each configured area's stub/range settings (`OspfArea`), replaced on
     /// every resync; an area missing here is a normal area with no range.
     area_settings: Mutex<HashMap<Ipv4Addr, AreaSettings>>,
@@ -1816,6 +1845,25 @@ pub struct LinkManager {
     /// log a change.
     nssa_translating: Mutex<HashMap<Ipv4Addr, bool>>,
     opener: Opener,
+}
+
+/// RFC 6987 stub-router state. `std` mutex: never held across an await.
+// Independent flags, each read on its own.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Default)]
+struct MaxMetric {
+    administrative: bool,
+    /// On-shutdown hold, seconds (0 = off).
+    on_shutdown: u8,
+    /// End of the on-startup period, armed once by the first `set_max_metric`.
+    until: Option<Instant>,
+    /// The first `set_max_metric` call has happened.
+    armed: bool,
+    /// Respawned after a graceful restart (`boot::take_grace_marker`): the
+    /// helpers kept the old topology, so on-startup is skipped.
+    after_graceful_restart: bool,
+    /// The last state logged by `max_metric_tick`.
+    logged: bool,
 }
 
 /// One area's RFC 2328 §3.5/§3.6 and RFC 3101 settings, resolved from
@@ -1882,6 +1930,7 @@ impl LinkManager {
             grace_period: AtomicU16::new(0),
             prefix_suppression: AtomicBool::new(false),
             restarting: AtomicBool::new(false),
+            max_metric: std::sync::Mutex::new(MaxMetric::default()),
             area_settings: Mutex::new(HashMap::new()),
             active_ranges: Mutex::new(HashMap::new()),
             nssa_translating: Mutex::new(HashMap::new()),
@@ -1924,6 +1973,76 @@ impl LinkManager {
 
     pub fn set_prefix_suppression(&self, on: bool) {
         self.prefix_suppression.store(on, Ordering::Relaxed);
+    }
+
+    fn max_metric_state(&self) -> std::sync::MutexGuard<'_, MaxMetric> {
+        self.max_metric
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Set once, before the first `set_max_metric`, when this process is the
+    /// respawn of a graceful restart (`boot::take_grace_marker`).
+    pub fn set_after_graceful_restart(&self, after: bool) {
+        self.max_metric_state().after_graceful_restart = after;
+    }
+
+    /// RFC 6987 knobs, every resync. The first call (the first config
+    /// resolution after start) arms the on-startup period — skipped after a
+    /// graceful restart; later calls never re-arm it (it takes effect on the
+    /// next start), and `None` ends a running one.
+    pub fn set_max_metric(
+        &self,
+        on_startup: Option<u32>,
+        on_shutdown: Option<u8>,
+        administrative: bool,
+    ) {
+        let mut mm = self.max_metric_state();
+        mm.administrative = administrative;
+        mm.on_shutdown = on_shutdown.unwrap_or(0);
+        if !mm.armed {
+            mm.armed = true;
+            match on_startup {
+                Some(_) if mm.after_graceful_restart => {
+                    info!("ospf stub router on-startup skipped after graceful restart");
+                }
+                Some(secs) => {
+                    mm.until = Some(Instant::now() + Duration::from_secs(u64::from(secs)));
+                }
+                None => {}
+            }
+        } else if on_startup.is_none() {
+            mm.until = None;
+        }
+    }
+
+    /// RFC 6987: whether this router advertises itself as a stub router
+    /// (max-metric transit links) — administratively, or still inside its
+    /// on-startup period. The one predicate RFC 8770's H-bit can OR into.
+    pub fn max_metric_active(&self) -> bool {
+        let mm = self.max_metric_state();
+        mm.administrative || mm.until.is_some_and(|t| Instant::now() < t)
+    }
+
+    /// `max_metric_active`, logging a change (read once per origination tick).
+    fn max_metric_tick(&self) -> bool {
+        let mut mm = self.max_metric_state();
+        let starting = mm.until.is_some_and(|t| Instant::now() < t);
+        let active = mm.administrative || starting;
+        if active != mm.logged {
+            mm.logged = active;
+            let reason = if active && mm.administrative {
+                "administrative"
+            } else if active {
+                "on-startup"
+            } else if mm.until.take().is_some() {
+                "expired"
+            } else {
+                "cleared"
+            };
+            info!(active, reason, "ospf stub router max-metric changed");
+        }
+        active
     }
 
     pub async fn set_area_settings(&self, settings: HashMap<Ipv4Addr, AreaSettings>) {
@@ -2042,6 +2161,19 @@ impl LinkManager {
     /// relevant link's status already sits in a `watch` channel this can
     /// just snapshot.
     async fn originate_router_lsas(&self, local_router_id: Ipv4Addr) {
+        let max_metric = self.max_metric_tick();
+        self.originate_router_lsas_with(local_router_id, max_metric)
+            .await;
+    }
+
+    /// `originate_router_lsas` with an explicit RFC 6987 `max_metric`.
+    /// Returns whether a Router-LSA was (re)installed in some area.
+    async fn originate_router_lsas_with(
+        &self,
+        local_router_id: Ipv4Addr,
+        max_metric: bool,
+    ) -> bool {
+        let mut router_lsa_installed = false;
         let snapshot: Vec<(LinkConfig, LinkStatus)> = self
             .links
             .lock()
@@ -2080,7 +2212,8 @@ impl LinkManager {
         if !self.redistribute_filtered.lock().await.is_empty() {
             flags |= lsa::ROUTER_FLAG_E;
         }
-        let mut router_info_caps = lsa::RI_CAP_GR_HELPER;
+        // RFC 7770 §2.4: stub-router support is a capability, always set.
+        let mut router_info_caps = lsa::RI_CAP_GR_HELPER | lsa::RI_CAP_STUB_ROUTER;
         if self.grace_period.load(Ordering::Relaxed) != 0 {
             router_info_caps |= lsa::RI_CAP_GR_CAPABLE;
         }
@@ -2112,7 +2245,8 @@ impl LinkManager {
                 continue;
             }
 
-            let mut router_links = router_lsa_links(local_router_id, &links, prefix_suppression);
+            let mut router_links =
+                router_lsa_links(local_router_id, &links, prefix_suppression, max_metric);
             // Loopbacks aren't transit, so RFC 6860 never hides them.
             for (subnet, cost) in stub_networks.get(&area_id).into_iter().flatten() {
                 router_links.push(RouterLink {
@@ -2134,7 +2268,7 @@ impl LinkManager {
             if area.nssa_translate_always && flags & lsa::ROUTER_FLAG_B != 0 {
                 area_flags |= lsa::ROUTER_FLAG_NT;
             }
-            install_self_originated(
+            router_lsa_installed |= install_self_originated(
                 &mut lsdb,
                 local_router_id,
                 lsa::LSA_TYPE_ROUTER,
@@ -2198,6 +2332,7 @@ impl LinkManager {
                 &network_ids,
             );
         }
+        router_lsa_installed
     }
 
     /// RFC 2328 §12.4.3-style self-origination of this router's own
@@ -2536,7 +2671,7 @@ impl LinkManager {
             } else {
                 0
             };
-            let (grace_tx, grace_rx) = mpsc::unbounded_channel();
+            let (commands, commands_rx) = mpsc::unbounded_channel();
             let link_local_lsdb = Arc::new(Mutex::new(Lsdb::new()));
             let task = tokio::spawn(run(
                 (self.opener)(&cfg),
@@ -2547,7 +2682,7 @@ impl LinkManager {
                 status_tx,
                 self.dbd_max_headers,
                 boot_count,
-                grace_rx,
+                commands_rx,
             ));
             links.insert(
                 key,
@@ -2555,7 +2690,7 @@ impl LinkManager {
                     config: cfg,
                     task,
                     status: status_rx,
-                    grace_tx,
+                    commands,
                     link_local_lsdb,
                 },
             );
@@ -2690,6 +2825,38 @@ impl LinkManager {
         withdrawn
     }
 
+    /// RFC 6987 on-shutdown: re-originates the Router-LSAs with max-metric
+    /// transit links, kicks them out and holds `on_shutdown` seconds so
+    /// neighbors move traffic away before the flush. Skipped when off, when
+    /// max-metric is already active (neighbors already avoid us), and when
+    /// `MinLSInterval` holds the Router-LSA back (it changed under 5s ago).
+    async fn max_metric_on_shutdown(&self) {
+        let hold = self.max_metric_state().on_shutdown;
+        if hold == 0 || self.max_metric_active() {
+            return;
+        }
+        let Some(router_id) = *self.router_id.lock().await else {
+            return;
+        };
+        if !self.originate_router_lsas_with(router_id, true).await {
+            info!("ospf stub router on-shutdown skipped, router-lsa unchanged or changed too recently");
+            return;
+        }
+        info!(
+            active = true,
+            reason = "on-shutdown",
+            "ospf stub router max-metric changed"
+        );
+        self.flood_now().await;
+        tokio::time::sleep(Duration::from_secs(u64::from(hold)).min(MAX_METRIC_SHUTDOWN_HOLD_MAX))
+            .await;
+    }
+
+    /// The configured RFC 3623 grace period, seconds (0 = off).
+    pub fn grace_period(&self) -> u16 {
+        self.grace_period.load(Ordering::Relaxed)
+    }
+
     /// RFC 3623: when graceful restart is configured, has every link send a
     /// Grace-LSA to its `Full` neighbors (twice) and waits for them to go
     /// out, then makes `shutdown` keep this router's LSAs. Called on a
@@ -2704,19 +2871,22 @@ impl LinkManager {
             "ospf graceful restart: announcing grace period before shutdown"
         );
         self.restarting.store(true, Ordering::Relaxed);
-        let senders: Vec<mpsc::UnboundedSender<u32>> = self
-            .links
-            .lock()
-            .await
-            .values()
-            .map(|e| e.grace_tx.clone())
-            .collect();
         for _ in 0..2 {
-            for tx in &senders {
-                let _ = tx.send(u32::from(grace_period));
-            }
+            self.send_to_links(LinkCommand::Grace(u32::from(grace_period)))
+                .await;
             tokio::time::sleep(GRACE_SEND_WINDOW).await;
         }
+    }
+
+    async fn send_to_links(&self, command: LinkCommand) {
+        for entry in self.links.lock().await.values() {
+            let _ = entry.commands.send(command);
+        }
+    }
+
+    /// Has every link resend its LSDB to its `Full` neighbors now.
+    async fn flood_now(&self) {
+        self.send_to_links(LinkCommand::FloodNow).await;
     }
 
     /// Graceful shutdown: flushes every self-originated LSA (RFC 2328
@@ -2728,7 +2898,11 @@ impl LinkManager {
     /// once when `crate::reconcile::run`'s loop exits on shutdown.
     pub async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::Relaxed);
-        let withdrawn = if self.restarting.load(Ordering::Relaxed) {
+        let restarting = self.restarting.load(Ordering::Relaxed);
+        if !restarting {
+            self.max_metric_on_shutdown().await;
+        }
+        let withdrawn = if restarting {
             0
         } else {
             self.withdraw_all_self_originated().await
@@ -2738,6 +2912,7 @@ impl LinkManager {
                 withdrawn,
                 "ospf flushing self-originated lsas before shutdown"
             );
+            self.flood_now().await;
             tokio::time::sleep(PREMATURE_AGE_FLOOD_WINDOW).await;
         }
         for (_, entry) in self.links.lock().await.drain() {
@@ -2850,15 +3025,23 @@ fn network_lsa_mask(cfg: &LinkConfig, prefix_suppression: bool) -> Ipv4Addr {
 /// directly-connected filter is what keeps that from producing a spurious
 /// route back to your own subnet via the neighbor. RFC 6860 §2.1: with
 /// `prefix_suppression` the type-3 stub is omitted, hiding the transit-only
-/// subnet. Pure — takes an already-gathered snapshot so it stays
-/// independently unit-testable.
+/// subnet. RFC 6987 §2: with `max_metric` (a stub router) the type-1 and
+/// type-2 links cost `MAX_LINK_METRIC`; the type-3 stubs keep their cost.
+/// Pure — takes an already-gathered snapshot so it stays independently
+/// unit-testable.
 fn router_lsa_links(
     local_router_id: Ipv4Addr,
     links: &[(LinkConfig, LinkStatus)],
     prefix_suppression: bool,
+    max_metric: bool,
 ) -> Vec<RouterLink> {
     let mut result = Vec::new();
     for (cfg, status) in links {
+        let transit_cost = if max_metric {
+            lsa::MAX_LINK_METRIC
+        } else {
+            cfg.cost
+        };
         match cfg.network_type {
             NetworkType::PointToPoint => {
                 if let Some((neighbor_id, _)) = status
@@ -2870,7 +3053,7 @@ fn router_lsa_links(
                         link_id: *neighbor_id,
                         link_data: cfg.local_addr,
                         link_type: LINK_TYPE_POINT_TO_POINT,
-                        metric: cfg.cost,
+                        metric: transit_cost,
                     });
                 }
                 if let Some(subnet) = local_subnet(cfg).filter(|_| !prefix_suppression) {
@@ -2896,7 +3079,7 @@ fn router_lsa_links(
                     link_id: dr_addr,
                     link_data: cfg.local_addr,
                     link_type: LINK_TYPE_TRANSIT_NETWORK,
-                    metric: cfg.cost,
+                    metric: transit_cost,
                 });
             }
         }
@@ -2920,12 +3103,13 @@ fn install_self_originated(
     lsa_type: u8,
     link_state_id: Ipv4Addr,
     body: LsaBody,
-) {
-    install_self_originated_with_options(lsdb, local_router_id, lsa_type, link_state_id, 0, body);
+) -> bool {
+    install_self_originated_with_options(lsdb, local_router_id, lsa_type, link_state_id, 0, body)
 }
 
 /// `install_self_originated` with header `options` (a Type-7's P-bit), which
-/// count as content: a change re-originates.
+/// count as content: a change re-originates. Returns whether a new instance
+/// was installed (`false`: unchanged, or held back by `MinLSInterval`).
 fn install_self_originated_with_options(
     lsdb: &mut Lsdb,
     local_router_id: Ipv4Addr,
@@ -2933,7 +3117,7 @@ fn install_self_originated_with_options(
     link_state_id: Ipv4Addr,
     options: u8,
     body: LsaBody,
-) {
+) -> bool {
     let key = LsaKey {
         lsa_type,
         link_state_id,
@@ -2944,7 +3128,7 @@ fn install_self_originated_with_options(
         .as_ref()
         .is_some_and(|e| e.header.age >= lsa::LS_REFRESH_TIME);
     let sequence_number = match &existing {
-        Some(e) if e.body == body && e.header.options == options && !needs_refresh => return,
+        Some(e) if e.body == body && e.header.options == options && !needs_refresh => return false,
         // RFC 2328 §12.1.6: at `MaxSequenceNumber` the instance is flushed
         // (at that same sequence number — never the reserved 0x8000_0000 a
         // wrapping increment would produce) and re-originated at
@@ -2953,14 +3137,14 @@ fn install_self_originated_with_options(
         // the `None` arm below then takes over.
         Some(e) if e.header.sequence_number == lsa::MAX_SEQUENCE_NUMBER => {
             withdraw_self_originated(lsdb, &key);
-            return;
+            return false;
         }
         // RFC 2328 §12.4 / Appendix B `MinLSInterval`: changed content is
         // not re-originated until the held instance is that old — the next
         // `ORIGINATION_INTERVAL` tick retries. `age` is the local clock
         // since origination (a neighbor's echo never supersedes it, see
         // `lsa::fill_checksum`), so no extra timestamp is needed.
-        Some(e) if e.header.age < lsa::MIN_LS_INTERVAL => return,
+        Some(e) if e.header.age < lsa::MIN_LS_INTERVAL => return false,
         Some(e) => e.header.sequence_number + 1,
         None => lsa::INITIAL_SEQUENCE_NUMBER,
     };
@@ -2986,6 +3170,7 @@ fn install_self_originated_with_options(
         refreshed = needs_refresh,
         "ospf lsa originated"
     );
+    true
 }
 
 /// RFC 2328 §14.1 premature aging: flushes this router's own `key` by
@@ -3345,7 +3530,7 @@ mod tests {
         // its own subnet, independent of neighbor state.
         let cfg = link("eth0.0", 10);
         let status = LinkStatus::new(NetworkType::PointToPoint);
-        let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)], false);
+        let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)], false, false);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].link_type, LINK_TYPE_STUB_NETWORK);
         assert_eq!(links[0].link_id, Ipv4Addr::new(10, 0, 0, 0));
@@ -3361,7 +3546,12 @@ mod tests {
             neighbor_id,
             neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2)),
         );
-        let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg.clone(), status)], false);
+        let links = router_lsa_links(
+            Ipv4Addr::new(1, 1, 1, 1),
+            &[(cfg.clone(), status)],
+            false,
+            false,
+        );
         assert_eq!(links.len(), 2);
         let p2p = links
             .iter()
@@ -3373,6 +3563,35 @@ mod tests {
     }
 
     #[test]
+    fn router_lsa_links_max_metric_raises_transit_links_only() {
+        // RFC 6987 §2: type-1/type-2 at MaxLinkMetric, type-3 keeps its cost.
+        let mut p2p = link("eth0.0", 10);
+        p2p.cost = 7;
+        let mut p2p_status = LinkStatus::new(NetworkType::PointToPoint);
+        p2p_status.neighbors.insert(
+            Ipv4Addr::new(9, 9, 9, 10),
+            neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2)),
+        );
+        let mut bcast = link("broadcast-domain:d", 10);
+        bcast.network_type = NetworkType::Broadcast;
+        bcast.local_addr = Ipv4Addr::new(10, 1, 0, 1);
+        bcast.cost = 7;
+        let mut bcast_status = LinkStatus::new(NetworkType::Broadcast);
+        bcast_status.dr = Some(Ipv4Addr::new(1, 1, 1, 1));
+        let links = router_lsa_links(
+            Ipv4Addr::new(1, 1, 1, 1),
+            &[(p2p, p2p_status), (bcast, bcast_status)],
+            false,
+            true,
+        );
+        let metric = |t| links.iter().find(|l| l.link_type == t).unwrap().metric;
+        assert_eq!(links.len(), 3);
+        assert_eq!(metric(LINK_TYPE_POINT_TO_POINT), lsa::MAX_LINK_METRIC);
+        assert_eq!(metric(LINK_TYPE_TRANSIT_NETWORK), lsa::MAX_LINK_METRIC);
+        assert_eq!(metric(LINK_TYPE_STUB_NETWORK), 7);
+    }
+
+    #[test]
     fn prefix_suppression_hides_the_p2p_stub_and_the_network_mask() {
         // RFC 6860 §2.1: only the type-1 link is left on a p2p link.
         let cfg = link("eth0.0", 10);
@@ -3381,7 +3600,12 @@ mod tests {
             Ipv4Addr::new(9, 9, 9, 10),
             neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2)),
         );
-        let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg.clone(), status)], true);
+        let links = router_lsa_links(
+            Ipv4Addr::new(1, 1, 1, 1),
+            &[(cfg.clone(), status)],
+            true,
+            false,
+        );
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].link_type, LINK_TYPE_POINT_TO_POINT);
 
@@ -3392,8 +3616,13 @@ mod tests {
         let mut status = LinkStatus::new(NetworkType::Broadcast);
         status.interface_state = InterfaceState::Dr;
         status.dr = Some(local_router_id);
-        let on = router_lsa_links(local_router_id, &[(bcast.clone(), status.clone())], true);
-        let off = router_lsa_links(local_router_id, &[(bcast, status)], false);
+        let on = router_lsa_links(
+            local_router_id,
+            &[(bcast.clone(), status.clone())],
+            true,
+            false,
+        );
+        let off = router_lsa_links(local_router_id, &[(bcast, status)], false, false);
         assert_eq!(on, off);
 
         // §2.2.2.1: the DR's Network-LSA mask.
@@ -3410,7 +3639,7 @@ mod tests {
         cfg.network_type = NetworkType::Broadcast;
         let status = LinkStatus::new(NetworkType::Broadcast);
         assert_eq!(
-            router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)], false),
+            router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)], false, false),
             []
         );
     }
@@ -3423,7 +3652,7 @@ mod tests {
         let mut status = LinkStatus::new(NetworkType::Broadcast);
         status.interface_state = InterfaceState::Dr;
         status.dr = Some(local_router_id);
-        let links = router_lsa_links(local_router_id, &[(cfg.clone(), status)], false);
+        let links = router_lsa_links(local_router_id, &[(cfg.clone(), status)], false, false);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].link_id, cfg.local_addr);
         assert_eq!(links[0].link_type, 2);
@@ -3442,7 +3671,7 @@ mod tests {
         status
             .neighbors
             .insert(dr_id, neighbor_info(NeighborState::Full, dr_addr));
-        let links = router_lsa_links(local_router_id, &[(cfg, status)], false);
+        let links = router_lsa_links(local_router_id, &[(cfg, status)], false, false);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].link_id, dr_addr);
     }
@@ -3692,11 +3921,13 @@ mod tests {
                 router_id,
             )
             .await;
-        assert_eq!(held(area0).await, body(lsa::RI_CAP_GR_HELPER));
-        assert_eq!(held(area1).await, body(lsa::RI_CAP_GR_HELPER));
+        // Helper and stub-router support are capabilities, always set.
+        let always = lsa::RI_CAP_GR_HELPER | lsa::RI_CAP_STUB_ROUTER;
+        assert_eq!(held(area0).await, body(always));
+        assert_eq!(held(area1).await, body(always));
 
         manager.set_graceful_restart(Some(120));
-        let both = lsa::RI_CAP_GR_HELPER | lsa::RI_CAP_GR_CAPABLE;
+        let both = always | lsa::RI_CAP_GR_CAPABLE;
         assert_eq!(held(area0).await, body(both));
 
         manager
@@ -5858,6 +6089,8 @@ mod tests {
         b.reconcile(vec![link_b.clone()], stub("192.0.2.2/32"), id(2))
             .await;
         b.set_graceful_restart(Some(120));
+        // RFC 3623 §3.2 (c): on-shutdown must not change the Router-LSA.
+        b.set_max_metric(None, Some(3), false);
         settle(60).await;
         assert_eq!(
             a.neighbor_summaries().await[0].state,
@@ -5868,6 +6101,7 @@ mod tests {
         b.announce_graceful_restart().await;
         b.shutdown().await;
         assert!(helping(&a, id(2)).await);
+        assert_eq!(router_lsa_at(&a, id(2)).await.1, [1]);
         let lsas = a.database_summaries().await;
         assert!(lsas.iter().all(|l| l.lsa_type != lsa::LSA_TYPE_OPAQUE_LINK));
         // RFC 3623 §2: the restarter keeps its LSAs, never prematurely aged.
@@ -5894,6 +6128,133 @@ mod tests {
         );
         assert!(!helping(&a, id(2)).await);
         assert!(routes_to(&a, "192.0.2.2/32").await);
+    }
+
+    /// `router`'s Router-LSA as `holder` has it: (age, p2p metrics, stub metrics).
+    async fn router_lsa_at(holder: &LinkManager, router: Ipv4Addr) -> (u16, Vec<u16>, Vec<u16>) {
+        let lsa = holder
+            .lsdb_for(Ipv4Addr::UNSPECIFIED)
+            .await
+            .lock()
+            .await
+            .get(&LsaKey {
+                lsa_type: lsa::LSA_TYPE_ROUTER,
+                link_state_id: router,
+                advertising_router: router,
+            })
+            .unwrap();
+        let LsaBody::Router(body) = &lsa.body else {
+            panic!("expected router lsa")
+        };
+        let metrics = |t| {
+            body.links
+                .iter()
+                .filter(|l| l.link_type == t)
+                .map(|l| l.metric)
+                .collect()
+        };
+        (
+            lsa.header.age,
+            metrics(LINK_TYPE_POINT_TO_POINT),
+            metrics(LINK_TYPE_STUB_NETWORK),
+        )
+    }
+
+    /// A p2p pair at `Full`, A with a loopback; `a_max_metric` is set on A
+    /// before its first resync, like `reconcile.rs` does.
+    async fn stub_router_pair(
+        a_max_metric: (Option<u32>, Option<u8>, bool),
+    ) -> (Arc<LinkManager>, Arc<LinkManager>) {
+        let wire = Arc::new(wire::Wire::default());
+        let (a, b) = (router(&wire), router(&wire));
+        a.set_max_metric(a_max_metric.0, a_max_metric.1, a_max_metric.2);
+        a.reconcile(
+            vec![wired_link([10, 0, 0, 1], 30, NetworkType::PointToPoint)],
+            stub("192.0.2.1/32"),
+            id(1),
+        )
+        .await;
+        b.reconcile(
+            vec![wired_link([10, 0, 0, 2], 30, NetworkType::PointToPoint)],
+            HashMap::new(),
+            id(2),
+        )
+        .await;
+        (a, b)
+    }
+
+    /// RFC 6987 on-startup: max-metric transit links for the configured
+    /// period, then normal costs; stub links (and B's route to A's loopback)
+    /// never change.
+    #[tokio::test(start_paused = true)]
+    async fn on_startup_max_metric_lasts_its_period() {
+        let (a, b) = stub_router_pair((Some(60), None, false)).await;
+        settle(40).await;
+        assert!(a.max_metric_active());
+        let (_, p2p, stubs) = router_lsa_at(&b, id(1)).await;
+        assert_eq!(p2p, [lsa::MAX_LINK_METRIC]);
+        assert!(stubs.iter().all(|&m| m == 1), "{stubs:?}");
+        assert!(routes_to(&b, "192.0.2.1/32").await);
+
+        settle(40).await;
+        assert!(!a.max_metric_active());
+        assert_eq!(router_lsa_at(&b, id(1)).await.1, [1]);
+        // Later resyncs never re-arm it.
+        a.set_max_metric(Some(60), None, false);
+        assert!(!a.max_metric_active());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn on_startup_is_armed_once_cleared_by_none_and_skipped_after_graceful_restart() {
+        let m = LinkManager::new(1, None, crate::boot::BootCounter::in_memory());
+        m.set_max_metric(Some(60), None, false);
+        assert!(m.max_metric_active());
+        m.set_max_metric(None, None, false);
+        assert!(!m.max_metric_active());
+        m.set_max_metric(None, None, true);
+        assert!(m.max_metric_active());
+
+        let restarted = LinkManager::new(1, None, crate::boot::BootCounter::in_memory());
+        restarted.set_after_graceful_restart(true);
+        restarted.set_max_metric(Some(60), None, false);
+        assert!(!restarted.max_metric_active());
+    }
+
+    /// RFC 6987 on-shutdown: B installs A's max-metric Router-LSA at once
+    /// (the flood kick, well inside `RXMT_INTERVAL`), then the flushed copy
+    /// of that same instance once the hold is over.
+    #[tokio::test(start_paused = true)]
+    async fn on_shutdown_advertises_max_metric_before_the_flush() {
+        let (a, b) = stub_router_pair((None, Some(3), false)).await;
+        settle(60).await;
+        assert_eq!(router_lsa_at(&b, id(1)).await.1, [1]);
+
+        let stopping = Arc::clone(&a);
+        let task = tokio::spawn(async move { stopping.shutdown().await });
+        settle(1).await;
+        let (age, p2p, _) = router_lsa_at(&b, id(1)).await;
+        assert_eq!(p2p, [lsa::MAX_LINK_METRIC]);
+        assert!(age < lsa::MAX_AGE);
+        settle(3).await;
+        let (age, p2p, _) = router_lsa_at(&b, id(1)).await;
+        assert_eq!((age, p2p), (lsa::MAX_AGE, vec![lsa::MAX_LINK_METRIC]));
+        task.await.unwrap();
+    }
+
+    /// A Router-LSA that changed under `MinLSInterval` ago skips on-shutdown;
+    /// the flush still happens.
+    #[tokio::test(start_paused = true)]
+    async fn on_shutdown_is_skipped_when_the_router_lsa_just_changed() {
+        let (a, b) = stub_router_pair((None, Some(3), false)).await;
+        settle(60).await;
+        a.set_prefix_suppression(true);
+        settle(2).await;
+        let stopping = Arc::clone(&a);
+        let task = tokio::spawn(async move { stopping.shutdown().await });
+        settle(2).await;
+        let (age, p2p, _) = router_lsa_at(&b, id(1)).await;
+        assert_eq!((age, p2p), (lsa::MAX_AGE, vec![1]));
+        task.await.unwrap();
     }
 
     /// Without a configured grace period, SIGTERM's announce is a no-op and

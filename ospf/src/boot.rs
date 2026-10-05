@@ -82,9 +82,68 @@ fn write_count(path: &Path, n: u32) -> io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// RFC 3623 graceful-restart marker (`<instance>.gr`): the grace deadline in
+/// unix seconds, written before the Grace-LSAs go out so the respawned
+/// process skips RFC 6987's on-startup period while its helpers keep the old
+/// topology. Atomic, like the boot count.
+pub fn write_grace_marker(path: &Path, deadline: u64) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, deadline.to_string())?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Consumes the marker (deleted whatever its content): `true` only if its
+/// deadline is still ahead of `now` and at most a `u16` grace period away
+/// (rejects a clock jump or garbage). Missing, unreadable or corrupt: `false`.
+pub fn take_grace_marker(path: &Path, now: u64) -> bool {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return false,
+        Err(e) => {
+            warn!(error = %e, "cannot read ospf graceful restart marker");
+            String::new()
+        }
+    };
+    if let Err(e) = std::fs::remove_file(path) {
+        warn!(error = %e, "cannot delete ospf graceful restart marker");
+    }
+    if let Ok(deadline) = content.trim().parse::<u64>() {
+        now < deadline && deadline <= now + u64::from(u16::MAX)
+    } else {
+        warn!("corrupt ospf graceful restart marker, ignoring");
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grace_marker_is_consumed_once_and_checked() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- test scratch dir, not a security boundary.
+        let dir = std::env::temp_dir().join(format!("nos-gr-{}", std::process::id()));
+        let path = dir.join("i.gr");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!take_grace_marker(&path, 1000));
+        write_grace_marker(&path, 1120).unwrap();
+        assert!(take_grace_marker(&path, 1000));
+        assert!(!path.exists());
+        assert!(!take_grace_marker(&path, 1000));
+        // At or past the deadline.
+        write_grace_marker(&path, 1000).unwrap();
+        assert!(!take_grace_marker(&path, 1000));
+        // Further ahead than any u16 grace period.
+        write_grace_marker(&path, 1000 + 65_536).unwrap();
+        assert!(!take_grace_marker(&path, 1000));
+        std::fs::write(&path, "garbage").unwrap();
+        assert!(!take_grace_marker(&path, 1000));
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn increments_and_survives_restart() {
