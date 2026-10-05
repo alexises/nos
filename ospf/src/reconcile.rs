@@ -143,10 +143,18 @@ async fn resync(
         area_count = own.areas.len(),
         graceful_restart_grace_period = ?own.graceful_restart_grace_period,
         prefix_suppression = own.prefix_suppression,
+        max_metric_on_startup = ?own.max_metric_on_startup,
+        max_metric_on_shutdown = ?own.max_metric_on_shutdown,
+        max_metric_administrative = own.max_metric_administrative,
         "ospf instance config resolved"
     );
     links.set_graceful_restart(own.graceful_restart_grace_period);
     links.set_prefix_suppression(own.prefix_suppression);
+    links.set_max_metric(
+        own.max_metric_on_startup,
+        own.max_metric_on_shutdown,
+        own.max_metric_administrative,
+    );
     links.set_area_settings(area_settings(&own.areas)).await;
 
     let mut desired_links = Vec::new();

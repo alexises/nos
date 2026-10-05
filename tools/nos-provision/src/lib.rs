@@ -803,6 +803,18 @@ pub struct Args {
     /// `--ospf-instance`): `true` turns it on, `false` off.
     #[arg(long)]
     pub ospf_prefix_suppression: Option<bool>,
+    /// RFC 6987 `max-metric router-lsa on-startup <secs>` for that instance
+    /// (requires `--ospf-instance`); `0` clears it.
+    #[arg(long)]
+    pub ospf_max_metric_on_startup: Option<u32>,
+    /// RFC 6987 `max-metric router-lsa on-shutdown <secs>` for that instance
+    /// (requires `--ospf-instance`); `0` clears it.
+    #[arg(long)]
+    pub ospf_max_metric_on_shutdown: Option<u8>,
+    /// RFC 6987 `max-metric router-lsa administrative` for that instance
+    /// (requires `--ospf-instance`): `true` turns it on, `false` off.
+    #[arg(long)]
+    pub ospf_max_metric_administrative: Option<bool>,
 
     /// If set (requires `--ospf-instance`), ensures this OSPF area under it
     /// (`OspfAreaOp::Ensure`).
@@ -2060,6 +2072,30 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         if let Some(enabled) = args.ospf_prefix_suppression {
             ops.push(ConfigOp::OspfInstance(
                 OspfInstanceOp::SetPrefixSuppression {
+                    name: name.clone(),
+                    enabled,
+                },
+            ));
+        }
+        if let Some(seconds) = args.ospf_max_metric_on_startup {
+            ops.push(ConfigOp::OspfInstance(
+                OspfInstanceOp::SetMaxMetricOnStartup {
+                    name: name.clone(),
+                    seconds: (seconds != 0).then_some(seconds),
+                },
+            ));
+        }
+        if let Some(seconds) = args.ospf_max_metric_on_shutdown {
+            ops.push(ConfigOp::OspfInstance(
+                OspfInstanceOp::SetMaxMetricOnShutdown {
+                    name: name.clone(),
+                    seconds: (seconds != 0).then_some(seconds),
+                },
+            ));
+        }
+        if let Some(enabled) = args.ospf_max_metric_administrative {
+            ops.push(ConfigOp::OspfInstance(
+                OspfInstanceOp::SetMaxMetricAdministrative {
                     name: name.clone(),
                     enabled,
                 },

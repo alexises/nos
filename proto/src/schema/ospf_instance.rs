@@ -80,6 +80,33 @@ pub struct OspfInstance {
     #[garde(skip)]
     #[cli(topic = OspfInstancePrefixSuppression)]
     pub prefix_suppression: bool,
+
+    /// RFC 6987 stub router for this many seconds (5-86400) after
+    /// `nos-ospfd` starts: every transit link in its Router-LSA costs 65535,
+    /// so traffic avoids the router while its routes converge; its own
+    /// prefixes stay reachable. Takes effect on the next start, and is
+    /// skipped after an RFC 3623 graceful restart. `None` (default) disables
+    /// it, and ends a period that is still running.
+    #[serde(default)]
+    #[garde(range(min = 5, max = 86400))]
+    #[cli(topic = OspfInstanceMaxMetricOnStartup, words = "max-metric router-lsa on-startup")]
+    pub max_metric_on_startup: Option<u32>,
+
+    /// RFC 6987 stub router for this many seconds (1-3) when `nos-ospfd`
+    /// stops (not on a graceful restart), before it withdraws its LSAs, so
+    /// traffic moves away first. At most 3s: that plus the 6s withdrawal fits
+    /// `nos-watchdogd`'s 10s stop budget. `None` (default) disables it.
+    #[serde(default)]
+    #[garde(range(min = 1, max = 3))]
+    #[cli(topic = OspfInstanceMaxMetricOnShutdown, words = "max-metric router-lsa on-shutdown")]
+    pub max_metric_on_shutdown: Option<u8>,
+
+    /// RFC 6987 stub router until turned off — drains transit traffic before
+    /// maintenance. Off by default.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = OspfInstanceMaxMetricAdministrative, words = "max-metric router-lsa administrative")]
+    pub max_metric_administrative: bool,
 }
 
 /// The placeholder a new `OspfInstance` starts from (`edit` on a missing one).
@@ -93,6 +120,9 @@ impl Default for OspfInstance {
             redistribute_policy: None,
             graceful_restart_grace_period: None,
             prefix_suppression: false,
+            max_metric_on_startup: None,
+            max_metric_on_shutdown: None,
+            max_metric_administrative: false,
         }
     }
 }
@@ -133,6 +163,9 @@ mod tests {
             redistribute_policy: None,
             graceful_restart_grace_period: None,
             prefix_suppression: false,
+            max_metric_on_startup: None,
+            max_metric_on_shutdown: None,
+            max_metric_administrative: false,
         }
     }
 
@@ -159,6 +192,23 @@ mod tests {
     fn distinct_names_pass() {
         let cfg = config_with(vec![instance("vrf-a"), instance("vrf-b")]);
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn max_metric_ranges_are_enforced() {
+        let with = |startup, shutdown| {
+            let mut i = instance("o1");
+            i.max_metric_on_startup = startup;
+            i.max_metric_on_shutdown = shutdown;
+            let cfg = config_with(vec![i]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(with(Some(5), Some(1)));
+        assert!(with(Some(86400), Some(3)));
+        assert!(!with(Some(4), None));
+        assert!(!with(Some(86401), None));
+        assert!(!with(None, Some(0)));
+        assert!(!with(None, Some(4)));
     }
 
     #[test]

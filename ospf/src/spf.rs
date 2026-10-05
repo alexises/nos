@@ -37,10 +37,10 @@ use std::sync::Arc;
 use ipnet::Ipv4Net;
 
 use crate::lsa::{
-    AsExternalLsaBody, Lsa, LsaBody, NetworkLsaBody, RouterLsaBody, SummaryLsaBody,
+    AsExternalLsaBody, Lsa, LsaBody, NetworkLsaBody, RouterLink, RouterLsaBody, SummaryLsaBody,
     LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK, LINK_TYPE_TRANSIT_NETWORK,
     LSA_TYPE_ASBR_SUMMARY, LSA_TYPE_AS_EXTERNAL, LSA_TYPE_NETWORK_SUMMARY, LSA_TYPE_NSSA_EXTERNAL,
-    MAX_AGE, OPTION_P, ROUTER_FLAG_B, ROUTER_FLAG_NT,
+    MAX_AGE, MAX_LINK_METRIC, OPTION_P, ROUTER_FLAG_B, ROUTER_FLAG_NT,
 };
 
 /// `ponytail:` RFC 2328 §16.4's E1/E2 external-metric-type distinction is not
@@ -309,15 +309,22 @@ fn alternates(
     let Some(root_lsa) = routers.get(&root) else {
         return Vec::new();
     };
-    // (neighbor router-id, its address toward us, our cost to it)
+    // (neighbor router-id, its address toward us, our cost to it). RFC 5286
+    // §3.5: never along a link whose cost or reverse cost (the neighbor's own
+    // link back to root, or to the network) is LSInfinity — an RFC 6987 stub
+    // router on either end.
     let mut candidates: Vec<(Ipv4Addr, Ipv4Addr, u32)> = Vec::new();
-    for l in &root_lsa.links {
+    for l in root_lsa
+        .links
+        .iter()
+        .filter(|l| l.metric != MAX_LINK_METRIC)
+    {
         match l.link_type {
             LINK_TYPE_POINT_TO_POINT => {
-                if let Some(addr) =
-                    own_link_data(routers, l.link_id, LINK_TYPE_POINT_TO_POINT, root)
+                if let Some(back) = own_link(routers, l.link_id, LINK_TYPE_POINT_TO_POINT, root)
+                    .filter(|b| b.metric != MAX_LINK_METRIC)
                 {
-                    candidates.push((l.link_id, addr, u32::from(l.metric)));
+                    candidates.push((l.link_id, back.link_data, u32::from(l.metric)));
                 }
             }
             LINK_TYPE_TRANSIT_NETWORK => {
@@ -325,10 +332,10 @@ fn alternates(
                     continue;
                 };
                 for &r in net.attached_routers.iter().filter(|&&r| r != root) {
-                    if let Some(addr) =
-                        own_link_data(routers, r, LINK_TYPE_TRANSIT_NETWORK, l.link_id)
+                    if let Some(back) = own_link(routers, r, LINK_TYPE_TRANSIT_NETWORK, l.link_id)
+                        .filter(|b| b.metric != MAX_LINK_METRIC)
                     {
-                        candidates.push((r, addr, u32::from(l.metric)));
+                        candidates.push((r, back.link_data, u32::from(l.metric)));
                     }
                 }
             }
@@ -641,11 +648,22 @@ fn own_link_data(
     link_type: u8,
     target: Ipv4Addr,
 ) -> Option<Ipv4Addr> {
+    own_link(routers, router, link_type, target).map(|l| l.link_data)
+}
+
+/// `own_link_data`'s whole link — its metric is the reverse cost RFC 5286
+/// §3.5 checks.
+fn own_link<'a>(
+    routers: &HashMap<Ipv4Addr, &'a RouterLsaBody>,
+    router: Ipv4Addr,
+    link_type: u8,
+    target: Ipv4Addr,
+) -> Option<&'a RouterLink> {
     routers
         .get(&router)?
         .links
         .iter()
-        .find_map(|l| (l.link_type == link_type && l.link_id == target).then_some(l.link_data))
+        .find(|l| l.link_type == link_type && l.link_id == target)
 }
 
 /// Transit-network destinations (Network-LSA vertices reached by SPF),
@@ -1716,6 +1734,117 @@ mod tests {
         let r = route_to(&routes, "192.168.2.0/24");
         assert_eq!(r.next_hops, vec![addr(10, 0, 12, 2)]);
         assert_eq!(r.backup_next_hop, None);
+    }
+
+    /// `triangle(1)` with `router`'s transit links at `MAX_LINK_METRIC`.
+    fn triangle_with_stub_router(router: Ipv4Addr) -> Vec<Arc<Lsa>> {
+        triangle(1)
+            .into_iter()
+            .map(|l| {
+                if l.header.advertising_router != router {
+                    return l;
+                }
+                let LsaBody::Router(body) = &l.body else {
+                    unreachable!()
+                };
+                let links = body
+                    .links
+                    .iter()
+                    .map(|rl| RouterLink {
+                        metric: if rl.link_type == LINK_TYPE_STUB_NETWORK {
+                            rl.metric
+                        } else {
+                            MAX_LINK_METRIC
+                        },
+                        ..*rl
+                    })
+                    .collect();
+                router_lsa(router, links)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stub_router_neighbor_is_never_an_alternate() {
+        // RFC 5286 §3.5: 3's reverse cost to root is LSInfinity.
+        let routes = compute(router_id(1), &triangle_with_stub_router(router_id(3)));
+        let r = route_to(&routes, "192.168.2.0/24");
+        assert_eq!(r.next_hops, vec![addr(10, 0, 12, 2)]);
+        assert_eq!(r.backup_next_hop, None);
+    }
+
+    #[test]
+    fn stub_router_root_has_no_alternates() {
+        // Root's own links are LSInfinity: no alternate at all.
+        let routes = compute(router_id(1), &triangle_with_stub_router(router_id(1)));
+        let r = route_to(&routes, "192.168.2.0/24");
+        assert_eq!(r.backup_next_hop, None);
+    }
+
+    #[test]
+    fn stub_router_on_a_transit_network_is_never_an_alternate() {
+        // root — 2 over p2p; root and 3 on one LAN (3 is DR); 3 — 2 over
+        // p2p; 2 owns a stub. 3 is a loop-free alternate until its link to
+        // the LAN (its reverse cost) is LSInfinity.
+        let (root, r2, r3) = (router_id(1), router_id(2), router_id(3));
+        let dr = addr(10, 0, 9, 3);
+        let lsas = |r3_cost| {
+            vec![
+                router_lsa(
+                    root,
+                    vec![
+                        p2p(r2, addr(10, 0, 12, 1), 1),
+                        transit(dr, addr(10, 0, 9, 1), 1),
+                    ],
+                ),
+                router_lsa(
+                    r2,
+                    vec![
+                        p2p(root, addr(10, 0, 12, 2), 1),
+                        p2p(r3, addr(10, 0, 23, 2), 1),
+                        stub(addr(192, 168, 2, 0), addr(255, 255, 255, 0), 1),
+                    ],
+                ),
+                router_lsa(
+                    r3,
+                    vec![transit(dr, dr, r3_cost), p2p(r2, addr(10, 0, 23, 3), 1)],
+                ),
+                network_lsa(dr, addr(255, 255, 255, 0), vec![root, r3]),
+            ]
+        };
+        let r = route_to(&compute(root, &lsas(1)), "192.168.2.0/24");
+        assert_eq!(r.next_hops, vec![addr(10, 0, 12, 2)]);
+        assert_eq!(r.backup_next_hop, Some(dr));
+        let r = route_to(&compute(root, &lsas(MAX_LINK_METRIC)), "192.168.2.0/24");
+        assert_eq!(r.next_hops, vec![addr(10, 0, 12, 2)]);
+        assert_eq!(r.backup_next_hop, None);
+    }
+
+    #[test]
+    fn stub_router_still_carries_transit_when_it_is_the_only_path() {
+        // RFC 6987 §3: MaxLinkMetric is not unreachable. Root reaches 3's
+        // neighbor 2 only through 3, a stub router.
+        let (root, r2, r3) = (router_id(1), router_id(2), router_id(3));
+        let lsas = [
+            router_lsa(root, vec![p2p(r3, addr(10, 0, 13, 1), 1)]),
+            router_lsa(
+                r3,
+                vec![
+                    p2p(root, addr(10, 0, 13, 3), MAX_LINK_METRIC),
+                    p2p(r2, addr(10, 0, 23, 3), MAX_LINK_METRIC),
+                ],
+            ),
+            router_lsa(
+                r2,
+                vec![
+                    p2p(r3, addr(10, 0, 23, 2), 1),
+                    stub(addr(192, 168, 2, 0), addr(255, 255, 255, 0), 1),
+                ],
+            ),
+        ];
+        let r = route_to(&compute(root, &lsas), "192.168.2.0/24");
+        assert_eq!(r.next_hops, vec![addr(10, 0, 13, 3)]);
+        assert_eq!(r.metric, 1 + u32::from(MAX_LINK_METRIC) + 1);
     }
 
     #[test]

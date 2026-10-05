@@ -472,6 +472,144 @@ pub async fn ospf_lfa(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&removed, r0, 60).await
 }
 
+/// RFC 6987 stub router on router-c (requires `ospf-lfa`: router-c on the
+/// bridge, router-b's loopback addressed but out of OSPF). Router-c is
+/// router-a's loop-free alternate to router-b's loopback; while router-c
+/// advertises max-metric transit links, RFC 5286 §3.5 forbids it as an
+/// alternate, so router-a drops the backup route and keeps the primary.
+/// Administrative first, then on-shutdown and on-startup across one restart.
+#[allow(clippy::too_many_lines)]
+pub async fn ospf_stub_router(w: &mut World) -> anyhow::Result<()> {
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let lo = OSPF_SPF_LOOPBACK_ADDRESS;
+    let primary = format!("added route prefix={lo}.*source=Some(Ospf) backup=false");
+    let backup_added = format!("added route prefix={lo}.*source=Some(Ospf) backup=true");
+    let backup_removed = format!("removed route prefix={lo}.*backup=true");
+    let primary_removed = format!("removed route prefix={lo}.*backup=false");
+    let c_flags = |extra: &[&str]| {
+        let mut flags = strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            OSPF_ROUTER_ID_C,
+        ]);
+        flags.extend(strings(extra));
+        flags
+    };
+    let changed = |active: bool, reason: &str| {
+        format!("ospf stub router max-metric changed active={active} reason=\"{reason}\"")
+    };
+
+    let (p0, b0) = (a.count(&primary), a.count(&backup_added));
+    b.provision(&[
+        "--loopback-address",
+        lo,
+        "--ospf-loopback-profile",
+        OSPF_PROFILE,
+    ])
+    .await?;
+    a.wait_new(&primary, p0, 60).await?;
+    a.wait_new(&backup_added, b0, 60).await?;
+    let primary_removed0 = a.count(&primary_removed);
+
+    log("router-c: max-metric router-lsa administrative; router-a must drop its lfa via c");
+    let (r0, on0) = (
+        a.count(&backup_removed),
+        c.count(&changed(true, "administrative")),
+    );
+    c.provision(&c_flags(&["--ospf-max-metric-administrative", "true"]))
+        .await?;
+    c.wait_new(&changed(true, "administrative"), on0, 30)
+        .await?;
+    a.wait_new(&backup_removed, r0, 60).await?;
+
+    log("router-c: administrative off; router-a must re-add the lfa");
+    let (b0, off0) = (a.count(&backup_added), c.count(&changed(false, "cleared")));
+    c.provision(&c_flags(&["--ospf-max-metric-administrative", "false"]))
+        .await?;
+    c.wait_new(&changed(false, "cleared"), off0, 30).await?;
+    a.wait_new(&backup_added, b0, 60).await?;
+
+    // On-shutdown + on-startup across one stop. No grace period on router-c,
+    // so no graceful-restart marker. On-startup is armed only by a fresh start.
+    // 60s: long enough to outlast the respawn and the new adjacency.
+    let resolved = "ospf instance config resolved.*max_metric_on_startup=Some(60) max_metric_on_shutdown=Some(3)";
+    let (res0, armed0) = (c.count(resolved), c.count(&changed(true, "on-startup")));
+    c.provision(&c_flags(&[
+        "--ospf-max-metric-on-shutdown",
+        "3",
+        "--ospf-max-metric-on-startup",
+        "60",
+    ]))
+    .await?;
+    c.wait_new(resolved, res0, 30).await?;
+    // Clear of MinLSInterval since c's last Router-LSA change, so on-shutdown
+    // isn't skipped; and on-startup must not arm on a running process.
+    c.assert_quiet(&changed(true, "on-startup"), armed0, 6)
+        .await?;
+
+    // A fresh (age below MaxAge) router-c Router-LSA on router-a: the
+    // origination tick is gated off after the signal, so only on-shutdown
+    // produces one before the flush (the respawned process's own first
+    // instance waits for the flushed copy's MaxAge hold to expire).
+    // (`logs::bre` has no `\{m,n\}`: one to three digits, never MaxAge 3600.)
+    let fresh = ["[0-9]", "[0-9][0-9]", "[0-9][0-9][0-9]"]
+        .map(|age| {
+            format!(
+                "ospf lsa installed.*lsa_type=1 link_state_id={OSPF_ROUTER_ID_C} advertising_router={OSPF_ROUTER_ID_C} age={age}$"
+            )
+        })
+        .join("\\|");
+    let full_c = format!(
+        "ospf neighbor reached full link=broadcast-domain:{BD} neighbor={OSPF_ROUTER_ID_C}"
+    );
+    let (fresh0, sd0, flush0, r0, st0, full0, exp0) = (
+        a.count(&fresh),
+        c.count(&changed(true, "on-shutdown")),
+        c.count("ospf flushing self-originated lsas before shutdown"),
+        a.count(&backup_removed),
+        c.count(&changed(true, "on-startup")),
+        a.count(&full_c),
+        c.count(&changed(false, "expired")),
+    );
+    log("sending SIGINT to router-c's nos-ospfd; it must advertise max-metric before flushing");
+    w.dock
+        .signal_process("router-c", "nos-ospfd", "-INT")
+        .await?;
+    c.wait_new(&changed(true, "on-shutdown"), sd0, 30).await?;
+    a.wait_new(&fresh, fresh0, 10).await?;
+    a.wait_new(&backup_removed, r0, 30).await?;
+    c.wait_new(
+        "ospf flushing self-originated lsas before shutdown",
+        flush0,
+        30,
+    )
+    .await?;
+
+    log("router-c respawns with on-startup max-metric: back in the lsdb, not an lfa");
+    c.wait_new(&changed(true, "on-startup"), st0, 90).await?;
+    a.wait_new(&full_c, full0, 90).await?;
+    let b0 = a.count(&backup_added);
+    a.assert_quiet(&backup_added, b0, 10).await?;
+    // Still inside the period: the quiet window above proved something.
+    c.assert_quiet(&changed(false, "expired"), exp0, 0).await?;
+    c.wait_new(&changed(false, "expired"), exp0, 90).await?;
+    a.wait_new(&backup_added, b0, 60).await?;
+    a.assert_quiet(&primary_removed, primary_removed0, 0)
+        .await?;
+
+    log("restoring: router-c's max-metric off, router-b's loopback out of ospf");
+    c.provision(&c_flags(&[
+        "--ospf-max-metric-on-shutdown",
+        "0",
+        "--ospf-max-metric-on-startup",
+        "0",
+    ]))
+    .await?;
+    b.provision(&["--clear-ospf-loopback-profile"]).await?;
+    a.wait_ospf_route_gone(lo, 15).await
+}
+
 /// Waits up to `secs` until `r`'s rt1 does (`want`) or doesn't list an OSPF
 /// candidate for `SUBNET`.
 async fn subnet_ospf_candidate(r: &Router, want: bool, secs: u32) -> anyhow::Result<()> {
@@ -699,7 +837,11 @@ pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
 /// restarted with SIGTERM. It must send a Grace-LSA and keep its LSAs instead
 /// of flushing them, and router-b must help: hold the eth0.0 adjacency and
 /// keep router-a's loopback route installed through the whole restart, then
-/// resynchronize with the respawned process.
+/// resynchronize with the respawned process. With RFC 6987 on-shutdown and
+/// on-startup also configured, neither may change the Router-LSA across the
+/// restart (RFC 3623 §3.2 (c)): on-shutdown is skipped under the grace period,
+/// and the respawned process skips on-startup through the marker file.
+#[allow(clippy::too_many_lines)]
 pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let instance = |extra: &[&str]| {
@@ -717,6 +859,10 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         instance(&[
             "--ospf-graceful-restart-grace-period",
             "120",
+            "--ospf-max-metric-on-startup",
+            "30",
+            "--ospf-max-metric-on-shutdown",
+            "3",
             "--loopback-address",
             OSPF_GR_LOOPBACK_ADDRESS,
             "--ospf-loopback-profile",
@@ -724,7 +870,7 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         ]),
     ))
     .await?;
-    a.wait("ospf instance config resolved.*graceful_restart_grace_period=Some(120)")
+    a.wait("ospf instance config resolved.*graceful_restart_grace_period=Some(120).*max_metric_on_startup=Some(30) max_metric_on_shutdown=Some(3)")
         .await?;
     b.wait(&format!(
         "added route prefix={OSPF_GR_LOOPBACK_ADDRESS}.*source=Some(Ospf)"
@@ -742,6 +888,10 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         b.count(&full_on_b),
         a.count(&full_on_a),
     );
+    let max_metric_on = "ospf stub router max-metric changed active=true";
+    let marker = "ospf graceful restart marker written";
+    let skipped = "ospf stub router on-startup skipped after graceful restart";
+    let (mm0, marker0, skipped0) = (a.count(max_metric_on), a.count(marker), a.count(skipped));
     log("sending SIGTERM to router-a's nos-ospfd; it must announce a grace period first");
     w.dock
         .signal_process("router-a", "nos-ospfd", "-TERM")
@@ -757,6 +907,8 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
             "ospf helper: grace period entered link=eth0.0 neighbor={OSPF_ROUTER_ID} grace_period=120 restart_reason=1"
         ))
         .await?;
+        a.wait_new(marker, marker0, 30).await?;
+        a.wait_new(skipped, skipped0, 90).await?;
         // The watchdog respawns router-a; the fresh process resynchronizes
         // with the neighbor that held it Full the whole time.
         b.wait_new(&full_on_b, full_b0, 90).await?;
@@ -792,12 +944,18 @@ pub async fn ospf_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     a.assert_quiet(flush_on_a, flush_a0, 0).await?;
     b.assert_quiet(torn, torn0, 0).await?;
     b.assert_quiet(&flushed, flushed0, 0).await?;
+    // Neither on-shutdown nor on-startup ever turned max-metric on.
+    a.assert_quiet(max_metric_on, mm0, 10).await?;
 
     log("restoring router-a: loopback out of ospf, graceful restart off");
     a.provision_flags(&with_base(
         A,
         instance(&[
             "--ospf-graceful-restart-grace-period",
+            "0",
+            "--ospf-max-metric-on-startup",
+            "0",
+            "--ospf-max-metric-on-shutdown",
             "0",
             "--loopback-remove-address",
             OSPF_GR_LOOPBACK_ADDRESS,
@@ -1285,6 +1443,47 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
     )
     .await?;
 
+    // RFC 6987 against an independent SPF: with router-a a stub router, FRR
+    // (whose only way to router-b is through router-a) reaches router-b's
+    // loopback at a cost of at least 65535 — used, since it is the only path
+    // — while router-a's own eth0.0 subnet (a type-3 stub, which keeps its
+    // cost) stays cheap.
+    log("router-a: max-metric router-lsa administrative; FRR must route through it at >= 65535");
+    let lo = OSPF_SPF_LOOPBACK_ADDRESS;
+    b.provision(&[
+        "--loopback-address",
+        lo,
+        "--ospf-loopback-profile",
+        OSPF_PROFILE,
+    ])
+    .await?;
+    frr_until(w, "show ip ospf route", 60, |out| {
+        frr_route_cost(out, lo).is_some_and(|c| c < 65535)
+    })
+    .await?;
+    let max_metric = |on: bool| {
+        strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            OSPF_ROUTER_ID,
+            "--ospf-max-metric-administrative",
+            &on.to_string(),
+        ])
+    };
+    a.provision(&max_metric(true)).await?;
+    frr_until(w, "show ip ospf route", 60, |out| {
+        frr_route_cost(out, lo).is_some_and(|c| c >= 65535)
+            && frr_route_cost(out, SUBNET).is_some_and(|c| c < 65535)
+    })
+    .await?;
+    a.provision(&max_metric(false)).await?;
+    frr_until(w, "show ip ospf route", 60, |out| {
+        frr_route_cost(out, lo).is_some_and(|c| c < 65535)
+    })
+    .await?;
+    b.provision(&["--clear-ospf-loopback-profile"]).await?;
+
     // RFC 2328 A.4.2 (#34): router-a becomes an ASBR (a redistributed static)
     // and an ABR (a loopback in area 1). FRR builds a router route — needed to
     // resolve a Type-5's ASBR or a Type-3's ABR — only from a Router-LSA with
@@ -1408,6 +1607,21 @@ fn specific(mut f: Vec<String>) -> Vec<String> {
 }
 
 /// Polls `vtysh -c <cmd>` on router-f every second until `ok` holds.
+/// The cost FRR's `show ip ospf route` lists for `prefix`
+/// (`N    203.0.113.80/32    [65537] area: 0.0.0.0`).
+fn frr_route_cost(out: &str, prefix: &str) -> Option<u32> {
+    out.lines().find_map(|line| {
+        let mut words = line.split_whitespace();
+        (words.nth(1)? == prefix).then_some(())?;
+        words
+            .next()?
+            .strip_prefix('[')?
+            .strip_suffix(']')?
+            .parse()
+            .ok()
+    })
+}
+
 async fn frr_until(
     w: &World,
     cmd: &str,

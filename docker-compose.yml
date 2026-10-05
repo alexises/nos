@@ -29,6 +29,10 @@ services:
       - NET_ADMIN
       - NET_RAW
       - NET_BIND_SERVICE
+    # The watchdog gives each child up to 10s after SIGINT; nos-ospfd's RFC
+    # 6987 on-shutdown hold plus its LSA flush takes up to 9s of that. Docker's
+    # own 10s default would SIGKILL the whole container first.
+    stop_grace_period: 15s
     volumes:
       - nos-run:/run/nos
       - nos-data:/var/lib/nos

@@ -66,9 +66,11 @@ pub const ROUTER_INFO_LINK_STATE_ID: Ipv4Addr = Ipv4Addr::new(OPAQUE_TYPE_ROUTER
 /// RFC 7770 §2.3: the Router Informational Capabilities TLV.
 const TLV_RI_CAPABILITIES: u16 = 1;
 /// RFC 7770 §2.4 capability bits, numbered from the most significant: bit 0
-/// graceful-restart capable, bit 1 graceful-restart helper (RFC 3623).
+/// graceful-restart capable, bit 1 graceful-restart helper (RFC 3623), bit
+/// 2 stub router support (RFC 6987).
 pub const RI_CAP_GR_CAPABLE: u32 = 1 << 31;
 pub const RI_CAP_GR_HELPER: u32 = 1 << 30;
+pub const RI_CAP_STUB_ROUTER: u32 = 1 << 29;
 
 /// An RI LSA body carrying only the Informational Capabilities TLV. Held as
 /// `LsaBody::Opaque`, like any other opaque body.
@@ -137,6 +139,11 @@ pub const MAX_AGE: u16 = 3600;
 /// reoriginated once its own age reaches this, even with unchanged content,
 /// so it never reaches `MAX_AGE` while its originator is still alive.
 pub const LS_REFRESH_TIME: u16 = 1800;
+
+/// RFC 6987 §3 `MaxLinkMetric`: the cost a stub router gives its transit
+/// (type 1/2) Router-LSA links. Not unreachable — a path through the router
+/// is still used when it's the only one. RFC 5286's `LSInfinity`.
+pub const MAX_LINK_METRIC: u16 = 0xFFFF;
 
 /// RFC 2328 §12.4 / Appendix B's `MinLSInterval` — the minimum age a
 /// self-originated instance must reach before it may be re-originated with

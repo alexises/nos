@@ -851,6 +851,18 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Hide transit-only networks (RFC 6860 prefix suppression).",
             "Leaves every point-to-point link's subnet out of this router's Router-LSA and gives the Network-LSA it originates as DR a /32 mask, so the rest of the area installs no route to those transit networks while still routing through them. Loopbacks are never hidden. The setting is instance-wide; enable it on every router attached to a network to hide it fully. `delete` turns it off.",
         ),
+        Topic::OspfInstanceMaxMetricOnStartup => (
+            "Advertise this router as a stub router for a while after it starts (RFC 6987).",
+            "For this many seconds (5-86400) after nos-ospfd starts, every transit link in this router's Router-LSA costs 65535, so traffic avoids the router while its routes converge; its own prefixes stay reachable at their normal cost. Takes effect on the next start. Skipped after a graceful restart, whose helpers keep the old topology. `delete` turns it off, and ends a period that is still running.",
+        ),
+        Topic::OspfInstanceMaxMetricOnShutdown => (
+            "Advertise this router as a stub router before it stops (RFC 6987).",
+            "When nos-ospfd stops (not a graceful restart), it first advertises every transit link at cost 65535 and holds that for this many seconds (1-3) before withdrawing its LSAs, so traffic moves away before the router disappears. Skipped when its Router-LSA changed in the last 5 seconds. 3 seconds is what fits in nos-watchdogd's 10-second stop budget beside the withdrawal. `delete` turns it off.",
+        ),
+        Topic::OspfInstanceMaxMetricAdministrative => (
+            "Advertise this router as a stub router until removed (RFC 6987).",
+            "Every transit link in this router's Router-LSA costs 65535 while set, so traffic avoids the router whenever another path exists — for draining it before maintenance. Its own prefixes stay reachable, and neighbors stop using it as a loop-free alternate. `delete` turns it off.",
+        ),
         Topic::OspfArea => (
             "Create an OSPF area in the transaction if it doesn't already exist.",
             concat!(
