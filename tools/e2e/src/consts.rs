@@ -306,6 +306,14 @@ pub const OSPF_ROUTER_ID_F: &str = "9.9.9.6";
 /// Scales nos-ospfd's LSA age clock: 1800/180 = 10s, 3600/180 = 20s.
 pub const OSPF_AGE_MULTIPLIER: u32 = 180;
 pub const ASBR_PREFIX: &str = "192.0.2.128/25";
+/// `asbr`/`ospf-opaque`: shares `ASBR_PREFIX`'s network address, so RFC 2328
+/// Appendix E gives its Type-5 the host-bits ID `ASBR_PREFIX_SPECIFIC_LSID`.
+pub const ASBR_PREFIX_SPECIFIC: &str = "192.0.2.128/26";
+pub const ASBR_PREFIX_SPECIFIC_LSID: &str = "192.0.2.191";
+/// `ospf-opaque`: FRR redistributes this overlapping pair; FRR's Appendix E
+/// is stateful, so which one carries host bits depends on origination order.
+pub const OSPF_FRR_EXTERNAL_WIDE: &str = "198.18.100.0/24";
+pub const OSPF_FRR_EXTERNAL_NARROW: &str = "198.18.100.0/25";
 pub const ASBR_GATEWAY: &str = "10.50.0.98";
 pub const MTU_VALUE: u32 = 9000;
 /// The RFC 791 minimum: resolves to one header per DBD packet.

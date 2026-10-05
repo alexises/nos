@@ -295,22 +295,26 @@ pub async fn asbr_phase(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let originated = a.count("ospf lsa originated.*lsa_type=5");
     let installed = b.count("ospf lsa installed.*lsa_type=5");
-    let route_pat = format!("added route prefix={ASBR_PREFIX}.*source=Some(Ospf)");
-    let route = b.count(&route_pat);
-    a.provision_flags(&with_base(A, asbr(ospf(OSPF_ROUTER_ID))))
+    let route_pat = |p: &str| format!("added route prefix={p} .*source=Some(Ospf)");
+    let route = b.count(&route_pat(ASBR_PREFIX));
+    let route_specific = b.count(&route_pat(ASBR_PREFIX_SPECIFIC));
+    // RFC 2328 Appendix E: a second static sharing ASBR_PREFIX's network
+    // address gets its own Type-5 at the host-bits link state id.
+    let specific_pat =
+        format!("ospf lsa originated lsa_type=5 link_state_id={ASBR_PREFIX_SPECIFIC_LSID} ");
+    let originated_specific = a.count(&specific_pat);
+    a.provision_flags(&with_base(A, specific(asbr(ospf(OSPF_ROUTER_ID)))))
         .await?;
 
     a.wait_new("ospf lsa originated.*lsa_type=5", originated, 60)
         .await?;
+    a.wait_new(&specific_pat, originated_specific, 60).await?;
     b.wait_new("ospf lsa installed.*lsa_type=5", installed, 60)
         .await?;
     // `add_route`'s source is an `Option<RouteSource>`, so it renders "Some(Ospf)".
-    b.wait_new(
-        &format!("added route prefix={ASBR_PREFIX}.*source=Some(Ospf)"),
-        route,
-        60,
-    )
-    .await?;
+    b.wait_new(&route_pat(ASBR_PREFIX), route, 60).await?;
+    b.wait_new(&route_pat(ASBR_PREFIX_SPECIFIC), route_specific, 60)
+        .await?;
 
     // RFC 2328 §14.1: dropping the redistribute rule must flush the Type-5 —
     // prematurely aged on router-a, MaxAge-flushed on router-b and its kernel
@@ -321,14 +325,20 @@ pub async fn asbr_phase(w: &mut World) -> anyhow::Result<()> {
     let flushed_pat =
         format!("ospf lsa maxage flushed.*lsa_type=5.*advertising_router={OSPF_ROUTER_ID}");
     let flushed = b.count(&flushed_pat);
-    let removed_pat = format!("removed route prefix={ASBR_PREFIX}");
-    let removed = b.count(&removed_pat);
-    log("removing the redistribute rule on router-a; its type-5 must be flushed");
+    let removed_pat = |p: &str| format!("removed route prefix={p} ");
+    let removed = b.count(&removed_pat(ASBR_PREFIX));
+    let removed_specific = b.count(&removed_pat(ASBR_PREFIX_SPECIFIC));
+    log("removing the redistribute rule on router-a; its type-5s must be flushed");
     a.provision(&["--clear-redistribute-to-ospf"]).await?;
     a.wait_new("ospf lsa prematurely aged.*lsa_type=5", aged, 30)
         .await?;
     b.wait_new(&flushed_pat, flushed, 30).await?;
-    b.wait_new(&removed_pat, removed, 30).await?;
+    b.wait_new(&removed_pat(ASBR_PREFIX), removed, 30).await?;
+    b.wait_new(&removed_pat(ASBR_PREFIX_SPECIFIC), removed_specific, 30)
+        .await?;
+    // Later phases redistribute rt1's statics again: keep that to ASBR_PREFIX.
+    a.provision(&["--remove-static-route", ASBR_PREFIX_SPECIFIC])
+        .await?;
 
     // RFC 2328 §13.5 delayed acknowledgment: router-b acks router-a's periodic
     // LSUs on its own RxmtInterval sweep, so some batch is held a second or
@@ -1176,7 +1186,7 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
     log("making router-a an asbr and an abr; FRR must see its E and B bits");
     a.provision_flags(&with_base(
         A,
-        asbr(strings(&[
+        specific(asbr(strings(&[
             "--ospf-instance",
             OSPF_INSTANCE,
             "--ospf-router-id",
@@ -1189,7 +1199,7 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
             OSPF_ABR_LOOPBACK_ADDRESS,
             "--ospf-loopback-profile",
             OSPF_PROFILE_AREA1,
-        ])),
+        ]))),
     ))
     .await?;
     frr_until(w, "show ip ospf border-routers", 60, |out| {
@@ -1197,10 +1207,51 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
             .any(|l| l.contains(OSPF_ROUTER_ID) && l.contains("ABR,") && l.contains("ASBR"))
     })
     .await?;
+    // ASBR_PREFIX_SPECIFIC travels at a host-bits link state id (RFC 2328
+    // Appendix E): FRR must still read it as its own prefix.
     frr_until(w, "show ip ospf route", 60, |out| {
-        out.contains(ASBR_PREFIX) && out.contains(OSPF_ABR_LOOPBACK_ADDRESS)
+        out.contains(ASBR_PREFIX)
+            && out.contains(ASBR_PREFIX_SPECIFIC)
+            && out.contains(OSPF_ABR_LOOPBACK_ADDRESS)
     })
     .await?;
+
+    // The other direction: FRR's own overlapping pair, one of them at a
+    // host-bits link state id, must become two routes with the right prefixes.
+    log("FRR redistributes two overlapping statics; router-a must learn both");
+    let (code, out) = w
+        .dock
+        .exec(
+            "router-f",
+            &[
+                "vtysh",
+                "-c",
+                "configure terminal",
+                "-c",
+                &format!("ip route {OSPF_FRR_EXTERNAL_WIDE} blackhole"),
+                "-c",
+                &format!("ip route {OSPF_FRR_EXTERNAL_NARROW} blackhole"),
+                "-c",
+                "router ospf",
+                "-c",
+                // ponytail: metric type 1, since nos drops the E (type-2)
+                // bit when it re-floods a Type-5 (#38), and FRR re-originates
+                // its LSA on every such echo. Type 2 once #38 lands.
+                "redistribute static metric-type 1",
+            ],
+        )
+        .await?;
+    anyhow::ensure!(code == 0, "FRR static redistribution failed: {out}");
+    // Any non-zero last octet: .127 (the /25) or .255 (the /24), depending
+    // on FRR's origination order.
+    a.wait(&format!(
+        r"ospf lsa installed {on_a} lsa_type=5 link_state_id=198\.18\.100\.[1-9][0-9]* .*advertising_router={OSPF_ROUTER_ID_F} "
+    ))
+    .await?;
+    for prefix in [OSPF_FRR_EXTERNAL_WIDE, OSPF_FRR_EXTERNAL_NARROW] {
+        a.wait(&format!("added route prefix={prefix} .*source=Some(Ospf)"))
+            .await?;
+    }
 
     log("FRR announces a graceful restart: a type-9 grace-lsa, link-local");
     let b9 = b.count(&from_frr(".*", 9));
@@ -1240,6 +1291,13 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
 
     w.dock.container_remove("router-f").await;
     Ok(())
+}
+
+/// Adds ASBR_PREFIX_SPECIFIC next to `asbr`'s ASBR_PREFIX: an overlapping
+/// pair, so one of the two Type-5s carries a host-bits link state id.
+fn specific(mut f: Vec<String>) -> Vec<String> {
+    f.extend(strings(&["--static-route", ASBR_PREFIX_SPECIFIC]));
+    f
 }
 
 /// Polls `vtysh -c <cmd>` on router-f every second until `ok` holds.

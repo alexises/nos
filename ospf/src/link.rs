@@ -2191,15 +2191,18 @@ impl LinkManager {
             // turned stub gets this router's own flushed), and a Type-7 only
             // in an NSSA.
             let mut lsdb = lsdb.lock().await;
-            for (&prefix, &metric) in &type5 {
+            // Type-5 and Type-7 are separate LS-ID spaces.
+            let mut type5_ids = HashSet::new();
+            for (prefix, id) in assign_link_state_ids(type5.keys().copied()) {
+                type5_ids.insert(id);
                 install_self_originated(
                     &mut lsdb,
                     local_router_id,
                     lsa::LSA_TYPE_AS_EXTERNAL,
-                    prefix.network(),
+                    id,
                     LsaBody::AsExternal(AsExternalLsaBody {
                         network_mask: prefix.netmask(),
-                        metric,
+                        metric: type5[&prefix],
                         // ponytail: a translated Type-5 doesn't carry the
                         // Type-7's forwarding address (§3.2 (3)), so traffic
                         // to it goes through the translator, not straight to
@@ -2209,12 +2212,15 @@ impl LinkManager {
                     }),
                 );
             }
-            for (&prefix, &(options, metric, forwarding_address)) in &type7 {
+            let mut type7_ids = HashSet::new();
+            for (prefix, id) in assign_link_state_ids(type7.keys().copied()) {
+                type7_ids.insert(id);
+                let (options, metric, forwarding_address) = type7[&prefix];
                 install_self_originated_with_options(
                     &mut lsdb,
                     local_router_id,
                     lsa::LSA_TYPE_NSSA_EXTERNAL,
-                    prefix.network(),
+                    id,
                     options,
                     LsaBody::AsExternal(AsExternalLsaBody {
                         network_mask: prefix.netmask(),
@@ -2227,14 +2233,8 @@ impl LinkManager {
             // RFC 2328 §14.1: a prefix no longer redistributed (or
             // translated) is flushed, not left to age out over `MAX_AGE`.
             for (lsa_type, desired) in [
-                (
-                    lsa::LSA_TYPE_AS_EXTERNAL,
-                    type5.keys().map(Ipv4Net::network).collect(),
-                ),
-                (
-                    lsa::LSA_TYPE_NSSA_EXTERNAL,
-                    type7.keys().map(Ipv4Net::network).collect(),
-                ),
+                (lsa::LSA_TYPE_AS_EXTERNAL, type5_ids),
+                (lsa::LSA_TYPE_NSSA_EXTERNAL, type7_ids),
             ] {
                 withdraw_undesired(&mut lsdb, local_router_id, lsa_type, &desired);
             }
@@ -2284,7 +2284,9 @@ impl LinkManager {
         for (dest_area, dest_lsdb) in &areas {
             let dest = settings.get(dest_area).cloned().unwrap_or_default();
             let mut dest_lsdb = dest_lsdb.lock().await;
-            let mut network_ids = HashSet::new();
+            // Collected first, so a prefix intra-area in two source areas is
+            // one Type-3 (the cheaper), and Appendix E sees the whole set.
+            let mut type3: HashMap<Ipv4Net, u32> = HashMap::new();
             let mut asbr_ids = HashSet::new();
             // RFC 2328 §12.4.3.1: an ABR sends a default Type-3 into a stub
             // area — and, totally stubby (no `ImportSummaries`), nothing else.
@@ -2292,40 +2294,15 @@ impl LinkManager {
             // them is the backbone.
             // RFC 3101 §2.3: into an NSSA, only when it's no-summary.
             if dest.stub && (!dest.nssa || !dest.import_summaries) && !per_area.is_empty() {
-                network_ids.insert(Ipv4Addr::UNSPECIFIED);
-                install_self_originated(
-                    &mut dest_lsdb,
-                    local_router_id,
-                    lsa::LSA_TYPE_NETWORK_SUMMARY,
-                    Ipv4Addr::UNSPECIFIED,
-                    LsaBody::Summary(SummaryLsaBody {
-                        network_mask: Ipv4Addr::UNSPECIFIED,
-                        metric: dest.default_cost,
-                    }),
-                );
+                type3.insert(Ipv4Net::default(), dest.default_cost);
             }
             for (src_area, (prefixes, asbrs)) in &per_area {
                 if src_area == dest_area || (dest.stub && !dest.import_summaries) {
                     continue;
                 }
                 for &(prefix, metric) in prefixes {
-                    // ponytail: if the identical prefix happens to be
-                    // intra-area in more than one source area (a subnet
-                    // spanning areas — not a real topology), the last
-                    // src_area processed here (HashMap iteration order) wins;
-                    // not worth cross-area coordination machinery for a case
-                    // that shouldn't occur.
-                    network_ids.insert(prefix.network());
-                    install_self_originated(
-                        &mut dest_lsdb,
-                        local_router_id,
-                        lsa::LSA_TYPE_NETWORK_SUMMARY,
-                        prefix.network(),
-                        LsaBody::Summary(SummaryLsaBody {
-                            network_mask: prefix.netmask(),
-                            metric,
-                        }),
-                    );
+                    let entry = type3.entry(prefix.trunc()).or_insert(metric);
+                    *entry = (*entry).min(metric);
                 }
                 // No ASBR-summary into a stub area or NSSA: it carries no
                 // Type-5.
@@ -2345,6 +2322,20 @@ impl LinkManager {
                         }),
                     );
                 }
+            }
+            let mut network_ids = HashSet::new();
+            for (prefix, id) in assign_link_state_ids(type3.keys().copied()) {
+                network_ids.insert(id);
+                install_self_originated(
+                    &mut dest_lsdb,
+                    local_router_id,
+                    lsa::LSA_TYPE_NETWORK_SUMMARY,
+                    id,
+                    LsaBody::Summary(SummaryLsaBody {
+                        network_mask: prefix.netmask(),
+                        metric: type3[&prefix],
+                    }),
+                );
             }
             // RFC 2328 §14.1: a prefix/ASBR no longer intra-area to some
             // other area is flushed, not left to age out over `MAX_AGE`.
@@ -2916,6 +2907,36 @@ fn withdraw_self_originated(lsdb: &mut Lsdb, key: &LsaKey) -> bool {
         "ospf lsa prematurely aged"
     );
     true
+}
+
+/// RFC 2328 Appendix E: the Link State ID of each of one LSA type's
+/// self-originated prefixes. Shortest mask first, a prefix takes its network
+/// address, or else that address with its host bits set — the end state of
+/// the RFC's own procedure, which re-originates the longer prefix when a
+/// shorter one turns up. Recomputed every tick, and sorted so it never
+/// churns. While a renumbered prefix's old ID is held back by
+/// `MinLSInterval`, both IDs carry it; receivers truncate (`spf::net_from`)
+/// and merge them.
+fn assign_link_state_ids(prefixes: impl IntoIterator<Item = Ipv4Net>) -> Vec<(Ipv4Net, Ipv4Addr)> {
+    let mut prefixes: Vec<Ipv4Net> = prefixes.into_iter().map(|p| p.trunc()).collect();
+    prefixes.sort_unstable_by_key(|p| (p.prefix_len(), p.network()));
+    prefixes.dedup();
+    let mut taken = HashSet::new();
+    prefixes
+        .into_iter()
+        .filter_map(|prefix| {
+            let id = [prefix.network(), prefix.broadcast()]
+                .into_iter()
+                .find(|&id| taken.insert(id));
+            if id.is_none() {
+                // ponytail: both IDs taken (10.0.0.0/16 and /24, then the
+                // host route 10.0.0.255/32): skipped, Appendix E doesn't
+                // resolve it either. A smarter pick is a matching problem.
+                warn!(prefix = %prefix, "ospf lsa link state id collision, not originating");
+            }
+            id.map(|id| (prefix, id))
+        })
+        .collect()
 }
 
 /// The inverse of an origination pass's `install_self_originated` loop:
@@ -3704,6 +3725,184 @@ mod tests {
         let live = lsdb.get(&key(kept)).unwrap();
         assert_eq!(live.header.age, 0);
         assert_eq!(live.header.sequence_number, lsa::INITIAL_SEQUENCE_NUMBER);
+    }
+
+    fn ids(prefixes: &[&str]) -> Vec<(String, Ipv4Addr)> {
+        assign_link_state_ids(prefixes.iter().map(|p| p.parse::<Ipv4Net>().unwrap()))
+            .into_iter()
+            .map(|(p, id)| (p.to_string(), id))
+            .collect()
+    }
+
+    /// RFC 2328 Appendix E: the shortest mask keeps the network address, a
+    /// longer one with the same address gets its host bits set.
+    #[test]
+    fn assign_link_state_ids_follows_appendix_e() {
+        let expected = vec![
+            ("192.0.2.128/25".to_string(), Ipv4Addr::new(192, 0, 2, 128)),
+            ("192.0.2.128/26".to_string(), Ipv4Addr::new(192, 0, 2, 191)),
+        ];
+        assert_eq!(ids(&["192.0.2.128/25", "192.0.2.128/26"]), expected);
+        assert_eq!(ids(&["192.0.2.128/26", "192.0.2.128/25"]), expected);
+        assert_eq!(
+            ids(&["0.0.0.0/8", "0.0.0.0/0"]),
+            vec![
+                ("0.0.0.0/0".to_string(), Ipv4Addr::UNSPECIFIED),
+                ("0.0.0.0/8".to_string(), Ipv4Addr::new(0, 255, 255, 255)),
+            ]
+        );
+        // Both IDs of the /32 are taken: skipped.
+        assert_eq!(
+            ids(&["10.0.0.255/32", "10.0.0.0/24", "10.0.0.0/16"]),
+            vec![
+                ("10.0.0.0/16".to_string(), Ipv4Addr::new(10, 0, 0, 0)),
+                ("10.0.0.0/24".to_string(), Ipv4Addr::new(10, 0, 0, 255)),
+            ]
+        );
+        assert_eq!(
+            ids(&["198.51.100.0/24", "192.0.2.0/24"]),
+            vec![
+                ("192.0.2.0/24".to_string(), Ipv4Addr::new(192, 0, 2, 0)),
+                (
+                    "198.51.100.0/24".to_string(),
+                    Ipv4Addr::new(198, 51, 100, 0)
+                ),
+            ]
+        );
+    }
+
+    fn mask_at(lsdb: &Lsdb, lsa_type: u8, id: Ipv4Addr, router_id: Ipv4Addr) -> (Ipv4Addr, u16) {
+        let lsa = lsdb
+            .get(&LsaKey {
+                lsa_type,
+                link_state_id: id,
+                advertising_router: router_id,
+            })
+            .unwrap_or_else(|| panic!("no type {lsa_type} lsa at {id}"));
+        let mask = match &lsa.body {
+            LsaBody::AsExternal(e) => e.network_mask,
+            LsaBody::Summary(s) => s.network_mask,
+            other => panic!("unexpected body {other:?}"),
+        };
+        (mask, lsa.header.age)
+    }
+
+    /// Two overlapping redistributed prefixes are two Type-5s (Appendix E);
+    /// once the shorter one goes, the longer one moves back to the network
+    /// address and its host-bits ID is flushed.
+    #[tokio::test]
+    async fn overlapping_redistributed_prefixes_get_distinct_type5s() {
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
+        let area = Ipv4Addr::UNSPECIFIED;
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let wide: Ipv4Net = "192.0.2.128/25".parse().unwrap();
+        let narrow: Ipv4Net = "192.0.2.128/26".parse().unwrap();
+        let (low, high) = (Ipv4Addr::new(192, 0, 2, 128), Ipv4Addr::new(192, 0, 2, 191));
+        manager.lsdb_for(area).await;
+        *manager.redistribute_filtered.lock().await = HashSet::from([wide, narrow]);
+        manager.originate_as_external_lsas(router_id).await;
+        {
+            let lsdb = manager.lsdb_for(area).await;
+            let lsdb = lsdb.lock().await;
+            let t5 = lsa::LSA_TYPE_AS_EXTERNAL;
+            assert_eq!(mask_at(&lsdb, t5, low, router_id), (wide.netmask(), 0));
+            assert_eq!(mask_at(&lsdb, t5, high, router_id), (narrow.netmask(), 0));
+        }
+
+        *manager.redistribute_filtered.lock().await = HashSet::from([narrow]);
+        // Past `MinLSInterval`, so `.128` may change content.
+        manager
+            .lsdb_for(area)
+            .await
+            .lock()
+            .await
+            .age_and_evict(lsa::MIN_LS_INTERVAL, &HashSet::new());
+        manager.originate_as_external_lsas(router_id).await;
+        let lsdb = manager.lsdb_for(area).await;
+        let lsdb = lsdb.lock().await;
+        let t5 = lsa::LSA_TYPE_AS_EXTERNAL;
+        assert_eq!(mask_at(&lsdb, t5, low, router_id), (narrow.netmask(), 0));
+        assert_eq!(
+            mask_at(&lsdb, t5, high, router_id),
+            (narrow.netmask(), lsa::MAX_AGE)
+        );
+    }
+
+    #[tokio::test]
+    async fn overlapping_redistributed_prefixes_get_distinct_type7s_in_an_nssa() {
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
+        let area = Ipv4Addr::new(0, 0, 0, 1);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let wide: Ipv4Net = "192.0.2.128/25".parse().unwrap();
+        let narrow: Ipv4Net = "192.0.2.128/26".parse().unwrap();
+        manager
+            .set_area_settings(HashMap::from([(
+                area,
+                AreaSettings {
+                    stub: true,
+                    nssa: true,
+                    import_summaries: true,
+                    ..AreaSettings::default()
+                },
+            )]))
+            .await;
+        manager.lsdb_for(area).await;
+        *manager.redistribute_filtered.lock().await = HashSet::from([wide, narrow]);
+        manager.originate_as_external_lsas(router_id).await;
+        let lsdb = manager.lsdb_for(area).await;
+        let lsdb = lsdb.lock().await;
+        let t7 = lsa::LSA_TYPE_NSSA_EXTERNAL;
+        let id = |d| Ipv4Addr::new(192, 0, 2, d);
+        assert_eq!(mask_at(&lsdb, t7, id(128), router_id).0, wide.netmask());
+        assert_eq!(mask_at(&lsdb, t7, id(191), router_id).0, narrow.netmask());
+    }
+
+    /// Overlapping intra-area stubs in area 0 become two Type-3s in area 1.
+    #[tokio::test]
+    async fn overlapping_intra_area_prefixes_get_distinct_type3s() {
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
+        let area0 = Ipv4Addr::UNSPECIFIED;
+        let area1 = Ipv4Addr::new(0, 0, 0, 1);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let wide: Ipv4Net = "10.1.0.0/16".parse().unwrap();
+        let narrow: Ipv4Net = "10.1.0.0/24".parse().unwrap();
+        let net1: Ipv4Net = "192.168.11.0/24".parse().unwrap();
+        manager
+            .reconcile(
+                Vec::new(),
+                HashMap::from([
+                    (area0, vec![(wide, 5), (narrow, 6)]),
+                    (area1, vec![(net1, 7)]),
+                ]),
+                router_id,
+            )
+            .await;
+        manager.originate_router_lsas(router_id).await;
+        manager.originate_summary_lsas(router_id).await;
+
+        let lsdb1 = manager.lsdb_for(area1).await;
+        let lsdb1 = lsdb1.lock().await;
+        let t3 = lsa::LSA_TYPE_NETWORK_SUMMARY;
+        assert_eq!(
+            mask_at(&lsdb1, t3, Ipv4Addr::new(10, 1, 0, 0), router_id).0,
+            wide.netmask()
+        );
+        assert_eq!(
+            mask_at(&lsdb1, t3, Ipv4Addr::new(10, 1, 0, 255), router_id).0,
+            narrow.netmask()
+        );
     }
 
     #[tokio::test]
@@ -4906,15 +5105,19 @@ mod tests {
             id(2),
         )
         .await;
-        // B also redistributes a static route: a Type-5 for A to learn.
+        // B also redistributes two overlapping static routes: two Type-5s
+        // for A to learn, the /25 at the host-bits ID (RFC 2328 Appendix E).
         b.set_redistribute_policy(Arc::new(nos_rpl::ACCEPT_ALL.clone()))
             .await;
-        b.apply_redistribute_update(RedistributeUpdate::Full(vec![
-            nos_proto::RedistributedRoute {
-                prefix: "198.51.100.0/24".parse().unwrap(),
-                gateway: "10.9.9.9".parse().unwrap(),
-            },
-        ]))
+        b.apply_redistribute_update(RedistributeUpdate::Full(
+            ["198.51.100.0/24", "198.51.100.0/25"]
+                .into_iter()
+                .map(|prefix| nos_proto::RedistributedRoute {
+                    prefix: prefix.parse().unwrap(),
+                    gateway: "10.9.9.9".parse().unwrap(),
+                })
+                .collect(),
+        ))
         .await;
         b.set_redistribute_policy(Arc::new(nos_rpl::ACCEPT_ALL.clone()))
             .await;
@@ -4925,7 +5128,7 @@ mod tests {
         assert_eq!(n[0].state, OspfNeighborState::Full, "{n:?}");
         assert_eq!(n[0].neighbor_router_id, Some(id(2)));
         let routes = a.compute_routes().await;
-        for prefix in ["192.0.2.2/32", "198.51.100.0/24"] {
+        for prefix in ["192.0.2.2/32", "198.51.100.0/24", "198.51.100.0/25"] {
             let r = routes
                 .iter()
                 .find(|r| r.prefix == prefix.parse::<Ipv4Net>().unwrap())
