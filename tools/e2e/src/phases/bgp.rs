@@ -3561,26 +3561,96 @@ async fn dataplane_teardown(w: &World) -> anyhow::Result<()> {
 ///
 /// Both PEs run RFC 8584 HRW (`df-algorithm hrw`), which elects router-b
 /// where modulo would elect router-a (the HRW note in `consts.rs`), so the DF read
-/// back from the kernel proves HRW ran. With the CE's link to router-b down,
-/// every frame the CE sends enters router-a (the non-DF) and must cross the
-/// VXLAN to reach the host, and back; with both up, one broadcast from the
-/// host reaches the CE through the DF only — once — while the non-DF's link
-/// stays silent; with the link to router-a down instead, the CE is bridged
-/// locally on router-b.
+/// back from the kernel proves HRW ran. With the CE's link to router-b gone
+/// (from below, so router-b's bond loses carrier and its segment is down),
+/// every frame the CE sends enters router-a and must cross the VXLAN to reach
+/// the host, and back: router-b reaches the CE through router-a (its remote
+/// Type-2 falls back to a VXLAN entry). With the link back, router-b pins the
+/// CE's MAC to its own bond (#173, read back from the kernel, as is learning
+/// off on the VXLAN port); one broadcast from the host reaches the CE through
+/// the DF only — once — while the non-DF's link stays silent; with the CE's
+/// link to router-a down instead, the CE is bridged locally on router-b.
 pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     let (bond_a, bond_b) = dataplane_setup(w, false, true).await?;
+    let (a, b) = (w.a()?, w.b()?);
     bridge_port_flood(w, "router-a", &bond_a, false).await?;
     bridge_port_flood(w, "router-b", &bond_b, true).await?;
+    let vxlan = format!("vx{EVPN_VNI}");
+    for router in ["router-a", "router-b"] {
+        let link = w
+            .dock
+            .in_netns(
+                NETNS_HELPER_IMAGE,
+                router,
+                &["bridge", "-d", "link", "show", "dev", &vxlan],
+            )
+            .await?;
+        if !link.contains("learning off") {
+            bail!("{router}'s {vxlan} does not read learning off: {link}");
+        }
+    }
 
     log("the CE bonds its two links; the host takes an address");
     dataplane_ce(w, "mode balance-xor miimon 100 xmit_hash_policy layer2").await?;
+    let ce_mac = host_sh(w, CE_HOST, "cat /sys/class/net/bond0/address")
+        .await?
+        .trim()
+        .to_string();
 
-    log("unicast across the VXLAN: the CE's link to router-b is down, so every frame enters router-a");
-    host_sh(w, CE_HOST, "ip link set eth1 down; sleep 1").await?;
+    log("unicast across the VXLAN: router-b loses its CE link, so every frame enters router-a");
+    let carrier_b = |up: bool| {
+        format!("segment port carrier changed domain={EVPN_DOMAIN} port={bond_b} up={up}")
+    };
+    // Before router-b's Type-4 arrived, router-a may have elected itself alone.
+    let df_a = format!("df elected domain={EVPN_DOMAIN} esi={ESI} port={bond_a} role=df");
+    let df_a_base = a.count(&df_a);
+    host_sh(w, CE_HOST, "ip link set eth1 down").await?;
+    link_lost(w, "router-b", &[NET_CE_B]).await;
+    b.wait(&carrier_b(false)).await?;
+    a.wait_new(&df_a, df_a_base, 60).await?;
+    ping_until(w, CE_HOST, H_IP, 30).await?;
     host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
     host_sh(w, H_HOST, &format!("ping -c 3 -W 2 {CE_IP}")).await?;
+    // Router-b's own segment is down: the CE's MAC goes to router-a.
+    b.wait(&format!(
+        "remote mac installed domain={EVPN_DOMAIN} mac={ce_mac} vtep={IP_A}"
+    ))
+    .await?;
 
     neigh_suppression(w).await?;
+
+    log("router-b's CE link back: it is the DF again and pins the CE's MAC to its bond");
+    let df_b = format!("df elected domain={EVPN_DOMAIN} esi={ESI} port={bond_b} role=df");
+    let pinned = format!("remote mac pinned domain={EVPN_DOMAIN} mac={ce_mac} port={bond_b}");
+    let (df_base, pin_base) = (b.count(&df_b), b.count(&pinned));
+    link_back(w, "router-b", &[NET_CE_B], &["eth1"]).await?;
+    b.wait(&carrier_b(true)).await?;
+    b.wait_new(&pinned, pin_base, 30).await?;
+    b.wait_new(&df_b, df_base, 60).await?;
+    let mut fdb = String::new();
+    for _ in 0..10 {
+        fdb = w
+            .dock
+            .in_netns(
+                NETNS_HELPER_IMAGE,
+                "router-b",
+                &["bridge", "fdb", "show", "dev", &bond_b],
+            )
+            .await?;
+        if fdb
+            .lines()
+            .any(|l| l.contains(&ce_mac) && l.contains("static"))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if !fdb
+        .lines()
+        .any(|l| l.contains(&ce_mac) && l.contains("static"))
+    {
+        bail!("router-b's {bond_b} holds no pin for the CE's MAC {ce_mac}: {fdb}");
+    }
 
     log("BUM: one broadcast from the host reaches the CE once, through the DF (router-b) only");
     host_sh(w, CE_HOST, "ip link set eth1 up; sleep 1").await?;
@@ -3617,8 +3687,8 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     log("the CE's link to router-a goes down: it is bridged locally on router-b");
     host_sh(w, CE_HOST, "ip link set eth0 down; sleep 1").await?;
     host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
-    let ce_mac = host_sh(w, CE_HOST, "cat /sys/class/net/bond0/address").await?;
-    same_segment_no_move(w, ce_mac.trim(), [(A, IP_B), (B, IP_A)]).await?;
+    // The CE now sends through router-b's pin, so router-b advertises it too.
+    same_segment_no_move(w, &ce_mac, [(A, IP_B), (B, IP_A)]).await?;
 
     dataplane_teardown(w).await
 }
@@ -4195,10 +4265,13 @@ async fn kernel_c(w: &World, mac: &str) -> anyhow::Result<(String, String)> {
 }
 
 /// `evpn-v6`: no BUM from the CE once the host's address is resolved —
-/// static neighbours both ways and no IPv6 on the CE (no ND/MLD). A broadcast
-/// the CE sends through one PE is flooded to the other PE, whose bridge then
-/// learns the CE behind its VXLAN port and drops aliased traffic for it there
-/// (no local bias / split horizon, see fdb/CLAUDE.md).
+/// static neighbours both ways and no IPv6 on the CE (no ND/MLD). Not for
+/// nos's sake: each CE link crosses a docker network, a *learning* bridge.
+/// A broadcast the CE sends through one PE comes back to it through the DF
+/// (no local bias, see fdb/CLAUDE.md), and that docker bridge then learns the
+/// CE's MAC behind the PE's side and drops every unicast the PE sends it. A
+/// direct link has no such switch in between. IPv6 goes before the CE's bond
+/// is built (`dataplane_ce`), so the bond never sends any.
 async fn quiet_ce(w: &World) -> anyhow::Result<()> {
     w.dock.ensure_helper_image(NETNS_HELPER_IMAGE).await?;
     netns(
@@ -4207,11 +4280,12 @@ async fn quiet_ce(w: &World) -> anyhow::Result<()> {
         &[
             "sh",
             "-c",
-            "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6; \
-             echo 1 > /proc/sys/net/ipv6/conf/bond0/disable_ipv6",
+            "for c in all default eth0 eth1; do \
+             echo 1 > /proc/sys/net/ipv6/conf/$c/disable_ipv6; done",
         ],
     )
     .await?;
+    dataplane_ce(w, "mode balance-xor miimon 100 xmit_hash_policy layer2").await?;
     let h_mac = host_sh(w, H_HOST, "cat /sys/class/net/eth0/address").await?;
     let ce_mac = host_sh(w, CE_HOST, "cat /sys/class/net/bond0/address").await?;
     host_sh(
@@ -4235,12 +4309,12 @@ async fn quiet_ce(w: &World) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `evpn-v6`: router-c balances flows to the CE over both PEs, so both bridges
-/// must know the CE's MAC behind their segment port: the CE sends unicast on
-/// each link alone. A PE that doesn't would flood the frame, and the non-DF
-/// floods nothing to the segment — nos doesn't pin a remote Type-2 for a
-/// segment it is on to that segment's port (fdb/CLAUDE.md).
-async fn learn_ce_on_both_pes(w: &World) -> anyhow::Result<()> {
+/// `evpn-v6`: the CE sends through each PE alone, so each sees it locally
+/// and advertises its MAC — what #172's check (`same_segment_no_move`) needs.
+/// Forwarding doesn't: a PE that never saw the CE has it pinned to its bond
+/// from the other's Type-2 (#173). A link downed on the CE side only is one
+/// its PE can't see, so a reply hashed there is lost: `|| true`.
+async fn ce_on_each_link(w: &World) -> anyhow::Result<()> {
     for link in ["eth1", "eth0"] {
         host_sh(
             w,
@@ -4366,18 +4440,32 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
     .await?;
 
     log("the CE bonds its two links; the host takes an address; they ping across the IPv6 VXLAN");
-    dataplane_ce(w, "mode balance-xor miimon 100 xmit_hash_policy layer2").await?;
     quiet_ce(w).await?;
     let ce_mac = host_sh(w, CE_HOST, "cat /sys/class/net/bond0/address")
         .await?
         .trim()
         .to_string();
-    learn_ce_on_both_pes(w).await?;
     ping_until(w, CE_HOST, H_IP, 30).await?;
     ping_until(w, H_HOST, CE_IP, 30).await?;
-    host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
-    host_sh(w, H_HOST, &format!("ping -c 3 -W 2 {CE_IP}")).await?;
-    same_segment_no_move(w, &ce_mac, [(A, V6_B), (B, V6_A)]).await?;
+
+    // #173: the CE sends through whichever PE its hash picks; the other
+    // learns nothing locally, yet must deliver what router-c balances onto
+    // it — its pin does.
+    log("the segment PE the CE doesn't send through pins its MAC to its own bond");
+    let bond_b = bond_name(b, "bond1").await?;
+    let pin =
+        |bond: &str| format!("remote mac pinned domain={EVPN_DOMAIN} mac={ce_mac} port={bond}");
+    let mut pinned = false;
+    for _ in 0..30 {
+        if a.count(&pin(&bond_a)) + b.count(&pin(&bond_b)) > 0 {
+            pinned = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if !pinned {
+        bail!("neither segment PE pinned the CE's MAC {ce_mac} to its bond");
+    }
 
     log("router-c aliases the CE's MAC over an IPv6 FDB nexthop group of both PEs");
     let group =
@@ -4405,6 +4493,11 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
     if !vteps.contains(V6_A) || !vteps.contains(V6_B) {
         bail!("router-c's show fdb does not list both VTEPs of the CE's MAC: {vteps}");
     }
+    // Flows balanced over both PEs: whichever one router-c picks delivers.
+    host_sh(w, H_HOST, &format!("ping -c 3 -W 2 {CE_IP}")).await?;
+    host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
+    ce_on_each_link(w).await?;
+    same_segment_no_move(w, &ce_mac, [(A, V6_B), (B, V6_A)]).await?;
 
     // A control-plane withdrawal, not router-a's bond going down: nos-interfaced
     // brings a downed bond back up within seconds (#169).
@@ -4434,7 +4527,6 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
     unshut.push("--unshutdown-peer".to_string());
     c.provision_flags(&unshut).await?;
     host_sh(w, CE_HOST, "ip link set eth0 up; sleep 1").await?;
-    learn_ce_on_both_pes(w).await?;
     c.wait_new(&group, base, 60).await?;
     let (_, entry) = kernel_c(w, &ce_mac).await?;
     if !entry.contains("nhid") {

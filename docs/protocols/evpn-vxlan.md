@@ -358,6 +358,15 @@ A router that has just joined a segment, whether it just started, the ESI was ju
 
 When a segment's bond loses its link, the router withdraws the segment's Type 4 and Type 1 routes, so the others re-elect without it. It rejoins, with the wait above, when the link returns.
 
+### Traffic towards a segment this router is on
+
+A CE's MAC address is often learned by only one of its routers: the CE sends on one link, the other router never sees it. Yet a remote router balances traffic over both (aliasing), so each must be able to deliver it:
+
+- A MAC address another router advertises on one of this router's own segments is pinned to the segment's bond, as a static entry of the domain's bridge. `show fdb` lists it as `remote, on our esi <esi>`.
+- It is pinned only while the bond can carry it: the bond has link, and in a single-active segment the router is the DF. Otherwise the MAC goes over the tunnel to the router that advertised it, like a MAC on a remote segment.
+- A pinned MAC is not advertised until the CE sends through this router. From then on the router advertises it too, and stops when the CE has been silent for the bridge's ageing time (300 seconds).
+- The bridge never learns MAC addresses from the tunnel: remote MACs come from EVPN routes only (RFC 7432 §9.2). A CE's broadcast that another router floods back here therefore cannot move the CE's MAC behind the tunnel.
+
 ### Failover and load sharing towards a remote segment
 
 For a segment that is attached to other routers, not this one:
@@ -369,6 +378,7 @@ For a segment that is attached to other routers, not this one:
 ### Limits
 
 - There is no local bias (RFC 8365 §8.3.1). In an all-active segment, a non-DF router does not deliver flooded traffic to the CE even when it came from a host on the same router; it reaches the CE through the DF instead.
+- A router only notices a segment failure when its own bond loses link. If a link fails only on the CE's side (a switch in between, say), the router keeps sending the CE's traffic into it. Run LACP between the CE and its routers so a dead link takes the bond down.
 - Over VXLAN only, no MPLS. IP prefix routes (Type 5) work through a routing table's L3 VNI; symmetric IRB host routes (a MAC+IP route carrying the L3 VNI and Router's MAC) are not generated or installed.
 - A Type 5 route is installed only in its interface-less form: one with a gateway IP or an ESI as overlay index (RFC 9136 §4.3) is ignored. Its prefix must be of the same family as the tunnel addresses, and when several routers advertise one prefix the one with the lowest tunnel address is used (no ECMP).
 - Routing policies do not apply to EVPN routes.

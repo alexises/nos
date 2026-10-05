@@ -172,6 +172,11 @@ enum Installed {
     Flood {
         vtep: IpAddr,
     },
+    /// A remote MAC on one of our own segments, pinned to its bridge port.
+    SegmentMac {
+        mac: Mac,
+        port: String,
+    },
 }
 
 /// The A-D index of `received`: only routes carrying one of our import Route
@@ -244,12 +249,33 @@ fn backup_pe(a: &SegmentAds, vni: u32) -> Option<IpAddr> {
     }
 }
 
+/// The segment ports that can carry unicast, by ESI: up, and not a
+/// single-active port held off its segment (non-DF, or still in its DF wait).
+/// An all-active non-DF still forwards unicast — its flood flags gate BUM only.
+fn pinnable(segments: &[Segment]) -> HashMap<Esi, String> {
+    segments
+        .iter()
+        .filter(|s| s.up && !(s.single_active && (!s.df || s.waiting)))
+        .map(|s| (s.esi, s.port.clone()))
+        .collect()
+}
+
 /// What a received route should become in the kernel, if anything: it must
 /// carry one of our import Route Targets, name this VNI, and not be our own.
 /// A Type-2 with an IP is both an FDB entry (its MAC) and a neighbour (its IP).
 /// A Type-2 on a segment is only usable while its PE's per-ES A-D route for
-/// that segment is held (`ads`).
-fn desired(r: &Ready, route: &EvpnRoute, ads: &Ads) -> Vec<Installed> {
+/// that segment is held (`ads`) — except on one of our own segments whose port
+/// can carry it (`pinnable`): the MAC is then pinned to that port (RFC 7432
+/// §8.4: it is behind our own link too), whatever the PE's A-D routes say,
+/// unless the bridge learned it behind another port (`local`). An unpinnable
+/// own segment falls back to the remote PEs like any other.
+fn desired(
+    r: &Ready,
+    route: &EvpnRoute,
+    ads: &Ads,
+    local: &BTreeMap<Mac, String>,
+    pinnable: &HashMap<Esi, String>,
+) -> Vec<Installed> {
     if !route
         .ext_communities
         .iter()
@@ -257,9 +283,31 @@ fn desired(r: &Ready, route: &EvpnRoute, ads: &Ads) -> Vec<Installed> {
     {
         return Vec::new();
     }
-    // A MAC on a segment we are attached to is reachable through our own
-    // bond; a VXLAN entry to the peer PE that also learned it would win.
-    let on_local_segment = route.esi != [0; 10] && r.es_ports.iter().any(|p| p.esi == route.esi);
+    let pin_port = (route.esi != [0; 10])
+        .then(|| pinnable.get(&route.esi))
+        .flatten();
+    if let (Some(port), true) = (pin_port, route.vni == r.vni && route.next_hop != r.vtep) {
+        let (mac, ip) = match &route.key {
+            EvpnKey::Mac { mac, .. } => (*mac, None),
+            EvpnKey::MacIp { mac, ip, .. } => (*mac, Some(*ip)),
+            _ => return Vec::new(),
+        };
+        if local.get(&mac).is_some_and(|p| p != port) {
+            return Vec::new();
+        }
+        let mut v = vec![Installed::SegmentMac {
+            mac,
+            port: port.clone(),
+        }];
+        if let Some(ip) = ip.filter(|ip| is_advertisable_ip(*ip)) {
+            v.push(Installed::Neigh {
+                mac,
+                ip,
+                vtep: route.next_hop,
+            });
+        }
+        return v;
+    }
     // The PE a MAC on a segment is reached through: the one that advertised it
     // while its per-ES A-D is held; on a single-active segment whose PE lost it,
     // a backup (a PE that advertised a per-EVI A-D for this VNI).
@@ -276,8 +324,7 @@ fn desired(r: &Ready, route: &EvpnRoute, ads: &Ads) -> Vec<Installed> {
             }
         })
     };
-    let foreign_type2 =
-        route.vni == r.vni && route.next_hop != r.vtep && !on_local_segment && via.is_some();
+    let foreign_type2 = route.vni == r.vni && route.next_hop != r.vtep && via.is_some();
     let vtep = via.unwrap_or(route.next_hop);
     // A MAC whose own PE's per-ES A-D is held is aliased over the segment's PEs.
     let group = (via == Some(route.next_hop))
@@ -722,6 +769,7 @@ impl Fdb {
     /// block is re-asserted every call, so a port the kernel recreated is
     /// healed by the tick.
     async fn sync_df(&self, g: &mut Inner) {
+        let was = pinnable(&g.segments);
         let mut plan = g
             .ready
             .as_ref()
@@ -809,6 +857,23 @@ impl Fdb {
             }
         }
         g.segments = plan;
+        // A segment port that can (no longer) carry unicast re-decides its
+        // remote MACs: pinned to the port, or sent to the other PEs.
+        let now = pinnable(&g.segments);
+        if now != was {
+            let keys: Vec<EvpnKey> = g
+                .received
+                .iter()
+                .filter(|(_, r)| {
+                    now.get(&r.esi) != was.get(&r.esi)
+                        && matches!(r.key, EvpnKey::Mac { .. } | EvpnKey::MacIp { .. })
+                })
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in keys {
+                self.sync_key(g, &k).await;
+            }
+        }
     }
 
     /// Applies the BUM-flood setting of one segment port; a block is
@@ -914,10 +979,11 @@ impl Fdb {
     /// Brings one route's kernel state in line with `received` + config.
     async fn sync_key(&self, g: &mut Inner, key: &EvpnKey) {
         let Some(ready) = g.ready.clone() else { return };
+        let pins = pinnable(&g.segments);
         let want = g
             .received
             .get(key)
-            .map(|r| desired(&ready, r, &g.ads))
+            .map(|r| desired(&ready, r, &g.ads, &g.local, &pins))
             .unwrap_or_default();
         let have = g.installed.get(key).cloned().unwrap_or_default();
         if want == have {
@@ -932,7 +998,12 @@ impl Fdb {
         }
         let mut now = Vec::new();
         for w in want {
-            if have.contains(&w) || held_elsewhere(g, &w) || self.install(&ready, &w).await {
+            // A pin over a MAC the bridge already learned there starts active,
+            // so its Type-2 is not withdrawn until the CE goes quiet.
+            let active =
+                matches!(&w, Installed::SegmentMac { mac, port } if g.local.get(mac) == Some(port));
+            if have.contains(&w) || held_elsewhere(g, &w) || self.install(&ready, &w, active).await
+            {
                 now.push(w);
             }
         }
@@ -943,7 +1014,7 @@ impl Fdb {
         }
     }
 
-    async fn install(&self, r: &Ready, i: &Installed) -> bool {
+    async fn install(&self, r: &Ready, i: &Installed, active: bool) -> bool {
         let res = match i {
             Installed::Mac { mac, vtep } => self.driver.set_remote_mac(r.vni, *mac, *vtep).await,
             Installed::MacGroup { mac, vteps } => {
@@ -951,6 +1022,9 @@ impl Fdb {
             }
             Installed::Neigh { mac, ip, .. } => self.driver.set_neigh(&r.bridge, *mac, *ip).await,
             Installed::Flood { vtep } => self.driver.add_flood(r.vni, *vtep).await,
+            Installed::SegmentMac { mac, port } => {
+                self.driver.set_segment_mac(port, *mac, active).await
+            }
         };
         match (res, i) {
             (Ok(()), Installed::Mac { mac, vtep }) => {
@@ -969,6 +1043,10 @@ impl Fdb {
                 info!(domain = %self.domain, vtep = %vtep, "flood entry installed");
                 true
             }
+            (Ok(()), Installed::SegmentMac { mac, port }) => {
+                info!(domain = %self.domain, mac = %format_mac(*mac), port = %port, "remote mac pinned");
+                true
+            }
             (Err(e), _) => {
                 warn!(domain = %self.domain, error = %e, "failed to program the fdb, retrying");
                 false
@@ -982,6 +1060,7 @@ impl Fdb {
             Installed::MacGroup { mac, .. } => self.driver.del_remote_mac_group(r.vni, *mac).await,
             Installed::Neigh { mac, ip, .. } => self.driver.del_neigh(&r.bridge, *mac, *ip).await,
             Installed::Flood { vtep } => self.driver.del_flood(r.vni, *vtep).await,
+            Installed::SegmentMac { mac, port } => self.driver.del_segment_mac(port, *mac).await,
         };
         match (res, i) {
             (Ok(()), Installed::Mac { mac, vtep }) => {
@@ -995,6 +1074,9 @@ impl Fdb {
             }
             (Ok(()), Installed::Flood { vtep }) => {
                 info!(domain = %self.domain, vtep = %vtep, "flood entry removed");
+            }
+            (Ok(()), Installed::SegmentMac { mac, port }) => {
+                info!(domain = %self.domain, mac = %format_mac(*mac), port = %port, "remote mac unpinned");
             }
             // Deleting the device already dropped them; nothing left to do.
             (Err(e), _) => debug!(domain = %self.domain, error = %e, "fdb delete failed"),
@@ -1070,8 +1152,28 @@ impl Fdb {
         for m in g.local.keys().filter(|m| !macs.contains_key(*m)) {
             info!(domain = %self.domain, mac = %format_mac(*m), "local mac removed");
         }
+        let moved: BTreeSet<Mac> = macs
+            .iter()
+            .filter(|(m, p)| g.local.get(*m) != Some(*p))
+            .map(|(m, _)| *m)
+            .chain(g.local.keys().filter(|m| !macs.contains_key(*m)).copied())
+            .collect();
         g.local = macs;
         self.publish(&g);
+        // A remote MAC on our segment is not pinned while learned behind
+        // another port.
+        let keys: Vec<EvpnKey> = g
+            .received
+            .keys()
+            .filter(|k| match k {
+                EvpnKey::Mac { mac, .. } | EvpnKey::MacIp { mac, .. } => moved.contains(mac),
+                _ => false,
+            })
+            .cloned()
+            .collect();
+        for k in keys {
+            self.sync_key(&mut g, &k).await;
+        }
     }
 
     /// The local-MAC loop: a kernel FDB notification (debounced) or the tick
@@ -1168,6 +1270,14 @@ impl Fdb {
                     vtep: Some(*vtep),
                 }),
                 Installed::Flood { vtep } => flood.push(*vtep),
+                // Behind our own segment port: no VTEP.
+                Installed::SegmentMac { mac, port } => macs.push(MacEntry {
+                    mac: format_mac(*mac),
+                    source: MacSource::Remote,
+                    vtep: None,
+                    vteps: Vec::new(),
+                    esi: g.ready.as_ref().map(|r| format_esi(&esi_of(r, Some(port)))),
+                }),
             }
         }
         macs.sort_by(|a, b| a.mac.cmp(&b.mac));
@@ -1279,7 +1389,12 @@ mod tests {
 
     /// `desired` with no per-ES A-D held.
     fn want(r: &Ready, route: &EvpnRoute) -> Vec<Installed> {
-        desired(r, route, &Ads::new())
+        desired(r, route, &Ads::new(), &BTreeMap::new(), &HashMap::new())
+    }
+
+    /// `desired` with these A-D routes, nothing local and no pinnable port.
+    fn want_ads(r: &Ready, route: &EvpnRoute, ads: &Ads) -> Vec<Installed> {
+        desired(r, route, ads, &BTreeMap::new(), &HashMap::new())
     }
 
     fn macip_route(mac: u8, ip: &str, vni: u32, rt: u64, next_hop: &str) -> EvpnRoute {
@@ -1455,6 +1570,25 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("group- {}", format_mac(m)));
+            Ok(())
+        }
+        async fn set_segment_mac(
+            &self,
+            port: &str,
+            m: Mac,
+            active: bool,
+        ) -> Result<(), DriverError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("pin {port} {} {active}", format_mac(m)));
+            Ok(())
+        }
+        async fn del_segment_mac(&self, port: &str, m: Mac) -> Result<(), DriverError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("unpin {port} {}", format_mac(m)));
             Ok(())
         }
         async fn add_flood(&self, _: u32, v: IpAddr) -> Result<(), DriverError> {
@@ -1807,23 +1941,158 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_mac_on_a_segment_needs_its_pes_per_es_ad_and_never_on_our_own() {
+    fn a_remote_mac_on_a_segment_needs_its_pes_per_es_ad_unless_pinned_to_our_own() {
         let mut route = mac_route(1, 10100, RT, REMOTE);
         route.esi = ESI;
         let ads = ads_of(ESI, &[REMOTE]);
         // Not usable until the PE that advertised it has advertised the segment.
         assert!(want(&ready(), &route).is_empty(), "no per-es a-d yet");
-        assert_ne!(desired(&ready(), &route, &ads), []);
+        assert_ne!(want_ads(&ready(), &route, &ads), []);
         // A different PE's A-D for the segment doesn't count.
         let other = ads_of(ESI, &["192.0.2.77"]);
-        assert_eq!(desired(&ready(), &route, &other), []);
-        // ... and on a segment we are attached to it is reachable via our own bond.
-        assert_eq!(desired(&ready_with_segment(), &route, &ads), []);
+        assert_eq!(want_ads(&ready(), &route, &other), []);
+        // On our own segment whose port can carry it: pinned there, with or
+        // without the PE's per-ES A-D.
+        let r = ready_with_segment();
+        let pins = HashMap::from([(ESI, "eth1".to_string())]);
+        let none = BTreeMap::new();
+        let pin = Installed::SegmentMac {
+            mac: [0, 0, 0, 0, 0, 1],
+            port: "eth1".to_string(),
+        };
+        assert_eq!(
+            desired(&r, &route, &Ads::new(), &none, &pins),
+            std::slice::from_ref(&pin)
+        );
+        assert_eq!(
+            desired(&r, &route, &ads, &none, &pins),
+            std::slice::from_ref(&pin)
+        );
+        // Learned on that port already: still pinned; behind another port: not.
+        let on = |p: &str| BTreeMap::from([([0, 0, 0, 0, 0, 1], p.to_string())]);
+        assert_eq!(
+            desired(&r, &route, &ads, &on("eth1"), &pins),
+            std::slice::from_ref(&pin)
+        );
+        assert_eq!(desired(&r, &route, &ads, &on("eth9"), &pins), []);
+        // A MAC+IP: the pin and the neighbour.
+        let mut mip = macip_route(1, "198.51.100.7", 10100, RT, REMOTE);
+        mip.esi = ESI;
+        assert_eq!(
+            desired(&r, &mip, &Ads::new(), &none, &pins),
+            [
+                pin,
+                Installed::Neigh {
+                    mac: [0, 0, 0, 0, 0, 1],
+                    ip: "198.51.100.7".parse().unwrap(),
+                    vtep: REMOTE.parse().unwrap()
+                }
+            ]
+        );
+        // Port not pinnable (down, single-active non-DF): the remote PE, still
+        // gated on its per-ES A-D.
+        assert_eq!(
+            want_ads(&r, &route, &ads),
+            [Installed::Mac {
+                mac: [0, 0, 0, 0, 0, 1],
+                vtep: REMOTE.parse().unwrap()
+            }]
+        );
+        assert_eq!(want(&r, &route), []);
         // A different segment's MAC is just as gated.
         route.esi = [9; 10];
-        assert_eq!(desired(&ready_with_segment(), &route, &ads), []);
+        assert_eq!(want_ads(&ready_with_segment(), &route, &ads), []);
         let ads9 = ads_of([9; 10], &[REMOTE]);
-        assert_ne!(desired(&ready_with_segment(), &route, &ads9), []);
+        assert_ne!(want_ads(&ready_with_segment(), &route, &ads9), []);
+    }
+
+    #[tokio::test]
+    async fn a_remote_mac_on_our_segment_is_pinned_while_the_port_carries_it() {
+        let driver = Arc::new(Recorder::default());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
+        fdb.set_ready(Some(ready_with_segment())).await;
+        fdb.refresh_local().await; // MAC 7 is local, behind eth1
+        calls(&driver);
+        let mut m1 = mac_route(1, 10100, RT, REMOTE);
+        m1.esi = ESI;
+        fdb.apply_push(EvpnUpdate::Add(m1.clone())).await;
+        assert_eq!(calls(&driver), ["pin eth1 00:00:00:00:00:01 false"]);
+        let t = fdb.table().await;
+        assert_eq!(
+            t.macs
+                .iter()
+                .filter(|m| m.source == MacSource::Remote)
+                .count(),
+            1
+        );
+        fdb.apply_push(EvpnUpdate::Add(es_ad(ESI, REMOTE))).await;
+        assert_eq!(calls(&driver), [] as [String; 0]);
+
+        // The segment loses carrier: the MAC goes to the PE that advertised it.
+        driver.1.lock().unwrap().insert("eth1".to_string());
+        fdb.refresh_local().await;
+        assert_eq!(
+            calls(&driver),
+            [
+                "flood eth1 false",
+                "unpin eth1 00:00:00:00:00:01",
+                "set 00:00:00:00:00:01 192.0.2.9"
+            ]
+        );
+        // Carrier back (no DF wait here): pinned again.
+        driver.1.lock().unwrap().clear();
+        fdb.refresh_local().await;
+        let c = calls(&driver);
+        assert!(
+            c.ends_with(&[
+                "del 00:00:00:00:00:01 192.0.2.9".to_string(),
+                "pin eth1 00:00:00:00:00:01 false".to_string()
+            ]),
+            "{c:?}"
+        );
+
+        // A MAC the bridge already learned on the port is pinned active.
+        let mut m7 = mac_route(7, 10100, RT, REMOTE);
+        m7.esi = ESI;
+        fdb.apply_push(EvpnUpdate::Add(m7)).await;
+        assert_eq!(calls(&driver), ["pin eth1 00:00:00:00:00:07 true"]);
+
+        // A withdrawal unpins.
+        fdb.apply_push(EvpnUpdate::Remove(m1.key)).await;
+        assert_eq!(calls(&driver), ["unpin eth1 00:00:00:00:00:01"]);
+    }
+
+    #[tokio::test]
+    async fn a_single_active_non_df_never_pins_and_pins_once_it_is_the_df() {
+        let driver = Arc::new(Recorder::default());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
+        fdb.set_ready(Some(ready_single_active())).await;
+        for r in [
+            es_route(ESI, LOW_PE),
+            evi_ad(ESI, LOW_PE),
+            es_ad(ESI, LOW_PE),
+        ] {
+            fdb.apply_push(EvpnUpdate::Add(r)).await;
+        }
+        assert!(!fdb.table().await.segments[0].designated_forwarder);
+        calls(&driver);
+        let mut m1 = mac_route(1, 10100, RT, LOW_PE);
+        m1.esi = ESI;
+        fdb.apply_push(EvpnUpdate::Add(m1)).await;
+        assert_eq!(calls(&driver), ["set 00:00:00:00:00:01 192.0.1.9"]);
+
+        // The DF leaves the segment: we are elected and the MAC is pinned.
+        fdb.apply_push(EvpnUpdate::Remove(es_route(ESI, LOW_PE).key))
+            .await;
+        let c = calls(&driver);
+        assert!(c.contains(&"fwd eth1 true".to_string()), "{c:?}");
+        assert!(
+            c.ends_with(&[
+                "del 00:00:00:00:00:01 192.0.1.9".to_string(),
+                "pin eth1 00:00:00:00:00:01 false".to_string()
+            ]),
+            "{c:?}"
+        );
     }
 
     #[test]
@@ -2196,20 +2465,20 @@ mod tests {
         };
         // REMOTE's per-ES A-D is gone: the MAC moves to the backup PE...
         assert_eq!(
-            desired(&ready(), &route, &ads(true, &[backup])),
+            want_ads(&ready(), &route, &ads(true, &[backup])),
             mac(backup)
         );
         // ... unless the segment is all-active (mass withdrawal), or the
         // backup never advertised the EVI.
-        assert_eq!(desired(&ready(), &route, &ads(false, &[backup])), []);
-        assert_eq!(desired(&ready(), &route, &ads(true, &[])), []);
+        assert_eq!(want_ads(&ready(), &route, &ads(false, &[backup])), []);
+        assert_eq!(want_ads(&ready(), &route, &ads(true, &[])), []);
         // While REMOTE's own per-ES A-D is held the MAC stays where it is.
         let mut held = ads(true, &[backup]);
         held.get_mut(&[9; 10])
             .unwrap()
             .pes
             .insert(REMOTE.parse().unwrap());
-        assert_eq!(desired(&ready(), &route, &held), mac(REMOTE));
+        assert_eq!(want_ads(&ready(), &route, &held), mac(REMOTE));
     }
 
     fn evi_ad(esi: Esi, origin: &str) -> EvpnRoute {
@@ -2349,11 +2618,11 @@ mod tests {
         let mut from_b = mac_route(1, 10100, RT, b);
         from_b.esi = esi;
         assert_eq!(
-            desired(&ready(), &from_a, &ads),
-            desired(&ready(), &from_b, &ads)
+            want_ads(&ready(), &from_a, &ads),
+            want_ads(&ready(), &from_b, &ads)
         );
         assert!(matches!(
-            desired(&ready(), &from_a, &ads)[..],
+            want_ads(&ready(), &from_a, &ads)[..],
             [Installed::MacGroup { .. }]
         ));
     }
