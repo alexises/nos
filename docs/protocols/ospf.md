@@ -400,6 +400,13 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **AS-external routes (ASBR).** Each redistributed static route becomes one type-5 LSA, flooded to every area the router is in. Other routers compute the route's metric as their distance to the ASBR plus 20. Only static routes can be redistributed, and every external route is metric type 1; there is no metric-type or per-route metric setting, and the forwarding address is always 0.0.0.0.
 
+**Overlapping prefixes (RFC 2328 Appendix E).** Prefixes that share a network address, such as `192.0.2.128/25` and `192.0.2.128/26`, are advertised as separate type-3, type-5 or type-7 LSAs:
+
+- The shortest one uses the network address as its link state ID, and each longer one uses its address with the host bits set (`192.0.2.191` for the `/26`). `show ospf database` lists both.
+- When a shorter prefix is added, the longer one moves to its host-bits ID. For a few seconds both IDs advertise it, and other routers still compute one route.
+- If both IDs of a prefix are already taken (`10.0.0.0/16` and `10.0.0.0/24`, then the host route `10.0.0.255/32`), that prefix is not advertised, and the router logs `ospf lsa link state id collision, not originating`.
+- LSAs from other routers that use host-bits IDs are read as their prefix, so they compete with and merge into routes for the same prefix.
+
 **Inter-area routes (ABR).** Each prefix of an area is advertised into the router's other areas as its own type-3 LSA, unless an area range covers it, and each ASBR as a type-4 LSA. There is no virtual link. Any router in two or more areas acts as an ABR, including towards a stub area, whether or not one of its areas is the backbone. This is designed and tested for one or more non-backbone areas each behind its own ABR; in topologies where several ABRs connect the same areas, check the result.
 
 **Opaque LSAs (RFC 5250).** NOS sets the O bit in its database description packets and stores and floods opaque LSAs it receives without reading them: type 9 (link-local) only on the link it arrived on, type 10 (area) in its area, type 11 (AS) in the area it arrived in. Opaque LSAs are offered only to neighbours whose database description packets set the O bit. NOS originates none except its own Grace-LSA. `show ospf database` lists a type-9 LSA under its link's area, without naming the link. An ABR does not pass a type-11 LSA on to its other areas. An LSA of a type NOS does not know (6, 7, 8, or above 11) is dropped on its own; the rest of the update is kept.

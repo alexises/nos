@@ -185,10 +185,11 @@ pub struct Args {
     #[arg(long)]
     pub peer: IpAddr,
 
-    /// If set, adds one static route (`--static-gateway` required) to a
-    /// static-routing-instance associated with `--routing-table`.
+    /// Adds a static route (`--static-gateway` required) to a
+    /// static-routing-instance associated with `--routing-table`. Repeat it
+    /// for more than one, all via the same gateway.
     #[arg(long)]
-    pub static_route: Option<IpNet>,
+    pub static_route: Vec<IpNet>,
     #[arg(long)]
     pub static_gateway: Option<IpAddr>,
     #[arg(long, default_value = "sri1")]
@@ -1256,7 +1257,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }),
     ]);
 
-    if let Some(subnet) = args.static_route {
+    if !args.static_route.is_empty() {
         let gateway = args
             .static_gateway
             .context("--static-gateway is required when --static-route is set")?;
@@ -1265,11 +1266,13 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 name: args.static_routing_instance.clone(),
             },
         ));
-        ops.push(ConfigOp::StaticRoute(StaticRouteOp::Set {
-            instance: args.static_routing_instance.clone(),
-            subnet,
-            gateway,
-        }));
+        for &subnet in &args.static_route {
+            ops.push(ConfigOp::StaticRoute(StaticRouteOp::Set {
+                instance: args.static_routing_instance.clone(),
+                subnet,
+                gateway,
+            }));
+        }
         ops.push(ConfigOp::RoutingTable(
             RoutingTableOp::SetStaticRoutingInstance {
                 name: args.routing_table.clone(),
@@ -2974,6 +2977,29 @@ mod tests {
                 source: "accept\n".into(),
             }),
         );
+    }
+
+    #[test]
+    fn static_route_can_be_repeated() {
+        let result = ops(&[
+            "--static-route",
+            "192.0.2.128/25",
+            "--static-route",
+            "192.0.2.128/26",
+            "--static-gateway",
+            "10.0.0.9",
+        ])
+        .unwrap();
+        for subnet in ["192.0.2.128/25", "192.0.2.128/26"] {
+            has(
+                &result,
+                &ConfigOp::StaticRoute(StaticRouteOp::Set {
+                    instance: "sri1".into(),
+                    subnet: subnet.parse().unwrap(),
+                    gateway: "10.0.0.9".parse().unwrap(),
+                }),
+            );
+        }
     }
 
     #[test]

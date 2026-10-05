@@ -257,7 +257,7 @@ pub fn compute(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<RouteEntry> {
         .collect();
 
     let (dist, next_hop) = run_dijkstra(root, &routers, &networks);
-    let mut out: HashMap<(Ipv4Addr, Ipv4Addr), RouteEntry> = HashMap::new();
+    let mut out: HashMap<Ipv4Net, RouteEntry> = HashMap::new();
 
     collect_network_routes(root, &routers, &networks, &dist, &next_hop, &mut out);
     collect_stub_routes(root, &routers, &dist, &next_hop, &mut out);
@@ -404,7 +404,7 @@ pub fn intra_area_routes(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> IntraAreaRoutes {
     let (routers, networks) = routers_and_networks(lsas);
     let (dist, next_hop) = run_dijkstra(root, &routers, &networks);
 
-    let mut out: HashMap<(Ipv4Addr, Ipv4Addr), RouteEntry> = HashMap::new();
+    let mut out: HashMap<Ipv4Net, RouteEntry> = HashMap::new();
     collect_network_routes(root, &routers, &networks, &dist, &next_hop, &mut out);
     collect_intra_area_stub_routes(root, &routers, &dist, &next_hop, &mut out);
 
@@ -658,7 +658,7 @@ fn collect_network_routes(
     networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
     dist: &HashMap<Vertex, u32>,
     next_hop: &HashMap<Vertex, Vec<NextHop>>,
-    out: &mut HashMap<(Ipv4Addr, Ipv4Addr), RouteEntry>,
+    out: &mut HashMap<Ipv4Net, RouteEntry>,
 ) {
     for (&network_id, network) in networks {
         let vertex = Vertex::Network(network_id);
@@ -672,10 +672,8 @@ fn collect_network_routes(
         if next_hops.is_empty() {
             continue;
         }
-        let key = (network_id, network.network_mask);
         insert_best(
             out,
-            key,
             RouteEntry {
                 prefix: net_from(network_id, network.network_mask),
                 next_hops,
@@ -698,7 +696,7 @@ fn collect_stub_routes(
     routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
     dist: &HashMap<Vertex, u32>,
     next_hop: &HashMap<Vertex, Vec<NextHop>>,
-    out: &mut HashMap<(Ipv4Addr, Ipv4Addr), RouteEntry>,
+    out: &mut HashMap<Ipv4Net, RouteEntry>,
 ) {
     for (&router_id, body) in routers {
         if router_id == root {
@@ -722,7 +720,6 @@ fn collect_stub_routes(
             }
             insert_best(
                 out,
-                key,
                 RouteEntry {
                     prefix: net_from(link.link_id, link.link_data),
                     next_hops: next_hops.clone(),
@@ -749,14 +746,14 @@ fn collect_stub_routes(
 /// needed (unlike `collect_stub_routes`'s `root_advertises_stub` guard): a
 /// p2p subnet's own copy (distance 0 + local cost) and a neighbor's mirrored
 /// copy (link cost + neighbor's advertised cost) share the same
-/// `(link_id, link_data)` key, so `insert_best` already keeps the cheaper —
+/// prefix key, so `insert_best` already keeps the cheaper —
 /// always root's own — automatically.
 fn collect_intra_area_stub_routes(
     root: Ipv4Addr,
     routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
     dist: &HashMap<Vertex, u32>,
     next_hop: &HashMap<Vertex, Vec<NextHop>>,
-    out: &mut HashMap<(Ipv4Addr, Ipv4Addr), RouteEntry>,
+    out: &mut HashMap<Ipv4Net, RouteEntry>,
 ) {
     for (&router_id, body) in routers {
         let vertex = Vertex::Router(router_id);
@@ -775,10 +772,8 @@ fn collect_intra_area_stub_routes(
             if link.link_type != LINK_TYPE_STUB_NETWORK {
                 continue;
             }
-            let key = (link.link_id, link.link_data);
             insert_best(
                 out,
-                key,
                 RouteEntry {
                     prefix: net_from(link.link_id, link.link_data),
                     next_hops: next_hops.clone(),
@@ -804,7 +799,7 @@ fn collect_summary_routes(
     summaries: &[(Ipv4Addr, Ipv4Addr, &SummaryLsaBody)],
     dist: &HashMap<Vertex, u32>,
     next_hop: &HashMap<Vertex, Vec<NextHop>>,
-    out: &mut HashMap<(Ipv4Addr, Ipv4Addr), RouteEntry>,
+    out: &mut HashMap<Ipv4Net, RouteEntry>,
 ) {
     for &(abr, link_state_id, s) in summaries {
         if abr == root {
@@ -818,10 +813,8 @@ fn collect_summary_routes(
         if next_hops.is_empty() {
             continue;
         }
-        let key = (link_state_id, s.network_mask);
         insert_best(
             out,
-            key,
             RouteEntry {
                 prefix: net_from(link_state_id, s.network_mask),
                 next_hops,
@@ -896,7 +889,7 @@ fn collect_external_routes(
     asbr_summaries: &[(Ipv4Addr, Ipv4Addr, &SummaryLsaBody)],
     dist: &HashMap<Vertex, u32>,
     next_hop: &HashMap<Vertex, Vec<NextHop>>,
-    out: &mut HashMap<(Ipv4Addr, Ipv4Addr), RouteEntry>,
+    out: &mut HashMap<Ipv4Net, RouteEntry>,
 ) {
     for &(asbr, link_state_id, ext) in externals {
         if asbr == root {
@@ -906,13 +899,11 @@ fn collect_external_routes(
         else {
             continue;
         };
-        // Same `(Ipv4Addr, Ipv4Addr)` key shape `collect_stub_routes` uses,
-        // so a stub route and an external route to the same prefix collide
-        // correctly and `insert_best` keeps whichever is cheaper.
-        let key = (link_state_id, ext.network_mask);
+        // Keyed by the truncated prefix like every collector, so a stub
+        // route and an external route to the same prefix collide, and
+        // `insert_best` keeps whichever is cheaper.
         insert_best(
             out,
-            key,
             RouteEntry {
                 prefix: net_from(link_state_id, ext.network_mask),
                 next_hops,
@@ -952,14 +943,10 @@ fn root_advertises_stub(
 /// (or, in principle, a transit network) reachable via more than one
 /// router/path keeps only its shortest, and equal-metric candidates merge
 /// their next hops (`merge_equal`).
-fn insert_best(
-    out: &mut HashMap<(Ipv4Addr, Ipv4Addr), RouteEntry>,
-    key: (Ipv4Addr, Ipv4Addr),
-    candidate: RouteEntry,
-) {
-    match out.get_mut(&key) {
+fn insert_best(out: &mut HashMap<Ipv4Net, RouteEntry>, candidate: RouteEntry) {
+    match out.get_mut(&candidate.prefix) {
         None => {
-            out.insert(key, candidate);
+            out.insert(candidate.prefix, candidate);
         }
         Some(existing) if candidate.metric < existing.metric => *existing = candidate,
         Some(existing) if candidate.metric == existing.metric => merge_equal(existing, candidate),
@@ -984,14 +971,19 @@ pub(crate) fn merge_equal(existing: &mut RouteEntry, other: RouteEntry) {
     }
 }
 
-/// Builds the `Ipv4Net` for a `(network address, subnet mask)` pair, as
-/// carried on the wire by a stub-network `RouterLink`/`NetworkLsaBody` —
-/// both always encode a contiguous mask (never fabricated elsewhere in this
-/// crate), so `count_ones` recovers the prefix length exactly.
+/// Builds the truncated `Ipv4Net` for an `(address, subnet mask)` pair off
+/// the wire. The address can have host bits set: a Network-LSA's ID is the
+/// DR's interface address, and a Type-3/5/7 ID is the prefix with host bits
+/// set when the originator needed RFC 2328 Appendix E to tell two
+/// overlapping prefixes apart. Truncating makes both name the same prefix as
+/// a network-address ID. The mask is assumed contiguous, so `count_ones`
+/// recovers the prefix length.
 fn net_from(addr: Ipv4Addr, mask: Ipv4Addr) -> Ipv4Net {
     #[allow(clippy::cast_possible_truncation)]
     let prefix_len = u32::from(mask).count_ones() as u8;
-    Ipv4Net::new(addr, prefix_len).unwrap_or_else(|_| Ipv4Net::new(addr, 32).unwrap())
+    Ipv4Net::new(addr, prefix_len)
+        .unwrap_or_else(|_| Ipv4Net::new(addr, 32).unwrap())
+        .trunc()
 }
 
 #[cfg(test)]
@@ -1820,6 +1812,76 @@ mod tests {
         assert_eq!(
             routes[0].next_hops,
             vec![addr(10, 0, 0, 2), addr(10, 0, 1, 2)]
+        );
+    }
+
+    /// RFC 2328 Appendix E: one ASBR/ABR names `192.0.2.128/26` by its
+    /// network address, another by the host-bits form `.191`. Both are the
+    /// same prefix, one route with both next hops.
+    #[test]
+    fn host_bit_link_state_ids_truncate_and_merge() {
+        let root = router_id(1);
+        let (r1, r2) = (router_id(2), router_id(3));
+        let mask = addr(255, 255, 255, 192);
+        let topology = || {
+            vec![
+                router_lsa(
+                    root,
+                    vec![p2p(r1, addr(10, 0, 0, 1), 1), p2p(r2, addr(10, 0, 1, 1), 1)],
+                ),
+                router_lsa(r1, vec![p2p(root, addr(10, 0, 0, 2), 1)]),
+                router_lsa(r2, vec![p2p(root, addr(10, 0, 1, 2), 1)]),
+            ]
+        };
+        let both = vec![addr(10, 0, 0, 2), addr(10, 0, 1, 2)];
+
+        let mut lsas = topology();
+        lsas.push(as_external_lsa(addr(192, 0, 2, 128), mask, r1));
+        lsas.push(as_external_lsa(addr(192, 0, 2, 191), mask, r2));
+        let routes = compute(root, &lsas);
+        assert_eq!(routes.len(), 1, "{routes:?}");
+        assert_eq!(routes[0].prefix, "192.0.2.128/26".parse().unwrap());
+        assert_eq!(routes[0].next_hops, both);
+
+        let mut lsas = topology();
+        lsas.push(network_summary_lsa(addr(192, 0, 2, 128), mask, r1, 10));
+        lsas.push(network_summary_lsa(addr(192, 0, 2, 191), mask, r2, 10));
+        let routes = compute(root, &lsas);
+        assert_eq!(routes.len(), 1, "{routes:?}");
+        assert_eq!(routes[0].prefix, "192.0.2.128/26".parse().unwrap());
+        assert_eq!(routes[0].next_hops, both);
+    }
+
+    /// A Network-LSA's ID is the DR's interface address: seen from a router
+    /// not on the segment, the route is the segment's prefix.
+    #[test]
+    fn network_lsa_route_is_truncated_to_the_segment_prefix() {
+        let root = router_id(1);
+        let (w, x) = (router_id(2), router_id(3));
+        let dr = addr(10, 0, 5, 1);
+        let lsas = [
+            router_lsa(root, vec![p2p(w, addr(10, 0, 0, 1), 1)]),
+            router_lsa(w, vec![p2p(root, addr(10, 0, 0, 2), 1), transit(dr, dr, 1)]),
+            router_lsa(x, vec![transit(dr, addr(10, 0, 5, 2), 1)]),
+            network_lsa(dr, addr(255, 255, 255, 0), vec![w, x]),
+        ];
+        let routes = compute(root, &lsas);
+        let r = route_to(&routes, "10.0.5.0/24");
+        assert_eq!(r.next_hops, vec![addr(10, 0, 0, 2)]);
+        assert!(!routes.iter().any(|r| r.prefix.addr() == dr), "{routes:?}");
+    }
+
+    #[test]
+    fn nssa_translations_truncate_a_host_bit_link_state_id() {
+        let (root, asbr) = (router_id(1), router_id(2));
+        let lsas = [
+            router_lsa(root, vec![p2p(asbr, addr(10, 0, 0, 1), 5)]),
+            router_lsa(asbr, vec![p2p(root, addr(10, 0, 0, 2), 5)]),
+            type7(addr(192, 0, 2, 255), asbr, true, addr(10, 0, 0, 2)),
+        ];
+        assert_eq!(
+            nssa_translations(root, &lsas),
+            vec![("192.0.2.0/24".parse().unwrap(), EXTERNAL_METRIC_CONSTANT)]
         );
     }
 
