@@ -252,6 +252,20 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Clear a peer-group's local-as (its peers see this instance's own AS again).",
             ),
         ),
+        Topic::BgpPeerGroupAddPath => (
+            "Set RFC 7911 ADD-PATH (several paths per prefix) for a peer-group.",
+            concat!(
+                "Sets ADD-PATH on a peer-group's ipv4/ipv6 unicast sessions (`receive`, `send` or \
+             `both`; RFC 7911). `receive` keeps every path a peer sends for a prefix instead of \
+             only the last one, so they all compete in best-path selection and can form multipath; \
+             `send` advertises with path identifiers: a route-server client gets every other \
+             source's path, any other peer the best path. What is used per family is what both \
+             sides offer. A route-server client defaults to `both`, any other group to off. The \
+             capability is in the OPEN, so a change restarts the group's sessions.",
+                " ",
+                "Clear a peer-group's ADD-PATH (back to off, or both for a route-server client).",
+            ),
+        ),
         Topic::BgpPeerGroupMaxHops => (
             "Set how many router hops away a peer-group's peers may be.",
             concat!(

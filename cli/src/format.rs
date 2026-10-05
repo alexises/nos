@@ -95,6 +95,9 @@ pub fn render_bgp_peer_group(group: &BgpPeerGroup, local_asn: u32) -> String {
             line.push_str(" replace-as");
         }
     }
+    if let Some(mode) = group.add_path {
+        let _ = write!(line, ", add-path {}", mode.as_str());
+    }
     for af in nos_proto::AddressFamily::ALL {
         if let Some(l) = group.maximum_prefix.get(af) {
             let _ = write!(line, ", maximum-prefix {af} limit {}", l.limit);
@@ -2415,6 +2418,7 @@ mod tests {
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
             local_as: None,
+            add_path: None,
         }
     }
 

@@ -79,6 +79,12 @@ pub const CONFED_BAD_PREFIX: &str = "203.0.119.0/24";
 pub const LOCAL_AS: u32 = 65020;
 pub const LOCAL_AS_LEARNED_PREFIX: &str = "203.0.122.0/24";
 pub const LOCAL_AS_LOOP_PREFIX: &str = "203.0.123.0/24";
+/// `add-path`: the prefix ExaBGP (router-g) announces to router-a twice, as
+/// RFC 7911 path 1 (MED `ADD_PATH_MED_1`) and path 2 (`ADD_PATH_MED_2`, the
+/// better one).
+pub const ADD_PATH_PREFIX: &str = "203.0.124.0/24";
+pub const ADD_PATH_MED_1: u32 = 50;
+pub const ADD_PATH_MED_2: u32 = 10;
 /// `rpki`: the StayRTR cache (RFC 8210) router-a validates against, and an
 /// address nothing answers on, configured as the more preferred cache so the
 /// phase sees the failover. The ASN the first VRP set wrongly authorizes for

@@ -226,6 +226,7 @@ async fn resync(
             maximum_prefix: group.maximum_prefix,
             announce_rpki_state: group.announce_rpki_state,
             local_as: group.local_as,
+            add_path: group.effective_add_path(),
             confed_id: own.confederation.identifier,
             confed_member: own.confederation.is_member(group.remote_as),
             graceful_restart: own.graceful_restart.enabled_restart_time(),

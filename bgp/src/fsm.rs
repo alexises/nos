@@ -167,18 +167,37 @@ fn negotiate_address_families(
     )
 }
 
-/// Whether the peer's OPEN granted RFC 7911 ADD-PATH for IPv4/IPv6 unicast —
-/// always `(false, false)` unless `ctx.is_rs_client`, since this session
-/// only ever advertises the capability itself in that case (see `run`);
-/// otherwise `true` for any AFI where the peer's OPEN carried an `AddPath`
-/// tuple with a non-zero `send_receive` (this crate always offers `3`/both
-/// itself, so it doesn't distinguish partial send-only/receive-only grants —
-/// `ponytail: treats ADD-PATH as fully bidirectional once negotiated`).
-fn negotiate_add_path(open: &OpenMessage, ctx: &NegotiationContext) -> (bool, bool) {
-    if !ctx.is_rs_client {
-        return (false, false);
+/// RFC 7911 §5, for one unicast family of one session: whether received
+/// NLRI carry a Path Identifier (`rx`) and whether ours must (`tx`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct AddPathDir {
+    rx: bool,
+    tx: bool,
+}
+
+impl AddPathDir {
+    fn as_str(self) -> &'static str {
+        match (self.rx, self.tx) {
+            (false, false) => "none",
+            (true, false) => "receive",
+            (false, true) => "send",
+            (true, true) => "both",
+        }
     }
-    let peer_add_path: HashSet<u16> = open
+}
+
+/// RFC 7911 §5: per family (`[ipv4, ipv6]`), we receive path ids iff we
+/// offered 1 or 3 and the peer 2 or 3, and send them iff we offered 2 or 3
+/// and the peer 1 or 3. Only unicast (SAFI 1) tuples count, and only for a
+/// family this session is configured with. A tuple with a Send/Receive value
+/// outside 1..=3 makes the whole capability "not understood" (§4), so
+/// nothing is negotiated.
+fn negotiate_add_path(open: &OpenMessage, ctx: &NegotiationContext) -> [AddPathDir; 2] {
+    let none = [AddPathDir::default(); 2];
+    let Some(mode) = ctx.add_path else {
+        return none;
+    };
+    let tuples: Vec<&message::AddPathTuple> = open
         .capabilities
         .iter()
         .filter_map(|c| match c {
@@ -186,13 +205,27 @@ fn negotiate_add_path(open: &OpenMessage, ctx: &NegotiationContext) -> (bool, bo
             _ => None,
         })
         .flatten()
-        .filter(|t| t.send_receive != 0)
-        .map(|t| t.afi)
         .collect();
-    (
-        peer_add_path.contains(&AFI_IPV4),
-        peer_add_path.contains(&AFI_IPV6),
-    )
+    if tuples.iter().any(|t| !(1..=3).contains(&t.send_receive)) {
+        return none;
+    }
+    let ours = mode.send_receive();
+    let dir = |afi: u16| {
+        let configured = ctx.address_families.iter().any(|af| afi_of(*af) == afi);
+        let theirs = tuples
+            .iter()
+            .rev()
+            .find(|t| t.afi == afi && t.safi == 1)
+            .map(|t| t.send_receive);
+        match theirs {
+            Some(theirs) if configured => AddPathDir {
+                rx: ours & 1 != 0 && theirs & 2 != 0,
+                tx: ours & 2 != 0 && theirs & 1 != 0,
+            },
+            _ => AddPathDir::default(),
+        }
+    };
+    [dir(AFI_IPV4), dir(AFI_IPV6)]
 }
 
 /// RFC 4271's own suggested `ConnectRetryTimer` default. Replaces
@@ -252,11 +285,8 @@ struct RemoteInfo {
     negotiated_ipv4_unicast: bool,
     negotiated_ipv6_unicast: bool,
     negotiated_evpn: bool,
-    /// RFC 7911 ADD-PATH negotiated for this AFI — always `false` unless
-    /// this session is `is_rs_client` (only such sessions ever advertise the
-    /// capability, see `run`) and the peer echoed it back.
-    add_path_ipv4: bool,
-    add_path_ipv6: bool,
+    /// RFC 7911 ADD-PATH per family, `[ipv4, ipv6]` (`negotiate_add_path`).
+    add_path: [AddPathDir; 2],
     /// The peer sent the four-octet AS capability (RFC 6793); `false` means
     /// 2-byte `AS_PATH` + `AS4_PATH` in both directions.
     four_octet_as: bool,
@@ -305,8 +335,7 @@ enum Action {
         negotiated_ipv4_unicast: bool,
         negotiated_ipv6_unicast: bool,
         negotiated_evpn: bool,
-        add_path_ipv4: bool,
-        add_path_ipv6: bool,
+        add_path: [AddPathDir; 2],
         four_octet_as: bool,
         extended_message: bool,
         gr: Option<PeerGr>,
@@ -320,11 +349,9 @@ struct NegotiationContext {
     keepalive_override: Option<u16>,
     address_families: Vec<AddressFamily>,
     transport_afi: u16,
-    /// See `PeerContext::is_rs_client` — gates whether `negotiate_add_path`
-    /// ever returns `true` at all (this session only ever offers the
-    /// capability itself when this is set, so a peer's own advertisement of
-    /// it is irrelevant otherwise).
-    is_rs_client: bool,
+    /// The ADD-PATH mode this session offers (`ResolvedPeer::add_path`);
+    /// `None` offers nothing, so the peer's capability is irrelevant.
+    add_path: Option<nos_proto::BgpAddPath>,
 }
 
 /// Pure state transition core — the unit-test surface for this module.
@@ -340,8 +367,7 @@ fn step(state: State, event: Event, ctx: &NegotiationContext) -> (Option<State>,
                 negotiated_ipv4_unicast: remote.negotiated_ipv4_unicast,
                 negotiated_ipv6_unicast: remote.negotiated_ipv6_unicast,
                 negotiated_evpn: remote.negotiated_evpn,
-                add_path_ipv4: remote.add_path_ipv4,
-                add_path_ipv6: remote.add_path_ipv6,
+                add_path: remote.add_path,
                 four_octet_as: remote.four_octet_as,
                 extended_message: remote.extended_message,
                 gr: remote.gr,
@@ -435,7 +461,7 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
     };
     let (mp_bgp_negotiated, negotiated_ipv4_unicast, negotiated_ipv6_unicast, negotiated_evpn) =
         negotiate_address_families(open, ctx);
-    let (add_path_ipv4, add_path_ipv6) = negotiate_add_path(open, ctx);
+    let add_path = negotiate_add_path(open, ctx);
     let remote = RemoteInfo {
         asn: remote_asn,
         bgp_id: open.bgp_identifier,
@@ -443,8 +469,7 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
         negotiated_ipv4_unicast,
         negotiated_ipv6_unicast,
         negotiated_evpn,
-        add_path_ipv4,
-        add_path_ipv6,
+        add_path,
         four_octet_as: message::four_octet_asn(open).is_some(),
         extended_message: open
             .capabilities
@@ -806,7 +831,6 @@ fn log_notification(peer: IpAddr, n: &NotificationMessage) {
     );
 }
 
-#[allow(clippy::similar_names)] // add_path_afis (wire AFI ints) vs. add_path_afs (AddressFamily)
 pub async fn run(
     stream: TcpStream,
     role: collision::Role,
@@ -843,7 +867,7 @@ pub async fn run(
         keepalive_override: peer.keepalive_override,
         address_families: peer.address_families.clone(),
         transport_afi: afi_of_addr(peer.remote_address),
-        is_rs_client: peer.is_rs_client,
+        add_path: slot.peer.add_path,
     };
 
     let mut state = State::OpenSent;
@@ -917,10 +941,11 @@ pub async fn run(
         open.capabilities
             .push(message::Capability::EnhancedRouteRefresh);
         open.capabilities.push(message::Capability::ExtendedMessage);
-        if peer.is_rs_client {
-            // Only ever advertised for a route-server-client peer-group,
-            // unlike this crate's other capabilities — see `bgp/CLAUDE.md`'s
-            // "Route reflection and route server" section for why.
+        if let Some(mode) = ctx.add_path {
+            // Only when configured (a route-server client defaults to
+            // `Both`): unlike the other capabilities, it changes the NLRI
+            // wire format of the whole session. One instance carries every
+            // tuple (RFC 7911 §4).
             let tuples = peer
                 .address_families
                 .iter()
@@ -928,7 +953,7 @@ pub async fn run(
                 .map(|&af| message::AddPathTuple {
                     afi: afi_of(af),
                     safi: 1,
-                    send_receive: 3,
+                    send_receive: mode.send_receive(),
                 })
                 .collect();
             open.capabilities.push(message::Capability::AddPath(tuples));
@@ -1137,8 +1162,7 @@ pub async fn run(
                         negotiated_ipv4_unicast,
                         negotiated_ipv6_unicast,
                         negotiated_evpn,
-                        add_path_ipv4,
-                        add_path_ipv6,
+                        add_path,
                         four_octet_as,
                         extended_message,
                         gr: remote_gr,
@@ -1157,25 +1181,36 @@ pub async fn run(
                         if *negotiated_evpn {
                             negotiated_afs.insert(AddressFamily::L2vpnEvpn);
                         }
-                        let mut add_path_afis = HashSet::new();
-                        let mut add_path_afs = HashSet::new();
-                        if *add_path_ipv4 {
-                            add_path_afis.insert(AFI_IPV4);
-                            add_path_afs.insert(AddressFamily::Ipv4Unicast);
+                        // RFC 7911 §5: each direction on its own — the
+                        // decoder reads ids only where we receive them, the
+                        // encoder (and the RIB) sends them only where we send.
+                        let unicast = [AddressFamily::Ipv4Unicast, AddressFamily::Ipv6Unicast];
+                        let mut rx_afis = HashSet::new();
+                        let mut tx_afis = HashSet::new();
+                        let mut add_path_tx = HashSet::new();
+                        for (family, dir) in unicast.into_iter().zip(*add_path) {
+                            if dir.rx {
+                                rx_afis.insert(afi_of(family));
+                            }
+                            if dir.tx {
+                                tx_afis.insert(afi_of(family));
+                                add_path_tx.insert(family);
+                            }
                         }
-                        if *add_path_ipv6 {
-                            add_path_afis.insert(AFI_IPV6);
-                            add_path_afs.insert(AddressFamily::Ipv6Unicast);
+                        if slot.peer.add_path.is_some() {
+                            info!(
+                                peer = %peer.remote_address,
+                                ipv4 = add_path[0].as_str(),
+                                ipv6 = add_path[1].as_str(),
+                                "add-path negotiated"
+                            );
                         }
                         // Must be set before any further UPDATE is
                         // decoded/encoded on this connection — done here,
                         // right after Established, the same point every
                         // other negotiated-capability field is applied.
-                        reader
-                            .decoder_mut()
-                            .add_path_afis
-                            .clone_from(&add_path_afis);
-                        writer.encoder_mut().add_path_afis = add_path_afis;
+                        reader.decoder_mut().add_path_afis = rx_afis;
+                        writer.encoder_mut().add_path_afis = tx_afis;
                         reader.decoder_mut().two_octet_as = !*four_octet_as;
                         writer.encoder_mut().two_octet_as = !*four_octet_as;
                         reader.decoder_mut().extended = *extended_message;
@@ -1219,7 +1254,7 @@ pub async fn run(
                             peer.next_hop,
                             peer.is_rr_client,
                             peer.is_rs_client,
-                            add_path_afs,
+                            add_path_tx,
                             peer.export_policy.clone(),
                             outbox_tx.clone(),
                         );
@@ -1489,7 +1524,7 @@ mod tests {
             keepalive_override: None,
             address_families: vec![AddressFamily::Ipv4Unicast],
             transport_afi: AFI_IPV4,
-            is_rs_client: false,
+            add_path: None,
         }
     }
 
@@ -1504,7 +1539,7 @@ mod tests {
             keepalive_override,
             address_families: vec![AddressFamily::Ipv4Unicast],
             transport_afi: AFI_IPV4,
-            is_rs_client: false,
+            add_path: None,
         }
     }
 
@@ -1562,6 +1597,74 @@ mod tests {
             negotiate_address_families(&evpn_only, &v6_transport),
             (true, false, false, true)
         );
+    }
+
+    fn open_with_add_path(tuples: &[(u16, u8, u8)]) -> OpenMessage {
+        let mut open = valid_open(65002, 90);
+        open.capabilities.push(message::Capability::AddPath(
+            tuples
+                .iter()
+                .map(|&(afi, safi, send_receive)| message::AddPathTuple {
+                    afi,
+                    safi,
+                    send_receive,
+                })
+                .collect(),
+        ));
+        open
+    }
+
+    fn add_path_ctx(mode: Option<nos_proto::BgpAddPath>) -> NegotiationContext {
+        NegotiationContext {
+            add_path: mode,
+            ..ctx_with_afs(
+                vec![AddressFamily::Ipv4Unicast, AddressFamily::Ipv6Unicast],
+                AFI_IPV4,
+            )
+        }
+    }
+
+    #[test]
+    fn add_path_direction_follows_rfc7911_section5() {
+        use nos_proto::BgpAddPath::{Both, Receive, Send};
+        let dir = |rx, tx| AddPathDir { rx, tx };
+        // Local mode x peer value (1 receive, 2 send, 3 both).
+        let cases = [
+            (Receive, 1, dir(false, false)),
+            (Receive, 2, dir(true, false)),
+            (Receive, 3, dir(true, false)),
+            (Send, 1, dir(false, true)),
+            (Send, 2, dir(false, false)),
+            (Send, 3, dir(false, true)),
+            (Both, 1, dir(false, true)),
+            (Both, 2, dir(true, false)),
+            (Both, 3, dir(true, true)),
+        ];
+        for (mode, peer, want) in cases {
+            let open = open_with_add_path(&[(AFI_IPV4, 1, peer)]);
+            assert_eq!(
+                negotiate_add_path(&open, &add_path_ctx(Some(mode))),
+                [want, AddPathDir::default()],
+                "{mode:?} x {peer}"
+            );
+        }
+    }
+
+    #[test]
+    fn add_path_ignores_safi2_bad_values_and_unconfigured_sessions() {
+        let none = [AddPathDir::default(); 2];
+        let both = Some(nos_proto::BgpAddPath::Both);
+        // A multicast (SAFI 2) tuple is not unicast ADD-PATH.
+        let multicast = open_with_add_path(&[(AFI_IPV4, 2, 3)]);
+        assert_eq!(negotiate_add_path(&multicast, &add_path_ctx(both)), none);
+        // A value of 4 makes the whole capability not understood.
+        let bad = open_with_add_path(&[(AFI_IPV4, 1, 3), (AFI_IPV6, 1, 4)]);
+        assert_eq!(negotiate_add_path(&bad, &add_path_ctx(both)), none);
+        // No local mode: the peer's capability doesn't matter.
+        let fine = open_with_add_path(&[(AFI_IPV4, 1, 3), (AFI_IPV6, 1, 3)]);
+        assert_eq!(negotiate_add_path(&fine, &add_path_ctx(None)), none);
+        let full = AddPathDir { rx: true, tx: true };
+        assert_eq!(negotiate_add_path(&fine, &add_path_ctx(both)), [full, full]);
     }
 
     #[test]
@@ -1742,8 +1845,7 @@ mod tests {
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
-            add_path_ipv4: false,
-            add_path_ipv6: false,
+            add_path: [AddPathDir::default(); 2],
             four_octet_as: true,
             extended_message: false,
             enhanced_refresh: false,
@@ -1770,8 +1872,7 @@ mod tests {
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
-            add_path_ipv4: false,
-            add_path_ipv6: false,
+            add_path: [AddPathDir::default(); 2],
             four_octet_as: true,
             extended_message: false,
             enhanced_refresh: false,
@@ -1801,8 +1902,7 @@ mod tests {
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
-            add_path_ipv4: false,
-            add_path_ipv6: false,
+            add_path: [AddPathDir::default(); 2],
             four_octet_as: true,
             extended_message: false,
             enhanced_refresh: false,
@@ -1865,8 +1965,7 @@ mod tests {
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
-            add_path_ipv4: false,
-            add_path_ipv6: false,
+            add_path: [AddPathDir::default(); 2],
             four_octet_as: true,
             extended_message: false,
             enhanced_refresh: false,
@@ -1891,8 +1990,7 @@ mod tests {
             negotiated_ipv4_unicast: true,
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
-            add_path_ipv4: false,
-            add_path_ipv6: false,
+            add_path: [AddPathDir::default(); 2],
             four_octet_as: true,
             extended_message: false,
             enhanced_refresh: false,

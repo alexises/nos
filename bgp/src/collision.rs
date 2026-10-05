@@ -521,6 +521,7 @@ mod tests {
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
             local_as: None,
+            add_path: None,
             confed_id: None,
             confed_member: false,
             graceful_restart: None,

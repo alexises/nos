@@ -1880,6 +1880,107 @@ async fn exabgp_parsed(
     bail!("ExaBGP never parsed `{want}`: {last}")
 }
 
+/// RFC 7911 ADD-PATH receive (#13): router-a (`add-path receive`) peers
+/// ExaBGP (router-g, `add-path send`), which announces `ADD_PATH_PREFIX` as
+/// path 1 (MED 50) and path 2 (MED 10) through its API — a command file
+/// `tail -F` feeds it, so a path can be withdrawn without restarting ExaBGP
+/// (which would drop the session and every path with it). router-a keeps
+/// both paths and picks path 2; withdrawing path 2 alone makes path 1 the
+/// best path, and the prefix is never withdrawn.
+pub async fn add_path(w: &mut World) -> anyhow::Result<()> {
+    let flags = strings(&[
+        "--address",
+        &format!("{IP_A}/24"),
+        "--asn",
+        &ASN_A.to_string(),
+        "--router-id",
+        RID_A,
+        "--remote-as",
+        &ASN_G.to_string(),
+        "--peer",
+        IP_G,
+        "--add-path",
+        "receive",
+    ]);
+    w.start(A, Some(flags), &[]).await?;
+    ensure_exabgp(w).await?;
+    let conf = format!(
+        "process cmd {{\n    run /bin/sh -c \"touch /tmp/exa.cmd; tail -F /tmp/exa.cmd\";\n    \
+         encoder text;\n}}\n\
+         neighbor {IP_A} {{\n    router-id {RID_G};\n    local-address {IP_G};\n    \
+         local-as {ASN_G};\n    peer-as {ASN_A};\n    family {{ ipv4 unicast; }}\n    \
+         capability {{ add-path send; }}\n    api {{ processes [ cmd ]; }}\n}}\n"
+    );
+    w.dock
+        .start_plain(
+            "router-g",
+            EXABGP_IMAGE,
+            NET,
+            IP_G,
+            &["/etc/exabgp.conf"],
+            ("/etc", "exabgp.conf", conf.as_bytes()),
+        )
+        .await?;
+    let announce = |id: u32, med: u32| {
+        format!(
+            "announce route {ADD_PATH_PREFIX} next-hop {IP_G} med {med} as-path [ {ASN_G} ] path-information {id}"
+        )
+    };
+    exabgp_api(w, &announce(1, ADD_PATH_MED_1)).await?;
+    exabgp_api(w, &announce(2, ADD_PATH_MED_2)).await?;
+
+    let a = w.a()?;
+    a.established().await?;
+    log("the capability is negotiated in router-a's receive direction");
+    a.wait(&format!("add-path negotiated peer={IP_G} ipv4=\"receive\""))
+        .await?;
+    log("both paths are kept, path 2 (lower MED) is the best path");
+    for id in [1, 2] {
+        a.wait(&format!(
+            "learned route for {ADD_PATH_PREFIX} into adj-rib-in peer={IP_G} path_id={id}"
+        ))
+        .await?;
+    }
+    let best =
+        |med: u32| format!("loc-rib best path for {ADD_PATH_PREFIX} updated .*med=Some({med})");
+    a.wait(&best(ADD_PATH_MED_2)).await?;
+
+    log("withdrawing path 2 alone: path 1 takes over, the prefix stays");
+    let established = a.count("bgp session established");
+    let withdrawn = format!("loc-rib route for {ADD_PATH_PREFIX} withdrawn");
+    let back_to_1 = a.count(&best(ADD_PATH_MED_1));
+    exabgp_api(
+        w,
+        &format!("withdraw route {ADD_PATH_PREFIX} next-hop {IP_G} path-information 2"),
+    )
+    .await?;
+    a.wait(&format!(
+        "withdrew path for {ADD_PATH_PREFIX} from adj-rib-in peer={IP_G} path_id=2"
+    ))
+    .await?;
+    a.wait_new(&best(ADD_PATH_MED_1), back_to_1, 30).await?;
+    a.assert_quiet(&withdrawn, 0, 10).await?;
+    anyhow::ensure!(
+        a.count("bgp session established") == established,
+        "withdrawing one path reset the session"
+    );
+    Ok(())
+}
+
+/// Hands ExaBGP (router-g) one API command, through the command file its
+/// `process cmd` follows.
+async fn exabgp_api(w: &World, line: &str) -> anyhow::Result<()> {
+    let (code, out) = w
+        .dock
+        .exec(
+            "router-g",
+            &["sh", "-c", &format!("echo '{line}' >> /tmp/exa.cmd")],
+        )
+        .await?;
+    anyhow::ensure!(code == 0, "writing ExaBGP's command file: {out}");
+    Ok(())
+}
+
 /// RFC 4486 §4 maximum-prefix (#79): ExaBGP (router-g) announces
 /// `MAX_PREFIX_ROUTES` (3) IPv4 routes to router-a, whose peer-group allows
 /// fewer. A trip closes the session with Cease subcode 1 and holds the peer
