@@ -194,11 +194,14 @@ fn apply_verdict(route: &mut RibRoute, verdict: nos_rpl::Verdict) -> Option<nos_
     Some(edits.next_hop)
 }
 
-/// A Type-2 route's `(VNI, MAC)` mobility identity — `None` for every other
-/// EVPN route type, which RFC 7432 §15 mobility doesn't apply to.
-fn evpn_mac_key(nlri: &EvpnNlri) -> Option<(u32, [u8; 6])> {
+/// A Type-2 route's `(VNI, MAC)` mobility identity, plus its ESI — `None`
+/// for every other EVPN route type, which RFC 7432 §15 mobility doesn't
+/// apply to.
+fn evpn_mac_key(nlri: &EvpnNlri) -> Option<(u32, [u8; 6], [u8; 10])> {
     match nlri {
-        EvpnNlri::MacIp { mac, labels, .. } => Some((labels.first().copied().unwrap_or(0), *mac)),
+        EvpnNlri::MacIp {
+            mac, labels, esi, ..
+        } => Some((labels.first().copied().unwrap_or(0), *mac, *esi)),
         _ => None,
     }
 }
@@ -220,12 +223,12 @@ fn learn_evpn(
             pmsi_vni: pmsi.map(|p| p.vni),
             extended_communities: extended_communities.to_vec(),
         };
-        if let Some((vni, mac)) = evpn_mac_key(nlri) {
+        if let Some((vni, mac, esi)) = evpn_mac_key(nlri) {
             let (seq, sticky) = extended_communities
                 .iter()
                 .find_map(|c| nos_proto::evpn_id::parse_mac_mobility(*c))
                 .unwrap_or((0, false));
-            mac_mobility.candidate(vni, mac, mp.next_hop, seq, sticky, Instant::now());
+            mac_mobility.candidate(vni, mac, mp.next_hop, esi, seq, sticky, Instant::now());
         }
         if table.insert(nlri.clone(), route.clone()) != Some(route) {
             info!(peer = %from, route_type = nlri.route_type(), route = %nlri, next_hop = %mp.next_hop, "evpn route learned");
@@ -1444,7 +1447,12 @@ impl BgpRib {
                             &attrs.extended_communities,
                             attrs.pmsi,
                         );
-                        evpn_recheck.extend(mp.evpn.iter().filter_map(evpn_mac_key));
+                        evpn_recheck.extend(
+                            mp.evpn
+                                .iter()
+                                .filter_map(evpn_mac_key)
+                                .map(|(vni, mac, _)| (vni, mac)),
+                        );
                     }
                 }
                 for (vni, mac) in evpn_recheck {
@@ -2830,6 +2838,82 @@ mod tests {
         assert_eq!((type5[0].vni, type5[0].next_hop), (5000, addr("192.0.2.1")));
         // The Type-2 is still there for nos-fdbd.
         assert_eq!(snap.len(), 2);
+    }
+
+    /// RFC 7432 §15 vs §8.4: a peer's higher-sequence Type-2 for a MAC we
+    /// advertise locally makes us withdraw ours only when it is behind a
+    /// different ESI; on our own segment both PEs keep theirs (#172).
+    /// Returns (we withdrew ours, the peer's copy reaches fdbd).
+    fn remote_claim_on(remote_esi: [u8; 10]) -> (bool, bool) {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let mut rx = register_mp_peer(&mut rib, peer, false, addr("10.0.0.254"), evpn_afs());
+        let mut local = mac_route(1);
+        local.esi = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Add(local));
+        let _ = recv_all(&mut rx);
+
+        let remote = EvpnNlri::MacIp {
+            rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 2],
+            esi: remote_esi,
+            tag: 0,
+            mac: [0, 0, 0, 0, 0, 1],
+            ip: None,
+            labels: vec![10100],
+        };
+        // The peer's VTEP (192.0.2.1) is lower than ours (192.0.2.9), seq 5.
+        let mut u = evpn_reach(vec![remote], vec![65001]);
+        u.attributes
+            .as_mut()
+            .unwrap()
+            .extended_communities
+            .push(nos_proto::evpn_id::mac_mobility_ext(5, false));
+        rib.handle_update(peer, false, v4("192.0.2.1"), &u, &deny_all_policy());
+        let withdrew = recv_all(&mut rx)
+            .iter()
+            .any(|u| matches!(u, OutboundUpdate::WithdrawEvpn(_)));
+        let pushed = rib
+            .evpn_push_snapshot()
+            .values()
+            .any(|r| r.next_hop == addr("192.0.2.1"));
+        (withdrew, pushed)
+    }
+
+    #[test]
+    fn same_esi_remote_type2_is_not_a_mac_move() {
+        assert_eq!(
+            remote_claim_on([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+            (false, true)
+        );
+    }
+
+    #[test]
+    fn different_esi_remote_type2_is_a_mac_move() {
+        assert_eq!(remote_claim_on([9; 10]), (true, true));
+    }
+
+    #[test]
+    fn same_esi_copies_reach_fdbd_once_from_the_lowest_vtep() {
+        let mut rib = new_rib(65000);
+        for (peer, nh, rd) in [("10.0.0.1", "192.0.2.5", 5), ("10.0.0.2", "192.0.2.3", 3)] {
+            let _rx = register_peer(&mut rib, addr(peer), false, addr("10.0.0.254"));
+            let mut u = evpn_reach(
+                vec![EvpnNlri::MacIp {
+                    rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, rd],
+                    esi: [7; 10],
+                    tag: 0,
+                    mac: [0, 0, 0, 0, 0, 1],
+                    ip: None,
+                    labels: vec![10100],
+                }],
+                vec![65001],
+            );
+            u.mp_reach[0].next_hop = addr(nh);
+            rib.handle_update(addr(peer), false, v4(peer), &u, &deny_all_policy());
+        }
+        let snap = rib.evpn_push_snapshot();
+        assert_eq!(snap.len(), 1, "{snap:?}");
+        assert!(snap.values().all(|r| r.next_hop == addr("192.0.2.3")));
     }
 
     #[test]

@@ -3617,8 +3617,32 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
     log("the CE's link to router-a goes down: it is bridged locally on router-b");
     host_sh(w, CE_HOST, "ip link set eth0 down; sleep 1").await?;
     host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
+    let ce_mac = host_sh(w, CE_HOST, "cat /sys/class/net/bond0/address").await?;
+    same_segment_no_move(w, ce_mac.trim(), [(A, IP_B), (B, IP_A)]).await?;
 
     dataplane_teardown(w).await
+}
+
+/// #172: the CE's MAC behind the all-active segment, advertised by both PEs
+/// (RFC 7432 §8.4), is not an RFC 7432 §15 MAC move. Each PE holds the
+/// other's Type-2 for it on `ESI`, and through 10s of `nos-fdbd` re-push
+/// ticks (when the flap used to start) neither withdraws its own nor freezes
+/// the MAC — at any point in the phase, since the routers are fresh.
+async fn same_segment_no_move(w: &World, mac: &str, pes: [(Id, &str); 2]) -> anyhow::Result<()> {
+    log("the CE's MAC on both PEs' segment is not a mac move (#172)");
+    for (id, other) in pes {
+        w.get(id)?
+            .wait(&format!(
+                "evpn route learned .*:\\[{ESI}\\]:\\[0\\]:\\[48\\]:\\[{mac}\\].* next_hop={other}$"
+            ))
+            .await?;
+    }
+    for (id, _) in pes {
+        let r = w.get(id)?;
+        r.assert_quiet("local mac mobility lost", 0, 10).await?;
+        r.assert_quiet("duplicate mac detected", 0, 0).await?;
+    }
+    Ok(())
 }
 
 /// The CE ARPs for the host once (`arping` from its bond, entering router-a);
@@ -4353,6 +4377,7 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
     ping_until(w, H_HOST, CE_IP, 30).await?;
     host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
     host_sh(w, H_HOST, &format!("ping -c 3 -W 2 {CE_IP}")).await?;
+    same_segment_no_move(w, &ce_mac, [(A, V6_B), (B, V6_A)]).await?;
 
     log("router-c aliases the CE's MAC over an IPv6 FDB nexthop group of both PEs");
     let group =
@@ -4382,9 +4407,7 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
     }
 
     // A control-plane withdrawal, not router-a's bond going down: nos-interfaced
-    // brings a downed bond back up within seconds (#169). Not asserted: which
-    // PE's Type-2 router-c then uses — nos-bgpd treats one MAC on one ESI from
-    // two PEs as a MAC move (RFC 7432 §15).
+    // brings a downed bond back up within seconds (#169).
     log("router-c shuts its session to router-a: router-a's A-D routes go, the group with them, the CE still reaches the host");
     let removed =
         format!("remote mac group removed domain={EVPN_DOMAIN} mac={ce_mac} vteps={V6_A},{V6_B}");

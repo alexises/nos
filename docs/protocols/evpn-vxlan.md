@@ -346,6 +346,8 @@ EVPN routes a router receives are used, never passed on to other peers. So EVPN 
 
 When a host moves from one router to another, both may briefly advertise its MAC address. NOS follows RFC 7432 §15: each advertisement carries a sequence number in a MAC Mobility community, the highest number wins (on a tie, the router with the lower tunnel address), and a router that learns the MAC locally again advertises it with a higher number than the one it saw, so a real move always wins over a stale copy. A MAC address that changes router more than 5 times within 3 minutes is treated as a duplicate: NOS keeps its last location and ignores further moves until it has been quiet for 3 minutes.
 
+A MAC address behind a multi-homed Ethernet Segment is not a move: every router on the segment advertises it with the same ESI, and they all keep their advertisement and share one sequence number. Only an advertisement behind a different ESI (or a single-homed one, ESI 0) competes as above.
+
 ### The designated forwarder
 
 Among the routers attached to one Ethernet Segment, one per domain is the designated forwarder: it alone delivers flooded traffic to the CE, so the CE never receives a copy through each router. The candidates are the routers that advertise the segment. When every one of them announces the AC-DF capability (RFC 8584; NOS always does), only those that also serve the domain are candidates; otherwise every router on the segment is, as in RFC 7432. By default (`df-algorithm modulo`, RFC 7432 §8.5) the candidates are ordered by tunnel address and the DF for a domain is candidate number `VNI mod <number of candidates>`. Two domains on the same segment can therefore have different DFs, which spreads the load.

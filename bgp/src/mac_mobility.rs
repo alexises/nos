@@ -11,6 +11,12 @@
 //! let a stale, lower-sequence re-announcement win a tie-break it shouldn't.
 //! `tick`'s `EXPIRE` bounds memory for a MAC that stops being advertised
 //! entirely instead.
+//!
+//! A MAC is held by one owner *or* by one Ethernet Segment: every PE
+//! advertising it with the holder's non-zero ESI is on the same multi-homed
+//! segment (RFC 7432 §8.4/§14.1.1 all-active), not a competing claim — §15
+//! mobility only applies to a MAC showing up behind a *different* ESI. Those
+//! PEs all `holds` it and share one sequence.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
@@ -31,9 +37,21 @@ struct MacState {
     seq: u32,
     sticky: bool,
     owner: IpAddr,
+    /// The holder's ESI; non-zero means every PE on that segment holds it.
+    esi: [u8; 10],
     moves: VecDeque<Instant>,
     frozen: bool,
     last_seen: Instant,
+}
+
+impl MacState {
+    fn same_segment(&self, esi: [u8; 10]) -> bool {
+        esi != [0; 10] && esi == self.esi
+    }
+
+    fn holds(&self, owner: IpAddr, esi: [u8; 10]) -> bool {
+        owner == self.owner || self.same_segment(esi)
+    }
 }
 
 /// One `(VNI, MAC)`'s current mobility state.
@@ -56,11 +74,17 @@ impl MacMobility {
     /// candidate; a conflicting candidate for a sticky MAC freezes at once,
     /// skipping the move-count threshold (RFC 7432 §15: a sticky/static MAC
     /// must never move).
+    ///
+    /// A candidate on the holder's own non-zero `esi` is the same segment:
+    /// always held, never a move, never a sticky conflict, and its sequence
+    /// is shared (the larger one is kept).
+    #[allow(clippy::too_many_arguments)]
     pub fn candidate(
         &mut self,
         vni: u32,
         mac: [u8; 6],
         owner: IpAddr,
+        esi: [u8; 10],
         seq: u32,
         sticky: bool,
         now: Instant,
@@ -73,6 +97,7 @@ impl MacMobility {
                     seq,
                     sticky,
                     owner,
+                    esi,
                     moves: VecDeque::new(),
                     frozen: false,
                     last_seen: now,
@@ -83,12 +108,23 @@ impl MacMobility {
         state.last_seen = now;
 
         if state.frozen {
-            return state.owner == owner;
+            return state.holds(owner, esi);
         }
         if state.owner == owner {
-            // Same PE re-asserting: track its latest seq/sticky, never a move.
-            state.seq = seq;
+            // Same PE re-asserting: track its latest seq/sticky/esi, never a
+            // move; on an unchanged segment the sequence stays shared.
+            state.seq = if state.same_segment(esi) {
+                state.seq.max(seq)
+            } else {
+                seq
+            };
             state.sticky = sticky;
+            state.esi = esi;
+            return true;
+        }
+        if state.same_segment(esi) {
+            // Another PE on the holder's segment: not a competing claim.
+            state.seq = state.seq.max(seq);
             return true;
         }
 
@@ -115,6 +151,7 @@ impl MacMobility {
         state.seq = seq;
         state.sticky = sticky;
         state.owner = owner;
+        state.esi = esi;
         if state.moves.len() > MOVE_LIMIT {
             Self::freeze(&mut state.moves, &mut state.frozen, vni, mac, now, false);
         }
@@ -141,24 +178,32 @@ impl MacMobility {
     }
 
     /// The sequence number a local advertisement for `(vni, mac)` from
-    /// `owner` should use: `owner`'s own current sequence, unchanged, if it
-    /// already holds `(vni, mac)` (an ordinary re-push isn't a re-learn and
-    /// must not keep bumping the sequence); otherwise one past whatever the
-    /// current winner holds, so a genuine local re-learn always outranks a
-    /// stale remote copy (RFC 7432 §7.7). `0` when nothing is known about
-    /// this MAC yet.
+    /// `owner` behind `esi` should use: the current sequence, unchanged, if
+    /// it already holds `(vni, mac)` on that same ESI — itself, or its
+    /// segment (an ordinary re-push, or a re-learn behind the shared bond,
+    /// isn't a move and must not keep bumping the sequence); otherwise one
+    /// past it, so a genuine local re-learn always outranks a stale remote
+    /// copy (RFC 7432 §15.1). `0` when nothing is known about this MAC yet.
     #[must_use]
-    pub fn local_seq(&self, vni: u32, mac: [u8; 6], owner: IpAddr) -> u32 {
+    pub fn local_seq(&self, vni: u32, mac: [u8; 6], owner: IpAddr, esi: [u8; 10]) -> u32 {
         match self.entries.get(&(vni, mac)) {
-            Some(s) if s.owner == owner => s.seq,
+            Some(s) if (s.owner == owner && s.esi == esi) || s.same_segment(esi) => s.seq,
             Some(s) => s.seq.wrapping_add(1),
             None => 0,
         }
     }
 
-    /// The current winning owner for `(vni, mac)`, if any.
+    /// Whether `owner` advertising `(vni, mac)` behind `esi` currently holds
+    /// it: it is the winner, or on the winner's (non-zero) segment.
     #[must_use]
-    pub fn winner(&self, vni: u32, mac: [u8; 6]) -> Option<IpAddr> {
+    pub fn holds(&self, vni: u32, mac: [u8; 6], owner: IpAddr, esi: [u8; 10]) -> bool {
+        self.entries
+            .get(&(vni, mac))
+            .is_some_and(|s| s.holds(owner, esi))
+    }
+
+    #[cfg(test)]
+    fn winner(&self, vni: u32, mac: [u8; 6]) -> Option<IpAddr> {
         self.entries.get(&(vni, mac)).map(|s| s.owner)
     }
 
@@ -195,15 +240,86 @@ pub(crate) fn format_mac(mac: [u8; 6]) -> String {
 mod tests {
     use super::*;
 
+    const Z: [u8; 10] = [0; 10];
+    const E1: [u8; 10] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 1];
+    const E2: [u8; 10] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 2];
+
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn same_esi_from_two_pes_is_not_a_move() {
+        let mut m = MacMobility::default();
+        let t0 = Instant::now();
+        let (a, b) = (ip("10.0.0.2"), ip("10.0.0.1"));
+        assert!(m.candidate(100, [1; 6], a, E1, 0, false, t0));
+        for i in 0..20u32 {
+            // b has the lower address and sometimes a higher seq: still no move.
+            assert!(m.candidate(100, [1; 6], b, E1, i % 2, false, t0));
+            assert!(m.candidate(100, [1; 6], a, E1, 0, false, t0));
+        }
+        assert!(m.holds(100, [1; 6], a, E1) && m.holds(100, [1; 6], b, E1));
+        assert_eq!(m.winner(100, [1; 6]), Some(a));
+        // Shared sequence: a segment peer's re-learn doesn't bump it.
+        assert_eq!(m.local_seq(100, [1; 6], a, E1), 1);
+        assert_eq!(m.local_seq(100, [1; 6], b, E1), 1);
+    }
+
+    #[test]
+    fn different_esi_is_still_a_move() {
+        let mut m = MacMobility::default();
+        let t0 = Instant::now();
+        let (a, b) = (ip("10.0.0.2"), ip("10.0.0.1"));
+        assert!(m.candidate(100, [1; 6], a, E1, 0, false, t0));
+        assert!(m.candidate(100, [1; 6], b, E2, 0, false, t0));
+        assert!(!m.holds(100, [1; 6], a, E1));
+        assert!(m.holds(100, [1; 6], b, E2));
+        assert_eq!(m.local_seq(100, [1; 6], a, E1), 1);
+    }
+
+    #[test]
+    fn zero_esi_is_never_the_same_segment() {
+        let mut m = MacMobility::default();
+        let t0 = Instant::now();
+        let (a, b) = (ip("10.0.0.1"), ip("10.0.0.2"));
+        assert!(m.candidate(100, [1; 6], a, Z, 0, false, t0));
+        assert!(!m.candidate(100, [1; 6], b, Z, 0, false, t0));
+        assert!(!m.holds(100, [1; 6], b, Z));
+    }
+
+    #[test]
+    fn moving_off_the_segment_bumps_and_displaces_it() {
+        let mut m = MacMobility::default();
+        let t0 = Instant::now();
+        let (a, b) = (ip("10.0.0.1"), ip("10.0.0.2"));
+        m.candidate(100, [1; 6], a, E1, 3, false, t0);
+        m.candidate(100, [1; 6], b, E1, 3, false, t0);
+        // b now sees the MAC behind a single-homed port.
+        let seq = m.local_seq(100, [1; 6], b, Z);
+        assert_eq!(seq, 4);
+        assert!(m.candidate(100, [1; 6], b, Z, seq, false, t0));
+        assert!(!m.holds(100, [1; 6], a, E1));
+    }
+
+    #[test]
+    fn sticky_same_esi_is_not_a_duplicate() {
+        let mut m = MacMobility::default();
+        let t0 = Instant::now();
+        let (a, b) = (ip("10.0.0.1"), ip("10.0.0.2"));
+        assert!(m.candidate(100, [1; 6], a, E1, 0, true, t0));
+        assert!(m.candidate(100, [1; 6], b, E1, 0, true, t0));
+        // A real conflict from another segment still freezes it (sticky),
+        // but the frozen entry keeps admitting every PE on the segment.
+        assert!(!m.candidate(100, [1; 6], ip("10.0.0.3"), E2, 9, false, t0));
+        assert!(m.holds(100, [1; 6], b, E1));
     }
 
     #[test]
     fn first_candidate_always_wins() {
         let mut m = MacMobility::default();
         let t0 = Instant::now();
-        assert!(m.candidate(100, [1; 6], ip("10.0.0.1"), 0, false, t0));
+        assert!(m.candidate(100, [1; 6], ip("10.0.0.1"), Z, 0, false, t0));
         assert_eq!(m.winner(100, [1; 6]), Some(ip("10.0.0.1")));
     }
 
@@ -211,11 +327,11 @@ mod tests {
     fn higher_sequence_wins() {
         let mut m = MacMobility::default();
         let t0 = Instant::now();
-        assert!(m.candidate(100, [1; 6], ip("10.0.0.1"), 0, false, t0));
-        assert!(m.candidate(100, [1; 6], ip("10.0.0.2"), 1, false, t0));
+        assert!(m.candidate(100, [1; 6], ip("10.0.0.1"), Z, 0, false, t0));
+        assert!(m.candidate(100, [1; 6], ip("10.0.0.2"), Z, 1, false, t0));
         assert_eq!(m.winner(100, [1; 6]), Some(ip("10.0.0.2")));
         // A stale, lower-sequence re-claim loses.
-        assert!(!m.candidate(100, [1; 6], ip("10.0.0.1"), 0, false, t0));
+        assert!(!m.candidate(100, [1; 6], ip("10.0.0.1"), Z, 0, false, t0));
         assert_eq!(m.winner(100, [1; 6]), Some(ip("10.0.0.2")));
     }
 
@@ -223,12 +339,12 @@ mod tests {
     fn tie_breaks_on_lower_owner_ip() {
         let mut m = MacMobility::default();
         let t0 = Instant::now();
-        assert!(m.candidate(100, [1; 6], ip("10.0.0.5"), 3, false, t0));
+        assert!(m.candidate(100, [1; 6], ip("10.0.0.5"), Z, 3, false, t0));
         // Same seq, lower IP: wins.
-        assert!(m.candidate(100, [1; 6], ip("10.0.0.2"), 3, false, t0));
+        assert!(m.candidate(100, [1; 6], ip("10.0.0.2"), Z, 3, false, t0));
         assert_eq!(m.winner(100, [1; 6]), Some(ip("10.0.0.2")));
         // Same seq, higher IP: loses.
-        assert!(!m.candidate(100, [1; 6], ip("10.0.0.9"), 3, false, t0));
+        assert!(!m.candidate(100, [1; 6], ip("10.0.0.9"), Z, 3, false, t0));
         assert_eq!(m.winner(100, [1; 6]), Some(ip("10.0.0.2")));
     }
 
@@ -238,26 +354,26 @@ mod tests {
         let t0 = Instant::now();
         let me = ip("10.0.0.1");
         let remote = ip("10.0.0.9");
-        assert_eq!(m.local_seq(100, [1; 6], me), 0);
-        m.candidate(100, [1; 6], remote, 5, false, t0);
+        assert_eq!(m.local_seq(100, [1; 6], me, Z), 0);
+        m.candidate(100, [1; 6], remote, Z, 5, false, t0);
         // A different owner (`me`) must outrank the remote's sequence.
-        assert_eq!(m.local_seq(100, [1; 6], me), 6);
-        m.candidate(100, [1; 6], me, 6, false, t0);
+        assert_eq!(m.local_seq(100, [1; 6], me, Z), 6);
+        m.candidate(100, [1; 6], me, Z, 6, false, t0);
         // Re-asking for the owner that already won doesn't keep bumping it.
-        assert_eq!(m.local_seq(100, [1; 6], me), 6);
+        assert_eq!(m.local_seq(100, [1; 6], me, Z), 6);
     }
 
     #[test]
     fn sticky_owner_is_never_displaced_and_a_conflict_freezes_at_once() {
         let mut m = MacMobility::default();
         let t0 = Instant::now();
-        assert!(m.candidate(100, [1; 6], ip("10.0.0.1"), 0, true, t0));
+        assert!(m.candidate(100, [1; 6], ip("10.0.0.1"), Z, 0, true, t0));
         // Even a much higher sequence from elsewhere doesn't win.
-        assert!(!m.candidate(100, [1; 6], ip("10.0.0.2"), 99, false, t0));
+        assert!(!m.candidate(100, [1; 6], ip("10.0.0.2"), Z, 99, false, t0));
         assert_eq!(m.winner(100, [1; 6]), Some(ip("10.0.0.1")));
         // The conflict froze it: the sticky owner's own re-assertion is
         // still reported as the winner (frozen keeps the last winner).
-        assert!(m.candidate(100, [1; 6], ip("10.0.0.1"), 0, true, t0));
+        assert!(m.candidate(100, [1; 6], ip("10.0.0.1"), Z, 0, true, t0));
     }
 
     #[test]
@@ -267,40 +383,48 @@ mod tests {
         let a = ip("10.0.0.1");
         let b = ip("10.0.0.2");
         // First candidate: not a move.
-        m.candidate(100, [1; 6], a, 0, false, t0);
+        m.candidate(100, [1; 6], a, Z, 0, false, t0);
         // MOVE_LIMIT real ownership changes: not frozen yet (len == MOVE_LIMIT).
         for i in 0..MOVE_LIMIT {
             let t = t0 + Duration::from_secs(i as u64 + 1);
             let owner = if i % 2 == 0 { b } else { a };
-            assert!(m.candidate(100, [1; 6], owner, u32::try_from(i).unwrap() + 1, false, t));
+            assert!(m.candidate(
+                100,
+                [1; 6],
+                owner,
+                Z,
+                u32::try_from(i).unwrap() + 1,
+                false,
+                t
+            ));
         }
         let winner_before = m.winner(100, [1; 6]).unwrap();
         // One more real move crosses the threshold (len == MOVE_LIMIT + 1) and freezes.
         let flip = if winner_before == a { b } else { a };
         let t_extra = t0 + Duration::from_secs(MOVE_LIMIT as u64 + 1);
-        assert!(m.candidate(100, [1; 6], flip, 999, false, t_extra));
+        assert!(m.candidate(100, [1; 6], flip, Z, 999, false, t_extra));
         let frozen_winner = m.winner(100, [1; 6]);
         assert_eq!(frozen_winner, Some(flip));
         // Further candidates are ignored while frozen, even a higher sequence.
-        assert!(!m.candidate(100, [1; 6], ip("10.0.0.3"), 1000, false, t_extra));
+        assert!(!m.candidate(100, [1; 6], ip("10.0.0.3"), Z, 1000, false, t_extra));
         assert_eq!(m.winner(100, [1; 6]), frozen_winner);
         // After the window passes quietly, it recovers and accepts a fresh candidate.
         let t_after = t_extra + MOVE_WINDOW + Duration::from_secs(1);
         m.tick(t_after);
-        assert!(m.candidate(100, [1; 6], ip("10.0.0.3"), 1001, false, t_after));
+        assert!(m.candidate(100, [1; 6], ip("10.0.0.3"), Z, 1001, false, t_after));
     }
 
     #[test]
     fn a_withdrawal_does_not_forget_the_sequence_but_a_long_silence_does() {
         let mut m = MacMobility::default();
         let t0 = Instant::now();
-        m.candidate(100, [1; 6], ip("10.0.0.9"), 5, false, t0);
+        m.candidate(100, [1; 6], ip("10.0.0.9"), Z, 5, false, t0);
         // No `withdraw` API at all: the RIB just stops feeding candidates for
         // a withdrawn route. A later local re-learn still outranks it.
-        assert_eq!(m.local_seq(100, [1; 6], ip("10.0.0.1")), 6);
+        assert_eq!(m.local_seq(100, [1; 6], ip("10.0.0.1"), Z), 6);
         // Only a long silence (EXPIRE) forgets it, resetting to 0.
         m.tick(t0 + EXPIRE + Duration::from_secs(1));
-        assert_eq!(m.local_seq(100, [1; 6], ip("10.0.0.1")), 0);
+        assert_eq!(m.local_seq(100, [1; 6], ip("10.0.0.1"), Z), 0);
         assert_eq!(m.winner(100, [1; 6]), None);
     }
 }
