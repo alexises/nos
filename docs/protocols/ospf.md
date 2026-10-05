@@ -170,7 +170,19 @@ After the wait interval (the dead interval, 40 seconds by default), the election
 show ospf neigh
 ```
 
-A profile's network type follows the link by default: point-to-point on a subinterface, broadcast on a broadcast domain. `set network-type point-to-point|broadcast` in the profile forces either one on every link that uses it.
+A profile's network type follows the link by default: point-to-point on a subinterface, broadcast on a broadcast domain. `set network-type point-to-point|broadcast|point-to-multipoint` in the profile forces one on every link that uses it.
+
+### Run point-to-multipoint (RFC 2328 section 9.5)
+
+- Use it when one interface reaches several routers that don't need a DR, such as a partial mesh over a shared segment.
+- Set `network-type point-to-multipoint` in the profile. Both ends of every link must use it.
+- Behaviour:
+  - Hello is multicast to 224.0.0.5, with no DR/BDR election and no network-mask check.
+  - Each neighbor found forms its own adjacency and reaches `Full`.
+  - The router originates one point-to-point link per `Full` neighbor and a single /32 stub for its own interface address, not the subnet. A neighbor's address shows up as a /32 OSPF route.
+- Hello and dead intervals keep the usual 10 and 40 seconds. Neighbors are discovered over multicast; there is no static neighbor list, so non-broadcast media (NBMA) are not supported.
+- Not available for OSPFv3: the commit is refused.
+- Check with `show ospf neigh`: one row per neighbor, interface state `PointToPoint`.
 
 ### Authenticate a link, and change its key
 
@@ -509,7 +521,7 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **NSSA (RFC 3101).** Described [above](#redistribute-from-inside-a-stub-like-area-nssa). In an NSSA, Hellos carry the N bit and not the E bit, a type-5 or type-11 LSA is neither sent nor accepted, and a type-7 LSA is never sent or accepted outside one. A type-7 LSA from an ABR has the P bit clear, so no other ABR translates it. The translator doesn't copy the type-7 forwarding address into its type-5 LSA, so traffic to a translated route goes through the translator. Its election has no stability delay: a translator that loses it flushes its type-5 LSAs at once.
 
-**Not supported:** virtual links, metric-type 2 external routes, redistribution of anything other than static routes, flooding type-11 opaque LSAs between areas, the restarting router's own RFC 3623 restart mode (it resynchronises from scratch while its neighbours help) and strict LSA checking in the helper, BFD, and the non-broadcast network types (NBMA and point-to-multipoint).
+**Not supported:** virtual links, metric-type 2 external routes, redistribution of anything other than static routes, flooding type-11 opaque LSAs between areas, the restarting router's own RFC 3623 restart mode (it resynchronises from scratch while its neighbours help) and strict LSA checking in the helper, BFD, NBMA, and static neighbor lists (so point-to-multipoint only runs over multicast-capable media).
 
 ## Configuration reference
 
@@ -556,7 +568,7 @@ Absolute forms start with `set ospf instance <name> area <area-id> profile <prof
 | cost | `set … profile <p> cost <n>`; relative `set cost <n>` / `delete cost` *(relative only)* | `cost` | integer 1 to 65535; default 1 | 0 is refused | cost of the link in SPF | `show route <table>` on other routers, `GET /v1/routes/{table}` |
 | priority | `set … profile <p> priority <n>`; relative `set priority <n>` / `delete priority` *(relative only)* | `priority` | integer 0 to 255; default 1 | | DR/BDR election; 0 never becomes DR or BDR; no effect on point-to-point | `show ospf neigh` |
 | MTU | `set … profile <p> mtu <bytes>`; relative `set mtu <bytes>` / `delete mtu` *(relative only)* | `mtu` | integer 0 to 65535; default: the link's own MTU (1500 if unknown) | | MTU advertised in database-description packets and used to size them; the interface's real MTU is not changed | `GET …/profile/<p>/mtu` |
-| network type | `set … profile <p> network-type point-to-point\|broadcast`; relative `set network-type …` / `delete network-type` *(relative only)* | `network-type`, `"PointToPoint"` or `"Broadcast"` | default: point-to-point on a subinterface or loopback, broadcast on a broadcast domain | | forces the network type on every link using the profile | `show ospf neigh` (link state) |
+| network type | `set … profile <p> network-type point-to-point\|broadcast\|point-to-multipoint`; relative `set network-type …` / `delete network-type` *(relative only)* | `network-type`, `"PointToPoint"`, `"Broadcast"` or `"PointToMultipoint"` | default: point-to-point on a subinterface or loopback, broadcast on a broadcast domain | | forces the network type on every link using the profile | `show ospf neigh` (link state) |
 | simple password | `set … profile <p> simple-password <password>`; relative `set simple-password <password>` | `auth`, `{"Simple":{"password":"…"}}` | 1 to 8 bytes; replaces any crypto keys | | RFC 2328 plain-text authentication; stored and shown in clear | `show this` in the profile |
 | crypto key | `set … profile <p> crypto-key <id> <algorithm> <key>`; relative `set crypto-key <id> <algorithm> <key>` / `delete crypto-key <id>` *(relative only)* | `auth`, `{"Crypto":{"keys":[{"key_id":1,"algorithm":"HmacSha256","key":"…","is_current":true}]}}` | ID 0 to 255 (up to 65535 with extended sequence numbers); algorithm `md5`, `hmac-sha1`, `hmac-sha256`, `hmac-sha384`, `hmac-sha512` (`Md5`, `HmacSha1`, … in JSON); key 1 to 80 bytes | key IDs unique; at least one key; exactly one current | adds or replaces one key; a new key list replaces a simple password | `show this` in the profile |
 | current key | `set … profile <p> crypto-key <id> current`; relative `set crypto-key <id> current` | `is_current` of each key | exactly one key | the key must exist | the key that signs sent packets; all keys verify | `show this` in the profile |

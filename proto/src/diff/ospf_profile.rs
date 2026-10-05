@@ -82,6 +82,7 @@ fn network_type_str(p: &OspfProfile) -> String {
         None => "unset (derived from attach point)".to_string(),
         Some(NetworkType::PointToPoint) => "point-to-point".to_string(),
         Some(NetworkType::Broadcast) => "broadcast".to_string(),
+        Some(NetworkType::PointToMultipoint) => "point-to-multipoint".to_string(),
     }
 }
 

@@ -2086,7 +2086,8 @@
         "description": "Which RFC 2328 network type an attach point using this profile runs.\n`OspfProfile.network_type` is `Option` — see its doc comment for how an\nunset value is resolved.",
         "enum": [
           "PointToPoint",
-          "Broadcast"
+          "Broadcast",
+          "PointToMultipoint"
         ],
         "type": "string"
       },

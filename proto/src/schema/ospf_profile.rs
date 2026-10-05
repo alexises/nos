@@ -29,6 +29,9 @@ pub const PRIORITY_DEFAULT: u8 = 1;
 pub enum NetworkType {
     PointToPoint,
     Broadcast,
+    /// RFC 2328 §9.5: multicast Hello, no DR/BDR, one adjacency per
+    /// discovered neighbor. `OSPFv2` only (rejected on an `Ospfv3Profile`).
+    PointToMultipoint,
 }
 
 /// A profile's own authentication — RFC 2328 Appendix D. Mutually exclusive
@@ -506,7 +509,11 @@ mod tests {
 
     #[test]
     fn either_network_type_passes() {
-        for network_type in [NetworkType::PointToPoint, NetworkType::Broadcast] {
+        for network_type in [
+            NetworkType::PointToPoint,
+            NetworkType::Broadcast,
+            NetworkType::PointToMultipoint,
+        ] {
             let mut p = profile("p1");
             p.network_type = Some(network_type);
             let cfg = config_with(vec![instance("r1", vec![area("0.0.0.0", vec![p])])]);

@@ -20,11 +20,11 @@ use ipnet::{IpNet, Ipv4Net};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp,
     BroadcastDomainOp, ConfigOp, EsRedundancy, InterfaceOp, LacpRate, LldpDestination, LldpOp,
-    OspfAreaOp, OspfAreaType, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstanceOp, OspfProfileOp,
-    Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp, PortAggregateMode,
-    PortAggregateOp, PortAggregateSubinterfaceOp, Redistribute, RedistributeSource,
-    RedistributeTarget, RoutingTableEvpn, RoutingTableOp, SourceAddress, StaticRouteOp,
-    StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, UserOp, VlanTag,
+    NetworkType, OspfAreaOp, OspfAreaType, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstanceOp,
+    OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp,
+    PortAggregateMode, PortAggregateOp, PortAggregateSubinterfaceOp, Redistribute,
+    RedistributeSource, RedistributeTarget, RoutingTableEvpn, RoutingTableOp, SourceAddress,
+    StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, UserOp, VlanTag,
 };
 
 /// Clap-facing mirror of `nos_proto::PortAggregateMode` — `clap::ValueEnum`
@@ -921,6 +921,12 @@ pub struct Args {
     /// hello-interval doesn't match the receiving interface's own.
     #[arg(long)]
     pub ospf_profile_hello_interval: Option<u16>,
+
+    /// If set (requires `--ospf-profile`), forces this profile's network type:
+    /// `point-to-point`, `broadcast`, `point-to-multipoint`, or `clear` to go
+    /// back to the per-attach-point default.
+    #[arg(long)]
+    pub ospf_profile_network_type: Option<String>,
 
     /// If set (requires `--ospf-profile`), enables/disables RFC 7474
     /// extended cryptographic sequence numbers on it
@@ -2251,6 +2257,27 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     mtu,
                 }));
             }
+            if let Some(kind) = args.ospf_profile_network_type.as_deref() {
+                let (instance, name) = (instance.clone(), name.clone());
+                ops.push(ConfigOp::OspfProfile(match kind {
+                    "clear" => OspfProfileOp::ClearNetworkType {
+                        instance,
+                        area_id,
+                        name,
+                    },
+                    _ => OspfProfileOp::SetNetworkType {
+                        instance,
+                        area_id,
+                        name,
+                        network_type: match kind {
+                            "point-to-point" => NetworkType::PointToPoint,
+                            "broadcast" => NetworkType::Broadcast,
+                            "point-to-multipoint" => NetworkType::PointToMultipoint,
+                            other => bail!("--ospf-profile-network-type: unknown {other:?}"),
+                        },
+                    },
+                }));
+            }
             if let Some(hello_interval) = args.ospf_profile_hello_interval {
                 ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetHelloInterval {
                     instance: instance.clone(),
@@ -2296,6 +2323,9 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             if args.ospf_profile_mtu.is_some() {
                 bail!("--ospf-profile-mtu requires --ospf-profile to also be set");
             }
+            if args.ospf_profile_network_type.is_some() {
+                bail!("--ospf-profile-network-type requires --ospf-profile to also be set");
+            }
             if args.ospf_profile_hello_interval.is_some() {
                 bail!("--ospf-profile-hello-interval requires --ospf-profile to also be set");
             }
@@ -2308,6 +2338,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     } else if args.ospf_simple_password.is_some() || args.ospf_crypto_key.is_some() {
         bail!("--ospf-simple-password/--ospf-crypto-key require --ospf-profile to also be set");
     } else if args.ospf_profile_mtu.is_some()
+        || args.ospf_profile_network_type.is_some()
         || args.ospf_profile_hello_interval.is_some()
         || args.ospf_extended_seq.is_some()
     {
