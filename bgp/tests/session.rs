@@ -275,6 +275,51 @@ async fn graceful_restart_keeps_routes_across_a_graceful_reset() {
     }
 }
 
+/// #12: `SessionManager::shutdown` (SIGINT) tells every Established peer
+/// first — a Hard Reset with N exchanged — so B, which would keep A's routes
+/// across a bare TCP close, drops them at once. Bounded by one `CEASE_GRACE`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_sends_a_hard_reset_so_the_peer_keeps_nothing() {
+    let prefix: ipnet::IpNet = "198.51.100.0/24".parse().unwrap();
+    let (a, b, _) = routers();
+    a.manager
+        .apply_redistribute_update(RedistributeUpdate::Full(vec![RedistributedRoute {
+            prefix,
+            gateway: "10.0.0.9".parse().unwrap(),
+        }]))
+        .await;
+    a.apply(vec![peer(B, A, 65002)]).await;
+    b.apply(vec![peer(A, B, 65001)]).await;
+    b.wait_for(BgpSessionState::Established).await;
+    let has = || async { b.manager.bgp_push_snapshot().await.1.contains_key(&prefix) };
+    for _ in 0..100 {
+        if has().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(has().await, "b never learned a's route");
+
+    let started = std::time::Instant::now();
+    a.manager.shutdown().await;
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "shutdown took {:?}",
+        started.elapsed()
+    );
+    let mut gone = false;
+    for _ in 0..40 {
+        if !has().await {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(gone, "b kept a's route after a's shutdown");
+    assert_eq!(b.manager.peer_summaries().await[0].stale_prefixes, 0);
+    b.manager.shutdown().await;
+}
+
 /// RFC 4486 §4 (#79): b allows one prefix from a, which sends two — b closes
 /// the session and holds a down; a clear is accepted, a raised limit lets
 /// both routes in.

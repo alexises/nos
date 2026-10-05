@@ -164,7 +164,7 @@ On by default: `BgpInstance.graceful_restart` (`nos_proto::BgpGracefulRestart { 
 - `PeerSummary.graceful_restart`/`stale_prefixes`; `show bgp brief` renders `Idle (gr-stale <n>)` and `gr <s>s N F:ipv4,…`.
 - Found while adding it: a connection already in flight when a peer tripped its maximum-prefix limit (the other side of a collision) used to bring the session back; `fsm::run` now answers its OPEN with Cease/Connection Rejected (5) while the hold is on.
 
-Verified by `nos-e2e bgp-graceful-restart` (nos↔nos, both sides) and `bgp-gr-frr` (FRR), and `bgp/tests/session.rs`'s `graceful_restart_keeps_routes_across_a_graceful_reset`.
+Verified by `nos-e2e bgp-graceful-restart` (nos↔nos, both sides) and `bgp-gr-frr` (FRR), and `bgp/tests/session.rs`'s `graceful_restart_keeps_routes_across_a_graceful_reset` and `shutdown_sends_a_hard_reset_so_the_peer_keeps_nothing` (SIGINT's Cease, which a bare abort would turn into retention).
 
 ### Confederations (RFC 5065)
 
