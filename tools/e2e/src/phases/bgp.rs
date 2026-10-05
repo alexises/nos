@@ -743,6 +743,11 @@ pub async fn bgp_multipath(w: &mut World) -> anyhow::Result<()> {
         f.extend(strings(&redistribute()));
         f
     };
+    // A router-b/router-c left over from an earlier phase would peer the
+    // fresh router-a with its old config before being replaced, and the
+    // `loc_rib` baseline below would count its route.
+    w.remove(B).await;
+    w.remove(C).await;
     w.start(A, Some(hub("pg-b", IP_B, "2")), &[]).await?;
     w.start(B, Some(spoke(IP_B, RID_B)), &[]).await?;
     w.start(C, Some(spoke(IP_C, RID_C)), &[]).await?;
