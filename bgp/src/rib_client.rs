@@ -46,6 +46,20 @@ pub async fn get_igp_costs(rib_socket: &Path) -> Option<Vec<(IpNet, u32)>> {
     }
 }
 
+/// One-shot query of how many BGP routes the table still holds
+/// (`RibRequest::BgpRouteCount`). `None` on any failure.
+pub async fn get_bgp_route_count(rib_socket: &Path) -> Option<u32> {
+    let stream = nos_pki::connect_role(rib_socket, Role::Ribd).await.ok()?;
+    let (r, w) = tokio::io::split(stream);
+    let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
+    let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
+    writer.send(RibRequest::BgpRouteCount).await.ok()?;
+    match reader.next().await {
+        Some(Ok(RibEvent::BgpRouteCount(n))) => Some(n),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +148,15 @@ mod tests {
         serve_once(&path, move |_req| Some(RibEvent::IgpCosts(vec![(net, 20)])));
 
         assert_eq!(get_igp_costs(&path).await, Some(vec![(net, 20)]));
+    }
+
+    #[tokio::test]
+    async fn returns_bgp_route_count_on_well_formed_reply() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rib.sock");
+        serve_once(&path, |req| {
+            matches!(req, RibRequest::BgpRouteCount).then_some(RibEvent::BgpRouteCount(7))
+        });
+        assert_eq!(get_bgp_route_count(&path).await, Some(7));
     }
 }

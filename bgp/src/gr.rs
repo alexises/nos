@@ -4,6 +4,10 @@
 //! state lives in `rib.rs` (`BgpRib.gr`, the stale sets and deadlines) and
 //! the wire format in `message.rs`.
 
+use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
+use std::time::{Duration, Instant};
+
 use nos_proto::AddressFamily;
 
 use crate::message::{CeaseSubcode, GrFamily, GracefulRestartCap};
@@ -163,6 +167,114 @@ pub fn sends_hard_reset(subcode: CeaseSubcode, n_exchanged: bool) -> bool {
         )
 }
 
+/// RFC 4724 §4.1 selection deferral of a restarting speaker (one whose
+/// `nos-ribd` still held BGP routes at startup): nothing leaves the process
+/// — UPDATEs, End-of-RIB, kernel and EVPN pushes — until every configured
+/// peer has sent End-of-RIB for each negotiated family, or the
+/// `selection-deferral-time` runs out. The Loc-RIB still fills meanwhile.
+#[derive(Debug)]
+pub struct Deferral {
+    started: Instant,
+    until: Instant,
+    restart_time: Duration,
+    /// Configured, non-shut peers not done yet.
+    waiting: HashSet<IpAddr>,
+    /// Of those, the ones `Established`: families still owing End-of-RIB.
+    pending: HashMap<IpAddr, HashSet<AddressFamily>>,
+    /// `nos-ribd`'s redistributed routes are in the Loc-RIB, so our own
+    /// End-of-RIB won't go out without them.
+    // ponytail: EVPN routes from nos-fdbd / IP-VRF tables aren't waited
+    // for; one arriving after the deferral is sent on its own, after a
+    // helper may already have purged our stale copy.
+    local: bool,
+}
+
+impl Deferral {
+    pub fn new(
+        now: Instant,
+        restart_time: u16,
+        selection_deferral_time: u16,
+        peers: impl IntoIterator<Item = IpAddr>,
+    ) -> Self {
+        Deferral {
+            started: now,
+            until: now + Duration::from_secs(u64::from(selection_deferral_time)),
+            restart_time: Duration::from_secs(u64::from(restart_time)),
+            waiting: peers.into_iter().collect(),
+            pending: HashMap::new(),
+            local: false,
+        }
+    }
+
+    /// `peer` reached `Established`. One that sent no capability (§4.1:
+    /// it won't send End-of-RIB) or is restarting itself (R bit — two
+    /// restarting speakers would otherwise wait for each other) is done.
+    pub fn established(
+        &mut self,
+        peer: IpAddr,
+        gr: Option<PeerGr>,
+        families: &HashSet<AddressFamily>,
+    ) {
+        if !self.waiting.contains(&peer) {
+            return;
+        }
+        match gr {
+            Some(g) if !g.restart && !families.is_empty() => {
+                self.pending.insert(peer, families.clone());
+            }
+            _ => self.done(peer),
+        }
+    }
+
+    pub fn end_of_rib(&mut self, peer: IpAddr, family: AddressFamily) {
+        if let Some(left) = self.pending.get_mut(&peer) {
+            left.remove(&family);
+            if left.is_empty() {
+                self.done(peer);
+            }
+        }
+    }
+
+    /// The session ended; a `hard` end (a peer deconfigured or shut, or a
+    /// Hard Reset) stops waiting for it altogether.
+    pub fn disconnected(&mut self, peer: IpAddr, hard: bool) {
+        self.pending.remove(&peer);
+        if hard {
+            self.waiting.remove(&peer);
+        }
+    }
+
+    /// Stops waiting for a peer still not `Established` our restart time
+    /// after we started: a dead peer must not hold every update for the
+    /// whole deferral, past a helper's stale timer (#12, owner Q9).
+    pub fn drop_dead(&mut self, now: Instant, established: impl Fn(IpAddr) -> bool) {
+        if now >= self.started + self.restart_time {
+            self.waiting.retain(|p| established(*p));
+        }
+    }
+
+    /// `nos-ribd`'s first redistribution snapshot arrived.
+    pub fn local_routes_in(&mut self) {
+        self.local = true;
+    }
+
+    /// Why the deferral is over, if it is.
+    pub fn over(&self, now: Instant) -> Option<&'static str> {
+        if self.waiting.is_empty() && self.local {
+            Some("end-of-rib")
+        } else if now >= self.until {
+            Some("timer")
+        } else {
+            None
+        }
+    }
+
+    fn done(&mut self, peer: IpAddr) {
+        self.waiting.remove(&peer);
+        self.pending.remove(&peer);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +338,49 @@ mod tests {
         assert_eq!(notification_disconnect(4, 0, true), Disconnect::Graceful);
         assert_eq!(notification_disconnect(6, 9, true), Disconnect::Hard);
         assert_eq!(notification_disconnect(6, 6, false), Disconnect::Hard);
+    }
+
+    #[test]
+    fn deferral_ends_on_the_last_end_of_rib_or_the_timers() {
+        let (a, b) = ("10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap());
+        let v4 = HashSet::from([AddressFamily::Ipv4Unicast]);
+        let t0 = Instant::now();
+        let gr = Some(cap(true, &[(AddressFamily::Ipv4Unicast, true)]));
+
+        let mut d = Deferral::new(t0, 120, 360, [a, b]);
+        d.local_routes_in();
+        d.established(a, gr, &v4);
+        d.end_of_rib(a, AddressFamily::Ipv6Unicast);
+        assert_eq!(d.over(t0), None);
+        d.end_of_rib(a, AddressFamily::Ipv4Unicast);
+        // b never came up: dropped once our restart time has passed.
+        d.drop_dead(t0 + Duration::from_secs(119), |_| false);
+        assert_eq!(d.over(t0), None);
+        d.drop_dead(t0 + Duration::from_secs(120), |_| false);
+        assert_eq!(d.over(t0), Some("end-of-rib"));
+
+        // An established GR peer that never sends End-of-RIB: the timer.
+        let mut d = Deferral::new(t0, 120, 360, [a]);
+        d.established(a, gr, &v4);
+        d.drop_dead(t0 + Duration::from_secs(200), |p| p == a);
+        assert_eq!(d.over(t0 + Duration::from_secs(359)), None);
+        assert_eq!(d.over(t0 + Duration::from_secs(360)), Some("timer"));
+
+        // A hard end (deconfigured) stops waiting; a soft one doesn't.
+        let mut d = Deferral::new(t0, 120, 360, [a]);
+        d.established(a, gr, &v4);
+        d.disconnected(a, true);
+        // ...and nothing goes out before the redistributed routes are in.
+        assert_eq!(d.over(t0), None);
+        d.local_routes_in();
+        assert_eq!(d.over(t0), Some("end-of-rib"));
+        let mut d = Deferral::new(t0, 120, 360, [a]);
+        d.local_routes_in();
+        d.established(a, gr, &v4);
+        d.disconnected(a, false);
+        assert_eq!(d.over(t0), None);
+        d.disconnected(a, true);
+        assert_eq!(d.over(t0), Some("end-of-rib"));
     }
 
     #[test]

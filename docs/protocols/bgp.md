@@ -682,6 +682,16 @@ Graceful restart is **on by default**. It lets a peer's routes stay in use while
 - A peer that comes back without the capability, or without its forwarding state for a family (F bit clear), has that family's stale routes removed at once (`flushing stale routes … reason=no-capability|forwarding-not-preserved`).
 - NOS sends End-of-RIB after the initial routes of each family, to peers that advertised graceful restart.
 
+When `nos-bgpd` itself restarts (a crash or a kill) while the routing table's `nos-ribd` keeps running, it restarts gracefully:
+
+- At startup it asks `nos-ribd` how many BGP routes it still holds. More than zero means the kernel kept forwarding, so it logs `graceful restart: forwarding state preserved, deferring route selection bgp_routes=<n>`.
+- Its OPEN then sets the R bit and F=1 for every family, so peers keep its routes until its End-of-RIB instead of dropping them.
+- It learns routes as usual but sends nothing yet: no UPDATE, no End-of-RIB, and no change to the kernel, which keeps the routes it had.
+- It waits for End-of-RIB from every configured peer and for the routes it redistributes. A peer that doesn't advertise graceful restart, or is restarting itself (R bit), isn't waited for, nor is one still down after `restart-time`.
+- Then it logs `route selection deferral ended reason=end-of-rib`, sends each peer its routes and End-of-RIB, and replaces the kernel's BGP routes with what it selected. If that takes longer than `selection-deferral-time`, it goes ahead anyway (`reason=timer`).
+- If `nos-ribd` restarted too, or holds no BGP route, there is nothing to preserve: no deferral, and F=0.
+- EVPN routes this router originates (from a broadcast domain or an IP-VRF) aren't waited for. One that reaches `nos-bgpd` after the deferral is sent on its own, so a peer may drop and re-learn it.
+
 Which session ends keep the routes:
 
 | How the session ended | Routes kept |
@@ -694,7 +704,7 @@ With N exchanged, these Cease NOTIFICATIONs go out as a Hard Reset wrapping the 
 
 What default-on costs:
 
-- After a crash, peers keep forwarding to this router for up to `restart-time` (120s by default), even though a freshly started `nos-bgpd` has emptied its routing table. Its OPEN then says F=0, so peers drop its routes as soon as it is back.
+- After a crash of the whole router (or of `nos-ribd` too), peers keep forwarding to it for up to `restart-time` (120s by default), even though its routing table is gone. Its OPEN then says F=0, so peers drop its routes as soon as it is back.
 - When a peer dies silently (no TCP reset) and both sides have N, its routes are kept until the hold timer expires and then for its restart time: up to 90 + 120 seconds, not 90.
 
 Settings, on the BGP instance:
@@ -702,7 +712,7 @@ Settings, on the BGP instance:
 - `graceful-restart disable` turns it off: no capability, nothing kept.
 - `graceful-restart restart-time <s>`: what we advertise, 0 to 4095, default 120.
 - `graceful-restart stale-time <s>`: how long a returned peer's stale routes wait for its End-of-RIB, default 180.
-- `graceful-restart selection-deferral-time <s>`: reserved for the restarting side, default 360.
+- `graceful-restart selection-deferral-time <s>`: the longest a restarted `nos-bgpd` waits for its peers' End-of-RIB before sending its routes, default 360.
 - `delete` any of them to go back to the default. Changing the setting restarts the instance's sessions.
 
 ```
@@ -719,7 +729,7 @@ $C -X DELETE $B/v1/transactions/t8/bgp-instance/r1/graceful-restart/disabled
 
 `GET /v1/bgp/summary` reports each peer's capability (`graceful_restart`: restart time, N, R and the F bit per family) and `stale_prefixes`.
 
-A peer that rejects capability 64 with an OPEN error never comes up; turn graceful restart off on that instance. NOS does not yet restart gracefully itself: a restarted `nos-bgpd` doesn't wait for its peers' End-of-RIB before sending its routes.
+A peer that rejects capability 64 with an OPEN error never comes up; turn graceful restart off on that instance.
 
 ### What is not supported yet
 
@@ -752,7 +762,7 @@ Created with `edit bgp instance <name>`; deleted with `delete bgp instance <name
 | graceful-restart disable | `set bgp instance <i> graceful-restart disable` / `set graceful-restart disable`; `delete … graceful-restart disable` | `…/graceful-restart/disabled`, boolean | default `false` (graceful restart on) | none | Turns graceful restart off; see [Graceful restart](#graceful-restart-rfc-4724-rfc-8538). Restarts the sessions | `GET /v1/bgp/summary` on the peer (`graceful_restart`) |
 | graceful-restart restart-time | `set bgp instance <i> graceful-restart restart-time <s>` / `set graceful-restart restart-time <s>`; `delete … graceful-restart restart-time` | `…/graceful-restart/restart-time`, number or `null` | seconds; default 120 | at most 4095 | The restart time we advertise. Restarts the sessions | `show bgp brief` on the peer (`gr <s>s`) |
 | graceful-restart stale-time | `set bgp instance <i> graceful-restart stale-time <s>` / `set graceful-restart stale-time <s>`; `delete … graceful-restart stale-time` | `…/graceful-restart/stale-time`, number or `null` | seconds; default 180 | at least 1 | How long a returned peer's stale routes wait for its End-of-RIB | `show log nos-bgpd[<i>]` |
-| graceful-restart selection-deferral-time | `set bgp instance <i> graceful-restart selection-deferral-time <s>`; `delete … graceful-restart selection-deferral-time` | `…/graceful-restart/selection-deferral-time`, number or `null` | seconds; default 360 | at least 1 | Reserved for the restarting side (not used yet) | `show config` |
+| graceful-restart selection-deferral-time | `set bgp instance <i> graceful-restart selection-deferral-time <s>`; `delete … graceful-restart selection-deferral-time` | `…/graceful-restart/selection-deferral-time`, number or `null` | seconds; default 360 | at least 1 | How long a restarted `nos-bgpd` waits for its peers' End-of-RIB before sending its routes | `show config` |
 | routing table | `set routing-table <t> bgp-instance <i>`; `delete routing-table <t> bgp-instance` | `routing-table/<t>/bgp-instance`, `"r1"` | name; default: none | instance must exist; one table per instance | Runs the instance in that table's VRF. Without it, the instance opens no session | `show bgp brief` |
 
 `bgp-instance/<name>/routing-table` and `bgp-instance/<name>/redistribute-policy` also appear in the REST tree. They are read-only copies of the routing table's settings, recomputed at every commit; set the routing table's fields instead.

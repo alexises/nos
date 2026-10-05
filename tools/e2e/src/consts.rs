@@ -301,6 +301,9 @@ pub const FRR_IMAGE: &str = "quay.io/frrouting/frr:10.7.1";
 /// `bgp-gr-frr`: the prefix FRR (`router-f`, at `IP_G` on `NET`) announces to
 /// router-a over eBGP.
 pub const FRR_BGP_PREFIX: &str = "198.18.210.0/24";
+/// `bgp-graceful-restart`: a static router-b redistributes, so router-a's
+/// `nos-ribd` holds a BGP route when its `nos-bgpd` restarts.
+pub const GR_B_PREFIX: &str = "198.18.211.0/24";
 pub const NET_OSPF_FRR: &str = "nos-verify-net-ospf-frr";
 pub const OSPF_FRR_SUBNET: &str = "10.51.0.0/24";
 pub const OSPF_FRR_IP_A: &str = "10.51.0.2";

@@ -606,6 +606,14 @@ pub struct BgpRib {
     gr_deadline: HashMap<IpAddr, Instant>,
     /// `BgpGracefulRestart.stale_time`.
     gr_stale_time: Duration,
+    /// RFC 4724 §4.1: set while this restarting process defers what it
+    /// sends (`begin_deferral`); every send site returns early meanwhile.
+    deferral: Option<crate::gr::Deferral>,
+    /// `nos-ribd` still held BGP routes when this process started, so our
+    /// F bit is 1 toward every peer (`gr_forwarding`).
+    forwarding_preserved: bool,
+    /// `nos-ribd`'s redistribution feed has delivered its first snapshot.
+    redistribute_seen: bool,
     /// EVPN routes originated by each `nos-fdbd` (keyed by broadcast domain),
     /// and what was last announced to each peer — see `evpn_out`.
     evpn_local: HashMap<evpn_out::EvpnSource, HashMap<nos_proto::EvpnKey, nos_proto::EvpnRoute>>,
@@ -710,6 +718,9 @@ impl BgpRib {
             gr: HashMap::new(),
             gr_deadline: HashMap::new(),
             gr_stale_time: Duration::from_secs(u64::from(nos_proto::GR_STALE_TIME_DEFAULT)),
+            deferral: None,
+            forwarding_preserved: false,
+            redistribute_seen: false,
             evpn_local: HashMap::new(),
             evpn_adj_rib_out: HashMap::new(),
             fdb_domains: Vec::new(),
@@ -882,6 +893,11 @@ impl BgpRib {
     /// no real gateway to install, and pushing it would round-trip
     /// static→bgp→rib→kernel pointlessly on the same table it came from.
     pub fn push_snapshot(&self) -> (Option<String>, HashMap<IpNet, Hops>) {
+        // Deferring: `nos-ribd` keeps what it holds, rather than getting a
+        // `Full` of a Loc-RIB that is still filling.
+        if self.deferring() {
+            return (None, HashMap::new());
+        }
         let routes = self
             .loc_rib
             .iter()
@@ -940,7 +956,25 @@ impl BgpRib {
                 export_policy,
             },
         );
-        let outbox = self.peer_outboxes.get(&peer).expect("just inserted");
+        if let Some(deferral) = self.deferral.as_mut() {
+            let families = self.peer_outboxes[&peer].negotiated_afs.clone();
+            deferral.established(peer, self.gr.get(&peer).copied(), &families);
+            // Ending it sends this peer's initial update too.
+            self.maybe_end_deferral(Instant::now());
+            return;
+        }
+        self.initial_update(peer);
+    }
+
+    /// The initial full advertisement of the current Loc-RIB (and local
+    /// EVPN routes) to a just-established peer, then — toward a graceful
+    /// restart peer — one End-of-RIB per negotiated family (RFC 4724 §2),
+    /// on the same channel so it follows the dump.
+    fn initial_update(&mut self, peer: IpAddr) {
+        let Some(outbox) = self.peer_outboxes.get(&peer) else {
+            return;
+        };
+        let is_rs_client = outbox.is_rs_client;
         let mut advertised = HashSet::new();
         for (prefix, best) in &self.loc_rib {
             if self.suppressed_by_aggregate(*prefix) {
@@ -968,6 +1002,59 @@ impl BgpRib {
                 self.propagate_rs_view(prefix);
             }
         }
+        if self.gr.contains_key(&peer) {
+            let outbox = &self.peer_outboxes[&peer];
+            for family in AddressFamily::ALL {
+                if outbox.negotiated_afs.contains(&family) {
+                    let _ = outbox.tx.send(OutboundUpdate::EndOfRib(family));
+                }
+            }
+        }
+    }
+
+    /// Starts RFC 4724 §4.1 selection deferral: `nos-ribd` still held
+    /// `routes` BGP routes when this process started. Call before any
+    /// session starts; `peers` are the configured, non-shut ones.
+    pub fn begin_deferral(
+        &mut self,
+        routes: u32,
+        restart_time: u16,
+        selection_deferral_time: u16,
+        peers: impl IntoIterator<Item = IpAddr>,
+    ) {
+        info!(
+            bgp_routes = routes,
+            "graceful restart: forwarding state preserved, deferring route selection"
+        );
+        self.forwarding_preserved = true;
+        let now = Instant::now();
+        let mut deferral =
+            crate::gr::Deferral::new(now, restart_time, selection_deferral_time, peers);
+        if self.redistribute_seen {
+            deferral.local_routes_in();
+        }
+        self.deferral = Some(deferral);
+        self.maybe_end_deferral(now);
+    }
+
+    /// Whether selection deferral is in progress — our R bit.
+    pub fn deferring(&self) -> bool {
+        self.deferral.is_some()
+    }
+
+    /// Ends the deferral if it is over: every established peer gets its
+    /// initial update and End-of-RIB, and the next push to `nos-ribd` is a
+    /// `Full` that replaces what it kept (§4.1: stale forwarding state goes).
+    fn maybe_end_deferral(&mut self, now: Instant) {
+        let Some(reason) = self.deferral.as_ref().and_then(|d| d.over(now)) else {
+            return;
+        };
+        self.deferral = None;
+        info!(reason = %reason, "route selection deferral ended");
+        let peers: Vec<IpAddr> = self.peer_outboxes.keys().copied().collect();
+        for peer in peers {
+            self.initial_update(peer);
+        }
     }
 
     /// RFC 2918 `ROUTE_REFRESH` handling: re-sends the current Loc-RIB to
@@ -978,7 +1065,8 @@ impl BgpRib {
     /// the prefix set already recorded as sent, so the withdrawal-diffing
     /// bookkeeping `recompute_and_propagate` relies on is unaffected.
     pub fn resend_all(&mut self, peer: IpAddr, family: AddressFamily, enhanced: bool) {
-        let Some(outbox) = self.peer_outboxes.get(&peer) else {
+        // Deferring: the initial update at its end sends everything anyway.
+        let Some(outbox) = self.peer_outboxes.get(&peer).filter(|_| !self.deferring()) else {
             return;
         };
         let marker = |subtype| OutboundUpdate::RefreshMarker { family, subtype };
@@ -1106,10 +1194,12 @@ impl BgpRib {
     }
 
     /// Our F bit toward `peer`: this process already had a session with it,
-    /// so the kernel still holds what that session installed. A fresh
-    /// process says 0 — its first push to `nos-ribd` replaced everything.
+    /// so the kernel still holds what that session installed, or
+    /// `nos-ribd` still held BGP routes when it started (`begin_deferral`).
+    /// Otherwise a fresh process says 0 — its first push to `nos-ribd`
+    /// replaced everything.
     pub fn gr_forwarding(&self, peer: IpAddr) -> bool {
-        self.gr.contains_key(&peer)
+        self.forwarding_preserved || self.gr.contains_key(&peer)
     }
 
     /// Routes from `peer` currently marked stale (`PeerSummary.stale_prefixes`).
@@ -1151,13 +1241,18 @@ impl BgpRib {
     /// re-announced since its restart is gone.
     pub fn end_of_rib(&mut self, peer: IpAddr, family: AddressFamily) {
         info!(peer = %peer, family = %family, "received end-of-rib");
-        if !self.gr_deadline.contains_key(&peer) {
-            return;
+        if self.gr_deadline.contains_key(&peer) {
+            let count = self.purge_stale(peer, family);
+            info!(peer = %peer, family = %family, count, "bgp: purged stale routes after end-of-rib");
+            if !self.has_stale(peer, None) {
+                self.gr_deadline.remove(&peer);
+            }
         }
-        let count = self.purge_stale(peer, family);
-        info!(peer = %peer, family = %family, count, "bgp: purged stale routes after end-of-rib");
-        if !self.has_stale(peer, None) {
-            self.gr_deadline.remove(&peer);
+        // After the purge, so the deferral's initial updates don't carry
+        // routes about to be withdrawn.
+        if let Some(deferral) = self.deferral.as_mut() {
+            deferral.end_of_rib(peer, family);
+            self.maybe_end_deferral(Instant::now());
         }
     }
 
@@ -1182,6 +1277,11 @@ impl BgpRib {
             for family in AddressFamily::ALL {
                 self.purge_stale(peer, family);
             }
+        }
+        if let Some(deferral) = self.deferral.as_mut() {
+            let established = &self.peer_outboxes;
+            deferral.drop_dead(now, |p| established.contains_key(&p));
+            self.maybe_end_deferral(now);
         }
     }
 
@@ -1342,6 +1442,11 @@ impl BgpRib {
     /// before. Called again for a peer already down and retaining (by
     /// `reconcile_peers` after an abort), only a `Hard` end changes anything.
     pub fn peer_disconnected(&mut self, peer: IpAddr, kind: Disconnect) {
+        // ponytail: a deferral this ends (its last waiting peer gone hard)
+        // is noticed by the next `gr_tick`, up to 5s later.
+        if let Some(deferral) = self.deferral.as_mut() {
+            deferral.disconnected(peer, kind == Disconnect::Hard);
+        }
         let outbox = self.peer_outboxes.remove(&peer);
         if outbox.is_none() && kind != Disconnect::Hard && self.gr_deadline.contains_key(&peer) {
             return;
@@ -1785,6 +1890,12 @@ impl BgpRib {
                 self.recompute_and_propagate(prefix);
             }
         }
+        // `nos-ribd` sends a `Full` (maybe empty) as soon as it connects.
+        self.redistribute_seen = true;
+        if let Some(deferral) = self.deferral.as_mut() {
+            deferral.local_routes_in();
+            self.maybe_end_deferral(Instant::now());
+        }
     }
 
     /// Recomputes `prefix`'s policy-filtered entry in `redistributed` from
@@ -1948,6 +2059,9 @@ impl BgpRib {
     /// Sends `prefix`'s current Loc-RIB entry (or its withdrawal) to every
     /// peer, diffed against `adj_rib_out`.
     fn fan_out(&mut self, prefix: IpNet) {
+        if self.deferring() {
+            return;
+        }
         let suppressed = self.suppressed_by_aggregate(prefix);
         let source_is_rr_client = self
             .loc_rib
@@ -2016,6 +2130,9 @@ impl BgpRib {
     /// submitted, and whether *this* instance can resolve a next hop says
     /// nothing about whether the client can.
     fn propagate_rs_view(&mut self, prefix: IpNet) {
+        if self.deferring() {
+            return;
+        }
         let rs_peers: Vec<IpAddr> = self
             .peer_outboxes
             .iter()
@@ -6702,6 +6819,83 @@ mod tests {
         rib.peer_disconnected(peer, Disconnect::Transport);
         assert_eq!(rib.stale_count(peer), 0);
         assert_eq!(rib.accepted_prefixes(peer), [0, 0, 0]);
+    }
+
+    /// RFC 4724 §4.1: while deferring, nothing leaves — no UPDATE, no
+    /// End-of-RIB, no push to `nos-ribd` — though the Loc-RIB fills; the
+    /// last End-of-RIB ends it and every peer gets its dump + End-of-RIB.
+    #[test]
+    fn selection_deferral_holds_output_until_the_last_end_of_rib() {
+        let mut rib = new_rib(65000);
+        rib.set_routing_table(Some("rt1".into()));
+        let (a, b) = (addr("10.0.0.1"), addr("10.0.0.2"));
+        rib.begin_deferral(5, 120, 360, [a, b]);
+        assert!(rib.deferring() && rib.gr_forwarding(a));
+        let cap = gr(true, &[(AddressFamily::Ipv4Unicast, true)]);
+        rib.set_peer_gr(a, Some(cap));
+        let mut rx_a = register_gr_peer(&mut rib, a);
+        rib.set_peer_gr(b, Some(cap));
+        let mut rx_b = register_gr_peer(&mut rib, b);
+        rib.handle_update(
+            a,
+            false,
+            v4("192.0.2.1"),
+            &ebgp_update(vec!["1.0.0.0/24"], vec![65001], "10.0.0.1"),
+            &nos_rpl::ACCEPT_ALL,
+        );
+        assert!(rib.loc_rib.contains_key(&prefix("1.0.0.0/24")));
+        assert!(recv_all(&mut rx_a).is_empty() && recv_all(&mut rx_b).is_empty());
+        assert_eq!(rib.push_snapshot(), (None, HashMap::new()));
+        // `nos-ribd`'s redistribution snapshot is waited for too.
+        rib.apply_redistribute_update(RedistributeUpdate::Full(Vec::new()));
+
+        for peer in [a, b] {
+            assert!(rib.deferring());
+            for family in AddressFamily::ALL {
+                rib.end_of_rib(peer, family);
+            }
+        }
+        assert!(!rib.deferring());
+        let to_b = recv_all(&mut rx_b);
+        assert!(matches!(&to_b[0], OutboundUpdate::Announce(_)), "{to_b:?}");
+        let eors = |v: &[OutboundUpdate]| {
+            v.iter()
+                .filter(|u| matches!(u, OutboundUpdate::EndOfRib(_)))
+                .count()
+        };
+        assert_eq!(eors(&to_b), 3);
+        assert_eq!(eors(&recv_all(&mut rx_a)), 3);
+        assert_eq!(rib.push_snapshot().0.as_deref(), Some("rt1"));
+    }
+
+    /// A peer without the capability, or restarting itself (R), is not
+    /// waited for; with nobody left the deferral ends at once.
+    #[test]
+    fn selection_deferral_skips_peers_without_gr_or_restarting() {
+        let mut rib = new_rib(65000);
+        let (a, b) = (addr("10.0.0.1"), addr("10.0.0.2"));
+        rib.apply_redistribute_update(RedistributeUpdate::Full(Vec::new()));
+        rib.begin_deferral(5, 120, 360, [a, b]);
+        let _rx_a = register_gr_peer(&mut rib, a);
+        assert!(rib.deferring());
+        let mut restarting = gr(true, &[(AddressFamily::Ipv4Unicast, true)]);
+        restarting.restart = true;
+        rib.set_peer_gr(b, Some(restarting));
+        let mut rx_b = register_gr_peer(&mut rib, b);
+        assert!(!rib.deferring());
+        assert_eq!(
+            recv_all(&mut rx_b)
+                .iter()
+                .filter(|u| matches!(u, OutboundUpdate::EndOfRib(_)))
+                .count(),
+            3
+        );
+        // No peers at all: only the redistributed routes to wait for.
+        let mut rib = new_rib(65000);
+        rib.begin_deferral(5, 120, 360, []);
+        assert!(rib.deferring());
+        rib.apply_redistribute_update(RedistributeUpdate::Full(Vec::new()));
+        assert!(!rib.deferring());
     }
 
     #[test]

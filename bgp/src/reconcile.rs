@@ -41,6 +41,8 @@ pub async fn run(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut policy_cache = PolicyCache::default();
+    // Whether the graceful-restart startup check (`restart_check`) is done.
+    let mut restart_decided = false;
     while !*shutdown.borrow() {
         match config_client::subscribe_diff(
             &config_socket,
@@ -69,7 +71,7 @@ pub async fn run(
                     tokio::select! {
                         event = reader.next() => match event {
                             Some(Ok(Event::Diff(_))) => {
-                                resync(&config_socket, &watchdog_socket, &instance, &sessions, &mut policy_cache).await;
+                                resync(&config_socket, &watchdog_socket, &instance, &sessions, &mut policy_cache, &mut restart_decided).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -82,7 +84,7 @@ pub async fn run(
                             }
                         },
                         _ = reapply.tick() => {
-                            resync(&config_socket, &watchdog_socket, &instance, &sessions, &mut policy_cache).await;
+                            resync(&config_socket, &watchdog_socket, &instance, &sessions, &mut policy_cache, &mut restart_decided).await;
                         }
                         _ = shutdown.changed() => break,
                     }
@@ -113,6 +115,7 @@ async fn resync(
     instance: &str,
     sessions: &Arc<SessionManager>,
     policy_cache: &mut PolicyCache,
+    restart_decided: &mut bool,
 ) {
     let cfg = match config_client::fetch_config(config_socket).await {
         Ok(cfg) => cfg,
@@ -141,7 +144,7 @@ async fn resync(
         Some(table) => resolve_vrf(watchdog_socket, table).await,
         None => None,
     };
-    let vrf = classify_vrf(own.routing_table.as_ref(), resolved);
+    let mut vrf = classify_vrf(own.routing_table.as_ref(), resolved);
     match &vrf {
         VrfRequirement::Invalid => error!(
             instance = %instance,
@@ -249,7 +252,7 @@ async fn resync(
 
     // The broadcast domains that `redistribute from mac to bgp` this instance
     // — the ones whose `nos-fdbd` gets every received EVPN route.
-    let fdb_domains = cfg
+    let mut fdb_domains: Vec<String> = cfg
         .broadcast_domains
         .iter()
         .filter(|d| d.vni.is_some() && d.mac_redistribute.as_deref() == Some(instance))
@@ -257,12 +260,25 @@ async fn resync(
         .collect();
     // The IP-VRFs whose `evpn` rides this (underlay) instance — fed every
     // received Type-5 route.
-    let evpn_tables = cfg
+    let mut evpn_tables: Vec<String> = cfg
         .routing_tables
         .iter()
         .filter(|t| t.evpn.l3_vni.is_some() && t.evpn.bgp_instance.as_deref() == Some(instance))
         .map(|t| t.name.clone())
         .collect();
+
+    let mut routing_table = own.routing_table.clone();
+    if !*restart_decided {
+        *restart_decided = restart_check(watchdog_socket, own, &vrf, &peers, sessions).await;
+    }
+    if !*restart_decided {
+        // Until it is decided, no session starts and nothing is pushed, so
+        // a restarted process can't empty `nos-ribd` before it knows.
+        vrf = VrfRequirement::Pending;
+        routing_table = None;
+        fdb_domains.clear();
+        evpn_tables.clear();
+    }
 
     sessions.set_maximum_paths(own.maximum_paths).await;
     sessions
@@ -271,7 +287,7 @@ async fn resync(
     sessions
         .reconcile(
             vrf,
-            own.routing_table.clone(),
+            routing_table,
             local,
             peers,
             redistribute_policy,
@@ -283,6 +299,50 @@ async fn resync(
     // After `reconcile`, which sets the local ASN/router-id the AGGREGATOR
     // attribute carries.
     sessions.set_aggregates(own.aggregates.clone()).await;
+}
+
+/// RFC 4724 §4.1, once per process before any session starts: if graceful
+/// restart is on and the owning `nos-ribd` still holds BGP routes (a
+/// restarted `nos-bgpd`, `nos-ribd` kept running), our forwarding state was
+/// preserved — start selection deferral. `false` (retry next pass) while the
+/// VRF or the count isn't answerable yet.
+async fn restart_check(
+    watchdog_socket: &Path,
+    own: &nos_proto::BgpInstance,
+    vrf: &VrfRequirement,
+    peers: &[ResolvedPeer],
+    sessions: &SessionManager,
+) -> bool {
+    let Some(restart_time) = own.graceful_restart.enabled_restart_time() else {
+        return true;
+    };
+    let (VrfRequirement::Resolved(_), Some(table)) = (vrf, &own.routing_table) else {
+        return matches!(vrf, VrfRequirement::Invalid);
+    };
+    let Some(socket) =
+        watchdog_client::resolve_once(watchdog_socket, &ServiceRef::RibTable(table.clone())).await
+    else {
+        return false;
+    };
+    let Some(routes) = rib_client::get_bgp_route_count(&socket).await else {
+        debug!(table = %table, "bgp route count not answerable yet");
+        return false;
+    };
+    if routes > 0 {
+        let peers = peers
+            .iter()
+            .filter(|p| p.shutdown.is_none())
+            .map(|p| p.remote_address);
+        sessions
+            .begin_deferral(
+                routes,
+                restart_time,
+                own.graceful_restart.selection_deferral_time(),
+                peers,
+            )
+            .await;
+    }
+    true
 }
 
 /// Resolves `table`'s Linux VRF interface name by asking the owning

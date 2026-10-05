@@ -196,6 +196,11 @@ pub enum RibRequest {
     /// received (`Full` on connect, then `Add`/`Remove`). Route-Target and
     /// VNI filtering is `nos-ribd`'s.
     PushEvpnRoutes(crate::fdb::EvpnUpdate),
+    /// One-shot, `nos-bgpd` only: how many `Bgp`-sourced candidates this
+    /// table still holds. A restarted `nos-bgpd` asks it once at startup:
+    /// more than zero means its forwarding state survived (RFC 4724 §4.1),
+    /// so it restarts gracefully (F bit, selection deferral).
+    BgpRouteCount,
 }
 
 /// Messages sent from a `nos-ribd` instance to a client.
@@ -220,4 +225,6 @@ pub enum RibEvent {
     TableId(Option<u32>),
     /// Reply to `IgpCosts`.
     IgpCosts(Vec<(IpNet, u32)>),
+    /// Reply to `BgpRouteCount`.
+    BgpRouteCount(u32),
 }

@@ -265,6 +265,10 @@ impl BgpRib {
     }
 
     fn announce_evpn(&mut self, r: &WireRoute) {
+        // Deferring (graceful restart): `announce_evpn_to` sends it after.
+        if self.deferring() {
+            return;
+        }
         for (peer, outbox) in &self.peer_outboxes {
             let Some(adv) = advertise(outbox, self.local_asn, r) else {
                 continue;
@@ -278,6 +282,9 @@ impl BgpRib {
     }
 
     fn withdraw_evpn(&mut self, nlri: &EvpnNlri) {
+        if self.deferring() {
+            return;
+        }
         for (peer, outbox) in &self.peer_outboxes {
             if self
                 .evpn_adj_rib_out
