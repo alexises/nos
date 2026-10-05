@@ -935,13 +935,17 @@ pub async fn run(
         }
         if let Some(time) = our_gr {
             // F = 1 only if this process already had a session with the
-            // peer: a fresh process's first push emptied `nos-ribd`.
-            let forwarding = bgp_rib.lock().await.gr_forwarding(peer.remote_address);
+            // peer, or `nos-ribd` kept our routes across a restart; R = 1
+            // while selection deferral is in progress (RFC 4724 §3).
+            let (restarting, forwarding) = {
+                let rib = bgp_rib.lock().await;
+                (rib.deferring(), rib.gr_forwarding(peer.remote_address))
+            };
             open.capabilities
                 .push(message::Capability::GracefulRestart(gr::our_cap(
                     time,
                     &peer.address_families,
-                    false,
+                    restarting,
                     forwarding,
                 )));
         }
@@ -1188,12 +1192,10 @@ pub async fn run(
                                 "graceful restart negotiated"
                             );
                         }
-                        // RFC 4724 §2: End-of-RIB closes the initial dump of
-                        // each family, only toward a peer that did GR too.
-                        let end_of_ribs: Vec<AddressFamily> = AddressFamily::ALL
-                            .into_iter()
-                            .filter(|f| gr_negotiated.is_some() && negotiated_afs.contains(f))
-                            .collect();
+                        // `peer_established` queues the initial dump and,
+                        // toward a peer that did GR too, End-of-RIB (RFC
+                        // 4724 §2) — or both later, at the end of a
+                        // restarting process's selection deferral.
                         let mut rib = bgp_rib.lock().await;
                         rib.set_peer_gr(peer.remote_address, gr_negotiated);
                         rib.set_peer_damping(peer.remote_address, peer.damping);
@@ -1221,10 +1223,6 @@ pub async fn run(
                             peer.export_policy.clone(),
                             outbox_tx.clone(),
                         );
-                        // Same channel, after `peer_established`'s dump.
-                        for family in end_of_ribs {
-                            let _ = outbox_tx.send(OutboundUpdate::EndOfRib(family));
-                        }
                         registered = true;
                         slot.status.send_modify(|s| {
                             s.state = PeerState::Established;

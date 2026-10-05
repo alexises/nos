@@ -66,7 +66,10 @@ fn allowed(role: Role, req: &RibRequest) -> bool {
                 | Role::Ribd
                 | Role::Fdbd
         ),
-        RibRequest::PushBgpRoutes(_) | RibRequest::PushEvpnRoutes(_) => role == Role::Bgpd,
+        // `BgpRouteCount`: a restarted `nos-bgpd`'s graceful-restart check.
+        RibRequest::PushBgpRoutes(_)
+        | RibRequest::PushEvpnRoutes(_)
+        | RibRequest::BgpRouteCount => role == Role::Bgpd,
         // `nos-ospfv3d` shares the OSPF route source: its SPF results are
         // pushed with the same request.
         RibRequest::PushOspfRoutes(_) => matches!(role, Role::Ospfd | Role::Ospfv3d),
@@ -156,6 +159,9 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
             None
         }
         RibRequest::IgpCosts => Some(RibEvent::IgpCosts(ctx.rib.read().await.igp_costs())),
+        RibRequest::BgpRouteCount => Some(RibEvent::BgpRouteCount(
+            ctx.rib.read().await.count_source(RouteSource::Bgp),
+        )),
         RibRequest::PushEvpnRoutes(update) => {
             apply_evpn_route_update(ctx, update).await;
             None
@@ -482,6 +488,17 @@ mod authz_tests {
         for role in Role::ALL {
             let expected = matches!(role, Role::User | Role::Restd | Role::Bgpd);
             assert_eq!(allowed(role, &RibRequest::IgpCosts), expected, "{role:?}");
+        }
+    }
+
+    #[test]
+    fn bgp_route_count_is_for_bgpd_only() {
+        for role in Role::ALL {
+            assert_eq!(
+                allowed(role, &RibRequest::BgpRouteCount),
+                role == Role::Bgpd,
+                "{role:?}"
+            );
         }
     }
 }

@@ -156,6 +156,18 @@ impl Rib {
         self.entries.retain(|_, c| !c.is_empty());
     }
 
+    /// How many `source`-sourced candidates the table holds
+    /// (`RibRequest::BgpRouteCount`).
+    pub fn count_source(&self, source: RouteSource) -> u32 {
+        let n = self
+            .entries
+            .values()
+            .flatten()
+            .filter(|e| e.source == source)
+            .count();
+        u32::try_from(n).unwrap_or(u32::MAX)
+    }
+
     /// Upserts one `source`-sourced candidate for `entry.prefix` — used for
     /// a BGP push's incremental `Add`.
     pub fn upsert(&mut self, entry: RibEntry) {
@@ -506,6 +518,16 @@ mod tests {
             backup: None,
             backup_interface_id: None,
         }
+    }
+
+    #[test]
+    fn count_source_counts_only_that_source() {
+        let mut rib = Rib::new();
+        rib.insert(entry("10.0.0.0/24", "10.0.0.1", RouteSource::Bgp));
+        rib.insert(entry("10.0.0.0/24", "10.0.0.2", RouteSource::Static));
+        rib.insert(entry("10.0.1.0/24", "10.0.0.1", RouteSource::Bgp));
+        assert_eq!(rib.count_source(RouteSource::Bgp), 2);
+        assert_eq!(rib.count_source(RouteSource::Ospf), 0);
     }
 
     #[test]

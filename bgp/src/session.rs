@@ -430,6 +430,10 @@ impl SessionManager {
         HashMap<nos_proto::EvpnKey, nos_proto::EvpnRoute>,
     ) {
         let rib = self.bgp_rib.lock().await;
+        // Deferring (graceful restart): the consumers keep what they hold.
+        if rib.deferring() {
+            return (Vec::new(), HashMap::new());
+        }
         let targets = if to_tables {
             rib.evpn_tables()
         } else {
@@ -446,6 +450,23 @@ impl SessionManager {
         let mut rib = self.bgp_rib.lock().await;
         rib.damping_tick();
         rib.gr_tick();
+    }
+
+    /// RFC 4724 §4.1: `nos-ribd` kept `routes` BGP routes across this
+    /// process's restart — see `BgpRib::begin_deferral`.
+    pub async fn begin_deferral(
+        &self,
+        routes: u32,
+        restart_time: u16,
+        selection_deferral_time: u16,
+        peers: impl IntoIterator<Item = IpAddr>,
+    ) {
+        self.bgp_rib.lock().await.begin_deferral(
+            routes,
+            restart_time,
+            selection_deferral_time,
+            peers,
+        );
     }
 
     /// `BgpInstance.graceful_restart`'s stale time, for the RIB.
