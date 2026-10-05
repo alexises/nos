@@ -159,7 +159,12 @@ impl Rib {
     /// How many `source`-sourced candidates the table holds
     /// (`RibRequest::BgpRouteCount`).
     pub fn count_source(&self, source: RouteSource) -> u32 {
-        let n = self.entries.values().flatten().filter(|e| e.source == source).count();
+        let n = self
+            .entries
+            .values()
+            .flatten()
+            .filter(|e| e.source == source)
+            .count();
         u32::try_from(n).unwrap_or(u32::MAX)
     }
 

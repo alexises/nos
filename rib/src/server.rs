@@ -66,12 +66,14 @@ fn allowed(role: Role, req: &RibRequest) -> bool {
                 | Role::Ribd
                 | Role::Fdbd
         ),
-        RibRequest::PushBgpRoutes(_) | RibRequest::PushEvpnRoutes(_) => role == Role::Bgpd,
+        // `BgpRouteCount`: a restarted `nos-bgpd`'s graceful-restart check.
+        RibRequest::PushBgpRoutes(_)
+        | RibRequest::PushEvpnRoutes(_)
+        | RibRequest::BgpRouteCount => role == Role::Bgpd,
         // `nos-ospfv3d` shares the OSPF route source: its SPF results are
         // pushed with the same request.
         RibRequest::PushOspfRoutes(_) => matches!(role, Role::Ospfd | Role::Ospfv3d),
         RibRequest::IgpCosts => matches!(role, Role::User | Role::Restd | Role::Bgpd),
-        RibRequest::BgpRouteCount => role == Role::Bgpd,
     }
 }
 
