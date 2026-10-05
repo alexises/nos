@@ -363,6 +363,17 @@ pub(crate) fn valid_redistribute_rules(tables: &[RoutingTable], ctx: &Config) ->
                 "redistribute to ospf requires ospf-instance to be set",
             ));
         }
+        // RFC 8770 §3: a host router is no ASBR.
+        if redistribute.to == RedistributeTarget::Ospf
+            && ctx
+                .ospf_instances
+                .iter()
+                .any(|i| table.ospf_instance.as_ref() == Some(&i.name) && i.host_router)
+        {
+            return Err(garde::Error::new(
+                "redistribute to ospf is not allowed on an ospf instance with host-router set",
+            ));
+        }
         if redistribute.to == RedistributeTarget::Ospfv3 && table.ospfv3_instance.is_none() {
             return Err(garde::Error::new(
                 "redistribute to ospfv3 requires ospfv3-instance to be set",
@@ -480,6 +491,7 @@ mod tests {
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            host_router: false,
         }
     }
 
@@ -691,6 +703,9 @@ mod tests {
         let mut cfg = config_with(vec![rt], vec![], vec![static_instance("sri1")]);
         cfg.ospf_instances = vec![ospf_instance("o1")];
         cfg.validate_with(&cfg).unwrap();
+        // RFC 8770 §3: not with a host router.
+        cfg.ospf_instances[0].host_router = true;
+        assert!(cfg.validate_with(&cfg).is_err());
     }
 
     #[test]

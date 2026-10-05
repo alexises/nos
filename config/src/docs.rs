@@ -863,6 +863,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Advertise this router as a stub router until removed (RFC 6987).",
             "Every transit link in this router's Router-LSA costs 65535 while set, so traffic avoids the router whenever another path exists — for draining it before maintenance. Its own prefixes stay reachable, and neighbors stop using it as a loop-free alternate. `delete` turns it off.",
         ),
+        Topic::OspfInstanceHostRouter => (
+            "Make this router a host router that never carries transit traffic (RFC 8770).",
+            "Sets the H-bit in this router's Router-LSA: routers that support RFC 8770 never route through it, only to it, once every router in the area advertises that support; its transit links also cost 65535, for routers that don't. Its own prefixes stay reachable, and it is never a loop-free alternate. Can't be combined with `redistribute … to ospf` on its routing table, since a host router is not an AS boundary router. `delete` turns it off.",
+        ),
         Topic::OspfArea => (
             "Create an OSPF area in the transaction if it doesn't already exist.",
             concat!(

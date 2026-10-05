@@ -151,6 +151,16 @@ A port of `nos-ospfv3d`'s RFC 5187 work (`ospfv3/CLAUDE.md`), nos↔nos only:
 - **Not done**: OSPFv3's R/V6-bits (`nos-ospfv3d`), an operational "max-metric active" field in `show` (the log line is it).
 - Tests: `link::tests::router_lsa_links_max_metric_raises_transit_links_only`, `on_startup_max_metric_lasts_its_period`, `on_startup_is_armed_once_cleared_by_none_and_skipped_after_graceful_restart`, `on_shutdown_advertises_max_metric_before_the_flush`, `on_shutdown_is_skipped_when_the_router_lsa_just_changed` (in-memory wire), `spf::tests::stub_router_*`; `nos-e2e ospf-stub-router` (administrative, on-shutdown and on-startup over a real restart, the LFA guard), `ospf-opaque` (FRR routes through a max-metric router-a at ≥ 65535, its stub subnet below), `ospf-graceful-restart` (the marker skip).
 
+### Host router (RFC 8770, #186)
+
+- **Knob**: `OspfInstance.host_router: bool` (`set ospf instance <i> host-router`; provision `--ospf-host-router true|false`), an atomic handed over with `LinkManager::set_host_router` every resync — no link restart.
+- **Origination** (§3): `originate_router_lsas_with` sets `lsa::ROUTER_FLAG_H` (0x80) in every area and forces RFC 6987's `max_metric` on (transit links at 0xFFFF, stubs keep their cost). `max_metric_active()` includes it, so on-shutdown is skipped (nothing would change).
+- **ASBR rule** (§3): commit refuses `redistribute … to ospf` on a table whose instance has `host_router` (`routing_table::valid_redistribute_rules`). nos has no Type-2 metric to set to LSInfinity, so refusing is the explicit choice.
+- **Receive side** (§4/§5, `spf.rs`): `host_bit_honoured` — every live Router-LSA's originator has an RI (type 10 or 11) with bit 7; `host_routers` — the H routers when honoured, else none. `run_dijkstra` doesn't expand a host router unless it is root (a leaf: its stubs and Type-3/5s still route), which covers `compute`, `intra_area_routes`, the NSSA passes and every Dijkstra inside `alternates`; `alternates` also drops a host-router candidate (its own Dijkstra is rooted at it). Not honoured: nothing changes, the max-metric links steer traffic.
+- **Log**: `compute_routes` logs `ospf host-bit state changed area=… honoured=… host_routers=…` (H routers seen, honoured or not) per area on a change.
+- **Not done**: OSPFv3 (RFC 8770 is OSPFv2 only; OSPFv3 has the R-bit).
+- Tests: `spf::tests::host_router_*`, `host_bit_support_counts_a_type_11_router_info`, `lsa::tests::router_info_capabilities_decodes_type_10_and_11`, `link::tests::host_router_sets_the_h_bit_in_every_area`, `routing_table::tests::redistribute_to_ospf_with_ospf_instance_passes`; `nos-e2e ospf-host-router` (router-c, all nos: honoured, router-a drops its LFA via c, back on clear) and `ospf-opaque` (FRR lacks bit 7: router-b doesn't honour router-a's H-bit, FRR routes via it at ≥ 65535).
+
 ### Hello prioritisation and liveness (RFC 4222, #185)
 
 - **Recommendation 1** (Hellos and LSAcks first): `run()`'s `tokio::select!` is `biased;`, ordered hello ticker, `recv_packet`, p2p dead deadline, `dead_sweep`, `wait_deadline`, `grace_rx`, `rxmt_sweep` — a due Hello never loses a draw to the 5s full-LSDB resend, and a queued packet is read before a dead timer that became ready in the same poll. A received LSAck is already handled inline (`handle_lsack`, no lock, no await). `ponytail:` ceiling on the select: bias doesn't preempt a running arm (a handler waiting on the LSDB lock still delays the next Hello), and a sustained inbound queue runs the timer arms late; upgrade to a separate Hello task or a high/low receive queue if a large LSDB shows Hello starvation. No deterministic test (the starvation is a race).
@@ -170,7 +180,7 @@ A port of `nos-ospfv3d`'s RFC 5187 work (`ospfv3/CLAUDE.md`), nos↔nos only:
   - Type 10, opaque type 4, Link State ID `4.0.0.0` (`lsa::ROUTER_INFO_LINK_STATE_ID`), one per attached area — area scope so stub areas and NSSAs carry it too.
   - Body: the Informational Capabilities TLV only (`lsa::encode_router_info`), kept as `LsaBody::Opaque`. Bits: GR helper (`RI_CAP_GR_HELPER`, always — helping is always on), stub router support (`RI_CAP_STUB_ROUTER`, bit 2, always — RFC 6987 is implemented), GR capable (`RI_CAP_GR_CAPABLE`) while `graceful_restart_grace_period` is set.
   - Originated by `originate_router_lsas` beside the Router-LSA, so it shares its pacing, refresh, flush on leaving an area, and shutdown flush.
-  - A received RI is not decoded (nothing consumes it yet; RFC 8770's H-bit will).
+  - Also host router support (`RI_CAP_HOST_ROUTER`, bit 7, always — RFC 8770 is implemented). A received RI's capabilities are read by `lsa::router_info_capabilities` (type 10 or 11), for the H-bit check below; its body stays `LsaBody::Opaque`.
 - Tests: `lsa::tests::opaque_lsas_round_trip_as_raw_bytes`, `packet::tests::lsu_skips_an_unknown_lsa_type_and_keeps_the_rest`, `exchange::tests::opaque_*`, `link::tests::opaque_lsas_are_flooded_by_scope` (in-memory wire), `lsa::tests::router_info_body_is_one_capabilities_tlv`, `link::tests::originate_router_lsas_originates_router_info_per_area`; `nos-e2e ospf-opaque` (FRR, which also accepts router-a's RI LSA).
 
 ## Modules

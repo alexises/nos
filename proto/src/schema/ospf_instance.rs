@@ -107,6 +107,17 @@ pub struct OspfInstance {
     #[garde(skip)]
     #[cli(topic = OspfInstanceMaxMetricAdministrative, words = "max-metric router-lsa administrative")]
     pub max_metric_administrative: bool,
+
+    /// RFC 8770 host router: sets the H-bit in this router's Router-LSA so
+    /// the rest of the area never routes transit traffic through it, and
+    /// advertises its transit links at 65535 for routers that don't honour
+    /// the bit. Its own prefixes stay reachable. Refused with a
+    /// `redistribute … to ospf` rule on its routing table (a host router is
+    /// no ASBR). Off by default.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = OspfInstanceHostRouter, words = "host-router")]
+    pub host_router: bool,
 }
 
 /// The placeholder a new `OspfInstance` starts from (`edit` on a missing one).
@@ -123,6 +134,7 @@ impl Default for OspfInstance {
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            host_router: false,
         }
     }
 }
@@ -166,6 +178,7 @@ mod tests {
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            host_router: false,
         }
     }
 

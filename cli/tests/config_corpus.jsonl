@@ -319,7 +319,7 @@
 {"at":[],"fixture":"populated","line":"set bgp instance R1 peer 10.0.0.1 peer-group PG1","navigate":null,"writes":[[["bgp-instance","R1","peer"],[{"peer_group":"PG1","remote_address":"192.0.2.1","shutdown":null},{"peer_group":"PG1","remote_address":"10.0.0.1","shutdown":null}]]]}
 {"at":["bgp-instance","R1"],"fixture":"populated","line":"set peer 10.0.0.1 peer-group PG1","navigate":null,"writes":[[["bgp-instance","R1","peer"],[{"peer_group":"PG1","remote_address":"192.0.2.1","shutdown":null},{"peer_group":"PG1","remote_address":"10.0.0.1","shutdown":null}]]]}
 {"at":[],"fixture":"populated","line":"edit ospf instance o1","navigate":["ospf-instance","o1"],"writes":[]}
-{"at":[],"fixture":"empty","line":"edit ospf instance o1","navigate":["ospf-instance","o1"],"writes":[[["ospf-instance"],[{"areas":[],"graceful_restart_grace_period":null,"max_metric_administrative":false,"max_metric_on_shutdown":null,"max_metric_on_startup":null,"name":"o1","prefix_suppression":false,"redistribute_policy":null,"router_id":"0.0.0.0","routing_table":null}]]]}
+{"at":[],"fixture":"empty","line":"edit ospf instance o1","navigate":["ospf-instance","o1"],"writes":[[["ospf-instance"],[{"areas":[],"graceful_restart_grace_period":null,"host_router":false,"max_metric_administrative":false,"max_metric_on_shutdown":null,"max_metric_on_startup":null,"name":"o1","prefix_suppression":false,"redistribute_policy":null,"router_id":"0.0.0.0","routing_table":null}]]]}
 {"at":[],"fixture":"populated","line":"set ospf instance o1 prefix-suppression","navigate":null,"writes":[[["ospf-instance","o1","prefix-suppression"],true]]}
 {"at":[],"fixture":"populated","line":"delete ospf instance o1 prefix-suppression","navigate":null,"writes":[[["ospf-instance","o1","prefix-suppression"],false]]}
 {"at":[],"fixture":"populated","line":"set ospf instance o1 max-metric router-lsa on-startup 300","navigate":null,"writes":[[["ospf-instance","o1","max-metric-on-startup"],300]]}
@@ -327,6 +327,8 @@
 {"at":[],"fixture":"populated","line":"set ospf instance o1 max-metric router-lsa on-shutdown 3","navigate":null,"writes":[[["ospf-instance","o1","max-metric-on-shutdown"],3]]}
 {"at":["ospf-instance","o1"],"fixture":"populated","line":"set max-metric router-lsa administrative","navigate":null,"writes":[[["ospf-instance","o1","max-metric-administrative"],true]]}
 {"at":[],"fixture":"populated","line":"delete ospf instance o1 max-metric router-lsa administrative","navigate":null,"writes":[[["ospf-instance","o1","max-metric-administrative"],false]]}
+{"at":[],"fixture":"populated","line":"set ospf instance o1 host-router","navigate":null,"writes":[[["ospf-instance","o1","host-router"],true]]}
+{"at":["ospf-instance","o1"],"fixture":"populated","line":"delete host-router","navigate":null,"writes":[[["ospf-instance","o1","host-router"],false]]}
 {"at":[],"fixture":"populated","line":"set ospf instance o1 router-id 10.0.0.1","navigate":null,"writes":[[["ospf-instance","o1","router-id"],"10.0.0.1"]]}
 {"at":[],"fixture":"populated","line":"set ospf instance o1 graceful-restart grace-period 120","navigate":null,"writes":[[["ospf-instance","o1","graceful-restart-grace-period"],120]]}
 {"at":[],"fixture":"populated","line":"delete ospf instance o1 graceful-restart grace-period","navigate":null,"writes":[[["ospf-instance","o1","graceful-restart-grace-period"],null]]}

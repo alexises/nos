@@ -40,7 +40,8 @@ use crate::lsa::{
     AsExternalLsaBody, Lsa, LsaBody, NetworkLsaBody, RouterLink, RouterLsaBody, SummaryLsaBody,
     LINK_TYPE_POINT_TO_POINT, LINK_TYPE_STUB_NETWORK, LINK_TYPE_TRANSIT_NETWORK,
     LSA_TYPE_ASBR_SUMMARY, LSA_TYPE_AS_EXTERNAL, LSA_TYPE_NETWORK_SUMMARY, LSA_TYPE_NSSA_EXTERNAL,
-    MAX_AGE, MAX_LINK_METRIC, OPTION_P, ROUTER_FLAG_B, ROUTER_FLAG_NT,
+    MAX_AGE, MAX_LINK_METRIC, OPTION_P, RI_CAP_HOST_ROUTER, ROUTER_FLAG_B, ROUTER_FLAG_H,
+    ROUTER_FLAG_NT,
 };
 
 /// `ponytail:` RFC 2328 §16.4's E1/E2 external-metric-type distinction is not
@@ -179,14 +180,53 @@ fn live_lsas(lsas: &[Arc<Lsa>]) -> Vec<Arc<Lsa>> {
         .collect()
 }
 
+/// RFC 8770 §5: the H-bit is honoured in an area only when every router
+/// there (every live Router-LSA's originator) advertises host-router support
+/// (bit 7) in an RI LSA — area-scoped type 10, or type 11 as FRR originates
+/// it. Otherwise the max-metric links alone steer traffic away.
+pub fn host_bit_honoured(lsas: &[Arc<Lsa>]) -> bool {
+    let live = live_lsas(lsas);
+    let supporting: HashSet<Ipv4Addr> = live
+        .iter()
+        .filter(|l| {
+            crate::lsa::router_info_capabilities(l).is_some_and(|c| c & RI_CAP_HOST_ROUTER != 0)
+        })
+        .map(|l| l.header.advertising_router)
+        .collect();
+    live.iter()
+        .filter(|l| matches!(l.body, LsaBody::Router(_)))
+        .all(|l| supporting.contains(&l.header.advertising_router))
+}
+
+/// RFC 8770: the routers SPF must not use for transit — every H-bit router
+/// in `lsas` while the area honours the bit, else none.
+pub fn host_routers(lsas: &[Arc<Lsa>]) -> HashSet<Ipv4Addr> {
+    if !host_bit_honoured(lsas) {
+        return HashSet::new();
+    }
+    h_bit_routers(lsas)
+}
+
+/// Every live Router-LSA with the H-bit, honoured or not.
+pub fn h_bit_routers(lsas: &[Arc<Lsa>]) -> HashSet<Ipv4Addr> {
+    lsas.iter()
+        .filter(|l| l.header.age < MAX_AGE)
+        .filter_map(|l| match &l.body {
+            LsaBody::Router(r) if r.flags & ROUTER_FLAG_H != 0 => Some(l.header.advertising_router),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Builds the `routers`/`networks` lookup maps `run_dijkstra` and every
 /// collector pass need — shared by `compute` and `intra_area_routes` so
-/// neither duplicates the filter.
+/// neither duplicates the filter — plus `host_routers`.
 fn routers_and_networks(
     lsas: &[Arc<Lsa>],
 ) -> (
     HashMap<Ipv4Addr, &RouterLsaBody>,
     HashMap<Ipv4Addr, &NetworkLsaBody>,
+    HashSet<Ipv4Addr>,
 ) {
     let routers = lsas
         .iter()
@@ -210,7 +250,7 @@ fn routers_and_networks(
             | LsaBody::Opaque(_) => None,
         })
         .collect();
-    (routers, networks)
+    (routers, networks, host_routers(lsas))
 }
 
 /// Runs RFC 2328 §16.1/§16.2 SPF from `root` over `lsas` (one area's
@@ -220,7 +260,7 @@ fn routers_and_networks(
 pub fn compute(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<RouteEntry> {
     let live = live_lsas(lsas);
     let lsas = &live[..];
-    let (routers, networks) = routers_and_networks(lsas);
+    let (routers, networks, hosts) = routers_and_networks(lsas);
     // Plain `Vec`s, not `HashMap`s keyed by advertising_router — one ASBR/ABR
     // can originate more than one Type-5/Type-3/Type-4 for different
     // prefixes/ASBRs.
@@ -256,7 +296,7 @@ pub fn compute(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<RouteEntry> {
         })
         .collect();
 
-    let (dist, next_hop) = run_dijkstra(root, &routers, &networks);
+    let (dist, next_hop) = run_dijkstra(root, &routers, &networks, &hosts);
     let mut out: HashMap<Ipv4Net, RouteEntry> = HashMap::new();
 
     collect_network_routes(root, &routers, &networks, &dist, &next_hop, &mut out);
@@ -271,7 +311,7 @@ pub fn compute(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<RouteEntry> {
         &mut out,
     );
 
-    let alternates = alternates(root, &routers, &networks);
+    let alternates = alternates(root, &routers, &networks, &hosts);
     for route in out.values_mut() {
         route.backup_next_hop = pick_backup(route, &alternates, &dist);
     }
@@ -305,6 +345,7 @@ fn alternates(
     root: Ipv4Addr,
     routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
     networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
+    hosts: &HashSet<Ipv4Addr>,
 ) -> Vec<Alternate> {
     let Some(root_lsa) = routers.get(&root) else {
         return Vec::new();
@@ -344,8 +385,11 @@ fn alternates(
     }
     candidates
         .into_iter()
+        // RFC 8770: a host router carries no transit, so it's no alternate —
+        // its own Dijkstra (rooted at it) wouldn't show that.
+        .filter(|(id, _, _)| !hosts.contains(id))
         .filter_map(|(id, addr, link_cost)| {
-            let dist_from = run_dijkstra(id, routers, networks).0;
+            let dist_from = run_dijkstra(id, routers, networks, hosts).0;
             let to_root = *dist_from.get(&Vertex::Router(root))?;
             Some(Alternate {
                 addr,
@@ -408,8 +452,8 @@ pub struct IntraAreaRoutes {
 pub fn intra_area_routes(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> IntraAreaRoutes {
     let live = live_lsas(lsas);
     let lsas = &live[..];
-    let (routers, networks) = routers_and_networks(lsas);
-    let (dist, next_hop) = run_dijkstra(root, &routers, &networks);
+    let (routers, networks, hosts) = routers_and_networks(lsas);
+    let (dist, next_hop) = run_dijkstra(root, &routers, &networks, &hosts);
 
     let mut out: HashMap<Ipv4Net, RouteEntry> = HashMap::new();
     collect_network_routes(root, &routers, &networks, &dist, &next_hop, &mut out);
@@ -442,8 +486,8 @@ pub fn nssa_translator(root: Ipv4Addr, lsas: &[Arc<Lsa>], always: bool) -> bool 
         return true;
     }
     let live = live_lsas(lsas);
-    let (routers, networks) = routers_and_networks(&live);
-    let (dist, next_hop) = run_dijkstra(root, &routers, &networks);
+    let (routers, networks, hosts) = routers_and_networks(&live);
+    let (dist, next_hop) = run_dijkstra(root, &routers, &networks, &hosts);
     !routers.iter().any(|(&id, r)| {
         id != root
             && r.flags & ROUTER_FLAG_B != 0
@@ -459,8 +503,8 @@ pub fn nssa_translator(root: Ipv4Addr, lsas: &[Arc<Lsa>], always: bool) -> bool 
 /// compared (§3.2's preference rules) — the last one wins.
 pub fn nssa_translations(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Summaries {
     let live = live_lsas(lsas);
-    let (routers, networks) = routers_and_networks(&live);
-    let (dist, next_hop) = run_dijkstra(root, &routers, &networks);
+    let (routers, networks, hosts) = routers_and_networks(&live);
+    let (dist, next_hop) = run_dijkstra(root, &routers, &networks, &hosts);
     live.iter()
         .filter(|l| {
             l.header.lsa_type == LSA_TYPE_NSSA_EXTERNAL
@@ -487,6 +531,7 @@ fn run_dijkstra(
     root: Ipv4Addr,
     routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
     networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
+    hosts: &HashSet<Ipv4Addr>,
 ) -> (HashMap<Vertex, u32>, HashMap<Vertex, Vec<NextHop>>) {
     let root_vertex = Vertex::Router(root);
     let mut dist: HashMap<Vertex, u32> = HashMap::new();
@@ -508,6 +553,11 @@ fn run_dijkstra(
             continue;
         }
 
+        // RFC 8770 §4: a host router other than root is a leaf — reached,
+        // and its stubs collected, but never transited.
+        if matches!(vertex, Vertex::Router(id) if id != root && hosts.contains(&id)) {
+            continue;
+        }
         for (next_vertex, edge_cost) in neighbors(vertex, routers, networks) {
             if visited.contains(&next_vertex) {
                 continue;
@@ -1762,6 +1812,123 @@ mod tests {
                 router_lsa(router, links)
             })
             .collect()
+    }
+
+    /// An RI LSA (`lsa_type` 10 or 11) from `id` with `caps`.
+    fn router_info(id: Ipv4Addr, lsa_type: u8, caps: u32) -> Arc<Lsa> {
+        Arc::new(Lsa {
+            header: LsaHeader {
+                lsa_type,
+                link_state_id: crate::lsa::ROUTER_INFO_LINK_STATE_ID,
+                ..router_lsa(id, vec![]).header
+            },
+            body: LsaBody::Opaque(crate::lsa::encode_router_info(caps)),
+        })
+    }
+
+    /// `lsas` with `router`'s Router-LSA flagged H (links unchanged, so only
+    /// the bit is under test), plus a bit-7 RI from each router in `ri_from`.
+    fn with_host_router(lsas: Vec<Arc<Lsa>>, router: Ipv4Addr, ri_from: &[u8]) -> Vec<Arc<Lsa>> {
+        let mut out: Vec<Arc<Lsa>> = lsas
+            .into_iter()
+            .map(|l| match &l.body {
+                LsaBody::Router(b) if l.header.advertising_router == router => {
+                    let mut body = b.clone();
+                    body.flags |= ROUTER_FLAG_H;
+                    router_lsa_with(router, body)
+                }
+                _ => l,
+            })
+            .collect();
+        for &n in ri_from {
+            out.push(router_info(
+                router_id(n),
+                crate::lsa::LSA_TYPE_OPAQUE_AREA,
+                RI_CAP_HOST_ROUTER,
+            ));
+        }
+        out
+    }
+
+    fn router_lsa_with(id: Ipv4Addr, body: RouterLsaBody) -> Arc<Lsa> {
+        Arc::new(Lsa {
+            header: router_lsa(id, vec![]).header,
+            body: LsaBody::Router(body),
+        })
+    }
+
+    /// root(1) — 3 — 2 over p2p; 2 and 3 each own a stub.
+    fn chain() -> Vec<Arc<Lsa>> {
+        let (r1, r2, r3) = (router_id(1), router_id(2), router_id(3));
+        vec![
+            router_lsa(r1, vec![p2p(r3, addr(10, 0, 13, 1), 1)]),
+            router_lsa(
+                r3,
+                vec![
+                    p2p(r1, addr(10, 0, 13, 3), 1),
+                    p2p(r2, addr(10, 0, 23, 3), 1),
+                    stub(addr(192, 168, 3, 0), addr(255, 255, 255, 0), 1),
+                ],
+            ),
+            router_lsa(
+                r2,
+                vec![
+                    p2p(r3, addr(10, 0, 23, 2), 1),
+                    stub(addr(192, 168, 2, 0), addr(255, 255, 255, 0), 1),
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    fn host_router_is_a_leaf_only_when_every_router_supports_the_bit() {
+        let has =
+            |routes: &[RouteEntry], p: &str| routes.iter().any(|r| r.prefix == p.parse().unwrap());
+        // RFC 8770 §4: 3 isn't transit, but its own stub is still reached.
+        let lsas = with_host_router(chain(), router_id(3), &[1, 2, 3]);
+        assert!(host_bit_honoured(&lsas));
+        let routes = compute(router_id(1), &lsas);
+        assert!(!has(&routes, "192.168.2.0/24"), "{routes:?}");
+        assert_eq!(
+            route_to(&routes, "192.168.3.0/24").next_hops,
+            vec![addr(10, 0, 13, 3)]
+        );
+        // §5: 2 doesn't advertise support, so the bit is ignored in the area.
+        let lsas = with_host_router(chain(), router_id(3), &[1, 3]);
+        assert!(!host_bit_honoured(&lsas));
+        assert!(has(&compute(router_id(1), &lsas), "192.168.2.0/24"));
+        // §4: "vertex V is not the root" — 3's own SPF transits itself.
+        let lsas = with_host_router(chain(), router_id(3), &[1, 2, 3]);
+        assert!(has(&compute(router_id(3), &lsas), "192.168.2.0/24"));
+    }
+
+    #[test]
+    fn host_router_neighbor_is_never_an_alternate() {
+        let lsas = with_host_router(triangle(1), router_id(3), &[1, 2, 3]);
+        let r = route_to(&compute(router_id(1), &lsas), "192.168.2.0/24");
+        assert_eq!(r.next_hops, vec![addr(10, 0, 12, 2)]);
+        assert_eq!(r.backup_next_hop, None);
+    }
+
+    #[test]
+    fn host_bit_support_counts_a_type_11_router_info() {
+        let mut lsas = with_host_router(chain(), router_id(3), &[1, 3]);
+        lsas.push(router_info(
+            router_id(2),
+            crate::lsa::LSA_TYPE_OPAQUE_AS,
+            RI_CAP_HOST_ROUTER,
+        ));
+        assert!(host_bit_honoured(&lsas));
+        assert_eq!(host_routers(&lsas), HashSet::from([router_id(3)]));
+        // An RI without bit 7 isn't support.
+        let mut lsas = with_host_router(chain(), router_id(3), &[1, 3]);
+        lsas.push(router_info(
+            router_id(2),
+            crate::lsa::LSA_TYPE_OPAQUE_AREA,
+            crate::lsa::RI_CAP_GR_HELPER,
+        ));
+        assert!(!host_bit_honoured(&lsas));
+        assert!(host_routers(&lsas).is_empty());
     }
 
     #[test]

@@ -815,6 +815,10 @@ pub struct Args {
     /// (requires `--ospf-instance`): `true` turns it on, `false` off.
     #[arg(long)]
     pub ospf_max_metric_administrative: Option<bool>,
+    /// RFC 8770 `host-router` for that instance (requires `--ospf-instance`):
+    /// `true` turns it on, `false` off.
+    #[arg(long)]
+    pub ospf_host_router: Option<bool>,
 
     /// If set (requires `--ospf-instance`), ensures this OSPF area under it
     /// (`OspfAreaOp::Ensure`).
@@ -2100,6 +2104,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     enabled,
                 },
             ));
+        }
+        if let Some(enabled) = args.ospf_host_router {
+            ops.push(ConfigOp::OspfInstance(OspfInstanceOp::SetHostRouter {
+                name: name.clone(),
+                enabled,
+            }));
         }
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::SetOspfInstance {
             name: args.routing_table.clone(),

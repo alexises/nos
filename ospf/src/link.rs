@@ -1828,6 +1828,13 @@ pub struct LinkManager {
     /// An instance-wide atomic rather than a `LinkConfig` field, so a toggle
     /// re-originates on the next tick without restarting any link.
     prefix_suppression: AtomicBool,
+    /// RFC 8770 host router (`OspfInstance.host_router`): the Router-LSA's
+    /// H-bit, with max-metric transit links. An atomic like
+    /// `prefix_suppression`.
+    host_router: AtomicBool,
+    /// Each area's last RFC 8770 state — (H-bit honoured, routers with the
+    /// H-bit) — only to log a change.
+    host_bit_state: Mutex<HashMap<Ipv4Addr, (bool, usize)>>,
     /// Set by `announce_graceful_restart`: `shutdown` then keeps every
     /// self-originated LSA instead of flushing it (RFC 3623 §2).
     restarting: AtomicBool,
@@ -1929,6 +1936,8 @@ impl LinkManager {
             shutting_down: AtomicBool::new(false),
             grace_period: AtomicU16::new(0),
             prefix_suppression: AtomicBool::new(false),
+            host_router: AtomicBool::new(false),
+            host_bit_state: Mutex::new(HashMap::new()),
             restarting: AtomicBool::new(false),
             max_metric: std::sync::Mutex::new(MaxMetric::default()),
             area_settings: Mutex::new(HashMap::new()),
@@ -1975,6 +1984,10 @@ impl LinkManager {
         self.prefix_suppression.store(on, Ordering::Relaxed);
     }
 
+    pub fn set_host_router(&self, on: bool) {
+        self.host_router.store(on, Ordering::Relaxed);
+    }
+
     fn max_metric_state(&self) -> std::sync::MutexGuard<'_, MaxMetric> {
         self.max_metric
             .lock()
@@ -2018,10 +2031,13 @@ impl LinkManager {
 
     /// RFC 6987: whether this router advertises itself as a stub router
     /// (max-metric transit links) — administratively, or still inside its
-    /// on-startup period. The one predicate RFC 8770's H-bit can OR into.
+    /// on-startup period — or as an RFC 8770 host router, whose transit
+    /// links are always at max metric.
     pub fn max_metric_active(&self) -> bool {
         let mm = self.max_metric_state();
-        mm.administrative || mm.until.is_some_and(|t| Instant::now() < t)
+        mm.administrative
+            || mm.until.is_some_and(|t| Instant::now() < t)
+            || self.host_router.load(Ordering::Relaxed)
     }
 
     /// `max_metric_active`, logging a change (read once per origination tick).
@@ -2166,13 +2182,16 @@ impl LinkManager {
             .await;
     }
 
-    /// `originate_router_lsas` with an explicit RFC 6987 `max_metric`.
-    /// Returns whether a Router-LSA was (re)installed in some area.
+    /// `originate_router_lsas` with an explicit RFC 6987 `max_metric`
+    /// (forced on as an RFC 8770 host router). Returns whether a Router-LSA
+    /// was (re)installed in some area.
     async fn originate_router_lsas_with(
         &self,
         local_router_id: Ipv4Addr,
         max_metric: bool,
     ) -> bool {
+        let host_router = self.host_router.load(Ordering::Relaxed);
+        let max_metric = max_metric || host_router;
         let mut router_lsa_installed = false;
         let snapshot: Vec<(LinkConfig, LinkStatus)> = self
             .links
@@ -2212,8 +2231,14 @@ impl LinkManager {
         if !self.redistribute_filtered.lock().await.is_empty() {
             flags |= lsa::ROUTER_FLAG_E;
         }
-        // RFC 7770 §2.4: stub-router support is a capability, always set.
-        let mut router_info_caps = lsa::RI_CAP_GR_HELPER | lsa::RI_CAP_STUB_ROUTER;
+        // RFC 8770 §3: in every area, ABR or not.
+        if host_router {
+            flags |= lsa::ROUTER_FLAG_H;
+        }
+        // RFC 7770 §2.4: stub-router and host-router support (honouring
+        // others' H-bit) are capabilities, always set.
+        let mut router_info_caps =
+            lsa::RI_CAP_GR_HELPER | lsa::RI_CAP_STUB_ROUTER | lsa::RI_CAP_HOST_ROUTER;
         if self.grace_period.load(Ordering::Relaxed) != 0 {
             router_info_caps |= lsa::RI_CAP_GR_CAPABLE;
         }
@@ -2780,6 +2805,13 @@ impl LinkManager {
             // out), is not a route there.
             let area = self.area(area_id).await;
             lsas.retain(|l| lsa::in_area_scope(l.header.lsa_type, area.stub, area.nssa));
+            let state = (
+                spf::host_bit_honoured(&lsas),
+                spf::h_bit_routers(&lsas).len(),
+            );
+            if self.host_bit_state.lock().await.insert(area_id, state) != Some(state) {
+                info!(area = %area_id, honoured = state.0, host_routers = state.1, "ospf host-bit state changed");
+            }
             for entry in spf::compute(router_id, &lsas) {
                 match merged.get_mut(&entry.prefix) {
                     None => {
@@ -3879,6 +3911,60 @@ mod tests {
         assert!(manager.lsdbs.lock().await.contains_key(&area1));
     }
 
+    /// RFC 8770 §3: H in the Router-LSA of every area while set, stubs at
+    /// their cost, and the router counts as max-metric (transit links at
+    /// 0xFFFF — `router_lsa_links_max_metric_raises_transit_links_only`).
+    #[tokio::test]
+    async fn host_router_sets_the_h_bit_in_every_area() {
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
+        let (area0, area1) = (Ipv4Addr::UNSPECIFIED, Ipv4Addr::new(0, 0, 0, 1));
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let stub0 = ("192.168.9.0/24".parse::<Ipv4Net>().unwrap(), 5);
+        let stub1 = ("192.168.10.0/24".parse::<Ipv4Net>().unwrap(), 5);
+        manager
+            .reconcile(
+                Vec::new(),
+                HashMap::from([(area0, vec![stub0]), (area1, vec![stub1])]),
+                router_id,
+            )
+            .await;
+        let key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_ROUTER,
+            link_state_id: router_id,
+            advertising_router: router_id,
+        };
+        let held = |area: Ipv4Addr| {
+            let manager = &manager;
+            async move {
+                for lsdb in manager.lsdbs.lock().await.values() {
+                    lsdb.lock()
+                        .await
+                        .age_and_evict(lsa::MIN_LS_INTERVAL, &HashSet::new());
+                }
+                manager.originate_router_lsas(router_id).await;
+                let lsa = manager.lsdb_for(area).await.lock().await.get(&key).unwrap();
+                let LsaBody::Router(body) = &lsa.body else {
+                    panic!("expected router lsa")
+                };
+                body.clone()
+            }
+        };
+        assert!(!manager.max_metric_active());
+        manager.set_host_router(true);
+        assert!(manager.max_metric_active());
+        for area in [area0, area1] {
+            let body = held(area).await;
+            assert_eq!(body.flags & lsa::ROUTER_FLAG_H, lsa::ROUTER_FLAG_H);
+            assert_eq!(body.links[0].metric, 5);
+        }
+        manager.set_host_router(false);
+        assert_eq!(held(area0).await.flags & lsa::ROUTER_FLAG_H, 0);
+    }
+
     /// RFC 7770: one type-10 RI per area, GR helper always, GR capable only
     /// with a grace period; flushed from an area that was left.
     #[tokio::test]
@@ -3922,7 +4008,7 @@ mod tests {
             )
             .await;
         // Helper and stub-router support are capabilities, always set.
-        let always = lsa::RI_CAP_GR_HELPER | lsa::RI_CAP_STUB_ROUTER;
+        let always = lsa::RI_CAP_GR_HELPER | lsa::RI_CAP_STUB_ROUTER | lsa::RI_CAP_HOST_ROUTER;
         assert_eq!(held(area0).await, body(always));
         assert_eq!(held(area1).await, body(always));
 

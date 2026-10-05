@@ -96,6 +96,13 @@ fn changed_fields(base: &OspfInstance, candidate: &OspfInstance) -> Vec<FieldDif
             new: Some(candidate.max_metric_administrative.to_string()),
         });
     }
+    if base.host_router != candidate.host_router {
+        fields.push(FieldDiff {
+            label: "host-router".to_string(),
+            old: Some(base.host_router.to_string()),
+            new: Some(candidate.host_router.to_string()),
+        });
+    }
     fields
 }
 
@@ -145,6 +152,7 @@ mod tests {
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            host_router: false,
         }
     }
 
@@ -155,6 +163,7 @@ mod tests {
         candidate[0].max_metric_on_startup = Some(30);
         candidate[0].max_metric_on_shutdown = Some(2);
         candidate[0].max_metric_administrative = true;
+        candidate[0].host_router = true;
         let diff = diff_ospf_instances(&base, &candidate);
         let field = |label: &str, old: &str, new: &str| FieldDiff {
             label: label.to_string(),
@@ -167,6 +176,7 @@ mod tests {
                 field("max-metric router-lsa on-startup", "unset", "30"),
                 field("max-metric router-lsa on-shutdown", "unset", "2"),
                 field("max-metric router-lsa administrative", "false", "true"),
+                field("host-router", "false", "true"),
             ]
         );
     }
