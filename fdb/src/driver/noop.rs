@@ -39,6 +39,12 @@ impl FdbDriver for NoopFdbDriver {
     async fn del_remote_mac_group(&self, _: u32, _: Mac) -> Result<(), DriverError> {
         Ok(())
     }
+    async fn set_segment_mac(&self, _: &str, _: Mac, _: bool) -> Result<(), DriverError> {
+        Ok(())
+    }
+    async fn del_segment_mac(&self, _: &str, _: Mac) -> Result<(), DriverError> {
+        Ok(())
+    }
     async fn add_flood(&self, _: u32, _: IpAddr) -> Result<(), DriverError> {
         Ok(())
     }

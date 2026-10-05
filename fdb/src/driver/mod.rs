@@ -74,6 +74,16 @@ pub trait FdbDriver: Send + Sync {
     /// Removes the entry `set_remote_mac_group` wrote.
     async fn del_remote_mac_group(&self, vni: u32, mac: Mac) -> Result<(), DriverError>;
 
+    /// A remote MAC on one of our own Ethernet Segments, pinned to the
+    /// segment's bridge port `port` (a static bridge FDB entry that is never
+    /// aged nor moved by the VXLAN side). It tracks activity: it starts
+    /// inactive (`active == false`) and the kernel marks it active when the CE
+    /// sends through `port` — only then does `local_macs` report it (RFC 7432
+    /// §8.4: a PE advertises what it sees locally, never what it was told).
+    /// `active` is for pinning over a MAC already learned on `port`.
+    async fn set_segment_mac(&self, port: &str, mac: Mac, active: bool) -> Result<(), DriverError>;
+    async fn del_segment_mac(&self, port: &str, mac: Mac) -> Result<(), DriverError>;
+
     /// One head-end-replication flood destination (the all-zero MAC entry).
     async fn add_flood(&self, vni: u32, vtep: IpAddr) -> Result<(), DriverError>;
     async fn del_flood(&self, vni: u32, vtep: IpAddr) -> Result<(), DriverError>;
@@ -81,7 +91,7 @@ pub trait FdbDriver: Send + Sync {
     /// MACs the bridge learned (or an operator pinned) on its local ports,
     /// each with the name of the port it sits behind: not `extern_learn`, not
     /// on the VXLAN port, not the ports' own (permanent/local) addresses, no
-    /// group addresses.
+    /// group addresses, and a `set_segment_mac` pin only while it is active.
     async fn local_macs(
         &self,
         bridge: &str,
@@ -170,12 +180,16 @@ pub fn is_local_neigh(
 }
 
 /// Whether a bridge FDB dump entry is a MAC this domain should originate.
-/// Pure so the rules are testable without a kernel.
+/// `active` is `Some` for an entry that tracks activity (a `set_segment_mac`
+/// pin): only an active one counts. Pure so the rules are testable without a
+/// kernel.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn is_local_mac(
     mac: Mac,
     permanent: bool,
     ext_learned: bool,
+    active: Option<bool>,
     port_ifindex: u32,
     master: Option<u32>,
     bridge_ifindex: u32,
@@ -184,6 +198,7 @@ pub fn is_local_mac(
     master == Some(bridge_ifindex)
         && Some(port_ifindex) != vxlan_ifindex
         && !ext_learned
+        && active != Some(false)
         && !permanent
         && mac != [0; 6]
         && mac[0] & 1 == 0
@@ -197,19 +212,50 @@ mod tests {
 
     #[test]
     fn only_dynamic_or_static_entries_on_a_local_port_count() {
-        assert!(is_local_mac(M, false, false, 5, Some(2), 2, Some(9)));
+        assert!(is_local_mac(M, false, false, None, 5, Some(2), 2, Some(9)));
         // the port's own (permanent) address
-        assert!(!is_local_mac(M, true, false, 5, Some(2), 2, Some(9)));
+        assert!(!is_local_mac(M, true, false, None, 5, Some(2), 2, Some(9)));
         // our own extern_learn write, and anything seen on the vxlan port
-        assert!(!is_local_mac(M, false, true, 9, Some(2), 2, Some(9)));
-        assert!(!is_local_mac(M, false, false, 9, Some(2), 2, Some(9)));
+        assert!(!is_local_mac(M, false, true, None, 9, Some(2), 2, Some(9)));
+        assert!(!is_local_mac(M, false, false, None, 9, Some(2), 2, Some(9)));
+        // a segment pin: only once the CE has sent through it
+        assert!(!is_local_mac(
+            M,
+            false,
+            false,
+            Some(false),
+            5,
+            Some(2),
+            2,
+            Some(9)
+        ));
+        assert!(is_local_mac(
+            M,
+            false,
+            false,
+            Some(true),
+            5,
+            Some(2),
+            2,
+            Some(9)
+        ));
         // another bridge's entry, the flood entry, a group address
-        assert!(!is_local_mac(M, false, false, 5, Some(3), 2, Some(9)));
-        assert!(!is_local_mac([0; 6], false, false, 5, Some(2), 2, Some(9)));
+        assert!(!is_local_mac(M, false, false, None, 5, Some(3), 2, Some(9)));
+        assert!(!is_local_mac(
+            [0; 6],
+            false,
+            false,
+            None,
+            5,
+            Some(2),
+            2,
+            Some(9)
+        ));
         assert!(!is_local_mac(
             [1, 0, 0x5e, 0, 0, 1],
             false,
             false,
+            None,
             5,
             Some(2),
             2,

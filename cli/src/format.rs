@@ -1543,7 +1543,11 @@ pub fn render_fdb_table(t: &nos_proto::FdbTable) -> String {
                     .join(", ")
             ),
             (nos_proto::MacSource::Remote, Some(vtep)) => format!("  {} remote via {vtep}", m.mac),
-            (nos_proto::MacSource::Remote, None) => format!("  {} remote", m.mac),
+            // A remote MAC pinned to one of our own segments' ports.
+            (nos_proto::MacSource::Remote, None) => match &m.esi {
+                Some(esi) => format!("  {} remote, on our esi {esi}", m.mac),
+                None => format!("  {} remote", m.mac),
+            },
             (nos_proto::MacSource::Local, _) => match &m.esi {
                 Some(esi) => format!("  {} local, esi {esi}", m.mac),
                 None => format!("  {} local", m.mac),

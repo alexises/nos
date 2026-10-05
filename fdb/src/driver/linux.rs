@@ -8,8 +8,8 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
 use netlink_packet_core::{
-    DefaultNla, NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_APPEND, NLM_F_CREATE,
-    NLM_F_REPLACE, NLM_F_REQUEST,
+    DefaultNla, Emitable, NetlinkMessage, NetlinkPayload, Nla, NlasIterator, NLA_F_NESTED,
+    NLA_TYPE_MASK, NLM_F_ACK, NLM_F_APPEND, NLM_F_CREATE, NLM_F_REPLACE, NLM_F_REQUEST,
 };
 use rtnetlink::packet_route::link::{
     InfoBridgePort, InfoData, InfoPortData, InfoPortKind, InfoVxlan, LinkAttribute, LinkFlags,
@@ -44,6 +44,15 @@ struct NhState {
     gateways: HashMap<IpAddr, u32>,
     groups: HashMap<Vec<IpAddr>, u32>,
 }
+
+/// `NDA_FDB_EXT_ATTRS` (nested) and its `NFEA_ACTIVITY_NOTIFY` (u8): an FDB
+/// entry that tracks activity. `FDB_NOTIFY_INACTIVE_BIT` is set until a frame
+/// from the entry's port is seen, and set again once none was for the
+/// bridge's ageing time (`br_fdb_update`/`br_fdb_cleanup`).
+const NDA_FDB_EXT_ATTRS: u16 = 14;
+const NFEA_ACTIVITY_NOTIFY: u8 = 1;
+const FDB_NOTIFY_BIT: u8 = 1;
+const FDB_NOTIFY_INACTIVE_BIT: u8 = 2;
 
 /// `IFLA_BRPORT_STATE` and the two bridge-port states used (`BR_STATE_*`).
 const IFLA_BRPORT_STATE: u16 = 1;
@@ -305,6 +314,66 @@ fn neigh_suppressed(link: &LinkMessage) -> bool {
         .any(|a| matches!(a, InfoBridgePort::NeighSupress(true)))
 }
 
+/// `IFLA_BRPORT_LEARNING` as the link dump reports it (`true` — the kernel
+/// default — when the dump carries no port data, as for a just-enslaved link).
+fn port_learning(link: &LinkMessage) -> bool {
+    !link
+        .attributes
+        .iter()
+        .filter_map(|a| match a {
+            LinkAttribute::LinkInfo(infos) => Some(infos),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|i| match i {
+            LinkInfo::PortData(InfoPortData::BridgePort(attrs)) => Some(attrs),
+            _ => None,
+        })
+        .flatten()
+        .any(|a| matches!(a, InfoBridgePort::Learning(false)))
+}
+
+/// A segment pin (`set_segment_mac`): a static bridge FDB entry on `port`
+/// that tracks activity, starting inactive unless `active`.
+fn segment_mac_msg(port: u32, mac: Mac, active: bool) -> NeighbourMessage {
+    let mut m = NeighbourMessage::default();
+    m.header.family = AddressFamily::Bridge;
+    m.header.ifindex = port;
+    m.header.state = NeighbourState::Noarp;
+    m.header.flags = NeighbourFlags::Controller;
+    let bits = if active {
+        FDB_NOTIFY_BIT
+    } else {
+        FDB_NOTIFY_BIT | FDB_NOTIFY_INACTIVE_BIT
+    };
+    // One nested NFEA_ACTIVITY_NOTIFY (u8, padded): the kernel insists on
+    // NLA_F_NESTED (`nla_parse_nested`).
+    m.attributes = vec![
+        NeighbourAttribute::LinkLayerAddress(mac.to_vec()),
+        NeighbourAttribute::Other(DefaultNla::new(
+            NDA_FDB_EXT_ATTRS | NLA_F_NESTED,
+            vec![5, 0, NFEA_ACTIVITY_NOTIFY, 0, bits, 0, 0, 0],
+        )),
+    ];
+    m
+}
+
+/// `Some(active)` for an FDB entry that tracks activity, `None` otherwise.
+fn fdb_activity(m: &NeighbourMessage) -> Option<bool> {
+    m.attributes.iter().find_map(|a| match a {
+        NeighbourAttribute::Other(n) if n.kind() & NLA_TYPE_MASK == NDA_FDB_EXT_ATTRS => {
+            let mut buf = vec![0; n.buffer_len()];
+            n.emit(&mut buf);
+            NlasIterator::new(&buf[4..])
+                .filter_map(Result::ok)
+                .find(|b| b.kind() == u16::from(NFEA_ACTIVITY_NOTIFY))
+                .and_then(|b| b.value().first().copied())
+                .map(|bits| bits & FDB_NOTIFY_INACTIVE_BIT == 0)
+        }
+        _ => None,
+    })
+}
+
 fn link_mac(link: &LinkMessage) -> Option<Mac> {
     link.attributes.iter().find_map(|a| match a {
         LinkAttribute::Address(b) => Mac::try_from(b.as_slice()).ok(),
@@ -484,6 +553,14 @@ impl FdbDriver for LinuxFdbDriver {
                 .await?;
             info!(vxlan = %name, suppress = neigh_suppress, "vxlan neigh suppression set");
         }
+        // RFC 7432 §9.2: remote MACs come from the control plane only. With
+        // bridge-port learning on, a CE's broadcast another segment PE floods
+        // here would move the CE's segment pin behind this port.
+        if port_learning(&link) {
+            self.set_bridge_port(idx, vec![InfoBridgePort::Learning(false)])
+                .await?;
+            info!(vxlan = %name, "vxlan port learning disabled");
+        }
         self.handle
             .link()
             .set(LinkUnspec::new_with_index(idx).up().build())
@@ -550,6 +627,26 @@ impl FdbDriver for LinuxFdbDriver {
     async fn del_remote_mac_group(&self, vni: u32, mac: Mac) -> Result<(), DriverError> {
         let idx = self.vxlan_index(vni).await?;
         self.neigh(fdb_group_msg(idx, mac, 0), true, 0, ENOENT)
+            .await
+    }
+
+    async fn set_segment_mac(&self, port: &str, mac: Mac, active: bool) -> Result<(), DriverError> {
+        let idx = self.bridge_index(port).await?;
+        self.neigh(
+            segment_mac_msg(idx, mac, active),
+            false,
+            NLM_F_CREATE | NLM_F_REPLACE,
+            0,
+        )
+        .await
+    }
+
+    async fn del_segment_mac(&self, port: &str, mac: Mac) -> Result<(), DriverError> {
+        // ponytail: deletes whatever the bridge holds for `mac` on `port`, so
+        // an entry relearned there meanwhile goes too — one flood until the
+        // next frame relearns it.
+        let idx = self.bridge_index(port).await?;
+        self.neigh(segment_mac_msg(idx, mac, false), true, 0, ENOENT)
             .await
     }
 
@@ -667,6 +764,7 @@ impl FdbDriver for LinuxFdbDriver {
                 mac,
                 m.header.state == NeighbourState::Permanent,
                 m.header.flags.contains(NeighbourFlags::ExtLearned),
+                fdb_activity(&m),
                 m.header.ifindex,
                 master,
                 bridge_idx,
@@ -786,6 +884,38 @@ impl FdbDriver for LinuxFdbDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_segment_pin_carries_and_reads_back_its_activity() {
+        assert_eq!(
+            fdb_activity(&segment_mac_msg(3, [0; 6], false)),
+            Some(false)
+        );
+        assert_eq!(fdb_activity(&segment_mac_msg(3, [0; 6], true)), Some(true));
+        assert_eq!(fdb_activity(&NeighbourMessage::default()), None);
+        // The wire form the kernel parses: nested flag, then one u8 NLA.
+        let NeighbourAttribute::Other(n) = &segment_mac_msg(3, [0; 6], false).attributes[1] else {
+            panic!("no ext attrs");
+        };
+        let mut buf = vec![0; n.buffer_len()];
+        n.emit(&mut buf);
+        assert_eq!(buf, [12, 0, 14, 0x80, 5, 0, 1, 0, 3, 0, 0, 0]);
+    }
+
+    #[test]
+    fn port_learning_defaults_on_and_reads_the_flag() {
+        let port = |attrs| {
+            let mut l = LinkMessage::default();
+            l.attributes
+                .push(LinkAttribute::LinkInfo(vec![LinkInfo::PortData(
+                    InfoPortData::BridgePort(attrs),
+                )]));
+            l
+        };
+        assert!(port_learning(&LinkMessage::default()));
+        assert!(port_learning(&port(vec![InfoBridgePort::Learning(true)])));
+        assert!(!port_learning(&port(vec![InfoBridgePort::Learning(false)])));
+    }
 
     #[test]
     fn neigh_suppressed_reads_the_bridge_port_flag() {
