@@ -142,9 +142,11 @@ async fn resync(
         routing_table = ?own.routing_table,
         area_count = own.areas.len(),
         graceful_restart_grace_period = ?own.graceful_restart_grace_period,
+        prefix_suppression = own.prefix_suppression,
         "ospf instance config resolved"
     );
     links.set_graceful_restart(own.graceful_restart_grace_period);
+    links.set_prefix_suppression(own.prefix_suppression);
     links.set_area_settings(area_settings(&own.areas)).await;
 
     let mut desired_links = Vec::new();

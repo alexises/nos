@@ -69,6 +69,17 @@ pub struct OspfInstance {
     #[garde(range(min = 1, max = 1800))]
     #[cli(topic = OspfInstanceGracefulRestart, words = "graceful-restart grace-period")]
     pub graceful_restart_grace_period: Option<u16>,
+
+    /// RFC 6860 prefix suppression: hide transit-only networks. Leaves every
+    /// point-to-point link's subnet out of this router's Router-LSA and gives
+    /// the Network-LSA it originates as DR a /32 mask, so other routers
+    /// install no route to them. Loopbacks stay advertised. Off by default;
+    /// `#[serde(default)]` so configs saved before this field existed still
+    /// load.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = OspfInstancePrefixSuppression)]
+    pub prefix_suppression: bool,
 }
 
 /// The placeholder a new `OspfInstance` starts from (`edit` on a missing one).
@@ -81,6 +92,7 @@ impl Default for OspfInstance {
             routing_table: None,
             redistribute_policy: None,
             graceful_restart_grace_period: None,
+            prefix_suppression: false,
         }
     }
 }
@@ -120,6 +132,7 @@ mod tests {
             routing_table: None,
             redistribute_policy: None,
             graceful_restart_grace_period: None,
+            prefix_suppression: false,
         }
     }
 
@@ -146,5 +159,14 @@ mod tests {
     fn distinct_names_pass() {
         let cfg = config_with(vec![instance("vrf-a"), instance("vrf-b")]);
         cfg.validate_with(&cfg).unwrap();
+    }
+
+    #[test]
+    fn prefix_suppression_defaults_off_when_absent() {
+        let i: OspfInstance = serde_json::from_str(
+            r#"{"name":"o1","router_id":"1.1.1.1","areas":[],"routing_table":null,"redistribute_policy":null}"#,
+        )
+        .unwrap();
+        assert!(!i.prefix_suppression);
     }
 }

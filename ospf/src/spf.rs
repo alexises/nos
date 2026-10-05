@@ -665,6 +665,12 @@ fn collect_network_routes(
         let Some(&d) = dist.get(&vertex) else {
             continue;
         };
+        // RFC 6860 §2.2.2.2: a hidden transit network still carries transit
+        // (it stays a Dijkstra vertex) but MUST NOT be installed — nor, via
+        // `intra_area_routes`, summarized into another area.
+        if network.network_mask == Ipv4Addr::BROADCAST {
+            continue;
+        }
         if root_attached_to_network(root, routers, network_id) {
             continue;
         }
@@ -1133,6 +1139,57 @@ mod tests {
         assert_eq!(routes[0].prefix, "192.168.3.0/24".parse().unwrap());
         assert_eq!(routes[0].next_hops, vec![addr(10, 0, 0, 2)]);
         assert_eq!(routes[0].metric, 2);
+    }
+
+    /// RFC 6860 §2.2.2.2: root reaches X only across W's segment. A /32
+    /// Network-LSA still carries that transit, but yields no route itself —
+    /// neither installed nor (via `intra_area_routes`) summarized.
+    #[test]
+    fn hidden_transit_network_carries_transit_but_yields_no_route() {
+        let root = router_id(1);
+        let w = router_id(2);
+        let x = router_id(3);
+        let segment = addr(10, 1, 0, 1); // W is DR
+        let lsdb = |mask: Ipv4Addr| {
+            vec![
+                router_lsa(root, vec![p2p(w, addr(10, 0, 0, 1), 1)]),
+                router_lsa(
+                    w,
+                    vec![
+                        p2p(root, addr(10, 0, 0, 2), 1),
+                        transit(segment, segment, 1),
+                    ],
+                ),
+                router_lsa(
+                    x,
+                    vec![
+                        transit(segment, addr(10, 1, 0, 2), 1),
+                        stub(addr(192, 168, 9, 0), addr(255, 255, 255, 0), 1),
+                    ],
+                ),
+                network_lsa(segment, mask, vec![w, x]),
+            ]
+        };
+        let by_prefix = |routes: Vec<RouteEntry>| -> HashMap<Ipv4Net, RouteEntry> {
+            routes.into_iter().map(|r| (r.prefix, r)).collect()
+        };
+        let stub_net: Ipv4Net = "192.168.9.0/24".parse().unwrap();
+        let segment_net: Ipv4Net = "10.1.0.0/24".parse().unwrap();
+
+        let shown = by_prefix(compute(root, &lsdb(addr(255, 255, 255, 0))));
+        assert!(shown.contains_key(&segment_net), "not vacuous");
+        let hidden = by_prefix(compute(root, &lsdb(Ipv4Addr::BROADCAST)));
+        assert_eq!(hidden.len(), 1);
+        assert!(!hidden.keys().any(|p| p.addr() == segment));
+        let (a, b) = (&shown[&stub_net], &hidden[&stub_net]);
+        assert_eq!((&a.next_hops, a.metric), (&b.next_hops, b.metric));
+        assert_eq!(b.next_hops, vec![addr(10, 0, 0, 2)]);
+
+        let summarized = intra_area_routes(root, &lsdb(Ipv4Addr::BROADCAST)).routes;
+        assert_eq!(
+            summarized.iter().map(|r| r.prefix).collect::<Vec<_>>(),
+            vec![stub_net]
+        );
     }
 
     #[test]

@@ -472,6 +472,91 @@ pub async fn ospf_lfa(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&removed, r0, 60).await
 }
 
+/// Waits up to `secs` until `r`'s rt1 does (`want`) or doesn't list an OSPF
+/// candidate for `SUBNET`.
+async fn subnet_ospf_candidate(r: &Router, want: bool, secs: u32) -> anyhow::Result<()> {
+    for _ in 0..secs {
+        if r.rt1_has(SUBNET, "Ospf").await? == want {
+            log(format!(
+                "{}: ospf candidate for {SUBNET} present={want}",
+                r.name()
+            ));
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!(
+        "{}: ospf candidate for {SUBNET} never became present={want}",
+        r.name()
+    )
+}
+
+/// RFC 6860 prefix suppression (requires `ospf-lfa`: router-c on the bridge,
+/// router-b's loopback addressed but out of OSPF). Router-c's eth0 is on
+/// `SUBNET` too, so the connected route always wins its kernel table (#139):
+/// the check reads nos-ribd's OSPF *candidate* for router-a/b's p2p subnet.
+pub async fn ospf_prefix_suppression(w: &mut World) -> anyhow::Result<()> {
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let candidate = subnet_ospf_candidate;
+    let suppression = |rid: &str, on: bool| {
+        strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            rid,
+            "--ospf-prefix-suppression",
+            &on.to_string(),
+        ])
+    };
+
+    // Baseline: router-c learns the p2p subnet from a/b's type-3 stubs.
+    candidate(c, true, 30).await?;
+
+    let network_lsa = format!(
+        "ospf lsa originated lsa_type=2 link_state_id={} advertising_router={OSPF_ROUTER_ID_B} refreshed=false",
+        OSPF_BROADCAST_ADDRESS_B.split('/').next().unwrap_or_default()
+    );
+    let n0 = b.count(&network_lsa);
+    let resolved = "ospf instance config resolved.*prefix_suppression=true";
+    let (ra0, rb0) = (a.count(resolved), b.count(resolved));
+    log("enabling rfc 6860 prefix suppression on router-a and router-b");
+    a.provision(&suppression(OSPF_ROUTER_ID, true)).await?;
+    b.provision(&suppression(OSPF_ROUTER_ID_B, true)).await?;
+    a.wait_new(resolved, ra0, 30).await?;
+    b.wait_new(resolved, rb0, 30).await?;
+    // Router-b is DR on the bridge: its Network-LSA is re-originated, /32 mask.
+    b.wait_new(&network_lsa, n0, 30).await?;
+    // §2.1: the type-3 stub for eth0.0's subnet is gone from both Router-LSAs.
+    c.wait_ospf_route_gone(SUBNET, 15).await?;
+
+    // Transit is untouched: router-b's loopback (a stub, never hidden) is
+    // reached by router-a over both links — one of them across the bridge's
+    // network vertex, whose Network-LSA now has a /32 mask — and by router-c
+    // only across it.
+    let lo = OSPF_SPF_LOOPBACK_ADDRESS;
+    let ecmp = format!("added route prefix={lo}.*next_hops=2.*source=Some(Ospf)");
+    let on_c = format!("added route prefix={lo}.*source=Some(Ospf)");
+    let (e0, c0) = (a.count(&ecmp), c.count(&on_c));
+    b.provision(&[
+        "--loopback-address",
+        lo,
+        "--ospf-loopback-profile",
+        OSPF_PROFILE,
+    ])
+    .await?;
+    a.wait_new(&ecmp, e0, 60).await?;
+    c.wait_new(&on_c, c0, 60).await?;
+    // Still hidden after the topology change.
+    candidate(c, false, 1).await?;
+
+    log("restoring: loopback out of ospf, prefix suppression off");
+    b.provision(&["--clear-ospf-loopback-profile"]).await?;
+    a.wait_ospf_route_gone(lo, 15).await?;
+    a.provision(&suppression(OSPF_ROUTER_ID, false)).await?;
+    b.provision(&suppression(OSPF_ROUTER_ID_B, false)).await?;
+    candidate(c, true, 60).await
+}
+
 /// Router-b's loopback moves into a second area, making it a real ABR: it must
 /// originate a Type-3 summary-LSA, and router-a (backbone only) must install a
 /// kernel route to a prefix that is not in its own area.

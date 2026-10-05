@@ -220,9 +220,14 @@ pub fn render_bgp_instance(instance: &BgpInstance) -> String {
 /// the instance line — mirrors `render_interface`'s nested subinterfaces.
 pub fn render_ospf_instance(instance: &OspfInstance) -> String {
     let mut lines = vec![format!(
-        "ospf instance {}: router-id {}{}",
+        "ospf instance {}: router-id {}{}{}",
         instance.name,
         instance.router_id,
+        if instance.prefix_suppression {
+            ", prefix-suppression"
+        } else {
+            ""
+        },
         instance
             .graceful_restart_grace_period
             .map_or(String::new(), |p| format!(
@@ -3262,6 +3267,7 @@ mod tests {
                 routing_table: None,
                 redistribute_policy: None,
                 graceful_restart_grace_period: None,
+                prefix_suppression: true,
             }],
             ospfv3_instances: vec![Ospfv3Instance {
                 name: "v3".to_string(),
@@ -3401,7 +3407,7 @@ mod tests {
             "  peer 192.0.2.2: peer-group pg, shutdown",
             "routing-table rt1: bgp-instance r1, ospf-instance unset, static-routing-instance unset, \
              redistribute from static to bgp, policy p1, rest-api 10.0.0.1:443",
-            "ospf instance o1: router-id 1.1.1.1\n  area 0.0.0.0\n    profile op: auth crypto-keys \
+            "ospf instance o1: router-id 1.1.1.1, prefix-suppression\n  area 0.0.0.0\n    profile op: auth crypto-keys \
              [key-id 1 md5 k, key-id 2 hmac-sha1 k, key-id 3 hmac-sha384 k, key-id 4 hmac-sha512 k (current)] \
              extended-sequence-numbers",
             "ospfv3 instance v3: router-id 2.2.2.2, extended-lsa, graceful-restart grace-period 120\n  \

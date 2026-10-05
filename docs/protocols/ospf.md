@@ -376,6 +376,31 @@ How it behaves:
 - **Other vendors.** NOS advertises opaque-LSA support (the O bit), so a third-party router's Grace-LSA is helped like a NOS one (tested with FRR's `graceful-restart prepare ip ospf`). As the restarting router, NOS has been tested with NOS helpers only.
 - `delete ospf instance o1 graceful-restart grace-period` turns it off.
 
+### Hide transit-only networks (RFC 6860)
+
+Keep the subnets of the links between routers out of everyone's routing table, while still routing through them:
+
+```
+configure ps
+set ospf instance o1 prefix-suppression
+commit
+```
+
+```sh
+$C -X POST $B/v1/transactions/ps
+$C -X PUT -H 'Content-Type: application/json' -d 'true' $B/v1/transactions/ps/ospf-instance/o1/prefix-suppression
+$C -X POST $B/v1/transactions/ps/commit
+```
+
+How it behaves:
+
+- **Point-to-point links.** The router stops advertising the link's subnet. Set it on both ends: each end advertises the subnet on its own.
+- **LAN segments.** When this router is the DR, its network LSA carries a `/32` mask, and other routers install no route for the segment. The segment's other routers don't need the setting.
+- **Loopbacks** stay advertised.
+- **Every router** ignores a network LSA with a `/32` mask when building routes and doesn't summarize it into other areas, whatever its own setting. A router without RFC 6860 installs a `/32` route to the DR's address instead.
+- **Check it** on another router: `show route rt1` no longer lists the link's subnet with source `ospf`.
+- `delete ospf instance o1 prefix-suppression` turns it off.
+
 ### Stop running OSPF
 
 - On one link: `delete interface eth0 ospf` (or `delete ospf` inside the interface, subinterface or broadcast domain). Over REST, `DELETE …/interface/eth0/subinterface/0/ospf-profile`.
@@ -409,6 +434,8 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **Inter-area routes (ABR).** Each prefix of an area is advertised into the router's other areas as its own type-3 LSA, unless an area range covers it, and each ASBR as a type-4 LSA. There is no virtual link. Any router in two or more areas acts as an ABR, including towards a stub area, whether or not one of its areas is the backbone. This is designed and tested for one or more non-backbone areas each behind its own ABR; in topologies where several ABRs connect the same areas, check the result.
 
+**Transit-only networks (RFC 6860).** Described [above](#hide-transit-only-networks-rfc-6860). With prefix suppression on, an NSSA type-7 LSA's forwarding address is a loopback's address, or `0.0.0.0` if the router has no loopback in the area, never a hidden link's.
+
 **Opaque LSAs (RFC 5250).** NOS sets the O bit in its database description packets and stores and floods opaque LSAs it receives without reading them: type 9 (link-local) only on the link it arrived on, type 10 (area) in its area, type 11 (AS) in the area it arrived in. Opaque LSAs are offered only to neighbours whose database description packets set the O bit. NOS originates none except its own Grace-LSA. `show ospf database` lists a type-9 LSA under its link's area, without naming the link. An ABR does not pass a type-11 LSA on to its other areas. An LSA of a type NOS does not know (6, 7, 8, or above 11) is dropped on its own; the rest of the update is kept.
 
 **LSA ageing and withdrawal (RFC 2328 §14).** Self-originated LSAs are refreshed every 30 minutes and others expire after an hour without refresh. An LSA that is no longer wanted (a removed link, redistribution rule or area) is withdrawn at once by flooding it at maximum age.
@@ -432,6 +459,7 @@ All paths are relative to `/v1/transactions/{tx}/`. `delete` forms marked *relat
 | name | `edit ospf instance <name>`; `delete ospf instance <name>` | `ospf-instance/<name>` | string, 1 to 64 characters | unique among OSPF instances | names the instance | `show config` |
 | router ID | `set ospf instance <name> router-id <ip>`; relative `set router-id <ip>` | `ospf-instance/<name>/router-id` | IPv4 address; `0.0.0.0` when created by `edit` | set it: it identifies the router in every LSA | router ID in Hellos and LSAs | `show ospf neigh` on the neighbour |
 | graceful restart | `set ospf instance <name> graceful-restart grace-period <seconds>`; `delete ospf instance <name> graceful-restart grace-period` | `ospf-instance/<name>/graceful-restart-grace-period` | seconds, 1 to 1800; unset by default | | on SIGTERM, ask Full neighbours to keep the adjacency and routes this long (RFC 3623) | `ospf helper: grace period entered` in the neighbour's log |
+| prefix suppression | `set ospf instance <name> prefix-suppression`; `delete ospf instance <name> prefix-suppression` | `ospf-instance/<name>/prefix-suppression` | boolean; off by default | | hides point-to-point subnets and, as DR, LAN segments (RFC 6860) | `show route <table>` on another router |
 | areas | `edit ospf instance <name> area <area-id>`; relative `edit area <area-id>` | `ospf-instance/<name>/area/<area-id>` | list of areas | area IDs unique within the instance | see [Area](#area) | `show config` |
 | routing table | set on the table: `set routing-table <table> ospf-instance <name>`; `delete routing-table <table> ospf-instance` | `routing-table/<table>/ospf-instance` | instance name; unset by default | the instance must exist; one table per instance | runs the instance in that table's VRF and installs its routes there | `show ospf neigh`, `show route <table>` |
 
