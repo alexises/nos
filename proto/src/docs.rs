@@ -319,6 +319,8 @@ topics! {
     BgpPeerGroupRouteRefreshStaleTime,
     /// `BgpPeerGroup.local_as`
     BgpPeerGroupLocalAs,
+    /// `BgpInstance.graceful_restart`
+    BgpInstanceGracefulRestart,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

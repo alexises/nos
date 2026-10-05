@@ -393,6 +393,7 @@ mod tests {
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
             aggregates: Vec::new(),
+            graceful_restart: crate::schema::BgpGracefulRestart::default(),
             routing_table: None,
             redistribute_policy: None,
         }];

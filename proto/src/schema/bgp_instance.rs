@@ -72,6 +72,16 @@ pub struct BgpInstance {
     #[cli(topic = BgpInstanceConfederation)]
     pub confederation: BgpConfederation,
 
+    /// RFC 4724 graceful restart with RFC 8538's N bit: on unless
+    /// `disabled`. While on, a peer that advertised the capability keeps its
+    /// routes in use across a session reset, until it sends End-of-RIB or a
+    /// timer expires. A plain struct (not an `Option`) so each field can be
+    /// set and deleted on its own.
+    #[serde(default)]
+    #[garde(custom(|g: &BgpGracefulRestart, _ctx: &Config| valid_graceful_restart(g)))]
+    #[cli(topic = BgpInstanceGracefulRestart)]
+    pub graceful_restart: BgpGracefulRestart,
+
     /// RFC 8210 RPKI-to-Router caches this instance's `nos-bgpd` takes its
     /// validated ROA payloads from, reached inside the instance's VRF. One
     /// is used at a time: the lowest `preference` that answers (RFC 8210
@@ -222,6 +232,70 @@ impl BgpConfederation {
     }
 }
 
+/// RFC 4724 §3: the default Restart Time (seconds) a peer gets to come back.
+pub const GR_RESTART_TIME_DEFAULT: u16 = 120;
+/// How long a returned peer's retained routes wait for its End-of-RIB.
+pub const GR_STALE_TIME_DEFAULT: u16 = 180;
+/// RFC 4724 §4.1 `Selection_Deferral_Timer` default.
+pub const GR_SELECTION_DEFERRAL_TIME_DEFAULT: u16 = 360;
+/// The Restart Time field is 12 bits wide.
+pub const GR_RESTART_TIME_MAX: u16 = 4095;
+
+/// RFC 4724 / RFC 8538 graceful restart of one BGP instance. `Default` is
+/// on, with every timer at its default.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
+pub struct BgpGracefulRestart {
+    /// Turn graceful restart off: no capability is advertised, and no
+    /// peer's routes are kept across a reset.
+    #[serde(default)]
+    #[cli(topic = BgpInstanceGracefulRestart, words = "disable")]
+    pub disabled: bool,
+    /// Seconds a peer may take to come back before its routes are dropped,
+    /// advertised as our own Restart Time (unset: 120, at most 4095).
+    #[serde(default)]
+    #[cli(topic = BgpInstanceGracefulRestart)]
+    pub restart_time: Option<u16>,
+    /// Seconds a returned peer's kept routes wait for its End-of-RIB
+    /// (unset: 180).
+    #[serde(default)]
+    #[cli(topic = BgpInstanceGracefulRestart)]
+    pub stale_time: Option<u16>,
+    /// Seconds a restarting instance waits for its peers' End-of-RIB before
+    /// selecting and advertising routes (unset: 360).
+    #[serde(default)]
+    #[cli(topic = BgpInstanceGracefulRestart)]
+    pub selection_deferral_time: Option<u16>,
+}
+
+impl BgpGracefulRestart {
+    /// The Restart Time to advertise, `None` when disabled.
+    pub fn enabled_restart_time(&self) -> Option<u16> {
+        (!self.disabled).then(|| self.restart_time.unwrap_or(GR_RESTART_TIME_DEFAULT))
+    }
+    pub fn stale_time(&self) -> u16 {
+        self.stale_time.unwrap_or(GR_STALE_TIME_DEFAULT)
+    }
+    pub fn selection_deferral_time(&self) -> u16 {
+        self.selection_deferral_time
+            .unwrap_or(GR_SELECTION_DEFERRAL_TIME_DEFAULT)
+    }
+}
+
+fn valid_graceful_restart(g: &BgpGracefulRestart) -> garde::Result {
+    if g.restart_time.is_some_and(|t| t > GR_RESTART_TIME_MAX) {
+        return Err(garde::Error::new(
+            "graceful-restart restart-time must be at most 4095 seconds",
+        ));
+    }
+    if g.stale_time == Some(0) || g.selection_deferral_time == Some(0) {
+        return Err(garde::Error::new(
+            "graceful-restart stale-time and selection-deferral-time must be at least 1 second",
+        ));
+    }
+    Ok(())
+}
+
 fn valid_confederation(instance: &BgpInstance) -> garde::Result {
     let c = &instance.confederation;
     let Some(id) = c.identifier else {
@@ -262,6 +336,7 @@ impl Default for BgpInstance {
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
             aggregates: Vec::new(),
+            graceful_restart: crate::schema::BgpGracefulRestart::default(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -377,6 +452,7 @@ mod tests {
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
             aggregates: Vec::new(),
+            graceful_restart: crate::schema::BgpGracefulRestart::default(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -405,6 +481,46 @@ mod tests {
     fn asn_max_reserved_fails() {
         let cfg = config_with(vec![instance("default", 4_294_967_295)]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn graceful_restart_timers_are_checked() {
+        use super::BgpGracefulRestart;
+        let with = |f: fn(&mut BgpGracefulRestart)| {
+            let mut g = BgpGracefulRestart::default();
+            f(&mut g);
+            g
+        };
+        let cases = [
+            (BgpGracefulRestart::default(), true),
+            (with(|g| g.restart_time = Some(4095)), true),
+            (with(|g| g.restart_time = Some(4096)), false),
+            (with(|g| g.stale_time = Some(0)), false),
+            (with(|g| g.selection_deferral_time = Some(0)), false),
+        ];
+        for (g, ok) in cases {
+            let mut i = instance("default", 65000);
+            i.graceful_restart = g;
+            let cfg = config_with(vec![i]);
+            assert_eq!(cfg.validate_with(&cfg).is_ok(), ok, "{g:?}");
+        }
+    }
+
+    /// Default-on: an instance saved before graceful restart existed loads
+    /// with it enabled and default timers.
+    #[test]
+    fn graceful_restart_defaults_to_on() {
+        let json = r#"{"name":"r1","router_id":"1.1.1.1","asn":65000,"peer_groups":[],
+            "peers":[],"cluster_id":null,"routing_table":null,"redistribute_policy":null}"#;
+        let i: BgpInstance = serde_json::from_str(json).unwrap();
+        assert_eq!(i.graceful_restart.enabled_restart_time(), Some(120));
+        assert_eq!(i.graceful_restart.stale_time(), 180);
+        assert_eq!(i.graceful_restart.selection_deferral_time(), 360);
+        let off = super::BgpGracefulRestart {
+            disabled: true,
+            ..Default::default()
+        };
+        assert_eq!(off.enabled_restart_time(), None);
     }
 
     #[test]

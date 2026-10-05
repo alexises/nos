@@ -427,6 +427,38 @@ fn confederation_identifier_and_peers() {
     );
 }
 
+/// #12: graceful restart is on by default; `disable` and each timer are set
+/// and deleted on their own.
+#[test]
+fn graceful_restart_disable_and_timers() {
+    let mut doc = serde_json::to_value(populated()).unwrap();
+    let run = |line: &str, doc: &mut Value| {
+        let edit = config_grammar::parse(line, &[], doc).unwrap_or_else(|| panic!("{line}"));
+        for (path, value) in edit.writes {
+            config_path::set(doc, &path, value).unwrap();
+        }
+    };
+    run("set bgp instance R1 graceful-restart disable", &mut doc);
+    run(
+        "set bgp instance R1 graceful-restart restart-time 60",
+        &mut doc,
+    );
+    let cfg: Config = serde_json::from_value(doc.clone()).unwrap();
+    let gr = cfg.bgp_instances[0].graceful_restart;
+    assert!(gr.disabled);
+    assert_eq!(gr.restart_time, Some(60));
+    run("delete bgp instance R1 graceful-restart disable", &mut doc);
+    run(
+        "delete bgp instance R1 graceful-restart restart-time",
+        &mut doc,
+    );
+    let cfg: Config = serde_json::from_value(doc).unwrap();
+    assert_eq!(
+        cfg.bgp_instances[0].graceful_restart,
+        nos_proto::BgpGracefulRestart::default()
+    );
+}
+
 /// #17: RPKI caches, keyed by address, with a default port and preference.
 #[test]
 fn rpki_cache_list() {

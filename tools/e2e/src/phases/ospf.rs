@@ -1714,7 +1714,7 @@ fn frr_route_cost(out: &str, prefix: &str) -> Option<u32> {
     })
 }
 
-async fn frr_until(
+pub(super) async fn frr_until(
     w: &World,
     cmd: &str,
     secs: u64,

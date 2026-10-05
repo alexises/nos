@@ -25,8 +25,8 @@ pub mod schema;
 pub mod validators;
 
 pub use bgp::{
-    BgpEvent, BgpRequest, BgpSessionState, EvpnRouteSummary, PeerSummary, RedistributeUpdate,
-    RedistributedRoute, RpkiCacheStatus, RpkiSessionState,
+    BgpEvent, BgpRequest, BgpSessionState, EvpnRouteSummary, GrSummary, PeerSummary,
+    RedistributeUpdate, RedistributedRoute, RpkiCacheStatus, RpkiSessionState,
 };
 pub use broker::{Role, ServiceRef, WatchdogEvent, WatchdogRequest, INVALID_CREDENTIALS};
 pub use codec::IpcCodec;
@@ -70,16 +70,17 @@ pub use rib::{
 };
 pub use schema::{
     loopback_table_name, AddressFamily, AsPathList, BgpAggregate, BgpAoAlgorithm, BgpAoKey,
-    BgpAuth, BgpConfederation, BgpDamping, BgpInstance, BgpLocalAs, BgpMaximumPrefix, BgpPeer,
-    BgpPeerGroup, BgpPrefixLimit, BgpShutdown, BroadcastDomain, CommunityAlias, CommunityGroup,
-    Config, DfAlgorithm, EsRedundancy, Interface, InterfaceAddress, LacpRate, LldpDestination,
-    LldpSettings, NetworkType, NextHopMode, OspfArea, OspfAreaRange, OspfAreaType, OspfAuth,
-    OspfCryptoAlgorithm, OspfCryptoKey, OspfInstance, OspfProfile, Ospfv3Area, Ospfv3Instance,
-    Ospfv3Profile, PolicyDefinition, PortAggregate, PortAggregateMode, PrefixList, PrefixListEntry,
-    Redistribute, RedistributeSource, RedistributeTarget, RestApi, RoutingTable, RoutingTableEvpn,
-    RpkiCache, SourceAddress, StaticRoute, StaticRoutingInstance, Subinterface, SwitchingProfile,
-    SwitchingProfileMember, User, VlanTag, CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT,
-    HELLO_INTERVAL_DEFAULT, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX,
-    PASSWORD_HASH_PREFIX, PRIORITY_DEFAULT, REST_API_PORT_DEFAULT,
-    ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS, RPKI_RTR_PORT_DEFAULT,
+    BgpAuth, BgpConfederation, BgpDamping, BgpGracefulRestart, BgpInstance, BgpLocalAs,
+    BgpMaximumPrefix, BgpPeer, BgpPeerGroup, BgpPrefixLimit, BgpShutdown, BroadcastDomain,
+    CommunityAlias, CommunityGroup, Config, DfAlgorithm, EsRedundancy, Interface, InterfaceAddress,
+    LacpRate, LldpDestination, LldpSettings, NetworkType, NextHopMode, OspfArea, OspfAreaRange,
+    OspfAreaType, OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstance, OspfProfile,
+    Ospfv3Area, Ospfv3Instance, Ospfv3Profile, PolicyDefinition, PortAggregate, PortAggregateMode,
+    PrefixList, PrefixListEntry, Redistribute, RedistributeSource, RedistributeTarget, RestApi,
+    RoutingTable, RoutingTableEvpn, RpkiCache, SourceAddress, StaticRoute, StaticRoutingInstance,
+    Subinterface, SwitchingProfile, SwitchingProfileMember, User, VlanTag,
+    CONNECT_RETRY_TIME_DEFAULT_SECS, DEAD_INTERVAL_DEFAULT, GR_RESTART_TIME_DEFAULT,
+    GR_SELECTION_DEFERRAL_TIME_DEFAULT, GR_STALE_TIME_DEFAULT, HELLO_INTERVAL_DEFAULT,
+    HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR, LOOPBACK_PREFIX, PASSWORD_HASH_PREFIX, PRIORITY_DEFAULT,
+    REST_API_PORT_DEFAULT, ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS, RPKI_RTR_PORT_DEFAULT,
 };

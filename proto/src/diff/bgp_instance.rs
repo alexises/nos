@@ -1,4 +1,4 @@
-use crate::schema::{BgpConfederation, BgpInstance};
+use crate::schema::{BgpConfederation, BgpGracefulRestart, BgpInstance};
 
 use super::{bgp_peer, bgp_peer_group, DiffStatus, FieldDiff, SectionDiff};
 
@@ -112,6 +112,13 @@ fn changed_fields(base: &BgpInstance, candidate: &BgpInstance) -> Vec<FieldDiff>
             new: candidate.maximum_paths.map(|n| n.to_string()),
         });
     }
+    if base.graceful_restart != candidate.graceful_restart {
+        fields.push(FieldDiff {
+            label: "graceful-restart".to_string(),
+            old: render_graceful_restart(&base.graceful_restart),
+            new: render_graceful_restart(&candidate.graceful_restart),
+        });
+    }
     if base.confederation != candidate.confederation {
         fields.push(FieldDiff {
             label: "confederation".to_string(),
@@ -120,6 +127,28 @@ fn changed_fields(base: &BgpInstance, candidate: &BgpInstance) -> Vec<FieldDiff>
         });
     }
     fields
+}
+
+/// `None` for the default (on, default timers), so a new instance shows no
+/// `graceful-restart` line.
+fn render_graceful_restart(g: &BgpGracefulRestart) -> Option<String> {
+    if *g == BgpGracefulRestart::default() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if g.disabled {
+        parts.push("disable".to_string());
+    }
+    for (word, value) in [
+        ("restart-time", g.restart_time),
+        ("stale-time", g.stale_time),
+        ("selection-deferral-time", g.selection_deferral_time),
+    ] {
+        if let Some(v) = value {
+            parts.push(format!("{word} {v}"));
+        }
+    }
+    Some(parts.join(" "))
 }
 
 fn render_confederation(c: &BgpConfederation) -> Option<String> {
@@ -163,7 +192,11 @@ fn added_section(instance: &BgpInstance) -> SectionDiff {
     fields.retain(|f| {
         matches!(
             f.label.as_str(),
-            "confederation" | "rpki-cache" | "maximum-paths" | "aggregate-address"
+            "confederation"
+                | "rpki-cache"
+                | "maximum-paths"
+                | "aggregate-address"
+                | "graceful-restart"
         )
     });
     SectionDiff {
@@ -212,6 +245,7 @@ mod tests {
             confederation: crate::schema::BgpConfederation::default(),
             rpki_caches: Vec::new(),
             aggregates: Vec::new(),
+            graceful_restart: crate::schema::BgpGracefulRestart::default(),
             routing_table: None,
             redistribute_policy: None,
         }
@@ -257,6 +291,32 @@ mod tests {
         assert_eq!(sections[0].fields[0].label, "asn");
         assert_eq!(sections[0].fields[0].old.as_deref(), Some("65000"));
         assert_eq!(sections[0].fields[0].new.as_deref(), Some("65001"));
+    }
+
+    #[test]
+    fn graceful_restart_change_is_a_field_diff_and_the_default_renders_nothing() {
+        let base = vec![instance("r1", 65000)];
+        let mut c = instance("r1", 65000);
+        c.graceful_restart.disabled = true;
+        c.graceful_restart.restart_time = Some(60);
+        let sections = diff_bgp_instances(&base, std::slice::from_ref(&c));
+        assert_eq!(sections[0].fields[0].label, "graceful-restart");
+        assert_eq!(sections[0].fields[0].old, None);
+        assert_eq!(
+            sections[0].fields[0].new.as_deref(),
+            Some("disable restart-time 60")
+        );
+        // An added instance with GR at its default (on) shows no line.
+        let added = diff_bgp_instances(&[], &base);
+        assert!(added[0]
+            .fields
+            .iter()
+            .all(|f| f.label != "graceful-restart"));
+        let added = diff_bgp_instances(&[], &[c]);
+        assert!(added[0]
+            .fields
+            .iter()
+            .any(|f| f.label == "graceful-restart"));
     }
 
     #[test]

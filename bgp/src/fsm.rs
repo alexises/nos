@@ -28,6 +28,7 @@ use tracing::{debug, info, warn};
 use nos_proto::{AddressFamily, NextHopMode, HOLD_TIME_FLOOR};
 
 use crate::collision::{self, FsmCommand, PeerSlot};
+use crate::gr::{self, Disconnect, PeerGr};
 use crate::message::{
     self, BgpCodec, BgpMessage, CeaseSubcode, ErrorCode, FsmSubcode, MessageHeaderSubcode,
     NotificationMessage, OpenMessage, OpenMessageSubcode, RouteRefreshMessage,
@@ -266,6 +267,8 @@ struct RemoteInfo {
     /// The peer sent the RFC 2918 Route Refresh capability: without it we
     /// must never send it a `ROUTE_REFRESH`.
     route_refresh: bool,
+    /// The peer's RFC 4724 graceful restart capability, if it sent one.
+    gr: Option<PeerGr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,6 +309,7 @@ enum Action {
         add_path_ipv6: bool,
         four_octet_as: bool,
         extended_message: bool,
+        gr: Option<PeerGr>,
     },
     Close,
 }
@@ -340,6 +344,7 @@ fn step(state: State, event: Event, ctx: &NegotiationContext) -> (Option<State>,
                 add_path_ipv6: remote.add_path_ipv6,
                 four_octet_as: remote.four_octet_as,
                 extended_message: remote.extended_message,
+                gr: remote.gr,
             }],
         ),
         (State::Established(remote), Event::KeepaliveReceived) => {
@@ -450,6 +455,7 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
         route_refresh: open
             .capabilities
             .contains(&message::Capability::RouteRefresh),
+        gr: message::graceful_restart(open).map(PeerGr::from_cap),
     };
     (
         Some(State::OpenConfirm(remote)),
@@ -502,10 +508,37 @@ fn notification_for_wire_error(e: &WireError) -> (u8, u8) {
 pub enum FsmOutcome {
     TcpError,
     PeerClosed,
-    NotificationSent { code: u8, subcode: u8 },
-    NotificationReceived { code: u8, subcode: u8 },
+    NotificationSent {
+        code: u8,
+        subcode: u8,
+    },
+    NotificationReceived {
+        code: u8,
+        subcode: u8,
+    },
     HoldTimerExpired,
     CollisionLost,
+    /// RFC 4724 §4.2: a new connection from the peer replaced this one.
+    GrReplaced,
+}
+
+/// How a session that ended with `outcome` counts for graceful restart.
+/// `n_exchanged`: both sides advertised RFC 8538's N bit.
+fn disconnect_kind(outcome: &FsmOutcome, n_exchanged: bool) -> Disconnect {
+    match outcome {
+        FsmOutcome::TcpError | FsmOutcome::PeerClosed | FsmOutcome::GrReplaced => {
+            Disconnect::Transport
+        }
+        // RFC 8538 §4: hold-timer expiry is graceful once N is exchanged.
+        FsmOutcome::HoldTimerExpired => {
+            gr::notification_disconnect(ErrorCode::HoldTimerExpired as u8, 0, n_exchanged)
+        }
+        FsmOutcome::NotificationSent { code, subcode }
+        | FsmOutcome::NotificationReceived { code, subcode } => {
+            gr::notification_disconnect(*code, *subcode, n_exchanged)
+        }
+        FsmOutcome::CollisionLost => Disconnect::Hard,
+    }
 }
 
 /// Turns one inbound message into the `Event` to feed `step`, or handles it
@@ -565,6 +598,17 @@ async fn classify_inbound(
         }
         BgpMessage::RouteRefresh(rr) => {
             resend_loc_rib(rr, state, peer, bgp_rib, stale_until).await;
+            None
+        }
+        BgpMessage::EndOfRib { afi, safi } => {
+            if let (State::Established(_), Some(family)) = (state, gr::family_of(afi, safi)) {
+                bgp_rib.lock().await.end_of_rib(peer.remote_address, family);
+            } else {
+                debug!(
+                    peer = %peer.remote_address, afi, safi,
+                    "ignoring end-of-rib before session established or for an unknown family"
+                );
+            }
             None
         }
         BgpMessage::Unhandled { message_type, .. } => {
@@ -683,7 +727,13 @@ async fn apply_collision_verdict(
     cease: Arc<Notify>,
 ) -> Option<(Option<State>, Vec<Action>)> {
     match slot
-        .on_open(role, local.router_id, remote.bgp_id, cease)
+        .on_open(
+            role,
+            local.router_id,
+            remote.bgp_id,
+            cease,
+            remote.gr.is_some_and(|g| g.restart),
+        )
         .await
     {
         collision::Decision::Lose => Some((
@@ -725,14 +775,33 @@ async fn apply_collision_verdict(
 /// `registered` below).
 /// Logs a received NOTIFICATION; for a Cease/Administrative Shutdown or Reset
 /// (RFC 9003) also the peer's shutdown communication, if it sent a valid one.
+///
+/// An RFC 8538 Hard Reset (Cease/9) is logged with the NOTIFICATION it wraps
+/// (§6), whose shutdown communication is decoded the same way.
 fn log_notification(peer: IpAddr, n: &NotificationMessage) {
-    let is_shutdown = n.error_code == ErrorCode::Cease as u8 && matches!(n.error_subcode, 2 | 4);
-    let message = is_shutdown
-        .then(|| message::decode_shutdown_message(&n.data))
-        .flatten();
+    let cease = ErrorCode::Cease as u8;
+    let shutdown_text = |code: u8, subcode: u8, data: &[u8]| {
+        (code == cease && matches!(subcode, 2 | 4))
+            .then(|| message::decode_shutdown_message(data))
+            .flatten()
+            .unwrap_or_default()
+    };
+    if n.error_code == cease
+        && n.error_subcode == CeaseSubcode::HardReset as u8
+        && n.data.len() >= 2
+    {
+        let (inner_code, inner_subcode) = (n.data[0], n.data[1]);
+        info!(
+            peer = %peer, code = n.error_code, subcode = n.error_subcode,
+            hard_reset_code = inner_code, hard_reset_subcode = inner_subcode,
+            shutdown_message = shutdown_text(inner_code, inner_subcode, &n.data[2..]),
+            "received notification"
+        );
+        return;
+    }
     info!(
         peer = %peer, code = n.error_code, subcode = n.error_subcode,
-        shutdown_message = message.as_deref().unwrap_or(""),
+        shutdown_message = shutdown_text(n.error_code, n.error_subcode, &n.data),
         "received notification"
     );
 }
@@ -792,6 +861,16 @@ pub async fn run(
     let mut negotiated_hold_time: Option<u16> = None;
     let mut negotiated_keepalive: Option<u16> = None;
     let cease = Arc::new(Notify::new());
+    // RFC 4724 §4.2: notified when a new connection from the peer replaces
+    // this one once it is `Established` (see `collision::PeerSlot`).
+    let replaced = Arc::new(Notify::new());
+    // Our graceful restart Restart Time, `None` when it's off here.
+    let our_gr = slot.peer.graceful_restart;
+    // RFC 8538: both sides advertised the N bit (we always do with GR on).
+    let n_exchanged = |state: &State| {
+        our_gr.is_some()
+            && matches!(state, State::Established(r) if r.gr.is_some_and(|g| g.notification))
+    };
 
     // Guarded on `is_established` rather than written unconditionally: an
     // inbound connection can arrive for a peer that's already `Established`
@@ -854,6 +933,18 @@ pub async fn run(
                 .collect();
             open.capabilities.push(message::Capability::AddPath(tuples));
         }
+        if let Some(time) = our_gr {
+            // F = 1 only if this process already had a session with the
+            // peer: a fresh process's first push emptied `nos-ribd`.
+            let forwarding = bgp_rib.lock().await.gr_forwarding(peer.remote_address);
+            open.capabilities
+                .push(message::Capability::GracefulRestart(gr::our_cap(
+                    time,
+                    &peer.address_families,
+                    false,
+                    forwarding,
+                )));
+        }
         if writer.send(BgpMessage::Open(open)).await.is_err() {
             break 'session FsmOutcome::TcpError;
         }
@@ -884,10 +975,14 @@ pub async fn run(
                     Event::KeepaliveTimerExpires
                 }
                 () = cease.notified() => Event::CollisionLost,
+                () = replaced.notified(), if matches!(state, State::Established(_)) => {
+                    info!(peer = %peer.remote_address, "bgp: session replaced by a new connection from the peer (graceful restart)");
+                    break 'session FsmOutcome::GrReplaced;
+                }
                 Some(update) = outbox_rx.recv() => {
-                    // RFC 7313: EoRR must follow every route it brackets, so
-                    // release anything MRAI is still holding first.
-                    if matches!(update, OutboundUpdate::RefreshMarker { subtype: message::REFRESH_EORR, .. }) {
+                    // RFC 7313 EoRR and RFC 4724 End-of-RIB must follow every
+                    // route they close, so release anything MRAI holds first.
+                    if matches!(update, OutboundUpdate::RefreshMarker { subtype: message::REFRESH_EORR, .. } | OutboundUpdate::EndOfRib(_)) {
                         for held in mrai.drain() {
                             if let Err(e) = writer.send(outbound_update_to_message(held)).await {
                                 warn!(error = %e, "could not send update");
@@ -935,20 +1030,31 @@ pub async fn run(
                             send_route_refresh(&mut writer, &state, &peer).await;
                         }
                         FsmCommand::Cease { subcode, data } => {
+                            // RFC 8538 §5.1: with N, a reset meant to keep
+                            // nothing goes out as a Hard Reset around it.
+                            let hard_reset = gr::sends_hard_reset(subcode, n_exchanged(&state));
+                            let (wire_subcode, data) = if hard_reset {
+                                (
+                                    CeaseSubcode::HardReset as u8,
+                                    message::encode_hard_reset(subcode as u8, &data),
+                                )
+                            } else {
+                                (subcode as u8, data)
+                            };
                             let _ = writer
                                 .send(BgpMessage::Notification(NotificationMessage {
                                     error_code: ErrorCode::Cease as u8,
-                                    error_subcode: subcode as u8,
+                                    error_subcode: wire_subcode,
                                     data,
                                 }))
                                 .await;
                             info!(
-                                peer = %peer.remote_address, subcode = subcode as u8,
+                                peer = %peer.remote_address, subcode = subcode as u8, hard_reset,
                                 "sent cease notification"
                             );
                             break 'session FsmOutcome::NotificationSent {
                                 code: ErrorCode::Cease as u8,
-                                subcode: subcode as u8,
+                                subcode: wire_subcode,
                             };
                         }
                     }
@@ -972,7 +1078,19 @@ pub async fn run(
                 _ => None,
             };
             if let Some(remote) = reached_open_confirm {
-                if let Some((state, lost)) =
+                if slot.max_prefix_held() {
+                    // RFC 4486 §4: a connection already in flight when the
+                    // peer tripped its maximum-prefix limit (the other side
+                    // of a collision) must not bring the session back.
+                    next_state = None;
+                    actions = vec![
+                        Action::SendNotification(
+                            ErrorCode::Cease as u8,
+                            CeaseSubcode::ConnectionRejected as u8,
+                        ),
+                        Action::Close,
+                    ];
+                } else if let Some((state, lost)) =
                     apply_collision_verdict(remote, role, &local, &slot, cease.clone()).await
                 {
                     next_state = state;
@@ -1019,8 +1137,12 @@ pub async fn run(
                         add_path_ipv6,
                         four_octet_as,
                         extended_message,
+                        gr: remote_gr,
                     } => {
-                        slot.mark_established(role).await;
+                        // GR on here and the peer sent the capability.
+                        let gr_negotiated = our_gr.and(*remote_gr);
+                        slot.mark_established(role, gr_negotiated.is_some(), replaced.clone())
+                            .await;
                         let mut negotiated_afs = HashSet::new();
                         if *negotiated_ipv4_unicast {
                             negotiated_afs.insert(AddressFamily::Ipv4Unicast);
@@ -1058,7 +1180,22 @@ pub async fn run(
                             extended_message = *extended_message,
                             "extended message negotiated"
                         );
+                        if let Some(g) = gr_negotiated {
+                            info!(
+                                peer = %peer.remote_address, restart_time = g.time,
+                                notification = g.notification, restarting = g.restart,
+                                families = ?g.families(),
+                                "graceful restart negotiated"
+                            );
+                        }
+                        // RFC 4724 §2: End-of-RIB closes the initial dump of
+                        // each family, only toward a peer that did GR too.
+                        let end_of_ribs: Vec<AddressFamily> = AddressFamily::ALL
+                            .into_iter()
+                            .filter(|f| gr_negotiated.is_some() && negotiated_afs.contains(f))
+                            .collect();
                         let mut rib = bgp_rib.lock().await;
+                        rib.set_peer_gr(peer.remote_address, gr_negotiated);
                         rib.set_peer_damping(peer.remote_address, peer.damping);
                         rib.set_peer_max_prefix(peer.remote_address, slot.peer.maximum_prefix);
                         rib.set_peer_asn(peer.remote_address, *remote_asn);
@@ -1084,6 +1221,10 @@ pub async fn run(
                             peer.export_policy.clone(),
                             outbox_tx.clone(),
                         );
+                        // Same channel, after `peer_established`'s dump.
+                        for family in end_of_ribs {
+                            let _ = outbox_tx.send(OutboundUpdate::EndOfRib(family));
+                        }
                         registered = true;
                         slot.status.send_modify(|s| {
                             s.state = PeerState::Established;
@@ -1118,7 +1259,11 @@ pub async fn run(
     };
 
     if registered {
-        bgp_rib.lock().await.peer_disconnected(peer.remote_address);
+        let kind = disconnect_kind(&outcome, n_exchanged(&state));
+        bgp_rib
+            .lock()
+            .await
+            .peer_disconnected(peer.remote_address, kind);
     }
     outcome
 }
@@ -1209,6 +1354,10 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     evpn: Vec::new(),
                 }],
             })
+        }
+        OutboundUpdate::EndOfRib(family) => {
+            let (afi, safi) = gr::afi_safi(family);
+            BgpMessage::EndOfRib { afi, safi }
         }
         OutboundUpdate::RefreshMarker { family, subtype } => {
             BgpMessage::RouteRefresh(RouteRefreshMessage {
@@ -1601,6 +1750,7 @@ mod tests {
             extended_message: false,
             enhanced_refresh: false,
             route_refresh: false,
+            gr: None,
         };
         let (next, actions) = step(
             State::OpenConfirm(remote),
@@ -1628,6 +1778,7 @@ mod tests {
             extended_message: false,
             enhanced_refresh: false,
             route_refresh: false,
+            gr: None,
         };
         for state in [
             State::OpenSent,
@@ -1658,6 +1809,7 @@ mod tests {
             extended_message: false,
             enhanced_refresh: false,
             route_refresh: false,
+            gr: None,
         };
         for (state, event, subcode) in [
             (State::OpenSent, Event::KeepaliveReceived, 1),
@@ -1721,6 +1873,7 @@ mod tests {
             extended_message: false,
             enhanced_refresh: false,
             route_refresh: false,
+            gr: None,
         };
         let (next, actions) = step(
             State::Established(remote),
@@ -1746,6 +1899,7 @@ mod tests {
             extended_message: false,
             enhanced_refresh: false,
             route_refresh: false,
+            gr: None,
         };
         let (next, actions) = step(
             State::Established(remote),
@@ -1805,6 +1959,69 @@ mod tests {
         );
         assert!(actions.contains(&Action::ArmHoldTimer(Duration::ZERO)));
         assert!(actions.contains(&Action::ArmKeepaliveTimer(Duration::ZERO)));
+    }
+
+    #[test]
+    fn graceful_restart_follows_the_peers_capability() {
+        let mut with_cap = valid_open(65002, 90);
+        with_cap
+            .capabilities
+            .push(message::Capability::GracefulRestart(gr::our_cap(
+                90,
+                &[AddressFamily::Ipv4Unicast],
+                true,
+                true,
+            )));
+        let (Some(State::OpenConfirm(r)), _) = handle_open(&with_cap, &ctx(65002)) else {
+            panic!("expected OpenConfirm");
+        };
+        let g = r.gr.unwrap();
+        assert!(g.restart && g.notification && g.forwarding(AddressFamily::Ipv4Unicast));
+        assert_eq!(g.time, 90);
+        let (Some(State::OpenConfirm(r)), _) = handle_open(&valid_open(65002, 90), &ctx(65002))
+        else {
+            panic!("expected OpenConfirm");
+        };
+        assert!(r.gr.is_none());
+    }
+
+    /// TCP loss keeps routes; a NOTIFICATION only with N, never a Hard Reset.
+    #[test]
+    fn disconnect_kind_per_outcome() {
+        use FsmOutcome::*;
+        let hard = CeaseSubcode::HardReset as u8;
+        for (outcome, n, want) in [
+            (TcpError, false, Disconnect::Transport),
+            (GrReplaced, true, Disconnect::Transport),
+            (HoldTimerExpired, true, Disconnect::Graceful),
+            (HoldTimerExpired, false, Disconnect::Hard),
+            (
+                NotificationSent {
+                    code: 6,
+                    subcode: 6,
+                },
+                true,
+                Disconnect::Graceful,
+            ),
+            (
+                NotificationReceived {
+                    code: 6,
+                    subcode: hard,
+                },
+                true,
+                Disconnect::Hard,
+            ),
+            (
+                NotificationReceived {
+                    code: 6,
+                    subcode: 6,
+                },
+                false,
+                Disconnect::Hard,
+            ),
+        ] {
+            assert_eq!(disconnect_kind(&outcome, n), want, "{outcome:?} n={n}");
+        }
     }
 
     /// RFC 4486 §4: Cease/Maximum Number of Prefixes Reached carries

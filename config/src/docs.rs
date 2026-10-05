@@ -1094,6 +1094,16 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "0 (the default) keeps the peer down until `clear bgp <instance> <peer>` or a \
              shutdown and un-shutdown.",
         ),
+        Topic::BgpInstanceGracefulRestart => (
+            "Tune or turn off a BGP instance's graceful restart (RFC 4724, RFC 8538).",
+            "On by default. A peer that advertises graceful restart keeps its routes in use \
+             across a session reset: they are marked stale until it comes back within \
+             restart-time (default 120s, also what we advertise) and sends End-of-RIB, or \
+             stale-time (default 180s) passes after it returns. selection-deferral-time (default \
+             360s) bounds how long a restarting instance waits for its peers' End-of-RIB. \
+             `disable` turns it off: no capability is advertised and nothing is kept. Changing \
+             it restarts the instance's sessions.",
+        ),
         Topic::BgpInstanceConfederation => (
             "Make a BGP instance a member of an RFC 5065 confederation.",
             "Takes `identifier <asn>` and `peer <asn>` (repeatable). With an identifier, the \

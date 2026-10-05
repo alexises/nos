@@ -29,6 +29,11 @@
 # way for all four, and measures the whole receive -> best-path ->
 # re-advertise pipeline rather than just "bytes arrived".
 #
+# The nos DUT advertises RFC 4724 graceful restart (on by default), but
+# neither ExaBGP nor the GoBGP monitor advertises it back here, so it sends no
+# End-of-RIB and keeps no stale routes: the capability is inert in this
+# topology and killing the injectors is still a hard flap.
+#
 # Fairness notes, because the numbers are meaningless without them:
 #   * All five rows now install their received best paths into a real
 #     kernel routing table, not just three of the previous four:

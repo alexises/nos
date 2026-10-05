@@ -298,6 +298,9 @@ pub const OSPF_GR_LOOPBACK_ADDRESS: &str = "203.0.113.112/32";
 /// `tools/bench-bgp.sh`'s `FRR_IMAGE`) on its own network with router-a's
 /// eth1 only, so router-b can hear FRR's LSAs only through router-a.
 pub const FRR_IMAGE: &str = "quay.io/frrouting/frr:10.7.1";
+/// `bgp-gr-frr`: the prefix FRR (`router-f`, at `IP_G` on `NET`) announces to
+/// router-a over eBGP.
+pub const FRR_BGP_PREFIX: &str = "198.18.210.0/24";
 pub const NET_OSPF_FRR: &str = "nos-verify-net-ospf-frr";
 pub const OSPF_FRR_SUBNET: &str = "10.51.0.0/24";
 pub const OSPF_FRR_IP_A: &str = "10.51.0.2";

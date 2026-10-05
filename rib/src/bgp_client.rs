@@ -13,6 +13,10 @@
 //! `RedistributeUpdate::Full` snapshot, and every later change against the
 //! same target is reduced to the minimal `Add`/`Remove` set before being
 //! sent.
+//!
+//! The connection is also read for EOF: `nos-bgpd` never replies on it, so a
+//! read returning means it went away (a restart, #12). Without that, a
+//! restarted `nos-bgpd` got nothing until the next route change.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -22,6 +26,7 @@ use std::time::Duration;
 use futures::SinkExt;
 use ipnet::IpNet;
 use nos_proto::{BgpRequest, IpcCodec, RedistributeUpdate, RedistributedRoute, Role, ServiceRef};
+use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 use tokio_util::codec::FramedWrite;
 use tracing::{debug, warn};
@@ -105,7 +110,9 @@ async fn run(
             }
         };
 
-        let mut writer = FramedWrite::new(stream, IpcCodec::<BgpRequest>::default());
+        let (mut reader, write_half) = tokio::io::split(stream);
+        let mut writer = FramedWrite::new(write_half, IpcCodec::<BgpRequest>::default());
+        let mut eof_buf = [0u8; 1];
 
         // Re-read the target once more: it may have changed while we were
         // resolving/connecting. If it no longer names the instance we just
@@ -169,6 +176,10 @@ async fn run(
                         break;
                     }
                     last_sent = build_last_sent(&new_target.routes);
+                }
+                _ = reader.read(&mut eof_buf) => {
+                    warn!(bgp_instance = %name, "nos-bgpd closed the redistribution connection, reconnecting");
+                    break;
                 }
                 _ = shutdown.changed() => return,
             }

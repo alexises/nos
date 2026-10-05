@@ -25,6 +25,7 @@ fn sample_config() -> Config {
             confederation: nos_proto::BgpConfederation::default(),
             rpki_caches: Vec::new(),
             aggregates: Vec::new(),
+            graceful_restart: nos_proto::BgpGracefulRestart::default(),
             routing_table: None,
             redistribute_policy: None,
         }],

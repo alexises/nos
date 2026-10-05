@@ -61,6 +61,27 @@ pub struct PeerSummary {
     /// Accepted (post-import-policy) prefixes from this peer per address
     /// family: ipv4, ipv6, l2vpn-evpn. `Some` only while `Established`.
     pub accepted_prefixes: Option<[u32; 3]>,
+    /// The RFC 4724 graceful restart capability the peer last advertised,
+    /// while this instance has graceful restart on. Kept after the session
+    /// ends, so it shows while its routes are retained.
+    pub graceful_restart: Option<GrSummary>,
+    /// Routes from this peer kept as stale after a graceful restart, waiting
+    /// for its End-of-RIB (also RFC 7313 enhanced route refresh's).
+    pub stale_prefixes: u32,
+}
+
+/// A peer's RFC 4724 / RFC 8538 graceful restart capability.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrSummary {
+    /// Its Restart Time, in seconds.
+    pub restart_time: u16,
+    /// RFC 8538 N bit: a NOTIFICATION other than a Hard Reset keeps routes.
+    pub notification: bool,
+    /// R bit: the peer has just restarted.
+    pub restarting: bool,
+    /// The families it keeps forwarding state for, and each one's F bit.
+    pub families: Vec<(crate::AddressFamily, bool)>,
 }
 
 /// One received EVPN (RFC 7432) route, for `show bgp evpn`. `route` is the

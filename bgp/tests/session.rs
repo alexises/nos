@@ -51,6 +51,7 @@ fn peer(remote: Ipv4Addr, source: Ipv4Addr, remote_as: u32) -> ResolvedPeer {
         local_as: None,
         confed_id: None,
         confed_member: false,
+        graceful_restart: Some(120),
     }
 }
 
@@ -219,6 +220,57 @@ async fn two_instances_peer_exchange_a_route_and_follow_config_changes() {
 
     a.manager.shutdown().await;
     b.manager.shutdown().await;
+}
+
+/// RFC 4724 / RFC 8538 (#12): with graceful restart on both sides, a config
+/// change on A resets the session with Cease/Other Configuration Change, which
+/// N makes graceful: B keeps A's route the whole time and shows A's
+/// capability. With graceful restart off on B, the same reset withdraws it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graceful_restart_keeps_routes_across_a_graceful_reset() {
+    let prefix: ipnet::IpNet = "198.51.100.0/24".parse().unwrap();
+    for gr_on_b in [true, false] {
+        let (a, b, _) = routers();
+        a.manager
+            .apply_redistribute_update(RedistributeUpdate::Full(vec![RedistributedRoute {
+                prefix,
+                gateway: "10.0.0.9".parse().unwrap(),
+            }]))
+            .await;
+        a.apply(vec![peer(B, A, 65002)]).await;
+        b.apply(vec![ResolvedPeer {
+            graceful_restart: gr_on_b.then_some(120),
+            ..peer(A, B, 65001)
+        }])
+        .await;
+        b.wait_for(BgpSessionState::Established).await;
+        let has = || async { b.manager.bgp_push_snapshot().await.1.contains_key(&prefix) };
+        for _ in 0..100 {
+            if has().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(has().await, "b never learned a's route");
+        let gr = b.manager.peer_summaries().await[0].graceful_restart.clone();
+        assert_eq!(
+            gr.as_ref().map(|g| (g.restart_time, g.notification)),
+            gr_on_b.then_some((120, true))
+        );
+
+        let mut changed = peer(B, A, 65002);
+        changed.hold_time = 12;
+        a.apply(vec![changed]).await;
+        let mut lost = false;
+        for _ in 0..60 {
+            lost |= !has().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        b.wait_for(BgpSessionState::Established).await;
+        assert_eq!(lost, !gr_on_b, "gr on b: {gr_on_b}");
+        a.manager.shutdown().await;
+        b.manager.shutdown().await;
+    }
 }
 
 /// RFC 4486 §4 (#79): b allows one prefix from a, which sends two — b closes
