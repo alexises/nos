@@ -26,6 +26,11 @@ pub enum OspfInstanceOp {
         name: String,
         grace_period: Option<u16>,
     },
+    /// Turns RFC 6860 prefix suppression on or off.
+    SetPrefixSuppression {
+        name: String,
+        enabled: bool,
+    },
     Delete {
         name: String,
     },
@@ -43,6 +48,7 @@ impl OspfInstanceOp {
                         routing_table: None,
                         redistribute_policy: None,
                         graceful_restart_grace_period: None,
+                        prefix_suppression: false,
                     });
                 }
                 Ok(())
@@ -53,6 +59,10 @@ impl OspfInstanceOp {
             }
             OspfInstanceOp::SetGracefulRestartGracePeriod { name, grace_period } => {
                 find_instance_mut(config, name)?.graceful_restart_grace_period = *grace_period;
+                Ok(())
+            }
+            OspfInstanceOp::SetPrefixSuppression { name, enabled } => {
+                find_instance_mut(config, name)?.prefix_suppression = *enabled;
                 Ok(())
             }
             OspfInstanceOp::Delete { name } => {
@@ -90,7 +100,31 @@ mod tests {
             routing_table: None,
             redistribute_policy: None,
             graceful_restart_grace_period: None,
+            prefix_suppression: false,
         }
+    }
+
+    #[test]
+    fn set_prefix_suppression_toggles() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance("o1")],
+            ..Default::default()
+        };
+        let op = |enabled| OspfInstanceOp::SetPrefixSuppression {
+            name: "o1".to_string(),
+            enabled,
+        };
+        op(true).apply(&mut cfg).unwrap();
+        assert!(cfg.ospf_instances[0].prefix_suppression);
+        op(false).apply(&mut cfg).unwrap();
+        assert!(!cfg.ospf_instances[0].prefix_suppression);
+        let err = OspfInstanceOp::SetPrefixSuppression {
+            name: "nope".to_string(),
+            enabled: true,
+        }
+        .apply(&mut cfg)
+        .unwrap_err();
+        assert!(matches!(err, OpError::OspfInstanceNotFound(n) if n == "nope"));
     }
 
     #[test]

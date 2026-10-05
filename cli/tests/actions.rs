@@ -111,6 +111,7 @@ fn fake_configd(path: &Path) {
             routing_table: None,
             redistribute_policy: None,
             graceful_restart_grace_period: None,
+            prefix_suppression: false,
         }],
         ospfv3_instances: vec![nos_proto::Ospfv3Instance {
             name: "v3".to_string(),

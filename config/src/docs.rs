@@ -847,6 +847,10 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Announce an RFC 3623 graceful restart before a planned shutdown.",
             "On a planned shutdown the instance sends a Grace-LSA to every Full neighbor, which then keeps the adjacency and this router's routes for this many seconds (1-1800) while it restarts. `delete` turns it off. Helping a restarting neighbor needs no config.",
         ),
+        Topic::OspfInstancePrefixSuppression => (
+            "Hide transit-only networks (RFC 6860 prefix suppression).",
+            "Leaves every point-to-point link's subnet out of this router's Router-LSA and gives the Network-LSA it originates as DR a /32 mask, so the rest of the area installs no route to those transit networks while still routing through them. Loopbacks are never hidden. The setting is instance-wide; enable it on every router attached to a network to hide it fully. `delete` turns it off.",
+        ),
         Topic::OspfArea => (
             "Create an OSPF area in the transaction if it doesn't already exist.",
             concat!(

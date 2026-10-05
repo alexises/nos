@@ -1737,6 +1737,10 @@ pub struct LinkManager {
     /// RFC 3623 grace period (seconds) to announce on a planned restart;
     /// `0` = graceful restart off.
     grace_period: AtomicU16,
+    /// RFC 6860: hide transit-only networks (`OspfInstance.prefix_suppression`).
+    /// An instance-wide atomic rather than a `LinkConfig` field, so a toggle
+    /// re-originates on the next tick without restarting any link.
+    prefix_suppression: AtomicBool,
     /// Set by `announce_graceful_restart`: `shutdown` then keeps every
     /// self-originated LSA instead of flushing it (RFC 3623 §2).
     restarting: AtomicBool,
@@ -1815,6 +1819,7 @@ impl LinkManager {
             redistribute_filtered: Mutex::new(HashSet::new()),
             shutting_down: AtomicBool::new(false),
             grace_period: AtomicU16::new(0),
+            prefix_suppression: AtomicBool::new(false),
             restarting: AtomicBool::new(false),
             area_settings: Mutex::new(HashMap::new()),
             active_ranges: Mutex::new(HashMap::new()),
@@ -1856,6 +1861,10 @@ impl LinkManager {
             .store(grace_period.unwrap_or(0), Ordering::Relaxed);
     }
 
+    pub fn set_prefix_suppression(&self, on: bool) {
+        self.prefix_suppression.store(on, Ordering::Relaxed);
+    }
+
     pub async fn set_area_settings(&self, settings: HashMap<Ipv4Addr, AreaSettings>) {
         *self.area_settings.lock().await = settings;
     }
@@ -1886,14 +1895,16 @@ impl LinkManager {
 
     /// RFC 3101 §2.3: a Type-7's forwarding address — one of this router's
     /// own addresses in the NSSA (the lowest link address, else a loopback
-    /// stub's), so a translator can translate it.
+    /// stub's), so a translator can translate it. RFC 6860 §4.1: with prefix
+    /// suppression the link addresses are hidden, so only a loopback's.
     async fn nssa_forwarding_address(&self, area_id: Ipv4Addr) -> Ipv4Addr {
+        let suppressed = self.prefix_suppression.load(Ordering::Relaxed);
         let link = self
             .links
             .lock()
             .await
             .values()
-            .filter(|e| e.config.area_id == area_id)
+            .filter(|e| e.config.area_id == area_id && !suppressed)
             .map(|e| e.config.local_addr)
             .min();
         match link {
@@ -1984,6 +1995,7 @@ impl LinkManager {
         }
 
         let stub_networks = self.stub_networks.lock().await.clone();
+        let prefix_suppression = self.prefix_suppression.load(Ordering::Relaxed);
 
         // An area with only a loopback stub and no live link would
         // otherwise never appear here at all — union both sets of area
@@ -2029,7 +2041,8 @@ impl LinkManager {
                 continue;
             }
 
-            let mut router_links = router_lsa_links(local_router_id, &links);
+            let mut router_links = router_lsa_links(local_router_id, &links, prefix_suppression);
+            // Loopbacks aren't transit, so RFC 6860 never hides them.
             for (subnet, cost) in stub_networks.get(&area_id).into_iter().flatten() {
                 router_links.push(RouterLink {
                     link_id: subnet.network(),
@@ -2084,7 +2097,7 @@ impl LinkManager {
                     // about this network from the LSDB's perspective.
                     continue;
                 }
-                let network_mask = local_subnet(cfg).map_or(Ipv4Addr::UNSPECIFIED, |n| n.netmask());
+                let network_mask = network_lsa_mask(cfg, prefix_suppression);
                 network_ids.insert(cfg.local_addr);
                 install_self_originated(
                     &mut lsdb,
@@ -2736,6 +2749,16 @@ fn local_netmask(cfg: &LinkConfig) -> Ipv4Addr {
     local_subnet(cfg).map_or(Ipv4Addr::UNSPECIFIED, |n| n.netmask())
 }
 
+/// The DR's Network-LSA mask: the segment's own, or RFC 6860 §2.2.2.1's
+/// all-ones mask hiding it (the LS-ID stays the DR's address).
+fn network_lsa_mask(cfg: &LinkConfig, prefix_suppression: bool) -> Ipv4Addr {
+    if prefix_suppression {
+        Ipv4Addr::BROADCAST
+    } else {
+        local_netmask(cfg)
+    }
+}
+
 /// RFC 2328 §12.4.1's Router-LSA link entries for every currently-running
 /// link in one area: one type-1 (point-to-point) entry per link with at
 /// least one neighbor, one type-2 (transit-network) entry per link with a
@@ -2745,11 +2768,14 @@ fn local_netmask(cfg: &LinkConfig) -> Ipv4Addr {
 /// interface always advertises its own subnet). Both ends of a p2p link
 /// therefore advertise the identical subnet; `crate::spf`'s
 /// directly-connected filter is what keeps that from producing a spurious
-/// route back to your own subnet via the neighbor. Pure — takes an
-/// already-gathered snapshot so it stays independently unit-testable.
+/// route back to your own subnet via the neighbor. RFC 6860 §2.1: with
+/// `prefix_suppression` the type-3 stub is omitted, hiding the transit-only
+/// subnet. Pure — takes an already-gathered snapshot so it stays
+/// independently unit-testable.
 fn router_lsa_links(
     local_router_id: Ipv4Addr,
     links: &[(LinkConfig, LinkStatus)],
+    prefix_suppression: bool,
 ) -> Vec<RouterLink> {
     let mut result = Vec::new();
     for (cfg, status) in links {
@@ -2767,7 +2793,7 @@ fn router_lsa_links(
                         metric: cfg.cost,
                     });
                 }
-                if let Some(subnet) = local_subnet(cfg) {
+                if let Some(subnet) = local_subnet(cfg).filter(|_| !prefix_suppression) {
                     result.push(RouterLink {
                         link_id: subnet.network(),
                         link_data: subnet.netmask(),
@@ -3238,7 +3264,7 @@ mod tests {
         // its own subnet, independent of neighbor state.
         let cfg = link("eth0.0", 10);
         let status = LinkStatus::new(NetworkType::PointToPoint);
-        let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)]);
+        let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)], false);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].link_type, LINK_TYPE_STUB_NETWORK);
         assert_eq!(links[0].link_id, Ipv4Addr::new(10, 0, 0, 0));
@@ -3254,7 +3280,7 @@ mod tests {
             neighbor_id,
             neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2)),
         );
-        let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg.clone(), status)]);
+        let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg.clone(), status)], false);
         assert_eq!(links.len(), 2);
         let p2p = links
             .iter()
@@ -3266,12 +3292,44 @@ mod tests {
     }
 
     #[test]
+    fn prefix_suppression_hides_the_p2p_stub_and_the_network_mask() {
+        // RFC 6860 §2.1: only the type-1 link is left on a p2p link.
+        let cfg = link("eth0.0", 10);
+        let mut status = LinkStatus::new(NetworkType::PointToPoint);
+        status.neighbors.insert(
+            Ipv4Addr::new(9, 9, 9, 10),
+            neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2)),
+        );
+        let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg.clone(), status)], true);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].link_type, LINK_TYPE_POINT_TO_POINT);
+
+        // A broadcast link's transit entry is unaffected.
+        let mut bcast = link("bd1", 10);
+        bcast.network_type = NetworkType::Broadcast;
+        let local_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let mut status = LinkStatus::new(NetworkType::Broadcast);
+        status.interface_state = InterfaceState::Dr;
+        status.dr = Some(local_router_id);
+        let on = router_lsa_links(local_router_id, &[(bcast.clone(), status.clone())], true);
+        let off = router_lsa_links(local_router_id, &[(bcast, status)], false);
+        assert_eq!(on, off);
+
+        // §2.2.2.1: the DR's Network-LSA mask.
+        assert_eq!(
+            network_lsa_mask(&cfg, false),
+            Ipv4Addr::new(255, 255, 255, 0)
+        );
+        assert_eq!(network_lsa_mask(&cfg, true), Ipv4Addr::BROADCAST);
+    }
+
+    #[test]
     fn router_lsa_links_skips_broadcast_link_with_no_dr_yet() {
         let mut cfg = link("bd1", 10);
         cfg.network_type = NetworkType::Broadcast;
         let status = LinkStatus::new(NetworkType::Broadcast);
         assert_eq!(
-            router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)]),
+            router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)], false),
             []
         );
     }
@@ -3284,7 +3342,7 @@ mod tests {
         let mut status = LinkStatus::new(NetworkType::Broadcast);
         status.interface_state = InterfaceState::Dr;
         status.dr = Some(local_router_id);
-        let links = router_lsa_links(local_router_id, &[(cfg.clone(), status)]);
+        let links = router_lsa_links(local_router_id, &[(cfg.clone(), status)], false);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].link_id, cfg.local_addr);
         assert_eq!(links[0].link_type, 2);
@@ -3303,7 +3361,7 @@ mod tests {
         status
             .neighbors
             .insert(dr_id, neighbor_info(NeighborState::Full, dr_addr));
-        let links = router_lsa_links(local_router_id, &[(cfg, status)]);
+        let links = router_lsa_links(local_router_id, &[(cfg, status)], false);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].link_id, dr_addr);
     }

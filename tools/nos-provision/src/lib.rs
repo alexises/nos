@@ -799,6 +799,10 @@ pub struct Args {
     /// (requires `--ospf-instance`); `0` clears it.
     #[arg(long)]
     pub ospf_graceful_restart_grace_period: Option<u16>,
+    /// RFC 6860 prefix suppression for that instance (requires
+    /// `--ospf-instance`): `true` turns it on, `false` off.
+    #[arg(long)]
+    pub ospf_prefix_suppression: Option<bool>,
 
     /// If set (requires `--ospf-instance`), ensures this OSPF area under it
     /// (`OspfAreaOp::Ensure`).
@@ -2050,6 +2054,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 OspfInstanceOp::SetGracefulRestartGracePeriod {
                     name: name.clone(),
                     grace_period: (grace_period != 0).then_some(grace_period),
+                },
+            ));
+        }
+        if let Some(enabled) = args.ospf_prefix_suppression {
+            ops.push(ConfigOp::OspfInstance(
+                OspfInstanceOp::SetPrefixSuppression {
+                    name: name.clone(),
+                    enabled,
                 },
             ));
         }

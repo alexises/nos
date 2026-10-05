@@ -126,6 +126,16 @@ A port of `nos-ospfv3d`'s RFC 5187 work (`ospfv3/CLAUDE.md`), nos↔nos only:
 - Routes need nothing: `nos-ribd` keeps a disconnected push client's OSPF routes.
 - Tests: `link::tests::graceful_restart_is_helped_through_a_real_restart` (in-memory wire); `nos-e2e ospf-graceful-restart`.
 
+### Prefix suppression (RFC 6860, #184)
+
+- **Knob**: `OspfInstance.prefix_suppression` (`set ospf instance <i> prefix-suppression`, `delete …` turns it off; provision `--ospf-prefix-suppression true|false`). Instance-wide, handed over with `LinkManager::set_prefix_suppression` (an atomic, so a toggle re-originates on the next tick without restarting links).
+- **Router-LSA** (§2.1): `router_lsa_links` leaves out every p2p link's type-3 stub; the type-1 link stays. Loopback stubs are never hidden.
+- **Network-LSA** (§2.2.2.1): as DR, `network_lsa_mask` gives it `255.255.255.255`; the LS-ID stays the DR's address.
+- **SPF** (§2.2.2.2, always on, whatever the local setting): `collect_network_routes` skips a /32 Network-LSA. The vertex stays in Dijkstra, so transit, next hops and LFAs are unchanged, and `intra_area_routes` doesn't summarize it into other areas. A router without RFC 6860 installs a /32 host route to the DR instead.
+- **NSSA forwarding address** (§4.1): `nssa_forwarding_address` uses only a loopback stub's address, else `0.0.0.0`.
+- Not done: OSPFv3 (RFC 6860 §3).
+- Tests: `link::tests::prefix_suppression_hides_the_p2p_stub_and_the_network_mask`, `spf::tests::hidden_transit_network_carries_transit_but_yields_no_route`; `nos-e2e ospf-prefix-suppression`.
+
 ### Opaque LSAs (RFC 5250)
 
 - **Bodies**: types 9/10/11 decode to `LsaBody::Opaque(Vec<u8>)`, the body bytes kept as received so a re-encode keeps the originator's checksum; the Grace-LSA (type 9, opaque type 3) stays `LsaBody::Grace`. SPF ignores both. `lsa::is_opaque`/`is_link_local_scope`/`opaque_type`.

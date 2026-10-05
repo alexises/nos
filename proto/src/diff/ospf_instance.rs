@@ -61,6 +61,13 @@ fn changed_fields(base: &OspfInstance, candidate: &OspfInstance) -> Vec<FieldDif
             new: Some(render(candidate.graceful_restart_grace_period)),
         });
     }
+    if base.prefix_suppression != candidate.prefix_suppression {
+        fields.push(FieldDiff {
+            label: "prefix-suppression".to_string(),
+            old: Some(base.prefix_suppression.to_string()),
+            new: Some(candidate.prefix_suppression.to_string()),
+        });
+    }
     fields
 }
 
@@ -106,7 +113,25 @@ mod tests {
             routing_table: None,
             redistribute_policy: None,
             graceful_restart_grace_period: None,
+            prefix_suppression: false,
         }
+    }
+
+    #[test]
+    fn prefix_suppression_change_is_reported() {
+        let base = vec![instance("o1", Ipv4Addr::new(1, 1, 1, 1))];
+        let mut candidate = base.clone();
+        candidate[0].prefix_suppression = true;
+        let diff = diff_ospf_instances(&base, &candidate);
+        assert_eq!(diff.len(), 1);
+        assert_eq!(
+            diff[0].fields,
+            vec![FieldDiff {
+                label: "prefix-suppression".to_string(),
+                old: Some("false".to_string()),
+                new: Some("true".to_string()),
+            }]
+        );
     }
 
     #[test]
