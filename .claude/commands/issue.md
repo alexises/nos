@@ -1,27 +1,35 @@
 ---
 description: Run the issue-driven agent workflow (implement labelled issues one at a time, plan others in parallel)
 argument-hint: "[issue numbers to restrict to]"
+model: sonnet
 ---
 
 You are the orchestrator of the NOS issue workflow for the GitHub repo `alexises/nos` (use `gh`; it is GitHub, not GitLab). Restrict to issues `$ARGUMENTS` if any were given, otherwise consider all open issues.
 
 Labels: `ready-for-claude-review` (needs a plan) and `ready-for-claude-implem` (plan approved, implement). Create either with `gh label create` if missing (check `gh label list` first).
 
-All agents you spawn: `model: "opus"` (latest Opus), `run_in_background: true`, `isolation: "worktree"`. Always prefix shell commands with `rtk` and locate code with CodeGraph first — restate this to every agent, since subagents don't inherit the global CLAUDE.md.
+Agents (defined in `.claude/agents/`, each with its own default `model:` — the owner tunes it there):
+
+- `issue-planner` — plans one issue; splits big work into linked sub-issues.
+- `issue-implementer` — implements one issue or sub-issue, opens one PR.
+
+Spawn them with `subagent_type`, `run_in_background: true`, `isolation: "worktree"` and **no `model` argument** (the agent file's default applies). Their files already carry the `rtk`/CodeGraph/lab-lock rules; still restate `rtk` + CodeGraph in the prompt, and pass the attribution lines from your system reminder (commit trailers, PR footer).
 
 ## Loop
 
-1. **Implementation has priority.** If no implem agent is running, pick the oldest open `ready-for-claude-implem` issue with no open PR (`gh pr list --search "Closes #N"`) and spawn ONE implem agent. Never more than one at a time. It must:
-   - read the issue, its `## Implementation plan (Claude review)` comment and every owner reply after it;
-   - branch `issue-N-<slug>`, implement, add/run the `nos-e2e` phase when the feature touches the kernel or IPC (per CLAUDE.md), run `make check`;
-   - push and `gh pr create` (body has `Closes #N`, ends with the attribution line). NEVER merge.
-   - **CI must be green before it reports.** `make check` (and `make miri`) runs CI's pinned toolchain — natively, or in the `nos-ci` image on a host without it — so it must pass locally first. CI is still the final gate: after pushing, poll `gh pr checks <PR>` until every check (Miri included) has finished, read any failure with `gh api repos/alexises/nos/actions/jobs/<id>/logs`, fix, push, repeat. Report only once they pass (or a failure is unrelated/flaky — say so).
-   After its PR opens, do not start the next implem until the owner says "merged".
-2. **Plans fill idle time.** Only while no implem agent is running, spawn up to **5** parallel plan agents for `ready-for-claude-review` issues that have no plan comment, or whose owner replied after it. Each posts ONE comment headed `## Implementation plan (Claude review)`. If one exists, edit it in place by comment id — never post a second, never `--edit-last` (the owner's comments share this GitHub account):
-   `rtk proxy jq -Rs '{body: .}' f > j && gh api -X PATCH repos/alexises/nos/issues/comments/<id> --input j`
-   Post new ones with `gh issue comment N --body-file f`. Launch no new plan agents once an implem agent is running.
-3. On each agent notification: **first** look for a `QUESTION:` block and immediately call `AskUserQuestion` with it (don't batch, don't wait for other agents), then `SendMessage` the answer to that agent. Otherwise report the plan/PR link in one line and loop.
+1. **Implementation has priority.** If no implementer is running, pick the oldest open `ready-for-claude-implem` issue with no open PR (`gh pr list --search "Closes #N"`) and spawn ONE `issue-implementer`. Never more than one at a time. Skip an issue whose `Depends on #M` (see its body) isn't merged/closed yet. If the issue has sub-issues and none is labelled implem, it's the planner's umbrella: skip it. After its PR opens, do not start the next implementer until the owner says "merged". A merged PR whose issue stays open (no auto-close) isn't yours to close: mention it.
+2. **Plans fill idle time.** Only while no implementer is running, spawn up to **5** parallel `issue-planner`s for `ready-for-claude-review` issues that have no plan comment, or whose owner replied after it. Launch no new planners once an implementer is running. Sub-issues a planner creates carry no `ready-for-claude-*` label: the owner approves each by labelling it `ready-for-claude-implem`. If the planner couldn't create them (denied), file them yourself from its report.
+3. On each agent notification: **first** look for a `QUESTION:` block and immediately call `AskUserQuestion` with it (don't batch, don't wait for other agents), then `SendMessage` the answer to that agent. Otherwise report the plan/PR link in one line and loop. A "completed" notice saying the agent still has background work isn't its final report: wait for the hand-back.
 4. Stop when neither label has work left (or you're waiting on the owner's "merged"); print a short summary.
+
+## Model upgrades (only with the owner's permission)
+
+Never override an agent's `model` on your own. If a task looks too complex for the agent's default model, ask first with `AskUserQuestion` (options: keep current / upgrade to the next model, recommendation first), then spawn with the `model` argument only on a yes. Ladder: `sonnet` → `opus` → `fable`. Signals worth asking about:
+
+- before spawning: the plan says it spans several daemons plus kernel/IPC/wire changes, has many open decisions, or the issue is a protocol state machine (graceful restart, ADD-PATH, EVPN multi-homing, …);
+- after: the agent stopped with a failure it couldn't fix, looped on the same failing check, or its report admits gaps it couldn't close.
+
+For an already-running agent you can't change the model: ask, then re-spawn (or `SendMessage` the old one's on-disk state to the new agent). Ask at most once per issue; remember the answer for its later PRs.
 
 ## Tell every agent
 
