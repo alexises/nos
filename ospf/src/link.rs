@@ -982,7 +982,8 @@ async fn handle_lsu(
             &mut lsdb,
             &mut link_local_lsdb,
             lsu,
-            std::time::Instant::now(),
+            // tokio's clock, so paused-time tests see MinLSArrival pass.
+            tokio::time::Instant::now().into_std(),
         );
         // A Grace-LSA is acted on at once and never held, even in the link
         // store (RFC 3623), so it is never offered back to the restarted
@@ -2079,6 +2080,10 @@ impl LinkManager {
         if !self.redistribute_filtered.lock().await.is_empty() {
             flags |= lsa::ROUTER_FLAG_E;
         }
+        let mut router_info_caps = lsa::RI_CAP_GR_HELPER;
+        if self.grace_period.load(Ordering::Relaxed) != 0 {
+            router_info_caps |= lsa::RI_CAP_GR_CAPABLE;
+        }
 
         for area_id in area_ids {
             let links = by_area.get(&area_id).cloned().unwrap_or_default();
@@ -2096,6 +2101,12 @@ impl LinkManager {
                     &mut lsdb,
                     local_router_id,
                     lsa::LSA_TYPE_NETWORK,
+                    &HashSet::new(),
+                );
+                withdraw_undesired(
+                    &mut lsdb,
+                    local_router_id,
+                    lsa::LSA_TYPE_OPAQUE_AREA,
                     &HashSet::new(),
                 );
                 continue;
@@ -2132,6 +2143,15 @@ impl LinkManager {
                     flags: area_flags,
                     links: router_links,
                 }),
+            );
+            // RFC 7770 Router Information, area scope (type 10) so it reaches
+            // stub areas and NSSAs too. Helper is always on (RFC 3623).
+            install_self_originated(
+                &mut lsdb,
+                local_router_id,
+                lsa::LSA_TYPE_OPAQUE_AREA,
+                lsa::ROUTER_INFO_LINK_STATE_ID,
+                LsaBody::Opaque(lsa::encode_router_info(router_info_caps)),
             );
 
             let mut network_ids = HashSet::new();
@@ -3630,6 +3650,62 @@ mod tests {
         assert!(manager.lsdbs.lock().await.contains_key(&area1));
     }
 
+    /// RFC 7770: one type-10 RI per area, GR helper always, GR capable only
+    /// with a grace period; flushed from an area that was left.
+    #[tokio::test]
+    async fn originate_router_lsas_originates_router_info_per_area() {
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
+        let area0 = Ipv4Addr::UNSPECIFIED;
+        let area1 = Ipv4Addr::new(0, 0, 0, 1);
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let stub0 = ("192.168.9.0/24".parse::<Ipv4Net>().unwrap(), 1);
+        let stub1 = ("192.168.10.0/24".parse::<Ipv4Net>().unwrap(), 1);
+        let key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_OPAQUE_AREA,
+            link_state_id: lsa::ROUTER_INFO_LINK_STATE_ID,
+            advertising_router: router_id,
+        };
+        let held = |area: Ipv4Addr| {
+            let manager = &manager;
+            async move {
+                for lsdb in manager.lsdbs.lock().await.values() {
+                    lsdb.lock()
+                        .await
+                        .age_and_evict(lsa::MIN_LS_INTERVAL, &HashSet::new());
+                }
+                manager.originate_router_lsas(router_id).await;
+                let lsdb = manager.lsdb_for(area).await;
+                let lsa = lsdb.lock().await.get(&key).unwrap();
+                (lsa.header.age < lsa::MAX_AGE, lsa.body.clone())
+            }
+        };
+        let body = |caps| (true, LsaBody::Opaque(lsa::encode_router_info(caps)));
+
+        manager
+            .reconcile(
+                Vec::new(),
+                HashMap::from([(area0, vec![stub0]), (area1, vec![stub1])]),
+                router_id,
+            )
+            .await;
+        assert_eq!(held(area0).await, body(lsa::RI_CAP_GR_HELPER));
+        assert_eq!(held(area1).await, body(lsa::RI_CAP_GR_HELPER));
+
+        manager.set_graceful_restart(Some(120));
+        let both = lsa::RI_CAP_GR_HELPER | lsa::RI_CAP_GR_CAPABLE;
+        assert_eq!(held(area0).await, body(both));
+
+        manager
+            .reconcile(Vec::new(), HashMap::from([(area0, vec![stub0])]), router_id)
+            .await;
+        assert_eq!(held(area0).await, body(both));
+        assert!(!held(area1).await.0);
+    }
+
     #[tokio::test]
     async fn originate_summary_lsas_installs_type3_into_every_other_area() {
         let manager = LinkManager::new(
@@ -4104,8 +4180,8 @@ mod tests {
         manager.originate_router_lsas(router_id).await;
         manager.originate_summary_lsas(router_id).await;
 
-        // Two Router-LSAs plus one Type-3 per area.
-        assert_eq!(manager.withdraw_all_self_originated().await, 4);
+        // A Router-LSA, an RI LSA and a Type-3 per area.
+        assert_eq!(manager.withdraw_all_self_originated().await, 6);
         for area in [area0, area1] {
             let lsdb = manager.lsdb_for(area).await;
             for header in lsdb.lock().await.headers() {

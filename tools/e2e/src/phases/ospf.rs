@@ -1263,6 +1263,28 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
         b.wait(&from_frr(&on_b, t)).await?;
     }
 
+    // RFC 7770: router-a's own Router Information LSA (type 10, opaque type
+    // 4, one 8-byte capabilities TLV) reaches router-b and FRR. FRR 10.7
+    // decodes an RI body only in the scope of its own `router-info` (AS
+    // here; `router-info area` is turned into `as`), so it is checked to the
+    // header and length; `lsa::tests` pins the body bytes.
+    log("router-a originates a router information lsa; router-b and FRR must accept it");
+    b.wait(&format!(
+        r"ospf lsa installed {on_b} lsa_type=10 link_state_id=4\.0\.0\.0 advertising_router={OSPF_ROUTER_ID} "
+    ))
+    .await?;
+    frr_until(
+        w,
+        &format!("show ip ospf database opaque-area adv-router {OSPF_ROUTER_ID}"),
+        60,
+        |out| {
+            out.contains("Link State ID: 4.0.0.0")
+                && out.contains("Length: 28")
+                && out.contains("Opaque-Type 4 (Router Information LSA)")
+        },
+    )
+    .await?;
+
     // RFC 2328 A.4.2 (#34): router-a becomes an ASBR (a redistributed static)
     // and an ABR (a loopback in area 1). FRR builds a router route — needed to
     // resolve a Type-5's ASBR or a Type-3's ABR — only from a Router-LSA with
