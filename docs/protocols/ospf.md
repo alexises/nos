@@ -430,6 +430,31 @@ How it behaves:
 - **Check it.** The router logs `ospf stub router max-metric changed active=true reason="administrative"` (or `"on-startup"`, `"on-shutdown"`), then `active=false` with `reason="expired"` or `"cleared"`. On another router, the route through it shows a metric of 65535 or more in `show route`, and its backup next hop through it is gone.
 - **Router Information.** Every router advertises *stub router support* in its Router Information LSA, whatever the setting.
 
+### Keep a router out of transit for good (RFC 8770 host router)
+
+For a router that should only ever be a destination (a server, a route reflector or a controller running OSPF), not a path between other routers:
+
+```
+configure host
+set ospf instance o1 host-router
+commit
+```
+
+```sh
+$C -X POST $B/v1/transactions/host
+$C -X PUT -H 'Content-Type: application/json' -d 'true' $B/v1/transactions/host/ospf-instance/o1/host-router
+$C -X POST $B/v1/transactions/host/commit
+```
+
+How it behaves:
+
+- **What it advertises.** The H-bit in its router LSA, in every area, and every link to a neighbour or LAN segment at cost 65535, as with [`max-metric router-lsa administrative`](#drain-traffic-away-from-a-router-rfc-6987-stub-router). Its stub links keep their cost, so its own prefixes stay reachable.
+- **Other NOS routers** never route through a router with the H-bit, even when it is the only path, and never use it as a loop-free alternate. They honour the bit only while every router in the area advertises *host router support* in its Router Information LSA; NOS always does.
+- **With a router that doesn't support it** in the area (FRR, for example), the bit is ignored everywhere in that area, and the 65535 costs alone steer traffic away: the router is still used when it is the only path.
+- **Not with redistribution.** A host router is not an ASBR: a commit with both `host-router` and `redistribute … to ospf` on its routing table is refused.
+- **Check it.** Every router logs `ospf host-bit state changed area=0.0.0.0 honoured=true host_routers=1` when the bit appears in the area (`honoured=false` if some router lacks support). On another router, routes through the host router disappear from `show route` and so do backup next hops through it.
+- `delete ospf instance o1 host-router` turns it off.
+
 ### Stop running OSPF
 
 - On one link: `delete interface eth0 ospf` (or `delete ospf` inside the interface, subinterface or broadcast domain). Over REST, `DELETE …/interface/eth0/subinterface/0/ospf-profile`.
@@ -472,8 +497,9 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 - *Graceful restart helper* is always set.
 - *Graceful restart capable* is set while `graceful-restart grace-period` is configured.
 - *Stub router support* (RFC 6987) is always set.
+- *Host router support* (RFC 8770) is always set; it says this router honours the H-bit.
 - `show ospf database` lists it as type 10 from each router; FRR lists it with `show ip ospf database opaque-area`, but FRR 10.7 shows the body only as raw bytes.
-- Router Information LSAs from other routers are stored and flooded but not read.
+- From other routers' Router Information LSAs (type 10 or 11), only *host router support* is read, to decide whether the H-bit is honoured in the area.
 
 **LSA ageing and withdrawal (RFC 2328 §14).** Self-originated LSAs are refreshed every 30 minutes and others expire after an hour without refresh. An LSA that is no longer wanted (a removed link, redistribution rule or area) is withdrawn at once by flooding it at maximum age.
 
@@ -500,6 +526,7 @@ All paths are relative to `/v1/transactions/{tx}/`. `delete` forms marked *relat
 | max-metric on startup | `set ospf instance <name> max-metric router-lsa on-startup <seconds>`; `delete ospf instance <name> max-metric router-lsa on-startup` | `ospf-instance/<name>/max-metric-on-startup` | seconds, 5 to 86400; unset by default | | stub router (RFC 6987) this long after the next start; skipped after a graceful restart | `ospf stub router max-metric changed` in the log |
 | max-metric on shutdown | `set ospf instance <name> max-metric router-lsa on-shutdown <seconds>`; `delete ospf instance <name> max-metric router-lsa on-shutdown` | `ospf-instance/<name>/max-metric-on-shutdown` | seconds, 1 to 3; unset by default | | stub router this long before withdrawing the LSAs on stop; not on a graceful restart | `reason="on-shutdown"` in the log |
 | max-metric administrative | `set ospf instance <name> max-metric router-lsa administrative`; `delete ospf instance <name> max-metric router-lsa administrative` | `ospf-instance/<name>/max-metric-administrative` | boolean; off by default | | stub router until removed | `show route <table>` on another router |
+| host router | `set ospf instance <name> host-router`; `delete ospf instance <name> host-router` | `ospf-instance/<name>/host-router` | boolean; off by default | refused with `redistribute … to ospf` on its routing table | H-bit and max-metric transit links: never used for transit (RFC 8770) | `ospf host-bit state changed` in every router's log |
 | areas | `edit ospf instance <name> area <area-id>`; relative `edit area <area-id>` | `ospf-instance/<name>/area/<area-id>` | list of areas | area IDs unique within the instance | see [Area](#area) | `show config` |
 | routing table | set on the table: `set routing-table <table> ospf-instance <name>`; `delete routing-table <table> ospf-instance` | `routing-table/<table>/ospf-instance` | instance name; unset by default | the instance must exist; one table per instance | runs the instance in that table's VRF and installs its routes there | `show ospf neigh`, `show route <table>` |
 

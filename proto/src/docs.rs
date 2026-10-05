@@ -207,6 +207,8 @@ topics! {
     OspfInstanceMaxMetricOnShutdown,
     /// `OspfInstance.max_metric_administrative`
     OspfInstanceMaxMetricAdministrative,
+    /// `OspfInstance.host_router`
+    OspfInstanceHostRouter,
     /// `OspfInstance.areas`
     OspfArea,
     /// `OspfArea.profiles`

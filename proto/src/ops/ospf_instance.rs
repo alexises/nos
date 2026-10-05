@@ -46,6 +46,11 @@ pub enum OspfInstanceOp {
         name: String,
         enabled: bool,
     },
+    /// Turns RFC 8770's host router (H-bit) on or off.
+    SetHostRouter {
+        name: String,
+        enabled: bool,
+    },
     Delete {
         name: String,
     },
@@ -67,6 +72,7 @@ impl OspfInstanceOp {
                         max_metric_on_startup: None,
                         max_metric_on_shutdown: None,
                         max_metric_administrative: false,
+                        host_router: false,
                     });
                 }
                 Ok(())
@@ -93,6 +99,10 @@ impl OspfInstanceOp {
             }
             OspfInstanceOp::SetMaxMetricAdministrative { name, enabled } => {
                 find_instance_mut(config, name)?.max_metric_administrative = *enabled;
+                Ok(())
+            }
+            OspfInstanceOp::SetHostRouter { name, enabled } => {
+                find_instance_mut(config, name)?.host_router = *enabled;
                 Ok(())
             }
             OspfInstanceOp::Delete { name } => {
@@ -134,6 +144,7 @@ mod tests {
             max_metric_on_startup: None,
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
+            host_router: false,
         }
     }
 
@@ -157,6 +168,10 @@ mod tests {
                 name: name(),
                 enabled: true,
             },
+            OspfInstanceOp::SetHostRouter {
+                name: name(),
+                enabled: true,
+            },
         ] {
             op.apply(&mut cfg).unwrap();
         }
@@ -169,6 +184,7 @@ mod tests {
             ),
             (Some(30), Some(3), true)
         );
+        assert!(i.host_router);
         OspfInstanceOp::SetMaxMetricOnStartup {
             name: name(),
             seconds: None,

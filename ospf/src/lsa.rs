@@ -67,10 +67,11 @@ pub const ROUTER_INFO_LINK_STATE_ID: Ipv4Addr = Ipv4Addr::new(OPAQUE_TYPE_ROUTER
 const TLV_RI_CAPABILITIES: u16 = 1;
 /// RFC 7770 §2.4 capability bits, numbered from the most significant: bit 0
 /// graceful-restart capable, bit 1 graceful-restart helper (RFC 3623), bit
-/// 2 stub router support (RFC 6987).
+/// 2 stub router support (RFC 6987), bit 7 host router support (RFC 8770).
 pub const RI_CAP_GR_CAPABLE: u32 = 1 << 31;
 pub const RI_CAP_GR_HELPER: u32 = 1 << 30;
 pub const RI_CAP_STUB_ROUTER: u32 = 1 << 29;
+pub const RI_CAP_HOST_ROUTER: u32 = 1 << 24;
 
 /// An RI LSA body carrying only the Informational Capabilities TLV. Held as
 /// `LsaBody::Opaque`, like any other opaque body.
@@ -78,6 +79,33 @@ pub fn encode_router_info(capabilities: u32) -> Vec<u8> {
     let mut buf = Vec::with_capacity(8);
     put_tlv(&mut buf, TLV_RI_CAPABILITIES, &capabilities.to_be_bytes());
     buf
+}
+
+/// A received RI LSA's Informational Capabilities (RFC 7770 §2.3): a type
+/// 10 or 11 opaque LSA of opaque type 4. Unknown TLVs are skipped; `None`
+/// for anything else, a malformed body, or no capabilities TLV.
+pub fn router_info_capabilities(lsa: &Lsa) -> Option<u32> {
+    if !matches!(
+        lsa.header.lsa_type,
+        LSA_TYPE_OPAQUE_AREA | LSA_TYPE_OPAQUE_AS
+    ) || opaque_type(lsa.header.link_state_id) != OPAQUE_TYPE_ROUTER_INFO
+    {
+        return None;
+    }
+    let LsaBody::Opaque(body) = &lsa.body else {
+        return None;
+    };
+    let mut data = body.as_slice();
+    while data.len() >= 4 {
+        let t = u16::from_be_bytes([data[0], data[1]]);
+        let len = usize::from(u16::from_be_bytes([data[2], data[3]]));
+        let v = data.get(4..4 + len)?;
+        if t == TLV_RI_CAPABILITIES {
+            return (len >= 4).then(|| u32::from_be_bytes([v[0], v[1], v[2], v[3]]));
+        }
+        data = data.get(4 + len.next_multiple_of(4)..).unwrap_or_default();
+    }
+    None
 }
 
 /// RFC 5250 §3: types 9-11. Only sent to a neighbor whose DBD set the O-bit.
@@ -124,6 +152,8 @@ pub const ROUTER_FLAG_B: u8 = 0x01;
 pub const ROUTER_FLAG_E: u8 = 0x02;
 /// RFC 3101 A.2: Nt — an NSSA border router that always translates Type-7s.
 pub const ROUTER_FLAG_NT: u8 = 0x10;
+/// RFC 8770 §3: H — a host router, never used for transit.
+pub const ROUTER_FLAG_H: u8 = 0x80;
 
 pub const LSA_HEADER_LEN: usize = 20;
 /// One Router-LSA link entry's wire length (Appendix A.4.2): Link ID (4) +
@@ -968,6 +998,44 @@ mod tests {
             [0, 1, 0, 4, 0xc0, 0, 0, 0]
         );
         assert_eq!(ROUTER_INFO_LINK_STATE_ID, Ipv4Addr::new(4, 0, 0, 0));
+    }
+
+    /// RFC 7770: the capabilities TLV is found past an unknown one, in a
+    /// type 10 or 11 RI; a truncated TLV, another opaque type or a non-opaque
+    /// LSA yields `None`. RFC 8770's bit 7 is `1 << 24`.
+    #[test]
+    fn router_info_capabilities_decodes_type_10_and_11() {
+        let ri = |lsa_type, id: Ipv4Addr, body: Vec<u8>| Lsa {
+            header: LsaHeader {
+                lsa_type,
+                link_state_id: id,
+                ..router_lsa().header
+            },
+            body: LsaBody::Opaque(body),
+        };
+        let caps = RI_CAP_HOST_ROUTER | RI_CAP_GR_HELPER;
+        let mut body = vec![0, 9, 0, 3, 1, 2, 3, 0];
+        body.extend(encode_router_info(caps));
+        for t in [LSA_TYPE_OPAQUE_AREA, LSA_TYPE_OPAQUE_AS] {
+            let lsa = ri(t, ROUTER_INFO_LINK_STATE_ID, body.clone());
+            assert_eq!(router_info_capabilities(&lsa), Some(caps));
+        }
+        assert_eq!(encode_router_info(RI_CAP_HOST_ROUTER)[4], 0x01);
+        let truncated = ri(
+            LSA_TYPE_OPAQUE_AREA,
+            ROUTER_INFO_LINK_STATE_ID,
+            vec![0, 1, 0, 4, 0],
+        );
+        assert_eq!(router_info_capabilities(&truncated), None);
+        let other = ri(
+            LSA_TYPE_OPAQUE_AREA,
+            Ipv4Addr::new(8, 0, 0, 0),
+            body.clone(),
+        );
+        assert_eq!(router_info_capabilities(&other), None);
+        let link = ri(LSA_TYPE_OPAQUE_LINK, ROUTER_INFO_LINK_STATE_ID, body);
+        assert_eq!(router_info_capabilities(&link), None);
+        assert_eq!(router_info_capabilities(&router_lsa()), None);
     }
 
     #[test]

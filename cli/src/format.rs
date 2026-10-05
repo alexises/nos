@@ -220,7 +220,7 @@ pub fn render_bgp_instance(instance: &BgpInstance) -> String {
 /// the instance line — mirrors `render_interface`'s nested subinterfaces.
 pub fn render_ospf_instance(instance: &OspfInstance) -> String {
     let mut lines = vec![format!(
-        "ospf instance {}: router-id {}{}{}{}{}{}",
+        "ospf instance {}: router-id {}{}{}{}{}{}{}",
         instance.name,
         instance.router_id,
         if instance.prefix_suppression {
@@ -245,6 +245,11 @@ pub fn render_ospf_instance(instance: &OspfInstance) -> String {
             )),
         if instance.max_metric_administrative {
             ", max-metric router-lsa administrative"
+        } else {
+            ""
+        },
+        if instance.host_router {
+            ", host-router"
         } else {
             ""
         },
@@ -3286,6 +3291,7 @@ mod tests {
                 max_metric_on_startup: Some(300),
                 max_metric_on_shutdown: Some(3),
                 max_metric_administrative: true,
+                host_router: true,
             }],
             ospfv3_instances: vec![Ospfv3Instance {
                 name: "v3".to_string(),
@@ -3425,7 +3431,7 @@ mod tests {
             "  peer 192.0.2.2: peer-group pg, shutdown",
             "routing-table rt1: bgp-instance r1, ospf-instance unset, static-routing-instance unset, \
              redistribute from static to bgp, policy p1, rest-api 10.0.0.1:443",
-            "ospf instance o1: router-id 1.1.1.1, prefix-suppression, max-metric router-lsa on-startup 300, max-metric router-lsa on-shutdown 3, max-metric router-lsa administrative\n  area 0.0.0.0\n    profile op: auth crypto-keys \
+            "ospf instance o1: router-id 1.1.1.1, prefix-suppression, max-metric router-lsa on-startup 300, max-metric router-lsa on-shutdown 3, max-metric router-lsa administrative, host-router\n  area 0.0.0.0\n    profile op: auth crypto-keys \
              [key-id 1 md5 k, key-id 2 hmac-sha1 k, key-id 3 hmac-sha384 k, key-id 4 hmac-sha512 k (current)] \
              extended-sequence-numbers",
             "ospfv3 instance v3: router-id 2.2.2.2, extended-lsa, graceful-restart grace-period 120\n  \

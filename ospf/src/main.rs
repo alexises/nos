@@ -155,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
             match boot::write_grace_marker(&grace_marker, unix_now() + u64::from(grace_period)) {
                 Ok(()) => info!(instance = %args.instance, "ospf graceful restart marker written"),
                 Err(e) => {
-                    tracing::warn!(instance = %args.instance, error = %e, "cannot write ospf graceful restart marker")
+                    tracing::warn!(instance = %args.instance, error = %e, "cannot write ospf graceful restart marker");
                 }
             }
         }

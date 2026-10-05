@@ -610,6 +610,68 @@ pub async fn ospf_stub_router(w: &mut World) -> anyhow::Result<()> {
     a.wait_ospf_route_gone(lo, 15).await
 }
 
+/// RFC 8770 host router on router-c (requires `ospf-lfa`, like
+/// `ospf-stub-router`). All three routers are nos, so all advertise host-router
+/// support in their RI LSA and router-a/router-b honour router-c's H-bit:
+/// router-c is no longer transit, nor router-a's loop-free alternate to
+/// router-b's loopback. Cleared again, the alternate comes back.
+pub async fn ospf_host_router(w: &mut World) -> anyhow::Result<()> {
+    let (a, b, c) = (w.a()?, w.b()?, w.c()?);
+    let lo = OSPF_SPF_LOOPBACK_ADDRESS;
+    let primary = format!("added route prefix={lo}.*source=Some(Ospf) backup=false");
+    let backup_added = format!("added route prefix={lo}.*source=Some(Ospf) backup=true");
+    let backup_removed = format!("removed route prefix={lo}.*backup=true");
+    let primary_removed = format!("removed route prefix={lo}.*backup=false");
+    let state = |hosts: u8| {
+        format!("ospf host-bit state changed area={OSPF_AREA} honoured=true host_routers={hosts}")
+    };
+    let host_router = |on: bool| {
+        strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            OSPF_ROUTER_ID_C,
+            "--ospf-host-router",
+            &on.to_string(),
+        ])
+    };
+
+    let (p0, b0) = (a.count(&primary), a.count(&backup_added));
+    b.provision(&[
+        "--loopback-address",
+        lo,
+        "--ospf-loopback-profile",
+        OSPF_PROFILE,
+    ])
+    .await?;
+    a.wait_new(&primary, p0, 60).await?;
+    a.wait_new(&backup_added, b0, 60).await?;
+    let pr0 = a.count(&primary_removed);
+
+    log("router-c: host-router; router-a and router-b must honour its h-bit, router-a drop its lfa via c");
+    let (r0, sa0, sb0) = (
+        a.count(&backup_removed),
+        a.count(&state(1)),
+        b.count(&state(1)),
+    );
+    c.provision(&host_router(true)).await?;
+    c.wait("ospf instance config resolved.*host_router=true")
+        .await?;
+    a.wait_new(&state(1), sa0, 30).await?;
+    b.wait_new(&state(1), sb0, 30).await?;
+    a.wait_new(&backup_removed, r0, 60).await?;
+
+    log("router-c: host-router off; router-a must re-add the lfa");
+    let (b0, sa0) = (a.count(&backup_added), a.count(&state(0)));
+    c.provision(&host_router(false)).await?;
+    a.wait_new(&state(0), sa0, 30).await?;
+    a.wait_new(&backup_added, b0, 60).await?;
+    a.assert_quiet(&primary_removed, pr0, 0).await?;
+
+    b.provision(&["--clear-ospf-loopback-profile"]).await?;
+    a.wait_ospf_route_gone(lo, 15).await
+}
+
 /// Waits up to `secs` until `r`'s rt1 does (`want`) or doesn't list an OSPF
 /// candidate for `SUBNET`.
 async fn subnet_ospf_candidate(r: &Router, want: bool, secs: u32) -> anyhow::Result<()> {
@@ -1478,6 +1540,36 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
     })
     .await?;
     a.provision(&max_metric(false)).await?;
+    frr_until(w, "show ip ospf route", 60, |out| {
+        frr_route_cost(out, lo).is_some_and(|c| c < 65535)
+    })
+    .await?;
+
+    // RFC 8770 §5 against a router without host-router support: FRR's RI
+    // lacks bit 7, so router-b sees router-a's H-bit but doesn't honour it,
+    // and FRR still routes through router-a over its 65535 transit links.
+    log("router-a: host-router; router-b must not honour it (FRR lacks support), FRR routes via it at >= 65535");
+    let host_router = |on: bool| {
+        strings(&[
+            "--ospf-instance",
+            OSPF_INSTANCE,
+            "--ospf-router-id",
+            OSPF_ROUTER_ID,
+            "--ospf-host-router",
+            &on.to_string(),
+        ])
+    };
+    a.provision(&host_router(true)).await?;
+    b.wait(&format!(
+        "ospf host-bit state changed area={OSPF_AREA} honoured=false host_routers=1"
+    ))
+    .await?;
+    frr_until(w, "show ip ospf route", 60, |out| {
+        frr_route_cost(out, lo).is_some_and(|c| c >= 65535)
+            && frr_route_cost(out, SUBNET).is_some_and(|c| c < 65535)
+    })
+    .await?;
+    a.provision(&host_router(false)).await?;
     frr_until(w, "show ip ospf route", 60, |out| {
         frr_route_cost(out, lo).is_some_and(|c| c < 65535)
     })
