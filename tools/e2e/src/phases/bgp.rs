@@ -198,7 +198,6 @@ fn followed_by(r: &Router, first: &str, then: &str, not: &str) -> anyhow::Result
 pub async fn bgp_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let removed = format!("removed route prefix={REDISTRIBUTE_PREFIX}");
-    let added = format!("added route prefix={REDISTRIBUTE_PREFIX}");
     let retaining = format!("peer down, retaining routes as stale peer={IP_A}");
     let est = "bgp session established";
 
@@ -284,7 +283,11 @@ pub async fn bgp_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     }
 
     log("clear: a Hard Reset wrapping Administrative Reset, the route flushed and re-learned");
-    let (removed_b, added_b) = (b.count(&removed), b.count(&added));
+    // Asserted on the Loc-RIB, not the kernel: the session is back within a
+    // second, inside one `rib_push_client` poll, so the kernel may never see
+    // the withdrawal.
+    let withdrawn = format!("loc-rib route for {REDISTRIBUTE_PREFIX} withdrawn");
+    let (withdrawn_b, loc_b) = (b.count(&withdrawn), b.count(&loc_rib()));
     a.rest_expect(
         Method::POST,
         &format!("/v1/bgp/r1/peer/{IP_B}/clear"),
@@ -296,8 +299,8 @@ pub async fn bgp_graceful_restart(w: &mut World) -> anyhow::Result<()> {
         "received notification peer={IP_A} code=6 subcode=9 hard_reset_code=6 hard_reset_subcode=4"
     ))
     .await?;
-    b.wait_new(&removed, removed_b, 30).await?;
-    b.wait_new(&added, added_b, 60).await?;
+    b.wait_new(&withdrawn, withdrawn_b, 30).await?;
+    b.wait_new(&loc_rib(), loc_b, 60).await?;
 
     log("graceful restart off on router-a: flushed on return, a kill is a hard flap");
     let no_cap = format!("flushing stale routes peer={IP_A} .*reason=.*no-capability");
@@ -309,15 +312,15 @@ pub async fn bgp_graceful_restart(w: &mut World) -> anyhow::Result<()> {
     reestablished(a, est_a).await?;
     reestablished(b, est_b).await?;
     let eor_from_b = format!("received end-of-rib peer={IP_B}");
-    let (est_a, est_b, eor_a, ret_b, removed_b) = (
+    let (est_a, est_b, eor_a, ret_b, withdrawn_b) = (
         a.count(est),
         b.count(est),
         a.count(&eor_from_b),
         b.count(&retaining),
-        b.count(&removed),
+        b.count(&withdrawn),
     );
     w.dock.kill_process("router-a", "nos-bgpd").await?;
-    b.wait_new(&removed, removed_b, 30).await?;
+    b.wait_new(&withdrawn, withdrawn_b, 30).await?;
     reestablished(a, est_a).await?;
     reestablished(b, est_b).await?;
     anyhow::ensure!(
