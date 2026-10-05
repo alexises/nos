@@ -1163,6 +1163,10 @@
             "description": "`00:11:22:33:44:55:66:77:88:99`.",
             "type": "string"
           },
+          "local_bias": {
+            "description": "EVPN local bias (RFC 8365 §8.3.1) is fully in place on this segment:\nthe PE delivers BUM from its own hosts to the segment whatever the DF\nrole and drops BUM from the other PEs on it. `false` on a single-active\nsegment (it does not apply) and when the kernel could not be set up\n(missing tc modules), in which case only the DF floods to the segment.",
+            "type": "boolean"
+          },
           "pes": {
             "description": "Every PE attached to the segment (this one included), in the order the\nDF election ranks them.",
             "items": {
@@ -1191,7 +1195,8 @@
           "ad_pes",
           "up",
           "single_active",
-          "df_algorithm"
+          "df_algorithm",
+          "local_bias"
         ],
         "type": "object"
       },

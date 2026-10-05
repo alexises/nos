@@ -125,6 +125,7 @@ pub struct FdbTable {
 /// One locally attached Ethernet Segment, as seen from one broadcast domain.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // wire status flags, one per independent fact
 pub struct EsEntry {
     /// `00:11:22:33:44:55:66:77:88:99`.
     pub esi: String,
@@ -152,6 +153,12 @@ pub struct EsEntry {
     /// The DF election algorithm in effect (RFC 8584 §2.2.3): `Hrw` only when
     /// every candidate PE asked for it, else `Modulo`.
     pub df_algorithm: crate::DfAlgorithm,
+    /// EVPN local bias (RFC 8365 §8.3.1) is fully in place on this segment:
+    /// the PE delivers BUM from its own hosts to the segment whatever the DF
+    /// role and drops BUM from the other PEs on it. `false` on a single-active
+    /// segment (it does not apply) and when the kernel could not be set up
+    /// (missing tc modules), in which case only the DF floods to the segment.
+    pub local_bias: bool,
 }
 
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

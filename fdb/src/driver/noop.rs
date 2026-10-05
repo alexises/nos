@@ -54,8 +54,28 @@ impl FdbDriver for NoopFdbDriver {
     async fn local_macs(&self, _: &str, _: u32) -> Result<BTreeMap<Mac, String>, DriverError> {
         Ok(BTreeMap::new())
     }
-    async fn set_port_flood(&self, port: &str, flood: bool) -> Result<(), DriverError> {
-        info!(port = %port, flood, "noop driver: set port flood");
+    async fn set_port_flood(
+        &self,
+        port: &str,
+        unicast: bool,
+        bum: bool,
+    ) -> Result<(), DriverError> {
+        info!(port = %port, unicast, bum, "noop driver: set port flood");
+        Ok(())
+    }
+    async fn set_segment_filter(
+        &self,
+        port: &str,
+        bit: u16,
+        df_filter: bool,
+    ) -> Result<(), DriverError> {
+        info!(port = %port, bit, df_filter, "noop driver: set segment filter");
+        Ok(())
+    }
+    async fn clear_segment_filter(&self, _: &str) -> Result<(), DriverError> {
+        Ok(())
+    }
+    async fn set_local_bias(&self, _: u32, _: &BTreeMap<IpAddr, u16>) -> Result<(), DriverError> {
         Ok(())
     }
     async fn set_port_forwarding(&self, port: &str, forwarding: bool) -> Result<(), DriverError> {

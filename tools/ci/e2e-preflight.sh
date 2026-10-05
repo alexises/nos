@@ -17,7 +17,9 @@ if ! $SUDO modprobe vrf 2>/dev/null; then
     $SUDO apt-get install -y "linux-modules-extra-$(uname -r)" || true
 fi
 $SUDO modprobe vrf dummy bonding vxlan 8021q bridge || true
-lsmod | grep -E 'vrf|dummy|bonding|vxlan|8021q|bridge' || true
+# EVPN local bias (nos-fdbd, tc): flower/skbedit mark, fw/gact drop, clsact.
+$SUDO modprobe cls_flower cls_fw act_skbedit act_gact sch_ingress || true
+lsmod | grep -E 'vrf|dummy|bonding|vxlan|8021q|bridge|cls_|act_|sch_ingress' || true
 uname -r
 
 # `docker cp` to a host path writes as the caller, who can't set the
