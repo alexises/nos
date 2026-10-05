@@ -183,6 +183,11 @@ A port of `nos-ospfv3d`'s RFC 5187 work (`ospfv3/CLAUDE.md`), nos↔nos only:
   - Also host router support (`RI_CAP_HOST_ROUTER`, bit 7, always — RFC 8770 is implemented). A received RI's capabilities are read by `lsa::router_info_capabilities` (type 10 or 11), for the H-bit check below; its body stays `LsaBody::Opaque`.
 - Tests: `lsa::tests::opaque_lsas_round_trip_as_raw_bytes`, `packet::tests::lsu_skips_an_unknown_lsa_type_and_keeps_the_rest`, `exchange::tests::opaque_*`, `link::tests::opaque_lsas_are_flooded_by_scope` (in-memory wire), `lsa::tests::router_info_body_is_one_capabilities_tlv`, `link::tests::originate_router_lsas_originates_router_info_per_area`; `nos-e2e ospf-opaque` (FRR, which also accepts router-a's RI LSA).
 
+### Not applicable RFCs (#45)
+
+- **RFC 1793 (demand circuits)**: nos never sets the DC option, so DC-capable neighbours never send it DoNotAge LSAs; nothing to implement.
+- **RFC 4577 (DN-bit)**: only matters on a PE, and nos has no BGP L3VPN (VPNv4) address family. Revisit when that exists.
+
 ## Modules
 
 | Module | Role |
