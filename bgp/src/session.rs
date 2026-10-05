@@ -116,6 +116,10 @@ pub struct ResolvedPeer {
     pub announce_rpki_state: bool,
     /// The peer-group's vendor `local-as` (see `BgpRib::set_peer_local_as`).
     pub local_as: Option<nos_proto::BgpLocalAs>,
+    /// RFC 7911 ADD-PATH mode with its default applied
+    /// (`BgpPeerGroup::effective_add_path`); in the OPEN, so a change
+    /// restarts the session (`diff_peers`).
+    pub add_path: Option<nos_proto::BgpAddPath>,
     /// RFC 5065: this instance's confederation identifier (what an
     /// external peer's OPEN carries), and whether `remote_as` is another
     /// member AS. Here rather than read from `LocalIdentity` so a change
@@ -1186,6 +1190,7 @@ mod tests {
             maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
             local_as: None,
+            add_path: None,
             confed_id: None,
             confed_member: false,
             graceful_restart: None,

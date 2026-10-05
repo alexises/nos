@@ -577,6 +577,7 @@ mod tests {
                 maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
                 announce_rpki_state: false,
                 local_as: None,
+                add_path: None,
             },
             BgpPeerGroup {
                 name: "invalid".to_string(),
@@ -600,6 +601,7 @@ mod tests {
                 maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
                 announce_rpki_state: false,
                 local_as: None,
+                add_path: None,
             },
         ];
         let cfg = config_with(vec![inst]);
@@ -635,6 +637,7 @@ mod tests {
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
             local_as: None,
+            add_path: None,
         }
     }
 

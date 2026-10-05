@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{
-    AddressFamily, BgpAoKey, BgpAuth, BgpDamping, BgpLocalAs, BgpPeerGroup, BgpPrefixLimit,
-    BgpShutdown, Config, NextHopMode, SourceAddress,
+    AddressFamily, BgpAddPath, BgpAoKey, BgpAuth, BgpDamping, BgpLocalAs, BgpPeerGroup,
+    BgpPrefixLimit, BgpShutdown, Config, NextHopMode, SourceAddress,
 };
 
 use super::bgp_instance::find_instance_mut;
@@ -239,6 +239,16 @@ pub enum BgpPeerGroupOp {
         instance: String,
         name: String,
     },
+    /// Sets RFC 7911 ADD-PATH (see `BgpAddPath`).
+    SetAddPath {
+        instance: String,
+        name: String,
+        mode: BgpAddPath,
+    },
+    ClearAddPath {
+        instance: String,
+        name: String,
+    },
 }
 
 impl BgpPeerGroupOp {
@@ -269,6 +279,7 @@ impl BgpPeerGroupOp {
                         maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
                         announce_rpki_state: false,
                         local_as: None,
+                        add_path: None,
                     });
                 }
                 Ok(())
@@ -437,6 +448,18 @@ impl BgpPeerGroupOp {
             }
             BgpPeerGroupOp::ClearLocalAs { instance, name } => {
                 find_group_mut(config, instance, name)?.local_as = None;
+                Ok(())
+            }
+            BgpPeerGroupOp::SetAddPath {
+                instance,
+                name,
+                mode,
+            } => {
+                find_group_mut(config, instance, name)?.add_path = Some(*mode);
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearAddPath { instance, name } => {
+                find_group_mut(config, instance, name)?.add_path = None;
                 Ok(())
             }
             BgpPeerGroupOp::SetMaxHops {
@@ -673,6 +696,7 @@ mod tests {
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
             local_as: None,
+            add_path: None,
         }
     }
 
@@ -986,6 +1010,29 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.bgp_instances[0].peer_groups[0].local_as, None);
+    }
+
+    #[test]
+    fn set_and_clear_add_path() {
+        let mut cfg = config_with(vec![instance("r1", vec![group("pg1", 65001)])]);
+        BgpPeerGroupOp::SetAddPath {
+            instance: "r1".into(),
+            name: "pg1".into(),
+            mode: BgpAddPath::Receive,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.bgp_instances[0].peer_groups[0].add_path,
+            Some(BgpAddPath::Receive)
+        );
+        BgpPeerGroupOp::ClearAddPath {
+            instance: "r1".into(),
+            name: "pg1".into(),
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.bgp_instances[0].peer_groups[0].add_path, None);
     }
 
     #[test]

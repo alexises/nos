@@ -86,6 +86,7 @@ use std::time::{Duration, Instant};
 use ipnet::IpNet;
 use nos_proto::{AddressFamily, BgpDamping, NextHopMode, RedistributeUpdate};
 use nos_rpl::CompiledPolicy;
+use smallvec::SmallVec;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -237,6 +238,109 @@ fn learn_evpn(
     }
 }
 
+/// Every path one peer holds for a prefix, by RFC 7911 path id (0 on a
+/// session that doesn't receive ADD-PATH). One inline entry, so a table
+/// without ADD-PATH pays no extra allocation per prefix.
+type Paths = SmallVec<[(u32, RibRoute); 1]>;
+
+/// What `propagate_rs_view` last sent one route-server client for one
+/// prefix: per source path (origin, received path id), the id it was sent
+/// under and the route.
+type RsSent = HashMap<(RouteOrigin, u32), (u32, RibRoute)>;
+
+/// One peer's Adj-RIB-In.
+type PeerTable = HashMap<IpNet, Paths>;
+
+/// How many paths a peer holds, `[ipv4, ipv6]` — kept in step at every
+/// Adj-RIB-In mutation by `put_path`/`take_path`.
+type PathCounts = [u32; 2];
+
+fn family_index(prefix: IpNet) -> usize {
+    usize::from(prefix.addr().is_ipv6())
+}
+
+fn get_path(table: &PeerTable, prefix: IpNet, id: u32) -> Option<&RibRoute> {
+    table
+        .get(&prefix)?
+        .iter()
+        .find(|(i, _)| *i == id)
+        .map(|(_, r)| r)
+}
+
+/// Stores path `id` of `prefix` (RFC 7911 §5: a new advertisement for the
+/// same path id replaces the old one).
+fn put_path(
+    table: &mut PeerTable,
+    counts: &mut PathCounts,
+    prefix: IpNet,
+    id: u32,
+    route: RibRoute,
+) {
+    let paths = table.entry(prefix).or_default();
+    if let Some((_, old)) = paths.iter_mut().find(|(i, _)| *i == id) {
+        *old = route;
+    } else {
+        paths.push((id, route));
+        counts[family_index(prefix)] += 1;
+    }
+}
+
+/// Removes path `id` of `prefix`, if held — an unknown id is a no-op (RFC
+/// 7911 §5).
+fn take_path(
+    table: &mut PeerTable,
+    counts: &mut PathCounts,
+    prefix: IpNet,
+    id: u32,
+) -> Option<RibRoute> {
+    let paths = table.get_mut(&prefix)?;
+    let pos = paths.iter().position(|(i, _)| *i == id)?;
+    let (_, route) = paths.remove(pos);
+    if paths.is_empty() {
+        table.remove(&prefix);
+    }
+    counts[family_index(prefix)] -= 1;
+    Some(route)
+}
+
+/// The path id of entry `i` of an NLRI list whose ids are index-aligned in
+/// `ids` — empty without ADD-PATH, which is path id 0.
+fn path_id_at(ids: &[u32], i: usize) -> u32 {
+    ids.get(i).copied().unwrap_or(0)
+}
+
+/// Every `(prefix, path id)` an UPDATE withdraws, legacy and MP alike.
+fn withdrawn_paths(update: &UpdateMessage) -> Vec<(IpNet, u32)> {
+    let legacy = update
+        .withdrawn_routes
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (IpNet::V4(*p), path_id_at(&update.withdrawn_path_ids, i)));
+    let mp = update.mp_unreach.iter().flat_map(|u| {
+        u.withdrawn
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (*p, path_id_at(&u.withdrawn_path_ids, i)))
+    });
+    legacy.chain(mp).collect()
+}
+
+/// Every `(prefix, path id)` an UPDATE announces, legacy and MP alike.
+fn announced_paths(update: &UpdateMessage) -> Vec<(IpNet, u32)> {
+    let legacy = update
+        .nlri
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (IpNet::V4(*p), path_id_at(&update.nlri_path_ids, i)));
+    let mp = update.mp_reach.iter().flat_map(|m| {
+        m.nlri
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (*p, path_id_at(&m.nlri_path_ids, i)))
+    });
+    legacy.chain(mp).collect()
+}
+
 /// Applies one learned NLRI to a peer's Adj-RIB-In, shared by an UPDATE's
 /// plain IPv4 NLRI and its RFC 4760 `MP_REACH_NLRI`, which differ only in
 /// where the next-hop comes from.
@@ -244,21 +348,24 @@ fn learn_evpn(
 /// A rejected prefix is *removed* rather than skipped — a policy that now
 /// rejects it must not leave an earlier, now-superseded copy behind — and is
 /// `touched` either way so best-path selection re-runs for it.
+// ponytail: damping stays keyed by (peer, prefix), so a flap of any one
+// ADD-PATH path penalises the prefix from that peer; key it by path id too
+// if per-path damping is ever needed.
 #[allow(clippy::too_many_arguments)]
 fn learn_prefix(
-    table: &mut HashMap<IpNet, RibRoute>,
-    v6_count: &mut u32,
+    table: &mut PeerTable,
+    counts: &mut PathCounts,
     damping: &mut Damping,
     touched: &mut HashSet<IpNet>,
     peer: (IpAddr, u32),
-    prefix: IpNet,
+    (prefix, id): (IpNet, u32),
     candidate: RibRoute,
     import_policy: &CompiledPolicy,
 ) {
     let (from, _) = peer;
     match apply_policy(prefix, candidate, import_policy, Some(peer)) {
         Some(mut route) => {
-            if let Some(old) = table.get(&prefix) {
+            if let Some(old) = get_path(table, prefix, id) {
                 // An RPKI state change alone is no flap (#17).
                 let same = RibRoute {
                     received_at: old.received_at,
@@ -276,20 +383,17 @@ fn learn_prefix(
             }
             info!(
                 peer = %from,
+                path_id = id,
                 atomic_aggregate = route.atomic_aggregate,
                 aggregator = ?route.aggregator.map(|a| (a.asn, a.router_id)),
                 validation_state = ?route.validation_state,
+                communities = ?route.communities,
                 "bgp: learned route for {prefix} into adj-rib-in"
             );
-            if table.insert(prefix, route).is_none() && prefix.addr().is_ipv6() {
-                *v6_count += 1;
-            }
+            put_path(table, counts, prefix, id, route);
         }
         None => {
-            if table.remove(&prefix).is_some() {
-                if prefix.addr().is_ipv6() {
-                    *v6_count -= 1;
-                }
+            if take_path(table, counts, prefix, id).is_some() {
                 damping.flap(from, prefix, WITHDRAW_PENALTY, Instant::now());
             }
         }
@@ -416,10 +520,8 @@ fn ov_state(
 /// `MP_REACH_NLRI`/`MP_UNREACH_NLRI`, `false` = legacy plain NLRI — see
 /// `fsm::outbound_update_to_message`), mirroring `AdvertisedRoute::use_mp`.
 /// `Withdraw`'s trailing `Option<u32>` is the RFC 7911 ADD-PATH identifier
-/// being withdrawn — `Some` only ever comes from
-/// `BgpRib::propagate_rs_view`'s per-source fan-out to a
-/// `route_server_client` peer; every other withdrawal path always sends
-/// `None` (no ADD-PATH in use).
+/// being withdrawn — `Some` exactly toward a peer we send ADD-PATH to for
+/// that family (`PeerOutbox::add_path_tx`), `None` otherwise.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutboundUpdate {
     Announce(AdvertisedRoute),
@@ -478,11 +580,10 @@ pub struct AdvertisedRoute {
     /// Transitive: forwarded unchanged to every eligible peer.
     pub atomic_aggregate: bool,
     pub aggregator: Option<message::Aggregator>,
-    /// RFC 7911 ADD-PATH identifier — `Some` only when
-    /// `BgpRib::propagate_rs_view` is sending one of several concurrent
-    /// paths for the same prefix to a `route_server_client` peer that
-    /// negotiated ADD-PATH for this family. `None` for every ordinary
-    /// single-best-path advertisement.
+    /// RFC 7911 ADD-PATH identifier — `Some` exactly toward a peer we send
+    /// ADD-PATH to for this family: one of a route-server client's paths
+    /// (`BgpRib::propagate_rs_view`), or 1 for the best path toward any
+    /// other such peer (`best_path_id`). `None` without ADD-PATH.
     pub path_id: Option<u32>,
 }
 
@@ -528,11 +629,11 @@ struct PeerOutbox {
     announce_rpki_state: bool,
     /// See `BgpRib::peer_asns`.
     remote_asn: u32,
-    /// Address families this peer negotiated RFC 7911 ADD-PATH for (always
-    /// empty unless `is_rs_client`) — gates `propagate_rs_view`'s per-source
-    /// multi-path fan-out; a family missing here still gets the ordinary
-    /// single-best-path advertisement like any other peer.
-    add_path_afs: HashSet<AddressFamily>,
+    /// Address families we send RFC 7911 ADD-PATH ids to this peer for
+    /// (`fsm::negotiate_add_path`). Every NLRI of such a family must carry
+    /// one, so the plain fan-out (`best_path_id`) gives the best path id 1,
+    /// or leaves a route-server client to `propagate_rs_view`.
+    add_path_tx: HashSet<AddressFamily>,
     /// This peer-group's resolved export policy — always present, `deny-all`
     /// by default (see root `CLAUDE.md`'s "Default-deny rollout impact"),
     /// consulted by `build_advertisement`.
@@ -574,11 +675,12 @@ pub struct BgpRib {
     /// unwrapped to `router_id` when unset) — prepended to `CLUSTER_LIST` on
     /// reflection and checked for loop-prevention on receipt.
     cluster_id: Ipv4Addr,
-    adj_rib_in: HashMap<IpAddr, HashMap<IpNet, RibRoute>>,
-    /// How many of each peer's `adj_rib_in` prefixes are IPv6 (the rest are
-    /// IPv4) — kept in step at every `adj_rib_in` mutation so the RFC 4486
+    /// Every path each peer sent per prefix (several with RFC 7911 ADD-PATH).
+    adj_rib_in: HashMap<IpAddr, PeerTable>,
+    /// How many paths each peer's `adj_rib_in` holds per family — kept in
+    /// step at every mutation (`put_path`/`take_path`) so the RFC 4486
     /// maximum-prefix check is O(1) per UPDATE, not a table scan.
-    v6_counts: HashMap<IpAddr, u32>,
+    path_counts: HashMap<IpAddr, PathCounts>,
     /// Each peer's maximum-prefix limits (`set_peer_max_prefix`), and the
     /// `(peer, family)` pairs already warned about for a `warning_only` limit,
     /// so the warning is logged once per crossing.
@@ -589,9 +691,9 @@ pub struct BgpRib {
     // import policy (RPL's `Input` is prefix-shaped) or re-advertisement, since
     // nothing consumes EVPN routes yet. Add a Loc-RIB when a MAC-VRF does.
     evpn_adj_rib_in: HashMap<IpAddr, HashMap<EvpnNlri, EvpnRoute>>,
-    /// RFC 7313: prefixes in a peer's Adj-RIB-In marked stale by a `BoRR` and
-    /// not yet re-announced; purged by the matching `EoRR`.
-    stale: HashMap<IpAddr, HashSet<IpNet>>,
+    /// RFC 7313: paths (prefix, path id) in a peer's Adj-RIB-In marked stale
+    /// by a `BoRR` and not yet re-announced; purged by the matching `EoRR`.
+    stale: HashMap<IpAddr, HashSet<(IpNet, u32)>>,
     /// The EVPN twin of `stale`, filled only by a graceful restart.
     evpn_stale: HashMap<IpAddr, HashSet<EvpnNlri>>,
     /// RFC 4724: each peer's last graceful restart capability
@@ -663,9 +765,9 @@ pub struct BgpRib {
     /// `this.bgp.peer_as`. Kept across resets like damping params.
     peer_asns: HashMap<IpAddr, u32>,
     /// Per `route_server_client` peer, per prefix, the path id and last-sent
-    /// snapshot of every source currently advertised to it — see
-    /// `propagate_rs_view`.
-    rs_sent: HashMap<(IpAddr, IpNet), HashMap<RouteOrigin, (u32, RibRoute)>>,
+    /// snapshot of every source path (origin, received path id) currently
+    /// advertised to it — see `propagate_rs_view`.
+    rs_sent: HashMap<(IpAddr, IpNet), RsSent>,
     /// Per `route_server_client` peer, per prefix, the next path id to
     /// allocate — monotonic, never recycled (see `propagate_rs_view`'s doc
     /// comment).
@@ -709,7 +811,7 @@ impl BgpRib {
             local_router_id: Ipv4Addr::UNSPECIFIED,
             cluster_id: Ipv4Addr::UNSPECIFIED,
             adj_rib_in: HashMap::new(),
-            v6_counts: HashMap::new(),
+            path_counts: HashMap::new(),
             max_prefix: HashMap::new(),
             max_prefix_warned: HashSet::new(),
             evpn_adj_rib_in: HashMap::new(),
@@ -773,16 +875,18 @@ impl BgpRib {
         let local = self.confed_id.unwrap_or(self.local_asn);
         let mut touched = HashSet::new();
         for table in self.adj_rib_in.values_mut() {
-            for (prefix, route) in table.iter_mut() {
-                let state = ov_state(
-                    &self.vrps,
-                    *prefix,
-                    crate::rpki::origin_as(&route.as_path, local),
-                    route.received_ov,
-                );
-                if state != route.validation_state {
-                    route.validation_state = state;
-                    touched.insert(*prefix);
+            for (prefix, paths) in table.iter_mut() {
+                for (_, route) in paths.iter_mut() {
+                    let state = ov_state(
+                        &self.vrps,
+                        *prefix,
+                        crate::rpki::origin_as(&route.as_path, local),
+                        route.received_ov,
+                    );
+                    if state != route.validation_state {
+                        route.validation_state = state;
+                        touched.insert(*prefix);
+                    }
                 }
             }
         }
@@ -930,7 +1034,7 @@ impl BgpRib {
         next_hop_mode: Option<NextHopMode>,
         is_rr_client: bool,
         is_rs_client: bool,
-        add_path_afs: HashSet<AddressFamily>,
+        add_path_tx: HashSet<AddressFamily>,
         export_policy: Arc<CompiledPolicy>,
         tx: mpsc::UnboundedSender<OutboundUpdate>,
     ) {
@@ -952,7 +1056,7 @@ impl BgpRib {
                 is_rr_client,
                 is_rs_client,
                 remote_asn,
-                add_path_afs,
+                add_path_tx,
                 export_policy,
             },
         );
@@ -977,6 +1081,9 @@ impl BgpRib {
         let is_rs_client = outbox.is_rs_client;
         let mut advertised = HashSet::new();
         for (prefix, best) in &self.loc_rib {
+            let Some(path_id) = best_path_id(outbox, *prefix) else {
+                continue;
+            };
             if self.suppressed_by_aggregate(*prefix) {
                 continue;
             }
@@ -990,7 +1097,9 @@ impl BgpRib {
                 source_is_rr_client,
                 self.cluster_id,
             ) {
-                let _ = outbox.tx.send(OutboundUpdate::Announce(adv));
+                let _ = outbox
+                    .tx
+                    .send(OutboundUpdate::Announce(AdvertisedRoute { path_id, ..adv }));
                 advertised.insert(*prefix);
             }
         }
@@ -1077,6 +1186,9 @@ impl BgpRib {
             if family_of(*prefix) != family || self.suppressed_by_aggregate(*prefix) {
                 continue;
             }
+            let Some(path_id) = best_path_id(outbox, *prefix) else {
+                continue;
+            };
             let source_is_rr_client = self.source_is_rr_client(best);
             if let Some(adv) = build_advertisement(
                 *prefix,
@@ -1087,7 +1199,38 @@ impl BgpRib {
                 source_is_rr_client,
                 self.cluster_id,
             ) {
-                let _ = outbox.tx.send(OutboundUpdate::Announce(adv));
+                let _ = outbox
+                    .tx
+                    .send(OutboundUpdate::Announce(AdvertisedRoute { path_id, ..adv }));
+            }
+        }
+        // A route-server client's ADD-PATH view: what `propagate_rs_view`
+        // last sent, under the same ids.
+        for ((p, prefix), sent) in &self.rs_sent {
+            if *p != peer || family_of(*prefix) != family {
+                continue;
+            }
+            for ((origin, _), (id, route)) in sent {
+                let source_is_rr_client = match origin {
+                    RouteOrigin::Peer(addr) => {
+                        self.peer_outboxes.get(addr).is_some_and(|o| o.is_rr_client)
+                    }
+                    RouteOrigin::Local => false,
+                };
+                if let Some(adv) = build_advertisement(
+                    *prefix,
+                    route,
+                    peer,
+                    outbox,
+                    self.local_asn,
+                    source_is_rr_client,
+                    self.cluster_id,
+                ) {
+                    let _ = outbox.tx.send(OutboundUpdate::Announce(AdvertisedRoute {
+                        path_id: Some(*id),
+                        ..adv
+                    }));
+                }
             }
         }
         if enhanced {
@@ -1102,7 +1245,11 @@ impl BgpRib {
             return;
         };
         let set = self.stale.entry(peer).or_default();
-        set.extend(table.keys().copied().filter(|p| family_of(*p) == family));
+        for (prefix, paths) in table {
+            if family_of(*prefix) == family {
+                set.extend(paths.iter().map(|(id, _)| (*prefix, *id)));
+            }
+        }
     }
 
     /// RFC 7313 `EoRR` received: withdraw every `family` route from `peer`
@@ -1112,24 +1259,17 @@ impl BgpRib {
         let Some(set) = self.stale.get_mut(&peer) else {
             return 0;
         };
-        let purge: Vec<IpNet> = set
+        let purge: Vec<(IpNet, u32)> = set
             .iter()
             .copied()
-            .filter(|p| family_of(*p) == family)
+            .filter(|(p, _)| family_of(*p) == family)
             .collect();
-        set.retain(|p| family_of(*p) != family);
+        set.retain(|(p, _)| family_of(*p) != family);
         let mut count = 0;
-        for prefix in purge {
-            if self
-                .adj_rib_in
-                .get_mut(&peer)
-                .is_some_and(|t| t.remove(&prefix).is_some())
-            {
-                if prefix.addr().is_ipv6() {
-                    *self.v6_counts.entry(peer).or_default() -= 1;
-                }
+        for (prefix, id) in purge {
+            if self.remove_path(peer, prefix, id).is_some() {
                 count += 1;
-                info!(peer = %peer, %prefix, "bgp: purged stale route");
+                info!(peer = %peer, %prefix, path_id = id, "bgp: purged stale route");
                 self.recompute_and_propagate(prefix);
             }
         }
@@ -1166,10 +1306,10 @@ impl BgpRib {
     /// Whether `peer` still has a route marked stale, of `family` or (with
     /// `None`) of any family.
     fn has_stale(&self, peer: IpAddr, family: Option<AddressFamily>) -> bool {
-        let ip = self
-            .stale
-            .get(&peer)
-            .is_some_and(|s| s.iter().any(|p| family.is_none_or(|f| family_of(*p) == f)));
+        let ip = self.stale.get(&peer).is_some_and(|s| {
+            s.iter()
+                .any(|(p, _)| family.is_none_or(|f| family_of(*p) == f))
+        });
         let evpn = family.is_none_or(|f| f == AddressFamily::L2vpnEvpn)
             && self.evpn_stale.get(&peer).is_some_and(|s| !s.is_empty());
         ip || evpn
@@ -1336,14 +1476,24 @@ impl BgpRib {
         self.max_prefix.insert(peer, limits);
     }
 
-    /// Accepted (post-import-policy) prefixes held from `peer`: ipv4, ipv6,
-    /// l2vpn-evpn.
+    /// Accepted (post-import-policy) paths held from `peer` — prefixes, or
+    /// more with RFC 7911 ADD-PATH: ipv4, ipv6, l2vpn-evpn.
     pub fn accepted_prefixes(&self, peer: IpAddr) -> [u32; 3] {
         let len = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-        let total = len(self.adj_rib_in.get(&peer).map_or(0, HashMap::len));
-        let v6 = self.v6_counts.get(&peer).copied().unwrap_or(0);
+        let [v4, v6] = self.path_counts.get(&peer).copied().unwrap_or_default();
         let evpn = len(self.evpn_adj_rib_in.get(&peer).map_or(0, HashMap::len));
-        [total - v6, v6, evpn]
+        [v4, v6, evpn]
+    }
+
+    /// Removes path `id` of `prefix` from `peer`'s Adj-RIB-In, keeping the
+    /// path counters in step.
+    fn remove_path(&mut self, peer: IpAddr, prefix: IpNet, id: u32) -> Option<RibRoute> {
+        take_path(
+            self.adj_rib_in.get_mut(&peer)?,
+            self.path_counts.entry(peer).or_default(),
+            prefix,
+            id,
+        )
     }
 
     /// RFC 4486 §4: the first address family whose accepted-prefix count from
@@ -1472,7 +1622,7 @@ impl BgpRib {
             self.retain_as_stale(peer, gr, &retained);
             return;
         }
-        self.v6_counts.remove(&peer);
+        self.path_counts.remove(&peer);
         self.stale.remove(&peer);
         self.evpn_stale.remove(&peer);
         self.gr_deadline.remove(&peer);
@@ -1505,23 +1655,18 @@ impl BgpRib {
         let mut dropped = Vec::new();
         if let Some(table) = self.adj_rib_in.get(&peer) {
             let stale = self.stale.entry(peer).or_default();
-            for prefix in table.keys() {
-                if families.contains(&family_of(*prefix)) {
-                    stale.insert(*prefix);
-                } else {
-                    dropped.push(*prefix);
+            for (prefix, paths) in table {
+                for (id, _) in paths {
+                    if families.contains(&family_of(*prefix)) {
+                        stale.insert((*prefix, *id));
+                    } else {
+                        dropped.push((*prefix, *id));
+                    }
                 }
             }
         }
-        for prefix in dropped {
-            if self
-                .adj_rib_in
-                .get_mut(&peer)
-                .is_some_and(|t| t.remove(&prefix).is_some())
-            {
-                if prefix.addr().is_ipv6() {
-                    *self.v6_counts.entry(peer).or_default() -= 1;
-                }
+        for (prefix, id) in dropped {
+            if self.remove_path(peer, prefix, id).is_some() {
                 self.recompute_and_propagate(prefix);
             }
         }
@@ -1593,39 +1738,16 @@ impl BgpRib {
                 stale.remove(n);
             }
         }
-        // RFC 7313 / RFC 4724: any prefix the peer mentions again is no
+        let withdrawn = withdrawn_paths(update);
+        let announced = announced_paths(update);
+        // RFC 7313 / RFC 4724: any path the peer mentions again is no
         // longer stale.
         if let Some(stale) = self.stale.get_mut(&from) {
-            for p in &update.nlri {
-                stale.remove(&IpNet::V4(*p));
-            }
-            for p in &update.withdrawn_routes {
-                stale.remove(&IpNet::V4(*p));
-            }
-            for mp in &update.mp_reach {
-                for p in &mp.nlri {
-                    stale.remove(p);
-                }
-            }
-            for mp in &update.mp_unreach {
-                for p in &mp.withdrawn {
-                    stale.remove(p);
-                }
+            for path in withdrawn.iter().chain(&announced) {
+                stale.remove(path);
             }
         }
 
-        let withdrawn: Vec<IpNet> = update
-            .withdrawn_routes
-            .iter()
-            .copied()
-            .map(IpNet::V4)
-            .chain(
-                update
-                    .mp_unreach
-                    .iter()
-                    .flat_map(|u| u.withdrawn.iter().copied()),
-            )
-            .collect();
         for nlri in update.mp_unreach.iter().flat_map(|u| &u.evpn) {
             // mac_mobility's record of this route's (vni, mac) is
             // deliberately left alone here too — see peer_disconnected.
@@ -1637,18 +1759,12 @@ impl BgpRib {
                 info!(peer = %from, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
             }
         }
-        if !withdrawn.is_empty() {
-            let table = self.adj_rib_in.entry(from).or_default();
-            let v6_count = self.v6_counts.entry(from).or_default();
-            for prefix in &withdrawn {
-                if table.remove(prefix).is_some() {
-                    if prefix.addr().is_ipv6() {
-                        *v6_count -= 1;
-                    }
-                    touched.insert(*prefix);
-                    self.damping
-                        .flap(from, *prefix, WITHDRAW_PENALTY, Instant::now());
-                }
+        for &(prefix, id) in &withdrawn {
+            if self.remove_path(from, prefix, id).is_some() {
+                debug!(peer = %from, path_id = id, "bgp: withdrew path for {prefix} from adj-rib-in");
+                touched.insert(prefix);
+                self.damping
+                    .flap(from, prefix, WITHDRAW_PENALTY, Instant::now());
             }
         }
 
@@ -1681,7 +1797,7 @@ impl BgpRib {
                     peer = %from, as_path = ?attrs.as_path,
                     "treating bgp update as withdraw: as_path has confederation segments from outside the confederation"
                 );
-                self.withdraw_announced(from, update, &mut touched);
+                self.withdraw_announced(from, update, &announced, &mut touched);
             } else if looped {
                 // RFC 4271 §9.1.2: a looped route is unfeasible, so it
                 // replaces (implicitly withdraws) an earlier one.
@@ -1689,23 +1805,23 @@ impl BgpRib {
                     peer = %from, as_path = ?attrs.as_path,
                     "dropping bgp update: as_path already contains our own asn (loop prevention)"
                 );
-                self.withdraw_announced(from, update, &mut touched);
+                self.withdraw_announced(from, update, &announced, &mut touched);
             } else if attrs.cluster_list.contains(&self.cluster_id) {
                 warn!(
                     peer = %from, cluster_list = ?attrs.cluster_list,
                     "dropping bgp update: cluster_list already contains our own cluster-id (rfc 4456 reflection loop prevention)"
                 );
-                self.withdraw_announced(from, update, &mut touched);
+                self.withdraw_announced(from, update, &announced, &mut touched);
             } else if attrs.originator_id == Some(self.local_router_id) {
                 warn!(
                     peer = %from, originator_id = ?attrs.originator_id,
                     "dropping bgp update: originator_id is our own router-id (rfc 4456 reflection loop prevention)"
                 );
-                self.withdraw_announced(from, update, &mut touched);
+                self.withdraw_announced(from, update, &announced, &mut touched);
             } else {
                 let mut evpn_recheck: Vec<(u32, [u8; 6])> = Vec::new();
                 let table = self.adj_rib_in.entry(from).or_default();
-                let v6_count = self.v6_counts.entry(from).or_default();
+                let counts = self.path_counts.entry(from).or_default();
                 // This UPDATE adds at most this many entries — reserving
                 // once lets the per-peer table grow in fewer, larger steps
                 // on the way up to a full table, instead of rehashing on
@@ -1756,7 +1872,7 @@ impl BgpRib {
                     &base_route.as_path,
                     self.confed_id.unwrap_or(self.local_asn),
                 );
-                for prefix in &update.nlri {
+                for (i, prefix) in update.nlri.iter().enumerate() {
                     let candidate = RibRoute {
                         next_hop: Some(IpAddr::V4(attrs.next_hop)),
                         validation_state: ov_state(
@@ -1769,17 +1885,17 @@ impl BgpRib {
                     };
                     learn_prefix(
                         table,
-                        v6_count,
+                        counts,
                         &mut self.damping,
                         &mut touched,
                         (from, peer_as),
-                        IpNet::V4(*prefix),
+                        (IpNet::V4(*prefix), path_id_at(&update.nlri_path_ids, i)),
                         candidate,
                         import_policy,
                     );
                 }
                 for mp in &update.mp_reach {
-                    for prefix in &mp.nlri {
+                    for (i, prefix) in mp.nlri.iter().enumerate() {
                         let candidate = RibRoute {
                             next_hop: Some(mp.next_hop),
                             validation_state: ov_state(&self.vrps, *prefix, origin_as, received_ov),
@@ -1787,11 +1903,11 @@ impl BgpRib {
                         };
                         learn_prefix(
                             table,
-                            v6_count,
+                            counts,
                             &mut self.damping,
                             &mut touched,
                             (from, peer_as),
-                            *prefix,
+                            (*prefix, path_id_at(&mp.nlri_path_ids, i)),
                             candidate,
                             import_policy,
                         );
@@ -1831,22 +1947,13 @@ impl BgpRib {
         &mut self,
         from: IpAddr,
         update: &UpdateMessage,
+        announced: &[(IpNet, u32)],
         touched: &mut HashSet<IpNet>,
     ) {
-        let announced = update
-            .nlri
-            .iter()
-            .copied()
-            .map(IpNet::V4)
-            .chain(update.mp_reach.iter().flat_map(|m| m.nlri.iter().copied()));
-        if let Some(table) = self.adj_rib_in.get_mut(&from) {
-            for prefix in announced {
-                if table.remove(&prefix).is_some() {
-                    if prefix.addr().is_ipv6() {
-                        *self.v6_counts.entry(from).or_default() -= 1;
-                    }
-                    touched.insert(prefix);
-                }
+        for &(prefix, id) in announced {
+            if self.remove_path(from, prefix, id).is_some() {
+                debug!(peer = %from, path_id = id, "bgp: withdrew path for {prefix} from adj-rib-in");
+                touched.insert(prefix);
             }
         }
         if let Some(table) = self.evpn_adj_rib_in.get_mut(&from) {
@@ -1970,11 +2077,11 @@ impl BgpRib {
         // `best_path`'s pick doesn't change.
         self.propagate_rs_view(prefix);
 
-        // Bounded by one redistributed candidate plus at most one per peer
-        // — sizing this avoids the reallocate-on-every-push churn this
-        // always-tiny, rebuilt-per-touched-prefix scratch Vec used to pay.
-        let mut candidates: Vec<(RibRoute, Option<IpAddr>)> =
-            Vec::with_capacity(1 + self.adj_rib_in.len());
+        // Sized for one redistributed candidate plus one path per peer —
+        // avoids the reallocate-on-every-push churn this always-tiny,
+        // rebuilt-per-touched-prefix scratch Vec used to pay. ADD-PATH
+        // peers add every path they sent.
+        let mut candidates: Vec<Candidate> = Vec::with_capacity(1 + self.adj_rib_in.len());
         if let Some(route) = self.redistributed.get(&prefix) {
             candidates.push((route.clone(), None));
         }
@@ -1985,8 +2092,8 @@ impl BgpRib {
             if self.damping.is_suppressed(*peer, &prefix) {
                 continue;
             }
-            if let Some(route) = table.get(&prefix) {
-                candidates.push((route.clone(), Some(*peer)));
+            for (id, route) in table.get(&prefix).into_iter().flatten() {
+                candidates.push((route.clone(), Some((*peer, *id))));
             }
         }
         // RFC 4271 §9.1.2: an unresolvable next hop is unfeasible — out of
@@ -2075,6 +2182,9 @@ impl BgpRib {
         peers.extend(self.peer_outboxes.keys().copied());
         for &peer in &peers {
             let outbox = self.peer_outboxes.get(&peer).expect("just listed");
+            let Some(path_id) = best_path_id(outbox, prefix) else {
+                continue;
+            };
             let advertisement = best.filter(|_| !suppressed).and_then(|route| {
                 build_advertisement(
                     prefix,
@@ -2090,7 +2200,9 @@ impl BgpRib {
             match advertisement {
                 Some(adv) => {
                     let outbox = self.peer_outboxes.get(&peer).expect("just listed");
-                    let _ = outbox.tx.send(OutboundUpdate::Announce(adv));
+                    let _ = outbox
+                        .tx
+                        .send(OutboundUpdate::Announce(AdvertisedRoute { path_id, ..adv }));
                     self.adj_rib_out.entry(peer).or_default().insert(prefix);
                 }
                 None => {
@@ -2100,7 +2212,7 @@ impl BgpRib {
                             let _ = outbox.tx.send(OutboundUpdate::Withdraw(
                                 prefix,
                                 outbox.mp_bgp_negotiated,
-                                None,
+                                path_id,
                             ));
                         }
                     }
@@ -2119,11 +2231,10 @@ impl BgpRib {
     /// (a route-server-client is always eBGP, so the iBGP reflection branch
     /// never triggers) and only overrides the resulting `path_id`.
     ///
-    /// `ponytail:` no inbound multi-path support — `adj_rib_in` still stores
-    /// at most one path per peer per prefix, so a client that itself submits
-    /// more than one path for the same prefix only ever contributes its
-    /// latest one here. Add per-path `adj_rib_in` keying if a client needs
-    /// to submit multiple paths itself.
+    /// A source is one path of one peer (several when that peer sends
+    /// ADD-PATH itself), so a client submitting several paths has each
+    /// passed on under its own id. A path that stops being advertisable (an
+    /// export policy now rejects it) has its id withdrawn.
     ///
     /// Deliberately *not* filtered by `next_hop_feasible`: RFC 7947 §2.2.2
     /// transparency means a client sees every other client's path as
@@ -2136,7 +2247,7 @@ impl BgpRib {
         let rs_peers: Vec<IpAddr> = self
             .peer_outboxes
             .iter()
-            .filter(|(_, o)| o.is_rs_client && o.add_path_afs.contains(&family_of(prefix)))
+            .filter(|(_, o)| o.is_rs_client && o.add_path_tx.contains(&family_of(prefix)))
             .map(|(addr, _)| *addr)
             .collect();
         if rs_peers.is_empty() {
@@ -2144,16 +2255,16 @@ impl BgpRib {
         }
 
         for peer in rs_peers {
-            let mut current: HashMap<RouteOrigin, RibRoute> = HashMap::new();
+            let mut current: HashMap<(RouteOrigin, u32), RibRoute> = HashMap::new();
             if let Some(route) = self.redistributed.get(&prefix) {
-                current.insert(RouteOrigin::Local, route.clone());
+                current.insert((RouteOrigin::Local, 0), route.clone());
             }
             for (src, table) in &self.adj_rib_in {
                 if *src == peer || self.damping.is_suppressed(*src, &prefix) {
                     continue; // never echo the destination's own contribution
                 }
-                if let Some(route) = table.get(&prefix) {
-                    current.insert(RouteOrigin::Peer(*src), route.clone());
+                for (id, route) in table.get(&prefix).into_iter().flatten() {
+                    current.insert((RouteOrigin::Peer(*src), *id), route.clone());
                 }
             }
 
@@ -2164,7 +2275,7 @@ impl BgpRib {
             let outbox_tx = self.peer_outboxes[&peer].tx.clone();
             let mp_bgp_negotiated = self.peer_outboxes[&peer].mp_bgp_negotiated;
 
-            let stale: Vec<RouteOrigin> = sent
+            let stale: Vec<(RouteOrigin, u32)> = sent
                 .keys()
                 .filter(|origin| !current.contains_key(origin))
                 .copied()
@@ -2182,7 +2293,7 @@ impl BgpRib {
                 if sent.get(&origin).is_some_and(|(_, last)| *last == route) {
                     continue; // unchanged since last sent to this peer
                 }
-                let source_is_rr_client = match origin {
+                let source_is_rr_client = match origin.0 {
                     RouteOrigin::Peer(addr) => self
                         .peer_outboxes
                         .get(&addr)
@@ -2199,6 +2310,14 @@ impl BgpRib {
                     source_is_rr_client,
                     self.cluster_id,
                 ) else {
+                    // No longer advertisable: the client must not keep it.
+                    if let Some((id, _)) = sent.remove(&origin) {
+                        let _ = outbox_tx.send(OutboundUpdate::Withdraw(
+                            prefix,
+                            mp_bgp_negotiated,
+                            Some(id),
+                        ));
+                    }
                     continue;
                 };
                 let id = sent.get(&origin).map_or_else(
@@ -2293,14 +2412,14 @@ pub type Hops = (Vec<IpAddr>, Option<IpAddr>);
 /// there is no such candidate (a single path, or every other path shares a
 /// primary next hop, which a backup route couldn't protect against anyway).
 fn runner_up_next_hop(
-    candidates: &[(RibRoute, Option<IpAddr>)],
+    candidates: &[Candidate],
     primary: &[IpAddr],
     igp: &HashMap<IpNet, u32>,
 ) -> Option<IpAddr> {
     if candidates.len() < 2 {
         return None;
     }
-    let others: Vec<(RibRoute, Option<IpAddr>)> = candidates
+    let others: Vec<Candidate> = candidates
         .iter()
         .filter(|(r, _)| r.next_hop.is_some_and(|nh| !primary.contains(&nh)))
         .cloned()
@@ -2328,14 +2447,14 @@ fn igp_cost(igp: &HashMap<IpNet, u32>, next_hop: Option<IpAddr>) -> u32 {
     next_hop.and_then(|addr| igp_lookup(igp, addr)).unwrap_or(0)
 }
 
+/// One best-path candidate: the route and, for a peer-learned one, its
+/// source peer and RFC 7911 path id (0 without ADD-PATH) — `None` for a
+/// locally-redistributed route. Used only for the final tiebreak (step 10).
+type Candidate = (RibRoute, Option<(IpAddr, u32)>);
+
 /// The full RFC 4271 §9.1.2.2 decision process — see the module doc
-/// comment for the ten-step order. `candidates` is `(route, source_peer)`
-/// — `source_peer` is `None` for a locally-redistributed route, used only
-/// for the final tiebreak (step 10).
-fn best_path(
-    candidates: &[(RibRoute, Option<IpAddr>)],
-    igp: &HashMap<IpNet, u32>,
-) -> Option<RibRoute> {
+/// comment for the ten-step order.
+fn best_path(candidates: &[Candidate], igp: &HashMap<IpNet, u32>) -> Option<RibRoute> {
     candidates
         .iter()
         .max_by(|a, b| decision_cmp(a, b, igp))
@@ -2345,8 +2464,8 @@ fn best_path(
 /// `best_path`'s comparator over two `(route, source_peer)` candidates:
 /// `Greater` means `a` is preferred.
 fn decision_cmp(
-    (a, a_peer): &(RibRoute, Option<IpAddr>),
-    (b, b_peer): &(RibRoute, Option<IpAddr>),
+    (a, a_peer): &Candidate,
+    (b, b_peer): &Candidate,
     igp: &HashMap<IpNet, u32>,
 ) -> std::cmp::Ordering {
     multipath_cmp(a, b, igp)
@@ -2367,13 +2486,13 @@ fn decision_cmp(
             }
         })
         .then_with(|| {
-            // Step 10: lowest peer address, the final deterministic
-            // tiebreak — reverse the comparison since `max_by`
-            // favors the greater element, and `None` (a local
-            // route) never reaches this arm (already decided by
-            // step 2).
+            // Step 10: lowest peer address, then lowest RFC 7911 path
+            // id (two paths of one peer tie on steps 9 and 10), so the
+            // order is total — reverse the comparison since `max_by`
+            // favors the greater element, and `None` (a local route)
+            // never reaches this arm (already decided by step 2).
             match (a_peer, b_peer) {
-                (Some(a_addr), Some(b_addr)) => b_addr.cmp(a_addr),
+                (Some(a_src), Some(b_src)) => b_src.cmp(a_src),
                 _ => std::cmp::Ordering::Equal,
             }
         })
@@ -2409,7 +2528,7 @@ fn multipath_cmp(a: &RibRoute, b: &RibRoute, igp: &HashMap<IpNet, u32>) -> std::
 /// (steps 8–10 between the ties), capped at `max`, then sorted so the push
 /// diff is stable. Empty when `best` has no next hop (a `Local` route).
 fn multipath_next_hops(
-    candidates: &[(RibRoute, Option<IpAddr>)],
+    candidates: &[Candidate],
     best: &RibRoute,
     igp: &HashMap<IpNet, u32>,
     max: usize,
@@ -2417,7 +2536,7 @@ fn multipath_next_hops(
     let Some(best_hop) = best.next_hop else {
         return Vec::new();
     };
-    let mut ties: Vec<&(RibRoute, Option<IpAddr>)> = candidates
+    let mut ties: Vec<&Candidate> = candidates
         .iter()
         .filter(|(r, _)| {
             r.next_hop.is_some()
@@ -2439,6 +2558,22 @@ fn multipath_next_hops(
     }
     hops.sort_unstable();
     hops
+}
+
+/// The RFC 7911 path id the plain single-best-path fan-out sends `prefix`
+/// under toward `outbox`'s peer: `Some(None)` without ADD-PATH send for
+/// that family, `Some(Some(1))` with it (every NLRI must then carry an id),
+/// and `None` for a route-server client, whose ADD-PATH view
+/// (`propagate_rs_view`) already includes the best path.
+#[allow(clippy::option_option)] // skip / no id / id: three distinct cases
+fn best_path_id(outbox: &PeerOutbox, prefix: IpNet) -> Option<Option<u32>> {
+    if !outbox.add_path_tx.contains(&family_of(prefix)) {
+        Some(None)
+    } else if outbox.is_rs_client {
+        None
+    } else {
+        Some(Some(1))
+    }
 }
 
 /// Decides whether `best` should be advertised to `peer` and, if so, rewrites
@@ -6381,7 +6516,7 @@ mod tests {
             });
             Arc::new(t)
         };
-        let state = |rib: &BgpRib, p| rib.adj_rib_in[&peer][&prefix(p)].validation_state;
+        let state = |rib: &BgpRib, p| rib.adj_rib_in[&peer][&prefix(p)][0].1.validation_state;
         rib.set_vrps(vrps(65001));
         let reject_invalid = nos_rpl::compile(
             "if this.bgp.validation_state == rpki.invalid:\n    reject\naccept\n",
@@ -6463,7 +6598,7 @@ mod tests {
             "the import policy sees the signalled state"
         );
         learn(&mut rib, ibgp, true, &tagged("1.2.4.0/24", Valid));
-        let held = |rib: &BgpRib, peer, p| rib.adj_rib_in[&peer][&prefix(p)].clone();
+        let held = |rib: &BgpRib, peer, p| rib.adj_rib_in[&peer][&prefix(p)][0].1.clone();
         let r = held(&rib, ibgp, "1.2.4.0/24");
         assert_eq!(r.validation_state, Valid);
         assert_eq!(r.extended_communities, vec![RT], "stripped");
@@ -6548,7 +6683,8 @@ mod tests {
         let table = rib.adj_rib_in.get(&peer);
         let count = |v6: bool| {
             table.map_or(0, |t| {
-                u32::try_from(t.keys().filter(|p| p.addr().is_ipv6() == v6).count()).unwrap()
+                let paths = t.iter().filter(|(p, _)| p.addr().is_ipv6() == v6);
+                u32::try_from(paths.map(|(_, paths)| paths.len()).sum::<usize>()).unwrap()
             })
         };
         let evpn = rib.evpn_adj_rib_in.get(&peer).map_or(0, HashMap::len);
@@ -7152,5 +7288,207 @@ mod tests {
             &ebgp_update(vec!["198.51.1.0/24"], vec![65001, 65000], "10.0.0.1"),
         );
         assert!(!rib.loc_rib.contains_key(&prefix("198.51.1.0/24")));
+    }
+
+    /// One RFC 7911 path of `prefix` from AS 65001 with path id `id`.
+    fn path_update(prefix: &str, id: u32, next_hop: &str, med: Option<u32>) -> UpdateMessage {
+        UpdateMessage {
+            nlri_path_ids: vec![id],
+            ..update_with(prefix, vec![65001], next_hop, message::Origin::Igp, med)
+        }
+    }
+
+    fn path_withdraw(prefix: &str, id: u32) -> UpdateMessage {
+        UpdateMessage {
+            withdrawn_routes: vec![prefix.parse().unwrap()],
+            withdrawn_path_ids: vec![id],
+            ..empty_update()
+        }
+    }
+
+    fn held_ids(rib: &BgpRib, peer: IpAddr, p: &str) -> Vec<u32> {
+        let mut ids: Vec<u32> = rib
+            .adj_rib_in
+            .get(&peer)
+            .and_then(|t| t.get(&prefix(p)))
+            .map(|paths| paths.iter().map(|(id, _)| *id).collect())
+            .unwrap_or_default();
+        ids.sort_unstable();
+        ids
+    }
+
+    #[test]
+    fn add_path_keeps_every_path_and_withdraws_one_by_id() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        let learn = |rib: &mut BgpRib, u: &UpdateMessage| {
+            rib.handle_update(peer, false, v4("192.0.2.1"), u, &nos_rpl::ACCEPT_ALL);
+        };
+        let best_med = |rib: &BgpRib| rib.loc_rib.get(&prefix("203.0.113.0/24")).map(|r| r.med);
+        learn(
+            &mut rib,
+            &path_update("203.0.113.0/24", 1, "10.0.0.1", Some(50)),
+        );
+        learn(
+            &mut rib,
+            &path_update("203.0.113.0/24", 2, "10.0.0.11", Some(10)),
+        );
+        assert_eq!(held_ids(&rib, peer, "203.0.113.0/24"), [1, 2]);
+        assert_eq!(best_med(&rib), Some(Some(10)));
+        // Maximum-prefix counts paths.
+        assert_eq!(rib.accepted_prefixes(peer), [2, 0, 0]);
+        assert_eq!(rib.accepted_prefixes(peer), recount(&rib, peer));
+
+        // RFC 7911 §5: an unknown path id is ignored.
+        learn(&mut rib, &path_withdraw("203.0.113.0/24", 7));
+        assert_eq!(held_ids(&rib, peer, "203.0.113.0/24"), [1, 2]);
+
+        // Withdrawing path 2 keeps path 1, which becomes the best path.
+        learn(&mut rib, &path_withdraw("203.0.113.0/24", 2));
+        assert_eq!(held_ids(&rib, peer, "203.0.113.0/24"), [1]);
+        assert_eq!(best_med(&rib), Some(Some(50)));
+        assert_eq!(rib.accepted_prefixes(peer), [1, 0, 0]);
+
+        // A re-announcement under the same id replaces the path in place.
+        learn(
+            &mut rib,
+            &path_update("203.0.113.0/24", 1, "10.0.0.1", Some(70)),
+        );
+        assert_eq!(held_ids(&rib, peer, "203.0.113.0/24"), [1]);
+        assert_eq!(best_med(&rib), Some(Some(70)));
+    }
+
+    #[test]
+    fn two_paths_of_one_peer_break_the_tie_on_path_id_and_form_multipath() {
+        let mut rib = new_rib(65000);
+        rib.set_maximum_paths(Some(2));
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, true, addr("10.0.0.254"));
+        // iBGP, so step 8 (oldest eBGP route) doesn't decide; everything
+        // else ties, so step 10 falls to the lower path id.
+        for (id, nh) in [(5, "10.0.0.5"), (3, "10.0.0.3")] {
+            rib.handle_update(
+                peer,
+                true,
+                v4("192.0.2.1"),
+                &path_update("203.0.113.0/24", id, nh, None),
+                &nos_rpl::ACCEPT_ALL,
+            );
+        }
+        let p = prefix("203.0.113.0/24");
+        assert_eq!(rib.loc_rib[&p].next_hop, Some(addr("10.0.0.3")));
+        assert_eq!(rib.multipaths[&p], [addr("10.0.0.3"), addr("10.0.0.5")]);
+    }
+
+    #[test]
+    fn route_refresh_stale_marks_are_per_path() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        let learn = |rib: &mut BgpRib, id| {
+            rib.handle_update(
+                peer,
+                false,
+                v4("192.0.2.1"),
+                &path_update("203.0.113.0/24", id, "10.0.0.1", None),
+                &nos_rpl::ACCEPT_ALL,
+            );
+        };
+        learn(&mut rib, 1);
+        learn(&mut rib, 2);
+        rib.begin_refresh_in(peer, AddressFamily::Ipv4Unicast);
+        // Re-announcing path 2 clears its mark only.
+        learn(&mut rib, 2);
+        assert_eq!(rib.end_refresh_in(peer, AddressFamily::Ipv4Unicast), 1);
+        assert_eq!(held_ids(&rib, peer, "203.0.113.0/24"), [2]);
+    }
+
+    #[test]
+    fn treat_as_withdraw_removes_only_the_announced_path_ids() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        for id in [1, 2] {
+            rib.handle_update(
+                peer,
+                false,
+                v4("192.0.2.1"),
+                &path_update("203.0.113.0/24", id, "10.0.0.1", None),
+                &nos_rpl::ACCEPT_ALL,
+            );
+        }
+        // Path 1 again, now looped through our own AS.
+        let looped = UpdateMessage {
+            nlri_path_ids: vec![1],
+            ..update_with(
+                "203.0.113.0/24",
+                vec![65001, 65000],
+                "10.0.0.1",
+                message::Origin::Igp,
+                None,
+            )
+        };
+        rib.handle_update(peer, false, v4("192.0.2.1"), &looped, &nos_rpl::ACCEPT_ALL);
+        assert_eq!(held_ids(&rib, peer, "203.0.113.0/24"), [2]);
+    }
+
+    #[test]
+    fn add_path_send_peers_never_get_a_path_without_an_id() {
+        let mut rib = new_rib(65000);
+        let source = addr("10.0.0.1");
+        let _src_rx = register_peer(&mut rib, source, false, addr("10.0.0.254"));
+        let v4_only: HashSet<AddressFamily> = HashSet::from([AddressFamily::Ipv4Unicast]);
+        // A route-server client gets the best path through its ADD-PATH
+        // view only; an ordinary peer gets it under path id 1.
+        let mut rs_rx = register_peer_full(
+            &mut rib,
+            addr("10.0.0.2"),
+            false,
+            addr("10.0.0.253"),
+            false,
+            true,
+            v4_only.clone(),
+        );
+        let mut plain_rx = register_peer_full(
+            &mut rib,
+            addr("10.0.0.3"),
+            false,
+            addr("10.0.0.252"),
+            false,
+            false,
+            v4_only,
+        );
+        let send = |rib: &mut BgpRib, u: &UpdateMessage| {
+            rib.handle_update(source, false, v4("192.0.2.1"), u, &nos_rpl::ACCEPT_ALL);
+        };
+        send(
+            &mut rib,
+            &ebgp_update(vec!["9.9.9.0/24"], vec![65001], "10.0.0.1"),
+        );
+        send(
+            &mut rib,
+            &UpdateMessage {
+                withdrawn_routes: vec!["9.9.9.0/24".parse().unwrap()],
+                ..empty_update()
+            },
+        );
+        let ids = |updates: Vec<OutboundUpdate>| -> Vec<(bool, Option<u32>)> {
+            updates
+                .into_iter()
+                .filter_map(|u| match u {
+                    OutboundUpdate::Announce(a) => Some((true, a.path_id)),
+                    OutboundUpdate::Withdraw(_, _, id) => Some((false, id)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let rs = ids(recv_all(&mut rs_rx));
+        assert_eq!(rs.len(), 2, "{rs:?}");
+        assert!(rs.iter().all(|(_, id)| id.is_some()), "{rs:?}");
+        assert_eq!(
+            ids(recv_all(&mut plain_rx)),
+            [(true, Some(1)), (false, Some(1))]
+        );
     }
 }

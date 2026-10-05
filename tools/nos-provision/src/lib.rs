@@ -352,6 +352,11 @@ pub struct Args {
     #[arg(long)]
     pub local_as_replace_as: bool,
 
+    /// If set, sets `--peer-group`'s RFC 7911 ADD-PATH (`receive`, `send`
+    /// or `both`; `BgpPeerGroupOp::SetAddPath`).
+    #[arg(long, value_parser = parse_add_path)]
+    pub add_path: Option<nos_proto::BgpAddPath>,
+
     /// One `<family>=<limit>` per repetition (`ipv4`, `ipv6`, `l2vpn-evpn`):
     /// sets `--peer-group`'s RFC 4486 maximum-prefix for that family
     /// (`BgpPeerGroupOp::SetMaximumPrefix`), with the two flags below.
@@ -1023,6 +1028,14 @@ fn parse_family(s: &str) -> Result<AddressFamily, String> {
         .ok_or_else(|| format!("unknown address family '{s}' (ipv4, ipv6, l2vpn-evpn)"))
 }
 
+fn parse_add_path(s: &str) -> Result<nos_proto::BgpAddPath, String> {
+    use nos_proto::BgpAddPath::{Both, Receive, Send};
+    [Receive, Send, Both]
+        .into_iter()
+        .find(|m| m.as_str() == s)
+        .ok_or_else(|| format!("unknown add-path mode '{s}' (receive, send, both)"))
+}
+
 fn parse_maximum_prefix(s: &str) -> Result<(AddressFamily, u32), String> {
     let (af, n) = s
         .split_once('=')
@@ -1622,6 +1635,13 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 no_prepend: args.local_as_no_prepend,
                 replace_as: args.local_as_replace_as,
             },
+        }));
+    }
+    if let Some(mode) = args.add_path {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetAddPath {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            mode,
         }));
     }
     if args.clear_damping {
@@ -2608,6 +2628,8 @@ mod tests {
             "--local-as",
             "65009",
             "--local-as-replace-as",
+            "--add-path",
+            "receive",
             "--maximum-prefix",
             "ipv4=2",
             "--maximum-prefix-warning-only",
@@ -2681,6 +2703,14 @@ mod tests {
                     no_prepend: false,
                     replace_as: true,
                 },
+            }),
+        );
+        has(
+            &ops,
+            &pg(BgpPeerGroupOp::SetAddPath {
+                instance: "r1".into(),
+                name: "pg1".into(),
+                mode: nos_proto::BgpAddPath::Receive,
             }),
         );
         has(

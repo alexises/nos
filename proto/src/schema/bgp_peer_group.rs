@@ -127,6 +127,38 @@ pub enum NextHopMode {
     Unchanged,
 }
 
+/// RFC 7911 ADD-PATH direction for a peer-group's unicast families: whether
+/// this side offers to receive several paths per prefix, send them, or both.
+/// What is actually used per family is negotiated against the peer's own
+/// capability (RFC 7911 §5).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub enum BgpAddPath {
+    Receive,
+    Send,
+    Both,
+}
+
+impl BgpAddPath {
+    /// The capability's Send/Receive value (RFC 7911 §4): 1 receive, 2
+    /// send, 3 both.
+    pub fn send_receive(self) -> u8 {
+        match self {
+            BgpAddPath::Receive => 1,
+            BgpAddPath::Send => 2,
+            BgpAddPath::Both => 3,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BgpAddPath::Receive => "receive",
+            BgpAddPath::Send => "send",
+            BgpAddPath::Both => "both",
+        }
+    }
+}
+
 /// Administrative shutdown (RFC 4486 Cease/Administrative Shutdown). While set
 /// on a peer-group, or on an individual `BgpPeer` (which overrides the group),
 /// no session is opened or accepted; an established one is closed with a
@@ -424,6 +456,22 @@ pub struct BgpPeerGroup {
     #[garde(skip)]
     #[cli(topic = BgpPeerGroupLocalAs)]
     pub local_as: Option<BgpLocalAs>,
+
+    /// RFC 7911 ADD-PATH for this group's unicast families (`ipv4`/`ipv6`;
+    /// never EVPN). `None` is `Both` for a `route_server_client` group and off
+    /// otherwise. Carried in the OPEN, so a change restarts the sessions.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BgpPeerGroupAddPath)]
+    pub add_path: Option<BgpAddPath>,
+}
+
+impl BgpPeerGroup {
+    /// `add_path` with its default applied: `Both` for a route-server client.
+    pub fn effective_add_path(&self) -> Option<BgpAddPath> {
+        self.add_path
+            .or(self.route_server_client.then_some(BgpAddPath::Both))
+    }
 }
 
 /// `"accept-all"`/`"deny-all"` are always valid regardless of what's
@@ -690,6 +738,7 @@ mod tests {
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
             local_as: None,
+            add_path: None,
         }
     }
 
@@ -1006,5 +1055,15 @@ mod tests {
         pg.auth = Some(BgpAuth::Ao { keys: vec![key] });
         let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn add_path_defaults_to_both_for_a_route_server_client_only() {
+        let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
+        assert_eq!(pg.effective_add_path(), None);
+        pg.route_server_client = true;
+        assert_eq!(pg.effective_add_path(), Some(BgpAddPath::Both));
+        pg.add_path = Some(BgpAddPath::Receive);
+        assert_eq!(pg.effective_add_path(), Some(BgpAddPath::Receive));
     }
 }

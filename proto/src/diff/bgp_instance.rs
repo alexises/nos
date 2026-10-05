@@ -373,6 +373,7 @@ mod tests {
             maximum_prefix: crate::schema::BgpMaximumPrefix::default(),
             announce_rpki_state: false,
             local_as: None,
+            add_path: None,
         };
 
         let mut base_instance = instance("r1", 65000);

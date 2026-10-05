@@ -3225,6 +3225,26 @@ mod tests {
     }
 
     #[test]
+    fn add_path_nlri_byte_vectors() {
+        // RFC 7911 §3: path id (4 octets) before the length octet.
+        let one = [0, 0, 0, 7, 24, 192, 0, 2];
+        let net: IpNet = "192.0.2.0/24".parse().unwrap();
+        assert_eq!(
+            decode_prefixes(AFI_IPV4, &one, true).unwrap(),
+            (vec![net], vec![7])
+        );
+        assert_eq!(encode_prefixes(&[net], &[7]), one);
+        // Two paths of one prefix in one NLRI field.
+        let two = [0, 0, 0, 1, 24, 203, 0, 113, 0, 0, 0, 2, 24, 203, 0, 113];
+        let net: IpNet = "203.0.113.0/24".parse().unwrap();
+        assert_eq!(
+            decode_prefixes(AFI_IPV4, &two, true).unwrap(),
+            (vec![net, net], vec![1, 2])
+        );
+        assert_eq!(encode_prefixes(&[net, net], &[1, 2]), two);
+    }
+
+    #[test]
     fn pure_withdrawal_with_bad_attribute_is_unchanged() {
         let mut body = vec![0u8, 2, 8, 10];
         let attrs = [0x80, ATTR_COMMUNITY, 1, 0];

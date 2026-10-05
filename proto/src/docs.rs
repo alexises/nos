@@ -321,6 +321,8 @@ topics! {
     BgpPeerGroupLocalAs,
     /// `BgpInstance.graceful_restart`
     BgpInstanceGracefulRestart,
+    /// `BgpPeerGroup.add_path`
+    BgpPeerGroupAddPath,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client
