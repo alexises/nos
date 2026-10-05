@@ -79,12 +79,20 @@ pub const CONFED_BAD_PREFIX: &str = "203.0.119.0/24";
 pub const LOCAL_AS: u32 = 65020;
 pub const LOCAL_AS_LEARNED_PREFIX: &str = "203.0.122.0/24";
 pub const LOCAL_AS_LOOP_PREFIX: &str = "203.0.123.0/24";
-/// `add-path`: the prefix ExaBGP (router-g) announces to router-a twice, as
-/// RFC 7911 path 1 (MED `ADD_PATH_MED_1`) and path 2 (`ADD_PATH_MED_2`, the
-/// better one).
+/// `add-path`: the prefix ExaBGP (router-g) announces to router-a as RFC
+/// 7911 path 1 (MED `ADD_PATH_MED_1`), path 2 (`ADD_PATH_MED_2`, the best)
+/// and, for the send half, path 3 (`ADD_PATH_MED_3`): router-a ranks them 2,
+/// 3, 1. Path N carries community 65000:N (`add_path_community`), which —
+/// unlike MED — crosses router-a's eBGP session to router-b.
 pub const ADD_PATH_PREFIX: &str = "203.0.124.0/24";
 pub const ADD_PATH_MED_1: u32 = 50;
 pub const ADD_PATH_MED_2: u32 = 10;
+pub const ADD_PATH_MED_3: u32 = 30;
+
+/// Community 65000:`id` as the `u32` nos-bgpd logs.
+pub const fn add_path_community(id: u32) -> u32 {
+    (65000 << 16) | id
+}
 /// `rpki`: the StayRTR cache (RFC 8210) router-a validates against, and an
 /// address nothing answers on, configured as the more preferred cache so the
 /// phase sees the failover. The ASN the first VRP set wrongly authorizes for

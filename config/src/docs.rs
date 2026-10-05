@@ -259,11 +259,28 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              `both`; RFC 7911). `receive` keeps every path a peer sends for a prefix instead of \
              only the last one, so they all compete in best-path selection and can form multipath; \
              `send` advertises with path identifiers: a route-server client gets every other \
-             source's path, any other peer the best path. What is used per family is what both \
+             source's path, any other peer the best `add-path-send-count` paths (2 by default). \
+             What is used per family is what both \
              sides offer. A route-server client defaults to `both`, any other group to off. The \
              capability is in the OPEN, so a change restarts the group's sessions.",
                 " ",
                 "Clear a peer-group's ADD-PATH (back to off, or both for a route-server client).",
+            ),
+        ),
+        Topic::BgpPeerGroupAddPathSendCount => (
+            "Set how many paths per prefix a peer-group is sent over ADD-PATH.",
+            concat!(
+                "Sets how many paths per prefix (2-64) a peer-group's sessions are sent when \
+             ADD-PATH send is negotiated: the best ones by the decision process, counted after the \
+             group's own filtering (split horizon, export policy), so a refused path doesn't use \
+             up a slot. Unset, a group gets 2 (the best path plus one backup), a route-server \
+             client every path. Independent of the instance's maximum-paths, which only sets \
+             what is installed: to let a receiver build the same multipath set, set this to at \
+             least maximum-paths. Needs add-path send or both. A change restarts the group's \
+             sessions.",
+                " ",
+                "Clear a peer-group's add-path-send-count (back to 2, or every path for a \
+             route-server client).",
             ),
         ),
         Topic::BgpPeerGroupMaxHops => (

@@ -120,6 +120,12 @@ pub struct ResolvedPeer {
     /// (`BgpPeerGroup::effective_add_path`); in the OPEN, so a change
     /// restarts the session (`diff_peers`).
     pub add_path: Option<nos_proto::BgpAddPath>,
+    /// How many paths per prefix ADD-PATH send gives this peer
+    /// (`BgpPeerGroup::effective_add_path_send_count`, `None`: every path;
+    /// `BgpRib::set_peer_add_path_send_count`). Not in the OPEN, but a change
+    /// restarts the session like every field (`diff_peers`). ponytail: re-run
+    /// the fan-out for the peer instead, if anyone tunes it on a live router.
+    pub add_path_send_count: Option<usize>,
     /// RFC 5065: this instance's confederation identifier (what an
     /// external peer's OPEN carries), and whether `remote_as` is another
     /// member AS. Here rather than read from `LocalIdentity` so a change
@@ -1191,6 +1197,7 @@ mod tests {
             announce_rpki_state: false,
             local_as: None,
             add_path: None,
+            add_path_send_count: None,
             confed_id: None,
             confed_member: false,
             graceful_restart: None,

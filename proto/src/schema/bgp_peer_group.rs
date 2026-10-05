@@ -464,6 +464,15 @@ pub struct BgpPeerGroup {
     #[garde(skip)]
     #[cli(topic = BgpPeerGroupAddPath)]
     pub add_path: Option<BgpAddPath>,
+
+    /// RFC 7911: how many paths per prefix this group is sent when ADD-PATH
+    /// send is negotiated: the best N by the decision process, after this
+    /// group's own filtering (split horizon, export policy). Unset: 2, or
+    /// every path for a route-server client. Needs `add_path` send or both.
+    #[serde(default)]
+    #[garde(range(min = 2, max = 64))]
+    #[cli(topic = BgpPeerGroupAddPathSendCount)]
+    pub add_path_send_count: Option<u8>,
 }
 
 impl BgpPeerGroup {
@@ -471,6 +480,22 @@ impl BgpPeerGroup {
     pub fn effective_add_path(&self) -> Option<BgpAddPath> {
         self.add_path
             .or(self.route_server_client.then_some(BgpAddPath::Both))
+    }
+
+    /// How many paths per prefix an ADD-PATH send peer of this group gets:
+    /// `add_path_send_count`, else `default_add_path_send_count`. `None` is
+    /// every path.
+    pub fn effective_add_path_send_count(&self) -> Option<usize> {
+        self.add_path_send_count.map_or_else(
+            || Self::default_add_path_send_count(self.route_server_client),
+            |n| Some(usize::from(n)),
+        )
+    }
+
+    /// The unset `add_path_send_count`: every path for a route-server client
+    /// (RFC 7947 transparency), 2 (best plus one backup) otherwise.
+    pub fn default_add_path_send_count(route_server_client: bool) -> Option<usize> {
+        (!route_server_client).then_some(2)
     }
 }
 
@@ -739,6 +764,7 @@ mod tests {
             announce_rpki_state: false,
             local_as: None,
             add_path: None,
+            add_path_send_count: None,
         }
     }
 

@@ -98,6 +98,9 @@ pub fn render_bgp_peer_group(group: &BgpPeerGroup, local_asn: u32) -> String {
     if let Some(mode) = group.add_path {
         let _ = write!(line, ", add-path {}", mode.as_str());
     }
+    if let Some(n) = group.add_path_send_count {
+        let _ = write!(line, ", add-path-send-count {n}");
+    }
     for af in nos_proto::AddressFamily::ALL {
         if let Some(l) = group.maximum_prefix.get(af) {
             let _ = write!(line, ", maximum-prefix {af} limit {}", l.limit);
@@ -2419,6 +2422,7 @@ mod tests {
             announce_rpki_state: false,
             local_as: None,
             add_path: None,
+            add_path_send_count: None,
         }
     }
 

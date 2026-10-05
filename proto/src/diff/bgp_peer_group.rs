@@ -317,6 +317,17 @@ fn changed_fields(base: &BgpPeerGroup, candidate: &BgpPeerGroup) -> Vec<FieldDif
             new: Some(mode(candidate)),
         });
     }
+    if base.add_path_send_count != candidate.add_path_send_count {
+        let count = |pg: &BgpPeerGroup| {
+            pg.add_path_send_count
+                .map_or("unset".to_string(), |n| n.to_string())
+        };
+        fields.push(FieldDiff {
+            label: "add-path-send-count".to_string(),
+            old: Some(count(base)),
+            new: Some(count(candidate)),
+        });
+    }
     for af in crate::schema::AddressFamily::ALL {
         let (old, new) = (
             base.maximum_prefix.get(af),
@@ -515,6 +526,7 @@ mod tests {
             announce_rpki_state: false,
             local_as: None,
             add_path: None,
+            add_path_send_count: None,
         }
     }
 
@@ -606,6 +618,7 @@ mod tests {
                 replace_as: true,
             }),
             add_path: Some(crate::schema::BgpAddPath::Receive),
+            add_path_send_count: Some(4),
             maximum_prefix: crate::schema::BgpMaximumPrefix {
                 ipv4: Some(crate::schema::BgpPrefixLimit {
                     limit: 2,
@@ -656,6 +669,7 @@ mod tests {
                 ("announce-rpki-state", "no", "yes"),
                 ("local-as", "unset", "65009 no-prepend replace-as"),
                 ("add-path", "unset", "receive"),
+                ("add-path-send-count", "unset", "4"),
                 (
                     "maximum-prefix ipv4",
                     "unset",
