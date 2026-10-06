@@ -20,7 +20,7 @@ A policy is used in three places:
 
 - **Import** (`set import-policy <policy>` on a BGP peer-group): runs on each route received from the group's peers. A rejected route is treated as if the peer had withdrawn it. An accepted route is stored with the changes the policy made, and those changes count in best-path selection and in what is advertised to other peers. **Default: `deny-all`.**
 - **Export** (`set export-policy <policy>` on a BGP peer-group): runs on each best route before it is advertised to the group's peers. A rejected route is not advertised to that group; other groups are not affected. **Default: `deny-all`.**
-- **Redistribution** (`set routing-table <table> redistribute from static to bgp|ospf policy <policy>`): runs on each static route before it enters BGP or OSPF. **Default: `accept-all`**, so adding `redistribute` without a policy redistributes every static route.
+- **Redistribution** (`set routing-table <table> redistribute bgp|ospf|ospfv3 policy <policy>`, one rule and so one policy per target): runs on each static route before it enters BGP or OSPF. **Default: `accept-all`**, so adding `redistribute` without a policy redistributes every static route.
 
 `accept-all` and `deny-all` are built in: they exist on every router and cannot be redefined or deleted. You name them wherever a policy name is expected.
 
@@ -366,16 +366,16 @@ else:
 edge-1(red)> edit policy-definition no-lab-prefix
 edge-1(red/policy-definition:no-lab-prefix)> edit source
 edge-1(red/policy-definition:no-lab-prefix)> top
-edge-1(red)> set routing-table rt1 redistribute from static to bgp policy no-lab-prefix
+edge-1(red)> set routing-table rt1 redistribute bgp policy no-lab-prefix
 edge-1(red)> commit
 ```
 
 ```sh
 $C -X PUT -H 'Content-Type: application/json' -d '{"from":"Static","to":"Bgp","policy":"no-lab-prefix"}' \
-  $B/v1/transactions/red/routing-table/rt1/redistribute
+  $B/v1/transactions/red/routing-table/rt1/redistribute/bgp
 ```
 
-`show config` shows the policy in the routing table's line: `redistribute from static to bgp, policy no-lab-prefix`.
+`show config` shows the policy in the routing table's line: `redistribute bgp` with `policy no-lab-prefix` indented under it.
 
 ### An import policy for a customer
 
@@ -421,7 +421,7 @@ Created with `edit policy-definition <name>`; deleted with `delete` inside it. R
 |---|---|---|---|---|---|---|
 | import-policy | `set bgp instance <i> peer-group <g> import-policy <p>` / `set import-policy <p>`; `delete import-policy` (relative) | `bgp-instance/<i>/peer-group/<g>/import-policy`, `"<p>"` or `null` | `deny-all` | `accept-all`, `deny-all` or an existing policy | Filters received routes; resets the group's sessions | `GET …/import-policy`; `show route` |
 | export-policy | `set bgp instance <i> peer-group <g> export-policy <p>` / `set export-policy <p>`; `delete export-policy` (relative) | `bgp-instance/<i>/peer-group/<g>/export-policy`, `"<p>"` or `null` | `deny-all` | as import-policy | Filters advertised routes; resets the group's sessions | `GET …/export-policy`; `show route` on the peer |
-| redistribute policy | `set routing-table <t> redistribute from static to bgp\|ospf policy <p>` / `set redistribute from static to bgp\|ospf policy <p>`; without `policy <p>` to remove it | `routing-table/<t>/redistribute`, `{"from":"Static","to":"Bgp","policy":"<p>"}`; or `…/redistribute/policy` | `accept-all` | as import-policy | Filters static routes before they enter BGP or OSPF | `show config` (routing-table line) |
+| redistribute policy | `set routing-table <t> redistribute bgp\|ospf policy <p>` / `set redistribute bgp\|ospf policy <p>`; without `policy <p>` to remove it | `routing-table/<t>/redistribute`, `{"from":"Static","to":"Bgp","policy":"<p>"}`; or `…/redistribute/policy` | `accept-all` | as import-policy | Filters static routes before they enter BGP or OSPF | `show config` (routing-table line) |
 
 ### Prefix list
 

@@ -60,19 +60,17 @@ impl std::fmt::Display for RedistributeTarget {
     }
 }
 
-/// A single route-redistribution rule on a `RoutingTable` (syntax:
-/// `redistribute from static to bgp`). Modeled as `Option<Redistribute>` on
-/// the table, not `Vec<Redistribute>`: at most one meaningful rule exists
-/// today, and a future second source/target is an enum-variant addition on
-/// `RedistributeSource`/`RedistributeTarget`, not a shape change here.
-/// `Vec<Redistribute>` is the documented follow-up if multiple simultaneous
-/// rules are ever needed.
+/// `redistribute bgp`). The table holds a list keyed by `to`
+/// `redistribute from static to bgp`). The table holds a list keyed by `to`
+/// (at most one rule per target), so static routes can feed BGP, OSPF and
+/// `OSPFv3` at once; an `Option<Redistribute>` from before the list is still
+/// read from disk (`deserialize_redistribute`).
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli, Default)]
 pub struct Redistribute {
     #[cli(topic = RoutingTableRedistribute)]
     pub from: RedistributeSource,
-    #[cli(topic = RoutingTableRedistribute)]
+    #[cli(key)]
     pub to: RedistributeTarget,
     /// Names a `PolicyDefinition` (or the built-in `accept-all`/`deny-all`)
     /// to filter redistributed routes through before they reach BGP.
@@ -217,9 +215,10 @@ pub struct RoutingTable {
     /// `custom` closures can't see a sibling field — so it's wired one level
     /// up, on `Config.routing_tables` (`valid_redistribute_rules`), the same
     /// reason `BgpPeerGroup`'s timer check is wired on `BgpInstance.peer_groups`.
+    #[serde(default, deserialize_with = "deserialize_redistribute")]
     #[garde(skip)]
     #[cli(topic = RoutingTableRedistribute)]
-    pub redistribute: Option<Redistribute>,
+    pub redistribute: Vec<Redistribute>,
 
     /// Pins a `nos-restd` to this table: it listens on `rest_api.address`
     /// inside this table's VRF. `serde(default)` so on-disk config saved
@@ -353,9 +352,47 @@ fn static_routing_instance_reference_valid(
 /// `RoutingTableOp::apply`.
 pub(crate) fn valid_redistribute_rules(tables: &[RoutingTable], ctx: &Config) -> garde::Result {
     for table in tables {
-        let Some(redistribute) = &table.redistribute else {
-            continue;
-        };
+        for (i, rule) in table.redistribute.iter().enumerate() {
+            if table.redistribute[..i].iter().any(|r| r.to == rule.to) {
+                return Err(garde::Error::new("duplicate redistribute target"));
+            }
+            valid_redistribute_rule(table, rule, ctx)?;
+        }
+    }
+    for table in tables {
+        valid_table_evpn(table, ctx)?;
+    }
+    Ok(())
+}
+
+/// Accepts the list, a single object or null (the pre-list `Option` shape) in
+/// YAML/JSON; postcard is not self-describing, so it reads the plain `Vec`.
+fn deserialize_redistribute<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<Redistribute>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Shim {
+        Many(Vec<Redistribute>),
+        One(Redistribute),
+        None(()),
+    }
+    if !d.is_human_readable() {
+        return Vec::deserialize(d);
+    }
+    Ok(match Shim::deserialize(d)? {
+        Shim::Many(v) => v,
+        Shim::One(r) => vec![r],
+        Shim::None(()) => Vec::new(),
+    })
+}
+
+fn valid_redistribute_rule(
+    table: &RoutingTable,
+    redistribute: &Redistribute,
+    ctx: &Config,
+) -> garde::Result {
+    {
         if redistribute.from == RedistributeSource::Static
             && table.static_routing_instance.is_none()
         {
@@ -411,9 +448,6 @@ pub(crate) fn valid_redistribute_rules(tables: &[RoutingTable], ctx: &Config) ->
         {
             return Err(garde::Error::new("redistribute metric-type must be 1 or 2"));
         }
-    }
-    for table in tables {
-        valid_table_evpn(table, ctx)?;
     }
     Ok(())
 }
@@ -506,7 +540,7 @@ mod tests {
             bgp_instance: bgp_instance.map(str::to_string),
             ospf_instance: None,
             static_routing_instance: sri.map(str::to_string),
-            redistribute: None,
+            redistribute: Vec::new(),
         }
     }
 
@@ -690,9 +724,41 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_redistribute_target_fails() {
+        let mut rt = table("rt1", Some("r1"), Some("sri1"));
+        rt.redistribute = vec![redistribute(), redistribute()];
+        let cfg = config_with(
+            vec![rt],
+            vec![instance("r1")],
+            vec![static_instance("sri1")],
+        );
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn redistribute_reads_old_shapes_and_postcard_round_trips() {
+        let rule = serde_json::json!({"from": "Static", "to": "Ospf", "policy": null});
+        let parse = |v: serde_json::Value| {
+            let mut j = serde_json::to_value(table("rt1", None, None)).unwrap();
+            j["redistribute"] = v;
+            serde_json::from_value::<RoutingTable>(j)
+                .unwrap()
+                .redistribute
+        };
+        assert_eq!(parse(rule.clone())[0].to, RedistributeTarget::Ospf);
+        assert_eq!(parse(serde_json::Value::Null).len(), 0);
+        assert_eq!(parse(serde_json::json!([rule.clone(), rule])).len(), 2);
+
+        let mut rt = table("rt1", None, None);
+        rt.redistribute = vec![redistribute()];
+        let bytes = postcard::to_allocvec(&rt).unwrap();
+        assert_eq!(postcard::from_bytes::<RoutingTable>(&bytes).unwrap(), rt);
+    }
+
+    #[test]
     fn redistribute_with_both_associations_passes() {
         let mut rt = table("rt1", Some("r1"), Some("sri1"));
-        rt.redistribute = Some(redistribute());
+        rt.redistribute = vec![redistribute()];
         let cfg = config_with(
             vec![rt],
             vec![instance("r1")],
@@ -704,7 +770,7 @@ mod tests {
     #[test]
     fn redistribute_without_static_routing_instance_fails() {
         let mut rt = table("rt1", Some("r1"), None);
-        rt.redistribute = Some(redistribute());
+        rt.redistribute = vec![redistribute()];
         let cfg = config_with(vec![rt], vec![instance("r1")], vec![]);
         assert!(cfg.validate_with(&cfg).is_err());
     }
@@ -712,7 +778,7 @@ mod tests {
     #[test]
     fn redistribute_without_bgp_instance_fails() {
         let mut rt = table("rt1", None, Some("sri1"));
-        rt.redistribute = Some(redistribute());
+        rt.redistribute = vec![redistribute()];
         let cfg = config_with(vec![rt], vec![], vec![static_instance("sri1")]);
         assert!(cfg.validate_with(&cfg).is_err());
     }
@@ -720,10 +786,10 @@ mod tests {
     #[test]
     fn redistribute_without_ospf_instance_fails() {
         let mut rt = table("rt1", None, Some("sri1"));
-        rt.redistribute = Some(Redistribute {
+        rt.redistribute = vec![Redistribute {
             to: RedistributeTarget::Ospf,
             ..redistribute()
-        });
+        }];
         let cfg = config_with(vec![rt], vec![], vec![static_instance("sri1")]);
         assert!(cfg.validate_with(&cfg).is_err());
     }
@@ -732,10 +798,10 @@ mod tests {
     fn redistribute_to_ospf_with_ospf_instance_passes() {
         let mut rt = table("rt1", None, Some("sri1"));
         rt.ospf_instance = Some("o1".to_string());
-        rt.redistribute = Some(Redistribute {
+        rt.redistribute = vec![Redistribute {
             to: RedistributeTarget::Ospf,
             ..redistribute()
-        });
+        }];
         let mut cfg = config_with(vec![rt], vec![], vec![static_instance("sri1")]);
         cfg.ospf_instances = vec![ospf_instance("o1")];
         cfg.validate_with(&cfg).unwrap();
@@ -747,10 +813,10 @@ mod tests {
     #[test]
     fn redistribute_to_ospfv3_requires_ospfv3_instance() {
         let mut rt = table("rt1", None, Some("sri1"));
-        rt.redistribute = Some(Redistribute {
+        rt.redistribute = vec![Redistribute {
             to: RedistributeTarget::Ospfv3,
             ..redistribute()
-        });
+        }];
         let cfg = config_with(vec![rt.clone()], vec![], vec![static_instance("sri1")]);
         assert!(cfg.validate_with(&cfg).is_err());
         rt.ospfv3_instance = Some("o1".to_string());
@@ -782,12 +848,12 @@ mod tests {
     ) -> Config {
         let mut rt = table("rt1", Some("r1"), Some("sri1"));
         rt.ospf_instance = Some("o1".to_string());
-        rt.redistribute = Some(Redistribute {
+        rt.redistribute = vec![Redistribute {
             to,
             metric,
             metric_type,
             ..redistribute()
-        });
+        }];
         let mut cfg = config_with(
             vec![rt],
             vec![instance("r1")],
@@ -826,7 +892,7 @@ mod tests {
     #[test]
     fn redistribute_with_no_policy_passes() {
         let mut rt = table("rt1", Some("r1"), Some("sri1"));
-        rt.redistribute = Some(redistribute());
+        rt.redistribute = vec![redistribute()];
         let cfg = config_with_policy(rt, vec![]);
         cfg.validate_with(&cfg).unwrap();
     }
@@ -834,10 +900,10 @@ mod tests {
     #[test]
     fn redistribute_with_existing_policy_passes() {
         let mut rt = table("rt1", Some("r1"), Some("sri1"));
-        rt.redistribute = Some(Redistribute {
+        rt.redistribute = vec![Redistribute {
             policy: Some("p1".to_string()),
             ..redistribute()
-        });
+        }];
         let cfg = config_with_policy(
             rt,
             vec![crate::schema::PolicyDefinition {
@@ -851,10 +917,10 @@ mod tests {
     #[test]
     fn redistribute_with_dangling_policy_fails() {
         let mut rt = table("rt1", Some("r1"), Some("sri1"));
-        rt.redistribute = Some(Redistribute {
+        rt.redistribute = vec![Redistribute {
             policy: Some("does-not-exist".to_string()),
             ..redistribute()
-        });
+        }];
         let cfg = config_with_policy(rt, vec![]);
         assert!(cfg.validate_with(&cfg).is_err());
     }
@@ -931,10 +997,10 @@ mod tests {
     fn redistribute_with_builtin_policy_names_passes() {
         for name in [nos_rpl::ACCEPT_ALL_NAME, nos_rpl::DENY_ALL_NAME] {
             let mut rt = table("rt1", Some("r1"), Some("sri1"));
-            rt.redistribute = Some(Redistribute {
+            rt.redistribute = vec![Redistribute {
                 policy: Some(name.to_string()),
                 ..redistribute()
-            });
+            }];
             let cfg = config_with_policy(rt, vec![]);
             cfg.validate_with(&cfg).unwrap();
         }

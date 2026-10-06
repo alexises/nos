@@ -230,10 +230,8 @@ pub struct Args {
     /// `--static-route` (so the table has a `static_routing_instance` to
     /// redistribute from) and `--ospf-instance` (so the table has an
     /// `ospf_instance` to redistribute into) to also be set. Not mutually
-    /// exclusive with `--redistribute` at the tool level, but
-    /// `RoutingTableOp::SetRedistribute` only stores one `Redistribute` rule
-    /// per table — setting both in one invocation just has the second
-    /// `SetRedistribute` op overwrite the first.
+    /// exclusive with `--redistribute`/`--redistribute-to-ospfv3`: the table
+    /// keeps one rule per target.
     #[arg(long)]
     pub redistribute_to_ospf: bool,
 
@@ -252,11 +250,11 @@ pub struct Args {
     #[arg(long)]
     pub redistribute_metric_type: Option<u8>,
 
-    /// If set, removes `--routing-table`'s redistribute rule
+    /// If set, removes `--routing-table`'s `to ospf` redistribute rule
     /// (`RoutingTableOp::ClearRedistribute`) — for verifying that a
     /// redistributed prefix's AS-external-LSA is actually withdrawn (RFC
     /// 2328 §14.1) rather than left to age out. Mutually exclusive with
-    /// `--redistribute`/`--redistribute-to-ospf`.
+    /// `--redistribute-to-ospf`.
     #[arg(long)]
     pub clear_redistribute_to_ospf: bool,
 
@@ -1546,14 +1544,16 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         }
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
             name: args.routing_table.clone(),
+            to: RedistributeTarget::Ospfv3,
         }));
     }
     if args.clear_redistribute_to_ospf {
-        if args.redistribute || args.redistribute_to_ospf {
-            bail!("--clear-redistribute-to-ospf is mutually exclusive with --redistribute/--redistribute-to-ospf");
+        if args.redistribute_to_ospf {
+            bail!("--clear-redistribute-to-ospf is mutually exclusive with --redistribute-to-ospf");
         }
         ops.push(ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
             name: args.routing_table.clone(),
+            to: RedistributeTarget::Ospf,
         }));
     }
 
@@ -3468,7 +3468,10 @@ mod tests {
         );
         has(
             &ops(&["--clear-redistribute-to-ospfv3"]).unwrap(),
-            &ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute { name: "rt1".into() }),
+            &ConfigOp::RoutingTable(RoutingTableOp::ClearRedistribute {
+                name: "rt1".into(),
+                to: RedistributeTarget::Ospfv3,
+            }),
         );
         assert!(err(&["--redistribute-to-ospfv3"]).contains("--static-route"));
         assert!(err(&[
@@ -3602,7 +3605,12 @@ mod tests {
             (
                 &[
                     &static_route[..],
-                    &["--redistribute", "--clear-redistribute-to-ospf"],
+                    &[
+                        "--ospf-instance",
+                        "o1",
+                        "--redistribute-to-ospf",
+                        "--clear-redistribute-to-ospf",
+                    ],
                 ]
                 .concat(),
                 "mutually exclusive",

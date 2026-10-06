@@ -2305,12 +2305,15 @@ fn either_form(legacy: u16, extended: u16, pat: impl Fn(u16) -> String) -> Strin
     format!(r"{}\|{}", pat(legacy), pat(extended))
 }
 
-/// RFC 5340 ASBR (requires `ospfv3`): an IPv6 static route plus `redistribute
-/// from static to ospfv3` on router-a makes it originate an AS-External-LSA
-/// (0x4005, or E-AS-External 0xC025), router-b installs it over the real
-/// adjacency and its SPF pushes a real kernel route; dropping the rule
-/// prematurely ages the LSA, router-b flushes it and removes the route within
-/// seconds. Restores the table's redistribute rule to none.
+/// RFC 5340 ASBR (requires `ospfv3`, hence `ospf`), and one routing table
+/// redistributing into OSPF and OSPFv3 at once (#222): an IPv4 static with
+/// `redistribute ospf` and an IPv6 static with `redistribute ospfv3` on
+/// router-a's `rt1` make it originate both an OSPFv2 Type-5 and an
+/// AS-External-LSA (0x4005, or E-AS-External 0xC025); router-b installs both
+/// over the real adjacencies and its SPFs push two real kernel routes.
+/// Dropping the OSPFv3 rule alone prematurely ages only its LSA (the Type-5
+/// and its route stay); dropping the OSPF rule then flushes the Type-5.
+/// Leaves the table with no redistribute rule.
 pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let (legacy, extended) = (LSA_TYPE_AS_EXTERNAL_V3, LSA_TYPE_E_AS_EXTERNAL);
@@ -2321,7 +2324,17 @@ pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
         format!("ospfv3 lsa installed.*lsa_type={t} .*advertising_router={OSPFV3_ROUTER_ID}")
     });
     let route = format!("added route prefix={OSPFV3_ASBR_PREFIX}.*source=Some(Ospf)");
+    let v2_route = format!("added route prefix={ASBR_PREFIX} .*source=Some(Ospf)");
+    let (v2_o0, v2_i0, v2_r0) = (
+        a.count("ospf lsa originated.*lsa_type=5"),
+        b.count("ospf lsa installed.*lsa_type=5"),
+        b.count(&v2_route),
+    );
     let (o0, i0, r0) = (a.count(&originated), b.count(&installed), b.count(&route));
+    // Two calls: every static route of one call shares one gateway, and the
+    // two families need their own. The OSPF rule survives the second call.
+    a.provision_flags(&with_base(A, asbr(ospf(OSPF_ROUTER_ID))))
+        .await?;
     a.provision_flags(&with_base(
         A,
         [
@@ -2340,6 +2353,13 @@ pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&originated, o0, 60).await?;
     b.wait_new(&installed, i0, 60).await?;
     b.wait_new(&route, r0, 60).await?;
+    a.wait_new("ospf lsa originated.*lsa_type=5", v2_o0, 60)
+        .await?;
+    b.wait_new("ospf lsa installed.*lsa_type=5", v2_i0, 60)
+        .await?;
+    b.wait_new(&v2_route, v2_r0, 60).await?;
+    let prefix_lsid = ASBR_PREFIX.split('/').next().unwrap_or_default();
+    wait_external_lsa(b, prefix_lsid, 20, false).await?;
 
     let aged = either_form(legacy, extended, |t| {
         format!("ospfv3 lsa prematurely aged lsa_type={t} ")
@@ -2349,11 +2369,27 @@ pub async fn ospfv3_asbr(w: &mut World) -> anyhow::Result<()> {
     });
     let removed = format!("removed route prefix={OSPFV3_ASBR_PREFIX}");
     let (aged0, flushed0, removed0) = (a.count(&aged), b.count(&flushed), b.count(&removed));
-    log("removing the redistribute rule on router-a; its as-external-lsa must be flushed");
+    let v2_aged = "ospf lsa prematurely aged.*lsa_type=5";
+    let v2_removed = format!("removed route prefix={ASBR_PREFIX} ");
+    let (v2_aged0, v2_removed0) = (a.count(v2_aged), b.count(&v2_removed));
+    log("removing router-a's ospfv3 redistribute rule; only its as-external-lsa must be flushed");
     a.provision(&["--clear-redistribute-to-ospfv3"]).await?;
     a.wait_new(&aged, aged0, 30).await?;
     b.wait_new(&flushed, flushed0, 30).await?;
-    b.wait_new(&removed, removed0, 30).await
+    b.wait_new(&removed, removed0, 30).await?;
+    // The `redistribute ospf` rule is untouched: its Type-5 and route stay.
+    a.assert_quiet(v2_aged, v2_aged0, 12).await?;
+    b.assert_quiet(&v2_removed, v2_removed0, 1).await?;
+    wait_external_lsa(b, prefix_lsid, 20, false).await?;
+
+    let v2_flushed_pat =
+        format!("ospf lsa maxage flushed.*lsa_type=5.*advertising_router={OSPF_ROUTER_ID}");
+    let v2_flushed0 = b.count(&v2_flushed_pat);
+    log("removing router-a's ospf redistribute rule; its type-5 must now be flushed");
+    a.provision(&["--clear-redistribute-to-ospf"]).await?;
+    a.wait_new(v2_aged, v2_aged0, 30).await?;
+    b.wait_new(&v2_flushed_pat, v2_flushed0, 30).await?;
+    b.wait_new(&v2_removed, v2_removed0, 30).await
 }
 
 /// RFC 5340 ABR (requires `ospfv3`): router-b's IPv6 loopback joins a second

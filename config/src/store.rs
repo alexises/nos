@@ -486,7 +486,7 @@ mod tests {
                     bgp_instance: Some("r1".to_string()),
                     ospf_instance: None,
                     static_routing_instance: None,
-                    redistribute: None,
+                    redistribute: Vec::new(),
                 }],
                 ..Default::default()
             },

@@ -6,7 +6,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use nos_proto::{
     BroadcastDomainStatus, Config, DiffScope, Event, InterfaceStatus, IpNet, PortAggregateStatus,
-    Redistribute, RedistributeSource, RedistributeTarget, RedistributedRoute, ServiceRef,
+    RedistributeSource, RedistributeTarget, RedistributedRoute, ServiceRef,
 };
 use tokio::sync::{watch, RwLock};
 use tokio::time::sleep;
@@ -365,8 +365,8 @@ fn connected_entries(
 ///
 /// Redistribution forwards every `RouteSource::Static` entry, v4 and v6
 /// alike (nos-bgp negotiates MP-BGP per peer independently), only when
-/// `table.redistribute` is exactly `Some(Redistribute{from: Static, to:
-/// Bgp})`, the one rule this config schema supports today.
+/// `table.redistribute` holds a `from Static to Bgp` rule (other rules, for
+/// OSPF/OSPFv3, feed their own targets independently).
 fn compute_redistribute_target(
     cfg: &Config,
     table_name: &str,
@@ -376,14 +376,10 @@ fn compute_redistribute_target(
         return bgp_client::RedistributeTarget::default();
     };
 
-    let active_rule = matches!(
-        &table.redistribute,
-        Some(Redistribute {
-            from: RedistributeSource::Static,
-            to: RedistributeTarget::Bgp,
-            ..
-        })
-    );
+    let active_rule = table
+        .redistribute
+        .iter()
+        .any(|r| r.from == RedistributeSource::Static && r.to == RedistributeTarget::Bgp);
 
     let redistributed = if active_rule {
         routes
@@ -427,8 +423,8 @@ fn compute_redistribute_target_ospf(
     let v3 = to == RedistributeTarget::Ospfv3;
     let active_rule = table
         .redistribute
-        .as_ref()
-        .is_some_and(|r| r.from == RedistributeSource::Static && r.to == to);
+        .iter()
+        .any(|r| r.from == RedistributeSource::Static && r.to == to);
 
     let redistributed = if active_rule {
         routes
@@ -468,6 +464,7 @@ mod tests {
     use std::net::IpAddr;
 
     use super::*;
+    use nos_proto::Redistribute;
     use nos_proto::RoutingTable;
 
     fn cfg_with_table(table: RoutingTable) -> Config {
@@ -618,7 +615,7 @@ mod tests {
             bgp_instance: Some("bgp1".into()),
             ospf_instance: None,
             static_routing_instance: None,
-            redistribute: None,
+            redistribute: Vec::new(),
         };
         let cfg = cfg_with_table(table);
         let mut routes = HashMap::new();
@@ -640,13 +637,13 @@ mod tests {
             bgp_instance: Some("bgp1".into()),
             ospf_instance: None,
             static_routing_instance: None,
-            redistribute: Some(Redistribute {
+            redistribute: vec![Redistribute {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
                 metric: None,
                 metric_type: None,
-            }),
+            }],
         };
         let cfg = cfg_with_table(table);
         let mut routes = HashMap::new();
@@ -673,13 +670,13 @@ mod tests {
             bgp_instance: Some("bgp1".into()),
             ospf_instance: None,
             static_routing_instance: None,
-            redistribute: Some(Redistribute {
+            redistribute: vec![Redistribute {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
                 metric: None,
                 metric_type: None,
-            }),
+            }],
         };
         let cfg = cfg_with_table(table);
         let mut routes = HashMap::new();
@@ -709,13 +706,13 @@ mod tests {
             bgp_instance: Some("bgp1".into()),
             ospf_instance: None,
             static_routing_instance: None,
-            redistribute: Some(Redistribute {
+            redistribute: vec![Redistribute {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
                 metric: None,
                 metric_type: None,
-            }),
+            }],
         };
         let cfg = cfg_with_table(table);
         let mut routes = HashMap::new();
@@ -760,7 +757,7 @@ mod tests {
             bgp_instance: None,
             ospf_instance: Some("ospf1".into()),
             static_routing_instance: None,
-            redistribute: None,
+            redistribute: Vec::new(),
         };
         let cfg = cfg_with_table(table);
         let mut routes = HashMap::new();
@@ -783,13 +780,13 @@ mod tests {
             bgp_instance: None,
             ospf_instance: Some("ospf1".into()),
             static_routing_instance: None,
-            redistribute: Some(Redistribute {
+            redistribute: vec![Redistribute {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospf,
                 policy: None,
                 metric: None,
                 metric_type: None,
-            }),
+            }],
         };
         let cfg = cfg_with_table(table);
         let mut routes = HashMap::new();
@@ -804,6 +801,50 @@ mod tests {
     }
 
     #[test]
+    fn rules_for_every_target_feed_independently() {
+        let rule = |to| Redistribute {
+            from: RedistributeSource::Static,
+            to,
+            policy: None,
+            metric: None,
+            metric_type: None,
+        };
+        let table = RoutingTable {
+            rest_api: None,
+            evpn: nos_proto::RoutingTableEvpn::default(),
+            ospfv3_instance: Some("o3".into()),
+            name: "rt1".into(),
+            bgp_instance: Some("bgp1".into()),
+            ospf_instance: Some("ospf1".into()),
+            static_routing_instance: None,
+            redistribute: vec![
+                rule(RedistributeTarget::Bgp),
+                rule(RedistributeTarget::Ospf),
+                rule(RedistributeTarget::Ospfv3),
+            ],
+        };
+        let cfg = cfg_with_table(table);
+        let mut routes = HashMap::new();
+        for (p, gw) in [
+            ("10.0.0.0/24", "10.0.0.1"),
+            ("2001:db8::/48", "2001:db8::1"),
+        ] {
+            let e = static_entry(p, gw);
+            routes.insert(e.prefix, e);
+        }
+        assert_eq!(
+            compute_redistribute_target(&cfg, "rt1", &routes)
+                .routes
+                .len(),
+            2
+        );
+        let ospf = compute_redistribute_target_ospf(&cfg, "rt1", &routes, RedistributeTarget::Ospf);
+        assert_eq!(ospf.routes.len(), 2);
+        let v3 = compute_redistribute_target_ospf(&cfg, "rt1", &routes, RedistributeTarget::Ospfv3);
+        assert_eq!(v3.routes.len(), 1);
+    }
+
+    #[test]
     fn ospf_active_rule_skips_bgp_sourced_routes() {
         let table = RoutingTable {
             rest_api: None,
@@ -813,13 +854,13 @@ mod tests {
             bgp_instance: None,
             ospf_instance: Some("ospf1".into()),
             static_routing_instance: None,
-            redistribute: Some(Redistribute {
+            redistribute: vec![Redistribute {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospf,
                 policy: None,
                 metric: None,
                 metric_type: None,
-            }),
+            }],
         };
         let cfg = cfg_with_table(table);
         let mut routes = HashMap::new();
@@ -850,13 +891,13 @@ mod tests {
             bgp_instance: None,
             ospf_instance: Some("ospf1".into()),
             static_routing_instance: None,
-            redistribute: Some(Redistribute {
+            redistribute: vec![Redistribute {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospfv3,
                 policy: None,
                 metric: None,
                 metric_type: None,
-            }),
+            }],
         };
         let cfg = cfg_with_table(table);
         let mut routes = HashMap::new();
@@ -887,13 +928,13 @@ mod tests {
             bgp_instance: Some("bgp1".into()),
             ospf_instance: Some("ospf1".into()),
             static_routing_instance: None,
-            redistribute: Some(Redistribute {
+            redistribute: vec![Redistribute {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
                 metric: None,
                 metric_type: None,
-            }),
+            }],
         };
         let cfg = cfg_with_table(table);
         let mut routes = HashMap::new();

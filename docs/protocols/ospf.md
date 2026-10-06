@@ -243,7 +243,7 @@ The other two authentication modes are a plain-text password of up to 8 bytes (`
 
 ### Redistribute static routes (ASBR)
 
-`redistribute from static to ospf` on a routing table advertises the table's static routes into its OSPF instance, which makes this router an AS boundary router (ASBR). The table needs both a static routing instance and an OSPF instance:
+`redistribute ospf` on a routing table advertises the table's static routes into its OSPF instance, which makes this router an AS boundary router (ASBR). The table needs both a static routing instance and an OSPF instance:
 
 ```
 configure asbr
@@ -251,7 +251,7 @@ edit static-routing-instance s1
 set route 198.51.100.0/24 gateway 10.50.0.98
 top
 set routing-table rt1 static-routing-instance s1
-set routing-table rt1 redistribute from static to ospf
+set routing-table rt1 redistribute ospf
 commit
 ```
 
@@ -266,25 +266,26 @@ The REST equivalent of the redistribute rule, in a transaction `asbr` opened and
 
 ```sh
 $C -X PUT -H 'Content-Type: application/json' -d '{"from":"Static","to":"Ospf","policy":null}' \
-  $B/v1/transactions/asbr/routing-table/rt1/redistribute
+  $B/v1/transactions/asbr/routing-table/rt1/redistribute/ospf
 ```
 
-Add `policy <name>` to the command (`"policy": "<name>"` in the JSON) to filter what is redistributed through a routing policy; without it, every static route is redistributed. See [Routing policy](../README.md#per-protocol-guides). Deleting the rule (`delete routing-table rt1 redistribute`) withdraws the routes from the other routers within about 15 seconds.
+Add `policy <name>` to the command (`"policy": "<name>"` in the JSON) to filter what is redistributed through a routing policy; without it, every static route is redistributed. See [Routing policy](../README.md#per-protocol-guides). Deleting the rule (`delete routing-table rt1 redistribute ospf`, or `DELETE …/routing-table/rt1/redistribute/ospf` over REST) withdraws the routes from the other routers within about 15 seconds.
 
-A routing table has only one `redistribute` rule, so it redistributes static routes into BGP or into OSPF, not both.
+A routing table keeps one `redistribute` rule per target, so it can redistribute the same static routes into BGP, OSPF and [OSPFv3](ospfv3.md#redistribute-static-routes-asbr) at once, each with its own `policy`. Deleting one rule leaves the others.
 
 #### Choose the metric and metric type of redistributed routes
 
 By default every redistributed route is advertised with metric 20 and metric type 1. Set `metric` (1 to 16777215) and `metric-type` (1 or 2) on the rule to change it; both are valid with `to ospf` only:
 
 ```
-set routing-table rt1 redistribute from static to ospf metric 50 metric-type 2
+set routing-table rt1 redistribute ospf metric 50
+set routing-table rt1 redistribute ospf metric-type 2
 ```
 
 ```sh
 $C -X PUT -H 'Content-Type: application/json' \
   -d '{"from":"Static","to":"Ospf","policy":null,"metric":50,"metric_type":2}' \
-  $B/v1/transactions/asbr/routing-table/rt1/redistribute
+  $B/v1/transactions/asbr/routing-table/rt1/redistribute/ospf
 ```
 
 - **Type 1** (default): other routers rank the route by the metric plus their distance to this router. Use it when the same prefix is reachable through several exits of comparable cost and you want the nearest one.
@@ -620,4 +621,4 @@ A physical interface such as `eth0` never takes a profile itself; `set interface
 
 | Field | CLI | Config-tree path | Type, default | Validation | Effect | Check with |
 |---|---|---|---|---|---|---|
-| redistribute | `set routing-table <table> redistribute from static to ospf [policy <policy>] [metric <1-16777215>] [metric-type <1\|2>]`; `delete routing-table <table> redistribute`; relative `set redistribute from static to ospf [policy <policy>]` / `delete redistribute` | `routing-table/<table>/redistribute`, `{"from":"Static","to":"Ospf","policy":null,"metric":null,"metric_type":null}` | unset by default; without a policy, everything is redistributed; metric 20, type 1 | the table needs both `static-routing-instance` and `ospf-instance`; the policy must exist; `metric`/`metric-type` only with `to ospf` | advertises the table's static routes as AS-external LSAs | `show ospf database` (type 5) on other routers |
+| redistribute | `set routing-table <table> redistribute ospf`, then `policy <policy>`, `metric <1-16777215>` or `metric-type <1\|2>` (one per line); `delete routing-table <table> redistribute ospf`; relative `set redistribute ospf` / `delete redistribute ospf` | `routing-table/<table>/redistribute/ospf`, `{"from":"Static","to":"Ospf","policy":null,"metric":null,"metric_type":null}` | no rule by default; without a policy, everything is redistributed; metric 20, type 1 | the table needs both `static-routing-instance` and `ospf-instance`; the policy must exist; `metric`/`metric-type` only with `to ospf` | advertises the table's static routes as AS-external LSAs | `show ospf database` (type 5) on other routers |

@@ -130,7 +130,7 @@ There is no command yet that lists BGP routes with their attributes (AS path, co
 NOS advertises two kinds of routes to BGP peers:
 
 - routes learned from other BGP peers, subject to the usual iBGP rules (see [Route reflection](#route-reflection-rfc-4456));
-- static routes of the same routing table, once you redistribute them with `set routing-table <table> redistribute from static to bgp`.
+- static routes of the same routing table, once you redistribute them with `set routing-table <table> redistribute bgp`.
 
 Every advertisement also has to pass the peer-group's export policy. This example advertises 198.51.100.0/24 from router-a:
 
@@ -140,7 +140,7 @@ edge-1(adv)> edit static-routing-instance s1
 edge-1(adv/static-routing-instance:s1)> set route 198.51.100.0/24 gateway 10.50.0.1
 edge-1(adv/static-routing-instance:s1)> top
 edge-1(adv)> set routing-table rt1 static-routing-instance s1
-edge-1(adv)> set routing-table rt1 redistribute from static to bgp
+edge-1(adv)> set routing-table rt1 redistribute bgp
 edge-1(adv)> commit
 transaction 'adv' committed
 ```
@@ -153,7 +153,7 @@ $C -X PUT -H 'Content-Type: application/json' \
 $C -X PUT -H 'Content-Type: application/json' -d '"s1"' \
   $B/v1/transactions/adv/routing-table/rt1/static-routing-instance
 $C -X PUT -H 'Content-Type: application/json' -d '{"from":"Static","to":"Bgp","policy":null}' \
-  $B/v1/transactions/adv/routing-table/rt1/redistribute
+  $B/v1/transactions/adv/routing-table/rt1/redistribute/bgp
 $C -X POST $B/v1/transactions/adv/commit
 ```
 

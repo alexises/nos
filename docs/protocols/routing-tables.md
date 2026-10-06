@@ -7,7 +7,7 @@ A routing table is a VRF: a separate IPv4/IPv6 forwarding table with its own int
   - [Create a routing table and put an interface in it](#create-a-routing-table-and-put-an-interface-in-it)
   - [Add static routes](#add-static-routes)
   - [Attach a BGP or OSPF instance](#attach-a-bgp-or-ospf-instance)
-  - [Redistribute static routes into BGP or OSPF](#redistribute-static-routes-into-bgp-or-ospf)
+  - [Redistribute static routes into BGP or OSPF](#redistribute-static-routes-into-bgp-ospf-or-ospfv3)
   - [Read a routing table](#read-a-routing-table)
   - [Run the REST API in a routing table](#run-the-rest-api-in-a-routing-table)
   - [Remove things](#remove-things)
@@ -119,13 +119,13 @@ $C -X PUT -H 'Content-Type: application/json' -d '"o1"' $B/v1/transactions/bgp/r
 
 An instance can feed only one routing table, and a table has at most one instance of each kind. A BGP instance that no routing table names opens no session at all: it has no VRF to run in. `show bgp brief` still lists it, but its peers stay down.
 
-### Redistribute static routes into BGP or OSPF
+### Redistribute static routes into BGP, OSPF or OSPFv3
 
-`redistribute from static to bgp` advertises the table's static routes through its BGP instance. `redistribute from static to ospf` makes the router an OSPF ASBR and originates an AS-external LSA for each of them. The table must already name both the static routing instance and the target instance:
+`redistribute bgp` advertises the table's static routes through its BGP instance. `redistribute ospf` makes the router an OSPF ASBR and originates an AS-external LSA for each of them, and `redistribute ospfv3` does the same into OSPFv3. The table must already name both the static routing instance and the target instance:
 
 ```
 lab-1> configure rd
-lab-1(rd)> set routing-table rt1 redistribute from static to bgp
+lab-1(rd)> set routing-table rt1 redistribute bgp
 lab-1(rd)> commit
 transaction 'rd' committed
 ```
@@ -138,11 +138,11 @@ lab-2> show route rt1 198.51.100.7
   * via 10.50.0.2 [bgp]
 ```
 
-The REST body is the whole rule. `from` is always `"Static"`, `to` is `"Bgp"` or `"Ospf"`, and `policy` is optional:
+The rules are a list keyed by target, so the REST path ends in the target (`bgp`, `ospf` or `ospfv3`, any case). The body is the whole rule: `from` is always `"Static"`, `to` is `"Bgp"`, `"Ospf"` or `"Ospfv3"` and matches the path, and `policy` is optional:
 
 ```sh
 $C -X PUT -H 'Content-Type: application/json' -d '{"from":"Static","to":"Bgp","policy":null}' \
-   $B/v1/transactions/rd/routing-table/rt1/redistribute
+   $B/v1/transactions/rd/routing-table/rt1/redistribute/bgp
 ```
 
 **With a policy.** Without a policy, every static route is redistributed. Add `policy <name>` to pass them through a routing policy first; routes the policy rejects are not redistributed, and routes it accepts carry any attribute it set (local preference, communities, and so on). The name is a policy definition, or one of the built-ins `accept-all` and `deny-all`. The routing-policy guide covers the language.
@@ -166,14 +166,14 @@ $C -X PUT -H 'Content-Type: application/json' \
 Then name it on the redistribution rule:
 
 ```
-lab-1(rd2)> set routing-table rt1 redistribute from static to bgp policy no-lab
+lab-1(rd2)> set routing-table rt1 redistribute bgp policy no-lab
 lab-1(rd2)> commit
 transaction 'rd2' committed
 ```
 
 ```sh
 $C -X PUT -H 'Content-Type: application/json' -d '{"from":"Static","to":"Bgp","policy":"no-lab"}' \
-   $B/v1/transactions/rd2/routing-table/rt1/redistribute
+   $B/v1/transactions/rd2/routing-table/rt1/redistribute/bgp
 ```
 
 Router-b then no longer has the prefix:
@@ -183,7 +183,12 @@ lab-2> show route rt1 198.51.100.7
 no route matches 198.51.100.7
 ```
 
-A table has one redistribution rule. Setting another one replaces it, so a table cannot redistribute into BGP and OSPF at the same time.
+A table has one rule per target and any number of targets, so it can redistribute into BGP, OSPF and OSPFv3 at once, each with its own `policy` (and `metric`/`metric-type` for `ospf`). Setting a rule for a target that already has one replaces only that rule:
+
+```
+lab-1(rd3)> set routing-table rt1 redistribute ospf
+lab-1(rd3)> set routing-table rt1 redistribute ospfv3 policy v6-only
+```
 
 Redistribution into BGP is only half of advertising a route: the peer-group's `export-policy` must also let it out, and it defaults to `deny-all`. See the BGP guide.
 
@@ -223,7 +228,8 @@ What a routing table is configured with, as opposed to what it holds, is in `sho
 routing-table rt1
   bgp-instance r1
   static-routing-instance s1
-  redistribute static policy no-lab
+  redistribute bgp
+    policy no-lab
   rest-api 10.50.0.2
 static-routing-instance s1
   route 198.51.100.0/24
@@ -234,7 +240,7 @@ Only what is set is shown, so `ospf-instance` and `ospfv3-instance` appear once 
 
 ```sh
 $ $C $B/v1/transactions/rd2/routing-table/rt1
-{"bgp_instance":"r1","name":"rt1","ospf_instance":null,"ospfv3_instance":null,"redistribute":{"from":"Static","policy":"no-lab","to":"Bgp"},"rest_api":{"address":"10.50.0.2","port":8080},"static_routing_instance":"s1"}
+{"bgp_instance":"r1","name":"rt1","ospf_instance":null,"ospfv3_instance":null,"redistribute":[{"from":"Static","metric":null,"metric_type":null,"policy":"no-lab","to":"Bgp"}],"rest_api":{"address":"10.50.0.2","port":8080},"static_routing_instance":"s1"}
 ```
 
 ### Run the REST API in a routing table
@@ -255,11 +261,11 @@ The port defaults to 8080; add `port <port>` to change it. Enabling it on a mana
 ### Remove things
 
 - `delete routing-table <table> bgp-instance` (and `ospf-instance`, `ospfv3-instance`, `static-routing-instance`) detaches that source. Its routes leave the table.
-- `delete routing-table <table> redistribute` stops redistribution. BGP withdraws the routes; OSPF flushes their AS-external LSAs at once.
+- `delete routing-table <table> redistribute <target>` stops redistribution into that target (`bgp`, `ospf` or `ospfv3`), leaving the other rules. BGP withdraws the routes; OSPF flushes their AS-external LSAs at once.
 - `delete static-routing-instance <instance> route <prefix>` removes one route; `delete static-routing-instance <instance>` removes the instance and all its routes.
 - `delete routing-table <table>` removes the table, and with it every route it held. The instances and interfaces it referred to are not deleted, but an interface that still names the table makes the commit fail until you move it elsewhere.
 
-Over REST, each is a `DELETE` on the same path, for example `DELETE …/routing-table/rt1/redistribute` or `DELETE …/static-routing-instance/s1/route/198.51.100.0%2F24`.
+Over REST, each is a `DELETE` on the same path, for example `DELETE …/routing-table/rt1/redistribute/ospf` or `DELETE …/static-routing-instance/s1/route/198.51.100.0%2F24`.
 
 ## How routing tables behave
 
@@ -286,7 +292,7 @@ Validation at commit time checks references and uniqueness:
 
 - A table name is 1 to 64 characters and unique.
 - Every instance a table names must exist, and no instance may be named by two tables.
-- `redistribute from static` needs `static-routing-instance` set on the same table; `to bgp` needs `bgp-instance`, and `to ospf` needs `ospf-instance`.
+- `redistribute` needs `static-routing-instance` set on the same table; `bgp` needs `bgp-instance`, `ospf` needs `ospf-instance` and `ospfv3` needs `ospfv3-instance`. A target can appear only once ("duplicate redistribute target").
 - A redistribution `policy` must be a policy definition, `accept-all` or `deny-all`.
 - In a static routing instance, a prefix appears at most once, and its gateway must be of the same address family (an IPv4 prefix needs an IPv4 gateway).
 - The REST API address must be a specific unicast address, and the port 1 to 65535.
@@ -308,8 +314,8 @@ A routing table's fields. CLI forms are shown absolute; the relative form, valid
 | ospf-instance | `set routing-table <t> ospf-instance <i>` / `delete … ospf-instance` | `routing-table/{t}/ospf-instance`, `"o1"` | name, unset | as above | Runs the OSPF instance in this VRF | `show ospf neigh`, `show route <t>` |
 | ospfv3-instance | `set routing-table <t> ospfv3-instance <i>` / `delete … ospfv3-instance` | `routing-table/{t}/ospfv3-instance`, `"o3"` | name, unset | as above | Runs the OSPFv3 instance in this VRF | `show ospfv3 neigh`, `show route <t>` |
 | static-routing-instance | `set routing-table <t> static-routing-instance <s>` / `delete … static-routing-instance` | `routing-table/{t}/static-routing-instance`, `"s1"` | name, unset | as above | Installs the instance's routes | `show route <t>` |
-| redistribute | `set routing-table <t> redistribute from static to bgp\|ospf [policy <p>]` / `delete … redistribute` | `routing-table/{t}/redistribute`, `{"from":"Static","to":"Bgp","policy":null}` | one rule, unset | source and target instances set on the table; policy exists | Advertises the static routes into BGP, or as OSPF AS-external LSAs | `show route <t>` on the peer, `show ospf database` |
-| redistribute policy | `… redistribute from static to <x> policy <p>` | `routing-table/{t}/redistribute/policy`, `"no-lab"` | name, unset (everything redistributed) | policy definition, `accept-all` or `deny-all` | Filters and rewrites what is redistributed | as above |
+| redistribute | `set routing-table <t> redistribute bgp\|ospf [policy <p>]` / `delete … redistribute` | `routing-table/{t}/redistribute`, `{"from":"Static","to":"Bgp","policy":null}` | one rule, unset | source and target instances set on the table; policy exists | Advertises the static routes into BGP, or as OSPF AS-external LSAs | `show route <t>` on the peer, `show ospf database` |
+| redistribute policy | `… redistribute <x> policy <p>` | `routing-table/{t}/redistribute/policy`, `"no-lab"` | name, unset (everything redistributed) | policy definition, `accept-all` or `deny-all` | Filters and rewrites what is redistributed | as above |
 | rest-api | `set routing-table <t> rest-api address <ip> [port <n>]` / `delete … rest-api` | `routing-table/{t}/rest-api`, `{"address":"10.50.0.2","port":8080}` | unset; port 8080 | unicast address; port 1-65535 | Runs the REST API on that address in this VRF | `show log nos-restd[<t>]` |
 
 A static routing instance and its routes. Relative forms, after `edit static-routing-instance <s>`: `set route <prefix> gateway <ip>`, `delete route <prefix>`.
