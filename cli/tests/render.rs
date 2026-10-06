@@ -201,6 +201,75 @@ fn every_field_survives_show_config_and_back() {
     }
 }
 
+/// Every field's change wakes its daemons (#116): mutate each non-hidden
+/// field of the sample (at the root, and inside the first element of every
+/// list and struct), and the diff must be non-empty and name the field.
+fn mutate(node: &Node, path: &[String], sample: &Value, at: &Value, count: &mut usize) {
+    for f in node.fields.iter().filter(|f| !f.hidden && !f.key) {
+        let cur = &at[f.name];
+        let mut generator = Gen { n: 1000, round: 3 };
+        let mut new = generator.value(&(f.kind)(), None);
+        if new == *cur {
+            new = Value::Null;
+        }
+        let mut cfg = sample.clone();
+        let mut target = path.to_vec();
+        target.push(f.name.to_string());
+        set_at(&mut cfg, &target, new);
+        let diff = nos_proto::diff::diff_values(sample, &cfg);
+        let label = cli::render::name(f);
+        let text = format!("{diff:?}");
+        assert!(
+            !diff.is_empty() && text.contains(&label),
+            "changing {} ({label}) is not in the diff: {text}",
+            target.join("/")
+        );
+        *count += 1;
+        // Only a plain struct and a keyed list show their inner fields; an
+        // optional struct (or an unkeyed list) is one field, named as a whole.
+        let (inner, list) = match (f.kind)() {
+            Kind::Struct(sub) => (Some(sub), false),
+            Kind::List(e) => match e() {
+                Kind::Struct(sub) if sub.fields.iter().any(|k| k.key) => (Some(sub), true),
+                _ => (None, true),
+            },
+            _ => (None, false),
+        };
+        let child = if list { cur.get(0) } else { Some(cur) };
+        if let (Some(sub), Some(child)) = (inner, child.filter(|c| c.is_object())) {
+            let mut inner_path = target.clone();
+            if list {
+                inner_path.push("0".into());
+            }
+            mutate(sub, &inner_path, sample, child, count);
+        }
+    }
+}
+
+fn set_at(v: &mut Value, path: &[String], new: Value) {
+    let (head, rest) = path.split_first().unwrap();
+    let slot = match v {
+        Value::Array(a) => &mut a[head.parse::<usize>().unwrap()],
+        _ => &mut v[head.as_str()],
+    };
+    if rest.is_empty() {
+        *slot = new;
+    } else {
+        set_at(slot, rest, new);
+    }
+}
+
+#[test]
+fn every_field_change_is_in_the_diff() {
+    let mut g = Gen { n: 0, round: 0 };
+    let mut sample = g.node(cli::root());
+    fix(&mut sample);
+    fix_interfaces(&mut sample);
+    let mut n = 0;
+    mutate(cli::root(), &[], &sample, &sample.clone(), &mut n);
+    assert!(n > 150, "only {n} fields mutated");
+}
+
 #[test]
 fn an_empty_config_shows_nothing_but_what_differs_from_default() {
     let json = serde_json::to_value(Config::default()).unwrap();

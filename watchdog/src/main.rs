@@ -4,8 +4,8 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::Parser;
 use nos_log_client::ForwardingLayer;
-use nos_proto::diff::broadcast_domain::VNI_LABEL;
-use nos_proto::diff::routing_table::REST_API_LABEL;
+use nos_proto::diff::REST_API_LABEL;
+use nos_proto::diff::VNI_LABEL;
 use nos_proto::{
     DiffScope, Role, DEFAULT_CONFIG_SOCKET, DEFAULT_LOG_SOCKET, DEFAULT_PKI_DIR,
     DEFAULT_WATCHDOG_SOCKET,

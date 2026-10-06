@@ -1155,7 +1155,7 @@ mod tests {
             });
         let out = render_diff(&nos_proto::diff_configs(&base, &candidate), false);
         for want in [
-            "+ broadcast-domain blue:",
+            "+ broadcast domain blue:",
             "+ switching-profile trunk:",
             "+ policy-definition p1:",
             "+   source: if this.prefix in 10.0.0.0/8:\n+     reject\n+ accept",
