@@ -296,6 +296,9 @@ async fn resync(
 
     let redistribute_policy = resolve_redistribute_policy(&cfg, own.redistribute_policy.as_deref());
     links.set_redistribute_policy(redistribute_policy).await;
+    links
+        .set_redistribute_metric(own.redistribute_metric, own.redistribute_metric_type)
+        .await;
 
     links
         .reconcile(desired_links, desired_stubs, own.router_id)

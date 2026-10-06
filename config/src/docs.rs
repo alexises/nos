@@ -557,7 +557,9 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              rule is set. An optional trailing 'policy <name>' clause names an RPL policy (or \
              accept-all/deny-all) to filter redistributed routes through before they reach BGP/ \
              OSPF; omitted, redistribution stays unfiltered (accept-all), unlike a peer-group's \
-             import-policy/export-policy, which default to deny-all.",
+             import-policy/export-policy, which default to deny-all. For 'to ospf' only, \
+             'metric <1-16777215>' (default 20) and 'metric-type <1|2>' (default 1) set the \
+             external metric and metric type of the AS-external-LSAs.",
                 " ",
                 "Clear this table's redistribution rule.",
             ),

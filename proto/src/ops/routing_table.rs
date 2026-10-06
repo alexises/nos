@@ -379,6 +379,8 @@ mod tests {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
+                metric: None,
+                metric_type: None,
             },
         }
         .apply(&mut cfg)
@@ -389,6 +391,8 @@ mod tests {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
+                metric: None,
+                metric_type: None,
             })
         );
 
@@ -414,6 +418,8 @@ mod tests {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: Some("p1".to_string()),
+                metric: None,
+                metric_type: None,
             },
         }
         .apply(&mut cfg)

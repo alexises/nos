@@ -252,13 +252,11 @@ pub struct NetworkLsaBody {
 
 /// RFC 2328 Appendix A.4.5's AS-external-LSA body.
 ///
-/// `ponytail:` the E bit (metric word's top bit, RFC 2328 A.4.5: Type-2) is
-/// carried verbatim in `e_type2` so a foreign LSA is re-flooded byte-identical
-/// (RFC 2328 §13), but `crate::spf` still sums `metric` as a Type-1 cost —
-/// no §16.4.1 Type-1/Type-2 comparison (issue #215), and this NOS originates
-/// `e_type2 = false` only. `forwarding_address` is decoded faithfully but
-/// `crate::spf` only ever treats an external route as reachable via the
-/// advertising ASBR's own next-hop (a non-zero one is never resolved).
+/// The E bit (metric word's top bit, A.4.5: Type-2) is carried in `e_type2`,
+/// so a foreign LSA is re-flooded byte-identical (RFC 2328 §13); a nos-
+/// originated one gets it from `redistribute ... metric-type`.
+/// `ponytail:` `forwarding_address` is decoded faithfully but never
+/// originated non-zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AsExternalLsaBody {
     pub network_mask: Ipv4Addr,

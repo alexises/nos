@@ -644,6 +644,8 @@ mod tests {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
+                metric: None,
+                metric_type: None,
             }),
         };
         let cfg = cfg_with_table(table);
@@ -675,6 +677,8 @@ mod tests {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
+                metric: None,
+                metric_type: None,
             }),
         };
         let cfg = cfg_with_table(table);
@@ -709,6 +713,8 @@ mod tests {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
+                metric: None,
+                metric_type: None,
             }),
         };
         let cfg = cfg_with_table(table);
@@ -781,6 +787,8 @@ mod tests {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospf,
                 policy: None,
+                metric: None,
+                metric_type: None,
             }),
         };
         let cfg = cfg_with_table(table);
@@ -809,6 +817,8 @@ mod tests {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospf,
                 policy: None,
+                metric: None,
+                metric_type: None,
             }),
         };
         let cfg = cfg_with_table(table);
@@ -844,6 +854,8 @@ mod tests {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospfv3,
                 policy: None,
+                metric: None,
+                metric_type: None,
             }),
         };
         let cfg = cfg_with_table(table);
@@ -879,6 +891,8 @@ mod tests {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: None,
+                metric: None,
+                metric_type: None,
             }),
         };
         let cfg = cfg_with_table(table);

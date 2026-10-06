@@ -273,6 +273,25 @@ Add `policy <name>` to the command (`"policy": "<name>"` in the JSON) to filter 
 
 A routing table has only one `redistribute` rule, so it redistributes static routes into BGP or into OSPF, not both.
 
+#### Choose the metric and metric type of redistributed routes
+
+By default every redistributed route is advertised with metric 20 and metric type 1. Set `metric` (1 to 16777215) and `metric-type` (1 or 2) on the rule to change it; both are valid with `to ospf` only:
+
+```
+set routing-table rt1 redistribute from static to ospf metric 50 metric-type 2
+```
+
+```sh
+$C -X PUT -H 'Content-Type: application/json' \
+  -d '{"from":"Static","to":"Ospf","policy":null,"metric":50,"metric_type":2}' \
+  $B/v1/transactions/asbr/routing-table/rt1/redistribute
+```
+
+- **Type 1** (default): other routers rank the route by the metric plus their distance to this router. Use it when the same prefix is reachable through several exits of comparable cost and you want the nearest one.
+- **Type 2**: other routers compare the metric first; their distance to this router only breaks a tie. Use it when the external cost dominates and the internal distance should not matter.
+- **Check it.** On any router, `GET /v1/ospf/database` lists each type-5 LSA with `external_metric` and `external_type2` (the E bit). Changing either value re-advertises the LSA with a higher sequence number (`ospf lsa originated` in the log).
+- **Upgrade note.** Redistributed routes used to be advertised with metric 0 on the wire; they now carry 20 unless you set a metric, so external costs on other routers rise by 20.
+
 ### Add a second area (ABR)
 
 A router attached to two or more areas is an area border router (ABR): it advertises each area's prefixes into the others as summary LSAs (type 3). There is no switch to turn this on; declaring a second area and attaching a profile from it is enough. Here router-a's loopback moves into area 0.0.0.1, while `eth0.0` stays in the backbone:
@@ -489,7 +508,7 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **Authentication (RFC 2328 Appendix D, RFC 5709, RFC 7474).** Described [above](#authenticate-a-link-and-change-its-key). A packet that fails authentication is dropped and logged (`ospf packet authentication failed`). A replayed or out-of-order packet (a sequence number that does not increase) is dropped and logged too.
 
-**AS-external routes (ASBR).** Each redistributed static route becomes one type-5 LSA, flooded to every area the router is in. Only static routes can be redistributed, and every external route nos originates is metric type 1 with metric 20; there is no metric-type or per-route metric setting, and the forwarding address is always 0.0.0.0.
+**AS-external routes (ASBR).** Each redistributed static route becomes one type-5 LSA, flooded to every area the router is in. Only static routes can be redistributed, and every one carries the rule's [metric and metric type](#choose-the-metric-and-metric-type-of-redistributed-routes) (default 20, type 1); the forwarding address is always 0.0.0.0.
 
 **Ranking external routes received from other routers (RFC 2328 §16.4).**
 - An intra-area or inter-area route always beats an external one, even a cheaper one. Type 1 beats type 2, even a cheaper type 2.
@@ -551,7 +570,7 @@ All paths are relative to `/v1/transactions/{tx}/`. `delete` forms marked *relat
 | areas | `edit ospf instance <name> area <area-id>`; relative `edit area <area-id>` | `ospf-instance/<name>/area/<area-id>` | list of areas | area IDs unique within the instance | see [Area](#area) | `show config` |
 | routing table | set on the table: `set routing-table <table> ospf-instance <name>`; `delete routing-table <table> ospf-instance` | `routing-table/<table>/ospf-instance` | instance name; unset by default | the instance must exist; one table per instance | runs the instance in that table's VRF and installs its routes there | `show ospf neigh`, `show route <table>` |
 
-The instance's JSON also carries `routing_table` and `redistribute_policy`. They are filled in by the router from the routing table's settings, are read-only, and any value you send is replaced at commit.
+The instance's JSON also carries `routing_table`, `redistribute_policy`, `redistribute_metric` and `redistribute_metric_type`. They are filled in by the router from the routing table's settings, are read-only, and any value you send is replaced at commit.
 
 ### Area
 
@@ -601,4 +620,4 @@ A physical interface such as `eth0` never takes a profile itself; `set interface
 
 | Field | CLI | Config-tree path | Type, default | Validation | Effect | Check with |
 |---|---|---|---|---|---|---|
-| redistribute | `set routing-table <table> redistribute from static to ospf [policy <policy>]`; `delete routing-table <table> redistribute`; relative `set redistribute from static to ospf [policy <policy>]` / `delete redistribute` | `routing-table/<table>/redistribute`, `{"from":"Static","to":"Ospf","policy":null}` | unset by default; without a policy, everything is redistributed | the table needs both `static-routing-instance` and `ospf-instance`; the policy must exist | advertises the table's static routes as AS-external LSAs | `show ospf database` (type 5) on other routers |
+| redistribute | `set routing-table <table> redistribute from static to ospf [policy <policy>] [metric <1-16777215>] [metric-type <1\|2>]`; `delete routing-table <table> redistribute`; relative `set redistribute from static to ospf [policy <policy>]` / `delete redistribute` | `routing-table/<table>/redistribute`, `{"from":"Static","to":"Ospf","policy":null,"metric":null,"metric_type":null}` | unset by default; without a policy, everything is redistributed; metric 20, type 1 | the table needs both `static-routing-instance` and `ospf-instance`; the policy must exist; `metric`/`metric-type` only with `to ospf` | advertises the table's static routes as AS-external LSAs | `show ospf database` (type 5) on other routers |

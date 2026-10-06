@@ -19,6 +19,8 @@ pub fn sync_routing_table_refs(config: &mut Config) {
     for instance in &mut config.ospf_instances {
         instance.routing_table = None;
         instance.redistribute_policy = None;
+        instance.redistribute_metric = None;
+        instance.redistribute_metric_type = None;
     }
     for instance in &mut config.ospfv3_instances {
         instance.routing_table = None;
@@ -51,6 +53,12 @@ pub fn sync_routing_table_refs(config: &mut Config) {
                     .as_ref()
                     .filter(|r| r.to == RedistributeTarget::Ospf)
                     .and_then(|r| r.policy.clone());
+                let ospf_rule = table
+                    .redistribute
+                    .as_ref()
+                    .filter(|r| r.to == RedistributeTarget::Ospf);
+                instance.redistribute_metric = ospf_rule.and_then(|r| r.metric);
+                instance.redistribute_metric_type = ospf_rule.and_then(|r| r.metric_type);
             }
         }
         if let Some(ospfv3_instance) = &table.ospfv3_instance {
@@ -108,6 +116,8 @@ mod tests {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             host_router: false,
+            redistribute_metric: None,
+            redistribute_metric_type: None,
         }
     }
 
@@ -143,6 +153,8 @@ mod tests {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: policy.map(str::to_string),
+                metric: None,
+                metric_type: None,
             }),
             ..table(name, bgp_instance)
         }
@@ -160,6 +172,8 @@ mod tests {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospf,
                 policy: policy.map(str::to_string),
+                metric: None,
+                metric_type: None,
             }),
             ..table_with_ospf(name, ospf_instance)
         }
@@ -288,6 +302,25 @@ mod tests {
             cfg.ospf_instances[0].redistribute_policy.as_deref(),
             Some("p1")
         );
+    }
+
+    #[test]
+    fn redistribute_to_ospf_mirrors_metric_and_clears_it() {
+        let mut table = table_with_ospf_redistribute("rt1", Some("o1"), None);
+        table.redistribute.as_mut().unwrap().metric = Some(50);
+        table.redistribute.as_mut().unwrap().metric_type = Some(2);
+        let mut cfg = Config {
+            ospf_instances: vec![ospf_instance("o1")],
+            routing_tables: vec![table],
+            ..Default::default()
+        };
+        sync_routing_table_refs(&mut cfg);
+        assert_eq!(cfg.ospf_instances[0].redistribute_metric, Some(50));
+        assert_eq!(cfg.ospf_instances[0].redistribute_metric_type, Some(2));
+        cfg.routing_tables[0].redistribute = None;
+        sync_routing_table_refs(&mut cfg);
+        assert_eq!(cfg.ospf_instances[0].redistribute_metric, None);
+        assert_eq!(cfg.ospf_instances[0].redistribute_metric_type, None);
     }
 
     #[test]

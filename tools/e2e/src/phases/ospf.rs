@@ -316,6 +316,30 @@ pub async fn asbr_phase(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&route_pat(ASBR_PREFIX_SPECIFIC), route_specific, 60)
         .await?;
 
+    // #216: no metric configured -> metric 20, Type 1. Then `metric 50
+    // metric-type 2`: the LSA is re-originated with the E bit, and flipping
+    // to type 1 clears it again (the sequence number moves each time).
+    let prefix_lsid = ASBR_PREFIX.split('/').next().unwrap_or_default();
+    let reorig_pat = format!("ospf lsa originated lsa_type=5 link_state_id={prefix_lsid} ");
+    wait_external_lsa(b, prefix_lsid, 20, false).await?;
+    for (metric_type, type2) in [("2", true), ("1", false)] {
+        let before = a.count(&reorig_pat);
+        let mut flags = with_base(A, specific(asbr(ospf(OSPF_ROUTER_ID))));
+        flags.extend(strings(&[
+            "--redistribute-metric",
+            "50",
+            "--redistribute-metric-type",
+            metric_type,
+        ]));
+        a.provision_flags(&flags).await?;
+        a.wait_new(&reorig_pat, before, 60).await?;
+        wait_external_lsa(b, prefix_lsid, 50, type2).await?;
+    }
+    // Back to the defaults for the flush checks below.
+    a.provision_flags(&with_base(A, specific(asbr(ospf(OSPF_ROUTER_ID)))))
+        .await?;
+    wait_external_lsa(b, prefix_lsid, 20, false).await?;
+
     // RFC 2328 §14.1: dropping the redistribute rule must flush the Type-5 —
     // prematurely aged on router-a, MaxAge-flushed on router-b and its kernel
     // route removed — in seconds, not after the 3600s MaxAge. The static route
@@ -345,6 +369,44 @@ pub async fn asbr_phase(w: &mut World) -> anyhow::Result<()> {
     // more before it goes out — impossible with an immediate per-LSU ack.
     b.wait_new("ospf lsack sent.*delayed_ms=[1-9][0-9][0-9][0-9]", 0, 30)
         .await
+}
+
+/// Polls router-b's `GET /v1/ospf/database` until router-a's live Type-5 for
+/// `link_state_id` carries `metric` and the E bit `type2` (60s).
+async fn wait_external_lsa(
+    r: &Router,
+    link_state_id: &str,
+    metric: u32,
+    type2: bool,
+) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..60 {
+        let body = r
+            .rest_expect(Method::GET, "/v1/ospf/database", None, 200)
+            .await?;
+        let report: serde_json::Value = serde_json::from_str(&body)?;
+        let found = report[0]["result"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|l| {
+                l["lsa_type"] == 5
+                    && l["advertising_router"] == OSPF_ROUTER_ID
+                    && l["link_state_id"] == link_state_id
+                    && l["age"].as_u64().is_some_and(|a| a < 3600)
+                    && l["external_metric"] == metric
+                    && l["external_type2"] == type2
+            });
+        if found {
+            return Ok(());
+        }
+        last = body;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!(
+        "{}: no type-5 {link_state_id} with metric {metric} type2={type2} in its database: {last}",
+        r.name()
+    )
 }
 
 /// A third router with a lower router-id joins the broadcast segment: the

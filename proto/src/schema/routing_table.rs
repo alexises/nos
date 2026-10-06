@@ -82,6 +82,16 @@ pub struct Redistribute {
     /// every existing `redistribute from static to bgp` config.
     #[cli(topic = RoutingTableRedistribute)]
     pub policy: Option<String>,
+    /// OSPF external metric (1..=16777215) for the AS-external-LSAs this
+    /// rule originates; `None` = 20. Only valid with `to ospf`.
+    #[serde(default)]
+    #[cli(topic = RoutingTableRedistribute)]
+    pub metric: Option<u32>,
+    /// OSPF external metric type, 1 or 2 (RFC 2328 §16.4); `None` = 1. Only
+    /// valid with `to ospf`.
+    #[serde(default)]
+    #[cli(topic = RoutingTableRedistribute)]
+    pub metric_type: Option<u8>,
 }
 
 /// Where `nos-restd` listens for a routing table: one specific address
@@ -380,6 +390,27 @@ pub(crate) fn valid_redistribute_rules(tables: &[RoutingTable], ctx: &Config) ->
             ));
         }
         redistribute_policy_reference_valid(redistribute.policy.as_ref(), ctx)?;
+        if (redistribute.metric.is_some() || redistribute.metric_type.is_some())
+            && redistribute.to != RedistributeTarget::Ospf
+        {
+            return Err(garde::Error::new(
+                "redistribute metric/metric-type apply to 'to ospf' only",
+            ));
+        }
+        if redistribute
+            .metric
+            .is_some_and(|m| !(1..=0x00ff_ffff).contains(&m))
+        {
+            return Err(garde::Error::new(
+                "redistribute metric must be between 1 and 16777215",
+            ));
+        }
+        if redistribute
+            .metric_type
+            .is_some_and(|t| !(1..=2).contains(&t))
+        {
+            return Err(garde::Error::new("redistribute metric-type must be 1 or 2"));
+        }
     }
     for table in tables {
         valid_table_evpn(table, ctx)?;
@@ -492,6 +523,8 @@ mod tests {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             host_router: false,
+            redistribute_metric: None,
+            redistribute_metric_type: None,
         }
     }
 
@@ -651,6 +684,8 @@ mod tests {
             from: RedistributeSource::Static,
             to: RedistributeTarget::Bgp,
             policy: None,
+            metric: None,
+            metric_type: None,
         }
     }
 
@@ -738,6 +773,54 @@ mod tests {
         );
         cfg.policy_definitions = policies;
         cfg
+    }
+
+    fn ospf_metric_config(
+        metric: Option<u32>,
+        metric_type: Option<u8>,
+        to: RedistributeTarget,
+    ) -> Config {
+        let mut rt = table("rt1", Some("r1"), Some("sri1"));
+        rt.ospf_instance = Some("o1".to_string());
+        rt.redistribute = Some(Redistribute {
+            to,
+            metric,
+            metric_type,
+            ..redistribute()
+        });
+        let mut cfg = config_with(
+            vec![rt],
+            vec![instance("r1")],
+            vec![static_instance("sri1")],
+        );
+        cfg.ospf_instances = vec![ospf_instance("o1")];
+        cfg
+    }
+
+    #[test]
+    fn redistribute_metric_validation() {
+        let ospf = RedistributeTarget::Ospf;
+        let ok = |m, t, to| {
+            let cfg = ospf_metric_config(m, t, to);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(ok(None, None, ospf));
+        assert!(ok(Some(1), Some(1), ospf));
+        assert!(ok(Some(0x00ff_ffff), Some(2), ospf));
+        assert!(!ok(Some(0), None, ospf));
+        assert!(!ok(Some(0x0100_0000), None, ospf));
+        assert!(!ok(None, Some(0), ospf));
+        assert!(!ok(None, Some(3), ospf));
+        // `to bgp` has no such knob.
+        assert!(!ok(Some(5), None, RedistributeTarget::Bgp));
+        assert!(!ok(None, Some(2), RedistributeTarget::Bgp));
+    }
+
+    #[test]
+    fn redistribute_without_metric_fields_still_deserializes() {
+        let r: Redistribute =
+            serde_json::from_str(r#"{"from":"Static","to":"Ospf","policy":null}"#).unwrap();
+        assert_eq!((r.metric, r.metric_type), (None, None));
     }
 
     #[test]
