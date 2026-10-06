@@ -6,6 +6,7 @@ use std::net::IpAddr;
 use std::path::Path;
 
 use futures::{SinkExt, StreamExt};
+use nos_proto::rib::EvpnIrb;
 use nos_proto::{
     BroadcastDomainStatus, InterfaceEvent, InterfaceRequest, IpcCodec, RibEvent, RibRequest, Role,
     ServiceRef, SourceAddress, LOOPBACK_PREFIX,
@@ -58,18 +59,31 @@ pub async fn bond_name(watchdog_socket: &Path, aggregate: &str) -> Option<String
 /// The kernel name of routing table `table`'s loopback device: `lo<table id>`,
 /// the id being `nos-ribd`'s (see `RibRequest::GetTableId`).
 async fn loopback_device(watchdog_socket: &Path, table: &str) -> Option<String> {
+    match ask_rib(watchdog_socket, table, RibRequest::GetTableId).await? {
+        RibEvent::TableId(Some(id)) => Some(format!("lo{id}")),
+        _ => None,
+    }
+}
+
+/// Routing table `table`'s EVPN IP-VRF, for symmetric IRB (`None` until its
+/// `nos-ribd` built it, or while that daemon isn't reachable).
+pub async fn evpn_irb(watchdog_socket: &Path, table: &str) -> Option<EvpnIrb> {
+    match ask_rib(watchdog_socket, table, RibRequest::GetEvpnIrb).await? {
+        RibEvent::EvpnIrb(irb) => irb,
+        _ => None,
+    }
+}
+
+async fn ask_rib(watchdog_socket: &Path, table: &str, req: RibRequest) -> Option<RibEvent> {
     let sock =
         watchdog_client::resolve_once(watchdog_socket, &ServiceRef::RibTable(table.to_string()))
             .await?;
-    let stream = nos_pki::connect_role(&sock, Role::Ribd).await.ok()?;
+    let stream = nos_pki::connect(&sock, Role::Ribd, table).await.ok()?;
     let (r, w) = tokio::io::split(stream);
     let mut reader = FramedRead::new(r, IpcCodec::<RibEvent>::default());
     let mut writer = FramedWrite::new(w, IpcCodec::<RibRequest>::default());
-    writer.send(RibRequest::GetTableId).await.ok()?;
-    match reader.next().await? {
-        Ok(RibEvent::TableId(Some(id))) => Some(format!("lo{id}")),
-        _ => None,
-    }
+    writer.send(req).await.ok()?;
+    reader.next().await?.ok()
 }
 
 /// The VTEP address `source` names, preferring IPv4, and the kernel device

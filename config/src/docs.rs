@@ -578,7 +578,9 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Set the table's L3 VNI.",
             "1-16777215, unique across every routing table's l3-vni and every broadcast \
              domain's vni. Carried as the label of every Type-5 route; a received one must \
-             carry the same value.",
+             carry the same value. Also turns on symmetric IRB (RFC 9135) for every EVPN \
+             broadcast domain whose SVI is in this table: their MAC+IP routes carry this L3 \
+             VNI as a second label, and a remote PE installs them as host routes here.",
         ),
         Topic::RoutingTableEvpnRd => (
             "Set the Route Distinguisher of the table's Type-5 routes.",
@@ -601,7 +603,8 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Name the underlay BGP instance the table's Type-5 routes are exchanged over.",
             "Must exist and must not be the table's own bgp-instance: the routes are carried \
              by the instance of the underlay VRF, which needs `address-family l2vpn-evpn` on \
-             its peer-groups.",
+             its peer-groups. It must also be the instance every EVPN broadcast domain whose \
+             SVI is in this table names on `redistribute from mac` (checked at commit).",
         ),
         Topic::StaticRoutingInstance => (
             "Create a static routing instance in the transaction if it doesn't already exist.",
@@ -782,7 +785,9 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Points a broadcast domain's own bridge device at a routing table by name, which \
              doubles as its VRF assignment. The routing table must exist, checked at commit \
              time; as with an interface, more than one broadcast domain (or interface) may be \
-             associated with the same routing table.",
+             associated with the same routing table. For a domain with a vni, a table with an \
+             evpn l3-vni makes its MAC+IP routes symmetric IRB (RFC 9135); the table's evpn \
+             bgp-instance must then be the domain's `redistribute from mac` instance.",
                 " ",
                 "Remove a broadcast domain's routing table association.",
             ),
@@ -829,7 +834,9 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              (link-local addresses excluded) on the domain's bridge is originated as an EVPN \
              Type-2 route carrying both its MAC and IP. The instance must be the one named by \
              `redistribute from mac`. Received Type-2 routes with an IP are programmed as \
-             kernel neighbours on the bridge.",
+             kernel neighbours on the bridge. When the domain's SVI is in a routing table \
+             with an evpn l3-vni, these routes also carry that L3 VNI (symmetric IRB), so a \
+             remote PE installs a host route to each.",
         ),
         Topic::BroadcastDomainConnectedRedistribute => (
             "Originate a broadcast domain's own (SVI) addresses as EVPN MAC+IP routes.",

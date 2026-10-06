@@ -168,6 +168,7 @@ mod tests {
             next_hop: "10.50.0.2".parse().unwrap(),
             ext_communities: vec![],
             esi: [0; 10],
+            l3_vni: None,
         }
     }
 

@@ -14,9 +14,10 @@ use std::time::Duration;
 
 use nos_proto::evpn_id::{
     df_election_ext, es_import_rt, esi_label_ext, format_esi, parse_df_election, parse_esi_label,
-    Esi, DEFAULT_GATEWAY, DF_ALG_HRW, DF_ALG_MODULO, ENCAP_VXLAN,
+    router_mac_ext, Esi, DEFAULT_GATEWAY, DF_ALG_HRW, DF_ALG_MODULO, ENCAP_VXLAN,
 };
 use nos_proto::fdb::AD_TAG_ES;
+use nos_proto::rib::EvpnIrb;
 use nos_proto::{
     DfAlgorithm, EsEntry, EvpnKey, EvpnRoute, EvpnUpdate, FdbTable, MacEntry, MacSource, NeighEntry,
 };
@@ -56,6 +57,10 @@ pub struct Ready {
     pub es_ports: Vec<EsPort>,
     /// `neigh-suppress`: ARP/ND suppression on the VXLAN bridge port.
     pub neigh_suppress: bool,
+    /// RFC 9135 symmetric IRB: the IP-VRF of the routing table the SVI is in,
+    /// when that table has an L3 VNI on our BGP instance (asked of its
+    /// `nos-ribd`). `None` is asymmetric.
+    pub irb: Option<EvpnIrb>,
 }
 
 /// A bridge port attached to an Ethernet Segment.
@@ -392,6 +397,7 @@ fn local_routes(
         next_hop: r.vtep,
         ext_communities: ext.clone(),
         esi,
+        l3_vni: None,
     };
     let mut out = HashMap::new();
     let imet = EvpnKey::Imet {
@@ -414,6 +420,19 @@ fn local_routes(
         // never a real ARP/ND-learned host behind a local port.
         if r.connected.contains(ip) {
             evpn_route.ext_communities.push(DEFAULT_GATEWAY);
+        } else if let Some(irb) = &r.irb {
+            // RFC 9135 §5.1: a host's MAC+IP carries the IP-VRF's L3 VNI as
+            // Label2, its export RTs and the Router's MAC. Never the gateway
+            // address: it is local on every PE.
+            // ponytail: no per-table off switch (owner's call, #188); add a
+            // `RoutingTableEvpn` field if a mixed deployment needs one.
+            evpn_route.l3_vni = Some(irb.l3_vni);
+            evpn_route
+                .ext_communities
+                .extend(irb.route_targets_export.iter().copied());
+            evpn_route
+                .ext_communities
+                .push(router_mac_ext(irb.router_mac));
         }
         out.insert(key, evpn_route);
     }
@@ -444,6 +463,7 @@ fn local_routes(
                 next_hop: r.vtep,
                 ext_communities: vec![es_import_rt(&esi), df_election_ext(alg, true)],
                 esi,
+                l3_vni: None,
             },
         );
         // Per-ES A-D (RFC 7432 §8.2.1): MAX-ET, the export RTs of the EVIs on
@@ -465,6 +485,7 @@ fn local_routes(
                 next_hop: r.vtep,
                 ext_communities: es_ext,
                 esi,
+                l3_vni: None,
             },
         );
         // Per-EVI A-D (§8.4): tag 0, the VNI in the label, this domain's RTs.
@@ -746,9 +767,15 @@ impl Fdb {
     /// everything on it when that changed, and heals drift when it didn't.
     pub async fn set_ready(&self, ready: Option<Ready>) {
         let mut g = self.inner.lock().await;
-        // `ensure_vxlan` applies a neigh-suppress toggle in place: no rebuild.
+        // `ensure_vxlan` applies a neigh-suppress toggle in place, and an IRB
+        // change only re-publishes the local routes: no rebuild for either.
         if let (Some(old), Some(new)) = (g.ready.as_mut(), ready.as_ref()) {
             old.neigh_suppress = new.neigh_suppress;
+            if old.irb != new.irb {
+                old.irb.clone_from(&new.irb);
+                info!(domain = %self.domain, l3_vni = ?new.irb.as_ref().map(|i| i.l3_vni), "symmetric irb changed");
+                self.publish(&g);
+            }
         }
         if g.ready != ready {
             if let Some(old) = g.ready.take() {
@@ -1544,6 +1571,7 @@ mod tests {
             connected: Vec::new(),
             es_ports: Vec::new(),
             neigh_suppress: false,
+            irb: None,
         }
     }
 
@@ -1600,6 +1628,7 @@ mod tests {
             next_hop: next_hop.parse().unwrap(),
             ext_communities: vec![rt],
             esi: [0; 10],
+            l3_vni: None,
         }
     }
 
@@ -1613,6 +1642,7 @@ mod tests {
             next_hop: next_hop.parse().unwrap(),
             ext_communities: vec![rt],
             esi: [0; 10],
+            l3_vni: None,
         }
     }
 
@@ -1626,6 +1656,7 @@ mod tests {
             next_hop: origin.parse().unwrap(),
             ext_communities: vec![rt],
             esi: [0; 10],
+            l3_vni: None,
         }
     }
 
@@ -1708,6 +1739,79 @@ mod tests {
         assert!(routes
             .keys()
             .any(|k| matches!(k, EvpnKey::MacIp { ip, .. } if ip.to_string() == "198.51.100.7")));
+    }
+
+    const IP_VRF_RT: u64 = 0x0002_fde8_0000_1388;
+
+    fn irb() -> EvpnIrb {
+        EvpnIrb {
+            l3_vni: 5000,
+            router_mac: [2, 0, 0, 0, 0, 0xaa],
+            route_targets_export: vec![IP_VRF_RT],
+        }
+    }
+
+    /// RFC 9135 §5.1: a host's MAC+IP gets Label2, the IP-VRF RT and the
+    /// Router's MAC; the SVI gateway and the MAC-only routes don't.
+    #[test]
+    fn symmetric_irb_marks_only_host_mac_ip_routes() {
+        let host: IpAddr = "198.51.100.7".parse().unwrap();
+        let gw: IpAddr = "198.51.100.1".parse().unwrap();
+        let r = Ready {
+            connected: vec![gw],
+            irb: Some(irb()),
+            ..ready()
+        };
+        let macs = BTreeMap::from([([0, 0, 0, 0, 0, 1], "eth1".to_string())]);
+        let neighbours = BTreeSet::from([([0, 0, 0, 0, 0, 1], host), ([0, 0, 0, 0, 0, 0xfe], gw)]);
+        let routes = local_routes(&r, &macs, &neighbours, &BTreeSet::new());
+        let symmetric: Vec<_> = routes.values().filter(|r| r.l3_vni.is_some()).collect();
+        assert_eq!(symmetric.len(), 1, "{routes:?}");
+        assert!(matches!(symmetric[0].key, EvpnKey::MacIp { ip, .. } if ip == host));
+        assert_eq!(symmetric[0].l3_vni, Some(5000));
+        assert_eq!(
+            symmetric[0].ext_communities,
+            vec![
+                RT,
+                ENCAP_VXLAN,
+                IP_VRF_RT,
+                router_mac_ext([2, 0, 0, 0, 0, 0xaa])
+            ]
+        );
+        assert!(routes
+            .values()
+            .filter(|r| r.l3_vni.is_none())
+            .all(|r| !r.ext_communities.contains(&IP_VRF_RT)));
+    }
+
+    /// An IRB-only change re-publishes the local routes and uninstalls nothing.
+    #[tokio::test]
+    async fn an_irb_change_is_applied_in_place() {
+        let driver = Arc::new(Recorder::default());
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
+        fdb.set_ready(Some(Ready {
+            arp: true,
+            ..ready()
+        }))
+        .await;
+        fdb.apply_push(EvpnUpdate::Add(mac_route(1, 10100, RT, REMOTE)))
+            .await;
+        fdb.refresh_local().await;
+        calls(&driver);
+        let rx = fdb.subscribe();
+        let before = rx.borrow().routes.clone();
+        assert!(before.values().all(|r| r.l3_vni.is_none()));
+
+        fdb.set_ready(Some(Ready {
+            arp: true,
+            irb: Some(irb()),
+            ..ready()
+        }))
+        .await;
+        assert_eq!(calls(&driver), ["ensure 10100"]);
+        let after = rx.borrow().routes.clone();
+        assert!(after.values().any(|r| r.l3_vni == Some(5000)), "{after:?}");
+        assert_eq!(before.len(), after.len());
     }
 
     /// Records every driver call; the second field is the ports with no
@@ -2080,6 +2184,7 @@ mod tests {
                 .chain(df_election)
                 .collect(),
             esi,
+            l3_vni: None,
         }
     }
 
@@ -2173,6 +2278,7 @@ mod tests {
             next_hop: origin,
             ext_communities: vec![RT, esi_label_ext(false)],
             esi,
+            l3_vni: None,
         }
     }
 

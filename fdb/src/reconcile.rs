@@ -118,6 +118,25 @@ async fn resolve(cfg: &Config, d: &BroadcastDomain, watchdog_socket: &Path) -> O
     };
     let rts = |v: &[String]| v.iter().filter_map(|r| parse_rt(r)).collect();
     let es_ports = es_ports(cfg, &d.name, watchdog_socket).await;
+    // RFC 9135 symmetric IRB: the SVI's table is an IP-VRF on our instance
+    // (validated at commit). Unanswered = asymmetric for now; the tick retries.
+    let irb_table = d.routing_table.as_deref().filter(|t| {
+        cfg.routing_tables.iter().any(|rt| {
+            rt.name == *t
+                && rt.evpn.l3_vni.is_some()
+                && rt.evpn.bgp_instance.as_deref() == Some(instance.as_str())
+        })
+    });
+    let irb = match irb_table {
+        Some(t) => {
+            let irb = interface_client::evpn_irb(watchdog_socket, t).await;
+            if irb.is_none() {
+                debug!(domain = %d.name, table = %t, "ip-vrf not up yet, mac+ip routes asymmetric");
+            }
+            irb
+        }
+        None => None,
+    };
     Some(Ready {
         vni,
         bridge,
@@ -139,6 +158,7 @@ async fn resolve(cfg: &Config, d: &BroadcastDomain, watchdog_socket: &Path) -> O
         },
         es_ports,
         neigh_suppress: d.neigh_suppress,
+        irb,
     })
 }
 

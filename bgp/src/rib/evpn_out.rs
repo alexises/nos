@@ -56,6 +56,18 @@ pub enum EvpnSource {
     Table(String),
 }
 
+/// Whether a received route feeds an IP-VRF's `nos-ribd` (`to_tables`) or a
+/// MAC-VRF's `nos-fdbd`: a Type-5 goes to tables only, a symmetric IRB
+/// MAC+IP (RFC 9135, Label2 set) to both, everything else to domains only.
+#[must_use]
+pub fn feeds(r: &WireRoute, to_tables: bool) -> bool {
+    match r.key {
+        EvpnKey::IpPrefix { .. } => to_tables,
+        EvpnKey::MacIp { .. } if r.l3_vni.is_some() => true,
+        _ => !to_tables,
+    }
+}
+
 fn nlri_of(r: &WireRoute) -> EvpnNlri {
     match &r.key {
         EvpnKey::Mac { rd, mac } => EvpnNlri::MacIp {
@@ -72,7 +84,8 @@ fn nlri_of(r: &WireRoute) -> EvpnNlri {
             tag: 0,
             mac: *mac,
             ip: Some(*ip),
-            labels: vec![r.vni],
+            // RFC 9135 §5.1: Label2 is the IP-VRF's L3 VNI (symmetric IRB).
+            labels: std::iter::once(r.vni).chain(r.l3_vni).collect(),
         },
         EvpnKey::Imet { rd, origin } => EvpnNlri::InclusiveMulticast {
             rd: *rd,
@@ -333,14 +346,16 @@ impl BgpRib {
         // otherwise collide with the winner's own key below) is filtered out
         // here — and of a multi-homed segment's PEs, only the lowest VTEP.
         let mut chosen: HashMap<(u32, [u8; 6]), IpAddr> = HashMap::new();
-        for (nlri, route) in self.evpn_adj_rib_in.values().flatten() {
+        for route in self.evpn_adj_rib_in.values().flat_map(HashMap::values) {
+            let nlri = &route.nlri;
             if let Some((key, true)) = held(nlri, route.next_hop) {
                 let nh = chosen.entry(key).or_insert(route.next_hop);
                 *nh = (*nh).min(route.next_hop);
             }
         }
         let mut out = HashMap::new();
-        for (nlri, route) in self.evpn_adj_rib_in.values().flatten() {
+        for route in self.evpn_adj_rib_in.values().flat_map(HashMap::values) {
+            let nlri = &route.nlri;
             if let Some((key, _)) = held(nlri, route.next_hop) {
                 if chosen.get(&key) != Some(&route.next_hop) {
                     continue;
@@ -424,6 +439,15 @@ impl BgpRib {
                 }
                 EvpnNlri::Unknown { .. } => continue,
             };
+            // RFC 9135 §5.2: a non-zero Label2 means symmetric IRB.
+            let l3_vni = match nlri {
+                EvpnNlri::MacIp {
+                    ip: Some(_),
+                    labels,
+                    ..
+                } => labels.get(1).copied().filter(|l| *l != 0),
+                _ => None,
+            };
             out.insert(
                 key.clone(),
                 WireRoute {
@@ -432,9 +456,70 @@ impl BgpRib {
                     next_hop: route.next_hop,
                     ext_communities: route.extended_communities.clone(),
                     esi,
+                    l3_vni,
                 },
             );
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mac_ip(l3_vni: Option<u32>) -> WireRoute {
+        WireRoute {
+            key: EvpnKey::MacIp {
+                rd: [0; 8],
+                mac: [2, 0, 0, 0, 0, 9],
+                ip: "10.72.0.20".parse().unwrap(),
+            },
+            vni: 10_300,
+            next_hop: "10.50.0.3".parse().unwrap(),
+            ext_communities: vec![],
+            esi: [0; 10],
+            l3_vni,
+        }
+    }
+
+    #[test]
+    fn a_symmetric_mac_ip_carries_the_l3_vni_as_label2() {
+        let labels = |r: &WireRoute| match nlri_of(r) {
+            EvpnNlri::MacIp { labels, .. } => labels,
+            _ => unreachable!(),
+        };
+        assert_eq!(labels(&mac_ip(Some(5000))), vec![10_300, 5000]);
+        assert_eq!(labels(&mac_ip(None)), vec![10_300]);
+    }
+
+    #[test]
+    fn a_symmetric_mac_ip_feeds_both_consumers() {
+        let type5 = WireRoute {
+            key: EvpnKey::IpPrefix {
+                rd: [0; 8],
+                prefix: "10.2.0.0/24".parse().unwrap(),
+            },
+            ..mac_ip(None)
+        };
+        let mac = WireRoute {
+            key: EvpnKey::Mac {
+                rd: [0; 8],
+                mac: [2, 0, 0, 0, 0, 9],
+            },
+            ..mac_ip(None)
+        };
+        for (r, tables, domains) in [
+            (mac_ip(Some(5000)), true, true),
+            (mac_ip(None), false, true),
+            (type5, true, false),
+            (mac, false, true),
+        ] {
+            assert_eq!(
+                (feeds(&r, true), feeds(&r, false)),
+                (tables, domains),
+                "{r:?}"
+            );
+        }
     }
 }

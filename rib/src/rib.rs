@@ -432,6 +432,7 @@ mod tests {
                 next_hop: "10.50.0.3".parse().unwrap(),
                 ext_communities: vec![rt, nos_proto::evpn_id::router_mac_ext([2; 6])],
                 esi: [0; 10],
+                l3_vni: None,
             },
         );
         // No local L3 VNI: nothing is installed.

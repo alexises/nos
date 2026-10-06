@@ -544,6 +544,12 @@ pub struct Args {
     #[arg(long)]
     pub broadcast_domain_svi_address: Option<IpNet>,
 
+    /// Puts `--broadcast-domain-svi-address`'s SVI in this routing table
+    /// instead of `--routing-table` (an EVPN IP-VRF from `--l3vni-table`,
+    /// for symmetric IRB).
+    #[arg(long)]
+    pub broadcast_domain_svi_table: Option<String>,
+
     /// If set, deletes `--broadcast-domain` outright instead of
     /// creating/updating its SVI. Mutually exclusive with
     /// `--broadcast-domain-svi-address`.
@@ -1873,12 +1879,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             address,
             label: None,
         }));
-        ops.push(ConfigOp::BroadcastDomain(
-            BroadcastDomainOp::SetRoutingTable {
-                name: args.broadcast_domain.clone(),
-                routing_table: args.routing_table.clone(),
-            },
-        ));
+        if args.broadcast_domain_svi_table.is_none() {
+            ops.push(ConfigOp::BroadcastDomain(
+                BroadcastDomainOp::SetRoutingTable {
+                    name: args.broadcast_domain.clone(),
+                    routing_table: args.routing_table.clone(),
+                },
+            ));
+        }
     }
     if args.delete_broadcast_domain_svi {
         ops.push(ConfigOp::BroadcastDomain(BroadcastDomainOp::Delete {
@@ -1888,6 +1896,18 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
 
     ops.extend(evpn_ops(args)?);
     ops.extend(l3vni_ops(args)?);
+    // After `--l3vni*`, which ensures the table.
+    if let (Some(_), Some(table)) = (
+        args.broadcast_domain_svi_address,
+        &args.broadcast_domain_svi_table,
+    ) {
+        ops.push(ConfigOp::BroadcastDomain(
+            BroadcastDomainOp::SetRoutingTable {
+                name: args.broadcast_domain.clone(),
+                routing_table: table.clone(),
+            },
+        ));
+    }
 
     // Adds a second (IPv6) address to `--broadcast-domain`'s SVI alongside
     // `--broadcast-domain-svi-address` — same dual-stack rationale as

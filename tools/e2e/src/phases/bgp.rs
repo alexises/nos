@@ -2792,6 +2792,43 @@ pub async fn evpn(w: &mut World) -> anyhow::Result<()> {
         bail!("router-a's {L3_TABLE} does not list {L3_GOBGP_PREFIX} as an evpn route");
     }
 
+    // RFC 9135 symmetric IRB from an independent implementation: a MAC+IP
+    // whose Label2 is the L3 VNI becomes a host route in the IP-VRF.
+    log("symmetric irb interop: GoBGP's MAC+IP with Label2 lands as a host route");
+    gobgp(
+        w,
+        &[
+            "global",
+            "rib",
+            "add",
+            "-a",
+            "evpn",
+            "macadv",
+            "aa:bb:cc:00:00:09",
+            L3_GOBGP_HOST,
+            "etag",
+            "0",
+            "label",
+            &format!("10100,{L3_VNI}"),
+            "rd",
+            "65010:6",
+            "rt",
+            L3_GOBGP_RT,
+            "encap",
+            "vxlan",
+            "router-mac",
+            L3_GOBGP_RMAC,
+        ],
+    )
+    .await?;
+    a.wait(&format!(
+        "added route prefix={L3_GOBGP_HOST}/32 gateway={IP_G} next_hops=1 .*source=Some(Evpn)"
+    ))
+    .await?;
+    if !tenant_has_evpn(a, &format!("{L3_GOBGP_HOST}/32")).await? {
+        bail!("router-a's {L3_TABLE} does not list {L3_GOBGP_HOST}/32 as an evpn route");
+    }
+
     log("removing the speaker: its remaining routes must go with the session");
     let base = a.count(&withdrawn(3));
     w.dock.container_remove("router-g").await;
@@ -4774,6 +4811,176 @@ async fn tenant_has_evpn(r: &Router, prefix: &str) -> anyhow::Result<bool> {
     }))
 }
 
+/// `evpn-l3`'s symmetric IRB flags: `IRB_DOMAIN` with its SVI (`IRB_GW`, the
+/// same anycast gateway on both PEs) in `L3_TABLE`, `redistribute from mac`
+/// and `arp` into r1.
+fn irb_flags(rd: &str) -> Vec<String> {
+    strings(&[
+        "--broadcast-domain",
+        IRB_DOMAIN,
+        "--evpn-vni",
+        &IRB_VNI.to_string(),
+        "--evpn-rd",
+        rd,
+        "--evpn-rt-import",
+        IRB_RT,
+        "--evpn-rt-export",
+        IRB_RT,
+        "--evpn-vtep-source-interface",
+        "eth0",
+        "--evpn-redistribute-bgp",
+        "r1",
+        "--evpn-redistribute-arp-bgp",
+        "r1",
+        "--broadcast-domain-svi-address",
+        &format!("{IRB_GW}/24"),
+        "--broadcast-domain-svi-table",
+        L3_TABLE,
+    ])
+}
+
+/// `evpn-l3`'s RFC 9135 symmetric IRB stage. `IRB_DOMAIN` is stretched over
+/// both PEs, its SVI in the IP-VRF; its only host sits behind router-b. So
+/// router-a holds the subnet as connected and, without a host route, would
+/// ARP and bridge over the L2 VNI (asymmetric): the host's MAC+IP carrying the
+/// L3 VNI as Label2, router-a's /32 for it and the echo request arriving on
+/// router-b's L3 VNI device (not the L2 one) are what prove symmetric.
+async fn symmetric_irb(w: &World, flags_a: &[String], flags_b: &[String]) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    log("symmetric irb: a stretched domain whose SVI is in the IP-VRF, a host behind router-b");
+    if !w.dock.network_exists(NET_IRB).await {
+        w.dock.network_create(NET_IRB, &[], false).await?;
+    }
+    w.dock.network_connect(NET_IRB, "router-b").await;
+    // Docker's own address on the new link would sit beside the bridge.
+    netns(w, "router-b", &["ip", "addr", "flush", "dev", "eth2"]).await?;
+    w.dock.start_host(IRB_HOST, HOST_IMAGE, NET_IRB).await?;
+    host_sh(
+        w,
+        IRB_HOST,
+        &format!(
+            "set -e; ip addr flush dev eth0; ip addr add {IRB_HOST_IP}/24 dev eth0; \
+             ip route add {L3_SUBNET_A} via {IRB_GW}"
+        ),
+    )
+    .await?;
+    host_sh(
+        w,
+        CE_HOST,
+        &format!("ip route add {IRB_HOST_IP}/32 via {L3_GW_A}"),
+    )
+    .await?;
+
+    let with = |base: &[String], extra: Vec<String>| {
+        let mut f = base.to_vec();
+        f.extend(extra);
+        f
+    };
+    a.provision_flags(&with(flags_a, irb_flags(IRB_RD_A)))
+        .await?;
+    let mut b_flags = irb_flags(IRB_RD_B);
+    b_flags.extend(strings(&[
+        "--link-interface",
+        "eth2",
+        "--switching-profile",
+        "sp-irb",
+        "--switching-profile-member",
+        &format!("{IRB_DOMAIN}:untagged"),
+    ]));
+    b.provision_flags(&with(flags_b, b_flags)).await?;
+
+    log("the domain on another bgp instance than the IP-VRF's l3 vni is refused at commit");
+    let refused = a
+        .edit(|c| {
+            let mut other = c.bgp_instances[0].clone();
+            other.name = "r-irb".to_string();
+            other.router_id = "192.0.2.99".parse()?;
+            other.peer_groups.clear();
+            other.peers.clear();
+            other.routing_table = None;
+            c.bgp_instances.push(other);
+            let d = c
+                .broadcast_domains
+                .iter_mut()
+                .find(|d| d.name == IRB_DOMAIN)
+                .context("no irb domain")?;
+            d.mac_redistribute = Some("r-irb".to_string());
+            d.arp_redistribute = Some("r-irb".to_string());
+            Ok(())
+        })
+        .await;
+    match refused {
+        Err(e) if format!("{e:#}").contains("symmetric irb") => {}
+        other => bail!("expected the symmetric irb instance mismatch refused: {other:?}"),
+    }
+
+    log("the host's ARP binding on router-b becomes a MAC+IP with the L3 VNI as Label2");
+    ping_until(w, IRB_HOST, IRB_GW, 30).await?;
+    a.wait(&format!(
+        "evpn route learned peer={IP_B} route_type=2 .*\\[{IRB_HOST_IP}\\]:\\[{IRB_VNI}\\]:\\[{L3_VNI}\\]"
+    ))
+    .await?;
+    let evpn = a
+        .rest_expect(Method::GET, "/v1/bgp/evpn", None, 200)
+        .await?;
+    if !evpn.contains(&format!("[{IRB_HOST_IP}]:[{IRB_VNI}]:[{L3_VNI}]")) {
+        bail!("router-a's show bgp evpn lacks the host's two labels: {evpn}");
+    }
+    let host_route = format!("{IRB_HOST_IP}/32");
+    a.wait(&format!(
+        "added route prefix={host_route} gateway={IP_B} next_hops=1 .*source=Some(Evpn)"
+    ))
+    .await?;
+    if !tenant_has_evpn(a, &host_route).await? {
+        bail!("router-a's {L3_TABLE} does not list {host_route} as an evpn route");
+    }
+
+    log("routed traffic to the host crosses the L3 VNI, not the L2 one");
+    let vx = format!("vx{L3_VNI}");
+    let filter = format!("icmp and dst host {IRB_HOST_IP}");
+    let tcpdump = ["timeout", "30", "tcpdump", "-c", "1", "-ni", &vx, &filter];
+    let (captured, pinged) =
+        tokio::join!(w.dock.in_netns(HOST_IMAGE, "router-b", &tcpdump), async {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            ping_until(w, CE_HOST, IRB_HOST_IP, 25).await
+        });
+    pinged?;
+    let captured =
+        captured.with_context(|| format!("no echo request to {IRB_HOST_IP} on router-b's {vx}"))?;
+    log(format!("router-b's {vx}: {}", captured.trim()));
+
+    log("router-b stops redistributing arp: router-a removes the host route");
+    let removed = format!("removed route prefix={host_route}");
+    let base = a.count(&removed);
+    b.edit(|c| {
+        if let Some(d) = c
+            .broadcast_domains
+            .iter_mut()
+            .find(|d| d.name == IRB_DOMAIN)
+        {
+            d.arp_redistribute = None;
+        }
+        Ok(())
+    })
+    .await?;
+    a.wait_new(&removed, base, 30).await?;
+
+    for r in [a, b] {
+        r.edit(|c| {
+            c.broadcast_domains.retain(|d| d.name != IRB_DOMAIN);
+            c.switching_profiles.retain(|p| p.name != "sp-irb");
+            c.interfaces.retain(|i| i.name != "eth2");
+            Ok(())
+        })
+        .await?;
+    }
+    host_sh(w, CE_HOST, &format!("ip route del {IRB_HOST_IP}/32")).await?;
+    w.dock.container_remove(IRB_HOST).await;
+    w.dock.network_disconnect(NET_IRB, "router-b").await;
+    w.dock.network_remove(NET_IRB).await;
+    Ok(())
+}
+
 /// `evpn-l3`: RFC 9136 Type-5 routes over an RFC 9135 §4.4.1 L3 VNI, for real.
 /// Two `nos` PEs peer `l2vpn-evpn` over the underlay (`rt1`); each has an
 /// IP-VRF (`L3_TABLE`) with `l3-vni`, whose `nos-ribd` builds `vx<vni>` on a
@@ -4904,6 +5111,13 @@ pub async fn evpn_l3(w: &mut World) -> anyhow::Result<()> {
     log("the hosts ping each other across the L3 VNI");
     ping_until(w, CE_HOST, L3_HOST_IP_B, 30).await?;
     ping_until(w, H_HOST, L3_HOST_IP_A, 30).await?;
+
+    symmetric_irb(
+        w,
+        &l3_pe_flags(A, L3_RD_A, L3_GW_A),
+        &l3_pe_flags(B, L3_RD_B, L3_GW_B),
+    )
+    .await?;
 
     log("router-b's evpn removed: its Type-5 is withdrawn and its devices deleted");
     let removed = format!("removed route prefix={L3_SUBNET_B} gateway={IP_B}");

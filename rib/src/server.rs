@@ -76,6 +76,8 @@ fn allowed(role: Role, req: &RibRequest) -> bool {
         // pushed with the same request.
         RibRequest::PushOspfRoutes(_) => matches!(role, Role::Ospfd | Role::Ospfv3d),
         RibRequest::IgpCosts => matches!(role, Role::User | Role::Restd | Role::Bgpd),
+        // Symmetric IRB: the `nos-fdbd` of a domain whose SVI is in this table.
+        RibRequest::GetEvpnIrb => role == Role::Fdbd,
     }
 }
 
@@ -168,6 +170,7 @@ async fn dispatch(ctx: &Context, req: RibRequest) -> Option<RibEvent> {
             apply_evpn_route_update(ctx, update).await;
             None
         }
+        RibRequest::GetEvpnIrb => Some(RibEvent::EvpnIrb(ctx.rib.read().await.evpn.irb())),
     }
 }
 
@@ -492,6 +495,18 @@ mod authz_tests {
             let expected = matches!(role, Role::User | Role::Restd | Role::Bgpd);
             assert_eq!(allowed(role, &RibRequest::IgpCosts), expected, "{role:?}");
         }
+    }
+
+    #[test]
+    fn evpn_irb_is_for_fdbd_only_and_none_before_the_router_mac() {
+        for role in Role::ALL {
+            assert_eq!(
+                allowed(role, &RibRequest::GetEvpnIrb),
+                role == Role::Fdbd,
+                "{role:?}"
+            );
+        }
+        assert_eq!(EvpnState::default().irb(), None);
     }
 
     #[test]
