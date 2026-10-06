@@ -20,6 +20,8 @@ use crate::rest::Rest;
 #[derive(Default)]
 struct Store {
     lines: Vec<String>,
+    /// `timestamp_ms` of each line in `lines`, same index.
+    stamps: Vec<u64>,
     seen: HashSet<(u64, String)>,
 }
 
@@ -105,6 +107,29 @@ impl Logs {
             .count()
     }
 
+    /// Milliseconds (the daemons' own log timestamps) from the latest
+    /// `before` match not after it, to the first `after` match past the first
+    /// `after_baseline` matches. `None` if either is missing.
+    pub fn delay_ms(&self, before: &str, after: &str, after_baseline: usize) -> Option<u64> {
+        let (b, a) = (bre(before), bre(after));
+        let st = self.store.lock().unwrap();
+        let t_after = st
+            .lines
+            .iter()
+            .zip(&st.stamps)
+            .filter(|(l, _)| a.is_match(l))
+            .nth(after_baseline)
+            .map(|(_, t)| *t)?;
+        let t_before = st
+            .lines
+            .iter()
+            .zip(&st.stamps)
+            .filter(|(l, t)| b.is_match(l) && **t <= t_after)
+            .map(|(_, t)| *t)
+            .max()?;
+        Some(t_after - t_before)
+    }
+
     /// The most recent line matching `pattern`.
     pub fn last(&self, pattern: &str) -> Option<String> {
         let re = bre(pattern);
@@ -185,6 +210,7 @@ fn push(store: &Mutex<Store>, entry: &LogEntry) {
     let mut s = store.lock().unwrap();
     if s.seen.insert((entry.timestamp_ms, line.clone())) {
         s.lines.push(line);
+        s.stamps.push(entry.timestamp_ms);
     }
 }
 

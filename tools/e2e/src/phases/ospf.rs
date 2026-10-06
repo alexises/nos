@@ -438,9 +438,19 @@ pub async fn ospf_spf(w: &mut World) -> anyhow::Result<()> {
     ))
     .await?;
 
+    let removed = format!("removed route prefix={OSPF_SPF_LOOPBACK_ADDRESS}");
+    let removed0 = a.count(&removed);
     b.provision(&["--clear-ospf-loopback-profile"]).await?;
-    a.wait(&format!("removed route prefix={OSPF_SPF_LOOPBACK_ADDRESS}"))
-        .await?;
+    a.wait_new(&removed, removed0, 60).await?;
+    // #190: the route push is event-driven, so once router-b's new Router-LSA
+    // is installed the route leaves the kernel table well inside the old 2s
+    // poll (the LSA's own arrival is still bounded by origination/flooding).
+    a.assert_delay_under(
+        &format!("ospf lsa installed.*advertising_router={OSPF_ROUTER_ID_B}"),
+        &removed,
+        removed0,
+        1000,
+    )?;
     // `next-hop-reachability` needs the loopback unreachable from its start.
     a.wait_ospf_route_gone(OSPF_SPF_LOOPBACK_ADDRESS, 15).await
 }
@@ -2096,6 +2106,13 @@ pub async fn ospfv3_phase(w: &mut World) -> anyhow::Result<()> {
         60,
     )
     .await?;
+    // #190: pushed on the LSDB change, not on the next 2s poll.
+    b.assert_delay_under(
+        &format!("ospfv3 lsa installed.*neighbor={OSPFV3_ROUTER_ID}"),
+        &route_pat,
+        route_before,
+        1000,
+    )?;
 
     // RFC 8362 Full mode on both routers: adjacency survives (mixed or not,
     // E-LSAs are known types), each originates E-LSAs, and the peer decodes
