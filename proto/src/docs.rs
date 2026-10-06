@@ -65,6 +65,16 @@ topics! {
     SyslogLevel,
     /// `SyslogServer.facility`
     SyslogFacility,
+    /// `SyslogServer.tls`
+    SyslogTls,
+    /// `SyslogTls.trust_anchor`
+    SyslogTlsTrustAnchor,
+    /// `SyslogTls.fingerprint`
+    SyslogTlsFingerprint,
+    /// `SyslogTls.server_name`
+    SyslogTlsServerName,
+    /// `SyslogTls.allow_tls12`
+    SyslogTlsAllowTls12,
     /// `Config.bgp_instances`
     BgpInstance,
     /// `BgpInstance.asn`

@@ -44,7 +44,9 @@ pub use interface::{
     loopback_table_name, Interface, InterfaceAddress, Subinterface, LOOPBACK_PREFIX,
 };
 pub use lldp::{LldpDestination, LldpSettings};
-pub use logging::{LoggingSettings, SyslogFacility, SyslogServer, SyslogTransport};
+pub use logging::{
+    parse_fingerprint, LoggingSettings, SyslogFacility, SyslogServer, SyslogTls, SyslogTransport,
+};
 pub use ospf_area::{OspfArea, OspfAreaRange, OspfAreaType};
 pub use ospf_instance::OspfInstance;
 pub use ospf_profile::{

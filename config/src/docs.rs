@@ -114,9 +114,11 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         ),
         Topic::SyslogTransport => (
             "Set a syslog collector's transport.",
-            "`udp` (RFC 5426, one message per datagram, truncated to 1180 octets) or `tcp` \
+            "`udp` (RFC 5426, one message per datagram, truncated to 1180 octets), `tcp` \
              (RFC 6587 octet-counted frames on one connection, reconnected every second while \
-             it is down). `delete` restores udp.",
+             it is down) or `tls` (RFC 5425: the same frames inside post-quantum TLS 1.3; \
+             needs `tls trust-anchor` or `tls fingerprint`, default port 6514). `delete` \
+             restores udp.",
         ),
         Topic::SyslogRoutingTable => (
             "Send syslog from inside a routing table's VRF.",
@@ -133,6 +135,37 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
             "Set a syslog collector's facility.",
             "The facility of every message sent to it, local0 to local7. `delete` restores \
              local7.",
+        ),
+        Topic::SyslogTls => (
+            "Configure how a TLS syslog collector is authenticated.",
+            "Needed by (and only valid with) transport `tls`: set exactly one of `trust-anchor` \
+             and `fingerprint`. nos presents no client certificate. `delete` removes the \
+             whole block.",
+        ),
+        Topic::SyslogTlsTrustAnchor => (
+            "Trust the collector's certificate through a CA (RFC 5425 §4.2.1).",
+            "PEM CA certificate(s) the collector's certificate must chain to; its name is \
+             checked against `tls server-name`, or against its IP address SANs by default. \
+             Exclusive with `fingerprint`.",
+        ),
+        Topic::SyslogTlsFingerprint => (
+            "Trust one collector certificate by its SHA-256 fingerprint (RFC 5425 §4.2.2).",
+            "`SHA-256:` followed by 32 colon-separated hex octets, the hash of the collector's \
+             own certificate. Exclusive with `trust-anchor`.",
+        ),
+        Topic::SyslogTlsServerName => (
+            "Set the DNS name the collector's certificate must carry.",
+            "Default: the collector's address is matched against the certificate's IP address \
+             SANs. Not checked with `fingerprint`. `delete` restores the default.",
+        ),
+        Topic::SyslogTlsAllowTls12 => (
+            "Also allow TLS 1.2 with classical key exchange, for collectors that need RFC 9662.",
+            "Also allows TLS 1.2 with classical (non-post-quantum) ECDHE-AES-GCM suites, for \
+             collectors that cannot do the post-quantum TLS 1.3 key exchange. TLS 1.3 stays \
+             post-quantum only, but traffic sent over TLS 1.2 can be recorded now and \
+             decrypted by a future quantum computer. A collector that offers TLS 1.3 without \
+             X25519MLKEM768 must have TLS 1.3 turned off on that listener. Turn it on only \
+             while such a collector cannot be upgraded; `delete` turns it off.",
         ),
         Topic::BgpInstance => (
             "Create a BGP instance in the transaction if it doesn't already exist.",

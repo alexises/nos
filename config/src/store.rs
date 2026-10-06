@@ -219,6 +219,7 @@ impl ConfigStore {
         txn.check(if_match)?;
         // Pass the config itself as the validation context (cross-reference checks).
         txn.config.validate_with(&txn.config)?;
+        check_syslog_trust_anchors(&txn.config)?;
         if txn.config.users.is_empty() && !self.0.running.read().await.users.is_empty() {
             return Err(ConfigError::NoUsersLeft);
         }
@@ -316,6 +317,23 @@ impl ConfigStore {
     ) -> std::io::Result<tokio::task::JoinHandle<()>> {
         crate::server::start(addr, self.clone(), identity)
     }
+}
+
+/// A syslog server's `trust_anchor` must parse as PEM certificates. Done here,
+/// not in `nos-proto`'s garde rules: proto must not gain an X.509 crate (the
+/// same split as password hashing).
+fn check_syslog_trust_anchors(config: &Config) -> Result<(), ConfigError> {
+    for s in &config.logging.syslog {
+        if let Some(pem) = s.tls.as_ref().and_then(|t| t.trust_anchor.as_deref()) {
+            nos_pki::syslog::parse_trust_anchor(pem).map_err(|e| {
+                ConfigError::SyslogTrustAnchor {
+                    server: s.name.clone(),
+                    reason: e.to_string(),
+                }
+            })?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -705,6 +723,36 @@ mod tests {
             store.discard_transaction("missing", None).await,
             Err(ConfigError::TransactionNotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn commit_refuses_a_malformed_syslog_trust_anchor() {
+        use nos_proto::{LoggingOp, SyslogTransport};
+        let store = ConfigStore::new(Config::default(), None);
+        store.open_transaction("t1", TransactionBase::Blank).await;
+        let name = || "c1".to_string();
+        for op in [
+            LoggingOp::EnsureSyslog { name: name() },
+            LoggingOp::SetSyslogAddress {
+                name: name(),
+                address: "192.0.2.9".parse().unwrap(),
+            },
+            LoggingOp::SetSyslogTransport {
+                name: name(),
+                transport: SyslogTransport::Tls,
+            },
+            LoggingOp::SetSyslogTlsTrustAnchor {
+                name: name(),
+                pem: Some("not a certificate".into()),
+            },
+        ] {
+            store.apply_op("t1", ConfigOp::Logging(op)).await.unwrap();
+        }
+        let err = store.commit_transaction("t1", None).await.unwrap_err();
+        assert!(
+            matches!(err, ConfigError::SyslogTrustAnchor { .. }),
+            "{err}"
+        );
     }
 
     /// `ConfigOp` cannot construct two `BgpInstance`s with the same name

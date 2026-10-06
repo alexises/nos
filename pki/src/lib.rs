@@ -8,6 +8,7 @@ mod identity;
 mod peer;
 mod policy;
 pub mod rest;
+pub mod syslog;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 #[cfg(test)]

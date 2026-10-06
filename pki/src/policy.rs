@@ -21,6 +21,13 @@ use webpki::aws_lc_rs::{ECDSA_P256_SHA256, ML_DSA_65};
 pub enum Policy {
     Ipc,
     Rest,
+    /// `nos-logd` as a client of a syslog collector (RFC 5425/9662, #71):
+    /// post-quantum key exchange, TLS 1.3 only, but the collector's certificate
+    /// may use any classical signature webpki supports — no deployed collector
+    /// holds an ML-DSA one. A deliberate deviation from RFC 9662, which wants
+    /// TLS 1.2 with classical suites; `syslog::Connector`'s `allow_tls12` opt-in
+    /// is the only way back to those, and is built there, not here.
+    Syslog,
 }
 
 static IPC_SIGNATURES: WebPkiSupportedAlgorithms = WebPkiSupportedAlgorithms {
@@ -40,6 +47,7 @@ pub(crate) fn provider(policy: Policy) -> Arc<CryptoProvider> {
     p.signature_verification_algorithms = match policy {
         Policy::Ipc => IPC_SIGNATURES,
         Policy::Rest => REST_SIGNATURES,
+        Policy::Syslog => p.signature_verification_algorithms,
     };
     Arc::new(p)
 }

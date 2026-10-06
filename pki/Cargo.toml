@@ -14,7 +14,7 @@ testing = []
 
 [dependencies]
 tokio        = { workspace = true }
-rustls       = { workspace = true }
+rustls       = { workspace = true, features = ["tls12"] }
 tokio-rustls = { workspace = true }
 rcgen        = { workspace = true }
 rustls-webpki = { workspace = true }
@@ -22,3 +22,4 @@ x509-parser  = { workspace = true }
 arc-swap     = { workspace = true }
 time         = { workspace = true }
 tracing      = { workspace = true }
+sha2         = { workspace = true }

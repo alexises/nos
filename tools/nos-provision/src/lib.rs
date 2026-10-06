@@ -822,7 +822,7 @@ pub struct Args {
     #[arg(long)]
     pub syslog_port: Option<u16>,
 
-    /// `udp` or `tcp` (`LoggingOp::SetSyslogTransport`).
+    /// `udp`, `tcp` or `tls` (`LoggingOp::SetSyslogTransport`).
     #[arg(long)]
     pub syslog_transport: Option<String>,
 
@@ -837,6 +837,28 @@ pub struct Args {
     /// `local0` to `local7`.
     #[arg(long)]
     pub syslog_facility: Option<String>,
+
+    /// A PEM CA certificate file (read here, sent as text) the TLS collector's
+    /// certificate must chain to (`LoggingOp::SetSyslogTlsTrustAnchor`).
+    #[arg(long)]
+    pub syslog_trust_anchor_file: Option<PathBuf>,
+
+    /// `SHA-256:AB:CD:...` of the TLS collector's certificate
+    /// (`LoggingOp::SetSyslogTlsFingerprint`).
+    #[arg(long)]
+    pub syslog_fingerprint: Option<String>,
+
+    /// The DNS name the TLS collector's certificate must carry.
+    #[arg(long)]
+    pub syslog_server_name: Option<String>,
+
+    /// Allows TLS 1.2 with classical key exchange (`SetSyslogTlsAllowTls12`).
+    #[arg(long)]
+    pub syslog_allow_tls12: bool,
+
+    /// Turns `--syslog-allow-tls12` off again.
+    #[arg(long)]
+    pub no_syslog_allow_tls12: bool,
 
     /// One collector per repetition to remove (`LoggingOp::RemoveSyslog`).
     #[arg(long = "no-syslog-server")]
@@ -2157,11 +2179,38 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             let transport = match t.as_str() {
                 "udp" => SyslogTransport::Udp,
                 "tcp" => SyslogTransport::Tcp,
-                _ => bail!("--syslog-transport is udp or tcp, not '{t}'"),
+                "tls" => SyslogTransport::Tls,
+                _ => bail!("--syslog-transport is udp, tcp or tls, not '{t}'"),
             };
             ops.push(ConfigOp::Logging(LoggingOp::SetSyslogTransport {
                 name: n(),
                 transport,
+            }));
+        }
+        if let Some(file) = &args.syslog_trust_anchor_file {
+            let pem = std::fs::read_to_string(file)
+                .with_context(|| format!("reading {}", file.display()))?;
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogTlsTrustAnchor {
+                name: n(),
+                pem: Some(pem),
+            }));
+        }
+        if let Some(fingerprint) = &args.syslog_fingerprint {
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogTlsFingerprint {
+                name: n(),
+                fingerprint: Some(fingerprint.clone()),
+            }));
+        }
+        if let Some(server_name) = &args.syslog_server_name {
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogTlsServerName {
+                name: n(),
+                server_name: Some(server_name.clone()),
+            }));
+        }
+        if args.syslog_allow_tls12 || args.no_syslog_allow_tls12 {
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogTlsAllowTls12 {
+                name: n(),
+                allow: args.syslog_allow_tls12,
             }));
         }
         if let Some(rt) = &args.syslog_routing_table {
