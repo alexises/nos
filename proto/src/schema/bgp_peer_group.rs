@@ -127,6 +127,66 @@ pub enum NextHopMode {
     Unchanged,
 }
 
+/// RFC 9234 §4.1 BGP Role: what this speaker is to the peer. Carried in the
+/// OPEN's Role capability (code 9); the pair must be legal (Provider/Customer,
+/// RS/RS-Client, Peer/Peer) or the session is refused with Role Mismatch.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub enum BgpRole {
+    Provider,
+    RouteServer,
+    RouteServerClient,
+    Customer,
+    Peer,
+}
+
+impl BgpRole {
+    /// RFC 9234 §4.1 capability value.
+    pub fn wire(self) -> u8 {
+        match self {
+            BgpRole::Provider => 0,
+            BgpRole::RouteServer => 1,
+            BgpRole::RouteServerClient => 2,
+            BgpRole::Customer => 3,
+            BgpRole::Peer => 4,
+        }
+    }
+
+    pub fn from_wire(v: u8) -> Option<Self> {
+        Some(match v {
+            0 => BgpRole::Provider,
+            1 => BgpRole::RouteServer,
+            2 => BgpRole::RouteServerClient,
+            3 => BgpRole::Customer,
+            4 => BgpRole::Peer,
+            _ => return None,
+        })
+    }
+
+    /// RFC 9234 §4.2 Table 2: the role the *peer* must announce for this
+    /// one to be a legal pair.
+    #[must_use]
+    pub fn counterpart(self) -> Self {
+        match self {
+            BgpRole::Provider => BgpRole::Customer,
+            BgpRole::Customer => BgpRole::Provider,
+            BgpRole::RouteServer => BgpRole::RouteServerClient,
+            BgpRole::RouteServerClient => BgpRole::RouteServer,
+            BgpRole::Peer => BgpRole::Peer,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BgpRole::Provider => "provider",
+            BgpRole::RouteServer => "route-server",
+            BgpRole::RouteServerClient => "route-server-client",
+            BgpRole::Customer => "customer",
+            BgpRole::Peer => "peer",
+        }
+    }
+}
+
 /// RFC 7911 ADD-PATH direction for a peer-group's unicast families: whether
 /// this side offers to receive several paths per prefix, send them, or both.
 /// What is actually used per family is negotiated against the peer's own
@@ -305,6 +365,7 @@ pub(super) fn valid_shutdown(s: Option<&BgpShutdown>) -> garde::Result {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
 #[garde(context(Config as ctx))]
+#[allow(clippy::struct_excessive_bools)] // each bool is an independent schema field
 pub struct BgpPeerGroup {
     #[garde(length(min = 1, max = 64), custom(|n, ctx: &Config| unique_name(n, ctx)))]
     #[cli(key)]
@@ -473,6 +534,20 @@ pub struct BgpPeerGroup {
     #[garde(range(min = 2, max = 64))]
     #[cli(topic = BgpPeerGroupAddPathSendCount)]
     pub add_path_send_count: Option<u8>,
+
+    /// RFC 9234 BGP Role this group's peers are to us — see `BgpRole`. eBGP
+    /// only; a change restarts the sessions (it is in the OPEN).
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BgpPeerGroupRole)]
+    pub role: Option<BgpRole>,
+
+    /// RFC 9234 §4.2 strict mode: refuse (Role Mismatch) a peer whose OPEN
+    /// carries no Role capability. Needs `role`.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = BgpPeerGroupStrictMode)]
+    pub strict_mode: bool,
 }
 
 impl BgpPeerGroup {
@@ -775,6 +850,8 @@ mod tests {
             local_as: None,
             add_path: None,
             add_path_send_count: None,
+            role: None,
+            strict_mode: false,
         }
     }
 
@@ -1113,5 +1190,17 @@ mod tests {
         assert_eq!(pg.effective_add_path(), Some(BgpAddPath::Both));
         pg.add_path = Some(BgpAddPath::Receive);
         assert_eq!(pg.effective_add_path(), Some(BgpAddPath::Receive));
+    }
+
+    #[test]
+    fn role_wire_and_counterpart() {
+        for v in 0..=4 {
+            let r = BgpRole::from_wire(v).unwrap();
+            assert_eq!(r.wire(), v);
+            assert_eq!(r.counterpart().counterpart(), r);
+        }
+        assert_eq!(BgpRole::from_wire(5), None);
+        assert_eq!(BgpRole::Provider.counterpart(), BgpRole::Customer);
+        assert_eq!(BgpRole::Peer.counterpart(), BgpRole::Peer);
     }
 }

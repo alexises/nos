@@ -126,6 +126,10 @@ pub struct ResolvedPeer {
     /// restarts the session like every field (`diff_peers`). ponytail: re-run
     /// the fan-out for the peer instead, if anyone tunes it on a live router.
     pub add_path_send_count: Option<usize>,
+    /// RFC 9234 role announced in the OPEN, and strict mode (a peer with no
+    /// Role is refused). In the OPEN, so a change restarts the session.
+    pub role: Option<nos_proto::BgpRole>,
+    pub strict_mode: bool,
     /// RFC 5065: this instance's confederation identifier (what an
     /// external peer's OPEN carries), and whether `remote_as` is another
     /// member AS. Here rather than read from `LocalIdentity` so a change
@@ -1335,6 +1339,8 @@ mod tests {
             local_as: None,
             add_path: None,
             add_path_send_count: None,
+            role: None,
+            strict_mode: false,
             confed_id: None,
             confed_member: false,
             graceful_restart: None,

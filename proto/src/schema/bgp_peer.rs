@@ -123,6 +123,8 @@ mod tests {
             local_as: None,
             add_path: None,
             add_path_send_count: None,
+            role: None,
+            strict_mode: false,
         }
     }
 

@@ -51,6 +51,8 @@ fn peer(remote: Ipv4Addr, source: Ipv4Addr, remote_as: u32) -> ResolvedPeer {
         local_as: None,
         add_path: None,
         add_path_send_count: None,
+        role: None,
+        strict_mode: false,
         confed_id: None,
         confed_member: false,
         graceful_restart: Some(120),

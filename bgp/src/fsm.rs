@@ -299,6 +299,9 @@ struct RemoteInfo {
     route_refresh: bool,
     /// The peer's RFC 4724 graceful restart capability, if it sent one.
     gr: Option<PeerGr>,
+    /// Our RFC 9234 role toward the peer, when both sides announced a legal
+    /// pair (`negotiate_role`).
+    role: Option<nos_proto::BgpRole>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,6 +342,7 @@ enum Action {
         four_octet_as: bool,
         extended_message: bool,
         gr: Option<PeerGr>,
+        role: Option<nos_proto::BgpRole>,
     },
     Close,
 }
@@ -352,6 +356,28 @@ struct NegotiationContext {
     /// The ADD-PATH mode this session offers (`ResolvedPeer::add_path`);
     /// `None` offers nothing, so the peer's capability is irrelevant.
     add_path: Option<nos_proto::BgpAddPath>,
+    /// The RFC 9234 role this session announces (`ResolvedPeer::role`).
+    role: Option<nos_proto::BgpRole>,
+    /// RFC 9234 §4.2 strict mode: a peer with no Role capability is refused.
+    strict_mode: bool,
+}
+
+/// RFC 9234 §4.2: the peer's Role must be our role's counterpart (Table 2).
+/// `Err` is Role Mismatch; `Ok(None)` means no role negotiated (we have none,
+/// or the peer sent none and strict mode is off).
+fn negotiate_role(
+    open: &OpenMessage,
+    ctx: &NegotiationContext,
+) -> Result<Option<nos_proto::BgpRole>, ()> {
+    let Some(ours) = ctx.role else {
+        return Ok(None);
+    };
+    match message::peer_role(open) {
+        None if ctx.strict_mode => Err(()),
+        None => Ok(None),
+        Some(v) if nos_proto::BgpRole::from_wire(v) == Some(ours.counterpart()) => Ok(Some(ours)),
+        Some(_) => Err(()),
+    }
 }
 
 /// Pure state transition core — the unit-test surface for this module.
@@ -371,6 +397,7 @@ fn step(state: State, event: Event, ctx: &NegotiationContext) -> (Option<State>,
                 four_octet_as: remote.four_octet_as,
                 extended_message: remote.extended_message,
                 gr: remote.gr,
+                role: remote.role,
             }],
         ),
         (State::Established(remote), Event::KeepaliveReceived) => {
@@ -462,7 +489,11 @@ fn handle_open(open: &OpenMessage, ctx: &NegotiationContext) -> (Option<State>, 
     let (mp_bgp_negotiated, negotiated_ipv4_unicast, negotiated_ipv6_unicast, negotiated_evpn) =
         negotiate_address_families(open, ctx);
     let add_path = negotiate_add_path(open, ctx);
+    let Ok(role) = negotiate_role(open, ctx) else {
+        return reject(OpenMessageSubcode::RoleMismatch);
+    };
     let remote = RemoteInfo {
+        role,
         asn: remote_asn,
         bgp_id: open.bgp_identifier,
         mp_bgp_negotiated,
@@ -868,6 +899,8 @@ pub async fn run(
         address_families: peer.address_families.clone(),
         transport_afi: afi_of_addr(peer.remote_address),
         add_path: slot.peer.add_path,
+        role: slot.peer.role,
+        strict_mode: slot.peer.strict_mode,
     };
 
     let mut state = State::OpenSent;
@@ -957,6 +990,10 @@ pub async fn run(
                 })
                 .collect();
             open.capabilities.push(message::Capability::AddPath(tuples));
+        }
+        if let Some(role) = ctx.role {
+            open.capabilities
+                .push(message::Capability::Role(role.wire()));
         }
         if let Some(time) = our_gr {
             // F = 1 only if this process already had a session with the
@@ -1172,6 +1209,10 @@ pub async fn run(
                             }))
                             .await;
                         notification_sent = Some((*code, *subcode));
+                        info!(
+                            peer = %peer.remote_address, code = *code, subcode = *subcode,
+                            "sent notification"
+                        );
                     }
                     Action::ArmHoldTimer(d) => {
                         hold_period = if d.is_zero() { None } else { Some(*d) };
@@ -1196,6 +1237,7 @@ pub async fn run(
                         four_octet_as,
                         extended_message,
                         gr: remote_gr,
+                        role: negotiated_role,
                     } => {
                         // GR on here and the peer sent the capability.
                         let gr_negotiated = our_gr.and(*remote_gr);
@@ -1235,6 +1277,13 @@ pub async fn run(
                                 "add-path negotiated"
                             );
                         }
+                        if let Some(ours) = negotiated_role {
+                            info!(
+                                peer = %peer.remote_address, local = ours.as_str(),
+                                remote = ours.counterpart().as_str(),
+                                "bgp role negotiated"
+                            );
+                        }
                         // Must be set before any further UPDATE is
                         // decoded/encoded on this connection — done here,
                         // right after Established, the same point every
@@ -1271,6 +1320,7 @@ pub async fn run(
                             peer.remote_address,
                             slot.peer.local_as.filter(|_| kind == PeerKind::External),
                         );
+                        rib.set_peer_role(peer.remote_address, *negotiated_role);
                         rib.set_peer_add_path_send_count(
                             peer.remote_address,
                             slot.peer.add_path_send_count,
@@ -1559,6 +1609,8 @@ mod tests {
             address_families: vec![AddressFamily::Ipv4Unicast],
             transport_afi: AFI_IPV4,
             add_path: None,
+            role: None,
+            strict_mode: false,
         }
     }
 
@@ -1574,6 +1626,8 @@ mod tests {
             address_families: vec![AddressFamily::Ipv4Unicast],
             transport_afi: AFI_IPV4,
             add_path: None,
+            role: None,
+            strict_mode: false,
         }
     }
 
@@ -1651,6 +1705,8 @@ mod tests {
     fn add_path_ctx(mode: Option<nos_proto::BgpAddPath>) -> NegotiationContext {
         NegotiationContext {
             add_path: mode,
+            role: None,
+            strict_mode: false,
             ..ctx_with_afs(
                 vec![AddressFamily::Ipv4Unicast, AddressFamily::Ipv6Unicast],
                 AFI_IPV4,
@@ -1880,6 +1936,7 @@ mod tests {
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
             add_path: [AddPathDir::default(); 2],
+            role: None,
             four_octet_as: true,
             extended_message: false,
             enhanced_refresh: false,
@@ -1907,6 +1964,7 @@ mod tests {
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
             add_path: [AddPathDir::default(); 2],
+            role: None,
             four_octet_as: true,
             extended_message: false,
             enhanced_refresh: false,
@@ -1937,6 +1995,7 @@ mod tests {
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
             add_path: [AddPathDir::default(); 2],
+            role: None,
             four_octet_as: true,
             extended_message: false,
             enhanced_refresh: false,
@@ -2000,6 +2059,7 @@ mod tests {
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
             add_path: [AddPathDir::default(); 2],
+            role: None,
             four_octet_as: true,
             extended_message: false,
             enhanced_refresh: false,
@@ -2025,6 +2085,7 @@ mod tests {
             negotiated_ipv6_unicast: false,
             negotiated_evpn: false,
             add_path: [AddPathDir::default(); 2],
+            role: None,
             four_octet_as: true,
             extended_message: false,
             enhanced_refresh: false,
@@ -2162,5 +2223,61 @@ mod tests {
         assert_eq!(data(AddressFamily::Ipv4Unicast), [0, 1, 1, 0, 0, 3, 0xe8]);
         assert_eq!(data(AddressFamily::Ipv6Unicast), [0, 2, 1, 0, 0, 3, 0xe8]);
         assert_eq!(data(AddressFamily::L2vpnEvpn), [0, 25, 70, 0, 0, 3, 0xe8]);
+    }
+
+    #[test]
+    fn role_pairs_and_strict_mode() {
+        use nos_proto::BgpRole::{Customer, Peer, Provider, RouteServer, RouteServerClient};
+        let all = [Provider, RouteServer, RouteServerClient, Customer, Peer];
+        for ours in all {
+            for theirs in all {
+                let mut open = valid_open(65002, 90);
+                open.capabilities
+                    .push(message::Capability::Role(theirs.wire()));
+                let c = NegotiationContext {
+                    role: Some(ours),
+                    ..ctx(65002)
+                };
+                let (state, actions) = handle_open(&open, &c);
+                if theirs == ours.counterpart() {
+                    assert!(matches!(state, Some(State::OpenConfirm(r)) if r.role == Some(ours)));
+                } else {
+                    assert!(state.is_none(), "{ours:?}/{theirs:?}");
+                    assert_eq!(
+                        actions[0],
+                        Action::SendNotification(2, OpenMessageSubcode::RoleMismatch as u8)
+                    );
+                }
+            }
+        }
+        // An unassigned wire value is never a legal pair.
+        let mut open = valid_open(65002, 90);
+        open.capabilities.push(message::Capability::Role(9));
+        let c = NegotiationContext {
+            role: Some(Peer),
+            ..ctx(65002)
+        };
+        assert!(handle_open(&open, &c).0.is_none());
+        // No Role from the peer: refused in strict mode, else no role negotiated.
+        for (strict, ok) in [(true, false), (false, true)] {
+            let c = NegotiationContext {
+                role: Some(Provider),
+                strict_mode: strict,
+                ..ctx(65002)
+            };
+            let (state, _) = handle_open(&valid_open(65002, 90), &c);
+            match state {
+                Some(State::OpenConfirm(r)) => assert!(ok && r.role.is_none()),
+                None => assert!(!ok),
+                _ => panic!(),
+            }
+        }
+        // We announce no role: the peer's is ignored.
+        let mut open = valid_open(65002, 90);
+        open.capabilities.push(message::Capability::Role(0));
+        assert!(matches!(
+            handle_open(&open, &ctx(65002)).0,
+            Some(State::OpenConfirm(r)) if r.role.is_none()
+        ));
     }
 }

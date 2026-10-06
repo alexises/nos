@@ -5577,3 +5577,74 @@ pub async fn gtsm(w: &mut World) -> anyhow::Result<()> {
     reestablished(a, base_a).await?;
     reestablished(b, base_b).await
 }
+
+/// RFC 9234 BGP roles (#220) between router-a and router-b: provider/customer
+/// negotiates (`bgp role negotiated`); provider/provider is refused with a Role
+/// Mismatch NOTIFICATION (OPEN Message Error subcode 11) and never
+/// establishes; a strict-mode speaker refuses a peer with no role, while a
+/// non-strict one just establishes with no role negotiated.
+pub async fn bgp_role(w: &mut World) -> anyhow::Result<()> {
+    w.up(&[]).await?;
+    let (a, b) = (w.a()?, w.b()?);
+    a.established().await?;
+    b.established().await?;
+    let est = "bgp session established";
+    let negotiated = |local: &str, remote: &str| {
+        format!("bgp role negotiated peer=.* local=\"{local}\" remote=\"{remote}\"")
+    };
+    let sent = "sent notification peer=.* code=2 subcode=11";
+    let set_role = |r: Option<nos_proto::BgpRole>, strict: bool| {
+        move |c: &mut nos_proto::Config| {
+            let g = &mut c.bgp_instances[0].peer_groups[0];
+            g.role = r;
+            g.strict_mode = strict;
+            Ok(())
+        }
+    };
+
+    log("provider / customer: a legal pair negotiates");
+    let (na, nb) = (
+        a.count("bgp role negotiated"),
+        b.count("bgp role negotiated"),
+    );
+    a.provision(&["--role", "provider"]).await?;
+    b.provision(&["--role", "customer"]).await?;
+    a.wait_new(&negotiated("provider", "customer"), na, 60)
+        .await?;
+    b.wait_new(&negotiated("customer", "provider"), nb, 60)
+        .await?;
+
+    log("provider / provider: Role Mismatch both ways, no session");
+    // Each side rejects the other's OPEN on its own, so both send one.
+    let (sa, sb) = (a.count(sent), b.count(sent));
+    b.provision(&["--role", "provider"]).await?;
+    a.wait_new(sent, sa, 60).await?;
+    b.wait_new(sent, sb, 60).await?;
+    let (ea, eb) = (a.count(est), b.count(est));
+    let (na, nb) = (
+        a.count("bgp role negotiated"),
+        b.count("bgp role negotiated"),
+    );
+    a.assert_quiet(est, ea, 10).await?;
+    b.assert_quiet(est, eb, 0).await?;
+    anyhow::ensure!(
+        a.count("bgp role negotiated") == na && b.count("bgp role negotiated") == nb,
+        "a role was negotiated for a mismatched pair"
+    );
+
+    log("a strict vs b with no role: refused");
+    b.edit(set_role(None, false)).await?;
+    let sa = a.count(sent);
+    a.provision(&["--role", "provider", "--strict-mode"])
+        .await?;
+    a.wait_new(sent, sa, 60).await?;
+    let ea = a.count(est);
+    a.assert_quiet(est, ea, 10).await?;
+
+    log("a non-strict vs b with no role: established, no role negotiated");
+    let (ea, na) = (a.count(est), a.count("bgp role negotiated"));
+    a.edit(set_role(Some(nos_proto::BgpRole::Provider), false))
+        .await?;
+    a.wait_new(est, ea, 60).await?;
+    a.assert_quiet("bgp role negotiated", na, 3).await
+}

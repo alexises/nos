@@ -77,6 +77,8 @@ const CAP_ADD_PATH: u8 = 69;
 /// RFC 4724 §3 Graceful Restart capability: `Restart Flags(4 bits) Restart
 /// Time(12 bits)` then `AFI(2) SAFI(1) Flags(1)` tuples.
 const CAP_GRACEFUL_RESTART: u8 = 64;
+/// RFC 9234 §4.1 BGP Role capability: one octet.
+const CAP_ROLE: u8 = 9;
 /// RFC 4724 R bit / RFC 8538 §2 N bit, in the first 16 bits.
 const GR_FLAG_RESTART: u16 = 0x8000;
 const GR_FLAG_NOTIFICATION: u16 = 0x4000;
@@ -182,6 +184,8 @@ pub enum OpenMessageSubcode {
     #[allow(dead_code)] // no optional parameters besides Capabilities are rejected yet
     UnsupportedOptionalParameter = 4,
     UnacceptableHoldTime = 6,
+    /// RFC 9234 §6 Role Mismatch.
+    RoleMismatch = 11,
 }
 
 /// RFC 4271 §6.3 UPDATE Message Error subcodes (only the one this crate's
@@ -289,6 +293,18 @@ pub enum Capability {
     AddPath(Vec<AddPathTuple>),
     /// RFC 4724 code 64 (with RFC 8538's N bit).
     GracefulRestart(GracefulRestartCap),
+    /// RFC 9234 code 9: the sender's BGP Role (`BgpRole::wire`). An
+    /// unassigned value is kept, so the receiver can tell "no role" from
+    /// "an illegal one".
+    Role(u8),
+}
+
+/// The peer's RFC 9234 Role capability value — the last one, if repeated.
+pub fn peer_role(open: &OpenMessage) -> Option<u8> {
+    open.capabilities.iter().rev().find_map(|c| match c {
+        Capability::Role(r) => Some(*r),
+        _ => None,
+    })
 }
 
 /// The RFC 4724 Graceful Restart capability. No tuples means the speaker
@@ -945,6 +961,7 @@ fn parse_capabilities(mut data: &[u8]) -> Result<Vec<Capability>, WireError> {
         }
         let cap_value = &data[2..2 + cap_len];
         match cap_code {
+            CAP_ROLE if cap_len == 1 => capabilities.push(Capability::Role(cap_value[0])),
             CAP_FOUR_OCTET_ASN if cap_len == 4 => {
                 capabilities.push(Capability::FourOctetAsn(u32::from_be_bytes(
                     cap_value.try_into().unwrap(),
@@ -1102,6 +1119,7 @@ fn encode_open(open: &OpenMessage) -> Vec<u8> {
                     cap_bytes.push(if t.forwarding { GR_FLAG_FORWARDING } else { 0 });
                 }
             }
+            Capability::Role(r) => cap_bytes.extend_from_slice(&[CAP_ROLE, 1, *r]),
             Capability::AddPath(tuples) => {
                 // A capability's length is one octet (RFC 5492), so 63 tuples
                 // at most per instance; the code may repeat (RFC 5492 §4).
@@ -3369,5 +3387,24 @@ mod shutdown_message_tests {
         assert_eq!(decode_shutdown_message(&[]), None);
         assert_eq!(decode_shutdown_message(&[5, b'a']), None);
         assert_eq!(decode_shutdown_message(&[1, 0xff]), None);
+    }
+
+    #[test]
+    fn role_capability_codec() {
+        let mut open = build_open(65001, Ipv4Addr::new(1, 1, 1, 1), 90);
+        open.capabilities.push(Capability::Role(3));
+        let back = parse_open(&encode_open(&open)).unwrap();
+        assert_eq!(peer_role(&back), Some(3));
+        // On the wire: code 9, length 1, value.
+        let mut open = build_open(65001, Ipv4Addr::new(1, 1, 1, 1), 90);
+        open.capabilities = vec![Capability::Role(0)];
+        assert_eq!(
+            encode_open(&open)[9..],
+            [5, OPT_PARAM_CAPABILITIES, 3, 9, 1, 0]
+        );
+        // Any other length is dropped as unknown (RFC 9234 §4.1: one octet).
+        let mut body = encode_open(&open)[..9].to_vec();
+        body.extend_from_slice(&[6, OPT_PARAM_CAPABILITIES, 4, 9, 2, 0, 0]);
+        assert_eq!(parse_open(&body).unwrap().capabilities, []);
     }
 }

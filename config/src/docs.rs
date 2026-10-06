@@ -357,6 +357,29 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              route-server client).",
             ),
         ),
+        Topic::BgpPeerGroupRole => (
+            "Set the RFC 9234 BGP role a peer-group's peers have toward this instance.",
+            concat!(
+                "Sets the role the peers of an eBGP peer-group are to this router (`provider`, \
+             `route-server`, `route-server-client`, `customer` or `peer`; RFC 9234) and announces \
+             the matching role in the OPEN. A legal pair is provider/customer, \
+             route-server/route-server-client or peer/peer; any other pair is refused with a Role \
+             Mismatch NOTIFICATION. A peer that announces no role is accepted unless strict-mode is \
+             set. A change restarts the group's sessions.",
+                " ",
+                "Clear a peer-group's role (no Role capability is sent).",
+            ),
+        ),
+        Topic::BgpPeerGroupStrictMode => (
+            "Refuse peers that do not announce a BGP role.",
+            concat!(
+                "With strict-mode (RFC 9234 §4.2) a session whose OPEN carries no Role capability \
+             is refused with a Role Mismatch NOTIFICATION. Requires a role on the peer-group. A \
+             change restarts the group's sessions.",
+                " ",
+                "Turn strict-mode off again.",
+            ),
+        ),
         Topic::BgpPeerGroupMaxHops => (
             "Set how many router hops away a peer-group's peers may be.",
             concat!(

@@ -676,6 +676,8 @@ pub struct BgpRib {
     confed_peers: HashSet<IpAddr>,
     /// External peers whose peer-group sets `local-as` (`set_peer_local_as`).
     local_as_peers: HashMap<IpAddr, nos_proto::BgpLocalAs>,
+    /// Peers with a negotiated RFC 9234 role (`set_peer_role`), ours toward them.
+    role_peers: HashMap<IpAddr, nos_proto::BgpRole>,
     /// iBGP peers exchanging RFC 8097 states (`set_peer_rpki_state`).
     rpki_state_peers: HashSet<IpAddr>,
     /// This instance's own router-id — used for RFC 4456 §5 `ORIGINATOR_ID`
@@ -821,6 +823,7 @@ impl BgpRib {
             confed_id: None,
             confed_peers: HashSet::new(),
             local_as_peers: HashMap::new(),
+            role_peers: HashMap::new(),
             rpki_state_peers: HashSet::new(),
             local_router_id: Ipv4Addr::UNSPECIFIED,
             cluster_id: Ipv4Addr::UNSPECIFIED,
@@ -970,6 +973,20 @@ impl BgpRib {
             Some(l) => self.local_as_peers.insert(peer, l),
             None => self.local_as_peers.remove(&peer),
         };
+    }
+
+    /// Records our negotiated RFC 9234 role toward `peer` (`None`: none
+    /// negotiated). Call before `peer_established`, like `set_peer_local_as`.
+    pub fn set_peer_role(&mut self, peer: IpAddr, role: Option<nos_proto::BgpRole>) {
+        match role {
+            Some(r) => self.role_peers.insert(peer, r),
+            None => self.role_peers.remove(&peer),
+        };
+    }
+
+    /// Our negotiated RFC 9234 role toward `peer`, if any.
+    pub fn peer_role(&self, peer: IpAddr) -> Option<nos_proto::BgpRole> {
+        self.role_peers.get(&peer).copied()
     }
 
     /// Records how many paths per prefix `peer` is sent over ADD-PATH

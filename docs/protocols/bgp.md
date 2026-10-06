@@ -606,6 +606,28 @@ $C -X PUT -H 'Content-Type: application/json' \
 
 The commit refuses `local-as` on an iBGP or confederation peer-group, together with `route-server-client`, and equal to the instance's `asn`, its confederation identifier or the group's `remote-as`. `delete local-as` removes it. Not supported: `dual-as` (accepting the peer with either AS).
 
+### BGP roles (RFC 9234)
+
+A role says what the peer-group's peers are to this router, so a misconfigured pair is caught when the session opens instead of leaking routes later. The role goes in the OPEN as a Role capability.
+
+- `provider`, `customer`, `route-server`, `route-server-client` or `peer`: the role of the peers, not of this router. Peers that sell you transit are `provider`; one of your own customers is `customer`.
+- Legal pairs: provider/customer, route-server/route-server-client, peer/peer. Any other pair closes the session with NOTIFICATION OPEN Message Error, subcode 11 (Role Mismatch); the refusing side logs `sent notification peer=<ip> code=2 subcode=11`.
+- A peer that sends no role is accepted, with no role negotiated, unless `strict-mode` is set: then it is refused with the same NOTIFICATION. `strict-mode` needs a `role`.
+- `bgp role negotiated peer=<ip> local=<role> remote=<role>` is logged when a pair is accepted.
+- Changing `role` or `strict-mode` resets the peer-group's sessions.
+- The commit refuses `role` on an iBGP or confederation peer-group, and on a `route-server-client` group any role but `route-server` or `route-server-client`.
+- This only negotiates roles. The Only-To-Customer attribute and the route-leak checks that use the role are not implemented yet (#14).
+
+```
+edge-1(t9/bgp-instance:r1/peer-group:pg1)> set role customer
+edge-1(t9/bgp-instance:r1/peer-group:pg1)> set strict-mode
+```
+
+```sh
+$C -X PUT -H 'Content-Type: application/json' -d '"Customer"' \
+  $B/v1/transactions/t9/bgp-instance/r1/peer-group/pg1/role
+```
+
 ### RPKI origin validation (RFC 6811, RFC 8210)
 
 NOS checks each route's origin AS against the Validated ROA Payloads (VRPs) of an RPKI cache, such as Routinator or StayRTR. Give the instance one or more caches:
@@ -835,6 +857,8 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 | local-as | `… local-as asn <n> [no-prepend] [replace-as]` / `set local-as …`; `delete local-as` | `…/local-as`, `{"asn":65020,"no_prepend":false,"replace_as":false}` or `null` | ASN 1 to 4294967294; default: off | eBGP peer-group outside the confederation; not the instance's asn, identifier or remote-as; not with route-server-client | AS presented to the peers; see [Local AS](#local-as-local-as) | `remote_asn` in the peer's `GET /v1/bgp/summary` |
 | add-path | `… add-path receive\|send\|both` / `set add-path …`; `delete add-path` | `…/add-path`, `"Receive"`, `"Send"`, `"Both"` or `null` | default: `both` for a route-server client, otherwise off | none | RFC 7911 several paths per prefix on ipv4/ipv6; see [ADD-PATH](#add-path-rfc-7911) | `show log nos-bgpd[<i>]` (`add-path negotiated`) |
 | add-path-send-count | `… add-path-send-count <n>` / `set add-path-send-count <n>`; `delete add-path-send-count` | `…/add-path-send-count`, number or `null` | 2 to 64; default: 2, or every path for a route-server client | add-path `send` or `both` | How many paths per prefix an ADD-PATH send peer gets: the best N after the group's own filtering | `show config` |
+| role | `… role provider\|route-server\|route-server-client\|customer\|peer` / `set role …`; `delete role` | `…/role`, `"Provider"`, `"RouteServer"`, `"RouteServerClient"`, `"Customer"`, `"Peer"` or `null` | default: none | eBGP peer-group outside the confederation; on a route-server-client group only route-server or route-server-client | Role of the peers, announced in the OPEN; see [BGP roles](#bgp-roles-rfc-9234) | `bgp role negotiated` in the logs |
+| strict-mode | `… strict-mode` / `set strict-mode`; `delete strict-mode` | `…/strict-mode`, boolean | default `false` | needs a role | Refuse a peer that sends no role | Role Mismatch NOTIFICATION in the logs |
 | max-hops | `… max-hops <n>` / `set max-hops <n>`; `delete max-hops` | `…/max-hops`, number or `null` | 1 to 254; default: off | 1 to 254 | GTSM: TTL 255 out, minimum TTL `256 - n` in | `show config` |
 | md5-password | `… md5-password <pw>` / `set md5-password <pw>`; `delete auth` | `…/auth`, `{"Md5":{"password":"…"}}` | 1 to 80 bytes; default: no authentication | 1 to 80 bytes | TCP MD5 signature; replaces any TCP-AO keys | `show bgp brief` (session up) |
 | ao-key | `… ao-key <send-id> <recv-id> hmac-sha1\|aes-cmac <secret>` / `set ao-key …`; `delete ao-key <send-id>`; `delete auth` | `…/auth`, `{"Ao":{"keys":[{"send_id":1,"recv_id":1,"algorithm":"HmacSha1_96","key":"…","is_current":true,"is_rnext":false,"exclude_options":false}]}}` | IDs 0 to 255; secret 1 to 80 bytes | at least one key; send IDs and receive IDs unique; exactly one current; at most one rnext | TCP-AO; replaces an MD5 password | `show bgp brief` (`ao-current`, `ao-rnext`, counters) |
