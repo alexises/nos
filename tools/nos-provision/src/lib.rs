@@ -971,6 +971,11 @@ pub struct Args {
     #[arg(long)]
     pub ospf_profile_mtu: Option<u16>,
 
+    /// If set (requires `--ospf-profile`), toggles `mtu-ignore` on it
+    /// (`OspfProfileOp::SetMtuIgnore`), the RFC 2328 §10.6 DBD MTU check.
+    #[arg(long)]
+    pub ospf_mtu_ignore: Option<bool>,
+
     /// If set (requires `--ospf-profile`), overrides this profile's
     /// hello-interval (`OspfProfileOp::SetHelloInterval`) — for verifying
     /// RFC 2328 §10.5's packet-validity check drops a Hello whose
@@ -1026,6 +1031,10 @@ pub struct Args {
     /// believes the profile's links have (`Ospfv3ProfileOp::SetMtu`).
     #[arg(long)]
     pub ospfv3_profile_mtu: Option<u16>,
+    /// If set (requires `--ospfv3-profile`), toggles `mtu-ignore` on it
+    /// (`Ospfv3ProfileOp::SetMtuIgnore`).
+    #[arg(long)]
+    pub ospfv3_mtu_ignore: Option<bool>,
     /// If set (requires `--ospfv3-profile`), the profile's RFC 5340 Instance
     /// ID (`Ospfv3ProfileOp::SetInstanceId`); `0` clears it.
     #[arg(long)]
@@ -2413,6 +2422,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     mtu,
                 }));
             }
+            if let Some(enabled) = args.ospf_mtu_ignore {
+                ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetMtuIgnore {
+                    instance: instance.clone(),
+                    area_id,
+                    name: name.clone(),
+                    enabled,
+                }));
+            }
             if let Some(kind) = args.ospf_profile_network_type.as_deref() {
                 let (instance, name) = (instance.clone(), name.clone());
                 ops.push(ConfigOp::OspfProfile(match kind {
@@ -2479,6 +2496,9 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             if args.ospf_profile_mtu.is_some() {
                 bail!("--ospf-profile-mtu requires --ospf-profile to also be set");
             }
+            if args.ospf_mtu_ignore.is_some() {
+                bail!("--ospf-mtu-ignore requires --ospf-profile to also be set");
+            }
             if args.ospf_profile_network_type.is_some() {
                 bail!("--ospf-profile-network-type requires --ospf-profile to also be set");
             }
@@ -2494,6 +2514,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     } else if args.ospf_simple_password.is_some() || args.ospf_crypto_key.is_some() {
         bail!("--ospf-simple-password/--ospf-crypto-key require --ospf-profile to also be set");
     } else if args.ospf_profile_mtu.is_some()
+        || args.ospf_mtu_ignore.is_some()
         || args.ospf_profile_network_type.is_some()
         || args.ospf_profile_hello_interval.is_some()
         || args.ospf_extended_seq.is_some()
@@ -2577,6 +2598,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     mtu,
                 }));
             }
+            if let Some(enabled) = args.ospfv3_mtu_ignore {
+                ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetMtuIgnore {
+                    instance: instance.clone(),
+                    area_id,
+                    name: name.clone(),
+                    enabled,
+                }));
+            }
             if let Some(id) = args.ospfv3_instance_id {
                 ops.push(ConfigOp::Ospfv3Profile(Ospfv3ProfileOp::SetInstanceId {
                     instance: instance.clone(),
@@ -2598,11 +2627,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 }));
             }
         } else if args.ospfv3_profile_mtu.is_some()
+            || args.ospfv3_mtu_ignore.is_some()
             || args.ospfv3_crypto_key.is_some()
             || args.ospfv3_instance_id.is_some()
         {
             bail!(
-                "--ospfv3-profile-mtu/--ospfv3-crypto-key/--ospfv3-instance-id require --ospfv3-profile to also be set"
+                "--ospfv3-profile-mtu/--ospfv3-mtu-ignore/--ospfv3-crypto-key/--ospfv3-instance-id require --ospfv3-profile to also be set"
             );
         }
     } else if args.ospfv3_profile.is_some() {

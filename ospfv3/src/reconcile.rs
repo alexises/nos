@@ -199,6 +199,7 @@ async fn resync(
                     network_type: profile.network_type.unwrap_or(NetworkType::PointToPoint),
                     priority,
                     mtu: resolve_effective_mtu(profile, Some(resolved.mtu)),
+                    mtu_ignore: profile.mtu_ignore,
                     auth: resolve_auth(profile),
                     instance_id: profile.instance_id.unwrap_or(0),
                 });
@@ -257,6 +258,7 @@ async fn resync(
                     network_type: profile.network_type.unwrap_or(NetworkType::Broadcast),
                     priority,
                     mtu: resolve_effective_mtu(profile, None),
+                    mtu_ignore: profile.mtu_ignore,
                     auth: resolve_auth(profile),
                     instance_id: profile.instance_id.unwrap_or(0),
                 });

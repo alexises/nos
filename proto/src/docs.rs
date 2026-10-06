@@ -249,6 +249,8 @@ topics! {
     OspfProfilePriority,
     /// `OspfProfile.mtu` (also `OSPFv3`'s)
     OspfProfileMtu,
+    /// `OspfProfile.mtu_ignore` (also `OSPFv3`'s)
+    OspfProfileMtuIgnore,
     /// `OspfProfile.network_type` (also `OSPFv3`'s)
     OspfProfileNetworkType,
     /// `OspfProfile.extended_sequence_numbers`
