@@ -9,6 +9,7 @@ use std::hash::BuildHasher;
 use std::net::IpAddr;
 
 use nos_proto::evpn_id::{parse_router_mac, router_mac_ext, ENCAP_VXLAN};
+use nos_proto::rib::EvpnIrb;
 use nos_proto::{EvpnKey, EvpnRoute, IpNet};
 use tracing::debug;
 
@@ -44,23 +45,27 @@ pub struct EvpnState {
 }
 
 /// The `Evpn` candidates `received` gives `l3`, and the remote VTEPs they
-/// use. A route is kept only if it carries one of our import Route Targets,
-/// names our L3 VNI, carries a Router's MAC, isn't our own VTEP's, and its
-/// prefix and next hop share our VTEP's family.
+/// use: every Type-5, and every RFC 9135 symmetric IRB MAC+IP (its Label2,
+/// `l3_vni`, set) as a host route. A route is kept only if it carries one of
+/// our import Route Targets, names our L3 VNI, carries a Router's MAC, isn't
+/// our own VTEP's, and its prefix and next hop share our VTEP's family.
 // ponytail: same-family only (an IPv6 prefix over an IPv4 underlay needs the
 // RFC 5549-style `RTA_VIA` route), and one PE per prefix — the lowest VTEP —
-// rather than ECMP over every PE advertising it.
+// rather than ECMP over every PE advertising it (a multi-homed host's ESI is
+// ignored here: no aliasing for host routes).
 pub fn desired<S: BuildHasher>(
     received: &HashMap<EvpnKey, EvpnRoute, S>,
     l3: &L3Vni,
 ) -> (Vec<RibEntry>, BTreeMap<IpAddr, Mac>) {
     let mut best: BTreeMap<IpNet, (IpAddr, Mac)> = BTreeMap::new();
     for r in received.values() {
-        let EvpnKey::IpPrefix { prefix, .. } = r.key else {
-            continue;
+        let (prefix, vni, route_type) = match r.key {
+            EvpnKey::IpPrefix { prefix, .. } => (prefix, Some(r.vni), 5),
+            EvpnKey::MacIp { ip, .. } => (IpNet::from(ip), r.l3_vni, 2),
+            _ => continue,
         };
         if !r.ext_communities.iter().any(|c| l3.import.contains(c))
-            || r.vni != l3.vni
+            || vni != Some(l3.vni)
             || r.next_hop == l3.vtep
             || prefix.addr().is_ipv4() != l3.vtep.is_ipv4()
             || r.next_hop.is_ipv4() != l3.vtep.is_ipv4()
@@ -68,7 +73,7 @@ pub fn desired<S: BuildHasher>(
             continue;
         }
         let Some(rmac) = r.ext_communities.iter().find_map(|c| parse_router_mac(*c)) else {
-            debug!(%prefix, vtep = %r.next_hop, "evpn type-5 without a router's mac skipped");
+            debug!(%prefix, vtep = %r.next_hop, route_type, "evpn route without a router's mac skipped");
             continue;
         };
         let e = best.entry(prefix).or_insert((r.next_hop, rmac));
@@ -87,6 +92,20 @@ pub fn desired<S: BuildHasher>(
         })
         .collect();
     (entries, best.into_values().collect())
+}
+
+impl EvpnState {
+    /// What `nos-fdbd` needs to make a domain's MAC+IP routes symmetric
+    /// (`RibRequest::GetEvpnIrb`): `None` until the IP-VRF is up.
+    #[must_use]
+    pub fn irb(&self) -> Option<EvpnIrb> {
+        let l3 = self.local.as_ref()?;
+        Some(EvpnIrb {
+            l3_vni: l3.vni,
+            router_mac: self.rmac?,
+            route_targets_export: l3.export.clone(),
+        })
+    }
 }
 
 /// One Type-5 per best route of the table that isn't itself `Evpn`-sourced
@@ -110,6 +129,7 @@ pub fn originated<S: BuildHasher>(
             next_hop: l3.vtep,
             ext_communities: ext.clone(),
             esi: [0; 10],
+            l3_vni: None,
         })
         .collect()
 }
@@ -143,6 +163,7 @@ mod tests {
             next_hop: vtep.parse().unwrap(),
             ext_communities: ext,
             esi: [0; 10],
+            l3_vni: None,
         };
         (key, r)
     }
@@ -175,6 +196,50 @@ mod tests {
             remotes,
             BTreeMap::from([("10.50.0.3".parse().unwrap(), [2, 0, 0, 0, 0, 3])])
         );
+    }
+
+    /// RFC 9135 symmetric IRB: a MAC+IP with our L3 VNI as Label2 is a host
+    /// route; the same filters apply.
+    #[test]
+    fn desired_installs_symmetric_mac_ip_as_host_routes() {
+        let rmac = router_mac_ext([2, 0, 0, 0, 0, 3]);
+        let mac_ip = |ip: &str, vtep: &str, ext: Vec<u64>, l3_vni: Option<u32>| {
+            let key = EvpnKey::MacIp {
+                rd: [0, 0, 0, 0, 0, 0, 0, u8::try_from(ip.len() + vtep.len()).unwrap()],
+                mac: [2, 0, 0, 0, 0, 9],
+                ip: ip.parse().unwrap(),
+            };
+            let r = EvpnRoute {
+                key: key.clone(),
+                vni: 10_300,
+                next_hop: vtep.parse().unwrap(),
+                ext_communities: ext,
+                esi: [0; 10],
+                l3_vni,
+            };
+            (key, r)
+        };
+        let received: HashMap<_, _> = [
+            mac_ip("10.72.0.20", "10.50.0.3", vec![RT, rmac], Some(5000)),
+            // Wrong L3 VNI, asymmetric, no IP-VRF RT, no rmac, our own VTEP.
+            mac_ip("10.72.0.21", "10.50.0.3", vec![RT, rmac], Some(5001)),
+            mac_ip("10.72.0.22", "10.50.0.3", vec![RT, rmac], None),
+            mac_ip("10.72.0.23", "10.50.0.3", vec![1, rmac], Some(5000)),
+            mac_ip("10.72.0.24", "10.50.0.3", vec![RT], Some(5000)),
+            mac_ip("10.72.0.25", "10.50.0.2", vec![RT, rmac], Some(5000)),
+            // A Type-5 /32 for the same host collapses with it.
+            route("10.72.0.20/32", "10.50.0.4", vec![RT, rmac], 5000),
+        ]
+        .into_iter()
+        .collect();
+        let (entries, remotes) = desired(&received, &l3());
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].prefix, "10.72.0.20/32".parse::<IpNet>().unwrap());
+        assert_eq!(
+            entries[0].next_hops,
+            vec![("10.50.0.3".parse().unwrap(), None)]
+        );
+        assert_eq!(remotes.len(), 1);
     }
 
     #[test]

@@ -71,6 +71,10 @@ pub struct EvpnRoute {
     /// replacement of one route, not a second one. (`bgp` withdraws the old
     /// NLRI itself, since the ESI is part of the wire identity.)
     pub esi: Esi,
+    /// RFC 9135 symmetric IRB: a Type-2 MAC+IP's MPLS Label2, the L3 VNI of
+    /// the tenant IP-VRF. `None` on every other route (and on a received
+    /// Label2 of 0, which RFC 9135 §5.2 reads as asymmetric).
+    pub l3_vni: Option<u32>,
 }
 
 /// A persistent, long-lived push in either direction (`nos-fdbd` ->

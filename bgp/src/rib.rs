@@ -99,7 +99,7 @@ use crate::message::{self, UpdateMessage};
 
 mod aggregate;
 mod evpn_out;
-pub use evpn_out::{AdvertisedEvpn, EvpnSource};
+pub use evpn_out::{feeds as evpn_feeds, AdvertisedEvpn, EvpnSource};
 
 /// Adapts a `RibRoute` into `nos_rpl`'s input shape — see root `CLAUDE.md`'s
 /// "Execution model". A plain function, not an adapter trait: there is
@@ -2975,6 +2975,7 @@ mod tests {
             next_hop: addr("192.0.2.9"),
             ext_communities: vec![0x0002_fde8_0000_2774],
             esi: [0; 10],
+            l3_vni: None,
         }
     }
 
@@ -3123,6 +3124,7 @@ mod tests {
             next_hop: addr("192.0.2.9"),
             ext_communities: vec![nos_proto::evpn_id::es_import_rt(&esi)],
             esi,
+            l3_vni: None,
         };
         rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Add(route));
         let updates = recv_all(&mut rx);
@@ -3179,6 +3181,7 @@ mod tests {
             next_hop: addr("192.0.2.9"),
             ext_communities: vec![nos_proto::evpn_id::esi_label_ext(false)],
             esi,
+            l3_vni: None,
         };
         rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Add(ad(AD_TAG_ES, 0)));
         rib.apply_evpn_local("bd1", nos_proto::EvpnUpdate::Add(ad(0, 10_100)));
@@ -3255,6 +3258,7 @@ mod tests {
             next_hop: addr("192.0.2.9"),
             ext_communities: vec![nos_proto::evpn_id::router_mac_ext([2, 0, 0, 0, 0, 9])],
             esi: [0; 10],
+            l3_vni: None,
         }
     }
 
@@ -3542,6 +3546,39 @@ mod tests {
         }];
         rib.handle_update(peer, false, v4("192.0.2.1"), &withdraw, &deny_all_policy());
         assert_eq!(rib.evpn_routes(), []);
+    }
+
+    /// RFC 9135 §5.2: a non-zero Label2 is the L3 VNI, zero means asymmetric.
+    #[test]
+    fn evpn_snapshot_maps_label2_to_the_l3_vni() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        let host = |last: u8, labels: Vec<u32>| EvpnNlri::MacIp {
+            rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
+            esi: [0; 10],
+            tag: 0,
+            mac: [2, 0, 0, 0, 0, last],
+            ip: Some(IpAddr::from([10, 72, 0, last])),
+            labels,
+        };
+        rib.handle_update(
+            peer,
+            false,
+            v4("192.0.2.1"),
+            &evpn_reach(
+                vec![host(1, vec![10_300, 5000]), host(2, vec![10_300, 0])],
+                vec![65001],
+            ),
+            &deny_all_policy(),
+        );
+        let mut got: Vec<_> = rib
+            .evpn_push_snapshot()
+            .into_values()
+            .map(|r| (r.vni, r.l3_vni))
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![(10_300, None), (10_300, Some(5000))]);
     }
 
     #[test]

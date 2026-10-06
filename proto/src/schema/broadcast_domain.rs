@@ -157,8 +157,9 @@ fn bgp_instance_exists(name: Option<&String>, ctx: &Config) -> garde::Result {
 /// on the same domain — mirrors `interface::valid_addressing_split`'s
 /// equivalent check. Wired one level up on `Config.broadcast_domains`
 /// (alongside the field-level `dive`) since it needs to see a sibling field.
-pub(crate) fn valid_broadcast_domains(domains: &[BroadcastDomain]) -> garde::Result {
+pub(crate) fn valid_broadcast_domains(domains: &[BroadcastDomain], ctx: &Config) -> garde::Result {
     for d in domains {
+        symmetric_irb_instance(d, ctx)?;
         if d.ospf_profile.is_some() && d.routing_table.is_none() {
             return Err(garde::Error::new(
                 "ospf profile requires a routing-table on the same broadcast domain",
@@ -198,6 +199,32 @@ pub(crate) fn valid_broadcast_domains(domains: &[BroadcastDomain]) -> garde::Res
         }
     }
     Ok(())
+}
+
+/// RFC 9135 symmetric IRB: an EVPN domain whose SVI is in an IP-VRF (a
+/// routing table with an L3 VNI) sends that L3 VNI on its MAC+IP routes, so
+/// the table must exchange it over the instance the domain redistributes into
+/// — otherwise the remote IP-VRF never hears those routes.
+fn symmetric_irb_instance(d: &BroadcastDomain, ctx: &Config) -> garde::Result {
+    let (Some(_), Some(instance), Some(table)) = (d.vni, &d.mac_redistribute, &d.routing_table)
+    else {
+        return Ok(());
+    };
+    let Some(rt) = ctx
+        .routing_tables
+        .iter()
+        .find(|rt| &rt.name == table && rt.evpn.l3_vni.is_some())
+    else {
+        return Ok(());
+    };
+    if rt.evpn.bgp_instance.as_ref() == Some(instance) {
+        return Ok(());
+    }
+    Err(garde::Error::new(format!(
+        "broadcast domain {} redistributes into bgp instance {instance}, but its svi's routing table {table} exchanges its l3 vni over {}: symmetric irb needs the same instance",
+        d.name,
+        rt.evpn.bgp_instance.as_deref().unwrap_or("no instance"),
+    )))
 }
 
 #[cfg(test)]
@@ -460,6 +487,54 @@ mod tests {
         d.rd = None;
         let cfg = config_with_instance(d);
         assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    /// `bd1` (redistributing into r1) with its SVI in `tenant`, an IP-VRF
+    /// whose L3 VNI rides `tenant_instance`; r2 exists too.
+    fn irb_config(tenant_instance: &str, l3_vni: Option<u32>) -> Config {
+        let mut d = evpn_domain();
+        d.routing_table = Some("tenant".to_string());
+        let mut cfg = config_with_instance(d);
+        let mut r2 = cfg.bgp_instances[0].clone();
+        r2.name = "r2".to_string();
+        cfg.bgp_instances.push(r2);
+        let mut underlay = table("underlay");
+        underlay.bgp_instance = Some("r1".to_string());
+        let mut tenant = table("tenant");
+        tenant.evpn = crate::schema::RoutingTableEvpn {
+            l3_vni,
+            rd: Some("65000:5000".to_string()),
+            route_targets_import: vec!["65000:5000".to_string()],
+            route_targets_export: vec!["65000:5000".to_string()],
+            vtep_source: Some(SourceAddress::Loopback { label: None }),
+            bgp_instance: Some(tenant_instance.to_string()),
+        };
+        cfg.routing_tables = vec![underlay, tenant];
+        cfg
+    }
+
+    #[test]
+    fn symmetric_irb_needs_the_domain_and_table_on_one_instance() {
+        let cfg = irb_config("r1", Some(5000));
+        cfg.validate_with(&cfg).unwrap();
+
+        let cfg = irb_config("r2", Some(5000));
+        let err = cfg.validate_with(&cfg).unwrap_err().to_string();
+        assert!(err.contains("bd1") && err.contains("tenant") && err.contains("r2"), "{err}");
+
+        // No L3 VNI on the table: asymmetric, any instance.
+        let mut cfg = irb_config("r2", None);
+        cfg.routing_tables[1].evpn = crate::schema::RoutingTableEvpn::default();
+        cfg.validate_with(&cfg).unwrap();
+
+        // A domain without a vni (and so no EVPN) isn't concerned.
+        let mut cfg = irb_config("r2", Some(5000));
+        let d = &mut cfg.broadcast_domains[0];
+        *d = BroadcastDomain {
+            routing_table: d.routing_table.clone(),
+            ..domain("bd1")
+        };
+        cfg.validate_with(&cfg).unwrap();
     }
 
     #[test]

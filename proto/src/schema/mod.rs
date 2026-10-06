@@ -133,7 +133,7 @@ pub struct Config {
 
     #[garde(
         dive,
-        custom(|domains, _ctx: &Config| broadcast_domain::valid_broadcast_domains(domains))
+        custom(|domains, ctx: &Config| broadcast_domain::valid_broadcast_domains(domains, ctx))
     )]
     #[cli(topic = BroadcastDomain, words = "broadcast domain")]
     pub broadcast_domains: Vec<BroadcastDomain>,

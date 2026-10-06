@@ -495,8 +495,8 @@ impl SessionManager {
 
     /// The consumers `fdb_push_client` feeds and what to feed them: every
     /// received Type-5 route to the IP-VRF routing tables (`to_tables`), every
-    /// other received EVPN route to the broadcast domains — so `nos-fdbd`
-    /// never sees a Type-5 and `nos-ribd` only Type-5s.
+    /// other received EVPN route to the broadcast domains, and a symmetric IRB
+    /// MAC+IP to both (`rib::evpn_feeds`) — so `nos-fdbd` never sees a Type-5.
     pub async fn evpn_feed_snapshot(
         &self,
         to_tables: bool,
@@ -515,7 +515,7 @@ impl SessionManager {
             rib.fdb_domains()
         };
         let mut routes = rib.evpn_push_snapshot();
-        routes.retain(|k, _| matches!(k, nos_proto::EvpnKey::IpPrefix { .. }) == to_tables);
+        routes.retain(|_, r| crate::rib::evpn_feeds(r, to_tables));
         (targets.to_vec(), routes)
     }
 

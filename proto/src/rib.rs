@@ -201,6 +201,19 @@ pub enum RibRequest {
     /// more than zero means its forwarding state survived (RFC 4724 §4.1),
     /// so it restarts gracefully (F bit, selection deferral).
     BgpRouteCount,
+    /// One-shot, `nos-fdbd` only: this table's EVPN IP-VRF, for RFC 9135
+    /// symmetric IRB (Label2 + Router's MAC on a domain's MAC+IP routes).
+    GetEvpnIrb,
+}
+
+/// Reply to `GetEvpnIrb`: what a MAC+IP route needs to be symmetric.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvpnIrb {
+    pub l3_vni: u32,
+    /// The IP-VRF's Router's MAC (`brv<l3-vni>`'s address).
+    pub router_mac: [u8; 6],
+    /// The IP-VRF's export Route Targets, as extended communities.
+    pub route_targets_export: Vec<u64>,
 }
 
 /// Messages sent from a `nos-ribd` instance to a client.
@@ -227,4 +240,7 @@ pub enum RibEvent {
     IgpCosts(Vec<(IpNet, u32)>),
     /// Reply to `BgpRouteCount`.
     BgpRouteCount(u32),
+    /// Reply to `GetEvpnIrb`. `None` until the IP-VRF is up (an L3 VNI, its
+    /// VTEP and the Router's MAC known; never with `--driver noop`).
+    EvpnIrb(Option<EvpnIrb>),
 }
