@@ -1840,6 +1840,9 @@ pub struct LinkManager {
     /// mirroring `bgp::BgpRib::set_redistribute_policy`'s "called
     /// unconditionally, re-filters eagerly" contract.
     redistribute_filtered: Mutex<HashSet<Ipv4Net>>,
+    /// `(metric, e_type2)` put in the Type-5/Type-7 LSAs of `redistribute_filtered`
+    /// (`OspfInstance.redistribute_metric`/`_type`, set every resync).
+    redistribute_metric: Mutex<(u32, bool)>,
     /// Set by `shutdown`: stops the origination tick from reoriginating the
     /// LSAs it just flushed while their `MaxAge` copies are still being
     /// flooded (`PREMATURE_AGE_FLOOD_WINDOW`). Aging keeps running.
@@ -1957,6 +1960,7 @@ impl LinkManager {
             boots,
             redistribute_raw: Mutex::new(HashSet::new()),
             redistribute_filtered: Mutex::new(HashSet::new()),
+            redistribute_metric: Mutex::new((spf::DEFAULT_EXTERNAL_METRIC, false)),
             shutting_down: AtomicBool::new(false),
             grace_period: AtomicU16::new(0),
             prefix_suppression: AtomicBool::new(false),
@@ -2416,6 +2420,7 @@ impl LinkManager {
             .collect();
         let settings = self.area_settings.lock().await.clone();
         let abr = self.is_area_border_router().await;
+        let (ext_metric, ext_type2) = *self.redistribute_metric.lock().await;
 
         // RFC 3101 §3.1/§3.2: as the elected translator of an NSSA, its P-bit
         // Type-7s become this router's own Type-5s in the normal areas.
@@ -2445,20 +2450,24 @@ impl LinkManager {
             // translated is originated once. Type-7: `(options, metric,
             // forwarding address)`.
             let mut type5: HashMap<Ipv4Net, (u32, bool)> = HashMap::new();
-            let mut type7: HashMap<Ipv4Net, (u8, u32, Ipv4Addr)> = HashMap::new();
+            let mut type7: HashMap<Ipv4Net, (u8, u32, Ipv4Addr, bool)> = HashMap::new();
             if !area.stub {
                 type5.extend(translated.iter().map(|&(p, m, e)| (p, (m, e))));
-                type5.extend(redistributed.iter().map(|&p| (p, (0, false))));
+                type5.extend(redistributed.iter().map(|&p| (p, (ext_metric, ext_type2))));
             } else if area.nssa {
                 // RFC 3101 §2.4: an ABR clears the P-bit, since it originates
                 // the Type-5 for the same prefix itself.
                 let options = if abr { 0 } else { lsa::OPTION_P };
                 let fa = self.nssa_forwarding_address(*area_id).await;
-                type7.extend(redistributed.iter().map(|&p| (p, (options, 0, fa))));
+                type7.extend(
+                    redistributed
+                        .iter()
+                        .map(|&p| (p, (options, ext_metric, fa, ext_type2))),
+                );
                 if abr && area.nssa_default_originate {
                     type7.insert(
                         Ipv4Net::default(),
-                        (0, area.default_cost, Ipv4Addr::UNSPECIFIED),
+                        (0, area.default_cost, Ipv4Addr::UNSPECIFIED, false),
                     );
                 }
             }
@@ -2491,7 +2500,7 @@ impl LinkManager {
             let mut type7_ids = HashSet::new();
             for (prefix, id) in assign_link_state_ids(type7.keys().copied()) {
                 type7_ids.insert(id);
-                let (options, metric, forwarding_address) = type7[&prefix];
+                let (options, metric, forwarding_address, e_type2) = type7[&prefix];
                 install_self_originated_with_options(
                     &mut lsdb,
                     local_router_id,
@@ -2501,7 +2510,7 @@ impl LinkManager {
                     LsaBody::AsExternal(AsExternalLsaBody {
                         network_mask: prefix.netmask(),
                         metric,
-                        e_type2: false,
+                        e_type2,
                         forwarding_address,
                         external_route_tag: 0,
                     }),
@@ -2674,6 +2683,16 @@ impl LinkManager {
         *self.redistribute_filtered.lock().await = filtered;
     }
 
+    /// Sets the metric and metric type (`None` = 20, type 1) of the externals
+    /// this router originates; called every resync like `set_redistribute_policy`.
+    /// A changed value changes the LSA body, so the next tick re-originates it.
+    pub async fn set_redistribute_metric(&self, metric: Option<u32>, metric_type: Option<u8>) {
+        *self.redistribute_metric.lock().await = (
+            metric.unwrap_or(spf::DEFAULT_EXTERNAL_METRIC),
+            metric_type == Some(2),
+        );
+    }
+
     /// Diffs `desired` against currently-running links by `attach_point`:
     /// links no longer desired, or whose resolved fields changed, are
     /// stopped (and, if still desired with new fields, respawned); newly
@@ -2787,7 +2806,12 @@ impl LinkManager {
             .collect();
         stores.extend(self.link_local_lsdbs().await);
         for (area_id, lsdb) in &stores {
-            for header in lsdb.lock().await.headers() {
+            for lsa in lsdb.lock().await.all() {
+                let header = &lsa.header;
+                let (external_metric, external_type2) = match &lsa.body {
+                    LsaBody::AsExternal(e) => (Some(e.metric), e.e_type2),
+                    _ => (None, false),
+                };
                 result.push(LsaSummary {
                     area_id: *area_id,
                     lsa_type: header.lsa_type,
@@ -2796,6 +2820,8 @@ impl LinkManager {
                     sequence_number: header.sequence_number,
                     age: header.age,
                     checksum: header.checksum,
+                    external_metric,
+                    external_type2,
                 });
             }
         }
@@ -4261,6 +4287,52 @@ mod tests {
         assert_eq!(fresh.header.sequence_number, lsa::INITIAL_SEQUENCE_NUMBER);
         assert_eq!(fresh.header.age, 0);
         assert_eq!(fresh.body, router_body(1));
+    }
+
+    /// `redistribute ... metric 50 metric-type 2` reaches the originated
+    /// Type-5; changing it re-originates the LSA with a bumped sequence number.
+    #[tokio::test]
+    async fn configured_external_metric_is_originated_and_change_bumps_sequence() {
+        async fn body(m: &LinkManager, key: &LsaKey) -> (u32, bool, i32) {
+            let lsdb = m.lsdb_for(Ipv4Addr::UNSPECIFIED).await;
+            let lsdb = lsdb.lock().await;
+            let l = lsdb.get(key).unwrap();
+            let LsaBody::AsExternal(e) = &l.body else {
+                panic!()
+            };
+            (e.metric, e.e_type2, l.header.sequence_number)
+        }
+        let manager = LinkManager::new(
+            1,
+            Some(exchange::DEFAULT_DBD_MAX_HEADERS),
+            crate::boot::BootCounter::in_memory(),
+        );
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let prefix: Ipv4Net = "192.0.2.0/24".parse().unwrap();
+        let key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_AS_EXTERNAL,
+            link_state_id: prefix.network(),
+            advertising_router: router_id,
+        };
+        manager.lsdb_for(Ipv4Addr::UNSPECIFIED).await;
+        *manager.redistribute_filtered.lock().await = HashSet::from([prefix]);
+        manager.originate_as_external_lsas(router_id).await;
+        assert_eq!(
+            body(&manager, &key).await,
+            (20, false, lsa::INITIAL_SEQUENCE_NUMBER)
+        );
+        manager.set_redistribute_metric(Some(50), Some(2)).await;
+        // RFC 2328 §12.4 MinLSInterval: a change waits for the held LSA to age.
+        manager
+            .lsdb_for(Ipv4Addr::UNSPECIFIED)
+            .await
+            .lock()
+            .await
+            .age_and_evict(lsa::MIN_LS_INTERVAL, &HashSet::new());
+        manager.originate_as_external_lsas(router_id).await;
+        let (m, e, seq) = body(&manager, &key).await;
+        assert_eq!((m, e), (50, true));
+        assert!(seq > lsa::INITIAL_SEQUENCE_NUMBER);
     }
 
     #[tokio::test]

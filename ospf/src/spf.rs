@@ -44,11 +44,12 @@ use crate::lsa::{
     ROUTER_FLAG_NT,
 };
 
-/// The metric nos itself originates for a redistributed prefix (Type 1).
-/// Received externals carry their own metric and E bit (`AsExternalLsaBody`).
 /// RFC 2328 §12.4.4 `LSInfinity`: an AS-external metric that is never routed.
 const LS_INFINITY: u32 = 0x00FF_FFFF;
-pub const EXTERNAL_METRIC_CONSTANT: u32 = 20;
+/// The metric nos originates for a redistributed prefix when none is configured
+/// (`redistribute ... metric`); received externals carry their own metric and
+/// E bit (`AsExternalLsaBody`).
+pub const DEFAULT_EXTERNAL_METRIC: u32 = 20;
 
 /// One SPF vertex — a router (keyed by its router-id) or a transit network
 /// (keyed by the Network-LSA's `link_state_id`, the DR's own address on
@@ -1459,7 +1460,7 @@ mod tests {
             },
             body: LsaBody::AsExternal(AsExternalLsaBody {
                 network_mask: mask,
-                metric: EXTERNAL_METRIC_CONSTANT,
+                metric: DEFAULT_EXTERNAL_METRIC,
                 // E bit set: translation must carry it, SPF ignores it.
                 e_type2: true,
                 forwarding_address: Ipv4Addr::UNSPECIFIED,
@@ -1480,7 +1481,7 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix, "192.0.2.0/24".parse().unwrap());
         assert_eq!(routes[0].next_hops, vec![addr(10, 0, 0, 2)]);
-        assert_eq!(routes[0].metric, 5 + EXTERNAL_METRIC_CONSTANT);
+        assert_eq!(routes[0].metric, 5 + DEFAULT_EXTERNAL_METRIC);
     }
 
     fn type7(prefix: Ipv4Addr, asbr: Ipv4Addr, p_bit: bool, fa: Ipv4Addr) -> Arc<Lsa> {
@@ -1525,12 +1526,12 @@ mod tests {
         assert_eq!(routes.len(), 3, "{routes:?}");
         assert!(routes
             .iter()
-            .all(|r| r.metric == 5 + EXTERNAL_METRIC_CONSTANT));
+            .all(|r| r.metric == 5 + DEFAULT_EXTERNAL_METRIC));
         assert_eq!(
             nssa_translations(root, &lsas),
             vec![(
                 "192.0.2.0/24".parse().unwrap(),
-                EXTERNAL_METRIC_CONSTANT,
+                DEFAULT_EXTERNAL_METRIC,
                 true
             )]
         );
@@ -1929,7 +1930,7 @@ mod tests {
         let routes = compute(root, &[root_lsa, border_lsa, asbr_summary, ext_lsa]);
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].next_hops, vec![addr(10, 0, 0, 2)]);
-        assert_eq!(routes[0].metric, 5 + 10 + EXTERNAL_METRIC_CONSTANT);
+        assert_eq!(routes[0].metric, 5 + 10 + DEFAULT_EXTERNAL_METRIC);
     }
 
     #[test]
@@ -1960,7 +1961,7 @@ mod tests {
         );
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].next_hops, vec![addr(10, 0, 2, 2)]);
-        assert_eq!(routes[0].metric, 1 + EXTERNAL_METRIC_CONSTANT);
+        assert_eq!(routes[0].metric, 1 + DEFAULT_EXTERNAL_METRIC);
     }
 
     #[test]
@@ -1992,7 +1993,7 @@ mod tests {
         );
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].next_hops, vec![addr(10, 0, 1, 2)]);
-        assert_eq!(routes[0].metric, 2 + EXTERNAL_METRIC_CONSTANT);
+        assert_eq!(routes[0].metric, 2 + DEFAULT_EXTERNAL_METRIC);
     }
 
     /// root(1) — 2, root — 3, 2 — 3 with the given 2–3 cost; 2 owns a stub.
@@ -2426,7 +2427,7 @@ mod tests {
             ],
         );
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].metric, 1 + EXTERNAL_METRIC_CONSTANT);
+        assert_eq!(routes[0].metric, 1 + DEFAULT_EXTERNAL_METRIC);
         assert_eq!(
             routes[0].next_hops,
             vec![addr(10, 0, 0, 2), addr(10, 0, 1, 2)]
@@ -2501,7 +2502,7 @@ mod tests {
             nssa_translations(root, &lsas),
             vec![(
                 "192.0.2.0/24".parse().unwrap(),
-                EXTERNAL_METRIC_CONSTANT,
+                DEFAULT_EXTERNAL_METRIC,
                 true
             )]
         );
@@ -2536,7 +2537,7 @@ mod tests {
         assert_eq!(summary.metric, 11);
         assert_eq!(summary.next_hops, both);
         let external = route_to(&routes, "198.51.100.0/24");
-        assert_eq!(external.metric, 1 + 5 + EXTERNAL_METRIC_CONSTANT);
+        assert_eq!(external.metric, 1 + 5 + DEFAULT_EXTERNAL_METRIC);
         assert_eq!(external.next_hops, both);
     }
 

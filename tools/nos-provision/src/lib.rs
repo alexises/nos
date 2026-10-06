@@ -227,6 +227,15 @@ pub struct Args {
     #[arg(long)]
     pub redistribute_to_ospf_policy: Option<String>,
 
+    /// External metric of the AS-external-LSAs `--redistribute-to-ospf`
+    /// sends (1..=16777215; unset = 20).
+    #[arg(long)]
+    pub redistribute_metric: Option<u32>,
+
+    /// External metric type, 1 or 2, for `--redistribute-to-ospf` (unset = 1).
+    #[arg(long)]
+    pub redistribute_metric_type: Option<u8>,
+
     /// If set, removes `--routing-table`'s redistribute rule
     /// (`RoutingTableOp::ClearRedistribute`) — for verifying that a
     /// redistributed prefix's AS-external-LSA is actually withdrawn (RFC
@@ -1432,8 +1441,15 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Bgp,
                 policy: args.redistribute_policy.clone(),
+                metric: None,
+                metric_type: None,
             },
         }));
+    }
+    if (args.redistribute_metric.is_some() || args.redistribute_metric_type.is_some())
+        && !args.redistribute_to_ospf
+    {
+        bail!("--redistribute-metric/--redistribute-metric-type require --redistribute-to-ospf");
     }
     if args.redistribute_to_ospf {
         if args.ospf_instance.is_none() {
@@ -1445,6 +1461,8 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospf,
                 policy: args.redistribute_to_ospf_policy.clone(),
+                metric: args.redistribute_metric,
+                metric_type: args.redistribute_metric_type,
             },
         }));
     }
@@ -1458,6 +1476,8 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 from: RedistributeSource::Static,
                 to: RedistributeTarget::Ospfv3,
                 policy: args.redistribute_to_ospfv3_policy.clone(),
+                metric: None,
+                metric_type: None,
             },
         }));
     }
@@ -3268,6 +3288,8 @@ mod tests {
                     from: RedistributeSource::Static,
                     to: RedistributeTarget::Ospf,
                     policy: None,
+                    metric: None,
+                    metric_type: None,
                 },
             }),
         );
@@ -3300,6 +3322,8 @@ mod tests {
                     from: RedistributeSource::Static,
                     to: RedistributeTarget::Ospfv3,
                     policy: Some("p".into()),
+                    metric: None,
+                    metric_type: None,
                 },
             }),
         );

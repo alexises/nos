@@ -1537,6 +1537,8 @@ mod tests {
             advertising_router: "1.1.1.1".parse().unwrap(),
             sequence_number: 0x8000_0001u32.cast_signed(),
             age: 42,
+            external_metric: None,
+            external_type2: false,
             checksum: 0xabcd,
         };
         assert_eq!(

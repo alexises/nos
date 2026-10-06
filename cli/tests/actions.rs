@@ -117,6 +117,8 @@ fn fake_configd(path: &Path) {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             host_router: false,
+            redistribute_metric: None,
+            redistribute_metric_type: None,
         }],
         ospfv3_instances: vec![nos_proto::Ospfv3Instance {
             name: "v3".to_string(),

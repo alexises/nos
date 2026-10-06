@@ -59,6 +59,21 @@ pub struct OspfInstance {
     #[cli(hidden)]
     pub redistribute_policy: Option<String>,
 
+    /// `RoutingTable.redistribute.metric` mirrored like `redistribute_policy`
+    /// (derived, read-only, hidden): the external metric `nos-ospfd` puts in
+    /// the Type-5/Type-7 LSAs it originates (`None` = 20).
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(hidden)]
+    pub redistribute_metric: Option<u32>,
+
+    /// `RoutingTable.redistribute.metric_type` mirrored like
+    /// `redistribute_metric` (`None` = 1).
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(hidden)]
+    pub redistribute_metric_type: Option<u8>,
+
     /// RFC 3623 graceful restart: on a planned shutdown, send a Grace-LSA
     /// asking every `Full` neighbor to keep the adjacency (and this router's
     /// routes) for this many seconds while the daemon restarts. `None`
@@ -135,6 +150,8 @@ impl Default for OspfInstance {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             host_router: false,
+            redistribute_metric: None,
+            redistribute_metric_type: None,
         }
     }
 }
@@ -179,6 +196,8 @@ mod tests {
             max_metric_on_shutdown: None,
             max_metric_administrative: false,
             host_router: false,
+            redistribute_metric: None,
+            redistribute_metric_type: None,
         }
     }
 

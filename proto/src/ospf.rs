@@ -97,6 +97,11 @@ pub struct LsaSummary {
     pub sequence_number: i32,
     pub age: u16,
     pub checksum: u16,
+    /// An AS-external/NSSA-external LSA's metric (low 24 bits); `None` for
+    /// every other type.
+    pub external_metric: Option<u32>,
+    /// That LSA's E bit: a metric type 2 external.
+    pub external_type2: bool,
 }
 
 /// Messages sent from a client to one `nos-ospfd` instance's IPC socket.
