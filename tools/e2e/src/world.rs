@@ -119,9 +119,17 @@ impl World {
         self.start(B, None, watchdog_args).await
     }
 
-    const CONTAINERS: [&'static str; 9] = [
-        "router-a", "router-b", "router-c", "router-r", "router-g", "router-f", CE_HOST, H_HOST,
+    const CONTAINERS: [&'static str; 10] = [
+        "router-a",
+        "router-b",
+        "router-c",
+        "router-r",
+        "router-g",
+        "router-f",
+        CE_HOST,
+        H_HOST,
         RPKI_CACHE,
+        SYSLOG_COLLECTOR,
     ];
 
     /// On a group failure: the last `n` `docker logs` lines of every container

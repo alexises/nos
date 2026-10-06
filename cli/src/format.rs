@@ -1764,13 +1764,14 @@ pub fn render_diff(diff: &ConfigDiff, color: bool) -> String {
         port_aggregates,
         lldp,
         users,
+        logging,
     } = diff;
     let mut lines = Vec::new();
 
     if let Some(field) = hostname {
         render_field_diff(&mut lines, field, "", color);
     }
-    for field in lldp {
+    for field in lldp.iter().chain(logging) {
         render_field_diff(&mut lines, field, "", color);
     }
 

@@ -20,11 +20,12 @@ use ipnet::{IpNet, Ipv4Net};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp,
     BroadcastDomainOp, ConfigOp, EsRedundancy, InterfaceOp, LacpRate, LldpDestination, LldpOp,
-    NetworkType, OspfAreaOp, OspfAreaType, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstanceOp,
-    OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp,
-    PortAggregateMode, PortAggregateOp, PortAggregateSubinterfaceOp, Redistribute,
-    RedistributeSource, RedistributeTarget, RoutingTableEvpn, RoutingTableOp, SourceAddress,
-    StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, UserOp, VlanTag,
+    LogLevel, LoggingOp, NetworkType, OspfAreaOp, OspfAreaType, OspfCryptoAlgorithm, OspfCryptoKey,
+    OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
+    PolicyDefinitionOp, PortAggregateMode, PortAggregateOp, PortAggregateSubinterfaceOp,
+    Redistribute, RedistributeSource, RedistributeTarget, RoutingTableEvpn, RoutingTableOp,
+    SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp,
+    SyslogFacility, SyslogTransport, UserOp, VlanTag,
 };
 
 /// Clap-facing mirror of `nos_proto::PortAggregateMode` — `clap::ValueEnum`
@@ -807,6 +808,39 @@ pub struct Args {
     /// (`LldpOp::RemoveManagementAddress`).
     #[arg(long = "no-lldp-management-address")]
     pub no_lldp_management_addresses: Vec<IpAddr>,
+
+    /// Ensures this remote syslog collector (`LoggingOp::EnsureSyslog`); every
+    /// other `--syslog-*` flag of the invocation applies to it. One per run.
+    #[arg(long)]
+    pub syslog_server: Option<String>,
+
+    /// The collector's address (`LoggingOp::SetSyslogAddress`).
+    #[arg(long)]
+    pub syslog_address: Option<IpAddr>,
+
+    /// The collector's port (`LoggingOp::SetSyslogPort`).
+    #[arg(long)]
+    pub syslog_port: Option<u16>,
+
+    /// `udp` or `tcp` (`LoggingOp::SetSyslogTransport`).
+    #[arg(long)]
+    pub syslog_transport: Option<String>,
+
+    /// The routing table whose VRF the socket is scoped into.
+    #[arg(long)]
+    pub syslog_routing_table: Option<String>,
+
+    /// Minimum severity: `error`, `warn`, `info`, `debug` or `trace`.
+    #[arg(long)]
+    pub syslog_level: Option<String>,
+
+    /// `local0` to `local7`.
+    #[arg(long)]
+    pub syslog_facility: Option<String>,
+
+    /// One collector per repetition to remove (`LoggingOp::RemoveSyslog`).
+    #[arg(long = "no-syslog-server")]
+    pub no_syslog_servers: Vec<String>,
 
     /// One `<interface>=<group>` per repetition (group is `nearest-bridge`,
     /// `non-tpmr` or `customer-bridge`): sets that interface's LLDP
@@ -2104,6 +2138,79 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     for &address in &args.no_lldp_management_addresses {
         ops.push(ConfigOp::Lldp(LldpOp::RemoveManagementAddress { address }));
     }
+    if let Some(name) = &args.syslog_server {
+        let n = || name.clone();
+        ops.push(ConfigOp::Logging(LoggingOp::EnsureSyslog { name: n() }));
+        if let Some(address) = args.syslog_address {
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogAddress {
+                name: n(),
+                address,
+            }));
+        }
+        if let Some(port) = args.syslog_port {
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogPort {
+                name: n(),
+                port: Some(port),
+            }));
+        }
+        if let Some(t) = &args.syslog_transport {
+            let transport = match t.as_str() {
+                "udp" => SyslogTransport::Udp,
+                "tcp" => SyslogTransport::Tcp,
+                _ => bail!("--syslog-transport is udp or tcp, not '{t}'"),
+            };
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogTransport {
+                name: n(),
+                transport,
+            }));
+        }
+        if let Some(rt) = &args.syslog_routing_table {
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogRoutingTable {
+                name: n(),
+                routing_table: Some(rt.clone()),
+            }));
+        }
+        if let Some(l) = &args.syslog_level {
+            let level = match l.as_str() {
+                "error" => LogLevel::Error,
+                "warn" => LogLevel::Warn,
+                "info" => LogLevel::Info,
+                "debug" => LogLevel::Debug,
+                "trace" => LogLevel::Trace,
+                _ => bail!("unknown --syslog-level '{l}'"),
+            };
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogLevel {
+                name: n(),
+                level: Some(level),
+            }));
+        }
+        if let Some(f) = &args.syslog_facility {
+            const FACILITIES: [SyslogFacility; 8] = [
+                SyslogFacility::Local0,
+                SyslogFacility::Local1,
+                SyslogFacility::Local2,
+                SyslogFacility::Local3,
+                SyslogFacility::Local4,
+                SyslogFacility::Local5,
+                SyslogFacility::Local6,
+                SyslogFacility::Local7,
+            ];
+            let facility = f
+                .strip_prefix("local")
+                .and_then(|d| d.parse::<usize>().ok())
+                .and_then(|i| FACILITIES.get(i).copied())
+                .with_context(|| format!("unknown --syslog-facility '{f}'"))?;
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogFacility {
+                name: n(),
+                facility: Some(facility),
+            }));
+        }
+    }
+    for name in &args.no_syslog_servers {
+        ops.push(ConfigOp::Logging(LoggingOp::RemoveSyslog {
+            name: name.clone(),
+        }));
+    }
     for spec in &args.lldp_destination_interfaces {
         let (name, group) = spec
             .split_once('=')
@@ -2888,8 +2995,38 @@ mod tests {
             "10.0.0.3",
             "--lldp-destination-interface",
             "eth1=customer-bridge",
+            "--syslog-server",
+            "c1",
+            "--syslog-address",
+            "192.0.2.9",
+            "--syslog-transport",
+            "tcp",
+            "--syslog-facility",
+            "local3",
+            "--syslog-level",
+            "debug",
+            "--no-syslog-server",
+            "old",
         ])
         .unwrap();
+        has(
+            &ops,
+            &ConfigOp::Logging(LoggingOp::SetSyslogFacility {
+                name: "c1".into(),
+                facility: Some(SyslogFacility::Local3),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Logging(LoggingOp::SetSyslogTransport {
+                name: "c1".into(),
+                transport: SyslogTransport::Tcp,
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Logging(LoggingOp::RemoveSyslog { name: "old".into() }),
+        );
         has(
             &ops,
             &ConfigOp::SwitchingProfile(SwitchingProfileOp::AddMember {

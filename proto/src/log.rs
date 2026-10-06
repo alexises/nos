@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// Wire twin of `tracing::Level` — kept separate so no component needs to
 /// depend on `tracing`'s own (de)serialization support.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, nos_proto_derive::Cli)]
 pub enum LogLevel {
     Trace,
     Debug,

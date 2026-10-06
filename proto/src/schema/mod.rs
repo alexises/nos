@@ -7,6 +7,7 @@ pub mod community_alias;
 pub mod community_group;
 pub mod interface;
 pub mod lldp;
+pub mod logging;
 pub mod ospf_area;
 pub mod ospf_instance;
 pub mod ospf_profile;
@@ -43,6 +44,7 @@ pub use interface::{
     loopback_table_name, Interface, InterfaceAddress, Subinterface, LOOPBACK_PREFIX,
 };
 pub use lldp::{LldpDestination, LldpSettings};
+pub use logging::{LoggingSettings, SyslogFacility, SyslogServer, SyslogTransport};
 pub use ospf_area::{OspfArea, OspfAreaRange, OspfAreaType};
 pub use ospf_instance::OspfInstance;
 pub use ospf_profile::{
@@ -157,6 +159,13 @@ pub struct Config {
     #[cli(topic = Lldp)]
     pub lldp: LldpSettings,
 
+    /// Log export (remote syslog). `serde(default)` so on-disk config saved
+    /// before this field existed still loads.
+    #[serde(default)]
+    #[garde(dive)]
+    #[cli(topic = Logging)]
+    pub logging: LoggingSettings,
+
     /// Local users allowed to log in. `serde(default)` so on-disk config saved
     /// before this field existed still loads (`nos-configd` then seeds `admin`).
     #[serde(default)]
@@ -184,6 +193,7 @@ impl Default for Config {
             port_aggregates: Vec::new(),
             hostname: default_hostname(),
             lldp: LldpSettings::default(),
+            logging: LoggingSettings::default(),
             users: Vec::new(),
         }
     }

@@ -390,6 +390,14 @@ pub const REST_PORT: u16 = 8080;
 pub const REST_ABSENT_ADDRESS: &str = "10.50.0.77";
 pub const REST_TX: &str = "rest-e2e";
 
+/// The `syslog` phase's collector (syslog-ng, an independent RFC 5424
+/// receiver) on the shared network.
+pub const SYSLOG_COLLECTOR: &str = "syslog-collector";
+pub const IP_SYSLOG: &str = "10.50.0.30";
+pub const SYSLOG_IMAGE: &str = "nos-e2e-syslog:local";
+/// Router-a's hostname while the phase runs (the default `nos` says nothing).
+pub const SYSLOG_HOSTNAME: &str = "e2e-a";
+
 /// `pki-rotation` runs the watchdog with certificates this short-lived and a
 /// rotation this frequent, so a daemon that never applied a rotation would be
 /// holding an *expired* certificate within seconds. Rotation must come well

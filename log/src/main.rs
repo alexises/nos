@@ -2,11 +2,11 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
-use nos_log::{persistence, server, LogStore};
+use nos_log::{persistence, server, syslog, LogStore};
 use nos_pki::Identity;
-use nos_proto::DEFAULT_LOG_SOCKET;
+use nos_proto::{DEFAULT_LOG_SOCKET, DEFAULT_WATCHDOG_SOCKET};
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::info;
 
 /// Default location for the persisted log store — under `/var/lib/nos` (the
@@ -34,6 +34,12 @@ struct Args {
     /// on disk). Oldest entries are evicted first.
     #[arg(long, default_value_t = 10_000)]
     capacity: usize,
+
+    /// nos-watchdogd's broker socket, to find nos-configd (the syslog
+    /// collectors to export to) and a collector's `nos-ribd` (its VRF).
+    /// Resolved in the background: startup never waits for it.
+    #[arg(long, default_value = DEFAULT_WATCHDOG_SOCKET)]
+    watchdog_socket: PathBuf,
 }
 
 #[tokio::main]
@@ -61,8 +67,14 @@ async fn main() -> anyhow::Result<()> {
         store.persist_queue_bytes(),
     ));
 
-    let server_task =
-        server::start(&args.listen_socket, store, &identity).context("starting log IPC server")?;
+    let server_task = server::start(&args.listen_socket, store.clone(), &identity)
+        .context("starting log IPC server")?;
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let syslog_task = tokio::spawn(syslog::reconcile::run(
+        args.watchdog_socket.clone(),
+        store,
+        shutdown_rx,
+    ));
 
     wait_for_shutdown_signal()
         .await
@@ -75,6 +87,9 @@ async fn main() -> anyhow::Result<()> {
     // rather than trying to await a drain, matching `nos-ribd`/
     // `nos-interfaced`'s own `server_task.abort()` shutdown, which makes the
     // same no-perfect-drain tradeoff for their IPC servers.
+    // Syslog sinks close their TCP connections cleanly before the exit.
+    let _ = shutdown_tx.send(true);
+    let _ = syslog_task.await;
     server_task.abort();
     persistence_task.abort();
 

@@ -93,6 +93,47 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              ifIndex; any other is still advertised as configured. `delete` stops advertising \
              one.",
         ),
+        Topic::Logging => (
+            "Log export settings.",
+            "Where nos-logd sends every log entry besides keeping it for `show log`.",
+        ),
+        Topic::LoggingSyslog => (
+            "Create or delete a remote syslog collector.",
+            "Every log entry at or above the collector's level is sent to it as an RFC 5424 \
+             message, in addition to being kept for `show log`. Entries are dropped, never \
+             queued, while a collector is unreachable. `delete` stops exporting to it.",
+        ),
+        Topic::SyslogAddress => (
+            "Set a syslog collector's address.",
+            "The collector's IPv4 or IPv6 unicast address (a name is not resolved: there is no \
+             resolver inside a VRF).",
+        ),
+        Topic::SyslogPort => (
+            "Set a syslog collector's port.",
+            "Destination port, 1-65535. `delete` restores the default: 514 for udp, 601 for tcp.",
+        ),
+        Topic::SyslogTransport => (
+            "Set a syslog collector's transport.",
+            "`udp` (RFC 5426, one message per datagram, truncated to 1180 octets) or `tcp` \
+             (RFC 6587 octet-counted frames on one connection, reconnected every second while \
+             it is down). `delete` restores udp.",
+        ),
+        Topic::SyslogRoutingTable => (
+            "Send syslog from inside a routing table's VRF.",
+            "Names an existing routing table: the socket is scoped into its VRF, so a \
+             collector reachable only through that table can be used. `delete` uses the \
+             default network namespace.",
+        ),
+        Topic::SyslogLevel => (
+            "Set a syslog collector's minimum severity.",
+            "Entries below this level are not sent: error, warn, info, debug or trace (debug \
+             and trace both map to syslog severity 7). `delete` restores info.",
+        ),
+        Topic::SyslogFacility => (
+            "Set a syslog collector's facility.",
+            "The facility of every message sent to it, local0 to local7. `delete` restores \
+             local7.",
+        ),
         Topic::BgpInstance => (
             "Create a BGP instance in the transaction if it doesn't already exist.",
             concat!(
