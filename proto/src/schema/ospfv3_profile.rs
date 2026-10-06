@@ -68,7 +68,7 @@ pub struct Ospfv3Profile {
     /// `OspfAuth::Crypto` (`is_current` signs, every key verifies).
     #[garde(custom(|a: &Option<Vec<OspfCryptoKey>>, _ctx: &Config| valid_auth(a.as_deref())))]
     #[serde(default)]
-    #[cli(topic = Ospfv3ProfileAuth, sugar(word = "crypto-key", with = sugar::ospfv3_crypto_key, topic = Ospfv3ProfileCryptoKey))]
+    #[cli(topic = Ospfv3ProfileAuth, render = sugar::render_ospfv3_auth, sugar(word = "crypto-key", with = sugar::ospfv3_crypto_key, topic = Ospfv3ProfileCryptoKey))]
     pub auth: Option<Vec<OspfCryptoKey>>,
 
     /// RFC 5340 §A.3.1 Instance ID (header byte 14) this profile's links send

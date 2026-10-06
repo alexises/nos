@@ -12,6 +12,8 @@ use serde_json::Value;
 
 use crate::Topic;
 
+pub mod render;
+
 /// A generic config verb. `edit` never reaches a sugar function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
@@ -23,6 +25,9 @@ pub enum Verb {
 /// that holds the field, in; the edit out. `None`: not this sugar — the
 /// words are read as the plain field instead, if they can be.
 pub type SugarFn = fn(Verb, &[&str], &Value) -> Option<SugarOut>;
+
+/// A field's own `show config` lines (see `Field::render`), from its JSON.
+pub type RenderFn = fn(&Value) -> Vec<String>;
 
 /// What a sugar word means.
 #[derive(Debug, Clone, PartialEq)]
@@ -52,6 +57,12 @@ pub struct Field {
     pub topic: Option<Topic>,
     /// Derived, read-only state: never edited from the CLI.
     pub hidden: bool,
+    /// A secret: `show config` and the diff never print its value.
+    pub secret: bool,
+    /// How `show config` writes this field when its value can only be
+    /// entered through sugar: the lines (words, relative to the field's
+    /// object) that set it. Round-trip tested like every generic rendering.
+    pub render: Option<RenderFn>,
     /// The field identifying a list element (see `config_path::ELEMENT_KEYS`).
     pub key: bool,
     /// Today's CLI spelling, when it differs from the REST segment.

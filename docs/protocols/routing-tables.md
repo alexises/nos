@@ -220,13 +220,17 @@ $ $C $B/v1/routes/rt1/198.51.100.7
 What a routing table is configured with, as opposed to what it holds, is in `show config` (or `GET /v1/transactions/{tx}/routing-table/{table}` inside a transaction):
 
 ```
-routing-table rt1: bgp-instance r1, ospf-instance unset, static-routing-instance s1, redistribute from static to bgp, policy no-lab, rest-api 10.50.0.2:8080
+routing-table rt1
+  bgp-instance r1
+  static-routing-instance s1
+  redistribute static policy no-lab
+  rest-api 10.50.0.2
 static-routing-instance s1
-  route 198.51.100.0/24: gateway 10.50.0.3
-  route 2001:db8:100::/48: gateway 2001:db8::3
+  route 198.51.100.0/24
+    gateway 10.50.0.3
 ```
 
-The shell's line does not show `ospfv3-instance`; `show config` in JSON form (`GET /v1/config`) does:
+Only what is set is shown, so `ospf-instance` and `ospfv3-instance` appear once you set them. Over REST the same table is one JSON object:
 
 ```sh
 $ $C $B/v1/transactions/rd2/routing-table/rt1

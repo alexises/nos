@@ -383,7 +383,7 @@ pub struct BgpPeerGroup {
     /// Secrets are stored clear-text, like every other field in this config
     /// — see `BgpAuth`.
     #[garde(custom(|a: &Option<BgpAuth>, _ctx: &Config| valid_auth(a.as_ref())))]
-    #[cli(topic = BgpPeerGroupAuth, sugar(word = "md5-password", with = sugar::md5_password, topic = BgpPeerGroupMd5Password), sugar(word = "ao-key", with = sugar::ao_key, topic = BgpPeerGroupAoKey))]
+    #[cli(topic = BgpPeerGroupAuth, render = sugar::render_bgp_auth, sugar(word = "md5-password", with = sugar::md5_password, topic = BgpPeerGroupMd5Password), sugar(word = "ao-key", with = sugar::ao_key, topic = BgpPeerGroupAoKey))]
     pub auth: Option<BgpAuth>,
 
     /// `None` defaults to `SelfAddress` for an eBGP peer-group and
@@ -431,7 +431,7 @@ pub struct BgpPeerGroup {
 
     /// See `BgpShutdown`. Appended last, like every later-added field.
     #[garde(custom(|s: &Option<BgpShutdown>, _ctx: &Config| valid_shutdown(s.as_ref())))]
-    #[cli(topic = BgpPeerGroupShutdown, sugar(word = "shutdown", with = sugar::shutdown, topic = BgpPeerGroupShutdown))]
+    #[cli(topic = BgpPeerGroupShutdown, render = sugar::render_shutdown, sugar(word = "shutdown", with = sugar::shutdown, topic = BgpPeerGroupShutdown))]
     pub shutdown: Option<BgpShutdown>,
 
     /// RFC 4486 §4 per-address-family maximum-prefix limits — see

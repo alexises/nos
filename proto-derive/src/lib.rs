@@ -19,7 +19,9 @@
 //! ```
 //!
 //! Field keys: `topic = Ident` (a `nos_proto::Topic` variant), `key`,
-//! `hidden`, `words = "…"` (today's CLI spelling), `alias = "…"`
+//! `hidden`, `secret` (shown as `<hidden>` by `show config`),
+//! `render = path` (the field's `show config` lines, for sugar-only
+//! syntax the generic renderer can't write), `words = "…"` (today's CLI spelling), `alias = "…"`
 //! (repeatable), `sugar(word = "…", with = path, topic = Ident)`
 //! (repeatable), `sugar = "{a}.{b} => {a} x {b}"` (a key-token rewrite,
 //! repeatable). A struct needs `Default` (a new element's starting point)
@@ -49,10 +51,13 @@ pub fn derive_cli(input: TokenStream) -> TokenStream {
 }
 
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)] // one flag per `#[cli]` key
 struct Attrs {
     topic: Option<Ident>,
     key: bool,
     hidden: bool,
+    secret: bool,
+    render: Option<Path>,
     words: Option<LitStr>,
     aliases: Vec<LitStr>,
     sugar: Vec<(LitStr, Path, Ident)>,
@@ -70,6 +75,10 @@ fn attrs(list: &[Attribute]) -> syn::Result<Attrs> {
                 a.key = true;
             } else if m.path.is_ident("hidden") {
                 a.hidden = true;
+            } else if m.path.is_ident("secret") {
+                a.secret = true;
+            } else if m.path.is_ident("render") {
+                a.render = Some(m.value()?.parse()?);
             } else if m.path.is_ident("words") {
                 a.words = Some(m.value()?.parse()?);
             } else if m.path.is_ident("alias") {
@@ -127,7 +136,11 @@ fn field(f: &syn::Field, required: bool) -> syn::Result<Tokens> {
         || quote!(::core::option::Option::None),
         |t| quote!(::core::option::Option::Some(::nos_proto::Topic::#t)),
     );
-    let (key, hidden, words) = (a.key, a.hidden, opt_str(a.words.as_ref()));
+    let (key, hidden, secret, words) = (a.key, a.hidden, a.secret, opt_str(a.words.as_ref()));
+    let render = a.render.as_ref().map_or_else(
+        || quote!(::core::option::Option::None),
+        |p| quote!(::core::option::Option::Some(#p as ::nos_proto::cli::RenderFn)),
+    );
     let (aliases, templates) = (&a.aliases, &a.templates);
     let sugar = a.sugar.iter().map(|(w, p, t)| {
         quote!(::nos_proto::cli::Sugar { word: #w, with: #p, topic: ::nos_proto::Topic::#t })
@@ -137,6 +150,8 @@ fn field(f: &syn::Field, required: bool) -> syn::Result<Tokens> {
         name: #name,
         topic: #topic,
         hidden: #hidden,
+        secret: #secret,
+        render: #render,
         key: #key,
         words: #words,
         aliases: &[#(#aliases),*],

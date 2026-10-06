@@ -65,7 +65,7 @@ $C -X PUT -H 'Content-Type: application/json' -d '"An0ther-one"' \
 $C -X DELETE $B/v1/transactions/users/user/admin
 ```
 
-`show config` lists only user names (`user alice`). `GET /v1/config` returns the password hashes, never the passwords.
+`show config` lists user names, with the password shown as `<hidden>`. `GET /v1/config` returns the password hashes, never the passwords.
 
 User names are case-sensitive Unicode text (RFC 8265 PRECIS rules), 1 to 64 characters and unique. Passwords have no length or complexity rules; choose long ones, especially for users who will log in over the network.
 

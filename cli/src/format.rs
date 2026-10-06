@@ -3,501 +3,22 @@ use std::net::Ipv4Addr;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use nos_proto::{
-    AddressFamily, AsPathList, BgpAoAlgorithm, BgpAuth, BgpInstance, BgpPeer, BgpPeerGroup,
-    BgpSessionState, BgpShutdown, BroadcastDomain, CommunityAlias, CommunityGroup, Config,
-    ConfigDiff, DiffStatus, EvpnRouteSummary, FieldDiff, Interface, InterfaceAddress,
+    BgpSessionState, Config, ConfigDiff, DiffStatus, EvpnRouteSummary, FieldDiff, InterfaceAddress,
     InterfaceStatus, LacpMuxState, LacpRate, LacpReceiveState, LinkInterfaceState, LogEntry,
-    LogLevel, LsaSummary, NeighborSummary, NextHopMode, OspfArea, OspfAreaType, OspfAuth,
-    OspfCryptoAlgorithm, OspfInstance, OspfNeighborState, OspfProfile, Ospfv3Area, Ospfv3Instance,
-    Ospfv3LsaSummary, Ospfv3NeighborSummary, Ospfv3Profile, PeerSummary, PolicyDefinition,
-    PortAggregate, PortAggregateLacpSummary, PortAggregateStatus, PrefixList, PrefixListEntry,
-    PrefixRoutes, RouteSourceKind, RoutingTable, SectionDiff, SourceAddress, StaticRoute,
-    StaticRoutingInstance, Subinterface, SubinterfaceStatus, SwitchingProfile, TransactionSnapshot,
-    VlanTag,
+    LogLevel, LsaSummary, NeighborSummary, OspfNeighborState, Ospfv3LsaSummary,
+    Ospfv3NeighborSummary, PeerSummary, PortAggregateLacpSummary, PortAggregateStatus,
+    PrefixRoutes, RouteSourceKind, SectionDiff, SubinterfaceStatus, TransactionSnapshot,
 };
 
+use nos_proto::cli::render;
+
 use crate::session::Path;
-
-/// Render one peer-group as human-readable text. `local_asn` is the owning
-/// BGP instance's own ASN, needed only to render `next_hop`'s default
-/// (eBGP/iBGP-dependent) label when the field is unset.
-pub fn render_bgp_peer_group(group: &BgpPeerGroup, local_asn: u32) -> String {
-    let source_address = group
-        .source_address
-        .as_ref()
-        .map_or_else(|| "unset".to_string(), SourceAddress::to_string);
-    let address_families = if group.address_families.is_empty() {
-        "none".to_string()
-    } else {
-        group
-            .address_families
-            .iter()
-            .map(AddressFamily::as_str)
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let hold_time = group
-        .hold_time
-        .map_or_else(|| "default (90s)".to_string(), |h| h.to_string());
-    let keepalive_interval = group
-        .keepalive_interval
-        .map_or_else(|| "default (hold-time / 3)".to_string(), |k| k.to_string());
-    let connect_retry_time = group
-        .connect_retry_time
-        .map_or_else(|| "default (120s)".to_string(), |c| c.to_string());
-    let auth = render_bgp_auth(group.auth.as_ref());
-    let next_hop = match group.next_hop {
-        Some(NextHopMode::SelfAddress) => "self".to_string(),
-        Some(NextHopMode::Unchanged) => "unchanged".to_string(),
-        None if group.remote_as == local_asn => "default (unchanged, iBGP)".to_string(),
-        None if group.route_server_client => "default (unchanged, route-server)".to_string(),
-        None => "default (self, eBGP)".to_string(),
-    };
-    let policy = |p: &Option<String>| p.clone().unwrap_or_else(|| "default (deny-all)".into());
-    let mut line = format!(
-        "peer-group {}: remote-as {}, source-address {source_address}, address-family [{address_families}], \
-         hold-time {hold_time}, keepalive-interval {keepalive_interval}, connect-retry-time {connect_retry_time}, \
-         auth {auth}, next-hop {next_hop}, import-policy {}, export-policy {}",
-        group.name,
-        group.remote_as,
-        policy(&group.import_policy),
-        policy(&group.export_policy),
-    );
-    line.push_str(
-        &group
-            .mrai
-            .map_or_else(String::new, |m| format!(", mrai {m}")),
-    );
-    line.push_str(
-        &group
-            .route_refresh_stale_time
-            .map_or_else(String::new, |s| format!(", route-refresh-stale-time {s}")),
-    );
-    line.push_str(
-        &group
-            .max_hops
-            .map_or_else(String::new, |h| format!(", max-hops {h}")),
-    );
-    line.push_str(&render_shutdown(group.shutdown.as_ref()));
-    if let Some(d) = group.damping {
-        let _ = write!(
-            line,
-            ", damping half-life {} reuse {} suppress {} max-suppress {}",
-            d.half_life, d.reuse, d.suppress, d.max_suppress
-        );
-    }
-    if let Some(l) = group.local_as {
-        let _ = write!(line, ", local-as asn {}", l.asn);
-        if l.no_prepend {
-            line.push_str(" no-prepend");
-        }
-        if l.replace_as {
-            line.push_str(" replace-as");
-        }
-    }
-    if let Some(mode) = group.add_path {
-        let _ = write!(line, ", add-path {}", mode.as_str());
-    }
-    if let Some(n) = group.add_path_send_count {
-        let _ = write!(line, ", add-path-send-count {n}");
-    }
-    for af in nos_proto::AddressFamily::ALL {
-        if let Some(l) = group.maximum_prefix.get(af) {
-            let _ = write!(line, ", maximum-prefix {af} limit {}", l.limit);
-            if l.warning_only {
-                line.push_str(" warning-only");
-            }
-            if l.restart_interval > 0 {
-                let _ = write!(line, " restart-interval {}", l.restart_interval);
-            }
-        }
-    }
-    if group.route_reflector_client {
-        line.push_str(", route-reflector-client");
-    }
-    if group.route_server_client {
-        line.push_str(", route-server-client");
-    }
-    if group.announce_rpki_state {
-        line.push_str(", announce-rpki-state");
-    }
-    line
-}
-
-/// Rendered in clear text, like every other field — passwords/keys are
-/// stored unencrypted in this config, so there is nothing to mask.
-fn render_bgp_auth(auth: Option<&BgpAuth>) -> String {
-    match auth {
-        None => "none".to_string(),
-        Some(BgpAuth::Md5 { password }) => format!("md5-password {password}"),
-        Some(BgpAuth::Ao { keys }) => {
-            let rendered = keys
-                .iter()
-                .map(|k| {
-                    let algorithm = match k.algorithm {
-                        BgpAoAlgorithm::HmacSha1_96 => "hmac-sha1",
-                        BgpAoAlgorithm::AesCmac96 => "aes-cmac",
-                    };
-                    let mut tags = Vec::new();
-                    if k.is_current {
-                        tags.push("current");
-                    }
-                    if k.is_rnext {
-                        tags.push("rnext");
-                    }
-                    if k.exclude_options {
-                        tags.push("exclude-options");
-                    }
-                    let flags = if tags.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", tags.join(", "))
-                    };
-                    format!("send-id {} {algorithm} {}{flags}", k.send_id, k.key)
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("ao-keys [{rendered}]")
-        }
-    }
-}
-
-/// `, shutdown` / `, shutdown "<message>"`, or nothing when unset.
-fn render_shutdown(shutdown: Option<&BgpShutdown>) -> String {
-    match shutdown {
-        None => String::new(),
-        Some(BgpShutdown { message: None }) => ", shutdown".to_string(),
-        Some(BgpShutdown { message: Some(m) }) => format!(", shutdown \"{m}\""),
-    }
-}
-
-/// Render one peer as human-readable text.
-pub fn render_bgp_peer(peer: &BgpPeer) -> String {
-    format!(
-        "peer {}: peer-group {}{}",
-        peer.remote_address,
-        peer.peer_group,
-        render_shutdown(peer.shutdown.as_ref())
-    )
-}
-
-/// Render one BGP instance as human-readable text, including any nested
-/// peer-groups and peers, each indented one level under the instance line.
-pub fn render_bgp_instance(instance: &BgpInstance) -> String {
-    let cluster_id = instance
-        .cluster_id
-        .map_or_else(|| "default (= router-id)".to_string(), |c| c.to_string());
-    let c = &instance.confederation;
-    let confederation = c.identifier.map_or_else(String::new, |id| {
-        let peers: Vec<String> = c.peers.iter().map(u32::to_string).collect();
-        format!(", confederation {id} peers [{}]", peers.join(", "))
-    });
-    let mut lines = vec![format!(
-        "bgp instance {}: router-id {}, asn {}, cluster-id {cluster_id}{confederation}",
-        instance.name, instance.router_id, instance.asn
-    )];
-    for group in &instance.peer_groups {
-        lines.push(format!("  {}", render_bgp_peer_group(group, instance.asn)));
-    }
-    for peer in &instance.peers {
-        lines.push(format!("  {}", render_bgp_peer(peer)));
-    }
-    for c in &instance.rpki_caches {
-        lines.push(format!(
-            "  rpki-cache {} port {} preference {}",
-            c.address, c.port, c.preference
-        ));
-    }
-    for a in &instance.aggregates {
-        let mut line = format!("  aggregate-address {}", a.prefix);
-        if a.as_set {
-            line.push_str(" as-set");
-        }
-        if a.summary_only {
-            line.push_str(" summary-only");
-        }
-        lines.push(line);
-    }
-    lines.join("\n")
-}
-
-/// Render one OSPF instance as human-readable text, including any nested
-/// areas (and each area's nested profiles), indented one/two levels under
-/// the instance line — mirrors `render_interface`'s nested subinterfaces.
-pub fn render_ospf_instance(instance: &OspfInstance) -> String {
-    let mut lines = vec![format!(
-        "ospf instance {}: router-id {}{}{}{}{}{}{}",
-        instance.name,
-        instance.router_id,
-        if instance.prefix_suppression {
-            ", prefix-suppression"
-        } else {
-            ""
-        },
-        instance
-            .graceful_restart_grace_period
-            .map_or(String::new(), |p| format!(
-                ", graceful-restart grace-period {p}"
-            )),
-        instance
-            .max_metric_on_startup
-            .map_or(String::new(), |s| format!(
-                ", max-metric router-lsa on-startup {s}"
-            )),
-        instance
-            .max_metric_on_shutdown
-            .map_or(String::new(), |s| format!(
-                ", max-metric router-lsa on-shutdown {s}"
-            )),
-        if instance.max_metric_administrative {
-            ", max-metric router-lsa administrative"
-        } else {
-            ""
-        },
-        if instance.host_router {
-            ", host-router"
-        } else {
-            ""
-        },
-    )];
-    for area in &instance.areas {
-        for line in render_ospf_area(area).lines() {
-            lines.push(format!("  {line}"));
-        }
-    }
-    lines.join("\n")
-}
-
-/// Render one OSPF area as human-readable text, including any nested
-/// profiles, each indented one level under the area line.
-pub fn render_ospf_area(area: &OspfArea) -> String {
-    let area_type = match area.area_type {
-        OspfAreaType::Normal => "",
-        OspfAreaType::Stub => " stub",
-        OspfAreaType::TotallyStubby => " totally-stubby",
-        OspfAreaType::Nssa => " nssa",
-        OspfAreaType::NssaNoSummary => " nssa-no-summary",
-    };
-    let cost = area
-        .stub_default_cost
-        .map_or(String::new(), |c| format!(" stub-default-cost {c}"));
-    let mut nssa = String::new();
-    if area.nssa_translate_always {
-        nssa.push_str(" nssa-translate-always");
-    }
-    if area.nssa_default_originate {
-        nssa.push_str(" nssa-default-originate");
-    }
-    let mut lines = vec![format!("area {}{area_type}{cost}{nssa}", area.area_id)];
-    for range in &area.ranges {
-        let suffix = if range.not_advertise {
-            " not-advertise"
-        } else {
-            ""
-        };
-        lines.push(format!("  range {}{suffix}", range.cidr));
-    }
-    for profile in &area.profiles {
-        lines.push(format!("  {}", render_ospf_profile(profile)));
-    }
-    lines.join("\n")
-}
-
-/// Render one OSPF profile as human-readable text.
-pub fn render_ospf_profile(profile: &OspfProfile) -> String {
-    let extended = if profile.extended_sequence_numbers {
-        " extended-sequence-numbers"
-    } else {
-        ""
-    };
-    format!(
-        "profile {}: auth {}{extended}",
-        profile.name,
-        render_ospf_auth(profile.auth.as_ref())
-    )
-}
-
-/// Rendered in clear text, like every other field — mirrors
-/// `render_bgp_auth`'s exact rationale.
-fn render_ospf_auth(auth: Option<&OspfAuth>) -> String {
-    match auth {
-        None => "none".to_string(),
-        Some(OspfAuth::Simple { password }) => format!("simple-password {password}"),
-        Some(OspfAuth::Crypto { keys }) => {
-            let rendered = keys
-                .iter()
-                .map(|k| {
-                    let algorithm = match k.algorithm {
-                        OspfCryptoAlgorithm::Md5 => "md5",
-                        OspfCryptoAlgorithm::HmacSha1 => "hmac-sha1",
-                        OspfCryptoAlgorithm::HmacSha256 => "hmac-sha256",
-                        OspfCryptoAlgorithm::HmacSha384 => "hmac-sha384",
-                        OspfCryptoAlgorithm::HmacSha512 => "hmac-sha512",
-                    };
-                    let flags = if k.is_current { " (current)" } else { "" };
-                    format!("key-id {} {algorithm} {}{flags}", k.key_id, k.key)
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("crypto-keys [{rendered}]")
-        }
-    }
-}
-
-/// Render one `Ospfv3Instance` as human-readable text — mirrors
-/// `render_ospf_instance` exactly.
-pub fn render_ospfv3_instance(instance: &Ospfv3Instance) -> String {
-    let mut lines = vec![format!(
-        "ospfv3 instance {}: router-id {}{}{}",
-        instance.name,
-        instance.router_id,
-        if instance.extended_lsa {
-            ", extended-lsa"
-        } else {
-            ""
-        },
-        instance
-            .graceful_restart_grace_period
-            .map_or(String::new(), |p| format!(
-                ", graceful-restart grace-period {p}"
-            ))
-    )];
-    for area in &instance.areas {
-        for line in render_ospfv3_area(area).lines() {
-            lines.push(format!("  {line}"));
-        }
-    }
-    lines.join("\n")
-}
-
-/// Render one `Ospfv3Area` as human-readable text — mirrors
-/// `render_ospf_area` exactly.
-pub fn render_ospfv3_area(area: &Ospfv3Area) -> String {
-    let mut lines = vec![format!("area {}", area.area_id)];
-    for profile in &area.profiles {
-        lines.push(format!("  {}", render_ospfv3_profile(profile)));
-    }
-    lines.join("\n")
-}
-
-/// Render one `Ospfv3Profile` as human-readable text — its RFC 7166 keys
-/// rendered like `render_ospf_profile`'s crypto auth, plus a non-zero
-/// instance id.
-pub fn render_ospfv3_profile(profile: &Ospfv3Profile) -> String {
-    let auth = profile
-        .auth
-        .as_ref()
-        .map(|keys| OspfAuth::Crypto { keys: keys.clone() });
-    let instance_id = match profile.instance_id {
-        Some(id) if id != 0 => format!(" instance-id {id}"),
-        _ => String::new(),
-    };
-    format!(
-        "profile {}: auth {}{instance_id}",
-        profile.name,
-        render_ospf_auth(auth.as_ref())
-    )
-}
-
-/// Render one routing table as human-readable text.
-pub fn render_routing_table(table: &RoutingTable) -> String {
-    let bgp_instance = table.bgp_instance.as_deref().unwrap_or("unset");
-    let ospf_instance = table.ospf_instance.as_deref().unwrap_or("unset");
-    let static_routing_instance = table.static_routing_instance.as_deref().unwrap_or("unset");
-    let redistribute_str = match &table.redistribute {
-        Some(r) => format!(
-            "from {} to {}, policy {}",
-            r.from,
-            r.to,
-            r.policy.as_deref().unwrap_or("unset")
-        ),
-        None => "unset".to_string(),
-    };
-    let rest_api = table
-        .rest_api
-        .as_ref()
-        .map_or("unset".to_string(), |r| format!("{}:{}", r.address, r.port));
-    format!(
-        "routing-table {}: bgp-instance {bgp_instance}, ospf-instance {ospf_instance}, static-routing-instance {static_routing_instance}, redistribute {redistribute_str}, rest-api {rest_api}",
-        table.name
-    )
-}
-
-/// Render one static route as human-readable text.
-pub fn render_static_route(route: &StaticRoute) -> String {
-    format!("route {}: gateway {}", route.subnet, route.gateway)
-}
 
 fn format_address(addr: &InterfaceAddress) -> String {
     match &addr.label {
         Some(label) => format!("{} (label {label})", addr.address),
         None => addr.address.to_string(),
     }
-}
-
-/// Render one subinterface as human-readable text — `tag 0` is the
-/// untagged/native case (what used to be a physical interface's own flat
-/// `addresses`/`routing_table`).
-pub fn render_subinterface(sub: &Subinterface) -> String {
-    let addresses = if sub.addresses.is_empty() {
-        "none".to_string()
-    } else {
-        sub.addresses
-            .iter()
-            .map(format_address)
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let routing_table = sub.routing_table.as_deref().unwrap_or("unset");
-    let ospf_profile = sub.ospf_profile.as_deref().unwrap_or("unset");
-    format!(
-        "subinterface {}: address [{addresses}], routing-table {routing_table}, ospf-profile {ospf_profile}",
-        sub.tag
-    )
-}
-
-/// Render one interface's config as human-readable text, including any
-/// (physical-interface-only) subinterfaces, each indented one level under
-/// the interface line — mirrors `render_bgp_instance`'s nested peer-groups.
-/// `iface.addresses`/`routing_table` are meaningful only for a loopback
-/// interface (unchanged flat rendering); every other interface's L3 config
-/// lives entirely in the nested subinterface lines instead.
-pub fn render_interface(iface: &Interface) -> String {
-    let addresses = if iface.addresses.is_empty() {
-        "none".to_string()
-    } else {
-        iface
-            .addresses
-            .iter()
-            .map(format_address)
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let routing_table = iface.routing_table.as_deref().unwrap_or("unset");
-    let ospf_profile = iface.ospf_profile.as_deref().unwrap_or("unset");
-    let switching_profile = iface.switching_profile.as_deref().unwrap_or("unset");
-    let mtu = iface
-        .mtu
-        .map_or_else(|| "unset".to_string(), |m| m.to_string());
-    let mut lines = vec![format!(
-        "interface {}: address [{addresses}], routing-table {routing_table}, ospf-profile {ospf_profile}, switching-profile {switching_profile}, mtu {mtu}, lldp-transmit {}, lldp-receive {}",
-        iface.name,
-        on_off(iface.lldp_transmit),
-        on_off(iface.lldp_receive),
-    )];
-    // Only when set, so an interface that doesn't use it renders unchanged.
-    if iface.lldp_destination != nos_proto::LldpDestination::default() {
-        write!(
-            lines[0],
-            ", lldp-destination {}",
-            iface.lldp_destination.name()
-        )
-        .expect("writing to a String cannot fail");
-    }
-    for sub in &iface.subinterfaces {
-        lines.push(format!("  {}", render_subinterface(sub)));
-    }
-    lines.join("\n")
 }
 
 /// Render one subinterface's daemon-reported status — the wire twin of
@@ -558,40 +79,6 @@ pub fn render_interface_statuses(statuses: &[InterfaceStatus]) -> String {
         .map(render_interface_status)
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Render one port aggregate's config-only view — the `PortAggregate`
-/// counterpart of `render_interface`, minus the loopback-only flat
-/// addresses/routing-table fields it has none of.
-pub fn render_port_aggregate(agg: &PortAggregate) -> String {
-    let switching_profile = agg.switching_profile.as_deref().unwrap_or("unset");
-    let mtu = agg
-        .mtu
-        .map_or_else(|| "unset".to_string(), |m| m.to_string());
-    let esi = agg
-        .esi
-        .as_ref()
-        .map_or_else(String::new, |e| format!(", esi {e}"));
-    let system_id = agg
-        .lacp_system_id
-        .as_ref()
-        .map_or_else(String::new, |i| format!(", lacp-system-id {i}"));
-    let redundancy = match agg.redundancy_mode {
-        nos_proto::EsRedundancy::AllActive => "",
-        nos_proto::EsRedundancy::SingleActive => ", redundancy-mode single-active",
-    };
-    let df_algorithm = match agg.df_algorithm {
-        nos_proto::DfAlgorithm::Modulo => "",
-        nos_proto::DfAlgorithm::Hrw => ", df-algorithm hrw",
-    };
-    let mut lines = vec![format!(
-        "port-aggregate {}: mode {:?}, switching-profile {switching_profile}, mtu {mtu}{esi}{redundancy}{df_algorithm}{system_id}",
-        agg.name, agg.mode
-    )];
-    for sub in &agg.subinterfaces {
-        lines.push(format!("  {}", render_subinterface(sub)));
-    }
-    lines.join("\n")
 }
 
 /// Render one port aggregate's daemon-reported status — the `PortAggregate`
@@ -663,14 +150,6 @@ fn render_lacp_port(port: &nos_proto::LacpPortStatus) -> String {
             (true, true) => "actor+partner",
         },
     )
-}
-
-fn on_off(value: bool) -> &'static str {
-    if value {
-        "on"
-    } else {
-        "off"
-    }
 }
 
 /// Render `nos-lldpd`'s neighbor table, for `show lldp neighbors`.
@@ -1230,274 +709,37 @@ pub fn render_ospfv3_database(instance: &str, entries: &[Ospfv3LsaSummary]) -> S
     lines.join("\n")
 }
 
-/// Render one static routing instance as human-readable text, including any
-/// nested routes, each indented one level under the instance line.
-pub fn render_static_routing_instance(instance: &StaticRoutingInstance) -> String {
-    let mut lines = vec![format!("static-routing-instance {}", instance.name)];
-    for route in &instance.routes {
-        lines.push(format!("  {}", render_static_route(route)));
-    }
-    lines.join("\n")
-}
-
-/// The system-wide `lldp` settings line; only shown when something is set.
-fn render_lldp_settings(lldp: &nos_proto::LldpSettings) -> String {
-    let secs = lldp
-        .tx_interval_secs
-        .map_or_else(|| "default".to_string(), |v| v.to_string());
-    let hold = lldp
-        .tx_hold
-        .map_or_else(|| "default".to_string(), |v| v.to_string());
-    let address = if lldp.management_addresses.is_empty() {
-        "unset".to_string()
-    } else {
-        lldp.management_addresses
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    format!("lldp: tx-interval {secs}, tx-hold {hold}, management-address {address}")
-}
-
-/// Render a full running-config snapshot as human-readable text.
+/// Render a full running-config snapshot as human-readable text: the
+/// generated `nos_proto::cli::render` hierarchy, only what is configured.
 pub fn render_config(config: &Config) -> String {
-    let mut lines = vec![format!("hostname: {}", config.hostname)];
-    if config.lldp != nos_proto::LldpSettings::default() {
-        lines.push(render_lldp_settings(&config.lldp));
-    }
-    // Names only — a user's password (hash) is never displayed.
-    lines.extend(config.users.iter().map(|u| format!("user {}", u.name)));
-    if config.bgp_instances.is_empty() {
-        lines.push("no BGP instances configured".to_string());
+    let doc = serde_json::to_value(config).unwrap_or_default();
+    let text = render::indent(&render::render_root(&doc));
+    if text.is_empty() {
+        "nothing configured".to_string()
     } else {
-        lines.extend(config.bgp_instances.iter().map(render_bgp_instance));
+        text
     }
-    if config.routing_tables.is_empty() {
-        lines.push("no routing tables configured".to_string());
-    } else {
-        lines.extend(config.routing_tables.iter().map(render_routing_table));
-    }
-    if config.ospf_instances.is_empty() {
-        lines.push("no OSPF instances configured".to_string());
-    } else {
-        lines.extend(config.ospf_instances.iter().map(render_ospf_instance));
-    }
-    if config.ospfv3_instances.is_empty() {
-        lines.push("no OSPFv3 instances configured".to_string());
-    } else {
-        lines.extend(config.ospfv3_instances.iter().map(render_ospfv3_instance));
-    }
-    if config.static_routing_instances.is_empty() {
-        lines.push("no static routing instances configured".to_string());
-    } else {
-        lines.extend(
-            config
-                .static_routing_instances
-                .iter()
-                .map(render_static_routing_instance),
-        );
-    }
-    if config.interfaces.is_empty() {
-        lines.push("no interfaces configured".to_string());
-    } else {
-        lines.extend(config.interfaces.iter().map(render_interface));
-    }
-    if config.policy_definitions.is_empty() {
-        lines.push("no policy definitions configured".to_string());
-    } else {
-        lines.extend(
-            config
-                .policy_definitions
-                .iter()
-                .map(render_policy_definition),
-        );
-    }
-    if config.community_aliases.is_empty() {
-        lines.push("no community aliases configured".to_string());
-    } else {
-        lines.extend(config.community_aliases.iter().map(render_community_alias));
-    }
-    if config.community_groups.is_empty() {
-        lines.push("no community groups configured".to_string());
-    } else {
-        lines.extend(config.community_groups.iter().map(render_community_group));
-    }
-    if config.as_path_lists.is_empty() {
-        lines.push("no as-path lists configured".to_string());
-    } else {
-        lines.extend(config.as_path_lists.iter().map(render_as_path_list));
-    }
-    if config.prefix_lists.is_empty() {
-        lines.push("no prefix lists configured".to_string());
-    } else {
-        lines.extend(config.prefix_lists.iter().map(render_prefix_list));
-    }
-    if config.broadcast_domains.is_empty() {
-        lines.push("no broadcast domains configured".to_string());
-    } else {
-        lines.extend(config.broadcast_domains.iter().map(render_broadcast_domain));
-    }
-    if config.switching_profiles.is_empty() {
-        lines.push("no switching profiles configured".to_string());
-    } else {
-        lines.extend(
-            config
-                .switching_profiles
-                .iter()
-                .map(render_switching_profile),
-        );
-    }
-    if config.port_aggregates.is_empty() {
-        lines.push("no port aggregates configured".to_string());
-    } else {
-        lines.extend(config.port_aggregates.iter().map(render_port_aggregate));
-    }
-    lines.join("\n")
 }
 
 /// Render a transaction's in-progress config, scoped to the current
 /// navigation position: the whole config at the root, else the object the
-/// position names.
+/// position names (headed by its own words).
 pub fn render_transaction(snapshot: &TransactionSnapshot, path: &Path) -> String {
-    fn show<T>(item: Option<&T>, render: impl Fn(&T) -> String) -> String {
-        item.map_or_else(|| "nothing configured here".to_string(), render)
+    if path.segments().is_empty() {
+        let header = if snapshot.dirty {
+            format!("transaction '{}' (uncommitted changes):", snapshot.name)
+        } else {
+            format!("transaction '{}':", snapshot.name)
+        };
+        return format!("{header}\n{}", render_config(&snapshot.config));
     }
-    let cfg = &snapshot.config;
-    let segs: Vec<&str> = path.segments().iter().map(String::as_str).collect();
-    let find = |name: &str, n: &String| n == name;
-    let ospf_area = |i: &str, a: &str| {
-        cfg.ospf_instances
-            .iter()
-            .find(|x| x.name == i)
-            .and_then(|x| x.areas.iter().find(|y| y.area_id.to_string() == a))
-    };
-    let ospfv3_area = |i: &str, a: &str| {
-        cfg.ospfv3_instances
-            .iter()
-            .find(|x| x.name == i)
-            .and_then(|x| x.areas.iter().find(|y| y.area_id.to_string() == a))
-    };
-    match segs.as_slice() {
-        [] => {
-            let header = if snapshot.dirty {
-                format!("transaction '{}' (uncommitted changes):", snapshot.name)
-            } else {
-                format!("transaction '{}':", snapshot.name)
-            };
-            format!("{header}\n{}", render_config(cfg))
-        }
-        ["bgp-instance", i] => show(
-            cfg.bgp_instances.iter().find(|x| find(i, &x.name)),
-            render_bgp_instance,
-        ),
-        ["bgp-instance", i, "peer-group", g] => {
-            let inst = cfg.bgp_instances.iter().find(|x| find(i, &x.name));
-            inst.and_then(|x| {
-                x.peer_groups
-                    .iter()
-                    .find(|y| find(g, &y.name))
-                    .map(|y| (y, x.asn))
-            })
-            .map_or_else(
-                || "nothing configured here".to_string(),
-                |(y, asn)| render_bgp_peer_group(y, asn),
-            )
-        }
-        ["routing-table", n] => show(
-            cfg.routing_tables.iter().find(|x| find(n, &x.name)),
-            render_routing_table,
-        ),
-        ["ospf-instance", n] => show(
-            cfg.ospf_instances.iter().find(|x| find(n, &x.name)),
-            render_ospf_instance,
-        ),
-        ["ospf-instance", i, "area", a] => show(ospf_area(i, a), render_ospf_area),
-        ["ospf-instance", i, "area", a, "profile", p] => show(
-            ospf_area(i, a).and_then(|x| x.profiles.iter().find(|y| find(p, &y.name))),
-            render_ospf_profile,
-        ),
-        ["ospfv3-instance", n] => show(
-            cfg.ospfv3_instances.iter().find(|x| find(n, &x.name)),
-            render_ospfv3_instance,
-        ),
-        ["ospfv3-instance", i, "area", a] => show(ospfv3_area(i, a), render_ospfv3_area),
-        ["ospfv3-instance", i, "area", a, "profile", p] => show(
-            ospfv3_area(i, a).and_then(|x| x.profiles.iter().find(|y| find(p, &y.name))),
-            render_ospfv3_profile,
-        ),
-        ["static-routing-instance", n] => show(
-            cfg.static_routing_instances
-                .iter()
-                .find(|x| find(n, &x.name)),
-            render_static_routing_instance,
-        ),
-        ["interface", n] => show(
-            cfg.interfaces.iter().find(|x| find(n, &x.name)),
-            render_interface,
-        ),
-        ["interface", n, "subinterface", t] => show(
-            cfg.interfaces
-                .iter()
-                .find(|x| find(n, &x.name))
-                .and_then(|x| x.subinterfaces.iter().find(|y| y.tag.to_string() == *t)),
-            render_subinterface,
-        ),
-        ["policy-definition", n] => show(
-            cfg.policy_definitions.iter().find(|x| find(n, &x.name)),
-            render_policy_definition,
-        ),
-        ["community-alias", n] => show(
-            cfg.community_aliases.iter().find(|x| find(n, &x.name)),
-            render_community_alias,
-        ),
-        ["community-group", n] => show(
-            cfg.community_groups.iter().find(|x| find(n, &x.name)),
-            render_community_group,
-        ),
-        ["as-path-list", n] => show(
-            cfg.as_path_lists.iter().find(|x| find(n, &x.name)),
-            render_as_path_list,
-        ),
-        ["prefix-list", n] => show(
-            cfg.prefix_lists.iter().find(|x| find(n, &x.name)),
-            render_prefix_list,
-        ),
-        ["broadcast-domain", n] => show(
-            cfg.broadcast_domains.iter().find(|x| find(n, &x.name)),
-            render_broadcast_domain,
-        ),
-        ["switching-profile", n] => show(
-            cfg.switching_profiles.iter().find(|x| find(n, &x.name)),
-            render_switching_profile,
-        ),
-        ["port-aggregate", n] => show(
-            cfg.port_aggregates.iter().find(|x| find(n, &x.name)),
-            render_port_aggregate,
-        ),
-        // A position with no dedicated renderer (e.g. a user, a peer): its
-        // own JSON, which is what `set` edits there anyway.
-        _ => serde_json::to_value(cfg)
-            .ok()
-            .and_then(|doc| {
-                nos_proto::config_path::get(&doc, path.segments())
-                    .ok()
-                    .cloned()
-            })
-            .and_then(|v| serde_json::to_string_pretty(&v).ok())
-            .unwrap_or_else(|| "nothing configured here".to_string()),
-    }
-}
-
-/// Render one policy-definition as human-readable text — the name plus its
-/// line-numbered source (see `render_policy_source`), matching `show
-/// source`'s own rendering so the two never drift apart.
-pub fn render_policy_definition(policy: &PolicyDefinition) -> String {
-    format!(
-        "policy-definition {}:\n{}",
-        policy.name,
-        render_policy_source(&policy.source)
-    )
+    serde_json::to_value(&snapshot.config)
+        .ok()
+        .and_then(|doc| render::render_at(&doc, path.segments()))
+        .map_or_else(
+            || "nothing configured here".to_string(),
+            |lines| render::indent(&lines),
+        )
 }
 
 /// Render policy source with `cat -n`-style line numbers, so `set source
@@ -1513,63 +755,6 @@ pub fn render_policy_source(source: &str) -> String {
         .map(|(i, line)| format!("{:4}  {line}", i + 1))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Render one community-alias as human-readable text.
-pub fn render_community_alias(alias: &CommunityAlias) -> String {
-    format!("community-alias {}: value {}", alias.name, alias.value)
-}
-
-/// Render one community-group as human-readable text.
-pub fn render_community_group(group: &CommunityGroup) -> String {
-    let members = if group.members.is_empty() {
-        "none".to_string()
-    } else {
-        group.members.join(", ")
-    };
-    format!("community-group {}: members [{members}]", group.name)
-}
-
-/// Render one as-path-list as human-readable text.
-pub fn render_as_path_list(list: &AsPathList) -> String {
-    let patterns = if list.patterns.is_empty() {
-        "none".to_string()
-    } else {
-        list.patterns.join(", ")
-    };
-    format!("as-path-list {}: patterns [{patterns}]", list.name)
-}
-
-/// Render one `PrefixListEntry` the same way for every caller — `<cidr>` for
-/// an exact-match entry, `<cidr> orlonger`/`<cidr> upto <max>` when the range starts at the
-/// cidr's own length, `<cidr> range(<min>,<max>)` otherwise.
-pub fn render_prefix_list_entry(entry: &PrefixListEntry) -> String {
-    match entry.range {
-        None => entry.cidr.to_string(),
-        Some((min, max))
-            if min == entry.cidr.prefix_len() && max == entry.cidr.max_prefix_len() =>
-        {
-            format!("{} orlonger", entry.cidr)
-        }
-        Some((min, max)) if min == entry.cidr.prefix_len() => {
-            format!("{} upto {max}", entry.cidr)
-        }
-        Some((min, max)) => format!("{} range({min},{max})", entry.cidr),
-    }
-}
-
-/// Render one prefix-list as human-readable text.
-pub fn render_prefix_list(list: &PrefixList) -> String {
-    let entries = if list.entries.is_empty() {
-        "none".to_string()
-    } else {
-        list.entries
-            .iter()
-            .map(render_prefix_list_entry)
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    format!("prefix-list {}: entries [{entries}]", list.name)
 }
 
 /// Render one domain's forwarding database for `show fdb`.
@@ -1659,70 +844,6 @@ pub fn render_fdb_table(t: &nos_proto::FdbTable) -> String {
         ));
     }
     lines.join("\n")
-}
-
-/// Render one broadcast domain as human-readable text, including its own
-/// SVI (address/routing-table) config — mirrors `render_interface`'s flat
-/// loopback rendering, since a domain's bridge has the same flat L3 shape.
-pub fn render_broadcast_domain(domain: &BroadcastDomain) -> String {
-    let addresses = if domain.addresses.is_empty() {
-        "none".to_string()
-    } else {
-        domain
-            .addresses
-            .iter()
-            .map(format_address)
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let routing_table = domain.routing_table.as_deref().unwrap_or("unset");
-    let ospf_profile = domain.ospf_profile.as_deref().unwrap_or("unset");
-    let mut line = format!(
-        "broadcast-domain {}: address [{addresses}], routing-table {routing_table}, ospf-profile {ospf_profile}",
-        domain.name
-    );
-    if let Some(vni) = domain.vni {
-        let list = |v: &[String]| v.join(",");
-        let _ = write!(
-            line,
-            ", vni {vni}, rd {}, rt-import [{}], rt-export [{}], vtep-source {}, redistribute-mac {}, redistribute-arp {}, redistribute-connected {}, neigh-suppress {}",
-            domain.rd.as_deref().unwrap_or("unset"),
-            list(&domain.route_targets_import),
-            list(&domain.route_targets_export),
-            domain
-                .vtep_source
-                .as_ref()
-                .map_or_else(|| "unset".to_string(), ToString::to_string),
-            domain.mac_redistribute.as_deref().unwrap_or("unset"),
-            domain.arp_redistribute.as_deref().unwrap_or("unset"),
-            domain.connected_redistribute.as_deref().unwrap_or("unset"),
-            if domain.neigh_suppress { "on" } else { "off" },
-        );
-    }
-    line
-}
-
-/// Render one `VlanTag` the same way for every caller.
-pub fn render_vlan_tag(tag: VlanTag) -> String {
-    match tag {
-        VlanTag::Untagged => "untagged".to_string(),
-        VlanTag::Dot1q(id) => format!("dot1q {id}"),
-    }
-}
-
-/// Render one switching profile as human-readable text.
-pub fn render_switching_profile(profile: &SwitchingProfile) -> String {
-    let members = if profile.members.is_empty() {
-        "none".to_string()
-    } else {
-        profile
-            .members
-            .iter()
-            .map(|m| format!("{}: {}", m.broadcast_domain, render_vlan_tag(m.tag)))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    format!("switching-profile {}: members [{members}]", profile.name)
 }
 
 // ANSI SGR codes for `render_diff`. Hand-rolled rather than pulling in a
@@ -1925,7 +1046,7 @@ fn emphasize_middle(chars: &[char], prefix: usize, suffix: usize) -> String {
 mod tests {
     use std::net::Ipv4Addr;
 
-    use nos_proto::{BgpInstance, SectionDiff};
+    use nos_proto::SectionDiff;
 
     use super::*;
 
@@ -1944,35 +1065,6 @@ mod tests {
         assert_eq!(
             render_prefix_routes(&routes),
             "203.0.113.120/29\n  * discard [ospf]"
-        );
-    }
-
-    #[test]
-    fn stub_area_renders_its_type_and_ranges() {
-        let area = OspfArea {
-            area_id: "0.0.0.1".parse().unwrap(),
-            profiles: vec![],
-            area_type: OspfAreaType::TotallyStubby,
-            stub_default_cost: Some(5),
-            ranges: vec![nos_proto::OspfAreaRange {
-                cidr: "10.1.0.0/16".parse().unwrap(),
-                not_advertise: true,
-            }],
-            ..Default::default()
-        };
-        assert_eq!(
-            render_ospf_area(&area),
-            "area 0.0.0.1 totally-stubby stub-default-cost 5\n  range 10.1.0.0/16 not-advertise"
-        );
-        let nssa = OspfArea {
-            area_id: "0.0.0.2".parse().unwrap(),
-            area_type: OspfAreaType::Nssa,
-            nssa_translate_always: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            render_ospf_area(&nssa),
-            "area 0.0.0.2 nssa nssa-translate-always"
         );
     }
 
@@ -2014,247 +1106,6 @@ mod tests {
             render_prefix_routes(&routes),
             "203.0.113.80/32\n  * via 10.0.0.2, 10.0.1.2 [ospf] backup 10.0.1.3"
         );
-    }
-
-    fn instance(name: &str, asn: u32) -> BgpInstance {
-        BgpInstance {
-            name: name.to_string(),
-            router_id: Ipv4Addr::new(1, 1, 1, 1),
-            asn,
-            peer_groups: Vec::new(),
-            peers: Vec::new(),
-            cluster_id: None,
-            maximum_paths: None,
-            confederation: nos_proto::BgpConfederation::default(),
-            rpki_caches: Vec::new(),
-            aggregates: Vec::new(),
-            graceful_restart: nos_proto::BgpGracefulRestart::default(),
-            routing_table: None,
-            redistribute_policy: None,
-        }
-    }
-
-    #[test]
-    fn empty_config() {
-        let cfg = Config::default();
-        assert_eq!(
-            render_config(&cfg),
-            "hostname: nos\nno BGP instances configured\nno routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\nno interfaces configured\n\
-             no policy definitions configured\nno community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
-             no broadcast domains configured\nno switching profiles configured\n\
-             no port aggregates configured"
-        );
-    }
-
-    #[test]
-    fn single_instance() {
-        let cfg = Config {
-            bgp_instances: vec![instance("default", 65000)],
-            ..Default::default()
-        };
-        assert_eq!(
-            render_config(&cfg),
-            "hostname: nos\nbgp instance default: router-id 1.1.1.1, asn 65000, cluster-id default (= router-id)\n\
-             no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
-             no interfaces configured\n\
-             no policy definitions configured\nno community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
-             no broadcast domains configured\nno switching profiles configured\n\
-             no port aggregates configured"
-        );
-    }
-
-    #[test]
-    fn multiple_instances() {
-        let cfg = Config {
-            bgp_instances: vec![instance("vrf-a", 65001), instance("vrf-b", 65002)],
-            ..Default::default()
-        };
-        assert_eq!(
-            render_config(&cfg),
-            "hostname: nos\nbgp instance vrf-a: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)\n\
-             bgp instance vrf-b: router-id 1.1.1.1, asn 65002, cluster-id default (= router-id)\n\
-             no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
-             no interfaces configured\n\
-             no policy definitions configured\nno community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
-             no broadcast domains configured\nno switching profiles configured\n\
-             no port aggregates configured"
-        );
-    }
-
-    #[test]
-    fn render_interface_with_subinterfaces() {
-        let iface = Interface {
-            ospfv3_profile: None,
-            name: "eth0".to_string(),
-            addresses: Vec::new(),
-            routing_table: None,
-            ospf_profile: None,
-            switching_profile: None,
-            port_aggregate: None,
-            mtu: Some(9000),
-            lldp_transmit: false,
-            lldp_receive: false,
-            lldp_destination: nos_proto::LldpDestination::default(),
-            subinterfaces: vec![
-                Subinterface {
-                    ospfv3_profile: None,
-                    tag: 0,
-                    addresses: vec![InterfaceAddress {
-                        address: "10.0.0.1/24".parse().unwrap(),
-                        label: None,
-                    }],
-                    routing_table: Some("rt1".to_string()),
-                    ospf_profile: None,
-                },
-                Subinterface {
-                    ospfv3_profile: None,
-                    tag: 100,
-                    addresses: Vec::new(),
-                    routing_table: None,
-                    ospf_profile: None,
-                },
-            ],
-        };
-        assert_eq!(
-            render_interface(&iface),
-            "interface eth0: address [none], routing-table unset, ospf-profile unset, switching-profile unset, mtu 9000, lldp-transmit off, lldp-receive off\n\
-             \x20 subinterface 0: address [10.0.0.1/24], routing-table rt1, ospf-profile unset\n\
-             \x20 subinterface 100: address [none], routing-table unset, ospf-profile unset"
-        );
-    }
-
-    /// A loopback interface's flat `addresses`/`routing_table` still render
-    /// on the interface's own line, unaffected by the addressing split — it
-    /// never has `subinterfaces`, so no nested lines are added.
-    #[test]
-    fn render_loopback_interface_stays_flat() {
-        let iface = Interface {
-            ospfv3_profile: None,
-            name: "loopback-rt1".to_string(),
-            addresses: vec![InterfaceAddress {
-                address: "10.0.0.1/32".parse().unwrap(),
-                label: None,
-            }],
-            routing_table: Some("rt1".to_string()),
-            ospf_profile: None,
-            switching_profile: None,
-            port_aggregate: None,
-            mtu: None,
-            lldp_transmit: false,
-            lldp_receive: false,
-            lldp_destination: nos_proto::LldpDestination::default(),
-            subinterfaces: Vec::new(),
-        };
-        assert_eq!(
-            render_interface(&iface),
-            "interface loopback-rt1: address [10.0.0.1/32], routing-table rt1, ospf-profile unset, switching-profile unset, mtu unset, lldp-transmit off, lldp-receive off"
-        );
-    }
-
-    fn snapshot(dirty: bool) -> TransactionSnapshot {
-        TransactionSnapshot {
-            name: "demo".to_string(),
-            config: Config {
-                bgp_instances: vec![instance("r1", 65001)],
-                ..Default::default()
-            },
-            dirty,
-            resumed: false,
-            generation: 0,
-        }
-    }
-
-    #[test]
-    fn render_transaction_at_root_clean() {
-        let rendered = render_transaction(&snapshot(false), &Path::root());
-        assert_eq!(
-            rendered,
-            "transaction 'demo':\nhostname: nos\nbgp instance r1: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)\n\
-             no routing tables configured\nno OSPF instances configured\nno OSPFv3 instances configured\nno static routing instances configured\n\
-             no interfaces configured\n\
-             no policy definitions configured\nno community aliases configured\nno community groups configured\nno as-path lists configured\nno prefix lists configured\n\
-             no broadcast domains configured\nno switching profiles configured\n\
-             no port aggregates configured"
-        );
-    }
-
-    #[test]
-    fn render_transaction_at_root_dirty() {
-        let rendered = render_transaction(&snapshot(true), &Path::root());
-        assert!(rendered.starts_with("transaction 'demo' (uncommitted changes):"));
-    }
-
-    #[test]
-    fn render_transaction_at_bgp_instance_found() {
-        let rendered = render_transaction(
-            &snapshot(false),
-            &Path::from(vec!["bgp-instance".to_string(), "r1".to_string()]),
-        );
-        assert_eq!(
-            rendered,
-            "bgp instance r1: router-id 1.1.1.1, asn 65001, cluster-id default (= router-id)"
-        );
-    }
-
-    #[test]
-    fn render_transaction_at_bgp_instance_not_found() {
-        let rendered = render_transaction(
-            &snapshot(false),
-            &Path::from(vec!["bgp-instance".to_string(), "r2".to_string()]),
-        );
-        assert_eq!(rendered, "nothing configured here");
-    }
-
-    #[test]
-    fn render_transaction_at_subinterface_found() {
-        let mut snap = snapshot(false);
-        snap.config.interfaces = vec![Interface {
-            ospfv3_profile: None,
-            name: "eth0".to_string(),
-            addresses: Vec::new(),
-            routing_table: None,
-            ospf_profile: None,
-            switching_profile: None,
-            port_aggregate: None,
-            mtu: None,
-            lldp_transmit: false,
-            lldp_receive: false,
-            lldp_destination: nos_proto::LldpDestination::default(),
-            subinterfaces: vec![Subinterface {
-                ospfv3_profile: None,
-                tag: 100,
-                addresses: Vec::new(),
-                routing_table: Some("rt1".to_string()),
-                ospf_profile: None,
-            }],
-        }];
-        let rendered = render_transaction(
-            &snap,
-            &Path::from(vec![
-                "interface".to_string(),
-                "eth0".to_string(),
-                "subinterface".to_string(),
-                "100".to_string(),
-            ]),
-        );
-        assert_eq!(
-            rendered,
-            "subinterface 100: address [none], routing-table rt1, ospf-profile unset"
-        );
-    }
-
-    #[test]
-    fn render_transaction_at_subinterface_not_found() {
-        let rendered = render_transaction(
-            &snapshot(false),
-            &Path::from(vec![
-                "interface".to_string(),
-                "eth0".to_string(),
-                "subinterface".to_string(),
-                "100".to_string(),
-            ]),
-        );
-        assert_eq!(rendered, "nothing configured here");
     }
 
     fn field(label: &str, old: Option<&str>, new: Option<&str>) -> FieldDiff {
@@ -2390,260 +1241,6 @@ mod tests {
         let (old, new) = highlight("65000", "65001", false);
         assert_eq!(old, "65000");
         assert_eq!(new, "65001");
-    }
-
-    use nos_proto::{BgpPeer, BgpPeerGroup};
-    use std::net::IpAddr;
-
-    fn peer_group(name: &str) -> BgpPeerGroup {
-        BgpPeerGroup {
-            name: name.to_string(),
-            remote_as: 65001,
-            source_address: Some(SourceAddress::Interface {
-                interface: "eth0".to_string(),
-                label: None,
-            }),
-            address_families: vec![AddressFamily::Ipv4Unicast],
-            hold_time: None,
-            keepalive_interval: None,
-            connect_retry_time: None,
-            mrai: None,
-            route_refresh_stale_time: None,
-            damping: None,
-            max_hops: None,
-            auth: None,
-            next_hop: None,
-            route_reflector_client: false,
-            route_server_client: false,
-            import_policy: None,
-            export_policy: None,
-            shutdown: None,
-            maximum_prefix: nos_proto::BgpMaximumPrefix::default(),
-            announce_rpki_state: false,
-            local_as: None,
-            add_path: None,
-            add_path_send_count: None,
-        }
-    }
-
-    #[test]
-    fn render_bgp_peer_group_line() {
-        assert_eq!(
-            render_bgp_peer_group(&peer_group("pg1"), 65000),
-            "peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
-             hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), auth none, next-hop default (self, eBGP), \
-             import-policy default (deny-all), export-policy default (deny-all)"
-        );
-    }
-
-    #[test]
-    fn render_bgp_peer_group_with_unset_source_address() {
-        let mut pg = peer_group("pg1");
-        pg.source_address = None;
-        assert_eq!(
-            render_bgp_peer_group(&pg, 65000),
-            "peer-group pg1: remote-as 65001, source-address unset, address-family [ipv4], \
-             hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), auth none, next-hop default (self, eBGP), \
-             import-policy default (deny-all), export-policy default (deny-all)"
-        );
-    }
-
-    #[test]
-    fn render_bgp_peer_group_with_explicit_timers() {
-        let mut pg = peer_group("pg1");
-        pg.hold_time = Some(30);
-        pg.keepalive_interval = Some(10);
-        pg.connect_retry_time = Some(45);
-        assert_eq!(
-            render_bgp_peer_group(&pg, 65000),
-            "peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
-             hold-time 30, keepalive-interval 10, connect-retry-time 45, auth none, \
-             next-hop default (self, eBGP), \
-             import-policy default (deny-all), export-policy default (deny-all)"
-        );
-    }
-
-    #[test]
-    fn render_bgp_peer_group_with_md5_auth() {
-        let mut pg = peer_group("pg1");
-        pg.auth = Some(BgpAuth::Md5 {
-            password: "secret".to_string(),
-        });
-        assert_eq!(
-            render_bgp_peer_group(&pg, 65000),
-            "peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
-             hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), auth md5-password secret, \
-             next-hop default (self, eBGP), \
-             import-policy default (deny-all), export-policy default (deny-all)"
-        );
-    }
-
-    #[test]
-    fn render_bgp_peer_group_with_ao_auth() {
-        use nos_proto::BgpAoKey;
-
-        let mut pg = peer_group("pg1");
-        pg.auth = Some(BgpAuth::Ao {
-            keys: vec![BgpAoKey {
-                send_id: 1,
-                recv_id: 1,
-                algorithm: BgpAoAlgorithm::HmacSha1_96,
-                key: "secret".to_string(),
-                is_current: true,
-                is_rnext: false,
-                exclude_options: true,
-            }],
-        });
-        assert_eq!(
-            render_bgp_peer_group(&pg, 65000),
-            "peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
-             hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), \
-             auth ao-keys [send-id 1 hmac-sha1 secret (current, exclude-options)], \
-             next-hop default (self, eBGP), \
-             import-policy default (deny-all), export-policy default (deny-all)"
-        );
-    }
-
-    #[test]
-    fn render_bgp_peer_group_next_hop_ibgp_default_and_explicit_override() {
-        let mut pg = peer_group("pg1");
-        pg.remote_as = 65000;
-        assert!(render_bgp_peer_group(&pg, 65000).contains("next-hop default (unchanged, iBGP)"));
-
-        pg.next_hop = Some(NextHopMode::SelfAddress);
-        assert!(render_bgp_peer_group(&pg, 65000).contains("next-hop self"));
-
-        pg.next_hop = Some(NextHopMode::Unchanged);
-        assert!(render_bgp_peer_group(&pg, 65000).contains("next-hop unchanged"));
-    }
-
-    #[test]
-    fn render_bgp_peer_group_policies() {
-        let mut pg = peer_group("pg1");
-        pg.import_policy = Some("in".to_string());
-        pg.export_policy = Some("out".to_string());
-        assert!(render_bgp_peer_group(&pg, 65000).ends_with("import-policy in, export-policy out"));
-    }
-
-    #[test]
-    fn render_bgp_peer_group_next_hop_route_server_default() {
-        let mut pg = peer_group("pg1");
-        pg.route_server_client = true;
-        assert!(render_bgp_peer_group(&pg, 65000)
-            .contains("next-hop default (unchanged, route-server)"));
-    }
-
-    fn ospf_profile(name: &str) -> OspfProfile {
-        OspfProfile {
-            name: name.to_string(),
-            hello_interval: None,
-            dead_interval: None,
-            cost: None,
-            priority: None,
-            mtu: None,
-            network_type: None,
-            auth: None,
-            extended_sequence_numbers: false,
-        }
-    }
-
-    #[test]
-    fn render_ospf_profile_with_no_auth() {
-        assert_eq!(
-            render_ospf_profile(&ospf_profile("p1")),
-            "profile p1: auth none"
-        );
-    }
-
-    #[test]
-    fn render_ospf_profile_with_simple_auth() {
-        let mut p = ospf_profile("p1");
-        p.auth = Some(OspfAuth::Simple {
-            password: "secret".to_string(),
-        });
-        assert_eq!(
-            render_ospf_profile(&p),
-            "profile p1: auth simple-password secret"
-        );
-    }
-
-    #[test]
-    fn render_ospf_profile_with_crypto_auth() {
-        use nos_proto::OspfCryptoKey;
-
-        let mut p = ospf_profile("p1");
-        p.auth = Some(OspfAuth::Crypto {
-            keys: vec![OspfCryptoKey {
-                key_id: 1,
-                algorithm: OspfCryptoAlgorithm::HmacSha256,
-                key: "secret".to_string(),
-                is_current: true,
-            }],
-        });
-        assert_eq!(
-            render_ospf_profile(&p),
-            "profile p1: auth crypto-keys [key-id 1 hmac-sha256 secret (current)]"
-        );
-    }
-
-    #[test]
-    fn render_instance_with_peer_groups_and_peers() {
-        let mut inst = instance("r1", 65000);
-        inst.peer_groups = vec![peer_group("pg1")];
-        inst.peers = vec![BgpPeer {
-            remote_address: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-            peer_group: "pg1".to_string(),
-            shutdown: None,
-        }];
-        assert_eq!(
-            render_bgp_instance(&inst),
-            "bgp instance r1: router-id 1.1.1.1, asn 65000, cluster-id default (= router-id)\n  \
-             peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
-             hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), auth none, next-hop default (self, eBGP), \
-             import-policy default (deny-all), export-policy default (deny-all)\n  \
-             peer 192.0.2.1: peer-group pg1"
-        );
-    }
-
-    #[test]
-    fn render_transaction_at_peer_group_found() {
-        let mut snap = snapshot(false);
-        snap.config.bgp_instances[0].peer_groups = vec![peer_group("pg1")];
-        let rendered = render_transaction(
-            &snap,
-            &Path::from(vec![
-                "bgp-instance".to_string(),
-                "r1".to_string(),
-                "peer-group".to_string(),
-                "pg1".to_string(),
-            ]),
-        );
-        assert_eq!(
-            rendered,
-            "peer-group pg1: remote-as 65001, source-address interface eth0, address-family [ipv4], \
-             hold-time default (90s), keepalive-interval default (hold-time / 3), \
-             connect-retry-time default (120s), auth none, next-hop default (unchanged, iBGP), \
-             import-policy default (deny-all), export-policy default (deny-all)"
-        );
-    }
-
-    #[test]
-    fn render_transaction_at_peer_group_not_found() {
-        let rendered = render_transaction(
-            &snapshot(false),
-            &Path::from(vec![
-                "bgp-instance".to_string(),
-                "r1".to_string(),
-                "peer-group".to_string(),
-                "pg-missing".to_string(),
-            ]),
-        );
-        assert_eq!(rendered, "nothing configured here");
     }
 
     fn log_entry(source: &str, message: &str) -> LogEntry {
@@ -2948,27 +1545,6 @@ mod tests {
     }
 
     #[test]
-    fn render_interface_shows_lldp_flags() {
-        let mut iface = Interface {
-            name: "eth1".to_string(),
-            addresses: Vec::new(),
-            routing_table: None,
-            ospf_profile: None,
-            ospfv3_profile: None,
-            switching_profile: None,
-            port_aggregate: None,
-            mtu: None,
-            lldp_transmit: true,
-            lldp_receive: false,
-            lldp_destination: nos_proto::LldpDestination::default(),
-            subinterfaces: Vec::new(),
-        };
-        assert!(render_interface(&iface).ends_with("lldp-transmit on, lldp-receive off"));
-        iface.lldp_receive = true;
-        assert!(render_interface(&iface).ends_with("lldp-transmit on, lldp-receive on"));
-    }
-
-    #[test]
     fn render_lldp_neighbors_empty_and_populated() {
         assert_eq!(render_lldp_neighbors(&[]), "no lldp neighbors");
         let neighbor = nos_proto::LldpNeighbor {
@@ -3070,48 +1646,6 @@ mod tests {
     }
 
     #[test]
-    fn lldp_settings_and_destination_render_only_when_set() {
-        let mut cfg = Config::default();
-        assert!(!render_config(&cfg).contains("lldp"));
-        cfg.lldp.tx_interval_secs = Some(5);
-        cfg.lldp.management_addresses =
-            vec!["10.0.0.1".parse().unwrap(), "2001:db8::1".parse().unwrap()];
-        assert!(render_config(&cfg).contains(
-            "lldp: tx-interval 5, tx-hold default, management-address 10.0.0.1,2001:db8::1"
-        ));
-
-        let mut iface = nos_proto::Interface {
-            name: "eth1".to_string(),
-            addresses: Vec::new(),
-            routing_table: None,
-            ospf_profile: None,
-            ospfv3_profile: None,
-            switching_profile: None,
-            port_aggregate: None,
-            mtu: None,
-            lldp_transmit: true,
-            lldp_receive: true,
-            lldp_destination: nos_proto::LldpDestination::default(),
-            subinterfaces: Vec::new(),
-        };
-        assert!(!render_interface(&iface).contains("lldp-destination"));
-        iface.lldp_destination = nos_proto::LldpDestination::NonTpmr;
-        assert!(render_interface(&iface).ends_with("lldp-receive on, lldp-destination non-tpmr"));
-    }
-
-    #[test]
-    fn render_config_shows_policy_definitions() {
-        let cfg = Config {
-            policy_definitions: vec![PolicyDefinition {
-                name: "p1".to_string(),
-                source: "accept\n".to_string(),
-            }],
-            ..Default::default()
-        };
-        assert!(render_config(&cfg).contains("policy-definition p1:\n   1  accept\n"));
-    }
-
-    #[test]
     fn render_lacp_summaries_empty() {
         assert_eq!(render_lacp_summaries(&[]), "no lacp port aggregates");
     }
@@ -3156,20 +1690,6 @@ mod tests {
         assert!(out.contains("lacp bond1: system 02:00:00:00:00:ab, key 7, rate fast"));
         assert!(out.contains("eth1: port 4, receive current, mux distributing, partner 02:00:00:00:00:01 key 3 port 9, selected yes, synchronized yes"));
         assert!(out.contains("eth2: port 5, receive defaulted, mux detached, partner none, selected no, synchronized no, churn partner"));
-    }
-
-    #[test]
-    fn render_config_shows_user_names_but_never_the_password() {
-        let config = Config {
-            users: vec![nos_proto::User {
-                name: "alice".to_string(),
-                password: "$argon2id$secret-hash".to_string(),
-            }],
-            ..Config::default()
-        };
-        let text = render_config(&config);
-        assert!(text.contains("user alice"));
-        assert!(!text.contains("argon2id") && !text.contains("secret-hash"));
     }
 
     #[test]
@@ -3262,318 +1782,10 @@ mod tests {
         ));
     }
 
-    fn crypto_key(
-        key_id: u16,
-        algorithm: OspfCryptoAlgorithm,
-        current: bool,
-    ) -> nos_proto::OspfCryptoKey {
-        nos_proto::OspfCryptoKey {
-            key_id,
-            algorithm,
-            key: "k".to_string(),
-            is_current: current,
-        }
-    }
-
     fn addr(a: &str, label: Option<&str>) -> InterfaceAddress {
         InterfaceAddress {
             address: a.parse().unwrap(),
             label: label.map(str::to_string),
-        }
-    }
-
-    /// One of everything `render_config`/`render_transaction` have a line for.
-    fn full_config() -> Config {
-        let area = |id: &str| id.parse::<Ipv4Addr>().unwrap();
-        Config {
-            bgp_instances: vec![BgpInstance {
-                peers: vec![BgpPeer {
-                    remote_address: "192.0.2.2".parse().unwrap(),
-                    peer_group: "pg".to_string(),
-                    shutdown: Some(BgpShutdown { message: None }),
-                }],
-                peer_groups: vec![BgpPeerGroup {
-                    name: "pg".to_string(),
-                    remote_as: 65002,
-                    ..Default::default()
-                }],
-                cluster_id: Some(Ipv4Addr::new(9, 9, 9, 9)),
-                maximum_paths: None,
-                confederation: nos_proto::BgpConfederation::default(),
-                rpki_caches: Vec::new(),
-                aggregates: Vec::new(),
-                graceful_restart: nos_proto::BgpGracefulRestart::default(),
-                ..instance("r1", 65001)
-            }],
-            routing_tables: vec![RoutingTable {
-                name: "rt1".to_string(),
-                bgp_instance: Some("r1".to_string()),
-                redistribute: Some(nos_proto::Redistribute {
-                    from: nos_proto::RedistributeSource::Static,
-                    to: nos_proto::RedistributeTarget::Bgp,
-                    policy: Some("p1".to_string()),
-                }),
-                rest_api: Some(nos_proto::RestApi {
-                    address: "10.0.0.1".parse().unwrap(),
-                    port: 443,
-                }),
-                ..Default::default()
-            }],
-            ospf_instances: vec![OspfInstance {
-                name: "o1".to_string(),
-                router_id: Ipv4Addr::new(1, 1, 1, 1),
-                areas: vec![OspfArea {
-                    area_id: area("0.0.0.0"),
-                    area_type: nos_proto::OspfAreaType::Normal,
-                    stub_default_cost: None,
-                    nssa_translate_always: false,
-                    nssa_default_originate: false,
-                    ranges: Vec::new(),
-                    profiles: vec![OspfProfile {
-                        name: "op".to_string(),
-                        extended_sequence_numbers: true,
-                        auth: Some(OspfAuth::Crypto {
-                            keys: vec![
-                                crypto_key(1, OspfCryptoAlgorithm::Md5, false),
-                                crypto_key(2, OspfCryptoAlgorithm::HmacSha1, false),
-                                crypto_key(3, OspfCryptoAlgorithm::HmacSha384, false),
-                                crypto_key(4, OspfCryptoAlgorithm::HmacSha512, true),
-                            ],
-                        }),
-                        ..Default::default()
-                    }],
-                }],
-                routing_table: None,
-                redistribute_policy: None,
-                graceful_restart_grace_period: None,
-                prefix_suppression: true,
-                max_metric_on_startup: Some(300),
-                max_metric_on_shutdown: Some(3),
-                max_metric_administrative: true,
-                host_router: true,
-            }],
-            ospfv3_instances: vec![Ospfv3Instance {
-                name: "v3".to_string(),
-                router_id: Ipv4Addr::new(2, 2, 2, 2),
-                areas: vec![Ospfv3Area {
-                    area_id: area("0.0.0.1"),
-                    profiles: vec![Ospfv3Profile {
-                        name: "p3".to_string(),
-                        auth: Some(vec![crypto_key(300, OspfCryptoAlgorithm::HmacSha256, true)]),
-                        instance_id: Some(5),
-                        ..Default::default()
-                    }],
-                }],
-                routing_table: None,
-                redistribute_policy: None,
-                extended_lsa: true,
-                graceful_restart_grace_period: Some(120),
-            }],
-            static_routing_instances: vec![StaticRoutingInstance {
-                name: "s1".to_string(),
-                routes: vec![StaticRoute {
-                    subnet: "203.0.113.0/24".parse().unwrap(),
-                    gateway: "10.0.0.2".parse().unwrap(),
-                }],
-            }],
-            interfaces: vec![Interface {
-                name: "eth0".to_string(),
-                subinterfaces: vec![Subinterface {
-                    tag: 0,
-                    addresses: vec![addr("10.0.0.1/24", Some("peering"))],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            community_aliases: vec![CommunityAlias {
-                name: "blackhole".to_string(),
-                value: "65535:666".to_string(),
-            }],
-            community_groups: vec![
-                CommunityGroup {
-                    name: "g".to_string(),
-                    members: vec!["blackhole".to_string(), "65000:1".to_string()],
-                },
-                CommunityGroup {
-                    name: "empty".to_string(),
-                    members: Vec::new(),
-                },
-            ],
-            as_path_lists: vec![
-                AsPathList {
-                    name: "a".to_string(),
-                    patterns: vec!["^65001_".to_string()],
-                },
-                AsPathList {
-                    name: "none".to_string(),
-                    patterns: Vec::new(),
-                },
-            ],
-            prefix_lists: vec![
-                PrefixList {
-                    name: "pl".to_string(),
-                    entries: [None, Some((8, 32)), Some((8, 24)), Some((16, 24))]
-                        .into_iter()
-                        .map(|range| PrefixListEntry {
-                            cidr: "10.0.0.0/8".parse().unwrap(),
-                            range,
-                        })
-                        .collect(),
-                },
-                PrefixList {
-                    name: "empty".to_string(),
-                    entries: Vec::new(),
-                },
-            ],
-            broadcast_domains: vec![
-                BroadcastDomain {
-                    name: "bd1".to_string(),
-                    addresses: vec![addr("10.1.0.1/24", None)],
-                    routing_table: Some("rt1".to_string()),
-                    vni: Some(10100),
-                    rd: Some("1.1.1.1:100".to_string()),
-                    route_targets_import: vec!["65000:100".to_string()],
-                    route_targets_export: vec!["65000:100".to_string(), "65000:101".to_string()],
-                    vtep_source: Some(SourceAddress::Interface {
-                        interface: "lo".to_string(),
-                        label: None,
-                    }),
-                    mac_redistribute: Some("r1".to_string()),
-                    ..Default::default()
-                },
-                BroadcastDomain {
-                    name: "bd2".to_string(),
-                    ..Default::default()
-                },
-            ],
-            switching_profiles: vec![
-                SwitchingProfile {
-                    name: "trunk".to_string(),
-                    members: vec![
-                        nos_proto::SwitchingProfileMember {
-                            broadcast_domain: "bd1".to_string(),
-                            tag: VlanTag::Untagged,
-                        },
-                        nos_proto::SwitchingProfileMember {
-                            broadcast_domain: "bd2".to_string(),
-                            tag: VlanTag::Dot1q(200),
-                        },
-                    ],
-                },
-                SwitchingProfile {
-                    name: "empty".to_string(),
-                    members: Vec::new(),
-                },
-            ],
-            port_aggregates: vec![PortAggregate {
-                name: "bond1".to_string(),
-                esi: Some("00:11:22:33:44:55:66:77:88:99".to_string()),
-                redundancy_mode: nos_proto::EsRedundancy::SingleActive,
-                df_algorithm: nos_proto::DfAlgorithm::default(),
-                lacp_system_id: Some("02:00:00:00:00:01".to_string()),
-                mtu: Some(9000),
-                subinterfaces: vec![Subinterface {
-                    tag: 10,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn render_config_covers_every_section() {
-        let out = render_config(&full_config());
-        for expected in [
-            "bgp instance r1: router-id 1.1.1.1, asn 65001, cluster-id 9.9.9.9",
-            "  peer 192.0.2.2: peer-group pg, shutdown",
-            "routing-table rt1: bgp-instance r1, ospf-instance unset, static-routing-instance unset, \
-             redistribute from static to bgp, policy p1, rest-api 10.0.0.1:443",
-            "ospf instance o1: router-id 1.1.1.1, prefix-suppression, max-metric router-lsa on-startup 300, max-metric router-lsa on-shutdown 3, max-metric router-lsa administrative, host-router\n  area 0.0.0.0\n    profile op: auth crypto-keys \
-             [key-id 1 md5 k, key-id 2 hmac-sha1 k, key-id 3 hmac-sha384 k, key-id 4 hmac-sha512 k (current)] \
-             extended-sequence-numbers",
-            "ospfv3 instance v3: router-id 2.2.2.2, extended-lsa, graceful-restart grace-period 120\n  \
-             area 0.0.0.1\n    profile p3: auth crypto-keys [key-id 300 hmac-sha256 k (current)] instance-id 5",
-            "static-routing-instance s1\n  route 203.0.113.0/24: gateway 10.0.0.2",
-            "  subinterface 0: address [10.0.0.1/24 (label peering)], routing-table unset, ospf-profile unset",
-            "community-alias blackhole: value 65535:666",
-            "community-group g: members [blackhole, 65000:1]",
-            "community-group empty: members [none]",
-            "as-path-list a: patterns [^65001_]",
-            "as-path-list none: patterns [none]",
-            "prefix-list pl: entries [10.0.0.0/8, 10.0.0.0/8 orlonger, 10.0.0.0/8 upto 24, 10.0.0.0/8 range(16,24)]",
-            "prefix-list empty: entries [none]",
-            "broadcast-domain bd1: address [10.1.0.1/24], routing-table rt1, ospf-profile unset, vni 10100, \
-             rd 1.1.1.1:100, rt-import [65000:100], rt-export [65000:100,65000:101], vtep-source ",
-            "redistribute-mac r1, redistribute-arp unset, redistribute-connected unset, neigh-suppress off",
-            "broadcast-domain bd2: address [none], routing-table unset, ospf-profile unset\n",
-            "switching-profile trunk: members [bd1: untagged, bd2: dot1q 200]",
-            "switching-profile empty: members [none]",
-            "port-aggregate bond1: mode Xor, switching-profile unset, mtu 9000, \
-             esi 00:11:22:33:44:55:66:77:88:99, redundancy-mode single-active, lacp-system-id 02:00:00:00:00:01\n  \
-             subinterface 10: address [none]",
-        ] {
-            assert!(out.contains(expected), "missing {expected:?} in:\n{out}");
-        }
-    }
-
-    #[test]
-    fn render_transaction_scopes_to_every_position() {
-        let snap = TransactionSnapshot {
-            name: "t".to_string(),
-            config: full_config(),
-            dirty: false,
-            resumed: false,
-            generation: 0,
-        };
-        for (segs, starts) in [
-            (&["routing-table", "rt1"][..], "routing-table rt1:"),
-            (&["ospf-instance", "o1"], "ospf instance o1:"),
-            (&["ospf-instance", "o1", "area", "0.0.0.0"], "area 0.0.0.0"),
-            (
-                &["ospf-instance", "o1", "area", "0.0.0.0", "profile", "op"],
-                "profile op:",
-            ),
-            (&["ospfv3-instance", "v3"], "ospfv3 instance v3:"),
-            (
-                &["ospfv3-instance", "v3", "area", "0.0.0.1"],
-                "area 0.0.0.1",
-            ),
-            (
-                &["ospfv3-instance", "v3", "area", "0.0.0.1", "profile", "p3"],
-                "profile p3:",
-            ),
-            (
-                &["static-routing-instance", "s1"],
-                "static-routing-instance s1",
-            ),
-            (&["interface", "eth0"], "interface eth0:"),
-            (
-                &["community-alias", "blackhole"],
-                "community-alias blackhole:",
-            ),
-            (&["community-group", "g"], "community-group g:"),
-            (&["as-path-list", "a"], "as-path-list a:"),
-            (&["prefix-list", "pl"], "prefix-list pl:"),
-            (&["broadcast-domain", "bd1"], "broadcast-domain bd1:"),
-            (&["switching-profile", "trunk"], "switching-profile trunk:"),
-            (&["port-aggregate", "bond1"], "port-aggregate bond1:"),
-            (&["policy-definition", "nope"], "nothing configured here"),
-            (
-                &["ospf-instance", "o1", "area", "9.9.9.9"],
-                "nothing configured here",
-            ),
-            // No dedicated renderer: the object's own JSON.
-            (&["bgp-instance", "r1", "peer", "192.0.2.2"], "{"),
-            (
-                &["bgp-instance", "r1", "peer", "192.0.2.99"],
-                "nothing configured here",
-            ),
-        ] {
-            let path = Path::from(segs.iter().map(|s| (*s).to_string()).collect::<Vec<_>>());
-            let out = render_transaction(&snap, &path);
-            assert!(out.starts_with(starts), "{segs:?} rendered {out:?}");
         }
     }
 
@@ -3769,17 +1981,6 @@ mod tests {
         entry.timestamp_ms = u64::MAX;
         entry.fields.clear();
         assert!(render_log_entry(&entry).starts_with(&u64::MAX.to_string()));
-        // A shutdown with an RFC 9003 message quotes it.
-        assert_eq!(
-            render_bgp_peer(&BgpPeer {
-                remote_address: "192.0.2.2".parse().unwrap(),
-                peer_group: "pg".to_string(),
-                shutdown: Some(BgpShutdown {
-                    message: Some("maintenance".to_string()),
-                }),
-            }),
-            "peer 192.0.2.2: peer-group pg, shutdown \"maintenance\""
-        );
         // A remote FDB entry with no VTEP, no devices yet, an empty flood list.
         let mut t = nos_proto::FdbTable {
             domain: "bd".to_string(),
@@ -3826,5 +2027,108 @@ mod tests {
             out.ends_with("on bond1: designated forwarder (PEs )"),
             "{out}"
         );
+    }
+
+    /// A config from the fields given, the rest default.
+    fn config_from(json: &serde_json::Value) -> Config {
+        let mut base = serde_json::to_value(Config::default()).unwrap();
+        base.as_object_mut()
+            .unwrap()
+            .extend(json.as_object().unwrap().clone());
+        serde_json::from_value(base).unwrap()
+    }
+
+    /// The fields #116 found missing from the hand-written renderer.
+    fn ospf_config() -> Config {
+        config_from(&serde_json::json!({
+            "hostname": "r1",
+            "ospf_instances": [{
+                "name": "o1", "router_id": "1.1.1.1", "areas": [{
+                    "area_id": "0.0.0.0", "profiles": [{
+                        "name": "p1", "hello_interval": 5, "dead_interval": 20,
+                        "cost": 10, "priority": 3, "mtu": 1400,
+                        "network_type": "PointToPoint",
+                        "auth": {"Crypto": {"keys": [
+                            {"key_id": 1, "algorithm": "HmacSha256", "key": "k", "is_current": true}
+                        ]}}
+                    }]
+                }]
+            }],
+            "routing_tables": [{
+                "name": "rt1", "ospfv3_instance": "o3",
+                "evpn": {"l3_vni": 5000, "rd": "1:1"}
+            }],
+            "users": [{"name": "admin", "password": "$argon2id$secret"}]
+        }))
+    }
+
+    #[test]
+    fn show_config_lists_every_configured_field() {
+        let out = render_config(&ospf_config());
+        for want in [
+            "hostname r1",
+            "ospf instance o1",
+            "  area 0.0.0.0",
+            "      hello-interval 5",
+            "      dead-interval 20",
+            "      cost 10",
+            "      priority 3",
+            "      mtu 1400",
+            "      network-type point-to-point",
+            "      crypto-key 1 hmac-sha256 k",
+            "      crypto-key 1 current",
+            "routing-table rt1",
+            "  ospfv3-instance o3",
+            "  evpn",
+            "    l3-vni 5000",
+            "    rd 1:1",
+        ] {
+            assert!(out.lines().any(|l| l == want), "missing `{want}` in\n{out}");
+        }
+    }
+
+    #[test]
+    fn show_config_never_prints_a_password() {
+        let out = render_config(&ospf_config());
+        assert!(out.contains("user admin\n  password <hidden>"), "{out}");
+        assert!(!out.contains("argon2id"), "{out}");
+    }
+
+    #[test]
+    fn show_config_of_nothing_says_so() {
+        assert_eq!(
+            render_config(&config_from(&serde_json::json!({"hostname": "nos"}))),
+            "nothing configured"
+        );
+    }
+
+    #[test]
+    fn show_this_scopes_to_the_position() {
+        let snap = TransactionSnapshot {
+            name: "t".to_string(),
+            config: ospf_config(),
+            dirty: false,
+            resumed: false,
+            generation: 0,
+        };
+        let at = |segs: &[&str]| {
+            let path = Path::from(segs.iter().map(ToString::to_string).collect::<Vec<_>>());
+            render_transaction(&snap, &path)
+        };
+        let out = at(&["ospf-instance", "o1", "area", "0.0.0.0", "profile", "p1"]);
+        assert!(out.starts_with("profile p1\n  hello-interval 5"), "{out}");
+        assert_eq!(at(&["routing-table", "nope"]), "nothing configured here");
+        assert!(at(&["routing-table", "rt1", "evpn"]).starts_with("evpn\n  l3-vni 5000"));
+    }
+
+    #[test]
+    fn show_config_of_a_switching_profile() {
+        let cfg = config_from(&serde_json::json!({
+            "broadcast_domains": [{"name": "bd1", "addresses": []}],
+            "switching_profiles": [{"name": "sp1", "members": [
+                {"broadcast_domain": "bd1", "tag": {"Dot1q": 100}}
+            ]}]
+        }));
+        assert_eq!(render_config(&cfg), "broadcast domain bd1\nswitching-profile sp1\n  broadcast-domain bd1\n    tag dot1q 100");
     }
 }
