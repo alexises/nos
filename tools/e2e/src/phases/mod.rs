@@ -59,6 +59,7 @@ pub async fn run(name: &str, w: &mut World) -> anyhow::Result<()> {
         "routed-subinterface" => drivers::routed_subinterface(w).await,
         "source-address" => drivers::source_address(w).await,
         "rest" => drivers::rest(w).await,
+        "syslog" => drivers::syslog(w).await,
         "ospf" => ospf::ospf_phase(w).await,
         "ospf-p2mp" => ospf::ospf_p2mp(w).await,
         "asbr" => ospf::asbr_phase(w).await,
@@ -123,6 +124,7 @@ pub fn group(name: &str) -> Option<&'static [&'static str]> {
             "routed-subinterface",
             "source-address",
             "rest",
+            "syslog",
         ],
         "rpl" => &[
             "up",
@@ -218,6 +220,7 @@ pub const ALL: &[&str] = &[
     "routed-subinterface",
     "source-address",
     "rest",
+    "syslog",
     "policy",
     "redistribute-policy",
     "communities",

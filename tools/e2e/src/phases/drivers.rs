@@ -1423,6 +1423,219 @@ async fn rest_destructive(w: &mut World) -> anyhow::Result<()> {
     Ok(())
 }
 
+// --- syslog (#71) ---
+
+const SYSLOG_UDP_LOG: &str = "/var/log/udp.log";
+const SYSLOG_TCP_LOG: &str = "/var/log/tcp.log";
+
+/// A collector that parses RFC 5424 itself (syslog-ng's `syslog()` source),
+/// writing one `HOST|PROGRAM|PID|LEVEL|FACILITY|SDATA|MSG` line per message
+/// to a file per transport.
+fn syslog_dockerfile() -> &'static str {
+    "FROM debian:trixie-slim\n\
+     RUN apt-get update && apt-get install -y --no-install-recommends syslog-ng-core \\\n \
+     && rm -rf /var/lib/apt/lists/*\n"
+}
+
+fn syslog_conf() -> String {
+    format!(
+        "@version: current\n\
+         options {{ keep-hostname(yes); chain-hostnames(no); }};\n\
+         source s_udp {{ syslog(ip(0.0.0.0) transport(\"udp\") port(514)); }};\n\
+         source s_tcp {{ syslog(ip(0.0.0.0) transport(\"tcp\") port(601)); }};\n\
+         template t_line {{ template(\"$HOST|$PROGRAM|$PID|$LEVEL|$FACILITY|$SDATA|$MSG\\n\"); }};\n\
+         destination d_udp {{ file(\"{SYSLOG_UDP_LOG}\" template(t_line)); }};\n\
+         destination d_tcp {{ file(\"{SYSLOG_TCP_LOG}\" template(t_line)); }};\n\
+         log {{ source(s_udp); destination(d_udp); }};\n\
+         log {{ source(s_tcp); destination(d_tcp); }};\n"
+    )
+}
+
+async fn start_syslog_collector(w: &World) -> anyhow::Result<()> {
+    let conf = syslog_conf();
+    w.dock
+        .start_plain(
+            SYSLOG_COLLECTOR,
+            SYSLOG_IMAGE,
+            NET,
+            IP_SYSLOG,
+            &[
+                "syslog-ng",
+                "-F",
+                "--no-caps",
+                "-f",
+                "/etc/syslog-ng/syslog-ng.conf",
+            ],
+            ("/etc/syslog-ng", "syslog-ng.conf", conf.as_bytes()),
+        )
+        .await
+}
+
+/// Every line the collector wrote to `file` (empty before the first one).
+async fn collected(w: &World, file: &str) -> anyhow::Result<Vec<Vec<String>>> {
+    let (_, out) = w.dock.exec(SYSLOG_COLLECTOR, &["cat", file]).await?;
+    Ok(out
+        .lines()
+        .filter(|l| l.matches('|').count() >= 6)
+        .map(|l| l.splitn(7, '|').map(str::to_string).collect())
+        .collect())
+}
+
+/// Waits for a collected line `f` accepts and returns it.
+async fn wait_collected(
+    w: &World,
+    file: &str,
+    what: &str,
+    secs: u64,
+    f: impl Fn(&[String]) -> bool,
+) -> anyhow::Result<Vec<String>> {
+    for _ in 0..secs {
+        if let Some(l) = collected(w, file).await?.into_iter().find(|l| f(l)) {
+            log(format!("collector {file}: saw {what}"));
+            return Ok(l);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("collector {file}: no line matching {what} within {secs}s")
+}
+
+/// `docker logs` of `container` with ANSI colour codes removed (the daemons'
+/// `fmt` layer colours field names even into a pipe).
+async fn plain_docker_logs(w: &World, container: &str) -> anyhow::Result<String> {
+    let raw = w.dock.logs(container).await?;
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for e in chars.by_ref() {
+                if e.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
+/// RFC 5424 export from `nos-logd` to a real syslog-ng, over both transports,
+/// from inside `rt1`'s VRF (eth0 is enslaved to it, so an unscoped socket
+/// could not reach the collector): hostname, program, instance, facility and
+/// level parsed by an independent implementation, the level filter, a TCP
+/// reconnect after the collector restarts, and removal.
+pub async fn syslog(w: &mut World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    log("building/starting the syslog collector");
+    w.dock
+        .ensure_image(SYSLOG_IMAGE, syslog_dockerfile())
+        .await?;
+    start_syslog_collector(w).await?;
+
+    let addr = IP_SYSLOG.to_string();
+    a.provision(&["--hostname", SYSLOG_HOSTNAME]).await?;
+    for (name, transport) in [("c-udp", "udp"), ("c-tcp", "tcp")] {
+        a.provision(&[
+            "--hostname",
+            SYSLOG_HOSTNAME,
+            "--syslog-server",
+            name,
+            "--syslog-address",
+            &addr,
+            "--syslog-transport",
+            transport,
+            "--syslog-routing-table",
+            "rt1",
+            "--syslog-facility",
+            "local3",
+        ])
+        .await?;
+    }
+
+    // Nothing logs at info in steady state, and each sink only sees what is
+    // logged after it connected: one more commit gives both a line.
+    a.provision(&["--hostname", SYSLOG_HOSTNAME]).await?;
+    for file in [SYSLOG_UDP_LOG, SYSLOG_TCP_LOG] {
+        // nos-configd's own commit line, with the hostname we configured,
+        // the facility and an info level; its PROCID is the NILVALUE.
+        let l = wait_collected(w, file, "a nos-configd info line", 60, |l| {
+            l[0] == SYSLOG_HOSTNAME && l[1] == "nos-configd" && l[3] == "info" && l[4] == "local3"
+        })
+        .await?;
+        if !l[5].contains("timeQuality") || !l[6].contains("config committed") {
+            bail!("unexpected structured data or text in {l:?}");
+        }
+    }
+
+    // The routers run with RUST_LOG=debug; the default minimum is info, so a
+    // collector with no level never sees a debug line.
+    let debug = |l: &[String]| l[3] == "debug";
+    if collected(w, SYSLOG_TCP_LOG).await?.iter().any(|l| debug(l)) {
+        bail!("a debug line reached a collector at the default level");
+    }
+    a.provision(&[
+        "--hostname",
+        SYSLOG_HOSTNAME,
+        "--syslog-server",
+        "c-tcp",
+        "--syslog-level",
+        "debug",
+    ])
+    .await?;
+    wait_collected(w, SYSLOG_TCP_LOG, "a debug line", 60, debug).await?;
+    // An instance daemon: APP-NAME nos-ribd/nos-bgpd, PROCID its instance.
+    wait_collected(w, SYSLOG_TCP_LOG, "an instance daemon's line", 60, |l| {
+        (l[1] == "nos-ribd" && l[2] == "rt1") || (l[1] == "nos-bgpd" && l[2] == "r1")
+    })
+    .await?;
+    if collected(w, SYSLOG_UDP_LOG).await?.iter().any(|l| debug(l)) {
+        bail!("a debug line reached the udp collector, still at the default level");
+    }
+
+    log("restarting the collector: the tcp sink must reconnect");
+    let connected = |logs: &str| logs.matches("syslog connected server=c-tcp").count();
+    let before = connected(&plain_docker_logs(w, "router-a").await?);
+    start_syslog_collector(w).await?;
+    let mut after = before;
+    for _ in 0..60 {
+        after = connected(&plain_docker_logs(w, "router-a").await?);
+        if after > before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if after <= before {
+        bail!("nos-logd never logged a new 'syslog connected server=c-tcp'");
+    }
+    wait_collected(w, SYSLOG_TCP_LOG, "a line after the restart", 60, |_| true).await?;
+
+    log("removing both collectors");
+    a.provision(&[
+        "--hostname",
+        SYSLOG_HOSTNAME,
+        "--no-syslog-server",
+        "c-udp",
+        "--no-syslog-server",
+        "c-tcp",
+    ])
+    .await?;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let (udp, tcp) = (
+        collected(w, SYSLOG_UDP_LOG).await?.len(),
+        collected(w, SYSLOG_TCP_LOG).await?.len(),
+    );
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    if collected(w, SYSLOG_UDP_LOG).await?.len() != udp
+        || collected(w, SYSLOG_TCP_LOG).await?.len() != tcp
+    {
+        bail!("a collector kept receiving lines after its removal");
+    }
+
+    a.provision(&["--hostname", "nos"]).await?;
+    w.dock.container_remove(SYSLOG_COLLECTOR).await;
+    Ok(())
+}
+
 fn expect_body(body: &str, needle: &str) -> anyhow::Result<()> {
     if body.contains(needle) {
         Ok(())

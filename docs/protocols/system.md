@@ -6,6 +6,7 @@ This page covers what is configured once per router rather than per protocol: it
 - [Users and passwords](#users-and-passwords)
 - [The REST API](#the-rest-api)
 - [Logs](#logs)
+  - [Sending logs to a syslog collector](#sending-logs-to-a-syslog-collector)
 - [Saving the configuration](#saving-the-configuration)
 - [Running the router](#running-the-router)
   - [Start-up options](#start-up-options)
@@ -146,6 +147,40 @@ Over REST, `GET /v1/logs?source=<source>&limit=<n>` returns entries as JSON and 
 
 How much is logged is set when the router starts, with the `RUST_LOG` environment variable (for example `RUST_LOG=info`, or `RUST_LOG=debug`). The default logs everything, including protocol traces, so on a busy router the 10,000 entries can cover only a few minutes; `RUST_LOG=info` keeps much more history. The same messages also go to the container's standard output (`docker logs`).
 
+### Sending logs to a syslog collector
+
+Every log entry can also be sent to one or more remote syslog collectors, as [RFC 5424](https://www.rfc-editor.org/rfc/rfc5424) messages. `show log` is unchanged. Only plain UDP and TCP are available so far; TLS is not.
+
+```
+edge-1> configure syslog
+edge-1(syslog)> set logging syslog c1 address 192.0.2.9 transport tcp routing-table mgmt level warn facility local3
+edge-1(syslog)> commit
+```
+
+```sh
+$C -X PUT -H 'Content-Type: application/json' \
+   -d '{"name":"c1","address":"192.0.2.9","transport":"Tcp","routing_table":"mgmt","level":"Warn","facility":"Local3"}' \
+   $B/v1/transactions/syslog/logging/syslog/c1
+```
+
+- **Address.** An IPv4 or IPv6 unicast address, not a name: there is no resolver inside a routing table.
+- **Transport and port.** `udp` (the default, port 514, [RFC 5426](https://www.rfc-editor.org/rfc/rfc5426): one message per datagram, cut to 1180 bytes) or `tcp` (port 601, [RFC 6587](https://www.rfc-editor.org/rfc/rfc6587) octet-counting frames, cut to 8192 bytes). `port` overrides the default.
+- **Routing table.** If the collector is only reachable through a routing table (for example a management VRF), name it with `routing-table`. Without it, the default network namespace is used. If that table does not run yet, the router retries every second.
+- **Level and facility.** `level` is the lowest severity sent (default `info`). `facility` is `local0` to `local7` (default `local7`). The levels map to syslog severities like this:
+
+  | nos level | syslog severity |
+  |---|---|
+  | `error` | 3 (err) |
+  | `warn` | 4 (warning) |
+  | `info` | 6 (info) |
+  | `debug`, `trace` | 7 (debug) |
+
+- **What a message holds.** The hostname is the router's [hostname](#hostname); the application name is the source (`nos-ribd`) and the process id is its instance (`rt1`), or `-` when it has none. The text is the log message followed by its fields as `name=value`, and the message is UTF-8 with the byte order mark RFC 5424 asks for. Its time is UTC with milliseconds. The structured data holds only `timeQuality` (`tzKnown="1" isSynced="0"`): the log entry's own fields stay in the text, because a private structured-data element needs an IANA enterprise number that NOS does not have.
+- **When the collector is down.** Entries are dropped, not queued, and not replayed when it comes back: use `show log` for the history. The router logs (to `docker logs`, not to `show log`) `syslog collector unavailable` once per failure, `syslog connected` when a connection is made and `syslog drops` once a minute while entries are being lost. A TCP connection that the collector closes is noticed at once and reopened every second.
+- **Several collectors** can be configured, each with its own transport, level, facility and routing table. `delete logging syslog <name>` stops one.
+
+Check it with `docker logs` on the router (`syslog connected server=c1`) and on the collector. A debug-level message needs the router started with `RUST_LOG=debug` (the default logs everything).
+
 ## Saving the configuration
 
 `commit` makes a configuration live; it does not save it. `save`, in operational mode, writes the running configuration to `/var/lib/nos/config.yaml`, which the router loads when it starts:
@@ -207,6 +242,12 @@ REST paths are relative to `/v1/transactions/{tx}/`.
 | hostname | `set hostname <name>` | `hostname`, `"edge-1"` | string, `nos` | 1-253 characters; letters, digits, `-`; no leading or trailing `-` | Shell prompt, LLDP System Name | the prompt, `show config` |
 | user | `set user <name> password <password>` / `delete user <name>` | `user/{name}`, `{"name":"alice","password":"…"}` | list, `admin`/`admin` on a new router | name 1-64 characters, PRECIS, unique; at least one user | Who may log in | `show config` |
 | user password | `set user <name> password <password>` | `user/{name}/password`, `"…"` | clear text in, argon2id hash stored | none | The user's password | a login |
+| logging syslog | `set logging syslog <name> address <ip>` / `delete logging syslog <name>` | `logging/syslog/{name}`, `{"name":"c1","address":"192.0.2.9"}` | list, empty | name 1-64 characters, unique | Exports every log entry to that collector | the collector, `docker logs` of the router |
+| logging syslog port | `set logging syslog <name> port <n>` | `logging/syslog/{name}/port`, `1514` | 514 (udp), 601 (tcp) | 1-65535 | Destination port | the collector |
+| logging syslog transport | `set logging syslog <name> transport udp\|tcp` | `logging/syslog/{name}/transport`, `"Tcp"` | `udp` | none | RFC 5426 datagrams or RFC 6587 frames | the collector |
+| logging syslog routing-table | `set logging syslog <name> routing-table <t>` | `logging/syslog/{name}/routing-table`, `"mgmt"` | unset | an existing routing table | Sends from inside that VRF | the collector |
+| logging syslog level | `set logging syslog <name> level error\|warn\|info\|debug\|trace` | `logging/syslog/{name}/level`, `"Warn"` | `info` | none | Lowest severity sent | the collector |
+| logging syslog facility | `set logging syslog <name> facility local0..local7` | `logging/syslog/{name}/facility`, `"Local3"` | `local7` | none | Facility of every message | the collector |
 | routing-table rest-api | `set routing-table <t> rest-api address <ip> [port <n>]` / `delete routing-table <t> rest-api` | `routing-table/{t}/rest-api`, `{"address":"192.0.2.10","port":8443}` | unset; port 8080 | unicast address; port 1-65535 | Runs the REST API on that address | `show log nos-restd[<t>]` |
 
 The operational commands on this page have no configuration: `save` (shell only), `show log [<source>] [--follow]` (`GET /v1/logs`, `GET /v1/logs/follow`).

@@ -49,6 +49,22 @@ topics! {
     LldpTxHold,
     /// `LldpSettings.management_addresses`
     LldpManagementAddress,
+    /// `Config.logging`
+    Logging,
+    /// `LoggingSettings.syslog`
+    LoggingSyslog,
+    /// `SyslogServer.address`
+    SyslogAddress,
+    /// `SyslogServer.port`
+    SyslogPort,
+    /// `SyslogServer.transport`
+    SyslogTransport,
+    /// `SyslogServer.routing_table`
+    SyslogRoutingTable,
+    /// `SyslogServer.level`
+    SyslogLevel,
+    /// `SyslogServer.facility`
+    SyslogFacility,
     /// `Config.bgp_instances`
     BgpInstance,
     /// `BgpInstance.asn`

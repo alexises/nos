@@ -257,6 +257,8 @@ async fn main() -> anyhow::Result<()> {
     // rest.
     let logd_args = std::iter::once("--listen-socket".to_string())
         .chain(std::iter::once(args.log_socket.display().to_string()))
+        .chain(std::iter::once("--watchdog-socket".to_string()))
+        .chain(std::iter::once(args.listen_socket.display().to_string()))
         .chain(args.logd_flags)
         .collect();
     let logd_spec = ProcessSpec::new("nos-logd", args.logd_bin, logd_args).with_identity(
