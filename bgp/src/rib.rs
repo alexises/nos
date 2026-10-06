@@ -221,6 +221,7 @@ fn learn_evpn(
 ) {
     for nlri in &mp.evpn {
         let route = EvpnRoute {
+            nlri: nlri.clone(),
             next_hop: mp.next_hop,
             pmsi_vni: pmsi.map(|p| p.vni),
             extended_communities: extended_communities.to_vec(),
@@ -232,7 +233,7 @@ fn learn_evpn(
                 .unwrap_or((0, false));
             mac_mobility.candidate(vni, mac, mp.next_hop, esi, seq, sticky, Instant::now());
         }
-        if table.insert(nlri.clone(), route.clone()) != Some(route) {
+        if table.insert(nlri.route_key(), route.clone()) != Some(route) {
             info!(peer = %from, route_type = nlri.route_type(), route = %nlri, next_hop = %mp.next_hop, "evpn route learned");
         }
     }
@@ -429,6 +430,9 @@ pub enum RouteOrigin {
 /// One received EVPN route's attributes — `Adj-RIB-In` content, nothing derived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvpnRoute {
+    /// The NLRI as last received; the table key is its `route_key`, so the
+    /// labels and ESI live here.
+    pub nlri: EvpnNlri,
     pub next_hop: IpAddr,
     /// The VNI of a Type-3 route's PMSI Tunnel attribute, when it had one.
     pub pmsi_vni: Option<u32>,
@@ -696,11 +700,13 @@ pub struct BgpRib {
     // ponytail: Adj-RIB-In only — no best-path, Route-Target import filtering,
     // import policy (RPL's `Input` is prefix-shaped) or re-advertisement, since
     // nothing consumes EVPN routes yet. Add a Loc-RIB when a MAC-VRF does.
+    /// Keyed by `EvpnNlri::route_key` (RFC 7432 §7.2: labels and ESI are
+    /// attributes, not identity).
     evpn_adj_rib_in: HashMap<IpAddr, HashMap<EvpnNlri, EvpnRoute>>,
     /// RFC 7313: paths (prefix, path id) in a peer's Adj-RIB-In marked stale
     /// by a `BoRR` and not yet re-announced; purged by the matching `EoRR`.
     stale: HashMap<IpAddr, HashSet<(IpNet, u32)>>,
-    /// The EVPN twin of `stale`, filled only by a graceful restart.
+    /// The EVPN twin of `stale` (route keys), filled only by a graceful restart.
     evpn_stale: HashMap<IpAddr, HashSet<EvpnNlri>>,
     /// RFC 4724: each peer's last graceful restart capability
     /// (`set_peer_gr`), recorded only while this instance has graceful
@@ -1292,8 +1298,8 @@ impl BgpRib {
             return 0;
         };
         let mut count = 0;
-        for nlri in set {
-            if table.remove(&nlri).is_some() {
+        for key in set {
+            if let Some(EvpnRoute { nlri, .. }) = table.remove(&key) {
                 count += 1;
                 info!(peer = %peer, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
             }
@@ -1459,7 +1465,7 @@ impl BgpRib {
         let mut out: Vec<_> = self
             .evpn_adj_rib_in
             .iter()
-            .flat_map(|(peer, t)| t.iter().map(move |(n, r)| (*peer, n, r)))
+            .flat_map(|(peer, t)| t.values().map(move |r| (*peer, &r.nlri, r)))
             .collect();
         out.sort_by_cached_key(|(peer, n, _)| (*peer, n.to_string()));
         out
@@ -1636,7 +1642,7 @@ impl BgpRib {
             // mac_mobility's record of this route's (vni, mac) is
             // deliberately left alone (see its own doc comment): a future
             // re-learn, local or remote, still needs to outrank it.
-            for nlri in routes.keys() {
+            for EvpnRoute { nlri, .. } in routes.values() {
                 info!(peer = %peer, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
             }
         }
@@ -1684,7 +1690,7 @@ impl BgpRib {
                     .extend(table.keys().cloned());
             }
         } else if let Some(routes) = self.evpn_adj_rib_in.remove(&peer) {
-            for nlri in routes.keys() {
+            for EvpnRoute { nlri, .. } in routes.values() {
                 info!(peer = %peer, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
             }
         }
@@ -1738,10 +1744,10 @@ impl BgpRib {
         // RFC 4724: an EVPN route the peer mentions again is no longer stale.
         if let Some(stale) = self.evpn_stale.get_mut(&from) {
             for n in update.mp_reach.iter().flat_map(|m| &m.evpn) {
-                stale.remove(n);
+                stale.remove(&n.route_key());
             }
             for n in update.mp_unreach.iter().flat_map(|m| &m.evpn) {
-                stale.remove(n);
+                stale.remove(&n.route_key());
             }
         }
         let withdrawn = withdrawn_paths(update);
@@ -1760,7 +1766,7 @@ impl BgpRib {
             let removed = self
                 .evpn_adj_rib_in
                 .get_mut(&from)
-                .is_some_and(|t| t.remove(nlri).is_some());
+                .is_some_and(|t| t.remove(&nlri.route_key()).is_some());
             if removed {
                 info!(peer = %from, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
             }
@@ -1964,7 +1970,7 @@ impl BgpRib {
         }
         if let Some(table) = self.evpn_adj_rib_in.get_mut(&from) {
             for nlri in update.mp_reach.iter().flat_map(|m| &m.evpn) {
-                if table.remove(nlri).is_some() {
+                if table.remove(&nlri.route_key()).is_some() {
                     info!(peer = %from, route_type = nlri.route_type(), route = %nlri, "evpn route withdrawn");
                 }
             }
@@ -3483,6 +3489,58 @@ mod tests {
         assert_eq!(routes[0].1, &evpn_nlri(2));
 
         rib.peer_disconnected(peer, Disconnect::Transport);
+        assert_eq!(rib.evpn_routes(), []);
+    }
+
+    /// RFC 7432 §7.2: labels and ESI are attributes. A re-announce changing
+    /// them replaces the route, and a withdrawal with other labels removes it.
+    #[test]
+    fn evpn_labels_and_esi_are_not_part_of_the_route_key() {
+        let mut rib = new_rib(65000);
+        let peer = addr("10.0.0.1");
+        let _rx = register_peer(&mut rib, peer, false, addr("10.0.0.254"));
+        let with = |labels: Vec<u32>, esi: u8| match evpn_nlri(1) {
+            EvpnNlri::MacIp {
+                rd, tag, mac, ip, ..
+            } => EvpnNlri::MacIp {
+                rd,
+                esi: [esi; 10],
+                tag,
+                mac,
+                ip,
+                labels,
+            },
+            _ => unreachable!(),
+        };
+        let announce = |rib: &mut BgpRib, nlri: EvpnNlri| {
+            rib.handle_update(
+                peer,
+                false,
+                v4("192.0.2.1"),
+                &evpn_reach(vec![nlri], vec![65001]),
+                &deny_all_policy(),
+            );
+        };
+        announce(&mut rib, with(vec![10_100], 0));
+        announce(&mut rib, with(vec![10_100, 5000], 0));
+        let routes = rib.evpn_routes();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].1, &with(vec![10_100, 5000], 0));
+
+        announce(&mut rib, with(vec![10_100, 5000], 7));
+        let routes = rib.evpn_routes();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].1, &with(vec![10_100, 5000], 7));
+
+        let mut withdraw = empty_update();
+        withdraw.mp_unreach = vec![message::MpUnreachNlri {
+            afi: message::AFI_L2VPN,
+            safi: message::SAFI_EVPN,
+            withdrawn: vec![],
+            withdrawn_path_ids: vec![],
+            evpn: vec![with(vec![0], 0)],
+        }];
+        rib.handle_update(peer, false, v4("192.0.2.1"), &withdraw, &deny_all_policy());
         assert_eq!(rib.evpn_routes(), []);
     }
 

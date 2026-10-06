@@ -333,14 +333,16 @@ impl BgpRib {
         // otherwise collide with the winner's own key below) is filtered out
         // here — and of a multi-homed segment's PEs, only the lowest VTEP.
         let mut chosen: HashMap<(u32, [u8; 6]), IpAddr> = HashMap::new();
-        for (nlri, route) in self.evpn_adj_rib_in.values().flatten() {
+        for route in self.evpn_adj_rib_in.values().flat_map(HashMap::values) {
+            let nlri = &route.nlri;
             if let Some((key, true)) = held(nlri, route.next_hop) {
                 let nh = chosen.entry(key).or_insert(route.next_hop);
                 *nh = (*nh).min(route.next_hop);
             }
         }
         let mut out = HashMap::new();
-        for (nlri, route) in self.evpn_adj_rib_in.values().flatten() {
+        for route in self.evpn_adj_rib_in.values().flat_map(HashMap::values) {
+            let nlri = &route.nlri;
             if let Some((key, _)) = held(nlri, route.next_hop) {
                 if chosen.get(&key) != Some(&route.next_hop) {
                     continue;

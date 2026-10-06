@@ -23,7 +23,7 @@ pub type Rd = [u8; 8];
 /// Ethernet Segment Identifier (RFC 7432 §5), 10 raw wire bytes.
 pub type Esi = [u8; 10];
 
-/// One EVPN route's NLRI — also its identity in the RIB (`Eq + Hash`).
+/// One EVPN route's NLRI. Its identity in the RIB is [`EvpnNlri::route_key`].
 /// `label`/`labels` hold the raw 24-bit field (a VNI for VXLAN, RFC 8365).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EvpnNlri {
@@ -84,6 +84,39 @@ impl EvpnNlri {
             | EvpnNlri::IpPrefix { rd, .. } => Some(*rd),
             EvpnNlri::Unknown { .. } => None,
         }
+    }
+
+    /// The route's identity in a RIB: the NLRI with the fields RFC 7432 §7.1/
+    /// §7.2 and RFC 9136 §3.1 call route *attributes* zeroed (Type-1's label,
+    /// Type-2's ESI and labels, Type-5's ESI, gateway and label). A re-announce
+    /// changing one of them is an implicit replace, and a withdrawal carrying
+    /// different ones still removes the route.
+    #[must_use]
+    pub fn route_key(&self) -> EvpnNlri {
+        let mut key = self.clone();
+        match &mut key {
+            EvpnNlri::EthernetAd { label, .. } => *label = 0,
+            EvpnNlri::MacIp { esi, labels, .. } => {
+                *esi = [0; 10];
+                labels.clear();
+            }
+            EvpnNlri::IpPrefix {
+                esi,
+                gateway,
+                label,
+                prefix,
+                ..
+            } => {
+                *esi = [0; 10];
+                *label = 0;
+                *gateway = match prefix {
+                    IpNet::V4(_) => Ipv4Addr::UNSPECIFIED.into(),
+                    IpNet::V6(_) => Ipv6Addr::UNSPECIFIED.into(),
+                };
+            }
+            _ => {}
+        }
+        key
     }
 }
 
@@ -597,6 +630,49 @@ mod tests {
         assert_eq!(wire[24], 48); // MAC length in bits
         assert_eq!(wire[31], 0); // no IP
         assert_eq!(&wire[32..35], &[0, 0x27, 0x10]); // label 10000
+    }
+
+    /// RFC 9135 §5.1 symmetric IRB: Label1 the L2 VNI, Label2 the L3 VNI.
+    #[test]
+    fn type2_with_two_labels_matches_rfc9135() {
+        let nlri = EvpnNlri::MacIp {
+            rd: [0, 0, 0xfd, 0xe8, 0, 0, 0, 1],
+            esi: [0; 10],
+            tag: 0,
+            mac: [0x02, 0x42, 0x0a, 0x48, 0x00, 0x14],
+            ip: Some(Ipv4Addr::new(10, 72, 0, 20).into()),
+            labels: vec![10_300, 5000],
+        };
+        let mut wire = Vec::new();
+        encode_nlri(&nlri, &mut wire);
+        #[rustfmt::skip]
+        let expected = [
+            0x02, 0x28,
+            0x00, 0x00, 0xfd, 0xe8, 0x00, 0x00, 0x00, 0x01,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0,
+            0x30, 0x02, 0x42, 0x0a, 0x48, 0x00, 0x14,
+            0x20, 0x0a, 0x48, 0x00, 0x14,
+            0x00, 0x28, 0x3c,
+            0x00, 0x13, 0x88,
+        ];
+        assert_eq!(wire, expected);
+        assert_eq!(decode_nlris(&wire).unwrap(), vec![nlri]);
+    }
+
+    #[test]
+    fn route_key_drops_attributes_only() {
+        let s = samples();
+        for n in &s {
+            let k = n.route_key();
+            assert_eq!(k.route_type(), n.route_type());
+            assert_eq!(k.rd(), n.rd());
+            assert_eq!(k.route_key(), k);
+        }
+        let EvpnNlri::MacIp { labels, esi, .. } = s[1].route_key() else {
+            panic!()
+        };
+        assert_eq!((labels, esi), (vec![], [0; 10]));
     }
 
     #[test]
