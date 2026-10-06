@@ -2419,7 +2419,7 @@ impl LinkManager {
 
         // RFC 3101 §3.1/§3.2: as the elected translator of an NSSA, its P-bit
         // Type-7s become this router's own Type-5s in the normal areas.
-        let mut translated: Vec<(Ipv4Net, u32)> = Vec::new();
+        let mut translated: Vec<(Ipv4Net, u32, bool)> = Vec::new();
         {
             let mut roles = self.nssa_translating.lock().await;
             for (area_id, lsdb) in &areas {
@@ -2444,11 +2444,11 @@ impl LinkManager {
             // Keyed by prefix, so a redistributed prefix that is also
             // translated is originated once. Type-7: `(options, metric,
             // forwarding address)`.
-            let mut type5: HashMap<Ipv4Net, u32> = HashMap::new();
+            let mut type5: HashMap<Ipv4Net, (u32, bool)> = HashMap::new();
             let mut type7: HashMap<Ipv4Net, (u8, u32, Ipv4Addr)> = HashMap::new();
             if !area.stub {
-                type5.extend(translated.iter().copied());
-                type5.extend(redistributed.iter().map(|&p| (p, 0)));
+                type5.extend(translated.iter().map(|&(p, m, e)| (p, (m, e))));
+                type5.extend(redistributed.iter().map(|&p| (p, (0, false))));
             } else if area.nssa {
                 // RFC 3101 §2.4: an ABR clears the P-bit, since it originates
                 // the Type-5 for the same prefix itself.
@@ -2477,7 +2477,8 @@ impl LinkManager {
                     id,
                     LsaBody::AsExternal(AsExternalLsaBody {
                         network_mask: prefix.netmask(),
-                        metric: type5[&prefix],
+                        metric: type5[&prefix].0,
+                        e_type2: type5[&prefix].1,
                         // ponytail: a translated Type-5 doesn't carry the
                         // Type-7's forwarding address (§3.2 (3)), so traffic
                         // to it goes through the translator, not straight to
@@ -2500,6 +2501,7 @@ impl LinkManager {
                     LsaBody::AsExternal(AsExternalLsaBody {
                         network_mask: prefix.netmask(),
                         metric,
+                        e_type2: false,
                         forwarding_address,
                         external_route_tag: 0,
                     }),
@@ -4662,6 +4664,7 @@ mod tests {
             body: LsaBody::AsExternal(AsExternalLsaBody {
                 network_mask: Ipv4Addr::new(255, 255, 255, 0),
                 metric: 0,
+                e_type2: false,
                 forwarding_address: Ipv4Addr::UNSPECIFIED,
                 external_route_tag: 0,
             }),
