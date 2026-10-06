@@ -616,7 +616,18 @@ A role says what the peer-group's peers are to this router, so a misconfigured p
 - `bgp role negotiated peer=<ip> local=<role> remote=<role>` is logged when a pair is accepted.
 - Changing `role` or `strict-mode` resets the peer-group's sessions.
 - The commit refuses `role` on an iBGP or confederation peer-group, and on a `route-server-client` group any role but `route-server` or `route-server-client`.
-- This only negotiates roles. The Only-To-Customer attribute and the route-leak checks that use the role are not implemented yet (#14).
+
+#### Only-To-Customer (route-leak prevention)
+
+With a `role`, the Only-To-Customer (OTC) attribute marks routes as they cross provider/customer/peer links, and a route that should never have crossed is dropped.
+
+- Applies to IPv4/IPv6 unicast on every eBGP session with a configured `role`, whether or not the peer sent the Role capability (RFC 9234 section 4.2). A session with no `role` forwards OTC unchanged.
+- On receipt, from a `provider`, `peer` or `route-server` with no OTC: the route is marked with the neighbor's ASN.
+- On receipt, a leak is dropped (the earlier path of that prefix is withdrawn): any OTC from a `customer` or `route-server-client`, or an OTC from a `peer` that is not the peer's ASN. It logs `route leak detected peer=<ip> prefix=... otc=... role=...`.
+- On sending, to a `customer`, `peer` or `route-server-client` with no OTC: the route gets our ASN (the `local-as` one when set). To a `provider`, `peer` or `route-server` a route that has an OTC is not sent.
+- So a route learned from one provider is not passed to another provider or to a peer, but does reach customers. Export policy cannot override this.
+- Check with the `learned route for <prefix> into adj-rib-in` log line, which carries `otc=`; it is not shown in `show bgp`.
+- A neighbor that does not speak RFC 9234 gets its routes marked on receipt, so they are not leaked onward either.
 
 ```
 edge-1(t9/bgp-instance:r1/peer-group:pg1)> set role customer

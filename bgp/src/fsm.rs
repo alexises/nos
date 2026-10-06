@@ -1320,7 +1320,7 @@ pub async fn run(
                             peer.remote_address,
                             slot.peer.local_as.filter(|_| kind == PeerKind::External),
                         );
-                        rib.set_peer_role(peer.remote_address, *negotiated_role);
+                        rib.set_peer_role(peer.remote_address, slot.peer.role);
                         rib.set_peer_add_path_send_count(
                             peer.remote_address,
                             slot.peer.add_path_send_count,
@@ -1416,6 +1416,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     pmsi: None,
                     atomic_aggregate: route.atomic_aggregate,
                     aggregator: route.aggregator,
+                    otc: route.otc,
                 }),
                 mp_reach: vec![message::MpReachNlri {
                     afi: afi_of_ipnet(route.prefix),
@@ -1449,6 +1450,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                     pmsi: None,
                     atomic_aggregate: route.atomic_aggregate,
                     aggregator: route.aggregator,
+                    otc: route.otc,
                 }),
                 mp_reach: Vec::new(),
                 mp_unreach: Vec::new(),
@@ -1497,6 +1499,7 @@ fn outbound_update_to_message(update: OutboundUpdate) -> BgpMessage {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: Vec::new(),
                 communities: Vec::new(),
                 extended_communities: route.extended_communities,

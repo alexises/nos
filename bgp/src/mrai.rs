@@ -118,6 +118,7 @@ mod tests {
             originator_id: None,
             atomic_aggregate: false,
             aggregator: None,
+            otc: None,
             cluster_list: vec![],
             communities: vec![],
             extended_communities: vec![],
