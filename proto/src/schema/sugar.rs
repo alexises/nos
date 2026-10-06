@@ -240,3 +240,81 @@ pub fn untagged_ospf(_: Verb, args: &[&str], interface: &Value) -> Option<SugarO
 pub fn untagged_ospfv3(_: Verb, args: &[&str], interface: &Value) -> Option<SugarOut> {
     untagged("ospfv3", args, interface)
 }
+
+// ---- `show config` halves (`#[cli(render = …)]`): the sugar lines that
+// re-enter each value, so the generic round-trip test covers them too.
+
+fn text(v: &Value) -> &str {
+    v.as_str().unwrap_or_default()
+}
+
+/// `crypto-key <id> <algorithm> <key>`, then `crypto-key <id> current`.
+fn crypto_key_lines(keys: &Value) -> Vec<String> {
+    let keys = keys.as_array().map_or(&[][..], Vec::as_slice);
+    let alg = |k: &Value| {
+        crate::cli::render::words(&OspfCryptoAlgorithm::kind(), &k["algorithm"]).join(" ")
+    };
+    let mut out: Vec<String> = keys
+        .iter()
+        .map(|k| format!("crypto-key {} {} {}", k["key_id"], alg(k), text(&k["key"])))
+        .collect();
+    out.extend(
+        keys.iter()
+            .filter(|k| k["is_current"] == Value::Bool(true))
+            .map(|k| format!("crypto-key {} current", k["key_id"])),
+    );
+    out
+}
+
+/// `OspfProfile.auth`.
+pub fn render_ospf_auth(auth: &Value) -> Vec<String> {
+    match (auth.get("Simple"), auth.get("Crypto")) {
+        (Some(s), _) => vec![format!("simple-password {}", text(&s["password"]))],
+        (_, Some(c)) => crypto_key_lines(&c["keys"]),
+        _ => Vec::new(),
+    }
+}
+
+/// `Ospfv3Profile.auth` (the key list itself).
+pub fn render_ospfv3_auth(auth: &Value) -> Vec<String> {
+    crypto_key_lines(auth)
+}
+
+/// `BgpPeerGroup.auth`.
+pub fn render_bgp_auth(auth: &Value) -> Vec<String> {
+    if let Some(m) = auth.get("Md5") {
+        return vec![format!("md5-password {}", text(&m["password"]))];
+    }
+    let keys = auth["Ao"]["keys"].as_array().map_or(&[][..], Vec::as_slice);
+    let alg =
+        |k: &Value| crate::cli::render::words(&BgpAoAlgorithm::kind(), &k["algorithm"]).join(" ");
+    let mut out = Vec::new();
+    for k in keys {
+        out.push(format!(
+            "ao-key {} {} {} {}",
+            k["send_id"],
+            k["recv_id"],
+            alg(k),
+            text(&k["key"])
+        ));
+        if k["exclude_options"] == Value::Bool(true) {
+            out.push(format!("ao-key {} exclude-options", k["send_id"]));
+        }
+    }
+    for (flag, word) in [("is_current", "current"), ("is_rnext", "rnext")] {
+        out.extend(
+            keys.iter()
+                .filter(|k| k[flag] == Value::Bool(true))
+                .map(|k| format!("ao-key {} {word}", k["send_id"])),
+        );
+    }
+    out
+}
+
+/// `shutdown [<message…>]`.
+pub fn render_shutdown(shutdown: &Value) -> Vec<String> {
+    match shutdown["message"].as_str() {
+        Some(m) => vec![format!("shutdown {m}")],
+        None => vec!["shutdown".to_string()],
+    }
+}

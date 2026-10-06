@@ -221,7 +221,7 @@ pub struct OspfProfile {
 
     /// `None` is RFC 2328 `AuType` 0 (Null) — no authentication.
     #[garde(custom(|a: &Option<OspfAuth>, _ctx: &Config| valid_auth(a.as_ref())))]
-    #[cli(topic = OspfProfileAuth, sugar(word = "simple-password", with = sugar::simple_password, topic = OspfProfileSimplePassword), sugar(word = "crypto-key", with = sugar::ospf_crypto_key, topic = OspfProfileCryptoKey))]
+    #[cli(topic = OspfProfileAuth, render = sugar::render_ospf_auth, sugar(word = "simple-password", with = sugar::simple_password, topic = OspfProfileSimplePassword), sugar(word = "crypto-key", with = sugar::ospf_crypto_key, topic = OspfProfileCryptoKey))]
     pub auth: Option<OspfAuth>,
 
     /// RFC 7474: sign with `AuType` 3 — a 64-bit (persisted boot count :

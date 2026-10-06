@@ -27,7 +27,7 @@ pub struct BgpPeer {
 
     /// Overrides the peer-group's own `shutdown` — see `BgpShutdown`.
     #[garde(custom(|s: &Option<BgpShutdown>, _ctx: &Config| valid_shutdown(s.as_ref())))]
-    #[cli(topic = BgpPeerShutdown, sugar(word = "shutdown", with = sugar::shutdown, topic = BgpPeerShutdown))]
+    #[cli(topic = BgpPeerShutdown, render = sugar::render_shutdown, sugar(word = "shutdown", with = sugar::shutdown, topic = BgpPeerShutdown))]
     pub shutdown: Option<BgpShutdown>,
 }
 

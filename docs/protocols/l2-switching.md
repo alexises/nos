@@ -58,9 +58,13 @@ interface eth0: address [none], routing-table unset, switching-profile sp1, mtu 
   subinterface 0: address [10.50.0.2/24], routing-table rt1
 router-a> show config
 …
-broadcast-domain bd1: address [none], routing-table unset, ospf-profile unset
-broadcast-domain bd2: address [none], routing-table unset, ospf-profile unset
-switching-profile sp1: members [bd1: dot1q 100, bd2: dot1q 200]
+broadcast domain bd1
+broadcast domain bd2
+switching-profile sp1
+  broadcast-domain bd1
+    tag dot1q 100
+  broadcast-domain bd2
+    tag dot1q 200
 …
 ```
 

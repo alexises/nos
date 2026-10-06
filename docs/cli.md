@@ -220,7 +220,18 @@ The descriptions come from the router itself, so they always match the version y
 
 These work in both modes. Only `clear` acts on anything, and it never changes configuration. The REST equivalent of each is in [CLI ↔ API mapping](cli-api-mapping.md#operational-commands).
 
-- `show config`: the whole running config.
+- `show config`: the whole running config, and `show this` the object you are in. Both are written in the same words you type to set things, indented under their parent, so any line can be copied back after `set`. Only what is configured appears: a field left at its default is not shown, and an empty config prints `nothing configured`. Secrets (a user's password) show as `<hidden>`. The output is generated from the same schema as `edit`/`set`/`delete`, so a field you can set always shows.
+  ```
+  ospf instance o1
+    router-id 1.1.1.1
+    area 0.0.0.0
+      profile p1
+        hello-interval 5
+        cost 10
+        crypto-key 1 hmac-sha256 <key> current
+  routing-table rt1
+    ospfv3-instance o3
+  ```
 - `show route <table>`: every prefix in a routing table, with every candidate route best first; `*` marks the one in use. `show route <table> <address>` looks up the longest-prefix match for one address.
 - `show interface [<name>]`: what is actually applied to each interface and subinterface: addresses, routing table, MTU.
 - `show port-aggregate [<name>]` and `show lacp [<name>]`: bonds, their members, and LACP negotiation state.

@@ -33,7 +33,7 @@ pub struct User {
     /// clear text still matches it, so re-setting the same password is not a
     /// change).
     #[garde(custom(|p: &String, _ctx: &Config| valid_password_hash(p)))]
-    #[cli(topic = UserPassword)]
+    #[cli(topic = UserPassword, secret)]
     pub password: String,
 }
 

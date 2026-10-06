@@ -575,7 +575,7 @@ Absolute forms start with `set ospf instance <name> area <area-id> profile <prof
 | no authentication | relative `delete auth` *(relative only)* | `DELETE …/auth` | default | | no authentication | `show this` in the profile |
 | extended sequence numbers | `set … profile <p> extended-sequence-numbers enable\|disable`; relative the same | `extended-sequence-numbers` | boolean; default `false` | needs crypto authentication with HMAC-SHA keys only | RFC 7474 authentication, protecting against replay across restarts; both ends must agree | `show this` in the profile |
 
-`show this` and `show config` show a profile's name and authentication only. To see its timers, cost, priority, MTU and network type, use `GET` on the profile path, or `diff` right after changing them.
+`show this` and `show config` show every field of a profile that is set (timers, cost, priority, MTU, network type, authentication), and leave out the ones that are not.
 
 ### Where a profile is attached
 

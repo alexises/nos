@@ -89,7 +89,7 @@ lab-1> show route rt1
 
 ## Users and logging in
 
-Every local user is a full administrator; there are no roles. You set a password in clear (`set user alice password s3cret`, or the same over REST). The router stores only a hash, and `show config` shows only user names. A commit that would remove the last user is refused. A new router has one user, `admin`, with password `admin`. Add your own user, then change or remove `admin`.
+Every local user is a full administrator; there are no roles. You set a password in clear (`set user alice password s3cret`, or the same over REST). The router stores only a hash, and `show config` shows user names and a hidden password. A commit that would remove the last user is refused. A new router has one user, `admin`, with password `admin`. Add your own user, then change or remove `admin`.
 
 The shell asks for your user name and password when it starts, and gives up after three wrong attempts. REST clients log in once with `POST /v1/login` and receive a client certificate, which they present on every later request. After five failed REST logins for one user within a minute, logins for that user are refused for a while. Certificates last 8 hours; the shell renews its own, and REST clients renew with `POST /v1/renew` (see [The REST API](api.md#getting-a-client-certificate)).
 

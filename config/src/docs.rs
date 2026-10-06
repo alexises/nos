@@ -1021,9 +1021,9 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         Topic::OspfProfileCost => (
             "Set an OSPF profile's interface cost.",
             concat!(
-                "Sets the cost field on a profile. This NOS has no SPF/LSDB yet, so this value has \
-             no behavioral effect today — it's stored and validated (1-65535) as a \
-             forward-declared placeholder for a future SPF phase.",
+                "Sets the cost field on a profile — the RFC 2328 §16 metric this link advertises in \
+             its Router-LSA and that SPF sums along a path (lower is preferred). 1-65535, \
+             1 when unset.",
                 " ",
                 "Clear an OSPF profile's interface cost.",
             ),
