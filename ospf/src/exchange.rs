@@ -1935,6 +1935,7 @@ mod tests {
                 body: lsa::LsaBody::AsExternal(lsa::AsExternalLsaBody {
                     network_mask: router_id("255.255.255.0"),
                     metric: 0,
+                    e_type2: false,
                     forwarding_address: Ipv4Addr::UNSPECIFIED,
                     external_route_tag: 0,
                 }),

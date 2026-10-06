@@ -499,9 +499,9 @@ pub fn nssa_translator(root: Ipv4Addr, lsas: &[Arc<Lsa>], always: bool) -> bool 
 /// RFC 3101 §3.2: what an elected translator turns into Type-5s from this
 /// NSSA's LSDB — every live Type-7 with the P-bit and a non-zero forwarding
 /// address, from an ASBR other than `root` reachable in the area, as
-/// `(prefix, metric)`. `ponytail:` two Type-7s for one prefix aren't
+/// `(prefix, metric, e_type2)`. `ponytail:` two Type-7s for one prefix aren't
 /// compared (§3.2's preference rules) — the last one wins.
-pub fn nssa_translations(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Summaries {
+pub fn nssa_translations(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<(Ipv4Net, u32, bool)> {
     let live = live_lsas(lsas);
     let (routers, networks, hosts) = routers_and_networks(&live);
     let (dist, next_hop) = run_dijkstra(root, &routers, &networks, &hosts);
@@ -513,9 +513,11 @@ pub fn nssa_translations(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Summaries {
                 && asbr_distance(l.header.advertising_router, &[], &dist, &next_hop).is_some()
         })
         .filter_map(|l| match &l.body {
-            LsaBody::AsExternal(e) if !e.forwarding_address.is_unspecified() => {
-                Some((net_from(l.header.link_state_id, e.network_mask), e.metric))
-            }
+            LsaBody::AsExternal(e) if !e.forwarding_address.is_unspecified() => Some((
+                net_from(l.header.link_state_id, e.network_mask),
+                e.metric,
+                e.e_type2,
+            )),
             _ => None,
         })
         .collect()
@@ -1359,6 +1361,8 @@ mod tests {
             body: LsaBody::AsExternal(AsExternalLsaBody {
                 network_mask: mask,
                 metric: EXTERNAL_METRIC_CONSTANT,
+                // E bit set: translation must carry it, SPF ignores it.
+                e_type2: true,
                 forwarding_address: Ipv4Addr::UNSPECIFIED,
                 external_route_tag: 0,
             }),
@@ -1419,7 +1423,11 @@ mod tests {
             .all(|r| r.metric == 5 + EXTERNAL_METRIC_CONSTANT));
         assert_eq!(
             nssa_translations(root, &lsas),
-            vec![("192.0.2.0/24".parse().unwrap(), EXTERNAL_METRIC_CONSTANT)]
+            vec![(
+                "192.0.2.0/24".parse().unwrap(),
+                EXTERNAL_METRIC_CONSTANT,
+                true
+            )]
         );
     }
 
@@ -2234,7 +2242,11 @@ mod tests {
         ];
         assert_eq!(
             nssa_translations(root, &lsas),
-            vec![("192.0.2.0/24".parse().unwrap(), EXTERNAL_METRIC_CONSTANT)]
+            vec![(
+                "192.0.2.0/24".parse().unwrap(),
+                EXTERNAL_METRIC_CONSTANT,
+                true
+            )]
         );
     }
 

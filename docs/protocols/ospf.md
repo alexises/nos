@@ -489,7 +489,7 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **Authentication (RFC 2328 Appendix D, RFC 5709, RFC 7474).** Described [above](#authenticate-a-link-and-change-its-key). A packet that fails authentication is dropped and logged (`ospf packet authentication failed`). A replayed or out-of-order packet (a sequence number that does not increase) is dropped and logged too.
 
-**AS-external routes (ASBR).** Each redistributed static route becomes one type-5 LSA, flooded to every area the router is in. Other routers compute the route's metric as their distance to the ASBR plus 20. Only static routes can be redistributed, and every external route is metric type 1; there is no metric-type or per-route metric setting, and the forwarding address is always 0.0.0.0.
+**AS-external routes (ASBR).** Each redistributed static route becomes one type-5 LSA, flooded to every area the router is in. Other routers compute the route's metric as their distance to the ASBR plus 20. Only static routes can be redistributed, and every external route nos originates is metric type 1 (a type-2 LSA from another router is flooded and translated unchanged, but SPF still sums its metric as type 1); there is no metric-type or per-route metric setting, and the forwarding address is always 0.0.0.0.
 
 **Overlapping prefixes (RFC 2328 Appendix E).** Prefixes that share a network address, such as `192.0.2.128/25` and `192.0.2.128/26`, are advertised as separate type-3, type-5 or type-7 LSAs:
 
@@ -521,7 +521,7 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **NSSA (RFC 3101).** Described [above](#redistribute-from-inside-a-stub-like-area-nssa). In an NSSA, Hellos carry the N bit and not the E bit, a type-5 or type-11 LSA is neither sent nor accepted, and a type-7 LSA is never sent or accepted outside one. A type-7 LSA from an ABR has the P bit clear, so no other ABR translates it. The translator doesn't copy the type-7 forwarding address into its type-5 LSA, so traffic to a translated route goes through the translator. Its election has no stability delay: a translator that loses it flushes its type-5 LSAs at once.
 
-**Not supported:** virtual links, metric-type 2 external routes, redistribution of anything other than static routes, flooding type-11 opaque LSAs between areas, the restarting router's own RFC 3623 restart mode (it resynchronises from scratch while its neighbours help) and strict LSA checking in the helper, BFD, NBMA, and static neighbor lists (so point-to-multipoint only runs over multicast-capable media).
+**Not supported:** virtual links, metric-type 2 route selection (the E bit is only preserved), redistribution of anything other than static routes, flooding type-11 opaque LSAs between areas, the restarting router's own RFC 3623 restart mode (it resynchronises from scratch while its neighbours help) and strict LSA checking in the helper, BFD, NBMA, and static neighbor lists (so point-to-multipoint only runs over multicast-capable media).
 
 ## Configuration reference
 

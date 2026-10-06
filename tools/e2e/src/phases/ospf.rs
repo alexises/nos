@@ -1696,10 +1696,7 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
                 "-c",
                 "router ospf",
                 "-c",
-                // ponytail: metric type 1, since nos drops the E (type-2)
-                // bit when it re-floods a Type-5 (#38), and FRR re-originates
-                // its LSA on every such echo. Type 2 once #38 lands.
-                "redistribute static metric-type 1",
+                "redistribute static",
             ],
         )
         .await?;
@@ -1714,6 +1711,18 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
         a.wait(&format!("added route prefix={prefix} .*source=Some(Ospf)"))
             .await?;
     }
+
+    // FRR's default type-2 redistribution (#214): router-a floods FRR's LSA
+    // to router-b with the E bit intact, so FRR never sees an echo as newer
+    // and re-originates (every 5s) — no new install of it on either router.
+    log("FRR's type-2 externals are not re-originated after nos floods them");
+    let from_frr5 =
+        format!(r"ospf lsa installed .* lsa_type=5 .*advertising_router={OSPF_ROUTER_ID_F} ");
+    b.wait(&from_frr5).await?;
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let (a5, b5) = (a.count(&from_frr5), b.count(&from_frr5));
+    a.assert_quiet(&from_frr5, a5, 15).await?;
+    b.assert_quiet(&from_frr5, b5, 1).await?;
 
     log("FRR announces a graceful restart: a type-9 grace-lsa, link-local");
     let b9 = b.count(&from_frr(".*", 9));
