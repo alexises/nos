@@ -44,15 +44,10 @@ use crate::lsa::{
     ROUTER_FLAG_NT,
 };
 
-/// `ponytail:` RFC 2328 §16.4's E1/E2 external-metric-type distinction is not
-/// implemented — every AS-external route is treated as Type-1 (the ASBR's
-/// own intra-area SPF distance plus this fixed constant, summed like a stub
-/// route), always. There is no per-route metric-type selection and no
-/// Type-1-beats-Type-2 tie-break, since this NOS never produces a Type-2
-/// route in the first place (see `AsExternalLsaBody`'s own doc comment).
-/// Upgrade path: thread an `e_type` through `RouteEntry` and compare per RFC
-/// 2328 §16.4.1 if a second redistribution source with meaningfully
-/// different cost semantics is ever added.
+/// The metric nos itself originates for a redistributed prefix (Type 1).
+/// Received externals carry their own metric and E bit (`AsExternalLsaBody`).
+/// RFC 2328 §12.4.4 `LSInfinity`: an AS-external metric that is never routed.
+const LS_INFINITY: u32 = 0x00FF_FFFF;
 pub const EXTERNAL_METRIC_CONSTANT: u32 = 20;
 
 /// One SPF vertex — a router (keyed by its router-id) or a transit network
@@ -90,6 +85,45 @@ pub struct RouteEntry {
     /// distance the metric was built from) — what the loop-free test is
     /// evaluated against, since the leaf metric cancels out of it.
     egress: Vertex,
+    /// RFC 2328 §16.4 path class, what `prefer` ranks first.
+    class: PathClass,
+}
+
+/// RFC 2328 §16.4 step 6: intra-/inter-area beats Type 1 beats Type 2.
+/// `External2.ext` is the LSA's own metric; `RouteEntry.metric` stays
+/// `X + ext` (what `nos-ribd` gets) and X is `metric - ext`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathClass {
+    Internal,
+    External1,
+    External2 { ext: u32 },
+}
+
+impl PathClass {
+    fn rank(self) -> u8 {
+        match self {
+            PathClass::Internal => 0,
+            PathClass::External1 => 1,
+            PathClass::External2 { .. } => 2,
+        }
+    }
+}
+
+/// RFC 2328 §16.4 step 6: `Less` = `a` is the better route to one prefix.
+/// `Equal` routes are merged (`merge_equal`). Intra vs inter-area stays raw
+/// metric.
+/// `ponytail:` no §16.4.1 area preference and no RFC 1583 mode; ceiling: a
+/// multi-area ABR with equal-preference externals in two areas.
+pub(crate) fn prefer(a: &RouteEntry, b: &RouteEntry) -> Ordering {
+    match (a.class, b.class) {
+        (PathClass::External2 { ext: x }, PathClass::External2 { ext: y }) => x
+            .cmp(&y)
+            .then_with(|| a.metric.saturating_sub(x).cmp(&b.metric.saturating_sub(y))),
+        (x, y) => x
+            .rank()
+            .cmp(&y.rank())
+            .then_with(|| a.metric.cmp(&b.metric)),
+    }
 }
 
 impl RouteEntry {
@@ -102,6 +136,7 @@ impl RouteEntry {
             metric,
             backup_next_hop: None,
             egress: Vertex::Router(Ipv4Addr::UNSPECIFIED),
+            class: PathClass::Internal,
         }
     }
 }
@@ -302,12 +337,14 @@ pub fn compute(root: Ipv4Addr, lsas: &[Arc<Lsa>]) -> Vec<RouteEntry> {
     collect_network_routes(root, &routers, &networks, &dist, &next_hop, &mut out);
     collect_stub_routes(root, &routers, &dist, &next_hop, &mut out);
     collect_summary_routes(root, &network_summaries, &dist, &next_hop, &mut out);
+    let attached = root_attached_prefixes(root, &routers, &networks);
     collect_external_routes(
         root,
         &externals,
         &asbr_summaries,
         &dist,
         &next_hop,
+        &attached,
         &mut out,
     );
 
@@ -352,7 +389,7 @@ fn alternates(
     };
     // (neighbor router-id, its address toward us, our cost to it). RFC 5286
     // §3.5: never along a link whose cost or reverse cost (the neighbor's own
-    // link back to root, or to the network) is LSInfinity — an RFC 6987 stub
+    // link back to root, or to the network) is `LSInfinity` — an RFC 6987 stub
     // router on either end.
     let mut candidates: Vec<(Ipv4Addr, Ipv4Addr, u32)> = Vec::new();
     for l in root_lsa
@@ -756,6 +793,7 @@ fn collect_network_routes(
                 metric: d,
                 backup_next_hop: None,
                 egress: vertex,
+                class: PathClass::Internal,
             },
         );
     }
@@ -802,6 +840,7 @@ fn collect_stub_routes(
                     metric: d.saturating_add(u32::from(link.metric)),
                     backup_next_hop: None,
                     egress: vertex,
+                    class: PathClass::Internal,
                 },
             );
         }
@@ -856,6 +895,7 @@ fn collect_intra_area_stub_routes(
                     metric: d.saturating_add(u32::from(link.metric)),
                     backup_next_hop: None,
                     egress: vertex,
+                    class: PathClass::Internal,
                 },
             );
         }
@@ -897,6 +937,7 @@ fn collect_summary_routes(
                 metric: d.saturating_add(s.metric),
                 backup_next_hop: None,
                 egress: vertex,
+                class: PathClass::Internal,
             },
         );
     }
@@ -944,40 +985,40 @@ fn asbr_distance(
     Some((best, hops, egress))
 }
 
-/// RFC 2328 §16.4 AS-external routes, restricted to this NOS's Type-1-only
-/// simplification (see `EXTERNAL_METRIC_CONSTANT`'s doc comment) and
-/// forwarding-address-`0.0.0.0`-only simplification (see
-/// `AsExternalLsaBody`'s doc comment): every external route's next-hop is
-/// always the advertising ASBR's own next-hop, and its cost is always the
-/// ASBR's distance (direct intra-area, or via a Type-4 proxy — see
-/// `asbr_distance`) plus the fixed external metric.
+/// RFC 2328 §16.4 AS-external routes. Per LSA: skip `LSInfinity` (step 1); a
+/// forwarding address of `0.0.0.0` routes via the ASBR (`asbr_distance`, direct
+/// or through a Type-4), any other via the intra-/inter-area route to it
+/// (`resolve_forwarding_address`, step 3; none = skip); the path class
+/// (Type 1 / Type 2) comes from the E bit and `insert_best` ranks with
+/// `prefer`. Must run after every Internal collector, which the FA lookup reads.
 ///
-/// **Explicit `asbr == root` guard**: this router's own Type-5 LSA, once
+/// **Explicit `asbr == root` guard**: this router's own Type-5, once
 /// installed into its own area's LSDB (see `crate::link::
 /// originate_as_external_lsas`), would otherwise compute a spurious route to
-/// its own redistributed prefix via itself at `0 + EXTERNAL_METRIC_CONSTANT`
-/// — `dist` is seeded with `root -> 0`, so this is a real, not hypothetical,
-/// case skipped here the same way `collect_stub_routes` skips `router_id ==
-/// root`.
+/// its own redistributed prefix via itself — `dist` is seeded with `root -> 0`.
 fn collect_external_routes(
     root: Ipv4Addr,
     externals: &[(Ipv4Addr, Ipv4Addr, &AsExternalLsaBody)],
     asbr_summaries: &[(Ipv4Addr, Ipv4Addr, &SummaryLsaBody)],
     dist: &HashMap<Vertex, u32>,
     next_hop: &HashMap<Vertex, Vec<NextHop>>,
+    attached: &[(Ipv4Net, u32)],
     out: &mut HashMap<Ipv4Net, RouteEntry>,
 ) {
     for &(asbr, link_state_id, ext) in externals {
-        if asbr == root {
+        if asbr == root || ext.metric >= LS_INFINITY {
             continue;
         }
-        let Some((d, next_hops, egress)) = asbr_distance(asbr, asbr_summaries, dist, next_hop)
-        else {
+        let resolved = if ext.forwarding_address.is_unspecified() {
+            asbr_distance(asbr, asbr_summaries, dist, next_hop)
+        } else {
+            resolve_forwarding_address(ext.forwarding_address, root, attached, out)
+        };
+        let Some((d, next_hops, egress)) = resolved else {
             continue;
         };
         // Keyed by the truncated prefix like every collector, so a stub
-        // route and an external route to the same prefix collide, and
-        // `insert_best` keeps whichever is cheaper.
+        // route and an external route to the same prefix collide.
         insert_best(
             out,
             RouteEntry {
@@ -986,9 +1027,65 @@ fn collect_external_routes(
                 metric: d.saturating_add(ext.metric),
                 backup_next_hop: None,
                 egress,
+                class: if ext.e_type2 {
+                    PathClass::External2 { ext: ext.metric }
+                } else {
+                    PathClass::External1
+                },
             },
         );
     }
+}
+
+/// RFC 3101 / RFC 2328 §16.4 step 3: cost and next hops to a non-zero
+/// forwarding address — the longest match among the Internal routes in `out`
+/// (intra- and inter-area; an external route doesn't count) and root's own
+/// attached prefixes (`attached`, which `out` leaves out: the FA is then on-link,
+/// next hop the FA itself).
+fn resolve_forwarding_address(
+    fa: Ipv4Addr,
+    root: Ipv4Addr,
+    attached: &[(Ipv4Net, u32)],
+    out: &HashMap<Ipv4Net, RouteEntry>,
+) -> Option<(u32, Vec<Ipv4Addr>, Vertex)> {
+    let route = out
+        .values()
+        .filter(|r| r.class == PathClass::Internal && r.prefix.contains(&fa))
+        .max_by_key(|r| r.prefix.prefix_len());
+    let direct = attached
+        .iter()
+        .filter(|(net, _)| net.contains(&fa))
+        .max_by_key(|(net, _)| net.prefix_len());
+    match (route, direct) {
+        (r, Some(&(net, cost))) if r.is_none_or(|r| net.prefix_len() >= r.prefix.prefix_len()) => {
+            Some((cost, vec![fa], Vertex::Router(root)))
+        }
+        (Some(r), _) if !r.next_hops.is_empty() => Some((r.metric, r.next_hops.clone(), r.egress)),
+        _ => None,
+    }
+}
+
+/// Root's own attached prefixes with their link cost: its stub links and the
+/// transit networks it sits on (mask from the Network-LSA).
+fn root_attached_prefixes(
+    root: Ipv4Addr,
+    routers: &HashMap<Ipv4Addr, &RouterLsaBody>,
+    networks: &HashMap<Ipv4Addr, &NetworkLsaBody>,
+) -> Vec<(Ipv4Net, u32)> {
+    let Some(body) = routers.get(&root) else {
+        return Vec::new();
+    };
+    body.links
+        .iter()
+        .filter_map(|l| match l.link_type {
+            LINK_TYPE_STUB_NETWORK => Some((net_from(l.link_id, l.link_data), l.metric)),
+            LINK_TYPE_TRANSIT_NETWORK => networks
+                .get(&l.link_id)
+                .map(|n| (net_from(l.link_id, n.network_mask), l.metric)),
+            _ => None,
+        })
+        .map(|(net, metric)| (net, u32::from(metric)))
+        .collect()
 }
 
 fn root_attached_to_network(
@@ -1024,9 +1121,11 @@ fn insert_best(out: &mut HashMap<Ipv4Net, RouteEntry>, candidate: RouteEntry) {
         None => {
             out.insert(candidate.prefix, candidate);
         }
-        Some(existing) if candidate.metric < existing.metric => *existing = candidate,
-        Some(existing) if candidate.metric == existing.metric => merge_equal(existing, candidate),
-        Some(_) => {}
+        Some(existing) => match prefer(&candidate, existing) {
+            Ordering::Less => *existing = candidate,
+            Ordering::Equal => merge_equal(existing, candidate),
+            Ordering::Greater => {}
+        },
     }
 }
 
@@ -1409,12 +1508,18 @@ mod tests {
     fn type7_routes_and_translations() {
         let (root, asbr, gone) = (router_id(1), router_id(2), router_id(9));
         let lsas = [
-            router_lsa(root, vec![p2p(asbr, addr(10, 0, 0, 1), 5)]),
+            router_lsa(
+                root,
+                vec![
+                    p2p(asbr, addr(10, 0, 0, 1), 5),
+                    stub(addr(10, 0, 0, 0), addr(255, 255, 255, 0), 5),
+                ],
+            ),
             router_lsa(asbr, vec![p2p(root, addr(10, 0, 0, 2), 5)]),
             type7(addr(192, 0, 2, 0), asbr, true, addr(10, 0, 0, 2)),
             type7(addr(198, 51, 100, 0), asbr, false, addr(10, 0, 0, 2)),
             type7(addr(203, 0, 113, 0), asbr, true, Ipv4Addr::UNSPECIFIED),
-            type7(addr(192, 0, 3, 0), gone, true, addr(10, 0, 0, 9)),
+            type7(addr(192, 0, 3, 0), gone, true, addr(10, 9, 0, 9)),
         ];
         let routes = compute(root, &lsas);
         assert_eq!(routes.len(), 3, "{routes:?}");
@@ -1477,7 +1582,7 @@ mod tests {
     }
 
     #[test]
-    fn external_route_tie_break_against_stub_route_keeps_cheaper() {
+    fn intra_area_route_beats_a_cheaper_external_route() {
         let root = router_id(1);
         let stub_router = router_id(2);
         let asbr = router_id(3);
@@ -1496,14 +1601,166 @@ mod tests {
             stub_router,
             vec![p2p(root, addr(10, 0, 0, 2), 1), stub(net, mask, 100)],
         );
-        // Via the ASBR: cost 1 + EXTERNAL_METRIC_CONSTANT (20) = 21, cheaper.
+        // Via the ASBR: cost 1 + 20 = 21, cheaper but external (§16.4 step 6a).
         let asbr_lsa = router_lsa(asbr, vec![p2p(root, addr(10, 0, 1, 2), 1)]);
         let ext_lsa = as_external_lsa(net, mask, asbr);
 
         let routes = compute(root, &[root_lsa, stub_router_lsa, asbr_lsa, ext_lsa]);
         assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].next_hops, vec![addr(10, 0, 0, 2)]);
+        assert_eq!(routes[0].metric, 101);
+    }
+
+    fn ext_lsa(
+        prefix: Ipv4Addr,
+        asbr: Ipv4Addr,
+        metric: u32,
+        e_type2: bool,
+        fa: Ipv4Addr,
+    ) -> Arc<Lsa> {
+        let mut l = (*as_external_lsa(prefix, addr(255, 255, 255, 0), asbr)).clone();
+        if let LsaBody::AsExternal(e) = &mut l.body {
+            e.metric = metric;
+            e.e_type2 = e_type2;
+            e.forwarding_address = fa;
+        }
+        Arc::new(l)
+    }
+
+    /// Root with two ASBRs behind p2p links of cost `ca`/`cb` (10.0.1.0/30 and
+    /// 10.0.2.0/30 root-side stubs, as `router_lsa_links` emits).
+    fn two_asbrs(ca: u16, cb: u16, extra: Vec<Arc<Lsa>>) -> Vec<Arc<Lsa>> {
+        let (root, a, b) = (router_id(1), router_id(2), router_id(3));
+        let mut lsas = vec![
+            router_lsa(
+                root,
+                vec![
+                    p2p(a, addr(10, 0, 1, 1), ca),
+                    stub(addr(10, 0, 1, 0), addr(255, 255, 255, 252), ca),
+                    p2p(b, addr(10, 0, 2, 1), cb),
+                    stub(addr(10, 0, 2, 0), addr(255, 255, 255, 252), cb),
+                ],
+            ),
+            router_lsa(a, vec![p2p(root, addr(10, 0, 1, 2), ca)]),
+            router_lsa(b, vec![p2p(root, addr(10, 0, 2, 2), cb)]),
+        ];
+        lsas.extend(extra);
+        lsas
+    }
+
+    /// RFC 2328 §16.4 step 6: Type 1 beats Type 2 even when dearer; between
+    /// Type 2s the smaller external metric wins, then the smaller distance;
+    /// equal in both merges the next hops.
+    #[test]
+    fn external_type1_beats_type2_and_type2_compares_metric_then_distance() {
+        let (a, b) = (router_id(2), router_id(3));
+        let p = addr(192, 0, 2, 0);
+        let none = Ipv4Addr::UNSPECIFIED;
+        // Type 1 at 1+500 vs Type 2 at 1+5.
+        let lsas = two_asbrs(
+            1,
+            1,
+            vec![
+                ext_lsa(p, a, 500, false, none),
+                ext_lsa(p, b, 5, true, none),
+            ],
+        );
+        let routes = compute(router_id(1), &lsas);
         assert_eq!(routes[0].next_hops, vec![addr(10, 0, 1, 2)]);
-        assert_eq!(routes[0].metric, 1 + EXTERNAL_METRIC_CONSTANT);
+        // Two Type 2s: smaller ext (b) wins although further away.
+        let lsas = two_asbrs(
+            1,
+            9,
+            vec![ext_lsa(p, a, 50, true, none), ext_lsa(p, b, 40, true, none)],
+        );
+        assert_eq!(
+            compute(router_id(1), &lsas)[0].next_hops,
+            vec![addr(10, 0, 2, 2)]
+        );
+        // Equal ext: the nearer ASBR (a).
+        let lsas = two_asbrs(
+            1,
+            9,
+            vec![ext_lsa(p, a, 40, true, none), ext_lsa(p, b, 40, true, none)],
+        );
+        assert_eq!(
+            compute(router_id(1), &lsas)[0].next_hops,
+            vec![addr(10, 0, 1, 2)]
+        );
+        // Equal in both: merged.
+        let lsas = two_asbrs(
+            1,
+            1,
+            vec![ext_lsa(p, a, 40, true, none), ext_lsa(p, b, 40, true, none)],
+        );
+        let r = &compute(router_id(1), &lsas)[0];
+        assert_eq!(r.next_hops, vec![addr(10, 0, 1, 2), addr(10, 0, 2, 2)]);
+        assert_eq!(r.metric, 41);
+    }
+
+    #[test]
+    fn external_with_ls_infinity_metric_is_skipped() {
+        let lsas = two_asbrs(
+            1,
+            1,
+            vec![ext_lsa(
+                addr(192, 0, 2, 0),
+                router_id(2),
+                LS_INFINITY,
+                false,
+                Ipv4Addr::UNSPECIFIED,
+            )],
+        );
+        assert_eq!(compute(router_id(1), &lsas), []);
+    }
+
+    /// §16.4 step 3: a forwarding address on a root-attached subnet routes
+    /// via the FA itself (not the ASBR), at the link cost.
+    #[test]
+    fn forwarding_address_on_an_attached_subnet_is_the_next_hop() {
+        let fa = addr(10, 0, 2, 3);
+        let lsas = two_asbrs(
+            1,
+            4,
+            vec![ext_lsa(addr(192, 0, 2, 0), router_id(2), 7, false, fa)],
+        );
+        let routes = compute(router_id(1), &lsas);
+        let r = route_to(&routes, "192.0.2.0/24");
+        assert_eq!(r.next_hops, vec![fa]);
+        assert_eq!(r.metric, 4 + 7);
+    }
+
+    /// An FA reached through an inter-area (Type-3) route uses that route's
+    /// cost and next hops; one that only an external route covers, or nothing
+    /// covers, drops the LSA.
+    #[test]
+    fn forwarding_address_resolves_through_inter_area_only() {
+        let (a, none) = (router_id(2), Ipv4Addr::UNSPECIFIED);
+        let mask = addr(255, 255, 255, 0);
+        let lsas = two_asbrs(
+            1,
+            1,
+            vec![
+                network_summary_lsa(addr(172, 16, 0, 0), mask, a, 10),
+                ext_lsa(addr(192, 0, 2, 0), a, 7, false, addr(172, 16, 0, 5)),
+                // FA covered only by the external route above.
+                ext_lsa(addr(198, 51, 100, 0), a, 7, false, addr(192, 0, 2, 9)),
+                ext_lsa(addr(203, 0, 113, 0), a, 7, false, addr(172, 17, 0, 5)),
+                // The metric-less control: still via the ASBR.
+                ext_lsa(addr(100, 64, 0, 0), a, 7, false, none),
+            ],
+        );
+        let routes = compute(router_id(1), &lsas);
+        let r = route_to(&routes, "192.0.2.0/24");
+        assert_eq!(r.next_hops, vec![addr(10, 0, 1, 2)]);
+        assert_eq!(r.metric, 1 + 10 + 7);
+        assert!(routes
+            .iter()
+            .all(|r| r.prefix.addr() != addr(198, 51, 100, 0)));
+        assert!(routes
+            .iter()
+            .all(|r| r.prefix.addr() != addr(203, 0, 113, 0)));
+        assert_eq!(route_to(&routes, "100.64.0.0/24").metric, 8);
     }
 
     #[test]
@@ -1941,7 +2198,7 @@ mod tests {
 
     #[test]
     fn stub_router_neighbor_is_never_an_alternate() {
-        // RFC 5286 §3.5: 3's reverse cost to root is LSInfinity.
+        // RFC 5286 §3.5: 3's reverse cost to root is `LSInfinity`.
         let routes = compute(router_id(1), &triangle_with_stub_router(router_id(3)));
         let r = route_to(&routes, "192.168.2.0/24");
         assert_eq!(r.next_hops, vec![addr(10, 0, 12, 2)]);
@@ -1950,7 +2207,7 @@ mod tests {
 
     #[test]
     fn stub_router_root_has_no_alternates() {
-        // Root's own links are LSInfinity: no alternate at all.
+        // Root's own links are `LSInfinity`: no alternate at all.
         let routes = compute(router_id(1), &triangle_with_stub_router(router_id(1)));
         let r = route_to(&routes, "192.168.2.0/24");
         assert_eq!(r.backup_next_hop, None);
@@ -1960,7 +2217,7 @@ mod tests {
     fn stub_router_on_a_transit_network_is_never_an_alternate() {
         // root — 2 over p2p; root and 3 on one LAN (3 is DR); 3 — 2 over
         // p2p; 2 owns a stub. 3 is a loop-free alternate until its link to
-        // the LAN (its reverse cost) is LSInfinity.
+        // the LAN (its reverse cost) is `LSInfinity`.
         let (root, r2, r3) = (router_id(1), router_id(2), router_id(3));
         let dr = addr(10, 0, 9, 3);
         let lsas = |r3_cost| {

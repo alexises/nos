@@ -489,7 +489,16 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **Authentication (RFC 2328 Appendix D, RFC 5709, RFC 7474).** Described [above](#authenticate-a-link-and-change-its-key). A packet that fails authentication is dropped and logged (`ospf packet authentication failed`). A replayed or out-of-order packet (a sequence number that does not increase) is dropped and logged too.
 
-**AS-external routes (ASBR).** Each redistributed static route becomes one type-5 LSA, flooded to every area the router is in. Other routers compute the route's metric as their distance to the ASBR plus 20. Only static routes can be redistributed, and every external route nos originates is metric type 1 (a type-2 LSA from another router is flooded and translated unchanged, but SPF still sums its metric as type 1); there is no metric-type or per-route metric setting, and the forwarding address is always 0.0.0.0.
+**AS-external routes (ASBR).** Each redistributed static route becomes one type-5 LSA, flooded to every area the router is in. Only static routes can be redistributed, and every external route nos originates is metric type 1 with metric 20; there is no metric-type or per-route metric setting, and the forwarding address is always 0.0.0.0.
+
+**Ranking external routes received from other routers (RFC 2328 §16.4).**
+- An intra-area or inter-area route always beats an external one, even a cheaper one. Type 1 beats type 2, even a cheaper type 2.
+- Type 1: cost is the distance to the ASBR plus the LSA metric.
+- Type 2: the smallest LSA metric wins, then the smaller distance to the ASBR. Equal in both: the next hops are merged (ECMP).
+- An LSA with metric 16777215 (LSInfinity) is ignored.
+- A zero forwarding address routes via the ASBR. A non-zero one routes via that address: it must be covered by an intra-area or inter-area route, or by a subnet the router is attached to (then the next hop is the address itself). Otherwise the LSA is ignored.
+- The route's metric given to the routing table is the distance plus the LSA metric, for both types.
+- Not done: the RFC 2328 §16.4.1 preference between areas, and RFC 1583 compatibility mode.
 
 **Overlapping prefixes (RFC 2328 Appendix E).** Prefixes that share a network address, such as `192.0.2.128/25` and `192.0.2.128/26`, are advertised as separate type-3, type-5 or type-7 LSAs:
 
@@ -521,7 +530,7 @@ When OSPF stops cleanly (and no [graceful restart](#restart-without-dropping-rou
 
 **NSSA (RFC 3101).** Described [above](#redistribute-from-inside-a-stub-like-area-nssa). In an NSSA, Hellos carry the N bit and not the E bit, a type-5 or type-11 LSA is neither sent nor accepted, and a type-7 LSA is never sent or accepted outside one. A type-7 LSA from an ABR has the P bit clear, so no other ABR translates it. The translator doesn't copy the type-7 forwarding address into its type-5 LSA, so traffic to a translated route goes through the translator. Its election has no stability delay: a translator that loses it flushes its type-5 LSAs at once.
 
-**Not supported:** virtual links, metric-type 2 route selection (the E bit is only preserved), redistribution of anything other than static routes, flooding type-11 opaque LSAs between areas, the restarting router's own RFC 3623 restart mode (it resynchronises from scratch while its neighbours help) and strict LSA checking in the helper, BFD, NBMA, and static neighbor lists (so point-to-multipoint only runs over multicast-capable media).
+**Not supported:** virtual links, redistribution of anything other than static routes, flooding type-11 opaque LSAs between areas, the restarting router's own RFC 3623 restart mode (it resynchronises from scratch while its neighbours help) and strict LSA checking in the helper, BFD, NBMA, and static neighbor lists (so point-to-multipoint only runs over multicast-capable media).
 
 ## Configuration reference
 
