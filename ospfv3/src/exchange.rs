@@ -406,6 +406,10 @@ pub fn on_lsu_received(
     let mut acked = Vec::with_capacity(lsu.lsas.len());
     let mut newly_installed = Vec::new();
     for l in &lsu.lsas {
+        // RFC 5340 §4.5 step (3): S2/S1 "reserved" is discarded, not acked.
+        if lsa::is_reserved_scope(l.header.lsa_type) {
+            continue;
+        }
         let store = if lsa::is_link_local_scope(l.header.lsa_type) {
             &mut *link_local_lsdb
         } else if lsa::is_as_scope(l.header.lsa_type) {
@@ -1171,6 +1175,48 @@ mod tests {
         assert!(area.get(&link.header.key()).is_none());
         assert!(link_local.get(&link.header.key()).is_some());
         assert!(link_local.get(&router.header.key()).is_none());
+    }
+
+    /// RFC 5340 §2.9/§4.5: unknown types land by effective scope; a reserved
+    /// scope is discarded without an ack.
+    #[test]
+    fn lsu_stores_unknown_types_by_effective_scope() {
+        let mut adj = AdjacencyData::default();
+        let (mut area, mut link_local, mut as_scope) = (Lsdb::new(), Lsdb::new(), Lsdb::new());
+        let mk = |t: u16| {
+            let mut l = full_lsa("1.1.1.1", 0x8000_0001u32.cast_signed());
+            l.header.lsa_type = t;
+            l.body = lsa::LsaBody::Opaque(vec![9; 8]);
+            l
+        };
+        let (u_area, u_as, u_link, no_u, reserved) =
+            (mk(0xA0FF), mk(0xC0FF), mk(0x80FF), mk(0x20FF), mk(0xE0FF));
+        let lsu = LsuPacket {
+            router_id: router_id("9.9.9.10"),
+            area_id: Ipv4Addr::UNSPECIFIED,
+            lsas: vec![
+                u_area.clone(),
+                u_as.clone(),
+                u_link.clone(),
+                no_u.clone(),
+                reserved.clone(),
+            ],
+        };
+        let (actions, installed) =
+            on_lsu_received(&mut adj, &mut area, &mut link_local, &mut as_scope, &lsu);
+        assert_eq!(installed.len(), 4);
+        assert!(area.get(&u_area.header.key()).is_some());
+        assert!(as_scope.get(&u_as.header.key()).is_some());
+        assert!(link_local.get(&u_link.header.key()).is_some());
+        assert!(link_local.get(&no_u.header.key()).is_some());
+        assert!(area.get(&no_u.header.key()).is_none());
+        for s in [&area, &link_local, &as_scope] {
+            assert!(s.get(&reserved.header.key()).is_none());
+        }
+        let Action::SendLsAck(acked) = &actions[0] else {
+            panic!("expected ack")
+        };
+        assert_eq!(acked.len(), 4);
     }
 
     #[test]
