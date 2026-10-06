@@ -755,6 +755,17 @@ pub struct Args {
     #[arg(long)]
     pub lacp_system_id: Option<String>,
 
+    /// If set (requires `--port-aggregate`), sets the aggregate's LACP Actor
+    /// System Priority (`PortAggregateOp::SetLacpSystemPriority`).
+    #[arg(long)]
+    pub lacp_system_priority: Option<u16>,
+
+    /// If set (requires `--port-aggregate`), sets the LACP Actor Port Priority
+    /// of every `--enslave-interface-into-port-aggregate` member
+    /// (`InterfaceOp::SetLacpPortPriority`).
+    #[arg(long)]
+    pub lacp_port_priority: Option<u16>,
+
     /// If set (requires `--port-aggregate`), makes the aggregate an untagged
     /// member of this broadcast domain: ensures the domain, a switching
     /// profile `<aggregate>-sp` holding it, and assigns that profile to the
@@ -2097,6 +2108,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 system_id,
             }));
         }
+        if let Some(priority) = args.lacp_system_priority {
+            ops.push(ConfigOp::PortAggregate(
+                PortAggregateOp::SetLacpSystemPriority {
+                    name: name.clone(),
+                    priority,
+                },
+            ));
+        }
         if let Some(domain) = args.port_aggregate_untagged_domain.clone() {
             let profile = format!("{name}-sp");
             ops.push(ConfigOp::BroadcastDomain(BroadcastDomainOp::Ensure {
@@ -2125,6 +2144,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 name: member.clone(),
                 port_aggregate: name.clone(),
             }));
+            if let Some(priority) = args.lacp_port_priority {
+                ops.push(ConfigOp::Interface(InterfaceOp::SetLacpPortPriority {
+                    name: member.clone(),
+                    priority,
+                }));
+            }
         }
     } else if args.port_aggregate_mtu.is_some()
         || args.port_aggregate_address.is_some()
@@ -2133,12 +2158,14 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || args.port_aggregate_redundancy_mode.is_some()
         || args.port_aggregate_df_algorithm.is_some()
         || args.lacp_system_id.is_some()
+        || args.lacp_system_priority.is_some()
+        || args.lacp_port_priority.is_some()
         || args.port_aggregate_untagged_domain.is_some()
         || args.lacp_rate.is_some()
         || !args.port_aggregate_members.is_empty()
     {
         bail!(
-            "--port-aggregate-mtu/--port-aggregate-address/--port-aggregate-esi/--port-aggregate-redundancy-mode/--port-aggregate-df-algorithm/--lacp-system-id/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
+            "--port-aggregate-mtu/--port-aggregate-address/--port-aggregate-esi/--port-aggregate-redundancy-mode/--port-aggregate-df-algorithm/--lacp-system-id/--lacp-system-priority/--lacp-port-priority/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
         );
     }
 
@@ -3088,6 +3115,10 @@ mod tests {
             "single-active",
             "--lacp-system-id",
             "02:00:00:00:00:01",
+            "--lacp-system-priority",
+            "100",
+            "--lacp-port-priority",
+            "200",
             "--port-aggregate-untagged-domain",
             "bd1",
             "--enslave-interface-into-port-aggregate",
@@ -3152,6 +3183,20 @@ mod tests {
                 name: "sp".into(),
                 broadcast_domain: "bd2".into(),
                 tag: VlanTag::Dot1q(20),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::PortAggregate(PortAggregateOp::SetLacpSystemPriority {
+                name: "bond0".into(),
+                priority: 100,
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Interface(InterfaceOp::SetLacpPortPriority {
+                name: "eth1".into(),
+                priority: 200,
             }),
         );
         has(
@@ -3548,6 +3593,8 @@ mod tests {
             ),
             (&["--delete-port-aggregate"], "requires --port-aggregate"),
             (&["--lacp-rate", "slow"], "require --port-aggregate"),
+            (&["--lacp-system-priority", "1"], "require --port-aggregate"),
+            (&["--lacp-port-priority", "1"], "require --port-aggregate"),
             (
                 &["--lldp-destination-interface", "eth1"],
                 "<interface>=<group>",

@@ -927,6 +927,21 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              sees one partner and bundles its links across them. Must be a unicast MAC. `delete` \
              goes back to the derived id.",
         ),
+        Topic::PortAggregateLacpSystemPriority => (
+            "Set a port aggregate's LACP Actor System Priority.",
+            "Sets the priority nos-lacpd advertises as the Actor System Priority of the named \
+             `lacp`-mode aggregate, 0-65535, default 32768. Lower is higher priority; the partner \
+             sees it in its Partner System Priority. `delete` goes back to 32768. Changing it \
+             restarts LACP on every member of the aggregate.",
+        ),
+        Topic::InterfaceLacpPortPriority => (
+            "Set an interface's LACP Actor Port Priority.",
+            "Sets the priority nos-lacpd advertises as the Actor Port Priority for this interface \
+             when it is a member of a `lacp`-mode port aggregate, 0-65535, default 32768. Lower \
+             is higher priority. It breaks ties when the partner splits the aggregate's members \
+             into equally sized groups: the group holding the lowest (port priority, port number) \
+             is kept. `delete` goes back to 32768. Changing it restarts LACP on this member only.",
+        ),
         Topic::PortAggregateRedundancyMode => (
             "Set how the PEs sharing a port aggregate's Ethernet Segment divide the traffic.",
             "Sets the redundancy-mode of the named port aggregate: `all-active` (the default) lets \

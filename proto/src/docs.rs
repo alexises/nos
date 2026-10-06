@@ -353,6 +353,10 @@ topics! {
     BgpPeerGroupAddPath,
     /// `BgpPeerGroup.add_path_send_count`
     BgpPeerGroupAddPathSendCount,
+    /// `PortAggregate.lacp_system_priority`
+    PortAggregateLacpSystemPriority,
+    /// `Interface.lacp_port_priority`
+    InterfaceLacpPortPriority,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

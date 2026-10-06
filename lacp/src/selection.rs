@@ -26,13 +26,21 @@ pub struct PortCandidate {
     pub current: bool,
     pub partner_system_id: [u8; 6],
     pub partner_key: u16,
+    /// This port's own advertised Actor Port Priority and number (lower wins
+    /// the tie-break in [`select`]).
+    pub actor_port_priority: u16,
+    pub actor_port_number: u16,
 }
 
 /// Returns the subset of `candidates` that should be `Selected`: every
 /// `current` port whose partner (system-id, key) matches the aggregate's
 /// most common such pair among its `current` ports — a `current` port
 /// disagreeing with that majority is excluded (a basic split-detection). A
-/// tie is broken by input order, for determinism.
+/// tie between equally large groups goes to the group holding the port with
+/// the lowest (actor port priority, actor port number) — lower priority
+/// value wins, as in LACP generally. Because membership is config-fixed and there
+/// is no standby/`max-links`, this tie-break is the only place priorities
+/// change which ports are selected.
 pub fn select(candidates: &[PortCandidate]) -> HashSet<String> {
     let mut counts: Vec<([u8; 6], u16, usize)> = Vec::new();
     for c in candidates.iter().filter(|c| c.current) {
@@ -42,9 +50,21 @@ pub fn select(candidates: &[PortCandidate]) -> HashSet<String> {
             None => counts.push((key.0, key.1, 1)),
         }
     }
-    let Some(&(winning_system, winning_key, _)) = counts.iter().max_by_key(|(_, _, n)| *n) else {
+    let Some(&(_, _, best)) = counts.iter().max_by_key(|(_, _, n)| *n) else {
         return HashSet::new();
     };
+    let rank = |system: [u8; 6], key: u16| {
+        candidates
+            .iter()
+            .filter(|c| c.current && (c.partner_system_id, c.partner_key) == (system, key))
+            .map(|c| (c.actor_port_priority, c.actor_port_number))
+            .min()
+    };
+    let &(winning_system, winning_key, _) = counts
+        .iter()
+        .filter(|(_, _, n)| *n == best)
+        .min_by_key(|(s, k, _)| rank(*s, *k))
+        .expect("a group of the best size exists");
     candidates
         .iter()
         .filter(|c| {
@@ -64,7 +84,41 @@ mod tests {
             current,
             partner_system_id: [0, 0, 0, 0, 0, system],
             partner_key: key,
+            actor_port_priority: 32768,
+            actor_port_number: 1,
         }
+    }
+
+    fn with_port(mut c: PortCandidate, priority: u16, number: u16) -> PortCandidate {
+        c.actor_port_priority = priority;
+        c.actor_port_number = number;
+        c
+    }
+
+    #[test]
+    fn tie_goes_to_lowest_port_priority_then_number() {
+        let split = |p1, n1, p2, n2| {
+            select(&[
+                with_port(candidate("eth1", true, 1, 1), p1, n1),
+                with_port(candidate("eth2", true, 2, 2), p2, n2),
+            ])
+        };
+        assert_eq!(split(200, 1, 100, 2), HashSet::from(["eth2".to_string()]));
+        assert_eq!(split(100, 1, 200, 2), HashSet::from(["eth1".to_string()]));
+        assert_eq!(split(100, 2, 100, 1), HashSet::from(["eth2".to_string()]));
+    }
+
+    #[test]
+    fn majority_beats_port_priority() {
+        let selected = select(&[
+            with_port(candidate("eth1", true, 1, 1), 1, 1),
+            with_port(candidate("eth2", true, 2, 2), 9, 2),
+            with_port(candidate("eth3", true, 2, 2), 9, 3),
+        ]);
+        assert_eq!(
+            selected,
+            HashSet::from(["eth2".to_string(), "eth3".to_string()])
+        );
     }
 
     #[test]

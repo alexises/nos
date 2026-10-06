@@ -70,6 +70,15 @@ pub enum PortAggregateOp {
         name: String,
         algorithm: DfAlgorithm,
     },
+    /// Appended (postcard indexes variants by position).
+    SetLacpSystemPriority {
+        name: String,
+        priority: u16,
+    },
+    /// Appended (postcard indexes variants by position).
+    ClearLacpSystemPriority {
+        name: String,
+    },
 }
 
 impl PortAggregateOp {
@@ -85,6 +94,7 @@ impl PortAggregateOp {
                         redundancy_mode: EsRedundancy::default(),
                         df_algorithm: DfAlgorithm::default(),
                         lacp_system_id: None,
+                        lacp_system_priority: None,
                         switching_profile: None,
                         mtu: None,
                         subinterfaces: Vec::new(),
@@ -136,6 +146,14 @@ impl PortAggregateOp {
                 find_aggregate_mut(config, name)?.lacp_system_id = None;
                 Ok(())
             }
+            PortAggregateOp::SetLacpSystemPriority { name, priority } => {
+                find_aggregate_mut(config, name)?.lacp_system_priority = Some(*priority);
+                Ok(())
+            }
+            PortAggregateOp::ClearLacpSystemPriority { name } => {
+                find_aggregate_mut(config, name)?.lacp_system_priority = None;
+                Ok(())
+            }
             PortAggregateOp::SetRedundancyMode { name, mode } => {
                 find_aggregate_mut(config, name)?.redundancy_mode = *mode;
                 Ok(())
@@ -180,6 +198,7 @@ mod tests {
             redundancy_mode: EsRedundancy::default(),
             df_algorithm: DfAlgorithm::default(),
             lacp_system_id: None,
+            lacp_system_priority: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
@@ -291,6 +310,29 @@ mod tests {
             cfg.port_aggregates[0].redundancy_mode,
             EsRedundancy::SingleActive
         );
+    }
+
+    #[test]
+    fn set_and_clear_lacp_system_priority() {
+        let mut cfg = Config::default();
+        let name = "bond1".to_string();
+        PortAggregateOp::Ensure {
+            name: name.clone(),
+            mode: PortAggregateMode::Lacp,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        PortAggregateOp::SetLacpSystemPriority {
+            name: name.clone(),
+            priority: 100,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.port_aggregates[0].lacp_system_priority, Some(100));
+        PortAggregateOp::ClearLacpSystemPriority { name }
+            .apply(&mut cfg)
+            .unwrap();
+        assert_eq!(cfg.port_aggregates[0].lacp_system_priority, None);
     }
 
     #[test]

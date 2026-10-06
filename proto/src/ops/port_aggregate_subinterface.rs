@@ -234,6 +234,7 @@ mod tests {
             redundancy_mode: crate::schema::EsRedundancy::default(),
             df_algorithm: crate::schema::DfAlgorithm::default(),
             lacp_system_id: None,
+            lacp_system_priority: None,
             switching_profile: None,
             mtu: None,
             subinterfaces,

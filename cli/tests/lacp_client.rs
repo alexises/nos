@@ -12,6 +12,7 @@ fn sample() -> PortAggregateLacpSummary {
         aggregate: "bond1".to_string(),
         actor_system_id: [2, 0, 0, 0, 0, 1],
         actor_key: 1,
+        actor_system_priority: 32768,
         rate: LacpRate::Fast,
         ports: vec![LacpPortStatus {
             interface: "eth1".to_string(),
@@ -21,6 +22,9 @@ fn sample() -> PortAggregateLacpSummary {
             partner_system_id: Some([2, 0, 0, 0, 0, 2]),
             partner_key: Some(1),
             partner_port_number: Some(4),
+            actor_port_priority: 32768,
+            partner_system_priority: Some(32768),
+            partner_port_priority: Some(32768),
             selected: true,
             synchronized: true,
             actor_churn: false,

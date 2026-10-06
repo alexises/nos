@@ -147,8 +147,20 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     on.extend(strings(&both));
     let mut on_a = on.clone();
     on_a.extend(strings(&["--lacp-system-id", LACP_SYSTEM_ID_A]));
+    on_a.extend(strings(&[
+        "--lacp-system-priority",
+        &LACP_SYSTEM_PRIORITY_A.to_string(),
+        "--lacp-port-priority",
+        &LACP_PORT_PRIORITY_A.to_string(),
+    ]));
     let mut on_b = on;
     on_b.extend(strings(&["--lacp-system-id", LACP_SYSTEM_ID_B]));
+    on_b.extend(strings(&[
+        "--lacp-system-priority",
+        &LACP_SYSTEM_PRIORITY_B.to_string(),
+        "--lacp-port-priority",
+        &LACP_PORT_PRIORITY_B.to_string(),
+    ]));
     a.provision(&on_a).await?;
     b.provision(&on_b).await?;
 
@@ -185,6 +197,44 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
             .all(|p| p["partner_system_id"] == id([2, 0, 0, 0, 0x0b, 1]))
     }) {
         bail!("router-a's partners are not router-b's configured system id: {body}");
+    }
+
+    log("configured system/port priorities are advertised, and each side sees the other's");
+    for (r, sys, port, p_sys, p_port) in [
+        (
+            a,
+            LACP_SYSTEM_PRIORITY_A,
+            LACP_PORT_PRIORITY_A,
+            LACP_SYSTEM_PRIORITY_B,
+            LACP_PORT_PRIORITY_B,
+        ),
+        (
+            b,
+            LACP_SYSTEM_PRIORITY_B,
+            LACP_PORT_PRIORITY_B,
+            LACP_SYSTEM_PRIORITY_A,
+            LACP_PORT_PRIORITY_A,
+        ),
+    ] {
+        let body = r
+            .rest_expect(reqwest::Method::GET, "/v1/lacp", None, 200)
+            .await?;
+        let summary: serde_json::Value = serde_json::from_str(&body)?;
+        let agg = summary
+            .as_array()
+            .and_then(|v| v.iter().find(|s| s["aggregate"] == LACP_AGGREGATE))
+            .with_context(|| format!("no {LACP_AGGREGATE} in show lacp: {body}"))?;
+        if agg["actor_system_priority"] != sys
+            || !agg["ports"].as_array().is_some_and(|ports| {
+                ports.iter().all(|p| {
+                    p["actor_port_priority"] == port
+                        && p["partner_system_priority"] == p_sys
+                        && p["partner_port_priority"] == p_port
+                })
+            })
+        {
+            bail!("lacp priorities are not the configured ones (want sys {sys} port {port}, partner {p_sys}/{p_port}): {body}");
+        }
     }
 
     log("waiting for both routers to actually enslave eth1/eth2 into the real kernel bond");
@@ -299,6 +349,42 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
         .await?;
     if body.contains("\"partner_churn\":true") {
         bail!("a partner is still flagged churned after recovery: {body}");
+    }
+
+    // A changed system priority restarts router-a's members, which
+    // renegotiate: router-b ends up seeing the new value from a Current,
+    // Distributing partner again.
+    log("changing router-a's system priority restarts its members and they renegotiate");
+    let mut changed = lacp_flags(&["--lacp-rate", "fast"]);
+    changed.extend(strings(&both));
+    changed.extend(strings(&[
+        "--lacp-system-priority",
+        &LACP_SYSTEM_PRIORITY_A_CHANGED.to_string(),
+    ]));
+    a.provision(&changed).await?;
+    let mut seen = false;
+    for _ in 0..30 {
+        let body = b
+            .rest_expect(reqwest::Method::GET, "/v1/lacp", None, 200)
+            .await?;
+        let summary: serde_json::Value = serde_json::from_str(&body)?;
+        seen = summary
+            .as_array()
+            .and_then(|v| v.iter().find(|s| s["aggregate"] == LACP_AGGREGATE))
+            .and_then(|s| s["ports"].as_array())
+            .is_some_and(|ports| {
+                ports.iter().all(|p| {
+                    p["partner_system_priority"] == LACP_SYSTEM_PRIORITY_A_CHANGED
+                        && p["mux_state"] == "Distributing"
+                })
+            });
+        if seen {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    if !seen {
+        bail!("router-b never saw router-a's changed system priority on Distributing ports");
     }
 
     let mut off = lacp_flags(&[]);

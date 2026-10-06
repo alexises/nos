@@ -95,6 +95,15 @@ pub enum InterfaceOp {
     Delete {
         name: String,
     },
+    /// Appended (postcard indexes variants by position).
+    SetLacpPortPriority {
+        name: String,
+        priority: u16,
+    },
+    /// Appended (postcard indexes variants by position).
+    ClearLacpPortPriority {
+        name: String,
+    },
 }
 
 impl InterfaceOp {
@@ -110,6 +119,7 @@ impl InterfaceOp {
                         ospfv3_profile: None,
                         switching_profile: None,
                         port_aggregate: None,
+                        lacp_port_priority: None,
                         mtu: None,
                         lldp_transmit: false,
                         lldp_receive: false,
@@ -219,6 +229,14 @@ impl InterfaceOp {
                 find_interface_mut(config, name)?.port_aggregate = Some(port_aggregate.clone());
                 Ok(())
             }
+            InterfaceOp::SetLacpPortPriority { name, priority } => {
+                find_interface_mut(config, name)?.lacp_port_priority = Some(*priority);
+                Ok(())
+            }
+            InterfaceOp::ClearLacpPortPriority { name } => {
+                find_interface_mut(config, name)?.lacp_port_priority = None;
+                Ok(())
+            }
             InterfaceOp::ClearPortAggregate { name } => {
                 find_interface_mut(config, name)?.port_aggregate = None;
                 Ok(())
@@ -259,6 +277,7 @@ mod tests {
             ospfv3_profile: None,
             switching_profile: None,
             port_aggregate: None,
+            lacp_port_priority: None,
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,
@@ -302,6 +321,7 @@ mod tests {
                 ospf_profile: None,
                 switching_profile: None,
                 port_aggregate: None,
+                lacp_port_priority: None,
                 mtu: None,
                 lldp_transmit: false,
                 lldp_receive: false,
@@ -567,6 +587,26 @@ mod tests {
         .apply(&mut cfg)
         .unwrap();
         assert_eq!(cfg.interfaces[0].switching_profile, None);
+    }
+
+    #[test]
+    fn set_and_clear_lacp_port_priority() {
+        let mut cfg = Config::default();
+        let name = "eth1".to_string();
+        InterfaceOp::Ensure { name: name.clone() }
+            .apply(&mut cfg)
+            .unwrap();
+        InterfaceOp::SetLacpPortPriority {
+            name: name.clone(),
+            priority: 7,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.interfaces[0].lacp_port_priority, Some(7));
+        InterfaceOp::ClearLacpPortPriority { name }
+            .apply(&mut cfg)
+            .unwrap();
+        assert_eq!(cfg.interfaces[0].lacp_port_priority, None);
     }
 
     #[test]

@@ -46,6 +46,10 @@ pub struct LacpPortStatus {
     pub partner_system_id: Option<[u8; 6]>,
     pub partner_key: Option<u16>,
     pub partner_port_number: Option<u16>,
+    /// This port's advertised Actor Port Priority.
+    pub actor_port_priority: u16,
+    pub partner_system_priority: Option<u16>,
+    pub partner_port_priority: Option<u16>,
     /// This port's Selection Logic outcome (`selection.rs`) — `true` iff it
     /// agrees with the aggregate's other `Current` ports on partner
     /// identity.
@@ -67,6 +71,8 @@ pub struct PortAggregateLacpSummary {
     pub aggregate: String,
     pub actor_system_id: [u8; 6],
     pub actor_key: u16,
+    /// The aggregate's advertised Actor System Priority.
+    pub actor_system_priority: u16,
     /// The aggregate's configured `lacp-rate`.
     pub rate: crate::schema::LacpRate,
     pub ports: Vec<LacpPortStatus>,

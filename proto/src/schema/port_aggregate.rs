@@ -139,6 +139,14 @@ pub struct PortAggregate {
     #[cli(topic = PortAggregateLacpSystemId)]
     pub lacp_system_id: Option<String>,
 
+    /// The LACP Actor System Priority `nos-lacpd` advertises for this bond
+    /// (802.1AX); `None` = 32768. Lower is higher priority. Only meaningful
+    /// for a `Lacp`-mode aggregate; ignored (not rejected) otherwise.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = PortAggregateLacpSystemPriority)]
+    pub lacp_system_priority: Option<u16>,
+
     /// Names a `SwitchingProfile` trunking this bond into one or more
     /// `BroadcastDomain`s — same field, same meaning, as
     /// `Interface.switching_profile`.
@@ -264,6 +272,7 @@ mod tests {
             redundancy_mode: EsRedundancy::default(),
             df_algorithm: DfAlgorithm::default(),
             lacp_system_id: None,
+            lacp_system_priority: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),

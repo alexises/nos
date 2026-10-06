@@ -294,6 +294,7 @@ mod tests {
             ospfv3_profile: None,
             switching_profile: None,
             port_aggregate: None,
+            lacp_port_priority: None,
             mtu: None,
             lldp_transmit: tx,
             lldp_receive: rx,

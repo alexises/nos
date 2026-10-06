@@ -43,9 +43,9 @@ The same on router-b. Once both ends have negotiated:
 
 ```
 router-a> show lacp
-lacp bond-lacp: system 02:47:33:45:65:f2, key 1, rate fast
-  eth1: port 17, receive current, mux distributing, partner 02:e1:8b:33:6b:4c key 1 port 4, selected yes, synchronized yes, churn none
-  eth2: port 18, receive current, mux distributing, partner 02:e1:8b:33:6b:4c key 1 port 5, selected yes, synchronized yes, churn none
+lacp bond-lacp: system 02:47:33:45:65:f2, key 1, rate fast, system priority 32768
+  eth1: port 17, receive current, mux distributing, partner 02:e1:8b:33:6b:4c key 1 port 4, selected yes, synchronized yes, churn none, port priority 32768, partner priority 32768/32768
+  eth2: port 18, receive current, mux distributing, partner 02:e1:8b:33:6b:4c key 1 port 5, selected yes, synchronized yes, churn none, port priority 32768, partner priority 32768/32768
 router-a> show port-aggregate
 port-aggregate bond-lacp: mode Lacp, switching-profile unset, mtu 1500
 ```
@@ -142,6 +142,13 @@ REST: `DELETE …/interface/eth1/port-aggregate`, the same for `eth2`, then `DEL
 
 **LACP identity.** An LACP partner is identified by a system ID (a MAC address) and a key. NOS derives both from the router and the aggregate; `show lacp` shows them as `system` and `key`. `lacp-system-id` overrides the system ID. It is meant for EVPN multi-homing, where two routers present one LACP partner to a dual-homed device: set the same value on both.
 
+**Priorities.** Each end advertises an Actor System Priority (per aggregate, `lacp-system-priority`) and an Actor Port Priority (per member interface, `lacp-port-priority`), both 0-65535 with default 32768; a lower value is a higher priority. `show lacp` prints your own values and the partner's (`partner priority <system>/<port>`).
+
+- Membership of an aggregate is fixed by configuration and there is no standby link, so priorities do not choose which members carry traffic.
+- They matter in one case: if the partner splits your members into equally sized groups, the group holding the member with the lowest (port priority, port number) is kept.
+- Changing the system priority restarts LACP on every member of the aggregate; changing a member's port priority restarts only that member. Each renegotiates and rejoins the bond.
+- Set with `set port-aggregate bond-lacp lacp-system-priority 100` and `set interface eth1 lacp-port-priority 100`; `delete` goes back to 32768. They have no effect on an `xor` aggregate.
+
 **EVPN multi-homing.** `esi` attaches the aggregate to an EVPN Ethernet Segment, `redundancy-mode` chooses all-active or single-active forwarding for it, and `df-algorithm` the designated forwarder election. They are documented with EVPN.
 
 **`show port-aggregate`** shows each aggregate's mode, switching profile, MTU and subinterfaces, as applied; `show lacp` the LACP state of every `lacp` aggregate. Neither lists the members of an `xor` aggregate: check them in `show config`.
@@ -162,6 +169,7 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 | mode | `set port-aggregate <pa> mode xor\|lacp` / `set mode xor\|lacp` | `port-aggregate/<pa>/mode`, body `"Xor"` or `"Lacp"` | `xor` (default) or `lacp` | | `xor`: members join unconditionally; `lacp`: members join once negotiated | `show port-aggregate`, `show lacp` |
 | lacp-rate | `set port-aggregate <pa> lacp-rate fast\|slow` / `set lacp-rate fast\|slow` | `port-aggregate/<pa>/lacp-rate`, body `"Fast"` or `"Slow"` | `slow` (default) or `fast` | | asks the partner for LACPDUs every 1 s (`fast`) or 30 s (`slow`); `lacp` mode only | `show lacp` (`rate`) |
 | lacp-system-id | `set port-aggregate <pa> lacp-system-id <mac>` / `set lacp-system-id <mac>`; `delete … lacp-system-id` | `port-aggregate/<pa>/lacp-system-id` | unicast MAC, `02:00:00:00:00:01`; default derived | a unicast MAC | the LACP system ID advertised to the partner | `show lacp` (`system`) |
+| lacp-system-priority | `set port-aggregate <pa> lacp-system-priority <n>` / `set lacp-system-priority <n>`; `delete … lacp-system-priority` | `port-aggregate/<pa>/lacp-system-priority` | 0-65535; default 32768 | | the Actor System Priority advertised to the partner; a change restarts every member's LACP; `lacp` mode only | `show lacp` (`system priority`) |
 | esi | `set port-aggregate <pa> esi <esi>` / `set esi <esi>`; `delete … esi` | `port-aggregate/<pa>/esi` | 10 hex bytes; default unset | not all zero; unique among aggregates | EVPN Ethernet Segment, see EVPN | `show bgp evpn` |
 | redundancy-mode | `set port-aggregate <pa> redundancy-mode all-active\|single-active` / `set redundancy-mode …` | `port-aggregate/<pa>/redundancy-mode`, body `"AllActive"` or `"SingleActive"` | `all-active` (default) | `single-active` needs an `esi` | EVPN multi-homing mode, see EVPN | `show config` |
 | df-algorithm | `set port-aggregate <pa> df-algorithm modulo\|hrw` / `set df-algorithm …` | `port-aggregate/<pa>/df-algorithm`, body `"Modulo"` or `"Hrw"` | `modulo` (default) | `hrw` needs an `esi` | EVPN designated forwarder election algorithm, see EVPN | `show config` |
@@ -176,5 +184,6 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 | Field | CLI | REST path | Type, range, default | Validation at commit | Effect | Check with |
 |---|---|---|---|---|---|---|
 | port-aggregate | `set interface <if> port-aggregate <pa>` / `set port-aggregate <pa>`; `delete interface <if> port-aggregate` / `delete port-aggregate` | `interface/<if>/port-aggregate` | name; default unset | aggregate exists; the interface has no subinterfaces and no switching profile | makes the interface a member | `show lacp` |
+| lacp-port-priority | `set interface <if> lacp-port-priority <n>` / `set lacp-port-priority <n>`; `delete … lacp-port-priority` | `interface/<if>/lacp-port-priority` | 0-65535; default 32768 | | the Actor Port Priority advertised for this member; a change restarts this member's LACP only; meaningful while it is in a `lacp` aggregate | `show lacp` (`port priority`) |
 
 Implementation notes for developers are in [`lacp/CLAUDE.md`](../../lacp/CLAUDE.md) and [`interface/CLAUDE.md`](../../interface/CLAUDE.md).
