@@ -405,10 +405,36 @@ pub(crate) fn valid_route_reflection_and_server(instances: &[BgpInstance]) -> ga
                     "add-path-send-count requires add-path send or both",
                 ));
             }
+            valid_role(instance, group)?;
             if let Some(l) = group.local_as {
                 valid_local_as(instance, group.remote_as, group.route_server_client, l.asn)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// RFC 9234 roles are an eBGP concept (not iBGP, not a confederation
+/// member); `strict-mode` needs a role; a route-server-client group's peers
+/// can only be route-server(-client)s.
+fn valid_role(instance: &BgpInstance, group: &crate::schema::BgpPeerGroup) -> garde::Result {
+    use crate::schema::BgpRole::{RouteServer, RouteServerClient};
+    let Some(role) = group.role else {
+        return if group.strict_mode {
+            Err(garde::Error::new("strict-mode requires a role"))
+        } else {
+            Ok(())
+        };
+    };
+    if group.remote_as == instance.asn || instance.confederation.is_member(group.remote_as) {
+        return Err(garde::Error::new(
+            "role requires an eBGP peer-group outside the confederation",
+        ));
+    }
+    if group.route_server_client && !matches!(role, RouteServer | RouteServerClient) {
+        return Err(garde::Error::new(
+            "a route-server-client peer-group's role can only be route-server or route-server-client",
+        ));
     }
     Ok(())
 }
@@ -614,6 +640,8 @@ mod tests {
                 local_as: None,
                 add_path: None,
                 add_path_send_count: None,
+                role: None,
+                strict_mode: false,
             },
             BgpPeerGroup {
                 name: "invalid".to_string(),
@@ -639,6 +667,8 @@ mod tests {
                 local_as: None,
                 add_path: None,
                 add_path_send_count: None,
+                role: None,
+                strict_mode: false,
             },
         ];
         let cfg = config_with(vec![inst]);
@@ -676,6 +706,8 @@ mod tests {
             local_as: None,
             add_path: None,
             add_path_send_count: None,
+            role: None,
+            strict_mode: false,
         }
     }
 
@@ -869,5 +901,45 @@ mod tests {
             65001,
             crate::schema::BgpDamping { half_life: 0, ..d }
         ));
+    }
+
+    #[test]
+    fn role_is_checked() {
+        use crate::schema::BgpRole::{Customer, Provider, RouteServer};
+        let check = |remote_as: u32,
+                     role: Option<crate::schema::BgpRole>,
+                     strict: bool,
+                     rs: bool,
+                     confed: bool| {
+            let mut inst = instance("r1", 65000);
+            if confed {
+                inst.confederation = crate::schema::BgpConfederation {
+                    identifier: Some(65100),
+                    peers: vec![65002],
+                };
+            }
+            let mut g = group_with_flags("pg1", remote_as, false, rs);
+            g.role = role;
+            g.strict_mode = strict;
+            inst.peer_groups = vec![g];
+            let cfg = config_with(vec![inst]);
+            cfg.validate_with(&cfg).is_ok()
+        };
+        assert!(check(65001, Some(Provider), true, false, false));
+        assert!(check(65001, None, false, false, false));
+        assert!(
+            !check(65001, None, true, false, false),
+            "strict needs a role"
+        );
+        assert!(!check(65000, Some(Provider), false, false, false), "iBGP");
+        assert!(
+            !check(65002, Some(Provider), false, false, true),
+            "confed member"
+        );
+        assert!(check(65001, Some(RouteServer), false, true, false));
+        assert!(
+            !check(65001, Some(Customer), false, true, false),
+            "rs-client group"
+        );
     }
 }

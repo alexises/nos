@@ -388,6 +388,15 @@ pub struct Args {
     #[arg(long)]
     pub add_path_send_count: Option<u8>,
 
+    /// If set, sets `--peer-group`'s RFC 9234 role (`provider`, `route-server`,
+    /// `route-server-client`, `customer` or `peer`; `BgpPeerGroupOp::SetRole`).
+    #[arg(long, value_parser = parse_role)]
+    pub role: Option<nos_proto::BgpRole>,
+
+    /// RFC 9234 strict mode on `--peer-group` (`BgpPeerGroupOp::SetStrictMode`).
+    #[arg(long)]
+    pub strict_mode: bool,
+
     /// One `<family>=<limit>` per repetition (`ipv4`, `ipv6`, `l2vpn-evpn`):
     /// sets `--peer-group`'s RFC 4486 maximum-prefix for that family
     /// (`BgpPeerGroupOp::SetMaximumPrefix`), with the two flags below.
@@ -1165,6 +1174,18 @@ fn parse_add_path(s: &str) -> Result<nos_proto::BgpAddPath, String> {
         .ok_or_else(|| format!("unknown add-path mode '{s}' (receive, send, both)"))
 }
 
+fn parse_role(s: &str) -> Result<nos_proto::BgpRole, String> {
+    use nos_proto::BgpRole::{Customer, Peer, Provider, RouteServer, RouteServerClient};
+    [Provider, RouteServer, RouteServerClient, Customer, Peer]
+        .into_iter()
+        .find(|r| r.as_str() == s)
+        .ok_or_else(|| {
+            format!(
+                "unknown role '{s}' (provider, route-server, route-server-client, customer, peer)"
+            )
+        })
+}
+
 fn parse_maximum_prefix(s: &str) -> Result<(AddressFamily, u32), String> {
     let (af, n) = s
         .split_once('=')
@@ -1792,6 +1813,20 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 count,
             },
         ));
+    }
+    if let Some(role) = args.role {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetRole {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            role,
+        }));
+    }
+    if args.strict_mode {
+        ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::SetStrictMode {
+            instance: args.bgp_instance.clone(),
+            name: args.peer_group.clone(),
+            enabled: true,
+        }));
     }
     if args.clear_damping {
         ops.push(ConfigOp::BgpPeerGroup(BgpPeerGroupOp::ClearDamping {

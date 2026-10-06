@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::schema::{
     AddressFamily, BgpAddPath, BgpAoKey, BgpAuth, BgpDamping, BgpLocalAs, BgpPeerGroup,
-    BgpPrefixLimit, BgpShutdown, Config, NextHopMode, SourceAddress,
+    BgpPrefixLimit, BgpRole, BgpShutdown, Config, NextHopMode, SourceAddress,
 };
 
 use super::bgp_instance::find_instance_mut;
@@ -259,6 +259,21 @@ pub enum BgpPeerGroupOp {
         instance: String,
         name: String,
     },
+    /// Sets the RFC 9234 role (see `BgpRole`).
+    SetRole {
+        instance: String,
+        name: String,
+        role: BgpRole,
+    },
+    ClearRole {
+        instance: String,
+        name: String,
+    },
+    SetStrictMode {
+        instance: String,
+        name: String,
+        enabled: bool,
+    },
 }
 
 impl BgpPeerGroupOp {
@@ -291,6 +306,8 @@ impl BgpPeerGroupOp {
                         local_as: None,
                         add_path: None,
                         add_path_send_count: None,
+                        role: None,
+                        strict_mode: false,
                     });
                 }
                 Ok(())
@@ -479,6 +496,26 @@ impl BgpPeerGroupOp {
                 count,
             } => {
                 find_group_mut(config, instance, name)?.add_path_send_count = Some(*count);
+                Ok(())
+            }
+            BgpPeerGroupOp::SetRole {
+                instance,
+                name,
+                role,
+            } => {
+                find_group_mut(config, instance, name)?.role = Some(*role);
+                Ok(())
+            }
+            BgpPeerGroupOp::ClearRole { instance, name } => {
+                find_group_mut(config, instance, name)?.role = None;
+                Ok(())
+            }
+            BgpPeerGroupOp::SetStrictMode {
+                instance,
+                name,
+                enabled,
+            } => {
+                find_group_mut(config, instance, name)?.strict_mode = *enabled;
                 Ok(())
             }
             BgpPeerGroupOp::ClearAddPathSendCount { instance, name } => {
@@ -721,6 +758,8 @@ mod tests {
             local_as: None,
             add_path: None,
             add_path_send_count: None,
+            role: None,
+            strict_mode: false,
         }
     }
 

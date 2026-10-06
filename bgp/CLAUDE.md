@@ -199,6 +199,16 @@ EVPN origination (`evpn_out::advertise`) follows the same table. On receipt, con
 - **Validation** (`bgp_instance::valid_local_as`): External peer-groups only, not `asn`/identifier/`remote_as`, not with `route_server_client`. `no_prepend`/`replace_as` are independent (inbound vs outbound); IOS's `no-prepend replace-as` is both set.
 - Not implemented: `dual-as`, per-peer local-as, Junos `private`/`alias`/`loops`. Verified by `nos-e2e local-as` against ExaBGP.
 
+### BGP roles (RFC 9234, #14, #220)
+
+`BgpPeerGroup.role: Option<BgpRole>` + `strict_mode: bool` (`set role provider|route-server|route-server-client|customer|peer`, `set strict-mode true`). Roles only here; the OTC attribute and the leak procedures are the follow-up sub-issue of #14.
+
+- **OPEN**: `Capability::Role(u8)` (code 9, length 1, other lengths dropped as unknown, `message::peer_role`); `ResolvedPeer.role/strict_mode` (so a change restarts the session) feed `NegotiationContext`, and `fsm::run` appends the capability when `role` is set.
+- **Negotiation** (`fsm::negotiate_role`, in `handle_open`): peer role must be `BgpRole::counterpart` of ours, else NOTIFICATION OPEN Message Error subcode 11 (`OpenMessageSubcode::RoleMismatch`); no peer role is refused only under `strict_mode`, else no role negotiated (`RemoteInfo.role = None`). We announce no role: the peer's is ignored. Logs `bgp role negotiated peer= local= remote=` on accept; every NOTIFICATION we send is now logged (`sent notification peer= code= subcode=`).
+- **RIB**: `BgpRib::set_peer_role` before `peer_established` (read with `peer_role`; consumed by the OTC procedures later).
+- **Validation** (`bgp_instance::valid_role`): `strict_mode` needs `role`; no role on iBGP or confederation groups; a `route_server_client` group only takes `route-server`/`route-server-client`.
+- Verified by `nos-e2e bgp-role` (two nos routers: pair, mismatch, strict, non-strict).
+
 ### Route reflection and route server
 
 A `BgpPeerGroup` carries two mutually exclusive bools, `route_reflector_client` and `route_server_client` (enforced, along with the iBGP/eBGP requirement below, by `nos-config`'s commit-time validation — `bgp_instance::valid_route_reflection_and_server`), plus a `BgpInstance.cluster_id: Option<Ipv4Addr>` (`None` resolves to the instance's own `router_id`). Both features are additive on top of the existing single-best-path `BgpRib` — no new process, no new IPC socket.

@@ -228,6 +228,8 @@ async fn resync(
             local_as: group.local_as,
             add_path: group.effective_add_path(),
             add_path_send_count: group.effective_add_path_send_count(),
+            role: group.role,
+            strict_mode: group.strict_mode,
             confed_id: own.confederation.identifier,
             confed_member: own.confederation.is_member(group.remote_as),
             graceful_restart: own.graceful_restart.enabled_restart_time(),

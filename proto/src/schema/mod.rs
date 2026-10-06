@@ -33,8 +33,8 @@ pub use bgp_instance::{
 pub use bgp_peer::BgpPeer;
 pub use bgp_peer_group::{
     AddressFamily, BgpAddPath, BgpAoAlgorithm, BgpAoKey, BgpAuth, BgpDamping, BgpLocalAs,
-    BgpMaximumPrefix, BgpPeerGroup, BgpPrefixLimit, BgpShutdown, NextHopMode, SourceAddress,
-    CONNECT_RETRY_TIME_DEFAULT_SECS, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR,
+    BgpMaximumPrefix, BgpPeerGroup, BgpPrefixLimit, BgpRole, BgpShutdown, NextHopMode,
+    SourceAddress, CONNECT_RETRY_TIME_DEFAULT_SECS, HOLD_TIME_DEFAULT, HOLD_TIME_FLOOR,
     ROUTE_REFRESH_STALE_TIME_DEFAULT_SECS,
 };
 pub use broadcast_domain::BroadcastDomain;
