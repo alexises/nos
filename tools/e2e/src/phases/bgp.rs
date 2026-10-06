@@ -491,14 +491,14 @@ fn expect_body(body: &str, needle: &str) -> anyhow::Result<()> {
     }
 }
 
-/// RFC 5925 TCP-AO: `exclude_options` must match on both sides to establish,
-/// `TCP_AO_INFO` readback surfaces sane current/rnext key ids, and a real
-/// key-rollover sequence (add key 2 as rnext, promote it to current, remove
-/// key 1) keeps authenticating throughout. Each config change here restarts
-/// this peer's session — an auth change is an ordinary `ResolvedPeer` diff,
-/// like a changed `remote_as` (see `bgp/CLAUDE.md`'s "Session
-/// authentication") — so this proves the sequence keeps authenticating end
-/// to end, not that the session survives without a reconnect.
+/// RFC 5925 TCP-AO: `exclude_options` must match on both sides to establish
+/// (changing a kept key's material restarts the session), `TCP_AO_INFO`
+/// readback surfaces sane current/rnext key ids, and a real key rollover
+/// (add key 2 as rnext, promote it to current, remove key 1) is *hitless*
+/// (#83): each step is applied to the live socket in place, the kernel
+/// advances `current_key` on the peer's RNextKeyID (§7.5.2), and no session
+/// ends or re-establishes throughout. Last, removing the key the peer still
+/// signs with is refused by the kernel (`EBUSY`) and falls back to a reset.
 pub async fn ao(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let secret = "correct-horse-battery-staple";
@@ -566,11 +566,15 @@ pub async fn ao(w: &mut World) -> anyhow::Result<()> {
         "\"ao_current_key\":1",
     )?;
 
-    log("rolling over to a second TCP-AO key (RFC 5925 §7.5)");
-    let (before_a, before_b) = (
+    log("rolling over to a second TCP-AO key (RFC 5925 §7.5), expecting no session reset");
+    let ended = "outbound bgp session ended\\|inbound bgp session ended";
+    let (est_a, est_b) = (
         a.count("bgp session established"),
         b.count("bgp session established"),
     );
+    let (end_a, end_b) = (a.count(ended), b.count(ended));
+    let updated = "bgp tcp-ao keys updated in place";
+    let (upd_a, upd_b) = (a.count(updated), b.count(updated));
     for r in [a, b] {
         r.provision(&[
             "--ao-send-id",
@@ -582,40 +586,90 @@ pub async fn ao(w: &mut World) -> anyhow::Result<()> {
         ])
         .await?;
     }
-    reestablished(a, before_a).await?;
-    reestablished(b, before_b).await?;
-
-    let (before_a, before_b) = (
-        a.count("bgp session established"),
-        b.count("bgp session established"),
-    );
+    a.wait_new(updated, upd_a, 30).await?;
+    b.wait_new(updated, upd_b, 30).await?;
+    log("waiting for the kernel's RNextKeyID auto-advance: both live sessions sign with key 2");
     for r in [a, b] {
-        r.provision(&["--ao-promote-current", "2"]).await?;
+        wait_summary(r, &["\"ao_current_key\":2", "\"ao_rnext_key\":2"], 60).await?;
     }
-    reestablished(a, before_a).await?;
-    reestablished(b, before_b).await?;
 
-    let (before_a, before_b) = (
-        a.count("bgp session established"),
-        b.count("bgp session established"),
-    );
+    for flags in [["--ao-promote-current", "2"], ["--ao-remove-key", "1"]] {
+        let (upd_a, upd_b) = (a.count(updated), b.count(updated));
+        for r in [a, b] {
+            r.provision(&flags).await?;
+        }
+        a.wait_new(updated, upd_a, 30).await?;
+        b.wait_new(updated, upd_b, 30).await?;
+    }
+
+    log("checking no session reset happened across the whole rollover");
+    for (r, est, end) in [(a, est_a, end_a), (b, est_b, end_b)] {
+        r.assert_quiet("bgp session established", est, 3).await?;
+        r.assert_quiet(ended, end, 1).await?;
+        let body = r
+            .rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
+            .await?;
+        expect_body(&body, "\"ao_current_key\":2")?;
+        expect_body(&body, "\"ao_packets_bad\":0")?;
+    }
+
+    log("re-adding key 1 everywhere, then removing key 2 on router-a only: the peer still signs with it");
+    let key1 = [
+        "--ao-send-id",
+        "1",
+        "--ao-key-secret",
+        secret,
+        "--ao-exclude-options",
+    ];
+    let (upd_a, upd_b) = (a.count(updated), b.count(updated));
     for r in [a, b] {
-        r.provision(&["--ao-remove-key", "1"]).await?;
+        r.provision(&key1).await?;
     }
-    reestablished(a, before_a).await?;
-    reestablished(b, before_b).await?;
-
-    log("checking TCP_AO_INFO readback surfaces key 2 as current on both sides after rollover");
-    expect_body(
-        &a.rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
-            .await?,
-        "\"ao_current_key\":2",
-    )?;
-    expect_body(
-        &b.rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
-            .await?,
-        "\"ao_current_key\":2",
+    a.wait_new(updated, upd_a, 30).await?;
+    b.wait_new(updated, upd_b, 30).await?;
+    let (est_a, fail_a) = (
+        a.count("bgp session established"),
+        a.count("failed to update tcp-ao keys in place, resetting session"),
+    );
+    a.provision(&["--ao-promote-current", "1"]).await?;
+    a.provision(&["--ao-remove-key", "2"]).await?;
+    a.wait_new(
+        "failed to update tcp-ao keys in place, resetting session",
+        fail_a,
+        30,
     )
+    .await?;
+    reestablished(a, est_a).await?;
+
+    log("removing key 2 on router-b too: key 1 only, current on both");
+    let est_b = b.count("bgp session established");
+    let upd_b = b.count(updated);
+    b.provision(&["--ao-promote-current", "1"]).await?;
+    b.provision(&["--ao-remove-key", "2"]).await?;
+    b.wait_new(updated, upd_b, 30).await?;
+    b.assert_quiet("bgp session established", est_b, 3).await?;
+    for r in [a, b] {
+        wait_summary(r, &["\"ao_current_key\":1"], 60).await?;
+    }
+    Ok(())
+}
+
+/// Polls `GET /v1/bgp/summary` until the body holds every needle (the next
+/// KEEPALIVE carries the peer's new RNextKeyID, so up to a minute).
+async fn wait_summary(r: &Router, needles: &[&str], secs: u64) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        let body = r
+            .rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
+            .await?;
+        if needles.iter().all(|n| body.contains(n)) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("{}: summary never held {needles:?}: {body}", r.name());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 }
 
 /// RFC 4456 route reflector: router-a reflects between router-b and router-c,

@@ -207,6 +207,71 @@ impl From<&BgpAuth> for ResolvedAuth {
     }
 }
 
+/// The key a connection advertises as its `RNextKeyID` (RFC 5925 §7.5): the
+/// one flagged `is_rnext`, else the `is_current` one — so "no rnext" means
+/// "don't ask the peer to switch". `None` for an empty list.
+pub fn ao_rnext(keys: &[nos_tcp_auth::AoKey]) -> Option<&nos_tcp_auth::AoKey> {
+    keys.iter()
+        .find(|k| k.set_rnext)
+        .or_else(|| keys.iter().find(|k| k.set_current))
+        .or_else(|| keys.first())
+}
+
+/// What changed between two TCP-AO key lists for one peer, applicable to a
+/// live socket without a reset (see `ao_delta`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AoDelta {
+    pub add: Vec<nos_tcp_auth::AoKey>,
+    /// `(send_id, recv_id)` of keys to delete.
+    pub remove: Vec<(u8, u8)>,
+    /// `RecvID` of the key to advertise as `RNextKeyID` afterwards.
+    pub rnext_recv_id: u8,
+}
+
+/// The in-place delta from `old` to `new`, or `None` when the session has to
+/// restart: either side is MD5 (or absent), or a kept key's material changed
+/// (an MKT is immutable for a connection), or an added key's `RecvID` is one a
+/// removed key still holds (the kernel refuses overlapping IDs, RFC 5925
+/// §3.1, and adds run before deletes). Moving `is_current`/`is_rnext` is
+/// in-place: the kernel follows the peer's `RNextKeyID` per connection
+/// (§7.5.2), so only rnext is ever pushed to a live socket.
+pub fn ao_delta(old: &ResolvedAuth, new: &ResolvedAuth) -> Option<AoDelta> {
+    let (ResolvedAuth::Ao(old), ResolvedAuth::Ao(new)) = (old, new) else {
+        return None;
+    };
+    let mut add = Vec::new();
+    for key in new {
+        match old.iter().find(|k| k.send_id == key.send_id) {
+            None => add.push(key.clone()),
+            Some(kept)
+                if kept.recv_id != key.recv_id
+                    || kept.algorithm != key.algorithm
+                    || kept.key != key.key
+                    || kept.exclude_options != key.exclude_options =>
+            {
+                return None;
+            }
+            Some(_) => {}
+        }
+    }
+    let remove: Vec<(u8, u8)> = old
+        .iter()
+        .filter(|k| !new.iter().any(|n| n.send_id == k.send_id))
+        .map(|k| (k.send_id, k.recv_id))
+        .collect();
+    if add
+        .iter()
+        .any(|a| remove.iter().any(|&(_, recv)| recv == a.recv_id))
+    {
+        return None;
+    }
+    Some(AoDelta {
+        add,
+        remove,
+        rnext_recv_id: ao_rnext(new)?.recv_id,
+    })
+}
+
 struct PeerTask {
     peer: ResolvedPeer,
     /// `None` for an administratively shut peer, which never dials out.
@@ -736,6 +801,19 @@ impl SessionManager {
             );
             return;
         }
+        // An accepted socket advertises whatever the peer is signing with as
+        // its RNextKeyID, not our configured rnext: set it, or a session
+        // coming back passive mid-rollover never asks for the new key.
+        if let Some(ResolvedAuth::Ao(keys)) = slot.auth() {
+            if let Some(key) = ao_rnext(&keys) {
+                if let Err(error) = nos_tcp_auth::set_ao_rnext(stream.as_raw_fd(), key.recv_id) {
+                    warn!(
+                        instance = %self.instance, peer = %remote, %error,
+                        "cannot set tcp-ao rnext on inbound connection"
+                    );
+                }
+            }
+        }
         info!(instance = %self.instance, peer = %remote, "accepted inbound bgp tcp session");
         let instance = self.instance.clone();
         let local = *self.local.borrow();
@@ -793,9 +871,29 @@ impl SessionManager {
             .iter()
             .map(|(addr, t)| (*addr, t.peer.clone()))
             .collect();
-        let (to_stop, to_spawn) = diff_peers(&current, &desired);
+        let (to_stop, to_spawn, to_update) = diff_peers(&current, &desired);
 
-        self.sync_listener_auth(&to_stop, &to_spawn).await;
+        self.sync_listener_auth(&to_stop, &to_spawn, &to_update)
+            .await;
+
+        // A key-list-only change: no restart. The live session (if any) gets
+        // the delta through its command channel — only when established, or
+        // the command would sit in the channel until some later session — and
+        // any other connection starts from `slot.auth()`.
+        for (peer, delta) in to_update {
+            if let Some(slot) = self.peers.read().await.get(&peer.remote_address).cloned() {
+                slot.set_auth(peer.auth.clone());
+                // ponytail: a connection still in its handshake keeps the
+                // keys it started with until the next reset; no live update
+                // is queued for it. Re-send once Established if it matters.
+                if slot.is_established().await {
+                    slot.send_command(FsmCommand::UpdateAo(delta));
+                }
+            }
+            if let Some(task) = tasks.get_mut(&peer.remote_address) {
+                task.peer = peer;
+            }
+        }
 
         // Tell every established session why it is going away (RFC 4486)
         // before the tasks are aborted — an abort sends nothing. Concurrent,
@@ -868,7 +966,12 @@ impl SessionManager {
     /// peer's listener key should be removed" (respectively "spawned"/
     /// "installed") are exactly the same event here. A no-op if no listener
     /// is currently bound (`VrfRequirement` not `Resolved`).
-    async fn sync_listener_auth(&self, to_stop: &[IpAddr], to_spawn: &[ResolvedPeer]) {
+    async fn sync_listener_auth(
+        &self,
+        to_stop: &[IpAddr],
+        to_spawn: &[ResolvedPeer],
+        to_update: &[(ResolvedPeer, AoDelta)],
+    ) {
         let mut listeners = self.listeners.lock().await;
         let Some(listeners) = listeners.as_mut() else {
             return;
@@ -882,6 +985,23 @@ impl SessionManager {
                         "failed to remove bgp listener auth key"
                     );
                 }
+            }
+        }
+        for (peer, delta) in to_update {
+            let fd = listener_fd_for(peer.remote_address, listeners.v4_fd, listeners.v6_fd);
+            // A listener has no current/rnext key, so nothing here can be busy.
+            match tcp::apply_ao_delta(fd, peer.remote_address, delta, false) {
+                Ok(()) => {
+                    if let Some(auth) = &peer.auth {
+                        listeners
+                            .applied_auth
+                            .insert(peer.remote_address, auth.clone());
+                    }
+                }
+                Err(e) => warn!(
+                    instance = %self.instance, peer = %peer.remote_address, error = %e,
+                    "failed to update bgp listener auth keys"
+                ),
             }
         }
         for peer in to_spawn {
@@ -969,7 +1089,7 @@ fn to_peer_summary(slot: &PeerSlot, rib: &BgpRib) -> PeerSummary {
     // as `None` below, same as "no AO auth configured". Upgrade path: none
     // needed unless a closed fd is ever observed reused by an unrelated
     // socket in that same microsecond-scale window.
-    let ao_info = match (&slot.peer.auth, status.fd) {
+    let ao_info = match (slot.auth(), status.fd) {
         (Some(ResolvedAuth::Ao(_)), Some(fd)) => nos_tcp_auth::get_ao_info(fd).ok(),
         _ => None,
     };
@@ -1028,20 +1148,37 @@ async fn reset_status_if_not_established(slot: &PeerSlot) {
 /// Diffs `current` (what's running) against `desired` (what config wants):
 /// peers no longer desired, or whose fields changed, are stopped (and, if
 /// still desired with new fields, respawned); newly desired peers are
-/// spawned. Pure and synchronous, like `interface`'s `diff_addresses`.
+/// spawned; a peer differing only by an in-place-applicable TCP-AO key
+/// change (`ao_delta`) is updated instead. Pure and synchronous, like
+/// `interface`'s `diff_addresses`.
 fn diff_peers(
     current: &HashMap<IpAddr, ResolvedPeer>,
     desired: &HashMap<IpAddr, ResolvedPeer>,
-) -> (Vec<IpAddr>, Vec<ResolvedPeer>) {
+) -> (Vec<IpAddr>, Vec<ResolvedPeer>, Vec<(ResolvedPeer, AoDelta)>) {
     let mut to_stop = Vec::new();
     let mut to_spawn = Vec::new();
+    let mut to_update = Vec::new();
 
     for (addr, running) in current {
         match desired.get(addr) {
             None => to_stop.push(*addr),
             Some(wanted) if wanted != running => {
-                to_stop.push(*addr);
-                to_spawn.push(wanted.clone());
+                let delta = running
+                    .auth
+                    .as_ref()
+                    .zip(wanted.auth.as_ref())
+                    .and_then(|(old, new)| ao_delta(old, new))
+                    .filter(|_| {
+                        let mut same = running.clone();
+                        same.auth.clone_from(&wanted.auth);
+                        same == *wanted
+                    });
+                if let Some(delta) = delta {
+                    to_update.push((wanted.clone(), delta));
+                } else {
+                    to_stop.push(*addr);
+                    to_spawn.push(wanted.clone());
+                }
             }
             Some(_) => {}
         }
@@ -1052,7 +1189,7 @@ fn diff_peers(
         }
     }
 
-    (to_stop, to_spawn)
+    (to_stop, to_spawn, to_update)
 }
 
 /// One peer's outbound side: while the VRF is resolved, attempts a connect
@@ -1087,7 +1224,7 @@ async fn active_connect_loop(
                         remote,
                         slot.peer.source_address,
                         bind_vrf.then_some(vrf_name.as_str()),
-                        slot.peer.auth.as_ref(),
+                        slot.auth().as_ref(),
                         slot.peer.max_hops,
                     ),
                 )
@@ -1294,7 +1431,7 @@ mod tests {
     fn new_peer_is_spawned() {
         let current = HashMap::new();
         let desired = HashMap::from([("10.0.0.1".parse().unwrap(), peer("10.0.0.1"))]);
-        let (to_stop, to_spawn) = diff_peers(&current, &desired);
+        let (to_stop, to_spawn, _) = diff_peers(&current, &desired);
         assert_eq!(to_stop, [] as [IpAddr; 0]);
         assert_eq!(to_spawn, vec![peer("10.0.0.1")]);
     }
@@ -1304,7 +1441,7 @@ mod tests {
         let addr: IpAddr = "10.0.0.1".parse().unwrap();
         let current = HashMap::from([(addr, peer("10.0.0.1"))]);
         let desired = HashMap::new();
-        let (to_stop, to_spawn) = diff_peers(&current, &desired);
+        let (to_stop, to_spawn, _) = diff_peers(&current, &desired);
         assert_eq!(to_stop, vec![addr]);
         assert_eq!(to_spawn, []);
     }
@@ -1314,7 +1451,7 @@ mod tests {
         let addr: IpAddr = "10.0.0.1".parse().unwrap();
         let current = HashMap::from([(addr, peer("10.0.0.1"))]);
         let desired = HashMap::from([(addr, peer("10.0.0.1"))]);
-        let (to_stop, to_spawn) = diff_peers(&current, &desired);
+        let (to_stop, to_spawn, _) = diff_peers(&current, &desired);
         assert_eq!(to_stop, [] as [IpAddr; 0]);
         assert_eq!(to_spawn, []);
     }
@@ -1326,7 +1463,7 @@ mod tests {
         let mut changed = peer("10.0.0.1");
         changed.source_address = Some("10.0.0.9".parse().unwrap());
         let desired = HashMap::from([(addr, changed.clone())]);
-        let (to_stop, to_spawn) = diff_peers(&current, &desired);
+        let (to_stop, to_spawn, _) = diff_peers(&current, &desired);
         assert_eq!(to_stop, vec![addr]);
         assert_eq!(to_spawn, vec![changed]);
     }
@@ -1338,7 +1475,7 @@ mod tests {
         let mut changed = peer("10.0.0.1");
         changed.remote_as = 65001;
         let desired = HashMap::from([(addr, changed.clone())]);
-        let (to_stop, to_spawn) = diff_peers(&current, &desired);
+        let (to_stop, to_spawn, _) = diff_peers(&current, &desired);
         assert_eq!(to_stop, vec![addr]);
         assert_eq!(to_spawn, vec![changed]);
     }
@@ -1350,7 +1487,7 @@ mod tests {
         let mut changed = peer("10.0.0.1");
         changed.auth = Some(ResolvedAuth::Md5("secret".to_string()));
         let desired = HashMap::from([(addr, changed.clone())]);
-        let (to_stop, to_spawn) = diff_peers(&current, &desired);
+        let (to_stop, to_spawn, _) = diff_peers(&current, &desired);
         assert_eq!(to_stop, vec![addr]);
         assert_eq!(to_spawn, vec![changed]);
     }
@@ -1403,7 +1540,7 @@ mod tests {
         });
         let current = HashMap::from([(addr, running.clone())]);
         let desired = HashMap::from([(addr, wanted.clone())]);
-        let (to_stop, to_spawn) = diff_peers(&current, &desired);
+        let (to_stop, to_spawn, _) = diff_peers(&current, &desired);
         assert_eq!(to_stop, vec![addr]);
         assert_eq!(to_spawn, vec![wanted.clone()]);
         assert_eq!(
@@ -1428,5 +1565,121 @@ mod tests {
             cease_reason(Some(&a), Some(&b)),
             (CeaseSubcode::OtherConfigurationChange, Bytes::new())
         );
+    }
+
+    fn ao(send_id: u8, secret: &str, current: bool, rnext: bool) -> nos_tcp_auth::AoKey {
+        nos_tcp_auth::AoKey {
+            send_id,
+            recv_id: send_id,
+            algorithm: nos_tcp_auth::AoAlgorithm::HmacSha1_96,
+            key: secret.as_bytes().to_vec(),
+            set_current: current,
+            set_rnext: rnext,
+            exclude_options: false,
+        }
+    }
+
+    fn ao_auth(keys: Vec<nos_tcp_auth::AoKey>) -> ResolvedAuth {
+        ResolvedAuth::Ao(keys)
+    }
+
+    #[test]
+    fn ao_delta_add_only_advertises_the_flagged_rnext() {
+        let old = ao_auth(vec![ao(1, "a", true, false)]);
+        let new = ao_auth(vec![ao(1, "a", true, false), ao(2, "b", false, true)]);
+        let d = ao_delta(&old, &new).unwrap();
+        assert_eq!(d.add, vec![ao(2, "b", false, true)]);
+        assert_eq!(d.remove, Vec::<(u8, u8)>::new());
+        assert_eq!(d.rnext_recv_id, 2);
+    }
+
+    #[test]
+    fn ao_delta_promote_and_remove_fall_back_to_current_as_rnext() {
+        let old = ao_auth(vec![ao(1, "a", true, false), ao(2, "b", false, true)]);
+        // Step 2: 2 becomes current (rnext flag dropped).
+        let promoted = ao_auth(vec![ao(1, "a", false, false), ao(2, "b", true, false)]);
+        let d = ao_delta(&old, &promoted).unwrap();
+        assert!(d.add.is_empty() && d.remove.is_empty());
+        assert_eq!(d.rnext_recv_id, 2);
+        // Step 3: 1 removed.
+        let d = ao_delta(&promoted, &ao_auth(vec![ao(2, "b", true, false)])).unwrap();
+        assert_eq!(d.remove, vec![(1, 1)]);
+        assert_eq!(d.rnext_recv_id, 2);
+    }
+
+    #[test]
+    fn ao_delta_rnext_move_is_in_place() {
+        let old = ao_auth(vec![ao(1, "a", true, true), ao(2, "b", false, false)]);
+        let new = ao_auth(vec![ao(1, "a", true, false), ao(2, "b", false, true)]);
+        assert_eq!(ao_delta(&old, &new).unwrap().rnext_recv_id, 2);
+    }
+
+    #[test]
+    fn ao_delta_needs_a_restart_when_a_kept_key_changes() {
+        let old = ao_auth(vec![ao(1, "a", true, false)]);
+        assert_eq!(
+            ao_delta(&old, &ao_auth(vec![ao(1, "other", true, false)])),
+            None
+        );
+        let mut excl = ao(1, "a", true, false);
+        excl.exclude_options = true;
+        assert_eq!(ao_delta(&old, &ao_auth(vec![excl])), None);
+        let mut recv = ao(1, "a", true, false);
+        recv.recv_id = 9;
+        assert_eq!(ao_delta(&old, &ao_auth(vec![recv])), None);
+    }
+
+    #[test]
+    fn ao_delta_needs_a_restart_when_an_added_recv_id_is_still_held() {
+        let old = ao_auth(vec![ao(1, "a", true, false)]);
+        let mut reused = ao(2, "b", true, false);
+        reused.recv_id = 1;
+        assert_eq!(ao_delta(&old, &ao_auth(vec![reused])), None);
+    }
+
+    #[test]
+    fn ao_delta_needs_a_restart_for_md5() {
+        let ao_one = ao_auth(vec![ao(1, "a", true, false)]);
+        let md5 = ResolvedAuth::Md5("x".to_string());
+        assert_eq!(ao_delta(&md5, &ao_one), None);
+        assert_eq!(ao_delta(&ao_one, &md5), None);
+        assert_eq!(ao_delta(&md5, &md5.clone()), None);
+    }
+
+    #[test]
+    fn diff_peers_ao_only_change_is_an_in_place_update() {
+        let mut a = peer("10.0.0.1");
+        a.auth = Some(ao_auth(vec![ao(1, "a", true, false)]));
+        let mut b = a.clone();
+        b.auth = Some(ao_auth(vec![
+            ao(1, "a", true, false),
+            ao(2, "b", false, true),
+        ]));
+        let (current, desired) = (map_of(&a), map_of(&b));
+        let (stop, spawn, update) = diff_peers(&current, &desired);
+        assert!(stop.is_empty() && spawn.is_empty());
+        assert_eq!(update.len(), 1);
+        assert_eq!(update[0].0, b);
+        assert_eq!(update[0].1.rnext_recv_id, 2);
+    }
+
+    #[test]
+    fn diff_peers_ao_change_with_another_field_still_restarts() {
+        let mut a = peer("10.0.0.1");
+        a.auth = Some(ao_auth(vec![ao(1, "a", true, false)]));
+        let mut b = a.clone();
+        b.auth = Some(ao_auth(vec![
+            ao(1, "a", true, false),
+            ao(2, "b", false, true),
+        ]));
+        b.remote_as += 1;
+        let (stop, spawn, update) = diff_peers(&map_of(&a), &map_of(&b));
+        assert_eq!(stop.len(), 1);
+        assert_eq!(spawn.len(), 1);
+        assert_eq!(update.len(), 0);
+    }
+
+    fn map_of(p: &ResolvedPeer) -> HashMap<IpAddr, ResolvedPeer> {
+        HashMap::from([(p.remote_address, p.clone())])
     }
 }

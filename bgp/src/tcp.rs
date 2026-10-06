@@ -67,7 +67,7 @@ pub fn apply_max_hops(fd: RawFd, peer: IpAddr, hops: u8) -> io::Result<()> {
 /// This is harmless to drop there: those bits designate the key actively
 /// signing/rolling on *one* connection, a concept a listener itself has
 /// none of; the kernel still matches an accepted connection's key from the
-/// wire's KeyID/RNextKeyID against every key installed here, current or not.
+/// wire's `KeyID`/`RNextKeyID` against every key installed here, current or not.
 pub fn apply_auth(
     fd: RawFd,
     peer: IpAddr,
@@ -77,21 +77,50 @@ pub fn apply_auth(
     match auth {
         ResolvedAuth::Md5(password) => nos_tcp_auth::set_md5_key(fd, peer, password.as_bytes()),
         ResolvedAuth::Ao(keys) => {
+            let rnext = crate::session::ao_rnext(keys).map(|k| k.send_id);
             for key in keys {
-                if on_listener && (key.set_current || key.set_rnext) {
-                    let key = nos_tcp_auth::AoKey {
-                        set_current: false,
-                        set_rnext: false,
-                        ..key.clone()
-                    };
-                    nos_tcp_auth::add_ao_key(fd, peer, &key)?;
-                } else {
-                    nos_tcp_auth::add_ao_key(fd, peer, key)?;
-                }
+                let key = nos_tcp_auth::AoKey {
+                    set_current: key.set_current && !on_listener,
+                    // Always advertise one RNextKeyID on a connection: the
+                    // flagged key, else the current one (never "whichever
+                    // the kernel saw first").
+                    set_rnext: !on_listener && Some(key.send_id) == rnext,
+                    ..key.clone()
+                };
+                nos_tcp_auth::add_ao_key(fd, peer, &key)?;
             }
             Ok(())
         }
     }
+}
+
+/// Applies an in-place TCP-AO key-list change to `fd`: adds first, then (on a
+/// live connection) moves rnext, then deletes — so a key being retired is
+/// never the rnext key when it goes, and one being introduced exists before
+/// it is advertised. A key the peer is still signing with (`EBUSY`) surfaces
+/// as the error. A listener has no current/rnext key, so `live = false`
+/// skips the rnext step.
+pub fn apply_ao_delta(
+    fd: RawFd,
+    peer: IpAddr,
+    delta: &crate::session::AoDelta,
+    live: bool,
+) -> io::Result<()> {
+    for key in &delta.add {
+        let key = nos_tcp_auth::AoKey {
+            set_current: false,
+            set_rnext: false,
+            ..key.clone()
+        };
+        nos_tcp_auth::add_ao_key(fd, peer, &key)?;
+    }
+    if live {
+        nos_tcp_auth::set_ao_rnext(fd, delta.rnext_recv_id)?;
+    }
+    for &(send_id, recv_id) in &delta.remove {
+        nos_tcp_auth::delete_ao_key(fd, peer, send_id, recv_id)?;
+    }
+    Ok(())
 }
 
 /// Removes whatever `apply_auth` installed for `peer` on `fd`.

@@ -39,7 +39,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::warn;
 
-use crate::session::ResolvedPeer;
+use crate::session::{ResolvedAuth, ResolvedPeer};
 use crate::status::{PeerStatus, StatusHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +71,10 @@ pub enum FsmCommand {
         subcode: crate::message::CeaseSubcode,
         data: bytes::Bytes,
     },
+    /// Apply a TCP-AO key-list change to this live session's socket (see
+    /// `session::ao_delta`); on failure the session resets with Cease/Other
+    /// Configuration Change and the reconnect uses `PeerSlot::auth`.
+    UpdateAo(crate::session::AoDelta),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +137,9 @@ pub enum Decision {
 /// into, rather than either individual connection owning it.
 pub struct PeerSlot {
     pub peer: ResolvedPeer,
+    /// `peer.auth`, but replaceable: a TCP-AO key-list change is applied in
+    /// place, so every new connection must start from the current keys.
+    auth: std::sync::Mutex<Option<ResolvedAuth>>,
     state: Mutex<CollisionState>,
     pub status: StatusHandle,
     command_tx: mpsc::UnboundedSender<FsmCommand>,
@@ -164,6 +171,7 @@ impl PeerSlot {
         let (status, _) = watch::channel(PeerStatus::default());
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         Arc::new(Self {
+            auth: std::sync::Mutex::new(peer.auth.clone()),
             peer,
             state: Mutex::new(CollisionState::default()),
             status,
@@ -172,6 +180,21 @@ impl PeerSlot {
             passive_task: Mutex::new(None),
             max_prefix_hold: std::sync::Mutex::new(None),
         })
+    }
+
+    /// The peer's current auth (see the `auth` field).
+    pub fn auth(&self) -> Option<ResolvedAuth> {
+        self.auth
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn set_auth(&self, auth: Option<ResolvedAuth>) {
+        *self
+            .auth
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = auth;
     }
 
     /// Records the task running this peer's passively-accepted session,

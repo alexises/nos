@@ -430,7 +430,9 @@ Each key has:
 - an algorithm: `hmac-sha1` (HMAC-SHA-1-96) or `aes-cmac` (AES-128-CMAC-96);
 - the secret, 1 to 80 bytes.
 
-Exactly one key must be marked `current`: it signs the segments this router sends. At most one may be marked `rnext`: it asks the peer to switch to that key.
+Exactly one key must be marked `current`: the key a new connection starts signing with. At most one may be marked `rnext`: the key this router asks the peer to switch to. Send IDs must be unique, and so must receive IDs (the kernel refuses overlapping IDs).
+
+On an established session the peer decides which key signs: the kernel follows the peer's RNextKeyID (RFC 5925 §7.5.2), so `current` never forces a switch on a live session.
 
 ```
 edge-1(t5/bgp-instance:r1/peer-group:pg1)> set ao-key 1 1 hmac-sha1 first-key
@@ -440,21 +442,27 @@ edge-1(t5/bgp-instance:r1/peer-group:pg1)> commit
 
 `set ao-key <send-id> <recv-id> <algorithm> <secret>` adds a key, or replaces the key with that send ID. `set ao-key <send-id> current` and `set ao-key <send-id> rnext` move the flags, and `delete ao-key <send-id>` removes one key.
 
-Once the session is up, `show bgp brief` adds the key state read from the kernel: the key ID this router is sending with, the key ID the peer asks for, and the counts of good segments, bad segments and segments for an unknown key:
+Once the session is up, `show bgp brief` adds the key state read from the kernel: the key ID this router is sending with, the key ID this router asks the peer to send with, and the counts of good segments, bad segments and segments for an unknown key:
 
 ```
   10.50.0.2 AS 65001 peer-group pg1 Established uptime 00:00:15 hold-time 90 ao-current 1 ao-rnext 1 ao-good 7 ao-bad 0 ao-no-key 0
 ```
 
-(That line is from router-b, whose peer is router-a.) During the rollover below, `ao-current` moves to key 2 once both sides have made it current.
+(That line is from router-b, whose peer is router-a.) During the rollover below, `ao-current` moves to key 2 as soon as both sides have key 2 as `rnext`.
 
 To roll over to a new key without dropping the session (RFC 5925 §7.5), on both routers:
 
-1. Add the new key and mark it `rnext`: `set ao-key 2 2 hmac-sha1 second-key`, `set ao-key 2 rnext`. Commit.
-2. When both sides have it, make it current: `set ao-key 2 current`. Commit.
+1. Add the new key and mark it `rnext`: `set ao-key 2 2 hmac-sha1 second-key`, `set ao-key 2 rnext`. Commit. Once both sides have done this, the live session switches to key 2 on its own.
+2. Make it current: `set ao-key 2 current`. Commit. This only changes what new connections start with.
 3. Remove the old key: `delete ao-key 1`. Commit.
 
-Each commit changes the peer-group, so it resets the session (see [How BGP is configured](#how-bgp-is-configured)); the session comes straight back up with the keys both sides have.
+Each of these commits is applied to the running session and to the listener in place: the session stays up. These still reset it:
+
+- changing the secret, algorithm, receive ID or `exclude-options` of a key that stays;
+- switching between MD5 and TCP-AO, or adding or removing authentication altogether;
+- removing the key the peer still signs with (the kernel refuses; the session resets with Cease/Other Configuration Change and comes back with the new key list). Remove the old key only after the peer has moved to the new one.
+
+A change to any other peer-group field in the same commit also resets the session (see [How BGP is configured](#how-bgp-is-configured)).
 
 Over REST, `auth` holds the whole key list:
 
@@ -829,9 +837,9 @@ Created with `edit bgp instance <i> peer-group <g>` (or `edit peer-group <g>` in
 | add-path-send-count | `… add-path-send-count <n>` / `set add-path-send-count <n>`; `delete add-path-send-count` | `…/add-path-send-count`, number or `null` | 2 to 64; default: 2, or every path for a route-server client | add-path `send` or `both` | How many paths per prefix an ADD-PATH send peer gets: the best N after the group's own filtering | `show config` |
 | max-hops | `… max-hops <n>` / `set max-hops <n>`; `delete max-hops` | `…/max-hops`, number or `null` | 1 to 254; default: off | 1 to 254 | GTSM: TTL 255 out, minimum TTL `256 - n` in | `show config` |
 | md5-password | `… md5-password <pw>` / `set md5-password <pw>`; `delete auth` | `…/auth`, `{"Md5":{"password":"…"}}` | 1 to 80 bytes; default: no authentication | 1 to 80 bytes | TCP MD5 signature; replaces any TCP-AO keys | `show bgp brief` (session up) |
-| ao-key | `… ao-key <send-id> <recv-id> hmac-sha1\|aes-cmac <secret>` / `set ao-key …`; `delete ao-key <send-id>`; `delete auth` | `…/auth`, `{"Ao":{"keys":[{"send_id":1,"recv_id":1,"algorithm":"HmacSha1_96","key":"…","is_current":true,"is_rnext":false,"exclude_options":false}]}}` | IDs 0 to 255; secret 1 to 80 bytes | at least one key; send IDs unique; exactly one current; at most one rnext | TCP-AO; replaces an MD5 password | `show bgp brief` (`ao-current`, `ao-rnext`, counters) |
-| ao-key current | `… ao-key <send-id> current` / `set ao-key <send-id> current` | `is_current` in the key | flag | exactly one key | Key used to sign outgoing segments | `show bgp brief` (`ao-current`) |
-| ao-key rnext | `… ao-key <send-id> rnext` / `set ao-key <send-id> rnext` | `is_rnext` in the key | flag | at most one key | Key the peer is asked to switch to | `show bgp brief` (`ao-rnext`) on the peer |
+| ao-key | `… ao-key <send-id> <recv-id> hmac-sha1\|aes-cmac <secret>` / `set ao-key …`; `delete ao-key <send-id>`; `delete auth` | `…/auth`, `{"Ao":{"keys":[{"send_id":1,"recv_id":1,"algorithm":"HmacSha1_96","key":"…","is_current":true,"is_rnext":false,"exclude_options":false}]}}` | IDs 0 to 255; secret 1 to 80 bytes | at least one key; send IDs and receive IDs unique; exactly one current; at most one rnext | TCP-AO; replaces an MD5 password | `show bgp brief` (`ao-current`, `ao-rnext`, counters) |
+| ao-key current | `… ao-key <send-id> current` / `set ao-key <send-id> current` | `is_current` in the key | flag | exactly one key | Key a new connection starts signing with; a live session follows the peer's choice | `show bgp brief` (`ao-current`) |
+| ao-key rnext | `… ao-key <send-id> rnext` / `set ao-key <send-id> rnext` | `is_rnext` in the key | flag | at most one key | Key this router asks the peer to switch to; applied to the live session in place | `show bgp brief` (`ao-rnext`) |
 | exclude-options | `… ao-key <send-id> exclude-options` / `set ao-key <send-id> exclude-options`; `delete ao-key <send-id> exclude-options` | `exclude_options` in the key | boolean; default `false` | the key must exist | Leaves TCP options out of the MAC; both sides must agree | `show bgp brief` (session up) |
 | next-hop | `… next-hop self\|unchanged` / `set next-hop self\|unchanged`; `delete next-hop` | `…/next-hop`, `"SelfAddress"`, `"Unchanged"` or `null` | default: `self` for eBGP, `unchanged` for iBGP and route-server peer-groups | none | `NEXT_HOP` of advertised routes | `show config`; `show route` on the peer |
 | route-reflector-client | `… route-reflector-client` / `set route-reflector-client`; `delete route-reflector-client` | `…/route-reflector-client`, boolean | default `false`; required in a whole-object `PUT` | iBGP peer-group only; not with route-server-client | Reflects iBGP routes to and from these peers | `show config` |

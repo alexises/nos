@@ -67,7 +67,7 @@
         "type": "string"
       },
       "BgpAoKey": {
-        "description": "One TCP-AO key. `send_id`/`recv_id` identify it on the wire (RFC 5925's\nKeyID/RNextKeyID); `is_current` marks the key actively signing outgoing\nsegments (exactly one key must have this set); `is_rnext` optionally\nrequests the peer switch to this key next, for rotation without a\ndropped session; `exclude_options` (RFC 5925 §5.2, `#[serde(default)]`\nso pre-existing on-disk config still loads as today's always-include\nbehavior) excludes TCP options from this key's MAC coverage — both peers\nmust agree, or authentication fails.",
+        "description": "One TCP-AO key. `send_id`/`recv_id` identify it on the wire (RFC 5925's\n`KeyID`/`RNextKeyID`); `is_current` marks the key a new connection starts\nsigning with (exactly one key must have this set; on a live session the\npeer's `RNextKeyID` decides, RFC 5925 §7.5.2); `is_rnext` optionally asks\nthe peer to switch to this key next, for rotation without a dropped\nsession (applied to the live session in place); `exclude_options` (RFC 5925 §5.2, `#[serde(default)]`\nso pre-existing on-disk config still loads as today's always-include\nbehavior) excludes TCP options from this key's MAC coverage — both peers\nmust agree, or authentication fails.",
         "properties": {
           "algorithm": {
             "$ref": "#/components/schemas/BgpAoAlgorithm"

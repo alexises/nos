@@ -403,14 +403,17 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              auth wasn't already TCP-AO (unset, or an MD5 password), this starts a fresh key \
              list containing just this key. Exactly one key across the whole list must be \
              marked current, and at most one may be marked rnext, for the peer-group to \
-             validate at commit time — see set-bgp-peer-group-ao-current-key/rnext-key. Stored \
+             validate at commit time; send-ids and recv-ids must each be unique — see set-bgp-peer-group-ao-current-key/rnext-key. Stored \
              clear-text, like every other field in this config.",
                 " ",
                 "Remove one of a peer-group's TCP-AO keys by send-id.",
                 " ",
-                "Mark one of a peer-group's TCP-AO keys as current.",
+                "Mark one of a peer-group's TCP-AO keys as current: the key a new connection \
+             starts signing with. On an established session the peer's RNextKeyID decides \
+             which key signs (RFC 5925 §7.5.2), so this never forces a switch.",
                 " ",
-                "Mark one of a peer-group's TCP-AO keys as rnext.",
+                "Mark one of a peer-group's TCP-AO keys as rnext: the key this router asks the \
+             peer to switch to. It takes effect on the live session without a reset.",
                 " ",
                 "`ao-key <send-id> exclude-options` makes that key's MAC skip TCP options \
              (RFC 5925 §5.2); `delete ao-key <send-id> exclude-options` clears it. Both \
