@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::testing::TestPki;
-use crate::{generate_csr, Bundle, Ca, Identity, KeyAlg, Negotiated, PeerId};
+use crate::{generate_csr, Bundle, Ca, Identity, KeyAlg, Negotiated, PeerId, Policy};
 
 fn sock(name: &str) -> (tempdir::Guard, PathBuf) {
     let g = tempdir::Guard::new();
@@ -705,4 +705,91 @@ fn a_bundle_carries_its_crl_through_the_frame() {
         Bundle::read_from(&mut b.encode().as_slice()).unwrap(),
         Some(b)
     );
+}
+
+/// Pins today's IPC and REST algorithms, so an edit to the `Syslog` arm (or
+/// the `allow_tls12` opt-in beside it) cannot leak into either.
+#[test]
+fn ipc_and_rest_policies_are_unchanged() {
+    use rustls::crypto::aws_lc_rs::{cipher_suite, kx_group};
+    use rustls::SignatureScheme;
+    for policy in [Policy::Ipc, Policy::Rest, Policy::Syslog] {
+        let p = crate::policy::provider(policy);
+        assert_eq!(p.kx_groups.len(), 1);
+        assert_eq!(p.kx_groups[0].name(), kx_group::X25519MLKEM768.name());
+        assert_eq!(p.cipher_suites.len(), 1);
+        assert_eq!(
+            p.cipher_suites[0].suite(),
+            cipher_suite::TLS13_AES_256_GCM_SHA384.suite()
+        );
+    }
+    let schemes = |p| {
+        crate::policy::provider(p)
+            .signature_verification_algorithms
+            .supported_schemes()
+    };
+    assert_eq!(schemes(Policy::Ipc), [SignatureScheme::ML_DSA_65]);
+    assert_eq!(
+        schemes(Policy::Rest),
+        [SignatureScheme::ECDSA_NISTP256_SHA256]
+    );
+}
+
+/// The `allow_tls12` opt-in's client (TLS 1.2, classical groups) gets nowhere
+/// on an IPC socket or the REST listener.
+#[tokio::test]
+async fn tls12_client_is_refused_on_ipc_and_rest() {
+    use rustls::pki_types::{CertificateDer, ServerName};
+    let mut p = (*crate::syslog::allow_tls12_provider()).clone();
+    p.signature_verification_algorithms =
+        rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms;
+    let client = |ca: &[u8]| {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(CertificateDer::from(ca.to_vec())).unwrap();
+        std::sync::Arc::new(
+            rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(p.clone()))
+                .with_protocol_versions(&[&rustls::version::TLS12])
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
+    };
+
+    let pki = TestPki::new();
+    let (_g, path) = sock("tls12.sock");
+    let listener = pki.identity("ribd", "rt1").listen(&path).unwrap();
+    let server =
+        tokio::spawn(async move { listener.accept().await?.handshake().await.map(|_| ()) });
+    let sock = tokio::net::UnixStream::connect(&path).await.unwrap();
+    let res = tokio_rustls::TlsConnector::from(client(pki.ca().cert_der()))
+        .connect(ServerName::try_from("nos.internal").unwrap(), sock)
+        .await;
+    assert!(res.is_err());
+    assert!(server.await.unwrap().is_err());
+
+    let rest_ca = Ca::new(KeyAlg::EcdsaP256).unwrap();
+    let rest = crate::rest::RestServer::new(rest_ca.cert_der()).unwrap();
+    let (csr, key) = crate::generate_csr_for(KeyAlg::EcdsaP256).unwrap();
+    let cert = rest_ca
+        .sign_server_csr(
+            &csr,
+            &["127.0.0.1".parse().unwrap()],
+            Duration::from_secs(60),
+        )
+        .unwrap();
+    rest.set_certificate(&cert, &key).unwrap();
+    let l = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = l.local_addr().unwrap();
+    let srv = tokio::spawn(async move {
+        let (tcp, _) = l.accept().await.unwrap();
+        rest.accept(tcp).await.map(|_| ())
+    });
+    let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let res = tokio_rustls::TlsConnector::from(client(rest_ca.cert_der()))
+        .connect(ServerName::try_from("127.0.0.1").unwrap(), tcp)
+        .await;
+    assert!(res.is_err());
+    assert!(srv.await.unwrap().is_err());
 }

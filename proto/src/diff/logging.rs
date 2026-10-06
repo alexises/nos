@@ -1,6 +1,10 @@
-use crate::schema::{LoggingSettings, SyslogServer};
+use crate::schema::{LoggingSettings, SyslogServer, SyslogTls};
 
 use super::FieldDiff;
+
+fn tls(s: &SyslogServer, f: impl Fn(&SyslogTls) -> Option<String>) -> String {
+    s.tls.as_ref().and_then(f).unwrap_or_else(|| "unset".into())
+}
 
 /// One collector's settings as `(label suffix, rendered value)`.
 fn fields(s: &SyslogServer) -> Vec<(&'static str, String)> {
@@ -16,6 +20,13 @@ fn fields(s: &SyslogServer) -> Vec<(&'static str, String)> {
         (
             "facility",
             format!("{:?}", s.effective_facility()).to_lowercase(),
+        ),
+        ("tls trust-anchor", tls(s, |t| t.trust_anchor.clone())),
+        ("tls fingerprint", tls(s, |t| t.fingerprint.clone())),
+        ("tls server-name", tls(s, |t| t.server_name.clone())),
+        (
+            "tls allow-tls12",
+            s.tls.as_ref().is_some_and(|t| t.allow_tls12).to_string(),
         ),
     ]
 }
@@ -84,6 +95,15 @@ mod tests {
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].label, "logging syslog a port");
         assert_eq!(d[0].new.as_deref(), Some("1514"));
+
+        let mut t = s("a");
+        t.tls = Some(SyslogTls {
+            allow_tls12: true,
+            ..SyslogTls::default()
+        });
+        let d = diff_logging(&cfg(vec![s("a")]), &cfg(vec![t]));
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].label, "logging syslog a tls allow-tls12");
 
         let added = diff_logging(&cfg(vec![]), &cfg(vec![s("a")]));
         assert!(added.iter().all(|f| f.old.is_none() && f.new.is_some()));

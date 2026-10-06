@@ -149,7 +149,7 @@ How much is logged is set when the router starts, with the `RUST_LOG` environmen
 
 ### Sending logs to a syslog collector
 
-Every log entry can also be sent to one or more remote syslog collectors, as [RFC 5424](https://www.rfc-editor.org/rfc/rfc5424) messages. `show log` is unchanged. Only plain UDP and TCP are available so far; TLS is not.
+Every log entry can also be sent to one or more remote syslog collectors, as [RFC 5424](https://www.rfc-editor.org/rfc/rfc5424) messages. `show log` is unchanged. UDP, TCP and TLS are available.
 
 ```
 edge-1> configure syslog
@@ -165,6 +165,28 @@ $C -X PUT -H 'Content-Type: application/json' \
 
 - **Address.** An IPv4 or IPv6 unicast address, not a name: there is no resolver inside a routing table.
 - **Transport and port.** `udp` (the default, port 514, [RFC 5426](https://www.rfc-editor.org/rfc/rfc5426): one message per datagram, cut to 1180 bytes) or `tcp` (port 601, [RFC 6587](https://www.rfc-editor.org/rfc/rfc6587) octet-counting frames, cut to 8192 bytes). `port` overrides the default.
+- **TLS.** `transport tls` (port 6514, [RFC 5425](https://www.rfc-editor.org/rfc/rfc5425)) sends the same octet-counted frames inside TLS 1.3, with the post-quantum key exchange `X25519MLKEM768`. The router checks the collector, and presents no certificate of its own. Set exactly one of:
+  - `tls trust-anchor`: PEM CA certificate(s) the collector's certificate must chain to. Its name is checked against the certificate's IP address entries (the collector's `address`), or against the DNS name given with `tls server-name`.
+  - `tls fingerprint`: `SHA-256:AB:CD:...`, the hash of the collector's own certificate. Get it with `openssl x509 -in collector.crt -noout -fingerprint -sha256`. Nothing else about the certificate is checked.
+
+  There is no "trust anything" mode and no built-in list of trusted CAs. Certificates may use any common classical signature (ECDSA, RSA, Ed25519).
+
+  ```
+  edge-1(syslog)> set logging syslog c2 address 192.0.2.10 transport tls tls fingerprint SHA-256:00:11:...:FF
+  ```
+
+  ```sh
+  $C -X PUT -H 'Content-Type: application/json' \
+     -d '{"name":"c2","address":"192.0.2.10","transport":"Tls","tls":{"fingerprint":"SHA-256:00:11:...:FF"}}' \
+     $B/v1/transactions/syslog/logging/syslog/c2
+  ```
+
+- **The collector must offer `X25519MLKEM768`.** That is the default of OpenSSL 3.5 and later (and so of syslog-ng and rsyslog built on it), and of recent GnuTLS. A collector on an older library cannot be reached by default: the router logs `syslog collector unavailable … tls handshake` with the alert or error it got. Either upgrade the collector, or use `allow-tls12` below.
+- **`allow-tls12`: a collector that only does TLS 1.2.** [RFC 9662](https://www.rfc-editor.org/rfc/rfc9662) still requires TLS 1.2 with classical suites, so the default deviates from it on purpose. `set logging syslog <name> tls allow-tls12` adds TLS 1.2 with `ECDHE` and AES-GCM suites, for that one collector. What to know before using it:
+  - Log traffic sent over TLS 1.2 can be recorded now and decrypted later by a quantum computer. Logs carry hostnames, addresses and configuration events. Turn it on only while the collector cannot be upgraded, and turn it off again (`delete logging syslog <name> tls allow-tls12`) afterwards. The router logs `syslog tls12 classical key exchange` for every connection that uses it.
+  - TLS 1.3 stays post-quantum only: a TLS 1.3 collector must still offer `X25519MLKEM768`, or the handshake fails. A collector that offers TLS 1.3 without it is not reached by falling back to TLS 1.2, because TLS does not fall back. On such a collector, turn TLS 1.3 off for that listener (syslog-ng: `ssl-options(no-tlsv13)`, OpenSSL: `MaxProtocol = TLSv1.2`).
+  - A collector that can do TLS 1.3 cannot be pushed down to TLS 1.2 by an attacker: the router checks the downgrade marker of RFC 8446.
+  - The one part of RFC 9662 that stays unmet is `TLS_RSA_WITH_AES_128_CBC_SHA`: the TLS library has neither RSA key exchange nor CBC. A collector that supports only that suite cannot be reached.
 - **Routing table.** If the collector is only reachable through a routing table (for example a management VRF), name it with `routing-table`. Without it, the default network namespace is used. If that table does not run yet, the router retries every second.
 - **Level and facility.** `level` is the lowest severity sent (default `info`). `facility` is `local0` to `local7` (default `local7`). The levels map to syslog severities like this:
 
@@ -179,7 +201,7 @@ $C -X PUT -H 'Content-Type: application/json' \
 - **When the collector is down.** Entries are dropped, not queued, and not replayed when it comes back: use `show log` for the history. The router logs (to `docker logs`, not to `show log`) `syslog collector unavailable` once per failure, `syslog connected` when a connection is made and `syslog drops` once a minute while entries are being lost. A TCP connection that the collector closes is noticed at once and reopened every second.
 - **Several collectors** can be configured, each with its own transport, level, facility and routing table. `delete logging syslog <name>` stops one.
 
-Check it with `docker logs` on the router (`syslog connected server=c1`) and on the collector. A debug-level message needs the router started with `RUST_LOG=debug` (the default logs everything).
+Check it with `docker logs` on the router (`syslog connected server=c1`; for TLS it also shows `version`, `kx` and `suite`) and on the collector. A debug-level message needs the router started with `RUST_LOG=debug` (the default logs everything).
 
 ## Saving the configuration
 
@@ -243,11 +265,15 @@ REST paths are relative to `/v1/transactions/{tx}/`.
 | user | `set user <name> password <password>` / `delete user <name>` | `user/{name}`, `{"name":"alice","password":"…"}` | list, `admin`/`admin` on a new router | name 1-64 characters, PRECIS, unique; at least one user | Who may log in | `show config` |
 | user password | `set user <name> password <password>` | `user/{name}/password`, `"…"` | clear text in, argon2id hash stored | none | The user's password | a login |
 | logging syslog | `set logging syslog <name> address <ip>` / `delete logging syslog <name>` | `logging/syslog/{name}`, `{"name":"c1","address":"192.0.2.9"}` | list, empty | name 1-64 characters, unique | Exports every log entry to that collector | the collector, `docker logs` of the router |
-| logging syslog port | `set logging syslog <name> port <n>` | `logging/syslog/{name}/port`, `1514` | 514 (udp), 601 (tcp) | 1-65535 | Destination port | the collector |
-| logging syslog transport | `set logging syslog <name> transport udp\|tcp` | `logging/syslog/{name}/transport`, `"Tcp"` | `udp` | none | RFC 5426 datagrams or RFC 6587 frames | the collector |
+| logging syslog port | `set logging syslog <name> port <n>` | `logging/syslog/{name}/port`, `1514` | 514 (udp), 601 (tcp), 6514 (tls) | 1-65535 | Destination port | the collector |
+| logging syslog transport | `set logging syslog <name> transport udp\|tcp\|tls` | `logging/syslog/{name}/transport`, `"Tcp"` | `udp` | none | RFC 5426 datagrams, RFC 6587 frames or RFC 5425 TLS | the collector |
 | logging syslog routing-table | `set logging syslog <name> routing-table <t>` | `logging/syslog/{name}/routing-table`, `"mgmt"` | unset | an existing routing table | Sends from inside that VRF | the collector |
 | logging syslog level | `set logging syslog <name> level error\|warn\|info\|debug\|trace` | `logging/syslog/{name}/level`, `"Warn"` | `info` | none | Lowest severity sent | the collector |
 | logging syslog facility | `set logging syslog <name> facility local0..local7` | `logging/syslog/{name}/facility`, `"Local3"` | `local7` | none | Facility of every message | the collector |
+| logging syslog tls trust-anchor | `set logging syslog <name> tls trust-anchor <pem>` | `logging/syslog/{name}/tls/trust_anchor`, `"-----BEGIN CERTIFICATE-----…"` | unset | valid PEM; exactly one of this and `fingerprint` | CA the TLS collector's certificate must chain to | `docker logs` of the router |
+| logging syslog tls fingerprint | `set logging syslog <name> tls fingerprint SHA-256:AB:…` | `logging/syslog/{name}/tls/fingerprint` | unset | `SHA-256:` and 32 hex octets | Trusts that one collector certificate | `docker logs` of the router |
+| logging syslog tls server-name | `set logging syslog <name> tls server-name <dns>` | `logging/syslog/{name}/tls/server_name` | the collector's address | none | DNS name the certificate must carry (with a trust anchor) | `docker logs` of the router |
+| logging syslog tls allow-tls12 | `set logging syslog <name> tls allow-tls12` | `logging/syslog/{name}/tls/allow_tls12`, `true` | off | none | Also allows classical TLS 1.2 for this collector | `docker logs`: `syslog tls12 classical key exchange` |
 | routing-table rest-api | `set routing-table <t> rest-api address <ip> [port <n>]` / `delete routing-table <t> rest-api` | `routing-table/{t}/rest-api`, `{"address":"192.0.2.10","port":8443}` | unset; port 8080 | unicast address; port 1-65535 | Runs the REST API on that address | `show log nos-restd[<t>]` |
 
 The operational commands on this page have no configuration: `save` (shell only), `show log [<source>] [--follow]` (`GET /v1/logs`, `GET /v1/logs/follow`).

@@ -8,6 +8,8 @@ pub enum ConfigError {
     Validation(#[from] garde::Report),
     #[error("refusing to commit: it would remove every user and lock everyone out")]
     NoUsersLeft,
+    #[error("syslog server '{server}': tls trust-anchor is not a PEM certificate: {reason}")]
+    SyslogTrustAnchor { server: String, reason: String },
     #[error("password hash upgrade refused: no such user, stale hash, or not a hash")]
     HashUpgradeRefused,
     #[error("no transaction named '{0}'")]

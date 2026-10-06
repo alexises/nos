@@ -26,6 +26,8 @@ regex         = { workspace = true }
 bollard       = { workspace = true }
 tar           = { workspace = true }
 bytes         = { workspace = true }
+rcgen         = { workspace = true }
+sha2          = { workspace = true }
 
 [[bin]]
 name = "nos-e2e"

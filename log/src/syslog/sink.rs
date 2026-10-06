@@ -8,10 +8,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use nos_proto::{LogEntry, SyslogServer, SyslogTransport};
+use nos_proto::{parse_fingerprint, LogEntry, SyslogServer, SyslogTransport};
 use socket2::{Domain, Protocol, SockRef, Socket, Type};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{tcp::OwnedReadHalf, TcpSocket, TcpStream, UdpSocket};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf};
+use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, info, warn};
 
@@ -63,7 +63,7 @@ pub async fn run(cfg: SinkConfig, store: LogStore, mut stop: watch::Receiver<boo
             SyslogTransport::Udp => {
                 run_udp(&cfg, dest, vrf.as_deref(), &store, &mut stop, &mut drops).await
             }
-            SyslogTransport::Tcp => {
+            SyslogTransport::Tcp | SyslogTransport::Tls => {
                 run_tcp(&cfg, dest, vrf.as_deref(), &store, &mut stop, &mut drops).await
             }
         };
@@ -104,6 +104,19 @@ impl Drops {
     fn connected(&mut self, transport: &str) {
         self.failing = None;
         info!(server = %self.name, transport, "syslog connected");
+    }
+
+    /// A TLS session is up: what it negotiated is visible in the log, and a
+    /// TLS 1.2 one (always classical key exchange) is called out.
+    fn connected_tls(&mut self, n: &nos_pki::syslog::Negotiated) {
+        self.failing = None;
+        info!(
+            server = %self.name, version = %n.version, kx = %n.kx, suite = %n.suite,
+            peer_key = %n.peer_key, "syslog connected"
+        );
+        if n.is_tls12() {
+            warn!(server = %self.name, "syslog tls12 classical key exchange");
+        }
     }
 
     /// Logs `failure` only when it differs from the last one reported.
@@ -217,7 +230,7 @@ async fn run_tcp(
         }
         socket.connect(dest).await
     };
-    let stream: TcpStream = tokio::select! {
+    let tcp: TcpStream = tokio::select! {
         _ = stop.changed() => return Ended::Stopped,
         r = tokio::time::timeout(WRITE_TIMEOUT, connect) => match r {
             Ok(Ok(s)) => s,
@@ -225,18 +238,67 @@ async fn run_tcp(
             Err(_) => return Ended::Failed("connect: timed out".to_string()),
         },
     };
+    if cfg.server.transport == SyslogTransport::Tls {
+        let connector = match connector(&cfg.server) {
+            Ok(c) => c,
+            Err(e) => return Ended::Failed(format!("tls config: {e}")),
+        };
+        let (stream, negotiated) = tokio::select! {
+            _ = stop.changed() => return Ended::Stopped,
+            r = connector.connect(tcp) => match r {
+                Ok(v) => v,
+                Err(e) => return Ended::Failed(format!("tls handshake: {e}")),
+            },
+        };
+        drops.connected_tls(&negotiated);
+        serve(cfg, stream, store, stop, drops).await
+    } else {
+        drops.connected("tcp");
+        debug!(server = %cfg.server.name, %dest, "syslog tcp connected");
+        serve(cfg, tcp, store, stop, drops).await
+    }
+}
+
+/// RFC 5425 §5: the collector is trusted by the configured CA, or by its
+/// certificate's fingerprint. Rebuilt on every attempt: cheap, and a stale
+/// config can never outlive its sink (a change restarts it).
+fn connector(server: &SyslogServer) -> Result<nos_pki::syslog::Connector, String> {
+    let tls = server.tls.as_ref().ok_or("no tls block")?;
+    let trust = match (&tls.fingerprint, &tls.trust_anchor) {
+        (Some(f), _) => nos_pki::syslog::Trust::Fingerprint(
+            parse_fingerprint(f).ok_or("malformed fingerprint")?,
+        ),
+        (None, Some(pem)) => nos_pki::syslog::Trust::AnchorPem(pem),
+        (None, None) => return Err("neither trust-anchor nor fingerprint".into()),
+    };
+    nos_pki::syslog::Connector::new(
+        &trust,
+        tls.server_name.as_deref(),
+        server.address,
+        tls.allow_tls12,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Octet-counted frames on an established (plain or TLS) stream.
+async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
+    cfg: &SinkConfig,
+    stream: S,
+    store: &LogStore,
+    stop: &mut watch::Receiver<bool>,
+    drops: &mut Drops,
+) -> Ended {
     // Subscribed only now: entries logged while the collector was down are
     // not replayed (the ring buffer still has them for `show log`).
     let mut rx = store.subscribe();
-    let (mut rd, mut wr) = stream.into_split();
-    drops.connected("tcp");
-    debug!(server = %cfg.server.name, %dest, "syslog tcp connected");
+    let (mut rd, mut wr) = tokio::io::split(stream);
     let mut report = tokio::time::interval(DROP_REPORT);
     report.tick().await;
     let mut scratch = [0u8; 64];
     loop {
         tokio::select! {
             _ = stop.changed() => {
+                // FIN, or TLS close_notify (RFC 5425 §4.4).
                 let _ = wr.shutdown().await;
                 return Ended::Stopped;
             }
@@ -269,7 +331,7 @@ async fn run_tcp(
 }
 
 /// Resolves when the peer sent anything or closed.
-async fn read_any(rd: &mut OwnedReadHalf, buf: &mut [u8]) -> io::Result<()> {
+async fn read_any<S: AsyncRead + Unpin>(rd: &mut ReadHalf<S>, buf: &mut [u8]) -> io::Result<()> {
     rd.read(buf).await.map(|_| ())
 }
 

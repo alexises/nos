@@ -43,6 +43,23 @@ pub enum LoggingOp {
         name: String,
         facility: Option<SyslogFacility>,
     },
+    /// Creates the `tls` block if missing.
+    SetSyslogTlsTrustAnchor {
+        name: String,
+        pem: Option<String>,
+    },
+    SetSyslogTlsFingerprint {
+        name: String,
+        fingerprint: Option<String>,
+    },
+    SetSyslogTlsServerName {
+        name: String,
+        server_name: Option<String>,
+    },
+    SetSyslogTlsAllowTls12 {
+        name: String,
+        allow: bool,
+    },
 }
 
 impl LoggingOp {
@@ -55,7 +72,11 @@ impl LoggingOp {
             | LoggingOp::SetSyslogTransport { name, .. }
             | LoggingOp::SetSyslogRoutingTable { name, .. }
             | LoggingOp::SetSyslogLevel { name, .. }
-            | LoggingOp::SetSyslogFacility { name, .. } => name,
+            | LoggingOp::SetSyslogFacility { name, .. }
+            | LoggingOp::SetSyslogTlsTrustAnchor { name, .. }
+            | LoggingOp::SetSyslogTlsFingerprint { name, .. }
+            | LoggingOp::SetSyslogTlsServerName { name, .. }
+            | LoggingOp::SetSyslogTlsAllowTls12 { name, .. } => name,
         }
     }
 
@@ -89,6 +110,27 @@ impl LoggingOp {
             }
             LoggingOp::SetSyslogLevel { level, .. } => s.level = *level,
             LoggingOp::SetSyslogFacility { facility, .. } => s.facility = *facility,
+            LoggingOp::SetSyslogTlsTrustAnchor { pem, .. } => {
+                s.tls
+                    .get_or_insert_with(Default::default)
+                    .trust_anchor
+                    .clone_from(pem);
+            }
+            LoggingOp::SetSyslogTlsFingerprint { fingerprint, .. } => {
+                s.tls
+                    .get_or_insert_with(Default::default)
+                    .fingerprint
+                    .clone_from(fingerprint);
+            }
+            LoggingOp::SetSyslogTlsServerName { server_name, .. } => {
+                s.tls
+                    .get_or_insert_with(Default::default)
+                    .server_name
+                    .clone_from(server_name);
+            }
+            LoggingOp::SetSyslogTlsAllowTls12 { allow, .. } => {
+                s.tls.get_or_insert_with(Default::default).allow_tls12 = *allow;
+            }
         }
         Ok(())
     }
@@ -145,6 +187,22 @@ mod tests {
         assert_eq!(s.routing_table.as_deref(), Some("rt1"));
         assert_eq!(s.level, Some(LogLevel::Debug));
         assert_eq!(s.facility, Some(SyslogFacility::Local3));
+
+        for op in [
+            LoggingOp::SetSyslogTlsFingerprint {
+                name: name(),
+                fingerprint: Some("SHA-256:00".into()),
+            },
+            LoggingOp::SetSyslogTlsAllowTls12 {
+                name: name(),
+                allow: true,
+            },
+        ] {
+            op.apply(&mut cfg).unwrap();
+        }
+        let t = cfg.logging.syslog[0].tls.clone().unwrap();
+        assert_eq!(t.fingerprint.as_deref(), Some("SHA-256:00"));
+        assert!(t.allow_tls12);
 
         LoggingOp::SetSyslogPort {
             name: name(),

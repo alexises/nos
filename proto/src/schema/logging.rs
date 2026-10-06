@@ -19,7 +19,10 @@ use super::Config;
 pub struct LoggingSettings {
     /// Remote syslog collectors every log entry is exported to.
     #[serde(default)]
-    #[garde(dive)]
+    #[garde(
+        dive,
+        custom(|v: &Vec<SyslogServer>, _ctx: &Config| tls_consistent(v))
+    )]
     #[cli(topic = LoggingSyslog, words = "syslog")]
     pub syslog: Vec<SyslogServer>,
 }
@@ -43,13 +46,14 @@ pub struct SyslogServer {
     #[cli(topic = SyslogAddress)]
     pub address: IpAddr,
 
-    /// Destination port. Default: 514 (udp), 601 (tcp).
+    /// Destination port. Default: 514 (udp), 601 (tcp), 6514 (tls).
     #[serde(default)]
     #[garde(custom(|p: &Option<u16>, _ctx: &Config| valid_port(*p)))]
     #[cli(topic = SyslogPort)]
     pub port: Option<u16>,
 
-    /// Transport. Default `udp` (RFC 5426); `tcp` uses RFC 6587 octet counting.
+    /// Transport. Default `udp` (RFC 5426); `tcp` uses RFC 6587 octet counting;
+    /// `tls` is RFC 5425 over post-quantum TLS 1.3 and needs a `tls` block.
     #[serde(default)]
     #[garde(skip)]
     #[cli(topic = SyslogTransport)]
@@ -72,6 +76,96 @@ pub struct SyslogServer {
     #[garde(skip)]
     #[cli(topic = SyslogFacility)]
     pub facility: Option<SyslogFacility>,
+
+    /// How the collector is authenticated; required by (and only valid with)
+    /// transport `tls`. There is no "trust anything" mode.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = SyslogTls)]
+    pub tls: Option<SyslogTls>,
+}
+
+/// Authentication of a TLS syslog collector (RFC 5425 §4.2). Server
+/// authentication only: `nos-logd` presents no client certificate.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub struct SyslogTls {
+    /// PEM CA certificate(s) the collector's certificate must chain to
+    /// (RFC 5425 §4.2.1). Exactly one of this and `fingerprint`.
+    #[serde(default)]
+    #[cli(topic = SyslogTlsTrustAnchor)]
+    pub trust_anchor: Option<String>,
+
+    /// `SHA-256:AB:CD:...`: the SHA-256 of the collector's own certificate
+    /// (RFC 5425 §4.2.2). Exactly one of this and `trust_anchor`.
+    #[serde(default)]
+    #[cli(topic = SyslogTlsFingerprint)]
+    pub fingerprint: Option<String>,
+
+    /// The DNS name the collector's certificate must carry. Default: match the
+    /// collector's address against the certificate's IP address SANs.
+    #[serde(default)]
+    #[cli(topic = SyslogTlsServerName)]
+    pub server_name: Option<String>,
+
+    /// Also allows TLS 1.2 with classical (non-post-quantum) key exchange, for
+    /// collectors that need RFC 9662; TLS 1.3 stays post-quantum only, but
+    /// traffic sent over TLS 1.2 can be decrypted by a future quantum computer.
+    #[serde(default)]
+    #[cli(topic = SyslogTlsAllowTls12)]
+    pub allow_tls12: bool,
+}
+
+/// `SHA-256:` plus 32 colon-separated hex octets (case-insensitive).
+pub fn parse_fingerprint(s: &str) -> Option<[u8; 32]> {
+    let rest = s.strip_prefix("SHA-256:")?;
+    let mut out = [0u8; 32];
+    let mut parts = rest.split(':');
+    for b in &mut out {
+        let p = parts.next()?;
+        if p.len() != 2 || !p.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        *b = u8::from_str_radix(p, 16).ok()?;
+    }
+    parts.next().is_none().then_some(out)
+}
+
+fn tls_consistent(servers: &[SyslogServer]) -> garde::Result {
+    for s in servers {
+        let n = &s.name;
+        match (s.transport, &s.tls) {
+            (SyslogTransport::Tls, None) => {
+                return Err(garde::Error::new(format!(
+                    "syslog server '{n}': transport tls needs a tls block (trust-anchor or fingerprint)"
+                )))
+            }
+            (SyslogTransport::Tls, Some(t)) => {
+                if t.trust_anchor.is_some() == t.fingerprint.is_some() {
+                    return Err(garde::Error::new(format!(
+                        "syslog server '{n}': set exactly one of tls trust-anchor and fingerprint"
+                    )));
+                }
+                if t.fingerprint.as_deref().is_some_and(|f| parse_fingerprint(f).is_none()) {
+                    return Err(garde::Error::new(format!(
+                        "syslog server '{n}': fingerprint must be SHA-256:XX:XX:... (32 octets)"
+                    )));
+                }
+                if t.server_name.as_deref().is_some_and(str::is_empty) {
+                    return Err(garde::Error::new(format!(
+                        "syslog server '{n}': tls server-name is empty"
+                    )));
+                }
+            }
+            (_, Some(_)) => {
+                return Err(garde::Error::new(format!(
+                    "syslog server '{n}': tls settings need transport tls (delete them)"
+                )))
+            }
+            (_, None) => {}
+        }
+    }
+    Ok(())
 }
 
 impl Default for SyslogServer {
@@ -84,6 +178,7 @@ impl Default for SyslogServer {
             routing_table: None,
             level: None,
             facility: None,
+            tls: None,
         }
     }
 }
@@ -93,6 +188,7 @@ impl SyslogServer {
         self.port.unwrap_or(match self.transport {
             SyslogTransport::Udp => 514,
             SyslogTransport::Tcp => 601,
+            SyslogTransport::Tls => 6514,
         })
     }
 
@@ -121,8 +217,6 @@ fn valid_port(p: Option<u16>) -> garde::Result {
     Ok(())
 }
 
-// ponytail: no `Tls` transport yet (RFC 5425/9662, #71 PR 2); it needs a new
-// `nos-pki` policy and trust configuration. Appended later, postcard-safe.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Cli)]
 pub enum SyslogTransport {
@@ -131,6 +225,8 @@ pub enum SyslogTransport {
     Udp,
     /// RFC 6587 octet-counted frames on one connection.
     Tcp,
+    /// RFC 5425 octet-counted frames inside TLS (post-quantum TLS 1.3).
+    Tls,
 }
 
 /// The user-level facilities, `local0`-`local7`; the others are reserved for
@@ -228,6 +324,71 @@ mod tests {
         assert!(ok(&c));
         c.routing_tables.clear();
         assert!(!ok(&c));
+    }
+
+    fn tls_server(tls: Option<SyslogTls>) -> SyslogServer {
+        SyslogServer {
+            transport: SyslogTransport::Tls,
+            tls,
+            ..server("t")
+        }
+    }
+
+    const FP: &str = "SHA-256:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF";
+
+    #[test]
+    fn tls_rules() {
+        let anchor = SyslogTls {
+            trust_anchor: Some("pem".into()),
+            ..SyslogTls::default()
+        };
+        let fp = SyslogTls {
+            fingerprint: Some(FP.into()),
+            ..SyslogTls::default()
+        };
+        assert!(ok(&cfg(vec![tls_server(Some(anchor.clone()))])));
+        assert!(ok(&cfg(vec![tls_server(Some(fp.clone()))])));
+        // no tls block, an empty one, both trust modes, a bad fingerprint
+        assert!(!ok(&cfg(vec![tls_server(None)])));
+        assert!(!ok(&cfg(vec![tls_server(Some(SyslogTls::default()))])));
+        let both = SyslogTls {
+            fingerprint: fp.fingerprint.clone(),
+            ..anchor.clone()
+        };
+        assert!(!ok(&cfg(vec![tls_server(Some(both))])));
+        let bad = SyslogTls {
+            fingerprint: Some("SHA-256:00".into()),
+            ..SyslogTls::default()
+        };
+        assert!(!ok(&cfg(vec![tls_server(Some(bad))])));
+        // allow_tls12 is valid with both trust modes
+        for t in [anchor.clone(), fp] {
+            let t = SyslogTls {
+                allow_tls12: true,
+                ..t
+            };
+            assert!(ok(&cfg(vec![tls_server(Some(t))])));
+        }
+        // a tls block on a non-tls transport
+        let mut s = server("a");
+        s.tls = Some(anchor);
+        assert!(!ok(&cfg(vec![s])));
+        assert_eq!(tls_server(None).effective_port(), 6514);
+    }
+
+    #[test]
+    fn tls_block_without_allow_tls12_loads_as_false() {
+        let t: SyslogTls = serde_json::from_str(r#"{"fingerprint":"x"}"#).unwrap();
+        assert!(!t.allow_tls12);
+    }
+
+    #[test]
+    fn fingerprint_parsing() {
+        assert_eq!(parse_fingerprint(FP).unwrap()[15], 0xff);
+        assert!(parse_fingerprint("SHA-1:00").is_none());
+        assert!(parse_fingerprint(&format!("{FP}:00")).is_none());
+        assert!(parse_fingerprint(&FP.replace(":ff", ":fg")).is_none());
+        assert!(parse_fingerprint(&FP.replace(":ff", ":f")).is_none());
     }
 
     #[test]
