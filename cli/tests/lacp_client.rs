@@ -14,6 +14,8 @@ fn sample() -> PortAggregateLacpSummary {
         actor_key: 1,
         actor_system_priority: 32768,
         rate: LacpRate::Fast,
+        min_links: 1,
+        min_links_met: true,
         ports: vec![LacpPortStatus {
             interface: "eth1".to_string(),
             actor_port_number: 4,
@@ -30,6 +32,7 @@ fn sample() -> PortAggregateLacpSummary {
             synchronized: true,
             actor_churn: false,
             partner_churn: false,
+            individual: false,
         }],
     }
 }

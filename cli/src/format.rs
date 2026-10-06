@@ -145,8 +145,13 @@ fn render_lacp_port(port: &nos_proto::LacpPortStatus) -> String {
         (Some(system), Some(port)) => format!(", partner priority {system}/{port}"),
         _ => String::new(),
     };
+    let individual = if port.individual {
+        ", individual (partner not aggregatable)"
+    } else {
+        ""
+    };
     format!(
-        "  {}: port {}, receive {receive}, mux {mux}, {partner}, selected {}, synchronized {}, churn {}, port priority {}{partner_priority}, mode {mode}",
+        "  {}: port {}, receive {receive}, mux {mux}, {partner}, selected {}, synchronized {}, churn {}, port priority {}{partner_priority}, mode {mode}{individual}",
         port.interface,
         port.actor_port_number,
         yes_no(port.selected),
@@ -323,6 +328,17 @@ pub fn render_lacp_summaries(summaries: &[PortAggregateLacpSummary]) -> String {
                 s.actor_key,
                 s.actor_system_priority
             )];
+            if s.min_links > 1 {
+                lines.push(format!(
+                    "  min-links {}: {}",
+                    s.min_links,
+                    if s.min_links_met {
+                        "met"
+                    } else {
+                        "not met, bond emptied"
+                    }
+                ));
+            }
             if s.ports.is_empty() {
                 lines.push("  no member ports".to_string());
             }
@@ -1672,6 +1688,8 @@ mod tests {
             actor_key: 7,
             actor_system_priority: 100,
             rate: LacpRate::Fast,
+            min_links: 2,
+            min_links_met: false,
             ports: vec![
                 nos_proto::LacpPortStatus {
                     interface: "eth1".to_string(),
@@ -1689,6 +1707,7 @@ mod tests {
                     synchronized: true,
                     actor_churn: false,
                     partner_churn: false,
+                    individual: false,
                 },
                 nos_proto::LacpPortStatus {
                     interface: "eth2".to_string(),
@@ -1706,6 +1725,7 @@ mod tests {
                     synchronized: false,
                     actor_churn: false,
                     partner_churn: true,
+                    individual: true,
                 },
             ],
         };
@@ -1713,6 +1733,8 @@ mod tests {
         assert!(out.contains(
             "lacp bond1: system 02:00:00:00:00:ab, key 7, rate fast, system priority 100"
         ));
+        assert!(out.contains("  min-links 2: not met, bond emptied"));
+        assert!(out.contains("churn partner, port priority 32768, mode active, individual (partner not aggregatable)"), "{out}");
         assert!(out.contains("eth1: port 4, receive current, mux distributing, partner 02:00:00:00:00:01 key 3 port 9, selected yes, synchronized yes, churn none, port priority 50, partner priority 200/60, mode passive"));
         assert!(out.contains("eth2: port 5, receive defaulted, mux detached, partner none, selected no, synchronized no, churn partner"));
     }
@@ -1888,6 +1910,7 @@ mod tests {
             synchronized: false,
             actor_churn,
             partner_churn,
+            individual: false,
         };
         for (p, want) in [
             (
@@ -1916,6 +1939,8 @@ mod tests {
             actor_key: 1,
             actor_system_priority: 32768,
             rate: LacpRate::Slow,
+            min_links: 1,
+            min_links_met: true,
             ports: Vec::new(),
         };
         assert!(

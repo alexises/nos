@@ -4,7 +4,8 @@
 //! `selection::select` whenever any port's observation changes, and pushes
 //! the resulting `Distributing`-state port set to `nos-interfaced`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
 use nos_proto::{
@@ -42,6 +43,9 @@ pub struct AggregateManager {
     /// change restarts them all (their advertised `LACP_Timeout` and timers
     /// are fixed for a task's lifetime).
     rate: Mutex<LacpRate>,
+    /// Config's `min-links`, read live by `selection_loop`: a pure
+    /// selection-side policy, so a change restarts no link.
+    min_links: Arc<AtomicU16>,
     /// Same, for the Actor System Priority.
     system_priority: Mutex<u16>,
     /// The port priority each running member task was started with; a
@@ -77,17 +81,20 @@ impl AggregateManager {
         let changed = Arc::new(Notify::new());
         let selected_txs: SelectedTxs = Arc::new(Mutex::new(HashMap::new()));
         let port_priorities = Arc::new(Mutex::new(HashMap::new()));
+        let min_links = Arc::new(AtomicU16::new(1));
         let selection_task = tokio::spawn(selection_loop(
             name.to_string(),
             observations.clone(),
             changed.clone(),
             selected_txs.clone(),
             port_priorities.clone(),
+            min_links.clone(),
             push_tx,
         ));
         Arc::new(Self {
             name: name.to_string(),
             rate: Mutex::new(LacpRate::default()),
+            min_links,
             system_priority: Mutex::new(DEFAULT_PRIORITY),
             port_priorities,
             modes: Mutex::new(HashMap::new()),
@@ -114,13 +121,17 @@ impl AggregateManager {
     /// link task's lifetime. `system_priority` (config's
     /// `lacp-system-priority`) restarts every member the same way, and a
     /// member's own `(name, port_priority)` change restarts just that member.
+    /// `min_links` (config's `min-links`) restarts nothing: it only gates the
+    /// pushed active set.
     pub fn reconcile(
         &self,
         mut desired: Vec<(String, u16, LacpMode)>,
         rate: LacpRate,
         system_id: Option<[u8; 6]>,
         system_priority: u16,
+        min_links: u16,
     ) {
+        self.min_links.store(min_links, Ordering::Relaxed);
         desired.sort_by(|a, b| a.0.cmp(&b.0));
         let desired_members: Vec<String> = desired.iter().map(|(n, _, _)| n.clone()).collect();
         let system_id = system_id.unwrap_or(self.derived_system_id);
@@ -226,6 +237,7 @@ impl AggregateManager {
                 partner_system_priority: obs.partner.map(|p| p.system_priority),
                 partner_port_priority: obs.partner.map(|p| p.port_priority),
                 selected: selected_txs.get(interface).is_some_and(|tx| *tx.borrow()),
+                individual: obs.partner_individual(),
                 synchronized: obs
                     .partner
                     .is_some_and(|p| p.has_state(state_bit::SYNCHRONIZATION)),
@@ -234,12 +246,21 @@ impl AggregateManager {
             })
             .collect();
         ports.sort_by(|a, b| a.interface.cmp(&b.interface));
+        let selected: HashSet<String> = selected_txs
+            .iter()
+            .filter(|(_, tx)| *tx.borrow())
+            .map(|(i, _)| i.clone())
+            .collect();
+        let min_links = self.min_links.load(Ordering::Relaxed);
+        let min_links_met = min_links_met(active_set(&observations, &selected).len(), min_links);
         PortAggregateLacpSummary {
             aggregate: self.name.clone(),
             actor_system_id: *self.system_id.lock().unwrap(),
             actor_key: self.key,
             actor_system_priority: *self.system_priority.lock().unwrap(),
             rate: *self.rate.lock().unwrap(),
+            min_links,
+            min_links_met,
             ports,
         }
     }
@@ -266,6 +287,7 @@ async fn selection_loop(
     changed: Arc<Notify>,
     selected_txs: SelectedTxs,
     port_priorities: Arc<Mutex<HashMap<String, u16>>>,
+    min_links: Arc<AtomicU16>,
     push_tx: mpsc::Sender<LacpAggregateMembers>,
 ) {
     let mut last_pushed: Option<Vec<String>> = None;
@@ -281,6 +303,7 @@ async fn selection_loop(
                 current: obs.current(),
                 partner_system_id: obs.partner.map(|p| p.system).unwrap_or_default(),
                 partner_key: obs.partner.map(|p| p.key).unwrap_or_default(),
+                partner_individual: obs.partner_individual(),
                 actor_port_priority: priorities
                     .get(interface)
                     .copied()
@@ -294,16 +317,22 @@ async fn selection_loop(
             set_if_changed(tx, selected.contains(interface));
         }
 
-        let mut active_members: Vec<String> = snapshot
-            .iter()
-            .filter(|(interface, obs)| {
-                selected.contains(*interface)
-                    && obs.mux_state == MuxState::Distributing
-                    && !obs.is_churned()
-            })
-            .map(|(interface, _)| interface.clone())
-            .collect();
+        let mut active_members = active_set(&snapshot, &selected);
         active_members.sort();
+        let min = min_links.load(Ordering::Relaxed);
+        if !min_links_met(active_members.len(), min) {
+            // Only the pushed set is gated: ports stay selected and keep
+            // negotiating, so the bond refills the moment the count is met.
+            if last_pushed.as_ref().is_some_and(|l| !l.is_empty()) {
+                info!(
+                    aggregate = %aggregate,
+                    members = active_members.len(),
+                    min_links = min,
+                    "lacp min-links not met, bond emptied"
+                );
+            }
+            active_members.clear();
+        }
 
         if last_pushed.as_ref() != Some(&active_members) {
             info!(
@@ -325,6 +354,27 @@ async fn selection_loop(
             last_pushed = Some(active_members);
         }
     }
+}
+
+/// Ports that belong in the bond: selected, `Distributing` and not churned.
+fn active_set(
+    snapshot: &HashMap<String, PortObservation>,
+    selected: &HashSet<String>,
+) -> Vec<String> {
+    snapshot
+        .iter()
+        .filter(|(interface, obs)| {
+            selected.contains(*interface)
+                && obs.mux_state == MuxState::Distributing
+                && !obs.is_churned()
+        })
+        .map(|(interface, _)| interface.clone())
+        .collect()
+}
+
+/// `min-links` gate: 0 and 1 both mean "any one active port is enough".
+fn min_links_met(active: usize, min_links: u16) -> bool {
+    active >= usize::from(min_links)
 }
 
 fn wire_receive_state(state: ReceiveState) -> LacpReceiveState {
@@ -405,11 +455,23 @@ mod tests {
         let agg = AggregateManager::new("bond1", 1, tx);
         let derived = agg.summary().actor_system_id;
         let mine = [0x02, 0, 0, 0, 0, 0x99];
-        agg.reconcile(Vec::new(), LacpRate::Slow, Some(mine), DEFAULT_PRIORITY);
+        agg.reconcile(Vec::new(), LacpRate::Slow, Some(mine), DEFAULT_PRIORITY, 1);
         assert_eq!(agg.summary().actor_system_id, mine);
-        agg.reconcile(Vec::new(), LacpRate::Slow, None, DEFAULT_PRIORITY);
+        agg.reconcile(Vec::new(), LacpRate::Slow, None, DEFAULT_PRIORITY, 1);
         assert_eq!(agg.summary().actor_system_id, derived);
         agg.shutdown();
+    }
+
+    #[test]
+    fn min_links_gate() {
+        // 0 and 1 are equivalent; N-1 fails, N and N+1 pass.
+        assert!(min_links_met(1, 0));
+        assert!(min_links_met(0, 0));
+        assert!(!min_links_met(0, 1));
+        assert!(min_links_met(1, 1));
+        assert!(!min_links_met(1, 2));
+        assert!(min_links_met(2, 2));
+        assert!(min_links_met(3, 2));
     }
 
     #[test]

@@ -46,7 +46,10 @@ Unlike `interface::driver::port_aggregate_registry`'s YAML-backed bond-id alloca
 
 - **Mode**: `Interface.lacp_mode` (`Active` default, `Passive`) sets Actor_State.LACP_Activity (`link::actor_state_byte`). `AggregateManager::reconcile` takes it per member alongside the port priority; a change restarts only that member. Two Passive ends never leave Defaulted and so never reach `Distributing` (permanent, standard behaviour).
 
-`lacp-rate`, `lacp-system-id`, the two priorities and `lacp-mode` are the CLI-exposed knobs. Priorities only advertise and break one tie in `selection.rs`: with config-fixed membership and no `max-links`/standby they never change which ports are selected otherwise.
+- **min-links**: `PortAggregate.min_links` (`u16`, default 1, 0 ≡ 1). A pure selection-side policy: `AggregateManager` holds it in an `AtomicU16` read by `selection_loop` (a change restarts no link; `reconcile` just wakes the loop), and `selection_loop` clears the *pushed* active set when `active_set(..).len() < min_links` (`min_links_met`), logging `lacp min-links not met, bond emptied` once per transition. `selected`, each port's Mux machine and the LACPDU flags are untouched, so ports keep negotiating and the bond refills as soon as the count is met. `reconcile.rs` warns when `min_links` exceeds the configured member count (no commit-time check: membership lives on `Interface`). `show lacp` carries `min_links`/`min_links_met`.
+- **Individual partner**: `PortObservation::partner_individual()` (the partner's last Actor_State has Aggregation clear). `selection::select` drops such ports before counting partner groups, so an Individual port is neither selected nor a voter; its Mux machine stays `Detached`/`Waiting` through the normal `SelectionChanged` path. Shown as `individual` in `show lacp`. Our own Aggregation bit stays 1 (only configured members run LACP).
+
+`lacp-rate`, `lacp-system-id`, the two priorities, `lacp-mode` and `min-links` are the CLI-exposed knobs. Priorities only advertise and break one tie in `selection.rs`: with config-fixed membership and no `max-links`/standby they never change which ports are selected otherwise.
 
 ## Robustness rules learned the hard way (each has a regression test)
 
@@ -82,6 +85,8 @@ Every one of these was a real hot loop or stall found by running `nos-e2e lacp` 
 | `reconcile.rs` | Steady-state loop: subscribes to `DiffScope::{Interfaces, PortAggregates}` purely as a resync trigger, always re-fetching the whole config, filters `port_aggregates` for `mode == Lacp`, resolves each one's member set from `Interface.port_aggregate`, drives one `AggregateManager` per name (creating/`shutdown`-ing as aggregates are added/removed from config) — plus a fixed 10s safety-net tick, mirroring `interface::reconcile`'s shape |
 
 ## `nos-e2e lacp`
+
+After the passive/active steps the phase runs `min-links` (`lacp_min_links`): `--min-links 2` with both members `Distributing` changes nothing; router-b withdrawing `eth2` makes router-a log `lacp min-links not met, bond emptied`, release `eth1` from the kernel bond while `GET /v1/lacp` still shows it `Distributing`/`selected`; then `tools/e2e/src/phases/individual.py` (a scripted partner in router-b's netns, 10s of LACPDUs on `eth2` with Actor_State.Aggregation clear) makes router-a report `eth2` `individual=true`, `Current` but not selected; router-b restoring `eth2` refills the bond. **A real Linux bond cannot play the Individual partner**: the kernel bonding driver advertises Aggregation on every slave it was tried with (veth full duplex, dummy/tun unknown or full duplex: port state `0x45`/`0x3d`), and no virtual device here can report half duplex, so the speaker is scripted.
 
 Before the withdraw step the phase also injects a real Marker PDU on router-b's eth1 from a python helper container (`tools/e2e/src/phases/marker.py`, raw `AF_PACKET`, source MAC = router-b's own so only router-a answers) and requires a byte-correct Marker Response back plus router-a's `lacp marker answered` log line.
 

@@ -353,6 +353,8 @@ topics! {
     BgpPeerGroupAddPath,
     /// `BgpPeerGroup.add_path_send_count`
     BgpPeerGroupAddPathSendCount,
+    /// `PortAggregate.min_links`
+    PortAggregateMinLinks,
     /// `PortAggregate.lacp_system_priority`
     PortAggregateLacpSystemPriority,
     /// `Interface.lacp_port_priority`

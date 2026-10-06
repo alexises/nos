@@ -776,6 +776,11 @@ pub struct Args {
     #[arg(long)]
     pub lacp_system_priority: Option<u16>,
 
+    /// If set (requires `--port-aggregate`), sets the aggregate's LACP
+    /// `min-links` (`PortAggregateOp::SetMinLinks`).
+    #[arg(long)]
+    pub min_links: Option<u16>,
+
     /// If set (requires `--port-aggregate`), sets the LACP Actor Port Priority
     /// of every `--enslave-interface-into-port-aggregate` member
     /// (`InterfaceOp::SetLacpPortPriority`).
@@ -2138,6 +2143,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 },
             ));
         }
+        if let Some(min_links) = args.min_links {
+            ops.push(ConfigOp::PortAggregate(PortAggregateOp::SetMinLinks {
+                name: name.clone(),
+                min_links,
+            }));
+        }
         if let Some(domain) = args.port_aggregate_untagged_domain.clone() {
             let profile = format!("{name}-sp");
             ops.push(ConfigOp::BroadcastDomain(BroadcastDomainOp::Ensure {
@@ -2187,6 +2198,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || args.port_aggregate_df_algorithm.is_some()
         || args.lacp_system_id.is_some()
         || args.lacp_system_priority.is_some()
+        || args.min_links.is_some()
         || args.lacp_port_priority.is_some()
         || args.lacp_mode.is_some()
         || args.port_aggregate_untagged_domain.is_some()
@@ -2194,7 +2206,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || !args.port_aggregate_members.is_empty()
     {
         bail!(
-            "--port-aggregate-mtu/--port-aggregate-address/--port-aggregate-esi/--port-aggregate-redundancy-mode/--port-aggregate-df-algorithm/--lacp-system-id/--lacp-system-priority/--lacp-port-priority/--lacp-mode/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
+            "--port-aggregate-mtu/--port-aggregate-address/--port-aggregate-esi/--port-aggregate-redundancy-mode/--port-aggregate-df-algorithm/--lacp-system-id/--lacp-system-priority/--min-links/--lacp-port-priority/--lacp-mode/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
         );
     }
 
@@ -3146,6 +3158,8 @@ mod tests {
             "02:00:00:00:00:01",
             "--lacp-system-priority",
             "100",
+            "--min-links",
+            "2",
             "--lacp-port-priority",
             "200",
             "--lacp-mode",
@@ -3221,6 +3235,13 @@ mod tests {
             &ConfigOp::PortAggregate(PortAggregateOp::SetLacpSystemPriority {
                 name: "bond0".into(),
                 priority: 100,
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::PortAggregate(PortAggregateOp::SetMinLinks {
+                name: "bond0".into(),
+                min_links: 2,
             }),
         );
         has(
@@ -3632,6 +3653,7 @@ mod tests {
             (&["--delete-port-aggregate"], "requires --port-aggregate"),
             (&["--lacp-rate", "slow"], "require --port-aggregate"),
             (&["--lacp-system-priority", "1"], "require --port-aggregate"),
+            (&["--min-links", "2"], "require --port-aggregate"),
             (&["--lacp-port-priority", "1"], "require --port-aggregate"),
             (&["--lacp-mode", "passive"], "require --port-aggregate"),
             (

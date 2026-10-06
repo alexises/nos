@@ -26,6 +26,9 @@ pub struct PortCandidate {
     pub current: bool,
     pub partner_system_id: [u8; 6],
     pub partner_key: u16,
+    /// The partner's `Actor_State.Aggregation` is clear: it treats this link as
+    /// Individual, so the port is neither selected nor counted as a vote.
+    pub partner_individual: bool,
     /// This port's own advertised Actor Port Priority and number (lower wins
     /// the tie-break in [`select`]).
     pub actor_port_priority: u16,
@@ -41,7 +44,9 @@ pub struct PortCandidate {
 /// value wins, as in LACP generally. Because membership is config-fixed and there
 /// is no standby/`max-links`, this tie-break is the only place priorities
 /// change which ports are selected.
-pub fn select(candidates: &[PortCandidate]) -> HashSet<String> {
+pub fn select(all: &[PortCandidate]) -> HashSet<String> {
+    // An Individual partner port is out before partner groups are counted.
+    let candidates: Vec<&PortCandidate> = all.iter().filter(|c| !c.partner_individual).collect();
     let mut counts: Vec<([u8; 6], u16, usize)> = Vec::new();
     for c in candidates.iter().filter(|c| c.current) {
         let key = (c.partner_system_id, c.partner_key);
@@ -84,6 +89,7 @@ mod tests {
             current,
             partner_system_id: [0, 0, 0, 0, 0, system],
             partner_key: key,
+            partner_individual: false,
             actor_port_priority: 32768,
             actor_port_number: 1,
         }
@@ -119,6 +125,23 @@ mod tests {
             selected,
             HashSet::from(["eth2".to_string(), "eth3".to_string()])
         );
+    }
+
+    #[test]
+    fn individual_partner_is_excluded_and_does_not_vote() {
+        let ind = |name, sys| PortCandidate {
+            partner_individual: true,
+            ..candidate(name, true, sys, 1)
+        };
+        // Two individual ports (same partner) would outvote the one normal port.
+        let selected = select(&[
+            candidate("eth1", true, 1, 1),
+            ind("eth2", 2),
+            ind("eth3", 2),
+        ]);
+        assert_eq!(selected, HashSet::from(["eth1".to_string()]));
+        // All individual: nothing selected.
+        assert!(select(&[ind("eth1", 1), ind("eth2", 1)]).is_empty());
     }
 
     #[test]

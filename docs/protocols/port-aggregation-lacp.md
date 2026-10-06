@@ -155,6 +155,19 @@ REST: `DELETE …/interface/eth1/port-aggregate`, the same for `eth2`, then `DEL
 - Active against passive negotiates normally. Passive against passive never does: neither end speaks, so both stay `defaulted`, no member reaches `distributing` and the bond stays empty. Put at least one end on `active`.
 - `show lacp` prints `mode active|passive` per member, and NOS logs `lacp periodic transmission machine transitioned … no_periodic=true` when a passive member goes silent.
 
+**`min-links`.** The minimum number of members that must be `distributing` for the bond to be used, default 1 (0 means the same).
+
+- Below it NOS empties the kernel bond: every member is released from it, and `nos-lacpd` logs `lacp min-links not met, bond emptied`. The members keep negotiating (`show lacp` still shows them `distributing`), so the bond refills the moment enough of them are back.
+- `show lacp` prints `min-links <n>: met` or `not met, bond emptied` under the aggregate when `min-links` is above 1.
+- It is not checked against the number of members, which are configured on the interfaces: a value above that count keeps the bond empty for good, and `nos-lacpd` logs a warning.
+- Set with `set port-aggregate bond-lacp min-links 2`. A change takes effect at once and restarts no member. It has no effect on an `xor` aggregate.
+
+**Individual ports.** A partner that clears the Aggregation bit of its LACPDUs declares the link Individual: it will not bundle it with any other link. NOS never selects such a member, and it does not count towards the partner groups of the others.
+
+- `show lacp` ends that member's line with `individual (partner not aggregatable)`; `GET /v1/lacp` has `"individual": true`.
+- NOS itself never declares a link Individual: only configured members run LACP.
+- An Individual member stays out of the bond while the partner keeps it so, and joins as soon as the partner sets the bit again. Check the partner's configuration (for example a link it considers half duplex).
+
 **EVPN multi-homing.** `esi` attaches the aggregate to an EVPN Ethernet Segment, `redundancy-mode` chooses all-active or single-active forwarding for it, and `df-algorithm` the designated forwarder election. They are documented with EVPN.
 
 **`show port-aggregate`** shows each aggregate's mode, switching profile, MTU and subinterfaces, as applied; `show lacp` the LACP state of every `lacp` aggregate. Neither lists the members of an `xor` aggregate: check them in `show config`.
@@ -176,6 +189,7 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 | lacp-rate | `set port-aggregate <pa> lacp-rate fast\|slow` / `set lacp-rate fast\|slow` | `port-aggregate/<pa>/lacp-rate`, body `"Fast"` or `"Slow"` | `slow` (default) or `fast` | | asks the partner for LACPDUs every 1 s (`fast`) or 30 s (`slow`); `lacp` mode only | `show lacp` (`rate`) |
 | lacp-system-id | `set port-aggregate <pa> lacp-system-id <mac>` / `set lacp-system-id <mac>`; `delete … lacp-system-id` | `port-aggregate/<pa>/lacp-system-id` | unicast MAC, `02:00:00:00:00:01`; default derived | a unicast MAC | the LACP system ID advertised to the partner | `show lacp` (`system`) |
 | lacp-system-priority | `set port-aggregate <pa> lacp-system-priority <n>` / `set lacp-system-priority <n>`; `delete … lacp-system-priority` | `port-aggregate/<pa>/lacp-system-priority` | 0-65535; default 32768 | | the Actor System Priority advertised to the partner; a change restarts every member's LACP; `lacp` mode only | `show lacp` (`system priority`) |
+| min-links | `set port-aggregate <pa> min-links <n>` / `set min-links <n>` | `port-aggregate/<pa>/min-links` | 0-65535; default 1 | | the bond carries traffic only with at least this many `distributing` members; applies live; `lacp` mode only | `show lacp` (`min-links`) |
 | esi | `set port-aggregate <pa> esi <esi>` / `set esi <esi>`; `delete … esi` | `port-aggregate/<pa>/esi` | 10 hex bytes; default unset | not all zero; unique among aggregates | EVPN Ethernet Segment, see EVPN | `show bgp evpn` |
 | redundancy-mode | `set port-aggregate <pa> redundancy-mode all-active\|single-active` / `set redundancy-mode …` | `port-aggregate/<pa>/redundancy-mode`, body `"AllActive"` or `"SingleActive"` | `all-active` (default) | `single-active` needs an `esi` | EVPN multi-homing mode, see EVPN | `show config` |
 | df-algorithm | `set port-aggregate <pa> df-algorithm modulo\|hrw` / `set df-algorithm …` | `port-aggregate/<pa>/df-algorithm`, body `"Modulo"` or `"Hrw"` | `modulo` (default) | `hrw` needs an `esi` | EVPN designated forwarder election algorithm, see EVPN | `show config` |

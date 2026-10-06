@@ -64,6 +64,10 @@ pub struct LacpPortStatus {
     pub actor_churn: bool,
     /// Same, for the partner's advertised state.
     pub partner_churn: bool,
+    /// The partner's last LACPDU had `Actor_State.Aggregation` clear: it
+    /// treats this link as an Individual (non-aggregatable) one, so the port
+    /// is never selected into the bond.
+    pub individual: bool,
 }
 
 /// One `PortAggregate`'s LACP engine state, for `show lacp [<name>]`.
@@ -77,6 +81,11 @@ pub struct PortAggregateLacpSummary {
     pub actor_system_priority: u16,
     /// The aggregate's configured `lacp-rate`.
     pub rate: crate::schema::LacpRate,
+    /// The aggregate's configured `min-links`.
+    pub min_links: u16,
+    /// Whether enough ports are Distributing to meet `min_links`; `false`
+    /// means the bond was emptied even though ports may be negotiating.
+    pub min_links_met: bool,
     pub ports: Vec<LacpPortStatus>,
 }
 

@@ -64,6 +64,13 @@ impl PortObservation {
         self.actor_churn == ChurnState::Churn || self.partner_churn == ChurnState::Churn
     }
 
+    /// The partner's last LACPDU cleared `Actor_State.Aggregation`: it treats
+    /// the link as an Individual one, not aggregatable with any other.
+    pub fn partner_individual(&self) -> bool {
+        self.partner
+            .is_some_and(|p| !p.has_state(state_bit::AGGREGATION))
+    }
+
     pub fn current(&self) -> bool {
         self.receive_state == ReceiveState::Current
     }
@@ -418,7 +425,8 @@ impl Churn {
 
 /// This port's own advertised `Actor_State` byte — see 802.1AX Table 6-4.
 /// `Activity` follows the configured `lacp-mode`; `Aggregation` is always set
-/// (no `Individual` aggregation — see `lacp/CLAUDE.md`'s deferred list);
+/// (our own bit stays set: only configured member ports run LACP at all, so
+/// we never declare ourselves Individual — see `lacp/CLAUDE.md`);
 /// `Timeout` is the aggregate's `LacpRate` (set = Fast, asking the partner
 /// to send every second); the rest reflect the live state machines.
 fn actor_state_byte(
