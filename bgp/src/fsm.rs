@@ -1054,7 +1054,37 @@ pub async fn run(
                 // `slot`'s shared command receiver — the collision loser
                 // never contends for it.
                 Some(cmd) = slot.recv_command(), if matches!(state, State::Established(_)) => {
+                    // An in-place key update that the kernel refuses (e.g.
+                    // `EBUSY`: the peer still signs with a removed key)
+                    // falls back to a reset; the reconnect uses the new keys.
+                    let cmd = match cmd {
+                        FsmCommand::UpdateAo(delta) => {
+                            match crate::tcp::apply_ao_delta(fd, peer.remote_address, &delta, true) {
+                                Ok(()) => {
+                                    info!(
+                                        peer = %peer.remote_address,
+                                        added = delta.add.len(), removed = delta.remove.len(),
+                                        rnext = delta.rnext_recv_id,
+                                        "bgp tcp-ao keys updated in place"
+                                    );
+                                    continue;
+                                }
+                                Err(error) => {
+                                    warn!(
+                                        peer = %peer.remote_address, %error,
+                                        "failed to update tcp-ao keys in place, resetting session"
+                                    );
+                                    FsmCommand::Cease {
+                                        subcode: CeaseSubcode::OtherConfigurationChange,
+                                        data: Bytes::new(),
+                                    }
+                                }
+                            }
+                        }
+                        other => other,
+                    };
                     match cmd {
+                        FsmCommand::UpdateAo(_) => unreachable!("handled above"),
                         FsmCommand::SendRouteRefresh => {
                             send_route_refresh(&mut writer, &state, &peer).await;
                         }

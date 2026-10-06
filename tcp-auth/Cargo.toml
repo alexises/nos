@@ -10,3 +10,6 @@ workspace = true
 
 [dependencies]
 libc = { workspace = true }
+
+[dev-dependencies]
+socket2 = { workspace = true }

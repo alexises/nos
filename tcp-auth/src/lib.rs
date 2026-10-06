@@ -22,6 +22,12 @@ const TCP_AO_ADD_KEY: libc::c_int = 38;
 const TCP_AO_DEL_KEY: libc::c_int = 39;
 const TCP_AO_INFO: libc::c_int = 40;
 
+/// `tcp_ao_info_opt` flag bits: `set_rnext` (bit 1), and the two state bits
+/// a getsockopt reports that a setsockopt would overwrite — `ao_required`
+/// (bit 2) and `accept_icmps` (bit 4) — which `set_ao_rnext` re-sends as read.
+const AO_INFO_SET_RNEXT: u32 = 1 << 1;
+const AO_INFO_KEEP: u32 = (1 << 2) | (1 << 4);
+
 /// `TCP_AO_KEYF_EXCLUDE_OPT` (`include/uapi/linux/tcp.h`) — the
 /// `tcp_ao_add`/`tcp_ao_del`/`tcp_ao_info_opt` `keyflags`/`flags` bit
 /// (RFC 5925 §5.2) excluding TCP options from this key's MAC coverage. Bit 0
@@ -74,9 +80,10 @@ pub fn remove_md5_key(fd: RawFd, peer: IpAddr) -> io::Result<()> {
     set_md5_key_raw(fd, peer, &[])
 }
 
-/// Adds one TCP-AO key (`TCP_AO_ADD_KEY`) for `peer` to this socket. Adding a
-/// key with the same `(send_id, recv_id, peer)` as an existing one replaces
-/// it. `key.key` must be at most [`MAX_KEY_LEN`] bytes.
+/// Adds one TCP-AO key (`TCP_AO_ADD_KEY`) for `peer` to this socket. The
+/// kernel refuses (`EEXIST`) a key whose `SendID` *or* `RecvID` overlaps an
+/// existing key for that peer (RFC 5925 §3.1) — it never replaces one.
+/// `key.key` must be at most [`MAX_KEY_LEN`] bytes.
 pub fn add_ao_key(fd: RawFd, peer: IpAddr, key: &AoKey) -> io::Result<()> {
     if key.key.len() > MAX_KEY_LEN {
         return Err(io::Error::new(
@@ -128,7 +135,8 @@ pub fn delete_ao_key(fd: RawFd, peer: IpAddr, send_id: u8, recv_id: u8) -> io::R
 
 /// One connection's live TCP-AO state, from `getsockopt(TCP_AO_INFO)`
 /// (RFC 5925 §7.2/§7.5): the `KeyID` currently signing outgoing segments, the
-/// `RNextKeyID` the peer is asking us to switch to, and per-connection
+/// `RecvID` of our own rnext key (the `RNextKeyID` *we* ask the peer to send
+/// with — the peer's request shows up as `current_key` moving), and per-connection
 /// verification counters since the kernel installed AO on this socket
 /// (reset on every reconnect, not cumulative across a peer's whole
 /// lifetime).
@@ -146,6 +154,35 @@ pub struct AoInfo {
 /// (e.g. a session that ended between a caller reading `fd` and calling
 /// this).
 pub fn get_ao_info(fd: RawFd) -> io::Result<AoInfo> {
+    let info = read_ao_info(fd)?;
+    Ok(AoInfo {
+        current_key: info.current_key,
+        rnext_key: info.rnext,
+        pkt_good: info.pkt_good,
+        pkt_bad: info.pkt_bad,
+        pkt_key_not_found: info.pkt_key_not_found,
+    })
+}
+
+/// Sets this connection's rnext key (`TCP_AO_INFO` with `set_rnext`) to the
+/// key whose `RecvID` is `rnext_recv_id`: the `RNextKeyID` we advertise, asking
+/// the peer to start signing with it (RFC 5925 §7.5). The kernel writes
+/// `ao_required`/`accept_icmps` from the same command, so the current values
+/// are read back and re-sent unchanged.
+pub fn set_ao_rnext(fd: RawFd, rnext_recv_id: u8) -> io::Result<()> {
+    let mut info = read_ao_info(fd)?;
+    info.flags &= AO_INFO_KEEP;
+    info.flags |= AO_INFO_SET_RNEXT;
+    info.rnext = rnext_recv_id;
+    info.pkt_good = 0;
+    info.pkt_bad = 0;
+    info.pkt_key_not_found = 0;
+    info.pkt_ao_required = 0;
+    info.pkt_dropped_icmp = 0;
+    setsockopt(fd, TCP_AO_INFO, &info)
+}
+
+fn read_ao_info(fd: RawFd) -> io::Result<TcpAoInfoOpt> {
     let mut info: TcpAoInfoOpt = zeroed();
     let mut len = libc::socklen_t::try_from(mem::size_of::<TcpAoInfoOpt>())
         .expect("fixed, small struct size");
@@ -169,13 +206,7 @@ pub fn get_ao_info(fd: RawFd) -> io::Result<AoInfo> {
             "kernel returned unexpected size for TCP_AO_INFO",
         ));
     }
-    Ok(AoInfo {
-        current_key: info.current_key,
-        rnext_key: info.rnext,
-        pkt_good: info.pkt_good,
-        pkt_bad: info.pkt_bad,
-        pkt_key_not_found: info.pkt_key_not_found,
-    })
+    Ok(info)
 }
 
 fn set_md5_key_raw(fd: RawFd, peer: IpAddr, key: &[u8]) -> io::Result<()> {
@@ -386,12 +417,11 @@ struct TcpAoDel {
 }
 
 /// `struct tcp_ao_info_opt` (`include/uapi/linux/tcp.h`) — for
-/// `getsockopt(TCP_AO_INFO)`. Only ever used for reads here: the kernel's
-/// `set_current:1, set_rnext:1, ao_required:1, set_counters:1,
-/// accept_icmps:1, reserved:27` bitfield is "in" for setsockopt and purely
-/// "out" (kernel-reported current state) for getsockopt — this crate never
-/// calls `setsockopt(TCP_AO_INFO)` and never reads that bitfield back, only
-/// `current_key`/`rnext`/the `pkt_*` counters.
+/// `getsockopt`/`setsockopt(TCP_AO_INFO)`. The kernel's `set_current:1,
+/// set_rnext:1, ao_required:1, set_counters:1, accept_icmps:1, reserved:27`
+/// bitfield is "in" (which fields to apply) for setsockopt and "out"
+/// (`ao_required`/`accept_icmps` state) for getsockopt; same LSB-first
+/// layout as [`TcpAoAdd`]. Only `set_ao_rnext` writes it.
 #[repr(C, align(8))]
 struct TcpAoInfoOpt {
     flags: u32,
@@ -592,5 +622,63 @@ mod kernel_tests {
         let _ = get_ao_info(fd);
         delete_ao_key(fd, PEER, 1, 1).unwrap_or(());
         assert!(get_ao_info(-1).is_err());
+    }
+
+    /// RFC 5925 §7.5.2 on a real loopback pair: one side asks for key 2 as
+    /// rnext, the other's `current_key` follows without any `set_current`.
+    #[test]
+    fn peer_rnext_advances_current_key() {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let lfd = l.as_raw_fd();
+        if let Err(e) = add_ao_key(lfd, PEER, &key(1, AoAlgorithm::HmacSha1_96, false)) {
+            assert!(matches!(
+                e.raw_os_error(),
+                Some(libc::ENOPROTOOPT | libc::ENOENT | libc::EOPNOTSUPP)
+            ));
+            return;
+        }
+        add_ao_key(lfd, PEER, &key(2, AoAlgorithm::HmacSha1_96, false)).unwrap();
+        let sock =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        let cfd = sock.as_raw_fd();
+        let mut k1 = key(1, AoAlgorithm::HmacSha1_96, false);
+        k1.set_current = true;
+        k1.set_rnext = true;
+        add_ao_key(cfd, PEER, &k1).unwrap();
+        add_ao_key(cfd, PEER, &key(2, AoAlgorithm::HmacSha1_96, false)).unwrap();
+        sock.connect(&addr.into()).unwrap();
+        let (mut srv, _) = l.accept().unwrap();
+        let sfd = srv.as_raw_fd();
+        let mut cli = std::net::TcpStream::from(sock);
+        let exchange = |a: &mut std::net::TcpStream, b: &mut std::net::TcpStream| {
+            a.write_all(b"x").unwrap();
+            let mut buf = [0u8; 1];
+            b.read_exact(&mut buf).unwrap();
+        };
+        exchange(&mut cli, &mut srv);
+        exchange(&mut srv, &mut cli);
+        assert_eq!(get_ao_info(sfd).unwrap().current_key, 1);
+        // The client asks for key 2; the server follows on the next segment.
+        set_ao_rnext(cfd, 2).unwrap();
+        assert_eq!(get_ao_info(cfd).unwrap().rnext_key, 2);
+        exchange(&mut cli, &mut srv);
+        exchange(&mut srv, &mut cli);
+        assert_eq!(get_ao_info(sfd).unwrap().current_key, 2);
+        // The client's own current key is untouched until the server asks.
+        assert_eq!(get_ao_info(cfd).unwrap().current_key, 1);
+        // The server's own rnext is still key 1 (an accepted socket copies the
+        // SYN's KeyID): key 1 is busy until it is moved, as is the current key.
+        assert_eq!(
+            delete_ao_key(sfd, PEER, 1, 1).unwrap_err().raw_os_error(),
+            Some(libc::EBUSY)
+        );
+        set_ao_rnext(sfd, 2).unwrap();
+        delete_ao_key(sfd, PEER, 1, 1).unwrap();
+        assert_eq!(
+            delete_ao_key(sfd, PEER, 2, 2).unwrap_err().raw_os_error(),
+            Some(libc::EBUSY)
+        );
     }
 }
