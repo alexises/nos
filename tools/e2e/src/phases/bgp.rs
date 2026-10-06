@@ -5590,9 +5590,8 @@ pub async fn bgp_role(w: &mut World) -> anyhow::Result<()> {
     b.established().await?;
     let est = "bgp session established";
     let negotiated = |local: &str, remote: &str| {
-        format!("bgp role negotiated peer=.* local={local} remote={remote}")
+        format!("bgp role negotiated peer=.* local=\"{local}\" remote=\"{remote}\"")
     };
-    let received = "received notification peer=.* code=2 subcode=11";
     let sent = "sent notification peer=.* code=2 subcode=11";
     let set_role = |r: Option<nos_proto::BgpRole>, strict: bool| {
         move |c: &mut nos_proto::Config| {
@@ -5616,11 +5615,11 @@ pub async fn bgp_role(w: &mut World) -> anyhow::Result<()> {
         .await?;
 
     log("provider / provider: Role Mismatch both ways, no session");
-    let (ra, rb) = (a.count(received), b.count(received));
+    // Each side rejects the other's OPEN on its own, so both send one.
+    let (sa, sb) = (a.count(sent), b.count(sent));
     b.provision(&["--role", "provider"]).await?;
-    a.wait_new(received, ra, 60).await?;
-    b.wait_new(received, rb, 60).await?;
-    a.wait(sent).await?;
+    a.wait_new(sent, sa, 60).await?;
+    b.wait_new(sent, sb, 60).await?;
     let (ea, eb) = (a.count(est), b.count(est));
     let (na, nb) = (
         a.count("bgp role negotiated"),

@@ -611,7 +611,7 @@ The commit refuses `local-as` on an iBGP or confederation peer-group, together w
 A role says what the peer-group's peers are to this router, so a misconfigured pair is caught when the session opens instead of leaking routes later. The role goes in the OPEN as a Role capability.
 
 - `provider`, `customer`, `route-server`, `route-server-client` or `peer`: the role of the peers, not of this router. Peers that sell you transit are `provider`; one of your own customers is `customer`.
-- Legal pairs: provider/customer, route-server/route-server-client, peer/peer. Any other pair closes the session with NOTIFICATION OPEN Message Error, subcode 11 (Role Mismatch); the logs show `sent notification ... code=2 subcode=11` on the refusing side and `received notification ... code=2 subcode=11` on the other.
+- Legal pairs: provider/customer, route-server/route-server-client, peer/peer. Any other pair closes the session with NOTIFICATION OPEN Message Error, subcode 11 (Role Mismatch); the refusing side logs `sent notification peer=<ip> code=2 subcode=11`.
 - A peer that sends no role is accepted, with no role negotiated, unless `strict-mode` is set: then it is refused with the same NOTIFICATION. `strict-mode` needs a `role`.
 - `bgp role negotiated peer=<ip> local=<role> remote=<role>` is logged when a pair is accepted.
 - Changing `role` or `strict-mode` resets the peer-group's sessions.
