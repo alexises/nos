@@ -173,6 +173,8 @@ pub struct LinkConfig {
     /// `LinkManager.dbd_max_headers` has no explicit test override. See
     /// `ospf/CLAUDE.md`'s "Exchange" section.
     pub mtu: u16,
+    /// `mtu-ignore`: skip the RFC 2328 §10.6 DBD Interface MTU check.
+    pub mtu_ignore: bool,
     /// RFC 2328 Appendix D auth, resolved once per reconcile from
     /// `OspfProfile.auth` (see `reconcile.rs`). Fits this struct's existing
     /// "any field change restarts the link" rule with no special-casing —
@@ -917,6 +919,17 @@ async fn handle_dbd(
         let neighbor = snapshot.neighbors.get(&dbd.router_id)?;
         (neighbor.state, neighbor.adjacency.clone()?)
     };
+
+    // RFC 2328 §10.6: only in ExStart/Exchange; the neighbor stays in ExStart.
+    if matches!(old_state, NeighborState::ExStart | NeighborState::Exchange)
+        && !exchange::mtu_acceptable(dbd.interface_mtu, cfg.mtu, cfg.mtu_ignore)
+    {
+        warn!(
+            neighbor = %dbd.router_id, local_mtu = cfg.mtu, neighbor_mtu = dbd.interface_mtu,
+            "ospf dbd rejected, neighbor interface mtu exceeds ours"
+        );
+        return None;
+    }
 
     // A MaxAge entry is never offered in the summary: it may be evicted
     // (`Lsdb::MAX_AGE_HOLD_TICKS`) before the neighbor's LSR for it lands,
@@ -3412,6 +3425,7 @@ mod tests {
             network_type: NetworkType::PointToPoint,
             priority: 1,
             mtu: 1500,
+            mtu_ignore: false,
             auth: LinkAuthConfig::None,
             stub: false,
             nssa: false,

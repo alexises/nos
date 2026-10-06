@@ -894,6 +894,60 @@ pub async fn ospf_auth(w: &mut World) -> anyhow::Result<()> {
         .await
 }
 
+/// RFC 2328 §10.6 Interface MTU check (requires `ospf`, runs after
+/// `ospf-auth`): an OSPF MTU of 1400 on router-a alone makes it reject
+/// router-b's 1500-byte DBDs and stay out of Full; `mtu-ignore` lets the
+/// adjacency form anyway; clearing both restores the defaults.
+pub async fn ospf_mtu_mismatch(w: &mut World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let reject = "ospf dbd rejected.*local_mtu=1400 neighbor_mtu=1500";
+    let with = |extra: &[&str]| {
+        let mut f = ospf(OSPF_ROUTER_ID);
+        f.extend(strings(extra));
+        with_base(A, f)
+    };
+    let (before, rejects) = (a.count(&full_p2p(OSPF_ROUTER_ID_B)), a.count(reject));
+    log("setting mtu 1400 on router-a's profile only");
+    a.provision_flags(&with(&["--ospf-profile-mtu", "1400"]))
+        .await?;
+    a.wait_new(reject, rejects, 60).await?;
+    log("waiting 30s to confirm no new ospf full adjacency forms with a larger neighbor mtu");
+    a.assert_quiet(&full_p2p(OSPF_ROUTER_ID_B), before, 30)
+        .await?;
+
+    log("setting mtu-ignore on router-a");
+    a.provision_flags(&with(&["--ospf-mtu-ignore", "true"]))
+        .await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 60).await?;
+
+    log("clearing the mtu override and mtu-ignore");
+    let before = a.count(&full_p2p(OSPF_ROUTER_ID_B));
+    a.edit(|c| {
+        let (instance, area_id, name) = (
+            OSPF_INSTANCE.to_string(),
+            OSPF_AREA.parse()?,
+            OSPF_PROFILE.to_string(),
+        );
+        nos_proto::OspfProfileOp::SetMtuIgnore {
+            instance: instance.clone(),
+            area_id,
+            name: name.clone(),
+            enabled: false,
+        }
+        .apply(c)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        nos_proto::OspfProfileOp::ClearMtu {
+            instance,
+            area_id,
+            name,
+        }
+        .apply(c)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+    })
+    .await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), before, 60).await
+}
+
 /// RFC 3623 graceful restart (requires `ospf`, runs after `ospf-auth`):
 /// router-a, with a grace period configured and its loopback in OSPF, is
 /// restarted with SIGTERM. It must send a Grace-LSA and keep its LSAs instead
@@ -1860,6 +1914,60 @@ pub async fn ospfv3_auth(w: &mut World) -> anyhow::Result<()> {
     }
     a.wait_new(&full(OSPFV3_ROUTER_ID_B), a_full, 60).await?;
     b.wait_new(&full(OSPFV3_ROUTER_ID), b_full, 60).await
+}
+
+/// RFC 5340 A.3.3 Interface MTU check, `ospf-mtu-mismatch`'s twin (requires
+/// `ospfv3`, runs after `ospfv3-auth`).
+pub async fn ospfv3_mtu_mismatch(w: &mut World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    let full =
+        |neighbor: &str| format!("ospfv3 neighbor reached full link=eth0.0 neighbor={neighbor}");
+    let reject = "ospfv3 dbd rejected.*local_mtu=1400 neighbor_mtu=1500";
+    let with = |extra: &[&str]| {
+        let mut f = ospfv3(OSPFV3_ADDRESS_A, OSPFV3_ROUTER_ID);
+        f.extend(strings(extra));
+        with_base(A, f)
+    };
+    let (before, rejects) = (a.count(&full(OSPFV3_ROUTER_ID_B)), a.count(reject));
+    log("setting mtu 1400 on router-a's profile only");
+    a.provision_flags(&with(&["--ospfv3-profile-mtu", "1400"]))
+        .await?;
+    a.wait_new(reject, rejects, 60).await?;
+    log("waiting 30s to confirm no new ospfv3 full adjacency forms with a larger neighbor mtu");
+    a.assert_quiet(&full(OSPFV3_ROUTER_ID_B), before, 30)
+        .await?;
+
+    log("setting mtu-ignore on router-a");
+    a.provision_flags(&with(&["--ospfv3-mtu-ignore", "true"]))
+        .await?;
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), before, 60).await?;
+
+    log("clearing the mtu override and mtu-ignore");
+    let before = a.count(&full(OSPFV3_ROUTER_ID_B));
+    a.edit(|c| {
+        let (instance, area_id, name) = (
+            OSPFV3_INSTANCE.to_string(),
+            OSPFV3_AREA.parse()?,
+            OSPFV3_PROFILE.to_string(),
+        );
+        nos_proto::Ospfv3ProfileOp::SetMtuIgnore {
+            instance: instance.clone(),
+            area_id,
+            name: name.clone(),
+            enabled: false,
+        }
+        .apply(c)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        nos_proto::Ospfv3ProfileOp::ClearMtu {
+            instance,
+            area_id,
+            name,
+        }
+        .apply(c)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+    })
+    .await?;
+    a.wait_new(&full(OSPFV3_ROUTER_ID_B), before, 60).await
 }
 
 /// RFC 5340 §A.3.1 Instance ID: instance-id 1 on router-a alone gets its

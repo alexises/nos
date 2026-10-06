@@ -77,6 +77,13 @@ pub enum OspfProfileOp {
         name: String,
         mtu: u16,
     },
+    /// Toggles the RFC 2328 §10.6 DBD Interface MTU check.
+    SetMtuIgnore {
+        instance: String,
+        area_id: Ipv4Addr,
+        name: String,
+        enabled: bool,
+    },
     ClearMtu {
         instance: String,
         area_id: Ipv4Addr,
@@ -159,6 +166,7 @@ impl OspfProfileOp {
                         cost: None,
                         priority: None,
                         mtu: None,
+                        mtu_ignore: false,
                         network_type: None,
                         auth: None,
                         extended_sequence_numbers: false,
@@ -260,6 +268,15 @@ impl OspfProfileOp {
                 mtu,
             } => {
                 find_profile_mut(config, instance, *area_id, name)?.mtu = Some(*mtu);
+                Ok(())
+            }
+            OspfProfileOp::SetMtuIgnore {
+                instance,
+                area_id,
+                name,
+                enabled,
+            } => {
+                find_profile_mut(config, instance, *area_id, name)?.mtu_ignore = *enabled;
                 Ok(())
             }
             OspfProfileOp::ClearMtu {
@@ -458,6 +475,7 @@ mod tests {
             cost: None,
             priority: None,
             mtu: None,
+            mtu_ignore: false,
             network_type: None,
             auth: None,
             extended_sequence_numbers: false,

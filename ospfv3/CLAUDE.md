@@ -57,7 +57,7 @@ Wire mechanics, all in `packet.rs` (`TrailerAuth::sign`/`verify_trailer`, pinned
 - **Checksum**: the IPv6 upper-layer checksum is done by the kernel via `IPV6_CHECKSUM` (offset 12), set in `socket::open` — `packet.rs` doesn't compute it. Skipped on an authenticated link (RFC 7166 §2.2/§4.2, see "Authentication").
 - **No IP header strip**: Linux IPv6 raw sockets deliver only the payload.
 - **Hop limit 1**: unicast and multicast hops are both set to 1 on the socket (link-local scope; there are no virtual links). `ospf/src/socket.rs` does the same for IPv4 TTL.
-- **DBD pagination** (RFC 2328 §10.8): the per-packet header budget is `exchange::mtu_based_max_headers(LinkConfig.mtu)` — MTU minus IPv6 (40) + OSPFv3 header (16) + DBD body (12), over the 20-byte LSA header. `Ospfv3Profile.mtu` overrides the interface MTU (`reconcile::resolve_effective_mtu`); `--dbd-max-headers` is a test/debug override only. Verified by `nos-e2e ospfv3-mtu-pagination`.
+- **DBD pagination** (RFC 2328 §10.8): the per-packet header budget is `exchange::mtu_based_max_headers(LinkConfig.mtu)` — MTU minus IPv6 (40) + OSPFv3 header (16) + DBD body (12), over the 20-byte LSA header. `Ospfv3Profile.mtu` overrides the interface MTU (`reconcile::resolve_effective_mtu`); `--dbd-max-headers` is a test/debug override only. Verified by `nos-e2e ospfv3-mtu-pagination`. The RFC 5340 A.3.3 Interface MTU check (`exchange::mtu_acceptable`, `link::handle_dbd`, `ospfv3 dbd rejected`) and `Ospfv3Profile.mtu_ignore` work as in `nos-ospfd`; verified by `nos-e2e ospfv3-mtu-mismatch`.
 - Timers (`--lsa-age-multiplier`) are test-only, like in `nos-ospfd`.
 
 ## Verification
@@ -65,4 +65,4 @@ Wire mechanics, all in `packet.rs` (`TrailerAuth::sign`/`verify_trailer`, pinned
 
 `link::tests::abr_and_asbr_reach_across_areas` runs three routers over two areas on the in-memory wire.
 
-`nos-e2e ospfv3`, `ospfv3-asbr`, `ospfv3-abr`, `ospfv3-graceful-restart`, `ospfv3-auth`, `ospfv3-instance-id`, `ospfv3-dr`, `ospfv3-lfa`, `ospfv3-flush`, `ospfv3-mtu-pagination` (see root `CLAUDE.md`).
+`nos-e2e ospfv3`, `ospfv3-asbr`, `ospfv3-abr`, `ospfv3-graceful-restart`, `ospfv3-auth`, `ospfv3-mtu-mismatch`, `ospfv3-instance-id`, `ospfv3-dr`, `ospfv3-lfa`, `ospfv3-flush`, `ospfv3-mtu-pagination` (see root `CLAUDE.md`).

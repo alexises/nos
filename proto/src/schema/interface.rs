@@ -870,6 +870,7 @@ mod tests {
                         cost: None,
                         priority: None,
                         mtu: None,
+                        mtu_ignore: false,
                         network_type: None,
                         auth: None,
                         extended_sequence_numbers: false,

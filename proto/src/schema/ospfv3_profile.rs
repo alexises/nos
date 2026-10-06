@@ -57,6 +57,14 @@ pub struct Ospfv3Profile {
     #[cli(topic = OspfProfileMtu)]
     pub mtu: Option<u16>,
 
+    /// RFC 2328 §10.6 (RFC 5340 §4.2.1): skip the Interface MTU check on a received DBD. By
+    /// default a neighbor advertising an MTU larger than this link's is
+    /// stuck in `ExStart`; set this to form the adjacency anyway.
+    #[garde(skip)]
+    #[serde(default)]
+    #[cli(topic = OspfProfileMtuIgnore, words = "mtu-ignore enable", alias = "mtu-ignore")]
+    pub mtu_ignore: bool,
+
     /// `None` resolves per attach point, exactly like `OspfProfile.network_type`.
     #[garde(skip)]
     #[cli(topic = OspfProfileNetworkType)]
@@ -160,6 +168,7 @@ mod tests {
             cost: None,
             priority: None,
             mtu: None,
+            mtu_ignore: false,
             network_type: None,
             auth: None,
             instance_id: None,
@@ -280,6 +289,7 @@ mod tests {
             cost: None,
             priority: None,
             mtu: None,
+            mtu_ignore: false,
             network_type: None,
             auth: None,
             instance_id: None,

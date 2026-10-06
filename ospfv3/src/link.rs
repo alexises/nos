@@ -132,6 +132,8 @@ pub struct LinkConfig {
     pub network_type: NetworkType,
     pub priority: u8,
     pub mtu: u16,
+    /// `mtu-ignore`: skip the RFC 2328 §10.6 DBD Interface MTU check.
+    pub mtu_ignore: bool,
     /// RFC 7166 keys resolved from `Ospfv3Profile.auth` (`reconcile.rs`);
     /// `None` runs unauthenticated. Part of the wholesale-diffed struct, so
     /// a key change restarts the link like any other field.
@@ -686,6 +688,17 @@ async fn handle_dbd(
         let neighbor = snapshot.neighbors.get(&dbd.router_id)?;
         (neighbor.state, neighbor.adjacency.clone()?)
     };
+
+    // RFC 2328 §10.6: only in ExStart/Exchange; the neighbor stays in ExStart.
+    if matches!(old_state, NeighborState::ExStart | NeighborState::Exchange)
+        && !exchange::mtu_acceptable(dbd.interface_mtu, cfg.mtu, cfg.mtu_ignore)
+    {
+        warn!(
+            neighbor = %dbd.router_id, local_mtu = cfg.mtu, neighbor_mtu = dbd.interface_mtu,
+            "ospfv3 dbd rejected, neighbor interface mtu exceeds ours"
+        );
+        return None;
+    }
 
     // A MaxAge entry is only held to be flooded out; summarizing it would
     // invite an LSR that fails (BadLSReq) once it's evicted.
@@ -2562,6 +2575,7 @@ mod tests {
             network_type: NetworkType::PointToPoint,
             priority: 1,
             mtu: 1500,
+            mtu_ignore: false,
             auth: None,
             instance_id: 0,
         }

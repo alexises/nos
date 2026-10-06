@@ -1051,6 +1051,13 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
                 "Clear an OSPF profile's MTU override.",
             ),
         ),
+        Topic::OspfProfileMtuIgnore => (
+            "Enable or disable the DBD Interface MTU check.",
+            "Sets mtu-ignore on a profile. By default (RFC 2328 §10.6) a Database Description \
+             packet advertising an Interface MTU larger than this link's effective MTU is \
+             dropped, which leaves the neighbor stuck in ExStart. With mtu-ignore set the \
+             check is skipped and the adjacency forms regardless.",
+        ),
         Topic::OspfProfileNetworkType => (
             "Set an OSPF profile's network type.",
             concat!(

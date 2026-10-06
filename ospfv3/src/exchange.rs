@@ -39,6 +39,14 @@ pub fn mtu_based_max_headers(mtu: u16) -> usize {
         .max(1)
 }
 
+/// RFC 2328 §10.6 (RFC 5340 §4.2.1 keeps it): a DBD whose Interface MTU
+/// exceeds this link's effective MTU is rejected, since the neighbor could send
+/// DBDs we can't receive whole. Smaller, equal and 0 (not advertised) are fine,
+/// and `ignore` (`mtu-ignore`) skips the check.
+pub fn mtu_acceptable(neighbor_mtu: u16, local_mtu: u16, ignore: bool) -> bool {
+    ignore || neighbor_mtu <= local_mtu
+}
+
 /// One neighbor's DBD/LSR/LSU exchange state, from `ExStart` onward.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AdjacencyData {
@@ -476,6 +484,15 @@ fn compute_request_list(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn mtu_acceptable_only_rejects_a_larger_neighbor_mtu() {
+        assert!(mtu_acceptable(1500, 1500, false));
+        assert!(mtu_acceptable(1400, 1500, false));
+        assert!(mtu_acceptable(0, 1500, false));
+        assert!(!mtu_acceptable(1500, 1400, false));
+        assert!(mtu_acceptable(1500, 1400, true));
+    }
     #[test]
     fn mtu_derived_budget() {
         assert_eq!(super::mtu_based_max_headers(1500), 71);
