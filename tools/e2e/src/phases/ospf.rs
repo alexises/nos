@@ -1724,6 +1724,29 @@ pub async fn ospf_opaque(w: &mut World) -> anyhow::Result<()> {
     a.assert_quiet(&from_frr5, a5, 15).await?;
     b.assert_quiet(&from_frr5, b5, 1).await?;
 
+    // RFC 2328 §16.4 step 3 (#215): FRR sets the forwarding address to its
+    // static's next hop, an unused address on the shared OSPF subnet.
+    log("a forwarding address is honoured: router-a routes via it, not via FRR");
+    let (code, out) = w
+        .dock
+        .exec(
+            "router-f",
+            &[
+                "vtysh",
+                "-c",
+                "configure terminal",
+                "-c",
+                &format!("ip route {OSPF_FRR_FA_PREFIX} {OSPF_FRR_FA}"),
+            ],
+        )
+        .await?;
+    anyhow::ensure!(code == 0, "FRR forwarding-address static failed: {out}");
+    a.wait(&format!(
+        r"added route prefix={} gateway={OSPF_FRR_FA} .*source=Some(Ospf)",
+        OSPF_FRR_FA_PREFIX.replace('.', r"\.")
+    ))
+    .await?;
+
     log("FRR announces a graceful restart: a type-9 grace-lsa, link-local");
     let b9 = b.count(&from_frr(".*", 9));
     let (code, out) = w

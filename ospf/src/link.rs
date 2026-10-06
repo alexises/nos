@@ -2849,11 +2849,11 @@ impl LinkManager {
                     None => {
                         merged.insert(entry.prefix, entry);
                     }
-                    Some(existing) if entry.metric < existing.metric => *existing = entry,
-                    Some(existing) if entry.metric == existing.metric => {
-                        spf::merge_equal(existing, entry);
-                    }
-                    Some(_) => {}
+                    Some(existing) => match spf::prefer(&entry, existing) {
+                        std::cmp::Ordering::Less => *existing = entry,
+                        std::cmp::Ordering::Equal => spf::merge_equal(existing, entry),
+                        std::cmp::Ordering::Greater => {}
+                    },
                 }
             }
         }

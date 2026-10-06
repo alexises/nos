@@ -349,6 +349,11 @@ pub const ASBR_PREFIX_SPECIFIC_LSID: &str = "192.0.2.191";
 /// is stateful, so which one carries host bits depends on origination order.
 pub const OSPF_FRR_EXTERNAL_WIDE: &str = "198.18.100.0/24";
 pub const OSPF_FRR_EXTERNAL_NARROW: &str = "198.18.100.0/25";
+/// `ospf-opaque`: FRR's static with a next hop on the router-a/FRR subnet
+/// (nobody owns `OSPF_FRR_FA`); FRR puts that address in the Type-5's
+/// forwarding address, and router-a must route via it, not via FRR (#215).
+pub const OSPF_FRR_FA_PREFIX: &str = "198.18.101.0/24";
+pub const OSPF_FRR_FA: &str = "10.51.0.9";
 pub const ASBR_GATEWAY: &str = "10.50.0.98";
 pub const MTU_VALUE: u32 = 9000;
 /// The RFC 791 minimum: resolves to one header per DBD packet.
