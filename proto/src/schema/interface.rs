@@ -223,6 +223,14 @@ pub struct Interface {
     #[cli(topic = InterfaceLacpPortPriority)]
     pub lacp_port_priority: Option<u16>,
 
+    /// This link's LACP Activity (`Passive` = never speaks first). Only
+    /// meaningful while `port_aggregate` names a `Lacp`-mode aggregate;
+    /// ignored (not rejected) otherwise.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = InterfaceLacpMode, words = "lacp mode")]
+    pub lacp_mode: crate::schema::LacpMode,
+
     /// The link's MTU, in bytes. A link-layer property of the physical (or
     /// loopback) interface itself — unlike `addresses`/`routing_table`, it's
     /// not part of the loopback/physical addressing split (see
@@ -479,6 +487,7 @@ mod tests {
             switching_profile: None,
             port_aggregate: None,
             lacp_port_priority: None,
+            lacp_mode: crate::schema::LacpMode::default(),
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,

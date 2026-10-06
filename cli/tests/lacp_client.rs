@@ -23,6 +23,7 @@ fn sample() -> PortAggregateLacpSummary {
             partner_key: Some(1),
             partner_port_number: Some(4),
             actor_port_priority: 32768,
+            mode: nos_proto::LacpMode::Active,
             partner_system_priority: Some(32768),
             partner_port_priority: Some(32768),
             selected: true,

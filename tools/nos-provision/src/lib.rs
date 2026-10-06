@@ -79,6 +79,22 @@ impl From<DfAlgorithmArg> for nos_proto::DfAlgorithm {
     }
 }
 
+/// Clap-facing mirror of `nos_proto::LacpMode`.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum LacpModeArg {
+    Active,
+    Passive,
+}
+
+impl From<LacpModeArg> for nos_proto::LacpMode {
+    fn from(mode: LacpModeArg) -> Self {
+        match mode {
+            LacpModeArg::Active => nos_proto::LacpMode::Active,
+            LacpModeArg::Passive => nos_proto::LacpMode::Passive,
+        }
+    }
+}
+
 /// Clap-facing mirror of `nos_proto::LacpRate`, for the same reason as
 /// `PortAggregateModeArg`.
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -765,6 +781,12 @@ pub struct Args {
     /// (`InterfaceOp::SetLacpPortPriority`).
     #[arg(long)]
     pub lacp_port_priority: Option<u16>,
+
+    /// If set (requires `--port-aggregate`), sets the LACP mode of every
+    /// `--enslave-interface-into-port-aggregate` member
+    /// (`InterfaceOp::SetLacpMode`).
+    #[arg(long, value_enum)]
+    pub lacp_mode: Option<LacpModeArg>,
 
     /// If set (requires `--port-aggregate`), makes the aggregate an untagged
     /// member of this broadcast domain: ensures the domain, a switching
@@ -2144,6 +2166,12 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                 name: member.clone(),
                 port_aggregate: name.clone(),
             }));
+            if let Some(mode) = args.lacp_mode {
+                ops.push(ConfigOp::Interface(InterfaceOp::SetLacpMode {
+                    name: member.clone(),
+                    mode: mode.into(),
+                }));
+            }
             if let Some(priority) = args.lacp_port_priority {
                 ops.push(ConfigOp::Interface(InterfaceOp::SetLacpPortPriority {
                     name: member.clone(),
@@ -2160,12 +2188,13 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
         || args.lacp_system_id.is_some()
         || args.lacp_system_priority.is_some()
         || args.lacp_port_priority.is_some()
+        || args.lacp_mode.is_some()
         || args.port_aggregate_untagged_domain.is_some()
         || args.lacp_rate.is_some()
         || !args.port_aggregate_members.is_empty()
     {
         bail!(
-            "--port-aggregate-mtu/--port-aggregate-address/--port-aggregate-esi/--port-aggregate-redundancy-mode/--port-aggregate-df-algorithm/--lacp-system-id/--lacp-system-priority/--lacp-port-priority/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
+            "--port-aggregate-mtu/--port-aggregate-address/--port-aggregate-esi/--port-aggregate-redundancy-mode/--port-aggregate-df-algorithm/--lacp-system-id/--lacp-system-priority/--lacp-port-priority/--lacp-mode/--port-aggregate-untagged-domain/--lacp-rate/--enslave-interface-into-port-aggregate require --port-aggregate to also be set"
         );
     }
 
@@ -3119,6 +3148,8 @@ mod tests {
             "100",
             "--lacp-port-priority",
             "200",
+            "--lacp-mode",
+            "passive",
             "--port-aggregate-untagged-domain",
             "bd1",
             "--enslave-interface-into-port-aggregate",
@@ -3197,6 +3228,13 @@ mod tests {
             &ConfigOp::Interface(InterfaceOp::SetLacpPortPriority {
                 name: "eth1".into(),
                 priority: 200,
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Interface(InterfaceOp::SetLacpMode {
+                name: "eth1".into(),
+                mode: nos_proto::LacpMode::Passive,
             }),
         );
         has(
@@ -3595,6 +3633,7 @@ mod tests {
             (&["--lacp-rate", "slow"], "require --port-aggregate"),
             (&["--lacp-system-priority", "1"], "require --port-aggregate"),
             (&["--lacp-port-priority", "1"], "require --port-aggregate"),
+            (&["--lacp-mode", "passive"], "require --port-aggregate"),
             (
                 &["--lldp-destination-interface", "eth1"],
                 "<interface>=<group>",

@@ -357,6 +357,8 @@ topics! {
     PortAggregateLacpSystemPriority,
     /// `Interface.lacp_port_priority`
     InterfaceLacpPortPriority,
+    /// `Interface.lacp_mode`
+    InterfaceLacpMode,
 }
 
 /// What an operation does, authored by `nos-config` and served to any client

@@ -656,6 +656,7 @@ mod tests {
             switching_profile: None,
             port_aggregate: None,
             lacp_port_priority: None,
+            lacp_mode: nos_proto::LacpMode::default(),
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,

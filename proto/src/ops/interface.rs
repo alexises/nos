@@ -104,6 +104,11 @@ pub enum InterfaceOp {
     ClearLacpPortPriority {
         name: String,
     },
+    /// Appended (postcard indexes variants by position).
+    SetLacpMode {
+        name: String,
+        mode: crate::schema::LacpMode,
+    },
 }
 
 impl InterfaceOp {
@@ -120,6 +125,7 @@ impl InterfaceOp {
                         switching_profile: None,
                         port_aggregate: None,
                         lacp_port_priority: None,
+                        lacp_mode: crate::schema::LacpMode::default(),
                         mtu: None,
                         lldp_transmit: false,
                         lldp_receive: false,
@@ -233,6 +239,10 @@ impl InterfaceOp {
                 find_interface_mut(config, name)?.lacp_port_priority = Some(*priority);
                 Ok(())
             }
+            InterfaceOp::SetLacpMode { name, mode } => {
+                find_interface_mut(config, name)?.lacp_mode = *mode;
+                Ok(())
+            }
             InterfaceOp::ClearLacpPortPriority { name } => {
                 find_interface_mut(config, name)?.lacp_port_priority = None;
                 Ok(())
@@ -278,6 +288,7 @@ mod tests {
             switching_profile: None,
             port_aggregate: None,
             lacp_port_priority: None,
+            lacp_mode: crate::schema::LacpMode::default(),
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,
@@ -322,6 +333,7 @@ mod tests {
                 switching_profile: None,
                 port_aggregate: None,
                 lacp_port_priority: None,
+                lacp_mode: crate::schema::LacpMode::default(),
                 mtu: None,
                 lldp_transmit: false,
                 lldp_receive: false,
@@ -607,6 +619,26 @@ mod tests {
             .apply(&mut cfg)
             .unwrap();
         assert_eq!(cfg.interfaces[0].lacp_port_priority, None);
+    }
+
+    #[test]
+    fn set_lacp_mode() {
+        let mut cfg = Config::default();
+        let name = "eth1".to_string();
+        InterfaceOp::Ensure { name: name.clone() }
+            .apply(&mut cfg)
+            .unwrap();
+        assert_eq!(cfg.interfaces[0].lacp_mode, crate::schema::LacpMode::Active);
+        InterfaceOp::SetLacpMode {
+            name,
+            mode: crate::schema::LacpMode::Passive,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(
+            cfg.interfaces[0].lacp_mode,
+            crate::schema::LacpMode::Passive
+        );
     }
 
     #[test]

@@ -20,14 +20,25 @@ use crate::receive_machine::ReceiveState;
 pub const SLOW_PERIODIC_INTERVAL: Duration = Duration::from_secs(30);
 pub const FAST_PERIODIC_INTERVAL: Duration = Duration::from_secs(1);
 
-/// `partner_wants_fast` is the partner's most recently advertised
+/// `None` is `NO_PERIODIC`: both ends Passive (or no partner heard yet and we
+/// are Passive), so nothing is sent at all. `partner_active` is the partner's
+/// last advertised `LACP_Activity` (`false` if none has been heard — the
+/// administrative default is Passive); `partner_wants_fast` is its
 /// `LACP_Timeout` bit (`false` if none has been heard).
-pub fn interval_for(receive_state: ReceiveState, partner_wants_fast: bool) -> Duration {
-    match receive_state {
+pub fn interval_for(
+    receive_state: ReceiveState,
+    actor_active: bool,
+    partner_active: bool,
+    partner_wants_fast: bool,
+) -> Option<Duration> {
+    if !actor_active && !partner_active {
+        return None;
+    }
+    Some(match receive_state {
         ReceiveState::Expired | ReceiveState::Defaulted => FAST_PERIODIC_INTERVAL,
         ReceiveState::Current if partner_wants_fast => FAST_PERIODIC_INTERVAL,
         ReceiveState::Current => SLOW_PERIODIC_INTERVAL,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -37,26 +48,38 @@ mod tests {
     #[test]
     fn always_fast_until_a_partner_is_heard() {
         for partner_wants_fast in [false, true] {
-            assert_eq!(
-                interval_for(ReceiveState::Expired, partner_wants_fast),
-                FAST_PERIODIC_INTERVAL
-            );
-            assert_eq!(
-                interval_for(ReceiveState::Defaulted, partner_wants_fast),
-                FAST_PERIODIC_INTERVAL
-            );
+            for state in [ReceiveState::Expired, ReceiveState::Defaulted] {
+                assert_eq!(
+                    interval_for(state, true, false, partner_wants_fast),
+                    Some(FAST_PERIODIC_INTERVAL)
+                );
+            }
         }
     }
 
     #[test]
     fn once_current_follows_the_partners_request() {
         assert_eq!(
-            interval_for(ReceiveState::Current, false),
-            SLOW_PERIODIC_INTERVAL
+            interval_for(ReceiveState::Current, true, true, false),
+            Some(SLOW_PERIODIC_INTERVAL)
         );
         assert_eq!(
-            interval_for(ReceiveState::Current, true),
-            FAST_PERIODIC_INTERVAL
+            interval_for(ReceiveState::Current, true, true, true),
+            Some(FAST_PERIODIC_INTERVAL)
         );
+    }
+
+    #[test]
+    fn only_both_passive_is_no_periodic() {
+        for state in [
+            ReceiveState::Expired,
+            ReceiveState::Defaulted,
+            ReceiveState::Current,
+        ] {
+            assert_eq!(interval_for(state, false, false, true), None);
+            assert!(interval_for(state, false, true, false).is_some());
+            assert!(interval_for(state, true, false, false).is_some());
+            assert!(interval_for(state, true, true, false).is_some());
+        }
     }
 }

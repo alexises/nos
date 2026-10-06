@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use nos_proto::{
-    LacpAggregateMembers, LacpMuxState, LacpPortStatus, LacpRate, LacpReceiveState,
+    LacpAggregateMembers, LacpMode, LacpMuxState, LacpPortStatus, LacpRate, LacpReceiveState,
     PortAggregateLacpSummary,
 };
 use tokio::sync::{mpsc, watch, Notify};
@@ -47,6 +47,8 @@ pub struct AggregateManager {
     /// The port priority each running member task was started with; a
     /// change restarts only that member.
     port_priorities: Arc<Mutex<HashMap<String, u16>>>,
+    /// Same, for each member's `lacp-mode`.
+    modes: Mutex<HashMap<String, LacpMode>>,
     /// Assigned once, sequentially, the first time `reconcile.rs` sees this
     /// aggregate name (see `reconcile.rs`) — not persisted, only needs to
     /// differ between simultaneously-active aggregates on this instance.
@@ -88,6 +90,7 @@ impl AggregateManager {
             rate: Mutex::new(LacpRate::default()),
             system_priority: Mutex::new(DEFAULT_PRIORITY),
             port_priorities,
+            modes: Mutex::new(HashMap::new()),
             key,
             members: Mutex::new(HashMap::new()),
             selected_txs,
@@ -113,13 +116,13 @@ impl AggregateManager {
     /// member's own `(name, port_priority)` change restarts just that member.
     pub fn reconcile(
         &self,
-        mut desired: Vec<(String, u16)>,
+        mut desired: Vec<(String, u16, LacpMode)>,
         rate: LacpRate,
         system_id: Option<[u8; 6]>,
         system_priority: u16,
     ) {
-        desired.sort();
-        let desired_members: Vec<String> = desired.iter().map(|(n, _)| n.clone()).collect();
+        desired.sort_by(|a, b| a.0.cmp(&b.0));
+        let desired_members: Vec<String> = desired.iter().map(|(n, _, _)| n.clone()).collect();
         let system_id = system_id.unwrap_or(self.derived_system_id);
         let rate_changed = {
             let mut current = self.rate.lock().unwrap();
@@ -132,6 +135,7 @@ impl AggregateManager {
             changed
         };
         let mut port_priorities = self.port_priorities.lock().unwrap();
+        let mut modes = self.modes.lock().unwrap();
 
         let mut members = self.members.lock().unwrap();
         let mut selected_txs = self.selected_txs.lock().unwrap();
@@ -142,9 +146,9 @@ impl AggregateManager {
             .filter(|k| {
                 rate_changed
                     || !desired_members.contains(k)
-                    || desired
-                        .iter()
-                        .any(|(n, p)| n == *k && port_priorities.get(*k) != Some(p))
+                    || desired.iter().any(|(n, p, m)| {
+                        n == *k && (port_priorities.get(*k) != Some(p) || modes.get(*k) != Some(m))
+                    })
             })
             .cloned()
             .collect();
@@ -156,7 +160,7 @@ impl AggregateManager {
             observations.remove(&interface);
         }
 
-        for (interface, port_priority) in &desired {
+        for (interface, port_priority, mode) in &desired {
             // A task that ended on its own (its socket failed hard, e.g. the
             // interface vanished) is not "running" — fall through and
             // respawn it on this pass, like `ospf::link::LinkManager` does.
@@ -164,6 +168,7 @@ impl AggregateManager {
                 continue;
             }
             port_priorities.insert(interface.clone(), *port_priority);
+            modes.insert(interface.clone(), *mode);
             let (selected_tx, selected_rx) = watch::channel(false);
             let config = LinkConfig {
                 interface: interface.clone(),
@@ -171,6 +176,7 @@ impl AggregateManager {
                 actor_system_priority: system_priority,
                 actor_key: self.key,
                 actor_port_priority: *port_priority,
+                actor_active: *mode == LacpMode::Active,
                 rate,
                 selected_rx,
                 churn_time: churn_time(),
@@ -184,7 +190,8 @@ impl AggregateManager {
             selected_txs.insert(interface.clone(), selected_tx);
         }
         port_priorities.retain(|k, _| members.contains_key(k));
-        drop((members, selected_txs, observations, port_priorities));
+        modes.retain(|k, _| members.contains_key(k));
+        drop((members, selected_txs, observations, port_priorities, modes));
         self.changed.notify_one();
     }
 
@@ -209,6 +216,13 @@ impl AggregateManager {
                     .get(interface)
                     .copied()
                     .unwrap_or(DEFAULT_PRIORITY),
+                mode: self
+                    .modes
+                    .lock()
+                    .unwrap()
+                    .get(interface)
+                    .copied()
+                    .unwrap_or_default(),
                 partner_system_priority: obs.partner.map(|p| p.system_priority),
                 partner_port_priority: obs.partner.map(|p| p.port_priority),
                 selected: selected_txs.get(interface).is_some_and(|tx| *tx.borrow()),

@@ -387,6 +387,8 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
         bail!("router-b never saw router-a's changed system priority on Distributing ports");
     }
 
+    lacp_passive(a, b, &both).await?;
+
     let mut off = lacp_flags(&[]);
     off.extend(strings(&both));
     off.push("--delete-port-aggregate".into());
@@ -397,6 +399,90 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     b.wait(&deleted).await?;
 
     w.unlink_veths().await;
+    Ok(())
+}
+
+/// Polls `GET /v1/lacp` on `r` until every port of the aggregate satisfies
+/// `want` (and there is at least one), up to 40s.
+async fn wait_lacp_ports(
+    r: &Router,
+    what: &str,
+    want: impl Fn(&serde_json::Value) -> bool,
+) -> anyhow::Result<()> {
+    let mut body = String::new();
+    for _ in 0..40 {
+        body = r
+            .rest_expect(reqwest::Method::GET, "/v1/lacp", None, 200)
+            .await?;
+        let summary: serde_json::Value = serde_json::from_str(&body)?;
+        if summary
+            .as_array()
+            .and_then(|v| v.iter().find(|s| s["aggregate"] == LACP_AGGREGATE))
+            .and_then(|s| s["ports"].as_array())
+            .is_some_and(|ports| !ports.is_empty() && ports.iter().all(&want))
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    bail!("{}: {what} never held: {body}", r.name())
+}
+
+/// `lacp-mode` (802.1AX LACP_Activity, NO_PERIODIC): passive against active
+/// still converges, passive against passive never forms a bundle and stays
+/// silent, and back to active converges again.
+async fn lacp_passive(a: &Router, b: &Router, both: &[&str]) -> anyhow::Result<()> {
+    let flags = |mode: &str| {
+        let mut f = lacp_flags(&["--lacp-rate", "fast", "--lacp-mode", mode]);
+        f.extend(strings(both));
+        f
+    };
+    let distributing = |p: &serde_json::Value| p["mux_state"] == "Distributing";
+
+    log("router-a passive, router-b active: the passive port still answers and both converge");
+    a.provision(&flags("passive")).await?;
+    wait_lacp_ports(a, "passive port Distributing", |p| {
+        distributing(p) && p["mode"] == "Passive"
+    })
+    .await?;
+    wait_lacp_ports(b, "active port Distributing", distributing).await?;
+
+    log("both passive: nobody speaks, no port is Distributing and the bond is emptied");
+    let none = "lacp periodic transmission machine transitioned interface=eth1 no_periodic=true";
+    let (none_a, none_b) = (a.count(none), b.count(none));
+    let release = a.count("removed interface from master enslavement interface=eth1");
+    b.provision(&flags("passive")).await?;
+    a.wait_new(none, none_a, 30).await?;
+    b.wait_new(none, none_b, 30).await?;
+    a.wait_new(
+        "removed interface from master enslavement interface=eth1",
+        release,
+        30,
+    )
+    .await?;
+    for r in [a, b] {
+        wait_lacp_ports(r, "no port Distributing", |p| !distributing(p)).await?;
+    }
+    // Let the last in-flight LACPDUs drain, then nothing may arrive.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let rx = "lacp lacpdu received";
+    let (rx_a, rx_b) = (a.count(rx), b.count(rx));
+    a.assert_quiet(rx, rx_a, 10).await?;
+    b.assert_quiet(rx, rx_b, 0).await?;
+
+    log("router-a back to active: the pair converges again");
+    a.provision(&flags("active")).await?;
+    for r in [a, b] {
+        wait_lacp_ports(r, "Distributing again", distributing).await?;
+    }
+    // b is still passive; put it back so later phases see the default.
+    b.provision(&flags("active")).await?;
+    for r in [a, b] {
+        wait_lacp_ports(r, "Distributing, both active", |p| {
+            distributing(p) && p["mode"] == "Active"
+        })
+        .await?;
+    }
     Ok(())
 }
 

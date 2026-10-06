@@ -149,6 +149,12 @@ REST: `DELETE …/interface/eth1/port-aggregate`, the same for `eth2`, then `DEL
 - Changing the system priority restarts LACP on every member of the aggregate; changing a member's port priority restarts only that member. Each renegotiates and rejoins the bond.
 - Set with `set port-aggregate bond-lacp lacp-system-priority 100` and `set interface eth1 lacp-port-priority 100`; `delete` goes back to 32768. They have no effect on an `xor` aggregate.
 
+**Passive mode.** `lacp-mode` on a member sets its LACP Activity: `active` (default) sends LACPDUs as soon as the link is up; `passive` stays silent until it hears a partner that is active, then answers and keeps sending.
+
+- Set with `set interface eth1 lacp mode passive`; `delete` goes back to `active`. Changing it restarts LACP on that member only. It has no effect on an `xor` aggregate.
+- Active against passive negotiates normally. Passive against passive never does: neither end speaks, so both stay `defaulted`, no member reaches `distributing` and the bond stays empty. Put at least one end on `active`.
+- `show lacp` prints `mode active|passive` per member, and NOS logs `lacp periodic transmission machine transitioned … no_periodic=true` when a passive member goes silent.
+
 **EVPN multi-homing.** `esi` attaches the aggregate to an EVPN Ethernet Segment, `redundancy-mode` chooses all-active or single-active forwarding for it, and `df-algorithm` the designated forwarder election. They are documented with EVPN.
 
 **`show port-aggregate`** shows each aggregate's mode, switching profile, MTU and subinterfaces, as applied; `show lacp` the LACP state of every `lacp` aggregate. Neither lists the members of an `xor` aggregate: check them in `show config`.
@@ -184,6 +190,7 @@ Every REST path starts with `/v1/transactions/{tx}/`. The relative CLI form is w
 | Field | CLI | REST path | Type, range, default | Validation at commit | Effect | Check with |
 |---|---|---|---|---|---|---|
 | port-aggregate | `set interface <if> port-aggregate <pa>` / `set port-aggregate <pa>`; `delete interface <if> port-aggregate` / `delete port-aggregate` | `interface/<if>/port-aggregate` | name; default unset | aggregate exists; the interface has no subinterfaces and no switching profile | makes the interface a member | `show lacp` |
+| lacp-mode | `set interface <if> lacp mode active\|passive`; `delete … lacp mode` | `interface/<if>/lacp-mode`, body `"Active"` or `"Passive"` | `active` (default) or `passive` | | the LACP Activity advertised for this member; `passive` sends nothing until the partner is heard active; a change restarts this member's LACP only; meaningful while it is in a `lacp` aggregate | `show lacp` (`mode`) |
 | lacp-port-priority | `set interface <if> lacp-port-priority <n>` / `set lacp-port-priority <n>`; `delete … lacp-port-priority` | `interface/<if>/lacp-port-priority` | 0-65535; default 32768 | | the Actor Port Priority advertised for this member; a change restarts this member's LACP only; meaningful while it is in a `lacp` aggregate | `show lacp` (`port priority`) |
 
 Implementation notes for developers are in [`lacp/CLAUDE.md`](../../lacp/CLAUDE.md) and [`interface/CLAUDE.md`](../../interface/CLAUDE.md).

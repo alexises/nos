@@ -942,6 +942,14 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              into equally sized groups: the group holding the lowest (port priority, port number) \
              is kept. `delete` goes back to 32768. Changing it restarts LACP on this member only.",
         ),
+        Topic::InterfaceLacpMode => (
+            "Set an interface's LACP mode (active or passive).",
+            "Sets the LACP Activity nos-lacpd advertises for this interface when it is a member of \
+             a `lacp`-mode port aggregate: `active` (the default) sends LACPDUs as soon as the link \
+             is up; `passive` stays silent until the partner's LACPDUs show it is active, then \
+             answers it. Two passive ends never bundle. Changing it restarts LACP on this member \
+             only.",
+        ),
         Topic::PortAggregateRedundancyMode => (
             "Set how the PEs sharing a port aggregate's Ethernet Segment divide the traffic.",
             "Sets the redundancy-mode of the named port aggregate: `all-active` (the default) lets \
