@@ -123,6 +123,14 @@ pub const LSA_TYPE_AS_EXTERNAL: u16 = SCOPE_AS | 5;
 /// boundary router).
 pub const ROUTER_FLAG_B: u8 = 0x01;
 pub const ROUTER_FLAG_E: u8 = 0x02;
+/// RFC 5340 §A.4.1.1 `PrefixOptions`: NU (no unicast: not used in routing
+/// calculations), LA (local address: a host address of the originator),
+/// P (propagate, NSSA) and DN (down, PE-CE). Only NU is honoured on
+/// receipt and only LA is originated; P/DN are never set.
+pub const PREFIX_OPT_NU: u8 = 0x01;
+pub const PREFIX_OPT_LA: u8 = 0x02;
+pub const PREFIX_OPT_P: u8 = 0x08;
+pub const PREFIX_OPT_DN: u8 = 0x10;
 /// RFC 5340 §A.4.7 AS-External-LSA flag bits (first byte).
 const EXTERNAL_FLAG_E: u8 = 0x04;
 const EXTERNAL_FLAG_F: u8 = 0x02;

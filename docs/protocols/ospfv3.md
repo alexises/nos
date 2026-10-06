@@ -30,6 +30,12 @@ The model is the same as OSPFv2's, with `ospfv3` in place of `ospf` in every com
 
 OSPFv2 and OSPFv3 are independent. One routing table can have both an `ospf-instance` and an `ospfv3-instance`, and one link can carry both an `ospf` and an `ospfv3` profile. OSPFv3 profile names are unique among OSPFv3 profiles, separately from OSPFv2's.
 
+Prefix options (RFC 5340 A.4.1.1):
+
+- a loopback `/128` is advertised with the LA bit (a host address of this router);
+- a prefix a neighbor advertises with the NU bit is not routed to, nor summarized into other areas;
+- the P and DN bits are never set.
+
 A link needs an IPv6 address to be advertised. Neighbours talk over IPv6 link-local addresses, which the kernel creates for every interface, so the next hops of OSPFv3 routes are link-local addresses.
 
 How the OSPFv3 implementation works internally is described in [`ospfv3/CLAUDE.md`](../../ospfv3/CLAUDE.md).
