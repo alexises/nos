@@ -26,6 +26,8 @@ pub struct LinkConfig {
     pub actor_system_priority: u16,
     pub actor_key: u16,
     pub actor_port_priority: u16,
+    /// `LACP_Activity`: `false` = Passive (see `periodic_tx_machine`).
+    pub actor_active: bool,
     /// How fast we ask the partner to send (our advertised `LACP_Timeout`),
     /// and so how long we wait for it — see `receive_machine`.
     pub rate: LacpRate,
@@ -113,6 +115,12 @@ pub async fn run(
     // First send is immediate; each later one is scheduled from the state at
     // the time of the previous send (see `periodic_tx_machine::interval_for`).
     let mut tx = TxState::new();
+    tx.update_periodic(
+        &config.interface,
+        config.actor_active,
+        receive_state,
+        partner,
+    );
     let mut marker_limiter = TxLimiter::new(Instant::now(), MAX_MARKER_PER_WINDOW);
 
     let mut churn = Churn::new(&config.interface, config.churn_time);
@@ -136,10 +144,14 @@ pub async fn run(
                 // elapsed deadline re-fires immediately: a hot loop. A send
                 // denied by the limiter retries at the next refill instead
                 // (`transmit` sets that).
-                tx.next_periodic_send = Instant::now() + interval_for(
-                    receive_state,
-                    partner.is_some_and(|p| p.has_state(state_bit::TIMEOUT)),
-                );
+                tx.next_periodic_send = Instant::now()
+                    + interval_for(
+                        receive_state,
+                        config.actor_active,
+                        partner.is_some_and(|p| p.has_state(state_bit::ACTIVITY)),
+                        partner.is_some_and(|p| p.has_state(state_bit::TIMEOUT)),
+                    )
+                    .unwrap_or(Duration::from_hours(24));
                 tx.transmit(&socket, &config.interface, pdu);
             }
             () = tokio::time::sleep_until(current_while_deadline.into()) => {
@@ -156,6 +168,7 @@ pub async fn run(
                     apply_mux_action(mux_action, &mut wait_while_deadline);
                 }
                 info!(interface = %config.interface, receive_state = ?receive_state, "lacp receive machine transitioned");
+                tx.update_periodic(&config.interface, config.actor_active, receive_state, partner);
                 churn.eval(mux_state, partner);
                 report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner, &churn);
                 tx.send_if_changed(&socket, &config.interface, build_pdu(&config, port_number, receive_state, mux_state, partner));
@@ -237,6 +250,7 @@ pub async fn run(
                     partner_system = ?pdu.actor.system,
                     "lacp lacpdu received"
                 );
+                tx.update_periodic(&config.interface, config.actor_active, receive_state, partner);
                 churn.eval(mux_state, partner);
                 report(&observations, &changed, &config.interface, port_number, receive_state, mux_state, partner, &churn);
                 tx.send_if_changed(&socket, &config.interface, build_pdu(&config, port_number, receive_state, mux_state, partner));
@@ -403,12 +417,20 @@ impl Churn {
 }
 
 /// This port's own advertised `Actor_State` byte — see 802.1AX Table 6-4.
-/// `Activity`/`Aggregation` are always set (v1 has no Passive mode, no
-/// `Individual` aggregation — see `lacp/CLAUDE.md`'s deferred list);
+/// `Activity` follows the configured `lacp-mode`; `Aggregation` is always set
+/// (no `Individual` aggregation — see `lacp/CLAUDE.md`'s deferred list);
 /// `Timeout` is the aggregate's `LacpRate` (set = Fast, asking the partner
 /// to send every second); the rest reflect the live state machines.
-fn actor_state_byte(receive_state: ReceiveState, mux_state: MuxState, rate: LacpRate) -> u8 {
-    let mut state = state_bit::ACTIVITY | state_bit::AGGREGATION;
+fn actor_state_byte(
+    receive_state: ReceiveState,
+    mux_state: MuxState,
+    rate: LacpRate,
+    active: bool,
+) -> u8 {
+    let mut state = state_bit::AGGREGATION;
+    if active {
+        state |= state_bit::ACTIVITY;
+    }
     if rate == LacpRate::Fast {
         state |= state_bit::TIMEOUT;
     }
@@ -445,7 +467,7 @@ fn build_pdu(
         key: config.actor_key,
         port_priority: config.actor_port_priority,
         port: port_number,
-        state: actor_state_byte(receive_state, mux_state, config.rate),
+        state: actor_state_byte(receive_state, mux_state, config.rate, config.actor_active),
     };
     // Before any LACPDU has ever been received, our own view of the
     // partner is all-zero/defaulted — 802.1AX's administrative default.
@@ -521,6 +543,9 @@ struct TxState {
     last_sent: Option<Lacpdu>,
     limiter: TxLimiter,
     next_periodic_send: Instant,
+    /// 802.1AX `NO_PERIODIC`: both ends Passive. Nothing is transmitted at all
+    /// (periodic or event-driven) until a partner LACPDU says it is Active.
+    no_periodic: bool,
 }
 
 fn needs_transmit(last_sent: Option<&Lacpdu>, pdu: &Lacpdu) -> bool {
@@ -535,6 +560,34 @@ impl TxState {
             limiter: TxLimiter::new(now, MAX_TX_PER_WINDOW),
             // First send is immediate.
             next_periodic_send: now,
+            no_periodic: false,
+        }
+    }
+
+    /// Re-evaluates `NO_PERIODIC` after anything that changes the partner
+    /// view or receive state; arms the first send on leaving it.
+    fn update_periodic(
+        &mut self,
+        interface: &str,
+        actor_active: bool,
+        receive_state: ReceiveState,
+        partner: Option<PortInfo>,
+    ) {
+        let interval = interval_for(
+            receive_state,
+            actor_active,
+            partner.is_some_and(|p| p.has_state(state_bit::ACTIVITY)),
+            partner.is_some_and(|p| p.has_state(state_bit::TIMEOUT)),
+        );
+        let no_periodic = interval.is_none();
+        if no_periodic {
+            self.next_periodic_send = far_future();
+        } else if self.no_periodic {
+            self.next_periodic_send = Instant::now();
+        }
+        if no_periodic != self.no_periodic {
+            self.no_periodic = no_periodic;
+            info!(interface = %interface, no_periodic, "lacp periodic transmission machine transitioned");
         }
     }
 
@@ -543,6 +596,9 @@ impl TxState {
     /// periodic timer forward to the next refill, which rebuilds the PDU from
     /// live state — so a suppressed change is delayed, never lost.
     fn transmit(&mut self, socket: &LacpSocket, interface: &str, pdu: Lacpdu) {
+        if self.no_periodic {
+            return;
+        }
         if self.limiter.try_take(Instant::now()) {
             send_lacpdu(socket, interface, &pdu);
             self.last_sent = Some(pdu);
@@ -630,9 +686,23 @@ mod tests {
 
     #[test]
     fn fast_rate_sets_the_advertised_timeout_bit_and_slow_clears_it() {
-        let state = |rate| actor_state_byte(ReceiveState::Current, MuxState::Detached, rate);
+        let state = |rate| actor_state_byte(ReceiveState::Current, MuxState::Detached, rate, true);
         assert_ne!(state(LacpRate::Fast) & state_bit::TIMEOUT, 0);
         assert_eq!(state(LacpRate::Slow) & state_bit::TIMEOUT, 0);
+    }
+
+    #[test]
+    fn passive_clears_the_activity_bit() {
+        let state = |active| {
+            actor_state_byte(
+                ReceiveState::Current,
+                MuxState::Detached,
+                LacpRate::Slow,
+                active,
+            )
+        };
+        assert_ne!(state(true) & state_bit::ACTIVITY, 0);
+        assert_eq!(state(false) & state_bit::ACTIVITY, 0);
     }
 
     #[test]

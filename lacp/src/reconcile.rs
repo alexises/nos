@@ -135,7 +135,7 @@ async fn resync(
                 AggregateManager::new(name, key, push_tx.clone())
             })
             .clone();
-        let members: Vec<(String, u16)> = cfg
+        let members: Vec<(String, u16, nos_proto::LacpMode)> = cfg
             .interfaces
             .iter()
             .filter(|i| i.port_aggregate.as_deref() == Some(name))
@@ -143,6 +143,7 @@ async fn resync(
                 (
                     i.name.clone(),
                     i.lacp_port_priority.unwrap_or(DEFAULT_PRIORITY),
+                    i.lacp_mode,
                 )
             })
             .collect();

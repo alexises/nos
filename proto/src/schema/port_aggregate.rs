@@ -43,6 +43,17 @@ pub enum LacpRate {
     Fast,
 }
 
+/// A member port's 802.1AX `LACP_Activity`: `Active` ports send LACPDUs
+/// whenever the link is up; `Passive` ones stay silent until they hear an
+/// `Active` partner (two `Passive` ends never form a bundle).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Cli)]
+pub enum LacpMode {
+    #[default]
+    Active,
+    Passive,
+}
+
 /// How the PEs sharing an Ethernet Segment (`PortAggregate.esi`) divide the
 /// traffic (RFC 7432 §8.5): `AllActive` lets every PE forward unicast to the
 /// segment and only the Designated Forwarder flood BUM; `SingleActive` lets

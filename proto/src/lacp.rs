@@ -48,6 +48,8 @@ pub struct LacpPortStatus {
     pub partner_port_number: Option<u16>,
     /// This port's advertised Actor Port Priority.
     pub actor_port_priority: u16,
+    /// This port's configured `lacp-mode` (`Actor_State.LACP_Activity`).
+    pub mode: crate::schema::LacpMode,
     pub partner_system_priority: Option<u16>,
     pub partner_port_priority: Option<u16>,
     /// This port's Selection Logic outcome (`selection.rs`) — `true` iff it
