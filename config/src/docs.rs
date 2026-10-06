@@ -934,6 +934,14 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              sees it in its Partner System Priority. `delete` goes back to 32768. Changing it \
              restarts LACP on every member of the aggregate.",
         ),
+        Topic::PortAggregateMinLinks => (
+            "Set how many LACP members a port aggregate needs to carry traffic.",
+            "Sets the minimum number of member ports of the named `lacp`-mode aggregate that must \
+             be distributing for the bond to be used, default 1 (0 means the same). With fewer, \
+             the kernel bond is emptied while the ports keep negotiating, and it refills as soon \
+             as enough members are back. A value above the number of members keeps the bond \
+             empty for good (nos-lacpd logs a warning).",
+        ),
         Topic::InterfaceLacpPortPriority => (
             "Set an interface's LACP Actor Port Priority.",
             "Sets the priority nos-lacpd advertises as the Actor Port Priority for this interface \

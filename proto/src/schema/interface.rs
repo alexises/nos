@@ -968,6 +968,7 @@ mod tests {
             df_algorithm: crate::schema::DfAlgorithm::default(),
             lacp_system_id: None,
             lacp_system_priority: None,
+            min_links: 1,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),

@@ -97,7 +97,7 @@ pub enum DfAlgorithm {
 /// `Interface.switching_profile` already uses for L2 trunk membership —
 /// rather than this type holding a member list itself.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Validate, Cli)]
 #[garde(context(Config as ctx))]
 pub struct PortAggregate {
     #[garde(
@@ -158,6 +158,18 @@ pub struct PortAggregate {
     #[cli(topic = PortAggregateLacpSystemPriority)]
     pub lacp_system_priority: Option<u16>,
 
+    /// Minimum number of member ports that must be `Distributing` for the
+    /// bond to carry traffic: below it `nos-lacpd` pushes an empty active
+    /// set, so the kernel bond holds no member, while the ports keep
+    /// negotiating and the bond refills as soon as the count is met. 0 and 1
+    /// behave the same (any Distributing port is enough). Only meaningful
+    /// for a `Lacp`-mode aggregate; ignored (not rejected) otherwise, and not
+    /// checked against the member count, which lives on the `Interface`s.
+    #[serde(default = "default_min_links")]
+    #[garde(skip)]
+    #[cli(topic = PortAggregateMinLinks, words = "min-links")]
+    pub min_links: u16,
+
     /// Names a `SwitchingProfile` trunking this bond into one or more
     /// `BroadcastDomain`s — same field, same meaning, as
     /// `Interface.switching_profile`.
@@ -174,6 +186,31 @@ pub struct PortAggregate {
     #[garde(dive, custom(|subs, _ctx: &Config| valid_subinterface_list(subs)))]
     #[cli(topic = Subinterface)]
     pub subinterfaces: Vec<Subinterface>,
+}
+
+fn default_min_links() -> u16 {
+    1
+}
+
+// Not derived: `min_links` defaults to 1, not 0, so a blank entry reads like a
+// config persisted before the field existed.
+impl Default for PortAggregate {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            mode: PortAggregateMode::default(),
+            lacp_rate: LacpRate::default(),
+            esi: None,
+            redundancy_mode: EsRedundancy::default(),
+            df_algorithm: DfAlgorithm::default(),
+            lacp_system_id: None,
+            lacp_system_priority: None,
+            min_links: default_min_links(),
+            switching_profile: None,
+            mtu: None,
+            subinterfaces: Vec::new(),
+        }
+    }
 }
 
 fn valid_esi(esi: Option<&str>) -> garde::Result {
@@ -284,6 +321,7 @@ mod tests {
             df_algorithm: DfAlgorithm::default(),
             lacp_system_id: None,
             lacp_system_priority: None,
+            min_links: 1,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),

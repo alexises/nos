@@ -79,6 +79,11 @@ pub enum PortAggregateOp {
     ClearLacpSystemPriority {
         name: String,
     },
+    /// Appended (postcard indexes variants by position).
+    SetMinLinks {
+        name: String,
+        min_links: u16,
+    },
 }
 
 impl PortAggregateOp {
@@ -95,6 +100,7 @@ impl PortAggregateOp {
                         df_algorithm: DfAlgorithm::default(),
                         lacp_system_id: None,
                         lacp_system_priority: None,
+                        min_links: 1,
                         switching_profile: None,
                         mtu: None,
                         subinterfaces: Vec::new(),
@@ -154,6 +160,10 @@ impl PortAggregateOp {
                 find_aggregate_mut(config, name)?.lacp_system_priority = None;
                 Ok(())
             }
+            PortAggregateOp::SetMinLinks { name, min_links } => {
+                find_aggregate_mut(config, name)?.min_links = *min_links;
+                Ok(())
+            }
             PortAggregateOp::SetRedundancyMode { name, mode } => {
                 find_aggregate_mut(config, name)?.redundancy_mode = *mode;
                 Ok(())
@@ -199,6 +209,7 @@ mod tests {
             df_algorithm: DfAlgorithm::default(),
             lacp_system_id: None,
             lacp_system_priority: None,
+            min_links: 1,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),
@@ -310,6 +321,23 @@ mod tests {
             cfg.port_aggregates[0].redundancy_mode,
             EsRedundancy::SingleActive
         );
+    }
+
+    #[test]
+    fn set_min_links() {
+        let mut cfg = Config::default();
+        let name = "bond1".to_string();
+        PortAggregateOp::Ensure {
+            name: name.clone(),
+            mode: PortAggregateMode::Lacp,
+        }
+        .apply(&mut cfg)
+        .unwrap();
+        assert_eq!(cfg.port_aggregates[0].min_links, 1);
+        PortAggregateOp::SetMinLinks { name, min_links: 2 }
+            .apply(&mut cfg)
+            .unwrap();
+        assert_eq!(cfg.port_aggregates[0].min_links, 2);
     }
 
     #[test]

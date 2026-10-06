@@ -388,6 +388,7 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
     }
 
     lacp_passive(a, b, &both).await?;
+    lacp_min_links(w, &both).await?;
 
     let mut off = lacp_flags(&[]);
     off.extend(strings(&both));
@@ -426,6 +427,118 @@ async fn wait_lacp_ports(
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
     bail!("{}: {what} never held: {body}", r.name())
+}
+
+/// One member port of `LACP_AGGREGATE` in `r`'s `GET /v1/lacp`.
+async fn lacp_port(r: &Router, name: &str) -> anyhow::Result<serde_json::Value> {
+    let body = r
+        .rest_expect(reqwest::Method::GET, "/v1/lacp", None, 200)
+        .await?;
+    let summary: serde_json::Value = serde_json::from_str(&body)?;
+    summary
+        .as_array()
+        .and_then(|v| v.iter().find(|s| s["aggregate"] == LACP_AGGREGATE))
+        .and_then(|s| s["ports"].as_array())
+        .and_then(|p| p.iter().find(|p| p["interface"] == name))
+        .cloned()
+        .with_context(|| format!("no port {name} in show lacp: {body}"))
+}
+
+/// `min-links`: with 2 and one member silent the bond is emptied (the other
+/// port keeps negotiating), and refills when it returns; then a scripted
+/// partner that clears Actor_State.Aggregation makes eth2 an Individual port,
+/// which is never selected. (No kernel bond can play that partner: bonding
+/// always sets Aggregation, even on an unknown-duplex slave.)
+async fn lacp_min_links(w: &World, both: &[&str]) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let min_links = |n: &str| {
+        let mut f = lacp_flags(&["--lacp-rate", "fast", "--min-links", n]);
+        f.extend(strings(both));
+        f
+    };
+    let reconciled = format!("lacp reconciled aggregate members aggregate={LACP_AGGREGATE}");
+    let base = a.count(&reconciled);
+    log("min-links 2 with both members Distributing changes nothing");
+    a.provision(&min_links("2")).await?;
+    a.assert_quiet(&reconciled, base, 5).await?;
+
+    log("router-b withdraws eth2: below min-links the bond is emptied, eth1 keeps negotiating");
+    let emptied = "lacp min-links not met, bond emptied";
+    let emptied_base = a.count(emptied);
+    let release_base = a.count("removed interface from master enslavement interface=eth1");
+    let enslave_base = a.count("enslaved interface to bond interface=eth1 bond=bond");
+    let mut withdraw = lacp_flags(&["--lacp-rate", "fast"]);
+    withdraw.extend(strings(&[
+        "--enslave-interface-into-port-aggregate",
+        "eth1",
+        "--clear-port-aggregate-member",
+        "eth2",
+    ]));
+    b.provision(&withdraw).await?;
+    a.wait_new(emptied, emptied_base, 30).await?;
+    a.wait_new(
+        "removed interface from master enslavement interface=eth1",
+        release_base,
+        30,
+    )
+    .await?;
+    let eth1 = lacp_port(a, "eth1").await?;
+    if eth1["mux_state"] != "Distributing" || eth1["selected"] != true {
+        bail!("eth1 stopped negotiating when min-links emptied the bond: {eth1}");
+    }
+
+    log("a partner that clears Aggregation makes eth2 an Individual port: never selected");
+    w.dock
+        .ensure_image(
+            PYTHON_HELPER_IMAGE,
+            "FROM debian:bookworm-slim\n\
+            RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
+            && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    let inject = w.dock.in_netns(
+        PYTHON_HELPER_IMAGE,
+        "router-b",
+        &["python3", "-c", include_str!("individual.py")],
+    );
+    let check = async {
+        for _ in 0..8 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let eth2 = lacp_port(a, "eth2").await?;
+            if eth2["individual"] == true {
+                let eth1 = lacp_port(a, "eth1").await?;
+                if eth2["receive_state"] != "Current"
+                    || eth2["selected"] != false
+                    || eth2["mux_state"] == "Distributing"
+                    || eth1["selected"] != true
+                {
+                    bail!("individual eth2 was selected or cost eth1 its selection: {eth2} {eth1}");
+                }
+                return Ok(());
+            }
+        }
+        bail!("eth2 never showed individual=true")
+    };
+    let (injected, checked) = tokio::join!(inject, check);
+    injected?;
+    checked?;
+
+    log("router-b restores eth2: the bond refills");
+    let mut restore = lacp_flags(&["--lacp-rate", "fast"]);
+    restore.extend(strings(both));
+    b.provision(&restore).await?;
+    a.wait_new(
+        "enslaved interface to bond interface=eth1 bond=bond",
+        enslave_base,
+        60,
+    )
+    .await?;
+    wait_lacp_ports(a, "both ports Distributing again", |p| {
+        p["mux_state"] == "Distributing" && p["individual"] == false
+    })
+    .await?;
+
+    a.provision(&min_links("1")).await
 }
 
 /// `lacp-mode` (802.1AX LACP_Activity, NO_PERIODIC): passive against active

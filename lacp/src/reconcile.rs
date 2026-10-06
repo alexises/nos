@@ -153,12 +153,22 @@ async fn resync(
             .lacp_system_id
             .as_deref()
             .and_then(nos_proto::evpn_id::parse_mac);
+        let member_count = members.len();
         manager.reconcile(
             members,
             agg_cfg.lacp_rate,
             system_id,
             agg_cfg.lacp_system_priority.unwrap_or(DEFAULT_PRIORITY),
+            agg_cfg.min_links,
         );
+        if usize::from(agg_cfg.min_links) > member_count {
+            warn!(
+                aggregate = name,
+                min_links = agg_cfg.min_links,
+                members = member_count,
+                "lacp min-links exceeds the configured member count, the bond stays empty"
+            );
+        }
     }
 
     debug!(count = lacp_names.len(), "reconciled lacp aggregates");
