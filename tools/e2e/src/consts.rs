@@ -220,6 +220,21 @@ pub const L3_HOST_IP_B: &str = "198.18.2.10";
 pub const L3_GOBGP_PREFIX: &str = "198.18.9.0/24";
 pub const L3_GOBGP_RT: &str = "65010:5000";
 pub const L3_GOBGP_RMAC: &str = "aa:bb:cc:00:00:50";
+/// `evpn`'s symmetric IRB interop check: GoBGP's MAC+IP with Label2 = the L3
+/// VNI, installed by router-a's IP-VRF as a host route.
+pub const L3_GOBGP_HOST: &str = "198.18.8.9";
+/// `evpn-l3`'s symmetric IRB stage (RFC 9135): a domain stretched over both
+/// PEs with its SVI (the same anycast gateway on each) in `L3_TABLE`, and a
+/// host behind router-b only, on its own docker network (router-b's eth2).
+pub const NET_IRB: &str = "nos-verify-net-irb";
+pub const IRB_DOMAIN: &str = "irb";
+pub const IRB_VNI: u32 = 10300;
+pub const IRB_RT: &str = "65000:10300";
+pub const IRB_RD_A: &str = "65001:10300";
+pub const IRB_RD_B: &str = "65002:10300";
+pub const IRB_GW: &str = "198.18.3.1";
+pub const IRB_HOST: &str = "e2e-irb";
+pub const IRB_HOST_IP: &str = "198.18.3.20";
 /// `evpn-v6`: each PE's IPv6 VTEP/BGP address on eth0 (in `SUBNET6`, above
 /// the low addresses docker hands out — nos-interfaced removes docker's own
 /// anyway), selected as the VTEP by its label.

@@ -520,7 +520,10 @@ mod tests {
 
         let cfg = irb_config("r2", Some(5000));
         let err = cfg.validate_with(&cfg).unwrap_err().to_string();
-        assert!(err.contains("bd1") && err.contains("tenant") && err.contains("r2"), "{err}");
+        assert!(
+            err.contains("bd1") && err.contains("tenant") && err.contains("r2"),
+            "{err}"
+        );
 
         // No L3 VNI on the table: asymmetric, any instance.
         let mut cfg = irb_config("r2", None);

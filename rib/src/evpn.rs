@@ -205,7 +205,16 @@ mod tests {
         let rmac = router_mac_ext([2, 0, 0, 0, 0, 3]);
         let mac_ip = |ip: &str, vtep: &str, ext: Vec<u64>, l3_vni: Option<u32>| {
             let key = EvpnKey::MacIp {
-                rd: [0, 0, 0, 0, 0, 0, 0, u8::try_from(ip.len() + vtep.len()).unwrap()],
+                rd: [
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    u8::try_from(ip.len() + vtep.len()).unwrap(),
+                ],
                 mac: [2, 0, 0, 0, 0, 9],
                 ip: ip.parse().unwrap(),
             };
