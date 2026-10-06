@@ -96,7 +96,7 @@ fn segment(f: &Field) -> String {
 }
 
 /// The canonical spelling of a field.
-fn name(f: &Field) -> String {
+pub fn name(f: &Field) -> String {
     field_spellings(f).swap_remove(0)
 }
 
@@ -195,7 +195,7 @@ fn join(head: String, words: Vec<String>) -> String {
         .join(" ")
 }
 
-fn unwrap_option(kind: Kind) -> Kind {
+pub fn unwrap_option(kind: Kind) -> Kind {
     match kind {
         Kind::Option(inner) => unwrap_option(inner()),
         k => k,

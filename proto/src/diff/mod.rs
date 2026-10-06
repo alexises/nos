@@ -1,28 +1,6 @@
-pub mod as_path_list;
-pub mod bgp_instance;
-pub mod bgp_peer;
-pub mod bgp_peer_group;
-pub mod broadcast_domain;
-pub mod community_alias;
-pub mod community_group;
-pub mod interface;
-pub mod lldp;
-pub mod logging;
-pub mod ospf_area;
-pub mod ospf_instance;
-pub mod ospf_profile;
-pub mod ospfv3_area;
-pub mod ospfv3_instance;
-pub mod ospfv3_profile;
-pub mod policy_definition;
-pub mod port_aggregate;
-pub mod prefix_list;
-pub mod routing_table;
-pub mod static_route;
-pub mod static_routing_instance;
-pub mod subinterface;
-pub mod switching_profile;
-pub mod user;
+mod generate;
+
+pub use generate::diff_values;
 
 use serde::{Deserialize, Serialize};
 
@@ -249,71 +227,24 @@ pub enum DiffScope {
     Logging,
 }
 
+/// The `FieldDiff` label `nos-watchdogd` keys on to decide whether a routing
+/// table currently wants a `nos-restd` — a table's `Added`/`Modified`
+/// section carries it with `new` = `"unset"` when the API is not pinned.
+pub const REST_API_LABEL: &str = "rest-api";
+
+/// The field label `nos-watchdogd` keys its `nos-fdbd` claim on (see
+/// `Managed::claim_label`): a domain runs one while its vni is set.
+pub const VNI_LABEL: &str = "vni";
+
 /// Computes what changed between `base` (e.g. the running config) and
 /// `candidate` (e.g. a transaction's in-progress config). Pure and
 /// synchronous — no store state needed, the same category as `ConfigOp::apply`.
+///
+/// Generated from the CLI tree (`cli::root()`), like `show config` (#116):
+/// every non-hidden field is compared, so a field can't exist without being
+/// diffed, and labels/headers are the CLI's own words.
 pub fn diff_configs(base: &Config, candidate: &Config) -> ConfigDiff {
-    let hostname = (base.hostname != candidate.hostname).then(|| FieldDiff {
-        label: "hostname".to_string(),
-        old: Some(base.hostname.clone()),
-        new: Some(candidate.hostname.clone()),
-    });
-    ConfigDiff {
-        hostname,
-        bgp_instances: bgp_instance::diff_bgp_instances(
-            &base.bgp_instances,
-            &candidate.bgp_instances,
-        ),
-        routing_tables: routing_table::diff_routing_tables(
-            &base.routing_tables,
-            &candidate.routing_tables,
-        ),
-        ospf_instances: ospf_instance::diff_ospf_instances(
-            &base.ospf_instances,
-            &candidate.ospf_instances,
-        ),
-        ospfv3_instances: ospfv3_instance::diff_ospfv3_instances(
-            &base.ospfv3_instances,
-            &candidate.ospfv3_instances,
-        ),
-        static_routing_instances: static_routing_instance::diff_static_routing_instances(
-            &base.static_routing_instances,
-            &candidate.static_routing_instances,
-        ),
-        interfaces: interface::diff_interfaces(&base.interfaces, &candidate.interfaces),
-        policy_definitions: policy_definition::diff_policy_definitions(
-            &base.policy_definitions,
-            &candidate.policy_definitions,
-        ),
-        community_aliases: community_alias::diff_community_aliases(
-            &base.community_aliases,
-            &candidate.community_aliases,
-        ),
-        community_groups: community_group::diff_community_groups(
-            &base.community_groups,
-            &candidate.community_groups,
-        ),
-        as_path_lists: as_path_list::diff_as_path_lists(
-            &base.as_path_lists,
-            &candidate.as_path_lists,
-        ),
-        prefix_lists: prefix_list::diff_prefix_lists(&base.prefix_lists, &candidate.prefix_lists),
-        broadcast_domains: broadcast_domain::diff_broadcast_domains(
-            &base.broadcast_domains,
-            &candidate.broadcast_domains,
-        ),
-        switching_profiles: switching_profile::diff_switching_profiles(
-            &base.switching_profiles,
-            &candidate.switching_profiles,
-        ),
-        port_aggregates: port_aggregate::diff_port_aggregates(
-            &base.port_aggregates,
-            &candidate.port_aggregates,
-        ),
-        lldp: lldp::diff_lldp(&base.lldp, &candidate.lldp),
-        users: user::diff_users(&base.users, &candidate.users),
-        logging: logging::diff_logging(&base.logging, &candidate.logging),
-    }
+    generate::diff_configs(base, candidate)
 }
 
 #[cfg(test)]
