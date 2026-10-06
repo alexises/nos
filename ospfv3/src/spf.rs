@@ -163,7 +163,8 @@ fn routers_networks_links(
             | LsaBody::Grace(_)
             | LsaBody::InterAreaPrefix(_)
             | LsaBody::InterAreaRouter(_)
-            | LsaBody::AsExternal(_) => {}
+            | LsaBody::AsExternal(_)
+            | LsaBody::Opaque(_) => {}
         }
     }
     (routers, networks, links)
@@ -978,6 +979,18 @@ mod tests {
         let r = &routes[0];
         assert_eq!(r.interface_id, 1);
         (r.metric, r.next_hop)
+    }
+
+    #[test]
+    fn opaque_lsa_does_not_change_routes() {
+        let mut lsas = root_and_abr();
+        lsas.push(inter_area_prefix(router_id(2), "2001:db8:9::/64", 7));
+        let before = compute(router_id(1), &lsas);
+        lsas.push(Arc::new(Lsa {
+            header: header(0xA0FF, router_id(2), router_id(2)),
+            body: LsaBody::Opaque(vec![1, 2, 3, 4]),
+        }));
+        assert_eq!(compute(router_id(1), &lsas), before);
     }
 
     #[test]
