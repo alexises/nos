@@ -20,11 +20,12 @@ use ipnet::{IpNet, Ipv4Net};
 use nos_proto::{
     AddressFamily, BgpAoAlgorithm, BgpAoKey, BgpInstanceOp, BgpPeerGroupOp, BgpPeerOp,
     BroadcastDomainOp, ConfigOp, EsRedundancy, InterfaceOp, LacpRate, LldpDestination, LldpOp,
-    OspfAreaOp, OspfAreaType, OspfCryptoAlgorithm, OspfCryptoKey, OspfInstanceOp, OspfProfileOp,
-    Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp, PolicyDefinitionOp, PortAggregateMode,
-    PortAggregateOp, PortAggregateSubinterfaceOp, Redistribute, RedistributeSource,
-    RedistributeTarget, RoutingTableEvpn, RoutingTableOp, SourceAddress, StaticRouteOp,
-    StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp, UserOp, VlanTag,
+    LogLevel, LoggingOp, NetworkType, OspfAreaOp, OspfAreaType, OspfCryptoAlgorithm, OspfCryptoKey,
+    OspfInstanceOp, OspfProfileOp, Ospfv3AreaOp, Ospfv3InstanceOp, Ospfv3ProfileOp,
+    PolicyDefinitionOp, PortAggregateMode, PortAggregateOp, PortAggregateSubinterfaceOp,
+    Redistribute, RedistributeSource, RedistributeTarget, RoutingTableEvpn, RoutingTableOp,
+    SourceAddress, StaticRouteOp, StaticRoutingInstanceOp, SubinterfaceOp, SwitchingProfileOp,
+    SyslogFacility, SyslogTransport, UserOp, VlanTag,
 };
 
 /// Clap-facing mirror of `nos_proto::PortAggregateMode` — `clap::ValueEnum`
@@ -808,6 +809,61 @@ pub struct Args {
     #[arg(long = "no-lldp-management-address")]
     pub no_lldp_management_addresses: Vec<IpAddr>,
 
+    /// Ensures this remote syslog collector (`LoggingOp::EnsureSyslog`); every
+    /// other `--syslog-*` flag of the invocation applies to it. One per run.
+    #[arg(long)]
+    pub syslog_server: Option<String>,
+
+    /// The collector's address (`LoggingOp::SetSyslogAddress`).
+    #[arg(long)]
+    pub syslog_address: Option<IpAddr>,
+
+    /// The collector's port (`LoggingOp::SetSyslogPort`).
+    #[arg(long)]
+    pub syslog_port: Option<u16>,
+
+    /// `udp`, `tcp` or `tls` (`LoggingOp::SetSyslogTransport`).
+    #[arg(long)]
+    pub syslog_transport: Option<String>,
+
+    /// The routing table whose VRF the socket is scoped into.
+    #[arg(long)]
+    pub syslog_routing_table: Option<String>,
+
+    /// Minimum severity: `error`, `warn`, `info`, `debug` or `trace`.
+    #[arg(long)]
+    pub syslog_level: Option<String>,
+
+    /// `local0` to `local7`.
+    #[arg(long)]
+    pub syslog_facility: Option<String>,
+
+    /// A PEM CA certificate file (read here, sent as text) the TLS collector's
+    /// certificate must chain to (`LoggingOp::SetSyslogTlsTrustAnchor`).
+    #[arg(long)]
+    pub syslog_trust_anchor_file: Option<PathBuf>,
+
+    /// `SHA-256:AB:CD:...` of the TLS collector's certificate
+    /// (`LoggingOp::SetSyslogTlsFingerprint`).
+    #[arg(long)]
+    pub syslog_fingerprint: Option<String>,
+
+    /// The DNS name the TLS collector's certificate must carry.
+    #[arg(long)]
+    pub syslog_server_name: Option<String>,
+
+    /// Allows TLS 1.2 with classical key exchange (`SetSyslogTlsAllowTls12`).
+    #[arg(long)]
+    pub syslog_allow_tls12: bool,
+
+    /// Turns `--syslog-allow-tls12` off again.
+    #[arg(long)]
+    pub no_syslog_allow_tls12: bool,
+
+    /// One collector per repetition to remove (`LoggingOp::RemoveSyslog`).
+    #[arg(long = "no-syslog-server")]
+    pub no_syslog_servers: Vec<String>,
+
     /// One `<interface>=<group>` per repetition (group is `nearest-bridge`,
     /// `non-tpmr` or `customer-bridge`): sets that interface's LLDP
     /// destination group (`InterfaceOp::SetLldpDestination`).
@@ -921,6 +977,12 @@ pub struct Args {
     /// hello-interval doesn't match the receiving interface's own.
     #[arg(long)]
     pub ospf_profile_hello_interval: Option<u16>,
+
+    /// If set (requires `--ospf-profile`), forces this profile's network type:
+    /// `point-to-point`, `broadcast`, `point-to-multipoint`, or `clear` to go
+    /// back to the per-attach-point default.
+    #[arg(long)]
+    pub ospf_profile_network_type: Option<String>,
 
     /// If set (requires `--ospf-profile`), enables/disables RFC 7474
     /// extended cryptographic sequence numbers on it
@@ -2098,6 +2160,106 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     for &address in &args.no_lldp_management_addresses {
         ops.push(ConfigOp::Lldp(LldpOp::RemoveManagementAddress { address }));
     }
+    if let Some(name) = &args.syslog_server {
+        let n = || name.clone();
+        ops.push(ConfigOp::Logging(LoggingOp::EnsureSyslog { name: n() }));
+        if let Some(address) = args.syslog_address {
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogAddress {
+                name: n(),
+                address,
+            }));
+        }
+        if let Some(port) = args.syslog_port {
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogPort {
+                name: n(),
+                port: Some(port),
+            }));
+        }
+        if let Some(t) = &args.syslog_transport {
+            let transport = match t.as_str() {
+                "udp" => SyslogTransport::Udp,
+                "tcp" => SyslogTransport::Tcp,
+                "tls" => SyslogTransport::Tls,
+                _ => bail!("--syslog-transport is udp, tcp or tls, not '{t}'"),
+            };
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogTransport {
+                name: n(),
+                transport,
+            }));
+        }
+        if let Some(file) = &args.syslog_trust_anchor_file {
+            let pem = std::fs::read_to_string(file)
+                .with_context(|| format!("reading {}", file.display()))?;
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogTlsTrustAnchor {
+                name: n(),
+                pem: Some(pem),
+            }));
+        }
+        if let Some(fingerprint) = &args.syslog_fingerprint {
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogTlsFingerprint {
+                name: n(),
+                fingerprint: Some(fingerprint.clone()),
+            }));
+        }
+        if let Some(server_name) = &args.syslog_server_name {
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogTlsServerName {
+                name: n(),
+                server_name: Some(server_name.clone()),
+            }));
+        }
+        if args.syslog_allow_tls12 || args.no_syslog_allow_tls12 {
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogTlsAllowTls12 {
+                name: n(),
+                allow: args.syslog_allow_tls12,
+            }));
+        }
+        if let Some(rt) = &args.syslog_routing_table {
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogRoutingTable {
+                name: n(),
+                routing_table: Some(rt.clone()),
+            }));
+        }
+        if let Some(l) = &args.syslog_level {
+            let level = match l.as_str() {
+                "error" => LogLevel::Error,
+                "warn" => LogLevel::Warn,
+                "info" => LogLevel::Info,
+                "debug" => LogLevel::Debug,
+                "trace" => LogLevel::Trace,
+                _ => bail!("unknown --syslog-level '{l}'"),
+            };
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogLevel {
+                name: n(),
+                level: Some(level),
+            }));
+        }
+        if let Some(f) = &args.syslog_facility {
+            const FACILITIES: [SyslogFacility; 8] = [
+                SyslogFacility::Local0,
+                SyslogFacility::Local1,
+                SyslogFacility::Local2,
+                SyslogFacility::Local3,
+                SyslogFacility::Local4,
+                SyslogFacility::Local5,
+                SyslogFacility::Local6,
+                SyslogFacility::Local7,
+            ];
+            let facility = f
+                .strip_prefix("local")
+                .and_then(|d| d.parse::<usize>().ok())
+                .and_then(|i| FACILITIES.get(i).copied())
+                .with_context(|| format!("unknown --syslog-facility '{f}'"))?;
+            ops.push(ConfigOp::Logging(LoggingOp::SetSyslogFacility {
+                name: n(),
+                facility: Some(facility),
+            }));
+        }
+    }
+    for name in &args.no_syslog_servers {
+        ops.push(ConfigOp::Logging(LoggingOp::RemoveSyslog {
+            name: name.clone(),
+        }));
+    }
     for spec in &args.lldp_destination_interfaces {
         let (name, group) = spec
             .split_once('=')
@@ -2251,6 +2413,27 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
                     mtu,
                 }));
             }
+            if let Some(kind) = args.ospf_profile_network_type.as_deref() {
+                let (instance, name) = (instance.clone(), name.clone());
+                ops.push(ConfigOp::OspfProfile(match kind {
+                    "clear" => OspfProfileOp::ClearNetworkType {
+                        instance,
+                        area_id,
+                        name,
+                    },
+                    _ => OspfProfileOp::SetNetworkType {
+                        instance,
+                        area_id,
+                        name,
+                        network_type: match kind {
+                            "point-to-point" => NetworkType::PointToPoint,
+                            "broadcast" => NetworkType::Broadcast,
+                            "point-to-multipoint" => NetworkType::PointToMultipoint,
+                            other => bail!("--ospf-profile-network-type: unknown {other:?}"),
+                        },
+                    },
+                }));
+            }
             if let Some(hello_interval) = args.ospf_profile_hello_interval {
                 ops.push(ConfigOp::OspfProfile(OspfProfileOp::SetHelloInterval {
                     instance: instance.clone(),
@@ -2296,6 +2479,9 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
             if args.ospf_profile_mtu.is_some() {
                 bail!("--ospf-profile-mtu requires --ospf-profile to also be set");
             }
+            if args.ospf_profile_network_type.is_some() {
+                bail!("--ospf-profile-network-type requires --ospf-profile to also be set");
+            }
             if args.ospf_profile_hello_interval.is_some() {
                 bail!("--ospf-profile-hello-interval requires --ospf-profile to also be set");
             }
@@ -2308,6 +2494,7 @@ pub fn build_ops(args: &Args) -> anyhow::Result<Vec<ConfigOp>> {
     } else if args.ospf_simple_password.is_some() || args.ospf_crypto_key.is_some() {
         bail!("--ospf-simple-password/--ospf-crypto-key require --ospf-profile to also be set");
     } else if args.ospf_profile_mtu.is_some()
+        || args.ospf_profile_network_type.is_some()
         || args.ospf_profile_hello_interval.is_some()
         || args.ospf_extended_seq.is_some()
     {
@@ -2857,8 +3044,38 @@ mod tests {
             "10.0.0.3",
             "--lldp-destination-interface",
             "eth1=customer-bridge",
+            "--syslog-server",
+            "c1",
+            "--syslog-address",
+            "192.0.2.9",
+            "--syslog-transport",
+            "tcp",
+            "--syslog-facility",
+            "local3",
+            "--syslog-level",
+            "debug",
+            "--no-syslog-server",
+            "old",
         ])
         .unwrap();
+        has(
+            &ops,
+            &ConfigOp::Logging(LoggingOp::SetSyslogFacility {
+                name: "c1".into(),
+                facility: Some(SyslogFacility::Local3),
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Logging(LoggingOp::SetSyslogTransport {
+                name: "c1".into(),
+                transport: SyslogTransport::Tcp,
+            }),
+        );
+        has(
+            &ops,
+            &ConfigOp::Logging(LoggingOp::RemoveSyslog { name: "old".into() }),
+        );
         has(
             &ops,
             &ConfigOp::SwitchingProfile(SwitchingProfileOp::AddMember {

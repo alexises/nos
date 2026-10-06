@@ -200,6 +200,33 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
         }
     }
 
+    // 802.1AX §6.5 Marker responder: a real Marker PDU injected on router-b's
+    // eth1 (source = its own MAC, so only router-a answers) must come back as
+    // a byte-correct Marker Response, and router-a logs it.
+    log("router-a answers a real injected Marker PDU on eth1");
+    w.dock
+        .ensure_image(
+            PYTHON_HELPER_IMAGE,
+            "FROM debian:bookworm-slim\n\
+            RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
+            && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    let marker_base = a.count("lacp marker answered interface=eth1");
+    w.dock
+        .in_netns(
+            PYTHON_HELPER_IMAGE,
+            "router-b",
+            &["python3", "-c", include_str!("marker.py")],
+        )
+        .await?;
+    a.wait_new(
+        "lacp marker answered interface=eth1 requester_port=7 .* transaction_id=1313821529",
+        marker_base,
+        15,
+    )
+    .await?;
+
     // Withdraw eth2 from router-b's aggregate (its veth stays up): router-a's
     // nos-lacpd must detect the silence via its real Receive Machine timeout
     // and nos-interfaced must release eth2 — proving the enslavement is
@@ -1394,6 +1421,579 @@ async fn rest_destructive(w: &mut World) -> anyhow::Result<()> {
 
     w.remove(R).await;
     Ok(())
+}
+
+// --- syslog (#71) ---
+
+const SYSLOG_UDP_LOG: &str = "/var/log/udp.log";
+const SYSLOG_TCP_LOG: &str = "/var/log/tcp.log";
+/// One file per TLS listener: 6514 (defaults), 6515 (TLS 1.2 only, RSA leaf),
+/// 6516 (TLS 1.3 with a classical group only).
+const SYSLOG_TLS_LOG: &str = "/var/log/tls.log";
+const SYSLOG_TLS12_LOG: &str = "/var/log/tls12.log";
+const SYSLOG_TLSC_LOG: &str = "/var/log/tlsc.log";
+
+/// A collector that parses RFC 5424 itself (syslog-ng's `syslog()` source),
+/// writing one `HOST|PROGRAM|PID|LEVEL|FACILITY|SDATA|MSG` line per message
+/// to a file per transport.
+fn syslog_dockerfile() -> &'static str {
+    "FROM debian:trixie-slim\n\
+     RUN apt-get update && apt-get install -y --no-install-recommends syslog-ng-core \\\n \
+     && rm -rf /var/lib/apt/lists/*\n"
+}
+
+fn syslog_conf() -> String {
+    // peer-verify(no): nos presents no client certificate (server auth only).
+    let tls = |port: u16, cert: &str, extra: &str| {
+        format!(
+            "syslog(ip(0.0.0.0) transport(\"tls\") port({port}) \
+             tls(key-file(\"/etc/syslog-ng/{cert}.key\") cert-file(\"/etc/syslog-ng/{cert}.crt\") \
+             peer-verify(no) {extra}));"
+        )
+    };
+    let (s_tls, s_tls12, s_tlsc) = (
+        tls(6514, "ecdsa", ""),
+        // RFC 9662's SHOULD-offer TLS 1.2 suite, and nothing newer.
+        tls(
+            6515,
+            "rsa",
+            "ssl-options(no-tlsv13) cipher-suite(\"ECDHE-RSA-AES128-GCM-SHA256\")",
+        ),
+        // TLS 1.3, but only a classical group: must be refused in every case.
+        tls(
+            6516,
+            "ecdsa",
+            "ssl-options(no-tlsv12) ecdh-curve-list(\"X25519\")",
+        ),
+    );
+    format!(
+        "@version: current\n\
+         options {{ keep-hostname(yes); chain-hostnames(no); }};\n\
+         source s_udp {{ syslog(ip(0.0.0.0) transport(\"udp\") port(514)); }};\n\
+         source s_tcp {{ syslog(ip(0.0.0.0) transport(\"tcp\") port(601)); }};\n\
+         source s_tls {{ {s_tls} }};\n\
+         source s_tls12 {{ {s_tls12} }};\n\
+         source s_tlsc {{ {s_tlsc} }};\n\
+         template t_line {{ template(\"$HOST|$PROGRAM|$PID|$LEVEL|$FACILITY|$SDATA|$MSG\\n\"); }};\n\
+         destination d_udp {{ file(\"{SYSLOG_UDP_LOG}\" template(t_line)); }};\n\
+         destination d_tcp {{ file(\"{SYSLOG_TCP_LOG}\" template(t_line)); }};\n\
+         destination d_tls {{ file(\"{SYSLOG_TLS_LOG}\" template(t_line)); }};\n\
+         destination d_tls12 {{ file(\"{SYSLOG_TLS12_LOG}\" template(t_line)); }};\n\
+         destination d_tlsc {{ file(\"{SYSLOG_TLSC_LOG}\" template(t_line)); }};\n\
+         log {{ source(s_udp); destination(d_udp); }};\n\
+         log {{ source(s_tcp); destination(d_tcp); }};\n\
+         log {{ source(s_tls); destination(d_tls); }};\n\
+         log {{ source(s_tls12); destination(d_tls12); }};\n\
+         log {{ source(s_tlsc); destination(d_tlsc); }};\n"
+    )
+}
+
+/// The collector's certificates, generated per run: one CA signing an ECDSA
+/// and an RSA-2048 leaf (an IP SAN for the collector's address plus a DNS SAN),
+/// and an unrelated CA to be refused.
+struct SyslogCerts {
+    ecdsa_crt: String,
+    ecdsa_key: String,
+    rsa_crt: String,
+    rsa_key: String,
+    /// `SHA-256:AB:CD:...` of the ECDSA leaf and of a certificate that is not
+    /// the collector's.
+    ecdsa_fingerprint: String,
+    wrong_fingerprint: String,
+    /// Host files for `--syslog-trust-anchor-file`.
+    ca_file: std::path::PathBuf,
+    other_ca_file: std::path::PathBuf,
+}
+
+const SYSLOG_DNS_NAME: &str = "syslog.e2e";
+
+impl SyslogCerts {
+    fn generate() -> anyhow::Result<Self> {
+        use rcgen::{
+            BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, RsaKeySize, SanType,
+            PKCS_RSA_SHA256,
+        };
+        use sha2::{Digest, Sha256};
+        let ca = |name: &str| -> anyhow::Result<(String, Issuer<'static, KeyPair>)> {
+            let key = KeyPair::generate()?;
+            let mut p = CertificateParams::new(Vec::<String>::new())?;
+            p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            p.distinguished_name
+                .push(rcgen::DnType::CommonName, name.to_string());
+            let cert = p.self_signed(&key)?;
+            Ok((cert.pem(), Issuer::new(p, key)))
+        };
+        let (ca_pem, issuer) = ca("nos-e2e syslog CA")?;
+        let (other_pem, _) = ca("nos-e2e unrelated CA")?;
+        let leaf = |key: &KeyPair| -> anyhow::Result<rcgen::Certificate> {
+            let mut p = CertificateParams::new(vec![SYSLOG_DNS_NAME.to_string()])?;
+            p.subject_alt_names
+                .push(SanType::IpAddress(IP_SYSLOG.parse()?));
+            Ok(p.signed_by(key, &issuer)?)
+        };
+        let ecdsa = KeyPair::generate()?;
+        let rsa = KeyPair::generate_rsa_for(&PKCS_RSA_SHA256, RsaKeySize::_2048)?;
+        let (ecdsa_cert, rsa_cert) = (leaf(&ecdsa)?, leaf(&rsa)?);
+        let fingerprint = |der: &[u8]| {
+            let hex: Vec<String> = Sha256::digest(der)
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect();
+            format!("SHA-256:{}", hex.join(":"))
+        };
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- public CA certificates, not secrets.
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let write = |name: &str, pem: &str| -> anyhow::Result<std::path::PathBuf> {
+            let path = dir.join(format!("nos-e2e-syslog-{pid}-{name}.pem"));
+            std::fs::write(&path, pem)?;
+            Ok(path)
+        };
+        Ok(Self {
+            ecdsa_crt: ecdsa_cert.pem(),
+            ecdsa_key: ecdsa.serialize_pem(),
+            rsa_crt: rsa_cert.pem(),
+            rsa_key: rsa.serialize_pem(),
+            ecdsa_fingerprint: fingerprint(ecdsa_cert.der()),
+            wrong_fingerprint: fingerprint(rsa_cert.der()),
+            ca_file: write("ca", &ca_pem)?,
+            other_ca_file: write("other-ca", &other_pem)?,
+        })
+    }
+}
+
+/// Starts the collector. syslog-ng reads its certificates at startup, so the
+/// container waits for a `ready` file uploaded after them.
+async fn start_syslog_collector(w: &World, certs: &SyslogCerts) -> anyhow::Result<()> {
+    let conf = syslog_conf();
+    w.dock
+        .start_plain(
+            SYSLOG_COLLECTOR,
+            SYSLOG_IMAGE,
+            NET,
+            IP_SYSLOG,
+            &[
+                "sh",
+                "-c",
+                "while [ ! -e /etc/syslog-ng/ready ]; do sleep 0.2; done; \
+                 exec syslog-ng -F --no-caps -f /etc/syslog-ng/syslog-ng.conf",
+            ],
+            ("/etc/syslog-ng", "syslog-ng.conf", conf.as_bytes()),
+        )
+        .await?;
+    for (file, contents) in [
+        ("ecdsa.crt", &certs.ecdsa_crt),
+        ("ecdsa.key", &certs.ecdsa_key),
+        ("rsa.crt", &certs.rsa_crt),
+        ("rsa.key", &certs.rsa_key),
+        ("ready", &String::new()),
+    ] {
+        w.dock
+            .upload(
+                SYSLOG_COLLECTOR,
+                "/etc/syslog-ng",
+                file,
+                contents.as_bytes(),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// Every line the collector wrote to `file` (empty before the first one).
+async fn collected(w: &World, file: &str) -> anyhow::Result<Vec<Vec<String>>> {
+    let (_, out) = w.dock.exec(SYSLOG_COLLECTOR, &["cat", file]).await?;
+    Ok(out
+        .lines()
+        .filter(|l| l.matches('|').count() >= 6)
+        .map(|l| l.splitn(7, '|').map(str::to_string).collect())
+        .collect())
+}
+
+/// Waits for a collected line `f` accepts and returns it.
+async fn wait_collected(
+    w: &World,
+    file: &str,
+    what: &str,
+    secs: u64,
+    f: impl Fn(&[String]) -> bool,
+) -> anyhow::Result<Vec<String>> {
+    for _ in 0..secs {
+        if let Some(l) = collected(w, file).await?.into_iter().find(|l| f(l)) {
+            log(format!("collector {file}: saw {what}"));
+            return Ok(l);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("collector {file}: no line matching {what} within {secs}s")
+}
+
+/// `docker logs` of `container` with ANSI colour codes removed (the daemons'
+/// `fmt` layer colours field names even into a pipe).
+async fn plain_docker_logs(w: &World, container: &str) -> anyhow::Result<String> {
+    let raw = w.dock.logs(container).await?;
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for e in chars.by_ref() {
+                if e.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
+/// RFC 5424 export from `nos-logd` to a real syslog-ng, over both transports,
+/// from inside `rt1`'s VRF (eth0 is enslaved to it, so an unscoped socket
+/// could not reach the collector): hostname, program, instance, facility and
+/// level parsed by an independent implementation, the level filter, a TCP
+/// reconnect after the collector restarts, and removal.
+pub async fn syslog(w: &mut World) -> anyhow::Result<()> {
+    let a = w.a()?;
+    log("building/starting the syslog collector");
+    w.dock
+        .ensure_image(SYSLOG_IMAGE, syslog_dockerfile())
+        .await?;
+    let certs = SyslogCerts::generate()?;
+    start_syslog_collector(w, &certs).await?;
+
+    let addr = IP_SYSLOG.to_string();
+    a.provision(&["--hostname", SYSLOG_HOSTNAME]).await?;
+    for (name, transport) in [("c-udp", "udp"), ("c-tcp", "tcp")] {
+        a.provision(&[
+            "--hostname",
+            SYSLOG_HOSTNAME,
+            "--syslog-server",
+            name,
+            "--syslog-address",
+            &addr,
+            "--syslog-transport",
+            transport,
+            "--syslog-routing-table",
+            "rt1",
+            "--syslog-facility",
+            "local3",
+        ])
+        .await?;
+    }
+
+    // Nothing logs at info in steady state, and each sink only sees what is
+    // logged after it connected: one more commit gives both a line.
+    a.provision(&["--hostname", SYSLOG_HOSTNAME]).await?;
+    for file in [SYSLOG_UDP_LOG, SYSLOG_TCP_LOG] {
+        // nos-configd's own commit line, with the hostname we configured,
+        // the facility and an info level; its PROCID is the NILVALUE.
+        let mut found = None;
+        for _ in 0..30 {
+            // A sink that connected late missed the earlier commits.
+            a.provision(&["--hostname", SYSLOG_HOSTNAME]).await?;
+            found = collected(w, file).await?.into_iter().find(|l| {
+                l[0] == SYSLOG_HOSTNAME
+                    && l[1] == "nos-configd"
+                    && l[3] == "info"
+                    && l[4] == "local3"
+            });
+            if found.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        let l = found.with_context(|| format!("{file}: no nos-configd info line"))?;
+        if !l[5].contains("timeQuality") || !l[6].contains("config committed") {
+            bail!("unexpected structured data or text in {l:?}");
+        }
+    }
+
+    // The routers run with RUST_LOG=debug; the default minimum is info, so a
+    // collector with no level never sees a debug line.
+    let debug = |l: &[String]| l[3] == "debug";
+    if collected(w, SYSLOG_TCP_LOG).await?.iter().any(|l| debug(l)) {
+        bail!("a debug line reached a collector at the default level");
+    }
+    a.provision(&[
+        "--hostname",
+        SYSLOG_HOSTNAME,
+        "--syslog-server",
+        "c-tcp",
+        "--syslog-level",
+        "debug",
+    ])
+    .await?;
+    wait_collected(w, SYSLOG_TCP_LOG, "a debug line", 60, debug).await?;
+    // An instance daemon: APP-NAME nos-ribd/nos-bgpd, PROCID its instance.
+    wait_collected(w, SYSLOG_TCP_LOG, "an instance daemon's line", 60, |l| {
+        (l[1] == "nos-ribd" && l[2] == "rt1") || (l[1] == "nos-bgpd" && l[2] == "r1")
+    })
+    .await?;
+    if collected(w, SYSLOG_UDP_LOG).await?.iter().any(|l| debug(l)) {
+        bail!("a debug line reached the udp collector, still at the default level");
+    }
+
+    log("restarting the collector: the tcp sink must reconnect");
+    let connected = |logs: &str| logs.matches("syslog connected server=c-tcp").count();
+    let before = connected(&plain_docker_logs(w, "router-a").await?);
+    start_syslog_collector(w, &certs).await?;
+    let mut after = before;
+    for _ in 0..60 {
+        after = connected(&plain_docker_logs(w, "router-a").await?);
+        if after > before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if after <= before {
+        bail!("nos-logd never logged a new 'syslog connected server=c-tcp'");
+    }
+    wait_collected(w, SYSLOG_TCP_LOG, "a line after the restart", 60, |_| true).await?;
+
+    log("removing both collectors");
+    a.provision(&[
+        "--hostname",
+        SYSLOG_HOSTNAME,
+        "--no-syslog-server",
+        "c-udp",
+        "--no-syslog-server",
+        "c-tcp",
+    ])
+    .await?;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let (udp, tcp) = (
+        collected(w, SYSLOG_UDP_LOG).await?.len(),
+        collected(w, SYSLOG_TCP_LOG).await?.len(),
+    );
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    if collected(w, SYSLOG_UDP_LOG).await?.len() != udp
+        || collected(w, SYSLOG_TCP_LOG).await?.len() != tcp
+    {
+        bail!("a collector kept receiving lines after its removal");
+    }
+
+    syslog_tls(w, &certs).await?;
+
+    a.provision(&["--hostname", "nos"]).await?;
+    w.dock.container_remove(SYSLOG_COLLECTOR).await;
+    Ok(())
+}
+
+/// Polls router-a's `docker logs` (nos-logd does not forward its own logs to
+/// the REST stream) until `pattern` shows up more often than `before` times.
+async fn wait_router_a_log(w: &World, pattern: &str, before: usize) -> anyhow::Result<()> {
+    for _ in 0..60 {
+        if plain_docker_logs(w, "router-a")
+            .await?
+            .matches(pattern)
+            .count()
+            > before
+        {
+            log(format!("router-a: saw '{pattern}'"));
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("nos-logd never logged '{pattern}'")
+}
+
+async fn router_a_log_count(w: &World, pattern: &str) -> anyhow::Result<usize> {
+    Ok(plain_docker_logs(w, "router-a")
+        .await?
+        .matches(pattern)
+        .count())
+}
+
+/// Adds/updates TLS collector `name` on `port`; `extra` are the trust flags.
+async fn tls_server(w: &World, name: &str, port: u16, extra: &[&str]) -> anyhow::Result<()> {
+    let (addr, port) = (IP_SYSLOG.to_string(), port.to_string());
+    let mut args = vec![
+        "--hostname",
+        SYSLOG_HOSTNAME,
+        "--syslog-server",
+        name,
+        "--syslog-address",
+        &addr,
+        "--syslog-transport",
+        "tls",
+        "--syslog-port",
+        &port,
+        "--syslog-routing-table",
+        "rt1",
+        "--syslog-facility",
+        "local3",
+    ];
+    args.extend_from_slice(extra);
+    w.a()?.provision(&args).await
+}
+
+/// The collector received a line `file` did not hold before: commits keep
+/// producing `nos-configd` info lines until a connected sink forwards one.
+async fn expect_tls_delivery(w: &World, file: &str) -> anyhow::Result<()> {
+    let before = collected(w, file).await?.len();
+    for _ in 0..30 {
+        w.a()?.provision(&["--hostname", SYSLOG_HOSTNAME]).await?;
+        if collected(w, file).await?.len() > before {
+            log(format!("collector {file}: a line arrived over tls"));
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!("collector {file}: no line arrived over tls")
+}
+
+/// The handshake was refused: `nos-logd` logs it and no collector file grows.
+async fn expect_tls_refused(
+    w: &World,
+    name: &str,
+    file: &str,
+    before: usize,
+) -> anyhow::Result<()> {
+    wait_router_a_log(
+        w,
+        &format!("syslog collector unavailable server={name} error=tls handshake"),
+        before,
+    )
+    .await?;
+    let lines = collected(w, file).await?.len();
+    for _ in 0..3 {
+        w.a()?.provision(&["--hostname", SYSLOG_HOSTNAME]).await?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if collected(w, file).await?.len() != lines {
+        bail!("a line reached {file} from '{name}', whose handshake was refused");
+    }
+    Ok(())
+}
+
+async fn remove_syslog_server(w: &World, name: &str) -> anyhow::Result<()> {
+    w.a()?
+        .provision(&["--hostname", SYSLOG_HOSTNAME, "--no-syslog-server", name])
+        .await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    Ok(())
+}
+
+/// RFC 5425 / RFC 9662 against syslog-ng (OpenSSL 3.5, which offers
+/// `X25519MLKEM768`): trust by CA and by fingerprint over post-quantum TLS 1.3;
+/// an unrelated CA, a wrong fingerprint, a wrong name, a TLS 1.2-only collector
+/// and a TLS 1.3 collector with a classical group only are all refused by
+/// default; `allow-tls12` reaches the TLS 1.2 one (classical, warned) but still
+/// never a classical TLS 1.3 one, and turning it off again refuses it once more.
+async fn syslog_tls(w: &World, certs: &SyslogCerts) -> anyhow::Result<()> {
+    let ca = certs.ca_file.to_str().context("ca path")?;
+    let other_ca = certs.other_ca_file.to_str().context("other ca path")?;
+    let connected = |name: &str, version: &str, kx: &str| {
+        format!("syslog connected server={name} version={version} kx={kx}")
+    };
+    let refused =
+        |name: &str| format!("syslog collector unavailable server={name} error=tls handshake");
+
+    log("tls: trust anchor, then fingerprint, on the default (post-quantum TLS 1.3) listener");
+    for (name, trust) in [
+        ("c-tls-ca", ["--syslog-trust-anchor-file", ca]),
+        (
+            "c-tls-fp",
+            ["--syslog-fingerprint", &certs.ecdsa_fingerprint],
+        ),
+    ] {
+        tls_server(w, name, 6514, &trust).await?;
+        wait_router_a_log(w, &connected(name, "TLSv1_3", "X25519MLKEM768"), 0).await?;
+        expect_tls_delivery(w, SYSLOG_TLS_LOG).await?;
+        remove_syslog_server(w, name).await?;
+    }
+
+    log("tls: server-name, right and wrong");
+    tls_server(
+        w,
+        "c-tls-name",
+        6514,
+        &[
+            "--syslog-trust-anchor-file",
+            ca,
+            "--syslog-server-name",
+            SYSLOG_DNS_NAME,
+        ],
+    )
+    .await?;
+    wait_router_a_log(w, &connected("c-tls-name", "TLSv1_3", "X25519MLKEM768"), 0).await?;
+    remove_syslog_server(w, "c-tls-name").await?;
+    tls_server(
+        w,
+        "c-tls-badname",
+        6514,
+        &[
+            "--syslog-trust-anchor-file",
+            ca,
+            "--syslog-server-name",
+            "other.e2e",
+        ],
+    )
+    .await?;
+    expect_tls_refused(w, "c-tls-badname", SYSLOG_TLS_LOG, 0).await?;
+    remove_syslog_server(w, "c-tls-badname").await?;
+
+    log("tls: an unrelated CA and a wrong fingerprint are refused");
+    tls_server(
+        w,
+        "c-tls-badca",
+        6514,
+        &["--syslog-trust-anchor-file", other_ca],
+    )
+    .await?;
+    expect_tls_refused(w, "c-tls-badca", SYSLOG_TLS_LOG, 0).await?;
+    remove_syslog_server(w, "c-tls-badca").await?;
+    tls_server(
+        w,
+        "c-tls-badfp",
+        6514,
+        &["--syslog-fingerprint", &certs.wrong_fingerprint],
+    )
+    .await?;
+    expect_tls_refused(w, "c-tls-badfp", SYSLOG_TLS_LOG, 0).await?;
+    remove_syslog_server(w, "c-tls-badfp").await?;
+
+    log("tls: policy refuses TLS 1.2 and classical TLS 1.3 by default");
+    tls_server(w, "c-tls12", 6515, &["--syslog-trust-anchor-file", ca]).await?;
+    expect_tls_refused(w, "c-tls12", SYSLOG_TLS12_LOG, 0).await?;
+    tls_server(w, "c-tlsc", 6516, &["--syslog-trust-anchor-file", ca]).await?;
+    expect_tls_refused(w, "c-tlsc", SYSLOG_TLSC_LOG, 0).await?;
+
+    log("tls: allow-tls12 reaches the TLS 1.2 collector, nothing classical on TLS 1.3");
+    tls_server(w, "c-tls12", 6515, &["--syslog-allow-tls12"]).await?;
+    wait_router_a_log(w, &connected("c-tls12", "TLSv1_2", ""), 0).await?;
+    wait_router_a_log(w, "syslog tls12 classical key exchange server=c-tls12", 0).await?;
+    wait_router_a_log(w, "suite=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", 0).await?;
+    expect_tls_delivery(w, SYSLOG_TLS12_LOG).await?;
+    // The opt-in never downgrades a collector that does the hybrid exchange.
+    remove_syslog_server(w, "c-tlsc").await?;
+    tls_server(
+        w,
+        "c-tls-ca",
+        6514,
+        &["--syslog-trust-anchor-file", ca, "--syslog-allow-tls12"],
+    )
+    .await?;
+    wait_router_a_log(w, &connected("c-tls-ca", "TLSv1_3", "X25519MLKEM768"), 1).await?;
+    remove_syslog_server(w, "c-tls-ca").await?;
+    // ... and still refuses the TLS 1.3 listener that offers a classical group only.
+    let before = router_a_log_count(w, &refused("c-tlsc")).await?;
+    tls_server(
+        w,
+        "c-tlsc",
+        6516,
+        &["--syslog-trust-anchor-file", ca, "--syslog-allow-tls12"],
+    )
+    .await?;
+    expect_tls_refused(w, "c-tlsc", SYSLOG_TLSC_LOG, before).await?;
+    remove_syslog_server(w, "c-tlsc").await?;
+
+    log("tls: allow-tls12 off again refuses the TLS 1.2 collector");
+    let before = router_a_log_count(w, &refused("c-tls12")).await?;
+    tls_server(w, "c-tls12", 6515, &["--no-syslog-allow-tls12"]).await?;
+    expect_tls_refused(w, "c-tls12", SYSLOG_TLS12_LOG, before).await?;
+    remove_syslog_server(w, "c-tls12").await
 }
 
 fn expect_body(body: &str, needle: &str) -> anyhow::Result<()> {

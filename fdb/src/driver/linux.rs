@@ -24,11 +24,17 @@ use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use super::nexthop::{self, Nexthop};
+use super::tc::{self, Tc};
 use super::{is_local_mac, is_local_neigh, vxlan_name, DriverError, FdbDriver, Mac, VXLAN_PORT};
 
 /// errno(3) values the kernel answers a missing object with.
 const ENODEV: i32 = 19;
 const ENOENT: i32 = 2;
+const EEXIST: i32 = 17;
+const EINVAL: i32 = 22;
+/// Deleting a filter (or a whole priority) that isn't there: `ENOENT`, or
+/// `EINVAL` when the device has no filter chain at all yet.
+const NO_FILTER: &[i32] = &[ENOENT, EINVAL];
 /// `NDA_NH_ID`: the FDB entry points at a nexthop (group) instead of a `dst`.
 const NDA_NH_ID: u16 = 13;
 /// Nexthop ids are `vni << 8 | slot`, so the per-domain `nos-fdbd` processes
@@ -78,6 +84,9 @@ pub struct LinuxFdbDriver {
     /// looked up in the main table and dropped (`ENETUNREACH`,
     /// `tx_carrier_errors`). A change, or no record, reopens the device.
     bound_master: Mutex<HashMap<u32, Option<u32>>>,
+    /// `vni ->` how many per-peer local-bias filters this process wrote on its
+    /// ingress (handles `1..=n`).
+    bias: Mutex<HashMap<u32, usize>>,
 }
 
 impl LinuxFdbDriver {
@@ -91,6 +100,7 @@ impl LinuxFdbDriver {
             underlay: Mutex::new(HashMap::new()),
             nexthops: Mutex::new(HashMap::new()),
             bound_master: Mutex::new(HashMap::new()),
+            bias: Mutex::new(HashMap::new()),
         })
     }
 
@@ -180,6 +190,28 @@ impl LinuxFdbDriver {
             .ok_or_else(|| DriverError::Other(format!("{} does not exist", vxlan_name(vni))))?;
         self.ifindex.lock().unwrap().insert(vni, link.header.index);
         Ok(link.header.index)
+    }
+
+    /// Runs one tc request on a blocking thread (see `tc`).
+    async fn tc(&self, req: Tc, tolerate: &'static [i32]) -> Result<(), DriverError> {
+        tokio::task::spawn_blocking(move || tc::send(&req, tolerate))
+            .await
+            .map_err(|e| DriverError::Other(e.to_string()))?
+            .map_err(|e| DriverError::Other(format!("tc request failed: {e}")))
+    }
+
+    /// Removes every filter at `prio`; nothing there is fine.
+    async fn tc_flush(&self, ifindex: u32, hook: tc::Hook, prio: u16) -> Result<(), DriverError> {
+        self.tc(
+            Tc::Delete {
+                ifindex,
+                hook,
+                prio,
+                handle: 0,
+            },
+            NO_FILTER,
+        )
+        .await
     }
 
     /// Runs one nexthop request on a blocking thread (see `nexthop`).
@@ -577,6 +609,7 @@ impl FdbDriver for LinuxFdbDriver {
 
     async fn remove_vxlan(&self, vni: u32) -> Result<(), DriverError> {
         self.bound_master.lock().unwrap().remove(&vni);
+        self.bias.lock().unwrap().remove(&vni);
         self.ifindex.lock().unwrap().remove(&vni);
         self.underlay.lock().unwrap().remove(&vni);
         if let Some(l) = self.find_link(&vxlan_name(vni)).await? {
@@ -665,7 +698,12 @@ impl FdbDriver for LinuxFdbDriver {
         self.neigh(msg, true, 0, ENOENT).await
     }
 
-    async fn set_port_flood(&self, port: &str, flood: bool) -> Result<(), DriverError> {
+    async fn set_port_flood(
+        &self,
+        port: &str,
+        unicast: bool,
+        bum: bool,
+    ) -> Result<(), DriverError> {
         let link = self
             .find_link(port)
             .await?
@@ -675,12 +713,123 @@ impl FdbDriver for LinuxFdbDriver {
         self.set_bridge_port(
             link.header.index,
             vec![
-                InfoBridgePort::UnicastFlood(flood),
-                InfoBridgePort::MulticastFlood(flood),
-                InfoBridgePort::BroadcastFlood(flood),
+                InfoBridgePort::UnicastFlood(unicast),
+                InfoBridgePort::MulticastFlood(bum),
+                InfoBridgePort::BroadcastFlood(bum),
             ],
         )
         .await
+    }
+
+    async fn set_segment_filter(
+        &self,
+        port: &str,
+        bit: u16,
+        df_filter: bool,
+    ) -> Result<(), DriverError> {
+        let ifindex = self.bridge_index(port).await?;
+        self.tc(Tc::Clsact { ifindex }, &[EEXIST]).await?;
+        self.tc(
+            Tc::DropMarked {
+                ifindex,
+                prio: tc::PRIO_FIRST,
+                bits: bit,
+            },
+            &[],
+        )
+        .await?;
+        if df_filter {
+            self.tc(
+                Tc::DropMarked {
+                    ifindex,
+                    prio: tc::PRIO_SECOND,
+                    bits: 0,
+                },
+                &[],
+            )
+            .await
+        } else {
+            self.tc_flush(ifindex, tc::Hook::Egress, tc::PRIO_SECOND)
+                .await
+        }
+    }
+
+    async fn clear_segment_filter(&self, port: &str) -> Result<(), DriverError> {
+        let Some(link) = self.find_link(port).await? else {
+            return Ok(());
+        };
+        let ifindex = link.header.index;
+        self.tc_flush(ifindex, tc::Hook::Egress, tc::PRIO_FIRST)
+            .await?;
+        self.tc_flush(ifindex, tc::Hook::Egress, tc::PRIO_SECOND)
+            .await
+    }
+
+    async fn set_local_bias(
+        &self,
+        vni: u32,
+        peers: &BTreeMap<IpAddr, u16>,
+    ) -> Result<(), DriverError> {
+        let ifindex = self.vxlan_index(vni).await?;
+        if peers.is_empty() {
+            self.tc_flush(ifindex, tc::Hook::Ingress, tc::PRIO_FIRST)
+                .await?;
+            self.tc_flush(ifindex, tc::Hook::Ingress, tc::PRIO_SECOND)
+                .await?;
+            self.bias.lock().unwrap().remove(&vni);
+            return Ok(());
+        }
+        self.tc(Tc::Clsact { ifindex }, &[EEXIST]).await?;
+        let before = self.bias.lock().unwrap().get(&vni).copied();
+        if before.is_none() {
+            // A first call in this process: whatever an earlier one (killed
+            // before it cleaned up) left under a handle we no longer know goes.
+            self.tc_flush(ifindex, tc::Hook::Ingress, tc::PRIO_FIRST)
+                .await?;
+        }
+        // Handle n is the n-th peer in address order; a peer set that changed
+        // overwrites in place, so the marking is never absent in between.
+        for (n, (peer, bit)) in (1u32..).zip(peers) {
+            self.tc(
+                Tc::Mark {
+                    ifindex,
+                    prio: tc::PRIO_FIRST,
+                    handle: n,
+                    src: Some(*peer),
+                    bits: *bit,
+                },
+                &[],
+            )
+            .await?;
+        }
+        let kept = u32::try_from(peers.len()).unwrap_or(u32::MAX);
+        let had = u32::try_from(before.unwrap_or(0)).unwrap_or(u32::MAX);
+        for handle in (kept + 1)..=had {
+            self.tc(
+                Tc::Delete {
+                    ifindex,
+                    hook: tc::Hook::Ingress,
+                    prio: tc::PRIO_FIRST,
+                    handle,
+                },
+                NO_FILTER,
+            )
+            .await?;
+        }
+        // The catch-all: every other core-origin BUM frame, magic byte only.
+        self.tc(
+            Tc::Mark {
+                ifindex,
+                prio: tc::PRIO_SECOND,
+                handle: 1,
+                src: None,
+                bits: 0,
+            },
+            &[],
+        )
+        .await?;
+        self.bias.lock().unwrap().insert(vni, peers.len());
+        Ok(())
     }
 
     async fn set_port_forwarding(&self, port: &str, forwarding: bool) -> Result<(), DriverError> {

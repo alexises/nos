@@ -138,6 +138,8 @@ REST: `DELETE …/interface/eth1/port-aggregate`, the same for `eth2`, then `DEL
 
 **`lacp-rate`** is how often this end asks its partner to send LACPDUs, and so how quickly a dead partner is detected: `slow` (default) asks for one every 30 seconds and gives up after 90; `fast` asks for one every second and gives up after 3. Each end sends at the rate the *other* end asks for, so set `fast` on both ends for fast detection in both directions.
 
+**Marker protocol.** NOS answers LACP Marker PDUs (802.1AX §6.5) on every member, so a partner that flushes a conversation before moving it gets an immediate reply. NOS never sends Markers itself: its members never move between aggregates.
+
 **LACP identity.** An LACP partner is identified by a system ID (a MAC address) and a key. NOS derives both from the router and the aggregate; `show lacp` shows them as `system` and `key`. `lacp-system-id` overrides the system ID. It is meant for EVPN multi-homing, where two routers present one LACP partner to a dual-homed device: set the same value on both.
 
 **EVPN multi-homing.** `esi` attaches the aggregate to an EVPN Ethernet Segment, `redundancy-mode` chooses all-active or single-active forwarding for it, and `df-algorithm` the designated forwarder election. They are documented with EVPN.

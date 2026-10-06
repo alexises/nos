@@ -2425,3 +2425,84 @@ pub async fn ospfv3_flush(w: &mut World) -> anyhow::Result<()> {
     b.wait_new(&aged, aged0, 90).await?;
     a.wait_new(&flushed, flushed0, 60).await
 }
+
+/// RFC 2328 §9.5 point-to-multipoint (requires `ospf`): the shared profile's
+/// network type forced to `point-to-multipoint` on router-a/router-b's eth0.0
+/// and bd-ospf bridge. Hello must still reach `Full` on both links with no
+/// DR election, router-a must learn router-b's own interface address as a /32
+/// stub (§12.4.1.4) and route to a loopback behind it; clearing the override
+/// restores point-to-point and the bridge's DR/BDR election.
+pub async fn ospf_p2mp(w: &mut World) -> anyhow::Result<()> {
+    let (a, b) = (w.a()?, w.b()?);
+    let bridge = format!("link=broadcast-domain:{BD}");
+    let full_bridge =
+        |neighbor: &str| format!("ospf neighbor reached full {bridge} neighbor={neighbor}");
+    let became_dr = format!("ospf interface became dr {bridge}");
+    let set = |rid: &str, kind: &str| {
+        let mut f = ospf(rid);
+        f.extend(strings(&["--ospf-profile-network-type", kind]));
+        f
+    };
+    let stub = format!(
+        "{}/32",
+        OSPF_BROADCAST_ADDRESS_B
+            .split('/')
+            .next()
+            .unwrap_or_default()
+    );
+
+    let (p0, q0, bq0) = (
+        a.count(&full_p2p(OSPF_ROUTER_ID_B)),
+        a.count(&full_bridge(OSPF_ROUTER_ID_B)),
+        b.count(&full_bridge(OSPF_ROUTER_ID)),
+    );
+    log("forcing network-type point-to-multipoint on both routers' shared profile");
+    a.provision_flags(&with_base(A, set(OSPF_ROUTER_ID, "point-to-multipoint")))
+        .await?;
+    b.provision_flags(&with_base(B, set(OSPF_ROUTER_ID_B, "point-to-multipoint")))
+        .await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), p0, 90).await?;
+    a.wait_new(&full_bridge(OSPF_ROUTER_ID_B), q0, 90).await?;
+    // No election ever runs on a point-to-multipoint link. (The baseline is
+    // taken once both ends have restarted: router-b was still broadcast, and
+    // elected itself DR again, while only router-a had flipped.)
+    b.wait_new(&full_bridge(OSPF_ROUTER_ID), bq0, 90).await?;
+    let dr0 = b.count(&became_dr);
+    b.assert_quiet(&became_dr, dr0, 6).await?;
+
+    // §12.4.1.4: router-b's Router-LSA carries a /32 stub for its own bridge
+    // address (the subnet stub is gone), which router-a's SPF turns into a route.
+    for _ in 0..60 {
+        if a.rt1_has(&stub, "Ospf").await? {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if !a.rt1_has(&stub, "Ospf").await? {
+        bail!("router-a never learned router-b's {stub} stub over point-to-multipoint");
+    }
+
+    let lo = OSPF_SPF_LOOPBACK_ADDRESS;
+    let route = format!("added route prefix={lo}.*source=Some(Ospf)");
+    let r0 = a.count(&route);
+    b.provision(&[
+        "--loopback-address",
+        lo,
+        "--ospf-loopback-profile",
+        OSPF_PROFILE,
+    ])
+    .await?;
+    a.wait_new(&route, r0, 60).await?;
+    b.provision(&["--clear-ospf-loopback-profile"]).await?;
+    a.wait_ospf_route_gone(lo, 15).await?;
+
+    log("clearing the network-type override: point-to-point and the bridge election are back");
+    let (p0, dr0) = (a.count(&full_p2p(OSPF_ROUTER_ID_B)), b.count(&became_dr));
+    a.provision_flags(&with_base(A, set(OSPF_ROUTER_ID, "clear")))
+        .await?;
+    b.provision_flags(&with_base(B, set(OSPF_ROUTER_ID_B, "clear")))
+        .await?;
+    a.wait_new(&full_p2p(OSPF_ROUTER_ID_B), p0, 90).await?;
+    b.wait_new(&became_dr, dr0, 60).await?;
+    a.wait_ospf_route_gone(&stub, 10).await
+}

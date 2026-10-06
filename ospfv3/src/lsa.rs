@@ -54,17 +54,59 @@ const SCOPE_LINK_LOCAL: u16 = 0x0000;
 /// S2/S1 scope bits: `10` = AS scope (flooded through every area).
 const SCOPE_AS: u16 = 0x4000;
 
-/// RFC 5340 §4.5.1: whether `lsa_type`'s S2/S1 bits say AS scope — such an
-/// LSA lives in `link.rs`'s one AS-wide store, not an area's.
-pub fn is_as_scope(lsa_type: u16) -> bool {
-    lsa_type & (SCOPE_AREA | SCOPE_AS) == SCOPE_AS
+/// RFC 5340 §A.4.2.1 U-bit: "store and flood the LSA as if type understood".
+const U_BIT: u16 = 0x8000;
+/// Mask of the S2/S1 bits.
+const SCOPE_MASK: u16 = SCOPE_AREA | SCOPE_AS;
+
+/// RFC 5340 §A.4.2.1 S2/S1 `11`: "reserved". RFC 5340 §4.5 step (3) (LSU
+/// receipt) discards such an LSA.
+pub fn is_reserved_scope(lsa_type: u16) -> bool {
+    lsa_type & SCOPE_MASK == SCOPE_MASK
 }
 
-/// RFC 5340 §4.5.1 / §A.4.2.1: whether `lsa_type`'s S2/S1 bits say
-/// link-local scope — such an LSA lives in its link's own store and is
-/// never flooded past that link (`link.rs`'s per-link `Lsdb`).
+/// RFC 5340 §2.9 / §4.5.1: the LSA's flooding scope as the router must treat
+/// it. A recognized type, or an unrecognized one with the U-bit set, uses
+/// its S2/S1 bits; an unrecognized type with the U-bit clear is treated as
+/// link-local (never leaves the link it arrived on).
+fn effective_scope(lsa_type: u16) -> u16 {
+    if !is_known_type(lsa_type) && lsa_type & U_BIT == 0 {
+        SCOPE_LINK_LOCAL
+    } else {
+        lsa_type & SCOPE_MASK
+    }
+}
+
+/// RFC 5340 §4.5.1: whether `lsa_type`'s effective scope is AS — such an
+/// LSA lives in `link.rs`'s one AS-wide store, not an area's.
+pub fn is_as_scope(lsa_type: u16) -> bool {
+    effective_scope(lsa_type) == SCOPE_AS
+}
+
+/// RFC 5340 §4.5.1 / §A.4.2.1: whether `lsa_type`'s effective scope is
+/// link-local — such an LSA lives in its link's own store and is never
+/// flooded past that link (`link.rs`'s per-link `Lsdb`). Includes
+/// unrecognized types with the U-bit clear (§2.9).
 pub fn is_link_local_scope(lsa_type: u16) -> bool {
-    lsa_type & (SCOPE_AREA | 0x4000) == SCOPE_LINK_LOCAL
+    effective_scope(lsa_type) == SCOPE_LINK_LOCAL
+}
+
+/// Whether this crate understands `lsa_type` (RFC 5340, RFC 5187, RFC 8362).
+/// Anything else decodes to `LsaBody::Opaque`: stored and flooded per
+/// `effective_scope`, never used by SPF.
+pub fn is_known_type(lsa_type: u16) -> bool {
+    is_extended(lsa_type)
+        || matches!(
+            lsa_type,
+            LSA_TYPE_ROUTER
+                | LSA_TYPE_NETWORK
+                | LSA_TYPE_INTER_AREA_PREFIX
+                | LSA_TYPE_INTER_AREA_ROUTER
+                | LSA_TYPE_AS_EXTERNAL
+                | LSA_TYPE_LINK
+                | LSA_TYPE_INTRA_AREA_PREFIX
+                | LSA_TYPE_GRACE
+        )
 }
 
 /// RFC 5340 §A.4.3 Router-LSA — area-scoped, function code 1.
@@ -81,6 +123,14 @@ pub const LSA_TYPE_AS_EXTERNAL: u16 = SCOPE_AS | 5;
 /// boundary router).
 pub const ROUTER_FLAG_B: u8 = 0x01;
 pub const ROUTER_FLAG_E: u8 = 0x02;
+/// RFC 5340 §A.4.1.1 `PrefixOptions`: NU (no unicast: not used in routing
+/// calculations), LA (local address: a host address of the originator),
+/// P (propagate, NSSA) and DN (down, PE-CE). Only NU is honoured on
+/// receipt and only LA is originated; P/DN are never set.
+pub const PREFIX_OPT_NU: u8 = 0x01;
+pub const PREFIX_OPT_LA: u8 = 0x02;
+pub const PREFIX_OPT_P: u8 = 0x08;
+pub const PREFIX_OPT_DN: u8 = 0x10;
 /// RFC 5340 §A.4.7 AS-External-LSA flag bits (first byte).
 const EXTERNAL_FLAG_E: u8 = 0x04;
 const EXTERNAL_FLAG_F: u8 = 0x02;
@@ -328,6 +378,9 @@ pub enum LsaBody {
     InterAreaPrefix(InterAreaPrefixLsaBody),
     InterAreaRouter(InterAreaRouterLsaBody),
     AsExternal(AsExternalLsaBody),
+    /// A type this crate does not understand (RFC 5340 §2.9): the raw body,
+    /// kept verbatim so the LSA re-floods with a valid checksum.
+    Opaque(Vec<u8>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -601,6 +654,7 @@ fn decode_ext_external(data: &[u8]) -> Result<LsaBody, PacketError> {
 fn encode_ext_body(body: &LsaBody) -> Vec<u8> {
     let mut buf = Vec::new();
     match body {
+        LsaBody::Opaque(raw) => buf.extend_from_slice(raw),
         LsaBody::Router(r) => {
             buf.extend_from_slice(&fixed_word(r.flags, r.options));
             for l in &r.links {
@@ -815,6 +869,7 @@ fn encode_body(lsa_type: u16, body: &LsaBody) -> Vec<u8> {
         return encode_ext_body(body);
     }
     match body {
+        LsaBody::Opaque(raw) => raw.clone(),
         LsaBody::Router(r) => {
             let mut buf = Vec::with_capacity(4 + r.links.len() * ROUTER_LINK_LEN);
             buf.push(r.flags);
@@ -1040,7 +1095,7 @@ fn decode_body(lsa_type: u16, data: &[u8]) -> Result<LsaBody, PacketError> {
         LSA_TYPE_INTER_AREA_PREFIX => Ok(inter_area_prefix(&decode_metric_prefix(data)?)),
         LSA_TYPE_INTER_AREA_ROUTER => decode_inter_area_router(data),
         LSA_TYPE_AS_EXTERNAL => decode_as_external(data),
-        other => Err(PacketError::UnknownLsaType(other)),
+        _ => Ok(LsaBody::Opaque(data.to_vec())),
     }
 }
 
@@ -1565,15 +1620,53 @@ mod tests {
         assert_eq!(decode_lsa(&encoded), Err(PacketError::BadChecksum));
     }
 
+    /// RFC 5340 §A.4.2.1 / §2.9: an unrecognized type decodes to its raw
+    /// body and re-encodes byte for byte (so the checksum survives), with the
+    /// scope its U/S2/S1 bits give.
     #[test]
-    fn unknown_lsa_type_is_rejected() {
-        let mut lsa = router_lsa();
-        lsa.header.lsa_type = 0x2FFF;
-        let encoded = encode_lsa(&lsa);
-        assert_eq!(
-            decode_lsa(&encoded),
-            Err(PacketError::UnknownLsaType(0x2FFF))
-        );
+    fn unknown_types_round_trip_with_effective_scope() {
+        // (type, link-local, as)
+        for (t, ll, a) in [
+            (0xA0FFu16, false, false), // U=1, area
+            (0xC0FF, false, true),     // U=1, AS
+            (0x80FF, true, false),     // U=1, link-local
+            (0x20FF, true, false),     // U=0, area bits: treated link-local
+            (0x40FF, true, false),     // U=0, AS bits: treated link-local
+        ] {
+            assert!(!is_known_type(t));
+            let mut lsa = router_lsa();
+            lsa.header.lsa_type = t;
+            lsa.body = LsaBody::Opaque(vec![1, 2, 3, 4, 5, 6, 7, 8]);
+            let encoded = encode_lsa(&lsa);
+            let decoded = decode_lsa(&encoded).unwrap();
+            assert_eq!(decoded.body, lsa.body);
+            assert_eq!(encode_lsa(&decoded), encoded, "{t:#06x}");
+            assert_eq!(is_link_local_scope(t), ll, "{t:#06x}");
+            assert_eq!(is_as_scope(t), a, "{t:#06x}");
+        }
+    }
+
+    #[test]
+    fn reserved_scope_is_flagged() {
+        assert!(is_reserved_scope(0xE0FF));
+        assert!(is_reserved_scope(0x60FF));
+        assert!(!is_reserved_scope(LSA_TYPE_AS_EXTERNAL));
+        assert!(!is_reserved_scope(LSA_TYPE_LINK));
+    }
+
+    #[test]
+    fn every_known_constant_is_known() {
+        for t in [
+            LSA_TYPE_ROUTER,
+            LSA_TYPE_NETWORK,
+            LSA_TYPE_LINK,
+            LSA_TYPE_GRACE,
+            LSA_TYPE_AS_EXTERNAL,
+            LSA_TYPE_E_ROUTER,
+            LSA_TYPE_E_AS_EXTERNAL,
+        ] {
+            assert!(is_known_type(t));
+        }
     }
 
     #[test]

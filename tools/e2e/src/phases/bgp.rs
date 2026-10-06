@@ -491,14 +491,14 @@ fn expect_body(body: &str, needle: &str) -> anyhow::Result<()> {
     }
 }
 
-/// RFC 5925 TCP-AO: `exclude_options` must match on both sides to establish,
-/// `TCP_AO_INFO` readback surfaces sane current/rnext key ids, and a real
-/// key-rollover sequence (add key 2 as rnext, promote it to current, remove
-/// key 1) keeps authenticating throughout. Each config change here restarts
-/// this peer's session — an auth change is an ordinary `ResolvedPeer` diff,
-/// like a changed `remote_as` (see `bgp/CLAUDE.md`'s "Session
-/// authentication") — so this proves the sequence keeps authenticating end
-/// to end, not that the session survives without a reconnect.
+/// RFC 5925 TCP-AO: `exclude_options` must match on both sides to establish
+/// (changing a kept key's material restarts the session), `TCP_AO_INFO`
+/// readback surfaces sane current/rnext key ids, and a real key rollover
+/// (add key 2 as rnext, promote it to current, remove key 1) is *hitless*
+/// (#83): each step is applied to the live socket in place, the kernel
+/// advances `current_key` on the peer's RNextKeyID (§7.5.2), and no session
+/// ends or re-establishes throughout. Last, removing the key the peer still
+/// signs with is refused by the kernel (`EBUSY`) and falls back to a reset.
 pub async fn ao(w: &mut World) -> anyhow::Result<()> {
     let (a, b) = (w.a()?, w.b()?);
     let secret = "correct-horse-battery-staple";
@@ -566,11 +566,15 @@ pub async fn ao(w: &mut World) -> anyhow::Result<()> {
         "\"ao_current_key\":1",
     )?;
 
-    log("rolling over to a second TCP-AO key (RFC 5925 §7.5)");
-    let (before_a, before_b) = (
+    log("rolling over to a second TCP-AO key (RFC 5925 §7.5), expecting no session reset");
+    let ended = "outbound bgp session ended\\|inbound bgp session ended";
+    let (est_a, est_b) = (
         a.count("bgp session established"),
         b.count("bgp session established"),
     );
+    let (end_a, end_b) = (a.count(ended), b.count(ended));
+    let updated = "bgp tcp-ao keys updated in place";
+    let (upd_a, upd_b) = (a.count(updated), b.count(updated));
     for r in [a, b] {
         r.provision(&[
             "--ao-send-id",
@@ -582,40 +586,90 @@ pub async fn ao(w: &mut World) -> anyhow::Result<()> {
         ])
         .await?;
     }
-    reestablished(a, before_a).await?;
-    reestablished(b, before_b).await?;
-
-    let (before_a, before_b) = (
-        a.count("bgp session established"),
-        b.count("bgp session established"),
-    );
+    a.wait_new(updated, upd_a, 30).await?;
+    b.wait_new(updated, upd_b, 30).await?;
+    log("waiting for the kernel's RNextKeyID auto-advance: both live sessions sign with key 2");
     for r in [a, b] {
-        r.provision(&["--ao-promote-current", "2"]).await?;
+        wait_summary(r, &["\"ao_current_key\":2", "\"ao_rnext_key\":2"], 60).await?;
     }
-    reestablished(a, before_a).await?;
-    reestablished(b, before_b).await?;
 
-    let (before_a, before_b) = (
-        a.count("bgp session established"),
-        b.count("bgp session established"),
-    );
+    for flags in [["--ao-promote-current", "2"], ["--ao-remove-key", "1"]] {
+        let (upd_a, upd_b) = (a.count(updated), b.count(updated));
+        for r in [a, b] {
+            r.provision(&flags).await?;
+        }
+        a.wait_new(updated, upd_a, 30).await?;
+        b.wait_new(updated, upd_b, 30).await?;
+    }
+
+    log("checking no session reset happened across the whole rollover");
+    for (r, est, end) in [(a, est_a, end_a), (b, est_b, end_b)] {
+        r.assert_quiet("bgp session established", est, 3).await?;
+        r.assert_quiet(ended, end, 1).await?;
+        let body = r
+            .rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
+            .await?;
+        expect_body(&body, "\"ao_current_key\":2")?;
+        expect_body(&body, "\"ao_packets_bad\":0")?;
+    }
+
+    log("re-adding key 1 everywhere, then removing key 2 on router-a only: the peer still signs with it");
+    let key1 = [
+        "--ao-send-id",
+        "1",
+        "--ao-key-secret",
+        secret,
+        "--ao-exclude-options",
+    ];
+    let (upd_a, upd_b) = (a.count(updated), b.count(updated));
     for r in [a, b] {
-        r.provision(&["--ao-remove-key", "1"]).await?;
+        r.provision(&key1).await?;
     }
-    reestablished(a, before_a).await?;
-    reestablished(b, before_b).await?;
-
-    log("checking TCP_AO_INFO readback surfaces key 2 as current on both sides after rollover");
-    expect_body(
-        &a.rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
-            .await?,
-        "\"ao_current_key\":2",
-    )?;
-    expect_body(
-        &b.rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
-            .await?,
-        "\"ao_current_key\":2",
+    a.wait_new(updated, upd_a, 30).await?;
+    b.wait_new(updated, upd_b, 30).await?;
+    let (est_a, fail_a) = (
+        a.count("bgp session established"),
+        a.count("failed to update tcp-ao keys in place, resetting session"),
+    );
+    a.provision(&["--ao-promote-current", "1"]).await?;
+    a.provision(&["--ao-remove-key", "2"]).await?;
+    a.wait_new(
+        "failed to update tcp-ao keys in place, resetting session",
+        fail_a,
+        30,
     )
+    .await?;
+    reestablished(a, est_a).await?;
+
+    log("removing key 2 on router-b too: key 1 only, current on both");
+    let est_b = b.count("bgp session established");
+    let upd_b = b.count(updated);
+    b.provision(&["--ao-promote-current", "1"]).await?;
+    b.provision(&["--ao-remove-key", "2"]).await?;
+    b.wait_new(updated, upd_b, 30).await?;
+    b.assert_quiet("bgp session established", est_b, 3).await?;
+    for r in [a, b] {
+        wait_summary(r, &["\"ao_current_key\":1"], 60).await?;
+    }
+    Ok(())
+}
+
+/// Polls `GET /v1/bgp/summary` until the body holds every needle (the next
+/// KEEPALIVE carries the peer's new RNextKeyID, so up to a minute).
+async fn wait_summary(r: &Router, needles: &[&str], secs: u64) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        let body = r
+            .rest_expect(Method::GET, "/v1/bgp/summary", None, 200)
+            .await?;
+        if needles.iter().all(|n| body.contains(n)) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("{}: summary never held {needles:?}: {body}", r.name());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 }
 
 /// RFC 4456 route reflector: router-a reflects between router-b and router-c,
@@ -2750,9 +2804,12 @@ pub async fn evpn(w: &mut World) -> anyhow::Result<()> {
 }
 
 /// Reads the real bridge port `dev` back, in `container`'s netns, until its
-/// unicast and multicast flood flags are both `on`.
-async fn bridge_port_flood(w: &World, container: &str, dev: &str, on: bool) -> anyhow::Result<()> {
-    let want = if on { "on" } else { "off" };
+/// flood flags read as a segment port's should: `df` floods everything; a
+/// non-DF (`!df`) has unicast flood off but multicast and broadcast flood *on*
+/// (EVPN local bias, #24: it delivers what its own hosts send, and the egress
+/// filters drop what the other PEs of the segment sent).
+async fn bridge_port_flood(w: &World, container: &str, dev: &str, df: bool) -> anyhow::Result<()> {
+    let (uni, bum) = if df { ("on", "on") } else { ("off", "on") };
     let mut last = String::new();
     for _ in 0..30 {
         last = w
@@ -2763,13 +2820,132 @@ async fn bridge_port_flood(w: &World, container: &str, dev: &str, on: bool) -> a
                 &["bridge", "-d", "link", "show", "dev", dev],
             )
             .await?;
-        if last.contains(&format!(" flood {want}")) && last.contains(&format!("mcast_flood {want}"))
+        if last.contains(&format!(" flood {uni}"))
+            && last.contains(&format!("mcast_flood {bum}"))
+            && last.contains(&format!("bcast_flood {bum}"))
         {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    bail!("bridge port {dev} never read flood {want}: {last}")
+    bail!("bridge port {dev} never read unicast flood {uni}, bum flood {bum}: {last}")
+}
+
+/// Waits until `tc filter show dev <dev> <hook>` in `container`'s netns does
+/// (`present`) or does not contain `needle`.
+async fn tc_has(
+    w: &World,
+    container: &str,
+    dev: &str,
+    hook: &str,
+    needle: &str,
+    present: bool,
+) -> anyhow::Result<()> {
+    let mut last = String::new();
+    for _ in 0..30 {
+        last = w
+            .dock
+            .in_netns(
+                NETNS_HELPER_IMAGE,
+                container,
+                &["tc", "filter", "show", "dev", dev, hook],
+            )
+            .await?;
+        if last.contains(needle) == present {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    bail!(
+        "{container}: `tc filter show dev {dev} {hook}` never {} {needle:?}: {last}",
+        if present { "listed" } else { "stopped listing" }
+    )
+}
+
+/// EVPN local bias, read back from the kernel (#24): the segment port `bond`
+/// of `container` carries the local-bias drop (`fw` handle `0xe5000001`, the
+/// segment's bit) and, only while it is a non-DF, the DF drop (`0xe5000000`);
+/// `vxlan`'s ingress marks frames from `peer`, the other PE of the segment
+/// (`enc_src_ip`, which tc prints for IPv6 too); and the flood flags read as
+/// `bridge_port_flood` says.
+async fn local_bias_readback(
+    w: &World,
+    container: &str,
+    bond: &str,
+    vxlan: &str,
+    peer: &str,
+    non_df: bool,
+) -> anyhow::Result<()> {
+    tc_has(w, container, bond, "egress", "handle 0xe5000001", true).await?;
+    tc_has(w, container, bond, "egress", "handle 0xe5000000", non_df).await?;
+    tc_has(
+        w,
+        container,
+        vxlan,
+        "ingress",
+        &format!("enc_src_ip {peer}"),
+        true,
+    )
+    .await?;
+    bridge_port_flood(w, container, bond, !non_df).await
+}
+
+/// One ARP broadcast, as `(CE eth0, CE eth1, host)` request counts: sent by the
+/// CE out of its `link` (`Some`; `eth0` is its link to router-a, `eth1` to
+/// router-b) or by the host (`None`). The CE's counts are what arrived *in* on
+/// each of its links (so an echo of its own request shows), the host's what
+/// reached the host.
+async fn arp_broadcast(w: &World, ce_link: Option<&str>) -> anyhow::Result<(usize, usize, usize)> {
+    let (target, sender) = if ce_link.is_some() {
+        (H_IP, CE_IP)
+    } else {
+        (CE_IP, H_IP)
+    };
+    host_sh(
+        w,
+        CE_HOST,
+        "rm -f /tmp/e0 /tmp/e1; \
+         timeout 12 tcpdump -l -n -Q in -i eth0 arp and ether broadcast >/tmp/e0 2>&1 & \
+         timeout 12 tcpdump -l -n -Q in -i eth1 arp and ether broadcast >/tmp/e1 2>&1 & \
+         sleep 2",
+    )
+    .await?;
+    host_sh(
+        w,
+        H_HOST,
+        "rm -f /tmp/h; timeout 12 tcpdump -l -n -Q in -i eth0 arp and ether broadcast >/tmp/h 2>&1 & sleep 2",
+    )
+    .await?;
+    // arping's exit code says whether a reply came back, which is none of this
+    // check's business.
+    let _ = match ce_link {
+        Some(link) => {
+            w.dock
+                .exec(
+                    CE_HOST,
+                    &[
+                        "arping", "-c", "1", "-w", "3", "-I", link, "-s", CE_IP, H_IP,
+                    ],
+                )
+                .await?
+        }
+        None => {
+            w.dock
+                .exec(
+                    H_HOST,
+                    &[
+                        "arping", "-c", "1", "-w", "3", "-I", "eth0", "-s", H_IP, CE_IP,
+                    ],
+                )
+                .await?
+        }
+    };
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    Ok((
+        arp_requests(w, CE_HOST, "/tmp/e0", target, sender).await?,
+        arp_requests(w, CE_HOST, "/tmp/e1", target, sender).await?,
+        arp_requests(w, H_HOST, "/tmp/h", target, sender).await?,
+    ))
 }
 
 async fn gobgp_owned(w: &World, args: Vec<String>) -> anyhow::Result<String> {
@@ -3278,6 +3454,9 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     }
     a.wait(&flooding(false)).await?;
     bridge_port_flood(w, "router-a", &bond, false).await?;
+    // Local bias (#24): a port in its DF wait drops core BUM through the DF
+    // filter, and floods multicast/broadcast (read above) for its own hosts.
+    tc_has(w, "router-a", &bond, "egress", "handle 0xe5000000", true).await?;
     let table = a
         .rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
         .await?;
@@ -3446,6 +3625,8 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     a.wait_new(&role("non-df"), base, 30).await?;
     a.wait(&flooding(false)).await?;
     bridge_port_flood(w, "router-a", &bond, false).await?;
+    log("local bias: router-a marks what the second PE sends (enc_src_ip on vx ingress) and drops it on the bond");
+    local_bias_readback(w, "router-a", &bond, &vxlan, ESI_PEER_ORIGIN, true).await?;
 
     log("its Type-4 and per-EVI A-D withdrawn: router-a is the DF again and the bond floods");
     let base = a.count(&role("df"));
@@ -3457,6 +3638,17 @@ pub async fn evpn_esi(w: &mut World) -> anyhow::Result<()> {
     .await?;
     a.wait_new(&role("df"), base, 30).await?;
     bridge_port_flood(w, "router-a", &bond, true).await?;
+    // No other PE on the segment: no marking, no DF filter, only the port's own.
+    tc_has(
+        w,
+        "router-a",
+        &vxlan,
+        "ingress",
+        &format!("enc_src_ip {ESI_PEER_ORIGIN}"),
+        false,
+    )
+    .await?;
+    tc_has(w, "router-a", &bond, "egress", "handle 0xe5000000", false).await?;
 
     log("mass withdrawal: MACs of a segment router-a is not on wait for their PE's per-ES A-D");
     let vni = EVPN_VNI.to_string();
@@ -4098,6 +4290,9 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
             bail!("{router}'s {vxlan} does not read learning off: {link}");
         }
     }
+    log("local bias in the kernel: router-a (non-DF) drops core BUM too, router-b (DF) only the other PE's");
+    local_bias_readback(w, "router-a", &bond_a, &vxlan, IP_B, true).await?;
+    local_bias_readback(w, "router-b", &bond_b, &vxlan, IP_A, false).await?;
 
     log("the CE bonds its two links; the host takes an address");
     dataplane_ce(w, "mode balance-xor miimon 100 xmit_hash_policy layer2").await?;
@@ -4163,32 +4358,63 @@ pub async fn evpn_dataplane(w: &mut World) -> anyhow::Result<()> {
 
     log("BUM: one broadcast from the host reaches the CE once, through the DF (router-b) only");
     host_sh(w, CE_HOST, "ip link set eth1 up; sleep 1").await?;
-    host_sh(
-        w,
-        CE_HOST,
-        "rm -f /tmp/e0 /tmp/e1; \
-         timeout 8 tcpdump -l -n -Q in -i eth0 arp and ether broadcast >/tmp/e0 2>&1 & \
-         timeout 8 tcpdump -l -n -Q in -i eth1 arp and ether broadcast >/tmp/e1 2>&1 & \
-         sleep 2",
-    )
-    .await?;
-    let arping = host_sh(
-        w,
-        H_HOST,
-        &format!("arping -c 1 -w 3 -I eth0 -s {H_IP} {CE_IP}"),
-    )
-    .await?;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    // The CE's eth0 is its link to router-a (the non-DF), eth1 to router-b.
-    let (via_df, via_non_df) = (
-        arp_requests(w, CE_HOST, "/tmp/e1", CE_IP, H_IP).await?,
-        arp_requests(w, CE_HOST, "/tmp/e0", CE_IP, H_IP).await?,
-    );
+    let (via_non_df, via_df, _) = arp_broadcast(w, None).await?;
     if (via_df, via_non_df) != (1, 0) {
         bail!(
             "the host's broadcast reached the CE {via_df}x through router-b (the DF) and \
              {via_non_df}x through router-a (the non-DF); expected exactly 1 and 0\n\
-             arping: {arping}\ncaptures: {}",
+             captures: {}",
+            host_sh(w, CE_HOST, "tail -n +1 /tmp/e0 /tmp/e1").await?
+        );
+    }
+
+    // The echo local bias removes (RFC 8365 §8.3.1): the CE broadcasts on its
+    // link to router-a (non-DF), router-a floods it to router-b, and router-b
+    // — the DF — used to send it back out of the segment.
+    log("local bias: the CE's broadcast out of its link to router-a is not echoed back through router-b (the DF), and the host gets it once");
+    let (echo_a, echo_b, host) = arp_broadcast(w, Some("eth0")).await?;
+    if (echo_a, echo_b, host) != (0, 0, 1) {
+        bail!(
+            "the CE's own broadcast came back {echo_a}x on its link to router-a and {echo_b}x on \
+             its link to router-b, and reached the host {host}x; expected 0, 0 and 1\n\
+             captures: {}",
+            host_sh(w, CE_HOST, "tail -n +1 /tmp/e0 /tmp/e1").await?
+        );
+    }
+
+    // Local bias changes who delivers a non-DF's own hosts' BUM: with modulo
+    // router-a is the DF and router-b, the host's PE, the non-DF. The host's
+    // broadcast must now reach the CE once through router-b (a non-DF delivers
+    // what it sourced locally) and never through router-a.
+    log("modulo instead of hrw: router-a becomes the DF; the host's broadcast still reaches the CE once, through its own PE router-b (the non-DF)");
+    let df_alg = |id: Id, rd: &str| {
+        let mut f = evpn_pe_flags(id, rd);
+        f.extend(bond_flags("bond1", true, "eth1"));
+        f.extend(strings(&["--port-aggregate-df-algorithm", "modulo"]));
+        f
+    };
+    let role = |bond: &str, r: &str| {
+        format!(
+            "df elected domain={EVPN_DOMAIN} esi={ESI} port={bond} role={r} \
+             algorithm=modulo ac_df=true pes={IP_A},{IP_B}"
+        )
+    };
+    let (base_a, base_b) = (
+        a.count(&role(&bond_a, "df")),
+        b.count(&role(&bond_b, "non-df")),
+    );
+    a.provision_flags(&df_alg(A, EVPN_DP_RD_A)).await?;
+    b.provision_flags(&df_alg(B, EVPN_DP_RD_B)).await?;
+    a.wait_new(&role(&bond_a, "df"), base_a, 60).await?;
+    b.wait_new(&role(&bond_b, "non-df"), base_b, 60).await?;
+    local_bias_readback(w, "router-a", &bond_a, &vxlan, IP_B, false).await?;
+    local_bias_readback(w, "router-b", &bond_b, &vxlan, IP_A, true).await?;
+    let (via_a, via_b, _) = arp_broadcast(w, None).await?;
+    if (via_b, via_a) != (1, 0) {
+        bail!(
+            "the host's broadcast reached the CE {via_b}x through router-b (the non-DF, its own PE) \
+             and {via_a}x through router-a (the DF); expected exactly 1 and 0\n\
+             captures: {}",
             host_sh(w, CE_HOST, "tail -n +1 /tmp/e0 /tmp/e1").await?
         );
     }
@@ -4436,6 +4662,11 @@ pub async fn evpn_single_active(w: &mut World) -> anyhow::Result<()> {
     bridge_port_state(w, "router-a", &bond_a, "forwarding").await?;
     // It is the state that blocks, not the flood flags.
     bridge_port_flood(w, "router-b", &bond_b, true).await?;
+    // Local bias does not apply to a single-active segment (#24): its non-DF
+    // drops everything already, so the DF delivers what its peer got locally.
+    for (router, bond) in [("router-a", &bond_a), ("router-b", &bond_b)] {
+        tc_has(w, router, bond, "egress", "handle 0xe5", false).await?;
+    }
     for (r, want_df) in [(a, true), (b, false)] {
         let body = r
             .rest_expect(Method::GET, &format!("/v1/fdb/{EVPN_DOMAIN}"), None, 200)
@@ -5007,6 +5238,30 @@ pub async fn evpn_v6(w: &mut World) -> anyhow::Result<()> {
     host_sh(w, CE_HOST, &format!("ping -c 3 -W 2 {H_IP}")).await?;
     ce_on_each_link(w).await?;
     same_segment_no_move(w, &ce_mac, [(A, V6_B), (B, V6_A)]).await?;
+
+    // Local bias (#24) over an IPv6 underlay: `enc_src_ip` matches the outer
+    // IPv6 source on the VXLAN device itself. Router-a is the DF, router-b the
+    // non-DF.
+    log("local bias: router-a and router-b mark each other's VTEP; core BUM from router-c reaches the CE once, through the DF router-a");
+    local_bias_readback(w, "router-a", &bond_a, &vxlan, V6_B, false).await?;
+    local_bias_readback(w, "router-b", &bond_b, &vxlan, V6_A, true).await?;
+    let (via_a, via_b, _) = arp_broadcast(w, None).await?;
+    if (via_a, via_b) != (1, 0) {
+        bail!(
+            "the host's broadcast reached the CE {via_a}x through router-a (the DF) and {via_b}x \
+             through router-b (the non-DF); expected exactly 1 and 0\ncaptures: {}",
+            host_sh(w, CE_HOST, "tail -n +1 /tmp/e0 /tmp/e1").await?
+        );
+    }
+    log("local bias: the CE's broadcast out of its link to router-b (non-DF) is not echoed through router-a, and the host gets it once");
+    let (echo_a, echo_b, host) = arp_broadcast(w, Some("eth1")).await?;
+    if (echo_a, echo_b, host) != (0, 0, 1) {
+        bail!(
+            "the CE's own broadcast came back {echo_a}x on its link to router-a and {echo_b}x on \
+             its link to router-b, and reached the host {host}x; expected 0, 0 and 1\ncaptures: {}",
+            host_sh(w, CE_HOST, "tail -n +1 /tmp/e0 /tmp/e1").await?
+        );
+    }
 
     // A control-plane withdrawal, not router-a's bond going down: nos-interfaced
     // brings a downed bond back up within seconds (#169).

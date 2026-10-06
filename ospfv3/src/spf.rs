@@ -163,7 +163,8 @@ fn routers_networks_links(
             | LsaBody::Grace(_)
             | LsaBody::InterAreaPrefix(_)
             | LsaBody::InterAreaRouter(_)
-            | LsaBody::AsExternal(_) => {}
+            | LsaBody::AsExternal(_)
+            | LsaBody::Opaque(_) => {}
         }
     }
     (routers, networks, links)
@@ -222,7 +223,11 @@ pub fn intra_area_routes(root: Ipv4Addr, lsas: &[std::sync::Arc<Lsa>]) -> IntraA
         let Some(&d) = dist.get(&vertex) else {
             continue;
         };
-        for entry in &body.prefixes {
+        for entry in body
+            .prefixes
+            .iter()
+            .filter(|e| e.options & lsa::PREFIX_OPT_NU == 0)
+        {
             let cost = d.saturating_add(u32::from(entry.metric));
             prefixes
                 .entry(entry.prefix.trunc())
@@ -623,7 +628,12 @@ fn collect_prefix_routes(
         let Some(NextHop::Router(nh, interface_id)) = next_hop.get(&vertex).copied() else {
             continue;
         };
-        for entry in &body.prefixes {
+        // RFC 5340 §4.8.1: an NU-bit prefix is not used for routing.
+        for entry in body
+            .prefixes
+            .iter()
+            .filter(|e| e.options & lsa::PREFIX_OPT_NU == 0)
+        {
             let key = prefix_key(entry.prefix);
             if root_prefixes.contains(&key) {
                 continue;
@@ -978,6 +988,45 @@ mod tests {
         let r = &routes[0];
         assert_eq!(r.interface_id, 1);
         (r.metric, r.next_hop)
+    }
+
+    /// RFC 5340 A.4.1.1: NU prefixes are not routed; LA and plain ones are.
+    #[test]
+    fn nu_prefix_is_not_installed_but_la_and_plain_are() {
+        let mut lsas = root_and_abr();
+        let r2 = router_id(2);
+        let mut lsa = router_prefix_lsa(
+            r2,
+            vec![
+                ("2001:db8:a::/64".parse().unwrap(), 1),
+                ("2001:db8:b::/64".parse().unwrap(), 1),
+                ("2001:db8:c::/128".parse().unwrap(), 1),
+            ],
+        );
+        let LsaBody::IntraAreaPrefix(body) = &mut Arc::make_mut(&mut lsa).body else {
+            unreachable!()
+        };
+        body.prefixes[0].options = lsa::PREFIX_OPT_NU;
+        body.prefixes[2].options = lsa::PREFIX_OPT_LA;
+        lsas.push(lsa);
+        let routes = compute(router_id(1), &lsas);
+        let mut got: Vec<String> = routes.iter().map(|r| r.prefix.to_string()).collect();
+        got.sort();
+        assert_eq!(got, ["2001:db8:b::/64", "2001:db8:c::/128"]);
+        let view = intra_area_routes(router_id(1), &lsas);
+        assert_eq!(view.prefixes.len(), 2);
+    }
+
+    #[test]
+    fn opaque_lsa_does_not_change_routes() {
+        let mut lsas = root_and_abr();
+        lsas.push(inter_area_prefix(router_id(2), "2001:db8:9::/64", 7));
+        let before = compute(router_id(1), &lsas);
+        lsas.push(Arc::new(Lsa {
+            header: header(0xA0FF, router_id(2), router_id(2)),
+            body: LsaBody::Opaque(vec![1, 2, 3, 4]),
+        }));
+        assert_eq!(compute(router_id(1), &lsas), before);
     }
 
     #[test]

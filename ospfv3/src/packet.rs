@@ -87,8 +87,6 @@ pub enum PacketError {
     BadVersion(u8),
     #[error("unrecognized OSPFv3 packet type {0}")]
     UnknownType(u8),
-    #[error("unrecognized LSA type {0:#06x}")]
-    UnknownLsaType(u16),
     #[error("packet body shorter than expected")]
     TruncatedBody,
     /// An LSA's own Fletcher-16 checksum (`lsa::lsa_checksum`) didn't match

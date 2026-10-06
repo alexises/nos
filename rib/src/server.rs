@@ -55,9 +55,11 @@ fn allowed(role: Role, req: &RibRequest) -> bool {
         }
         // `ribd`/`fdbd` name a loopback VTEP's device (`lo<table id>`) of
         // the underlay table.
+        // `logd` scopes a syslog collector's socket into its table's VRF.
         RibRequest::GetVrfName | RibRequest::GetTableId => matches!(
             role,
             Role::User
+                | Role::Logd
                 | Role::Restd
                 | Role::Interfaced
                 | Role::Bgpd
@@ -477,6 +479,7 @@ mod authz_tests {
             Role::Ospfv3d,
             Role::Ribd,
             Role::Fdbd,
+            Role::Logd,
         ] {
             assert!(allowed(role, &RibRequest::GetVrfName), "{role:?}");
         }

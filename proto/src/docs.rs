@@ -49,6 +49,32 @@ topics! {
     LldpTxHold,
     /// `LldpSettings.management_addresses`
     LldpManagementAddress,
+    /// `Config.logging`
+    Logging,
+    /// `LoggingSettings.syslog`
+    LoggingSyslog,
+    /// `SyslogServer.address`
+    SyslogAddress,
+    /// `SyslogServer.port`
+    SyslogPort,
+    /// `SyslogServer.transport`
+    SyslogTransport,
+    /// `SyslogServer.routing_table`
+    SyslogRoutingTable,
+    /// `SyslogServer.level`
+    SyslogLevel,
+    /// `SyslogServer.facility`
+    SyslogFacility,
+    /// `SyslogServer.tls`
+    SyslogTls,
+    /// `SyslogTls.trust_anchor`
+    SyslogTlsTrustAnchor,
+    /// `SyslogTls.fingerprint`
+    SyslogTlsFingerprint,
+    /// `SyslogTls.server_name`
+    SyslogTlsServerName,
+    /// `SyslogTls.allow_tls12`
+    SyslogTlsAllowTls12,
     /// `Config.bgp_instances`
     BgpInstance,
     /// `BgpInstance.asn`

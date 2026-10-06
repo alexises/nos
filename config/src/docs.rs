@@ -93,6 +93,80 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              ifIndex; any other is still advertised as configured. `delete` stops advertising \
              one.",
         ),
+        Topic::Logging => (
+            "Log export settings.",
+            "Where nos-logd sends every log entry besides keeping it for `show log`.",
+        ),
+        Topic::LoggingSyslog => (
+            "Create or delete a remote syslog collector.",
+            "Every log entry at or above the collector's level is sent to it as an RFC 5424 \
+             message, in addition to being kept for `show log`. Entries are dropped, never \
+             queued, while a collector is unreachable. `delete` stops exporting to it.",
+        ),
+        Topic::SyslogAddress => (
+            "Set a syslog collector's address.",
+            "The collector's IPv4 or IPv6 unicast address (a name is not resolved: there is no \
+             resolver inside a VRF).",
+        ),
+        Topic::SyslogPort => (
+            "Set a syslog collector's port.",
+            "Destination port, 1-65535. `delete` restores the default: 514 for udp, 601 for tcp.",
+        ),
+        Topic::SyslogTransport => (
+            "Set a syslog collector's transport.",
+            "`udp` (RFC 5426, one message per datagram, truncated to 1180 octets), `tcp` \
+             (RFC 6587 octet-counted frames on one connection, reconnected every second while \
+             it is down) or `tls` (RFC 5425: the same frames inside post-quantum TLS 1.3; \
+             needs `tls trust-anchor` or `tls fingerprint`, default port 6514). `delete` \
+             restores udp.",
+        ),
+        Topic::SyslogRoutingTable => (
+            "Send syslog from inside a routing table's VRF.",
+            "Names an existing routing table: the socket is scoped into its VRF, so a \
+             collector reachable only through that table can be used. `delete` uses the \
+             default network namespace.",
+        ),
+        Topic::SyslogLevel => (
+            "Set a syslog collector's minimum severity.",
+            "Entries below this level are not sent: error, warn, info, debug or trace (debug \
+             and trace both map to syslog severity 7). `delete` restores info.",
+        ),
+        Topic::SyslogFacility => (
+            "Set a syslog collector's facility.",
+            "The facility of every message sent to it, local0 to local7. `delete` restores \
+             local7.",
+        ),
+        Topic::SyslogTls => (
+            "Configure how a TLS syslog collector is authenticated.",
+            "Needed by (and only valid with) transport `tls`: set exactly one of `trust-anchor` \
+             and `fingerprint`. nos presents no client certificate. `delete` removes the \
+             whole block.",
+        ),
+        Topic::SyslogTlsTrustAnchor => (
+            "Trust the collector's certificate through a CA (RFC 5425 §4.2.1).",
+            "PEM CA certificate(s) the collector's certificate must chain to; its name is \
+             checked against `tls server-name`, or against its IP address SANs by default. \
+             Exclusive with `fingerprint`.",
+        ),
+        Topic::SyslogTlsFingerprint => (
+            "Trust one collector certificate by its SHA-256 fingerprint (RFC 5425 §4.2.2).",
+            "`SHA-256:` followed by 32 colon-separated hex octets, the hash of the collector's \
+             own certificate. Exclusive with `trust-anchor`.",
+        ),
+        Topic::SyslogTlsServerName => (
+            "Set the DNS name the collector's certificate must carry.",
+            "Default: the collector's address is matched against the certificate's IP address \
+             SANs. Not checked with `fingerprint`. `delete` restores the default.",
+        ),
+        Topic::SyslogTlsAllowTls12 => (
+            "Also allow TLS 1.2 with classical key exchange, for collectors that need RFC 9662.",
+            "Also allows TLS 1.2 with classical (non-post-quantum) ECDHE-AES-GCM suites, for \
+             collectors that cannot do the post-quantum TLS 1.3 key exchange. TLS 1.3 stays \
+             post-quantum only, but traffic sent over TLS 1.2 can be recorded now and \
+             decrypted by a future quantum computer. A collector that offers TLS 1.3 without \
+             X25519MLKEM768 must have TLS 1.3 turned off on that listener. Turn it on only \
+             while such a collector cannot be upgraded; `delete` turns it off.",
+        ),
         Topic::BgpInstance => (
             "Create a BGP instance in the transaction if it doesn't already exist.",
             concat!(
@@ -329,14 +403,17 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
              auth wasn't already TCP-AO (unset, or an MD5 password), this starts a fresh key \
              list containing just this key. Exactly one key across the whole list must be \
              marked current, and at most one may be marked rnext, for the peer-group to \
-             validate at commit time — see set-bgp-peer-group-ao-current-key/rnext-key. Stored \
+             validate at commit time; send-ids and recv-ids must each be unique — see set-bgp-peer-group-ao-current-key/rnext-key. Stored \
              clear-text, like every other field in this config.",
                 " ",
                 "Remove one of a peer-group's TCP-AO keys by send-id.",
                 " ",
-                "Mark one of a peer-group's TCP-AO keys as current.",
+                "Mark one of a peer-group's TCP-AO keys as current: the key a new connection \
+             starts signing with. On an established session the peer's RNextKeyID decides \
+             which key signs (RFC 5925 §7.5.2), so this never forces a switch.",
                 " ",
-                "Mark one of a peer-group's TCP-AO keys as rnext.",
+                "Mark one of a peer-group's TCP-AO keys as rnext: the key this router asks the \
+             peer to switch to. It takes effect on the live session without a reset.",
                 " ",
                 "`ao-key <send-id> exclude-options` makes that key's MAC skip TCP options \
              (RFC 5925 §5.2); `delete ao-key <send-id> exclude-options` clears it. Both \
@@ -977,7 +1054,7 @@ pub fn command_doc(topic: Topic) -> CommandDoc {
         Topic::OspfProfileNetworkType => (
             "Set an OSPF profile's network type.",
             concat!(
-                "Sets the network-type field on a profile to point-to-point or broadcast, \
+                "Sets the network-type field on a profile to point-to-point, broadcast or point-to-multipoint (RFC 2328 §9.5, OSPFv2 only), \
              overriding the default that would otherwise be derived from each attach point's \
              own kind (a subinterface defaults to point-to-point, a broadcast domain defaults \
              to broadcast). Never validated against the attach point's actual kind — this NOS \

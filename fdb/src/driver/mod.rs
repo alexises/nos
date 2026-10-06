@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 pub mod linux;
 mod nexthop;
 pub mod noop;
+pub mod tc;
 
 pub use linux::LinuxFdbDriver;
 pub use noop::NoopFdbDriver;
@@ -98,11 +99,41 @@ pub trait FdbDriver: Send + Sync {
         vni: u32,
     ) -> Result<BTreeMap<Mac, String>, DriverError>;
 
-    /// Turns flooding of unknown-unicast, multicast and broadcast frames to
-    /// the bridge port `port` on or off (`bridge link set ... flood`). How a
-    /// non-Designated-Forwarder PE stops delivering BUM traffic to an
-    /// Ethernet Segment. `Err` while the port doesn't exist (yet).
-    async fn set_port_flood(&self, port: &str, flood: bool) -> Result<(), DriverError>;
+    /// Sets the flooding of the bridge port `port`: `unicast` is
+    /// unknown-unicast, `bum` multicast and broadcast (`bridge link set ...
+    /// flood .. mcast_flood .. bcast_flood ..`). How a non-Designated-Forwarder
+    /// PE stops delivering core BUM to an Ethernet Segment. `Err` while the
+    /// port doesn't exist (yet).
+    async fn set_port_flood(&self, port: &str, unicast: bool, bum: bool)
+        -> Result<(), DriverError>;
+
+    /// Local bias, egress half (RFC 8365 §8.3.1, see `tc`): on the segment
+    /// port `port`, drop a frame marked as coming from a PE on the segment
+    /// whose bit is set in `bit` (one bit per local all-active segment), and,
+    /// with `df_filter`, every core-origin BUM frame (a non-DF's rule).
+    /// Creates the `clsact` qdisc if needed; idempotent. `Err` while the port
+    /// doesn't exist (yet).
+    async fn set_segment_filter(
+        &self,
+        port: &str,
+        bit: u16,
+        df_filter: bool,
+    ) -> Result<(), DriverError>;
+
+    /// Removes what `set_segment_filter` put on `port` (the qdisc stays). Ok
+    /// when there is nothing, or no port.
+    async fn clear_segment_filter(&self, port: &str) -> Result<(), DriverError>;
+
+    /// Local bias, ingress half: on `vx<vni>`, mark every multi-destination
+    /// frame received from one of `peers` (the other PEs of our segments) with
+    /// its segment bitmap, and every other one with the magic byte alone, so
+    /// a segment port's egress filter can tell them apart. An empty map removes
+    /// it all. Idempotent; replaces whatever it wrote before.
+    async fn set_local_bias(
+        &self,
+        vni: u32,
+        peers: &BTreeMap<IpAddr, u16>,
+    ) -> Result<(), DriverError>;
 
     /// Puts the bridge port `port` in the `forwarding` or `disabled` STP state
     /// (`bridge link set ... state 3|0`): a disabled port drops every frame in

@@ -532,10 +532,11 @@ pub enum BgpAuth {
 }
 
 /// One TCP-AO key. `send_id`/`recv_id` identify it on the wire (RFC 5925's
-/// KeyID/RNextKeyID); `is_current` marks the key actively signing outgoing
-/// segments (exactly one key must have this set); `is_rnext` optionally
-/// requests the peer switch to this key next, for rotation without a
-/// dropped session; `exclude_options` (RFC 5925 §5.2, `#[serde(default)]`
+/// `KeyID`/`RNextKeyID`); `is_current` marks the key a new connection starts
+/// signing with (exactly one key must have this set; on a live session the
+/// peer's `RNextKeyID` decides, RFC 5925 §7.5.2); `is_rnext` optionally asks
+/// the peer to switch to this key next, for rotation without a dropped
+/// session (applied to the live session in place); `exclude_options` (RFC 5925 §5.2, `#[serde(default)]`
 /// so pre-existing on-disk config still loads as today's always-include
 /// behavior) excludes TCP options from this key's MAC coverage — both peers
 /// must agree, or authentication fails.
@@ -590,6 +591,7 @@ fn valid_auth(auth: Option<&BgpAuth>) -> garde::Result {
                 ));
             }
             let mut seen_send_ids: Vec<u8> = Vec::new();
+            let mut seen_recv_ids: Vec<u8> = Vec::new();
             let mut current_count = 0;
             let mut rnext_count = 0;
             for key in keys {
@@ -602,6 +604,14 @@ fn valid_auth(auth: Option<&BgpAuth>) -> garde::Result {
                     ));
                 }
                 seen_send_ids.push(key.send_id);
+                // RFC 5925 §3.1: the kernel refuses (EEXIST) overlapping
+                // RecvIDs just like SendIDs, at socket time otherwise.
+                if seen_recv_ids.contains(&key.recv_id) {
+                    return Err(garde::Error::new(
+                        "ao key recv-id must be unique within a peer-group",
+                    ));
+                }
+                seen_recv_ids.push(key.recv_id);
                 if key.is_current {
                     current_count += 1;
                 }
@@ -1068,6 +1078,18 @@ mod tests {
         let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
         pg.auth = Some(BgpAuth::Ao {
             keys: vec![ao_key(1, true), ao_key(1, false)],
+        });
+        let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
+        assert!(cfg.validate_with(&cfg).is_err());
+    }
+
+    #[test]
+    fn ao_with_duplicate_recv_id_fails() {
+        let mut pg = group("pg1", 65001, vec![AddressFamily::Ipv4Unicast]);
+        let mut second = ao_key(2, false);
+        second.recv_id = 1;
+        pg.auth = Some(BgpAuth::Ao {
+            keys: vec![ao_key(1, true), second],
         });
         let cfg = config_with(vec![instance_with_groups("r1", vec![pg])]);
         assert!(cfg.validate_with(&cfg).is_err());

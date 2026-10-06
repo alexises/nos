@@ -113,6 +113,7 @@ pub async fn run(
     // First send is immediate; each later one is scheduled from the state at
     // the time of the previous send (see `periodic_tx_machine::interval_for`).
     let mut tx = TxState::new();
+    let mut marker_limiter = TxLimiter::new(Instant::now(), MAX_MARKER_PER_WINDOW);
 
     let mut churn = Churn::new(&config.interface, config.churn_time);
     churn.eval(mux_state, partner);
@@ -195,6 +196,19 @@ pub async fn run(
                     warn!(interface = %config.interface, error = ?recv.err(), "lacp socket closed, link task exiting");
                     return;
                 };
+                if let Some(m) = packet::decode_marker(&bytes) {
+                    // §6.5.4.2 responder: stateless, same port, no effect on the LACP machines.
+                    if marker_limiter.try_take(Instant::now()) {
+                        match socket.send(&packet::encode_marker_response(&m)) {
+                            Ok(()) => info!(interface = %config.interface, requester_port = m.requester_port, requester_system = ?m.requester_system, transaction_id = m.transaction_id, "lacp marker answered"),
+                            Err(e) if crate::socket::is_link_down(&e) => debug!(interface = %config.interface, "link down, marker response not sent"),
+                            Err(e) => warn!(interface = %config.interface, error = %e, "failed to send marker response"),
+                        }
+                    } else {
+                        debug!(interface = %config.interface, "marker rate limit hit, dropping");
+                    }
+                    continue;
+                }
                 let Ok(pdu) = packet::decode(&bytes) else {
                     continue;
                 };
@@ -464,24 +478,29 @@ fn send_lacpdu(socket: &LacpSocket, interface: &str, pdu: &Lacpdu) {
 /// 802.1AX §6.4.16: at most 3 LACPDUs per `Fast_Periodic_Time`, whatever the
 /// NTT events. A fixed window refilled once per second.
 const MAX_TX_PER_WINDOW: u8 = 3;
+/// Marker Responses get their own budget so a Marker flood can't starve
+/// LACPDUs; 3 + 5 stays under 802.3 Annex 57A's 10 slow-protocol frames/s.
+const MAX_MARKER_PER_WINDOW: u8 = 5;
 const TX_WINDOW: Duration = Duration::from_secs(1);
 
 struct TxLimiter {
+    max: u8,
     tokens: u8,
     window_start: Instant,
 }
 
 impl TxLimiter {
-    fn new(now: Instant) -> Self {
+    fn new(now: Instant, max: u8) -> Self {
         Self {
-            tokens: MAX_TX_PER_WINDOW,
+            max,
+            tokens: max,
             window_start: now,
         }
     }
 
     fn try_take(&mut self, now: Instant) -> bool {
         if now.duration_since(self.window_start) >= TX_WINDOW {
-            self.tokens = MAX_TX_PER_WINDOW;
+            self.tokens = self.max;
             self.window_start = now;
         }
         if self.tokens == 0 {
@@ -513,7 +532,7 @@ impl TxState {
         let now = Instant::now();
         Self {
             last_sent: None,
-            limiter: TxLimiter::new(now),
+            limiter: TxLimiter::new(now, MAX_TX_PER_WINDOW),
             // First send is immediate.
             next_periodic_send: now,
         }
@@ -584,7 +603,7 @@ mod tests {
     #[test]
     fn limiter_allows_three_per_window() {
         let t0 = Instant::now();
-        let mut l = TxLimiter::new(t0);
+        let mut l = TxLimiter::new(t0, MAX_TX_PER_WINDOW);
         assert!((0..3).all(|_| l.try_take(t0)));
         assert!(!l.try_take(t0 + Duration::from_millis(999)));
         assert_eq!(l.next_refill(), t0 + TX_WINDOW);

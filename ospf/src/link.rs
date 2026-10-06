@@ -316,7 +316,9 @@ impl LinkStatus {
     fn new(network_type: NetworkType) -> Self {
         Self {
             interface_state: match network_type {
-                NetworkType::PointToPoint => InterfaceState::PointToPoint,
+                NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
+                    InterfaceState::PointToPoint
+                }
                 NetworkType::Broadcast => InterfaceState::Waiting,
             },
             neighbors: HashMap::new(),
@@ -424,6 +426,9 @@ pub async fn run(
     hello_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let is_broadcast = cfg.network_type == NetworkType::Broadcast;
+    // RFC 2328 §9.5: several neighbors, no election — each one's dead timer is
+    // tracked by the 1s sweep below instead of the single p2p deadline.
+    let is_p2mp = cfg.network_type == NetworkType::PointToMultipoint;
     let mut p2p_dead_deadline = Instant::now() + Duration::from_secs(u64::from(cfg.dead_interval));
     // ponytail: a 1s periodic sweep, not N precise per-neighbor timers — a
     // broadcast link's dead-interval tracking only needs to be accurate to
@@ -536,17 +541,17 @@ pub async fn run(
                     Err(e) => warn!(link = %cfg.attach_point, error = %e, "ospf recv error"),
                 }
             }
-            () = tokio::time::sleep_until(p2p_dead_deadline), if !is_broadcast => {
+            () = tokio::time::sleep_until(p2p_dead_deadline), if !is_broadcast && !is_p2mp => {
                 apply_dead_timer(&cfg, &status);
                 p2p_dead_deadline = Instant::now() + Duration::from_secs(u64::from(cfg.dead_interval));
             }
             _ = dead_sweep.tick() => {
                 expire_grace(&cfg, &status);
-                if !is_broadcast {
+                if !is_broadcast && !is_p2mp {
                     continue;
                 }
                 sweep_dead_neighbors(&cfg, &status);
-                if !waiting {
+                if is_broadcast && !waiting {
                     run_election(&cfg, local_router_id, &status);
                     advance_adjacencies(&socket, &cfg, local_router_id, &status, &mut next_seq);
                 }
@@ -663,7 +668,9 @@ fn send_hello(
     // election has run — always unspecified on a point-to-point link, since
     // no election ever runs there (RFC 2328 §10.5).
     let (designated_router, backup_designated_router) = match cfg.network_type {
-        NetworkType::PointToPoint => (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED),
+        NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
+            (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED)
+        }
         NetworkType::Broadcast => (
             current.dr.unwrap_or(Ipv4Addr::UNSPECIFIED),
             current.bdr.unwrap_or(Ipv4Addr::UNSPECIFIED),
@@ -738,9 +745,9 @@ fn handle_hello(
         );
         return false;
     }
-    // NetworkMask is meaningless on point-to-point/virtual links (RFC 2328
-    // §10.5) — this NOS has neither NBMA nor point-to-multipoint, so
-    // `Broadcast` is the only network type it's ever checked on.
+    // NetworkMask is meaningless on point-to-point, point-to-multipoint and
+    // virtual links (RFC 2328 §10.5) — `Broadcast` is the only network type
+    // it's checked on.
     if cfg.network_type == NetworkType::Broadcast {
         let expected_mask = local_netmask(cfg);
         if hello.network_mask != expected_mask {
@@ -835,7 +842,8 @@ fn handle_hello(
             run_election(cfg, local_router_id, status);
             false
         }
-        NetworkType::Broadcast => false,
+        // `last_heard` was refreshed above; the sweep expires it.
+        NetworkType::Broadcast | NetworkType::PointToMultipoint => false,
     }
 }
 
@@ -1477,7 +1485,7 @@ fn note_alive(
     }
 }
 
-/// Broadcast only. Ages out any neighbor whose `last_heard` is
+/// Broadcast and point-to-multipoint. Ages out any neighbor whose `last_heard` is
 /// older than `cfg.dead_interval` — see `run()`'s `ponytail:` note on why
 /// this is a periodic sweep rather than per-neighbor timers.
 fn sweep_dead_neighbors(cfg: &LinkConfig, status: &StatusHandle) {
@@ -2983,7 +2991,7 @@ fn to_neighbor_summaries(entry: &LinkEntry) -> Vec<NeighborSummary> {
         // A point-to-point link always reports a row, even with no
         // neighbor yet; a broadcast link has no single fixed peer to show
         // a placeholder for.
-        if entry.config.network_type == NetworkType::Broadcast {
+        if entry.config.network_type != NetworkType::PointToPoint {
             return Vec::new();
         }
         return vec![NeighborSummary {
@@ -3092,6 +3100,29 @@ fn router_lsa_links(
                     result.push(RouterLink {
                         link_id: subnet.network(),
                         link_data: subnet.netmask(),
+                        link_type: LINK_TYPE_STUB_NETWORK,
+                        metric: cfg.cost,
+                    });
+                }
+            }
+            NetworkType::PointToMultipoint => {
+                // RFC 2328 §12.4.1.4: a type-1 link per fully adjacent
+                // neighbor, plus one /32 stub for our own address (not the
+                // subnet's — the neighbors needn't share one).
+                for (neighbor_id, n) in &status.neighbors {
+                    if n.state == NeighborState::Full || n.grace_deadline.is_some() {
+                        result.push(RouterLink {
+                            link_id: *neighbor_id,
+                            link_data: cfg.local_addr,
+                            link_type: LINK_TYPE_POINT_TO_POINT,
+                            metric: transit_cost,
+                        });
+                    }
+                }
+                if !prefix_suppression {
+                    result.push(RouterLink {
+                        link_id: cfg.local_addr,
+                        link_data: Ipv4Addr::BROADCAST,
                         link_type: LINK_TYPE_STUB_NETWORK,
                         metric: cfg.cost,
                     });
@@ -5046,6 +5077,70 @@ mod tests {
             status.borrow().neighbors.get(&peer).unwrap().state,
             NeighborState::Init
         );
+    }
+
+    #[test]
+    fn p2mp_link_status_is_point_to_point_state_and_hello_has_no_dr() {
+        let status = LinkStatus::new(NetworkType::PointToMultipoint);
+        assert_eq!(status.interface_state, InterfaceState::PointToPoint);
+    }
+
+    #[test]
+    fn p2mp_handle_hello_keeps_several_neighbors_ignoring_mask_and_election() {
+        let mut cfg = link("eth0.0", 10);
+        cfg.network_type = NetworkType::PointToMultipoint;
+        let (status, _rx) = watch::channel(LinkStatus::new(cfg.network_type));
+        let mut deadline = Instant::now();
+        for (i, mask) in [(9u8, cfg.local_prefix_len), (10, 30)] {
+            let peer = Ipv4Addr::new(9, 9, 9, i);
+            let mut hello = matching_hello(&cfg, peer);
+            hello.network_mask = Ipv4Addr::new(255, 255, 255, mask);
+            handle_hello(
+                &cfg,
+                Ipv4Addr::new(1, 1, 1, 1),
+                &status,
+                Ipv4Addr::new(10, 0, 0, i),
+                &hello,
+                &mut deadline,
+                false,
+            );
+        }
+        let s = status.borrow();
+        assert_eq!(s.neighbors.len(), 2);
+        assert_eq!((s.dr, s.bdr), (None, None));
+    }
+
+    #[test]
+    fn router_lsa_links_p2mp_has_link_per_full_neighbor_and_host_stub() {
+        let mut cfg = link("eth0.0", 10);
+        cfg.network_type = NetworkType::PointToMultipoint;
+        let mut status = LinkStatus::new(cfg.network_type);
+        status.neighbors.insert(
+            Ipv4Addr::new(9, 9, 9, 1),
+            neighbor_info(NeighborState::Full, Ipv4Addr::new(10, 0, 0, 2)),
+        );
+        status.neighbors.insert(
+            Ipv4Addr::new(9, 9, 9, 2),
+            neighbor_info(NeighborState::TwoWay, Ipv4Addr::new(10, 0, 0, 3)),
+        );
+        status.neighbors.insert(
+            Ipv4Addr::new(9, 9, 9, 3),
+            neighbor_info(NeighborState::Down, Ipv4Addr::new(10, 0, 0, 4)),
+        );
+        let links = router_lsa_links(Ipv4Addr::new(1, 1, 1, 1), &[(cfg, status)], false, false);
+        assert_eq!(links.len(), 2);
+        let p2p = links
+            .iter()
+            .find(|l| l.link_type == LINK_TYPE_POINT_TO_POINT)
+            .unwrap();
+        assert_eq!(p2p.link_id, Ipv4Addr::new(9, 9, 9, 1));
+        assert_eq!(p2p.link_data, Ipv4Addr::new(10, 0, 0, 1));
+        let stub = links
+            .iter()
+            .find(|l| l.link_type == LINK_TYPE_STUB_NETWORK)
+            .unwrap();
+        assert_eq!(stub.link_id, Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(stub.link_data, Ipv4Addr::BROADCAST);
     }
 
     #[test]

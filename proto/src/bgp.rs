@@ -49,7 +49,10 @@ pub struct PeerSummary {
     /// `None` for MD5/no-auth peers, a non-`Established` peer, or a readback
     /// that raced session teardown. Counters are since the kernel installed
     /// AO on *this* connection (reset on every reconnect, not cumulative
-    /// across the peer's whole configured lifetime).
+    /// across the peer's whole configured lifetime). `ao_current_key` is the
+    /// `KeyID` signing outgoing segments right now (it follows the peer's
+    /// `RNextKeyID`, RFC 5925 §7.5.2); `ao_rnext_key` is the `RecvID` of the key
+    /// *this router* asks the peer to send with, not what the peer asked for.
     pub ao_current_key: Option<u8>,
     pub ao_rnext_key: Option<u8>,
     pub ao_packets_good: Option<u64>,

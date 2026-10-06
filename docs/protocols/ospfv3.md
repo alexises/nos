@@ -30,6 +30,12 @@ The model is the same as OSPFv2's, with `ospfv3` in place of `ospf` in every com
 
 OSPFv2 and OSPFv3 are independent. One routing table can have both an `ospf-instance` and an `ospfv3-instance`, and one link can carry both an `ospf` and an `ospfv3` profile. OSPFv3 profile names are unique among OSPFv3 profiles, separately from OSPFv2's.
 
+Prefix options (RFC 5340 A.4.1.1):
+
+- a loopback `/128` is advertised with the LA bit (a host address of this router);
+- a prefix a neighbor advertises with the NU bit is not routed to, nor summarized into other areas;
+- the P and DN bits are never set.
+
 A link needs an IPv6 address to be advertised. Neighbours talk over IPv6 link-local addresses, which the kernel creates for every interface, so the next hops of OSPFv3 routes are link-local addresses.
 
 How the OSPFv3 implementation works internally is described in [`ospfv3/CLAUDE.md`](../../ospfv3/CLAUDE.md).
@@ -247,6 +253,7 @@ Neighbour discovery, DR/BDR election, timers, costs, network types, the MTU over
 - **Loop-free alternates.** The backup next hop is a link-local address too, and may leave through a different interface from the primary; it is installed with its own interface, at a worse metric than the primary.
 - **Authentication** is RFC 7166's authentication trailer, with HMAC-SHA-1, -256, -384 or -512 only. A packet that fails is dropped and logged (`ospfv3 packet authentication failed`).
 - **Link-local flooding scope.** A link LSA is only ever sent on the link it belongs to (RFC 5340 §4.5.1).
+- **Unknown LSA types** (RFC 5340 §2.9) are accepted, not refused. With the U bit set they are stored and flooded by their S2/S1 scope (area, AS or link-local); with it clear they are kept link-local and never sent past the link they arrived on. They are never used for routing. An LSA with the reserved scope `11` is silently dropped (not acknowledged).
 - **Areas and AS boundary.** As in OSPFv2, an inter-area or external route is chosen by cost alone, and an external route is always type 1 (the LSA's metric plus the distance to the ASBR). Unlike OSPFv2, an external LSA's own metric counts, and an ABR passes another router's external LSAs on into all its areas. Every area is a normal area, so Hellos and LSAs set the E option bit.
 - **Withdrawal.** An LSA the router stops originating is flushed within about 2 seconds (log `ospfv3 lsa prematurely aged`): for example its network LSA after it stops being DR or loses its last Full neighbour on the link, or its LSAs in an area it has left. Unlike OSPFv2, a clean stop of `nos-ospfv3d` flushes nothing; neighbours drop the router when the dead interval runs out.
 
@@ -257,7 +264,7 @@ These work in OSPFv2 but not yet in OSPFv3:
 - **Area ranges** (summarizing an area into one prefix) and their discard routes.
 - **RFC 7474-style replay protection** (`extended-sequence-numbers`).
 
-Also not supported: several OSPFv3 instances on one link (the RFC 5838 address families; one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), RFC 8362's sparse mode, NSSA and stub areas, virtual links, graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and the non-broadcast network types.
+Also not supported: several OSPFv3 instances on one link (the RFC 5838 address families; one instance ID per link works, see [Set the instance ID](#set-the-instance-id)), RFC 8362's sparse mode, NSSA and stub areas, virtual links, graceful restart after a crash (RFC 5187 only covers restarts announced beforehand), BFD, and the non-broadcast network types (point-to-multipoint is refused at commit).
 
 ## Configuration reference
 

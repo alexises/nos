@@ -571,6 +571,44 @@ fn plan_df(
         .collect()
 }
 
+/// What EVPN local bias (RFC 8365 §8.3.1) needs for the current plan: the
+/// egress filters per all-active segment port and the ingress marking per
+/// peer. Pure, so the bitmaps are testable without a kernel.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BiasPlan {
+    /// Segment port -> (its bit, whether it also drops every core-origin BUM:
+    /// a non-DF, a port in its DF wait or without carrier).
+    ports: BTreeMap<String, (u16, bool)>,
+    /// Every other PE of those segments -> the bits of the segments it is on.
+    peers: BTreeMap<IpAddr, u16>,
+    /// All-active ports beyond the 16 the mark has bits for: they keep DF-only
+    /// flooding.
+    overflow: Vec<String>,
+}
+
+/// Single-active segments are left out: their non-DF drops *everything* on the
+/// port (STP disabled), so the DF has to deliver the BUM its peer received
+/// locally — a local-bias drop there would lose it.
+///
+/// `ponytail:` 16 all-active segments per domain, one mark bit each (the mark's
+/// top byte is the magic, the next one left to others).
+fn plan_local_bias(vtep: IpAddr, plan: &[Segment]) -> BiasPlan {
+    let mut out = BiasPlan::default();
+    let mut all_active: Vec<&Segment> = plan.iter().filter(|s| !s.single_active).collect();
+    all_active.sort_by(|a, b| a.port.cmp(&b.port));
+    for (i, s) in all_active.into_iter().enumerate() {
+        let Some(bit) = 1u16.checked_shl(u32::try_from(i).unwrap_or(u32::MAX)) else {
+            out.overflow.push(s.port.clone());
+            continue;
+        };
+        out.ports.insert(s.port.clone(), (bit, !s.df || s.waiting));
+        for pe in s.pes.iter().filter(|pe| **pe != vtep) {
+            *out.peers.entry(*pe).or_default() |= bit;
+        }
+    }
+    out
+}
+
 fn algorithm_name(a: DfAlgorithm) -> &'static str {
     match a {
         DfAlgorithm::Modulo => "modulo",
@@ -604,8 +642,22 @@ struct Inner {
     local: BTreeMap<Mac, String>,
     /// The last election result per attached segment.
     segments: Vec<Segment>,
-    /// The flood setting last applied to each segment port.
-    es_flood: BTreeMap<String, bool>,
+    /// The `(unicast, bum)` flood setting last applied to each segment port.
+    es_flood: BTreeMap<String, (bool, bool)>,
+    /// The egress filters (`bit`, DF filter) last written on each segment port.
+    es_filter: BTreeMap<String, (u16, bool)>,
+    /// The segment ports whose local bias is fully in place (their egress
+    /// filters *and* the ingress marking): what `show fdb` reports.
+    es_bias: BTreeSet<String>,
+    /// The peers (with their segment bitmaps) the ingress marking was last
+    /// written for.
+    bias_peers: BTreeMap<IpAddr, u16>,
+    /// Ports already warned about for a failed local-bias setup.
+    bias_warned: BTreeSet<String>,
+    /// When the local-bias kernel state was last written unconditionally: an
+    /// unchanged one is only re-asserted (healing a recreated bond or VXLAN
+    /// device) about once per `TICK`, not on every pushed route.
+    bias_healed: Option<Instant>,
     /// The forwarding state last applied to each segment port (only recorded
     /// once it left the kernel default, forwarding).
     es_fwd: BTreeMap<String, bool>,
@@ -716,6 +768,8 @@ impl Fdb {
                 }
                 g.local.clear();
                 g.local_neigh.clear();
+                // `remove_vxlan` took the ingress marking with the device.
+                g.bias_peers.clear();
             }
             self.publish(&g);
         }
@@ -805,6 +859,53 @@ impl Fdb {
             *d = next;
             changed
         });
+        // Local bias (RFC 8365 §8.3.1). The order is the safety property: the
+        // egress filters, then the ingress marking, and only then do a port's
+        // multicast/broadcast flood flags open (below). A missing piece leaves
+        // that port on today's DF-only flooding: duplicates, never loss.
+        let bias = g
+            .ready
+            .as_ref()
+            .map(|r| (r.vni, plan_local_bias(r.vtep, &plan)));
+        let mut filtered: BTreeSet<String> = BTreeSet::new();
+        let mut marked = true;
+        if let Some((vni, b)) = &bias {
+            let heal = g.bias_healed.is_none_or(|t| now - t >= TICK / 2);
+            if heal {
+                g.bias_healed = Some(now);
+            }
+            for (port, (bit, df_filter)) in &b.ports {
+                if self
+                    .apply_segment_filter(g, port, *bit, *df_filter, heal)
+                    .await
+                {
+                    filtered.insert(port.clone());
+                }
+            }
+            marked = self.apply_local_bias(g, *vni, &b.peers, heal).await;
+            if marked {
+                g.bias_warned.remove("");
+            }
+            for port in &b.overflow {
+                if g.bias_warned.insert(port.clone()) {
+                    warn!(domain = %self.domain, port = %port, "more than 16 all-active segments, no local bias, df-only flooding");
+                }
+            }
+        }
+        // Filters of a port that left the plan or went single-active.
+        let stale: Vec<String> = g
+            .es_filter
+            .keys()
+            .filter(|p| bias.as_ref().is_none_or(|(_, b)| !b.ports.contains_key(*p)))
+            .cloned()
+            .collect();
+        for port in stale {
+            if self.driver.clear_segment_filter(&port).await.is_ok() {
+                g.es_filter.remove(&port);
+                info!(domain = %self.domain, port = %port, "segment filter cleared");
+            }
+        }
+        g.es_bias.clear();
         for s in &plan {
             if !s.waiting
                 && !g
@@ -823,13 +924,24 @@ impl Fdb {
                     "df elected"
                 );
             }
-            // All-active: only the DF floods BUM to the port. Single-active: the
-            // port floods normally but only the DF's forwards anything.
+            // All-active with local bias: multicast and broadcast flood on
+            // whatever the role (a frame from a local access port goes to the
+            // segment regardless of the DF; core BUM is the egress filter's),
+            // unknown unicast only on the DF. Without it, only the DF floods
+            // anything. Single-active: the port floods normally but only the
+            // DF's forwards anything.
             let active = s.df && !s.waiting;
+            let biased = filtered.contains(&s.port) && marked;
+            if biased {
+                g.es_bias.insert(s.port.clone());
+                g.bias_warned.remove(&s.port);
+            }
             let (flood, forwarding) = if s.single_active {
-                (true, active)
+                ((true, true), active)
+            } else if biased {
+                ((active, true), true)
             } else {
-                (active, true)
+                ((active, active), true)
             };
             self.apply_port_flood(g, &s.port, flood).await;
             self.apply_port_forwarding(g, &s.port, forwarding).await;
@@ -846,7 +958,7 @@ impl Fdb {
         for port in gone {
             // Best effort: if the port is gone too there is nothing to restore.
             if g.es_flood.remove(&port).is_some()
-                && self.driver.set_port_flood(&port, true).await.is_ok()
+                && self.driver.set_port_flood(&port, true, true).await.is_ok()
             {
                 info!(domain = %self.domain, port = %port, flood = true, "segment port flooding set");
             }
@@ -855,6 +967,7 @@ impl Fdb {
             {
                 info!(domain = %self.domain, port = %port, forwarding = true, "segment port forwarding set");
             }
+            g.bias_warned.remove(&port);
         }
         g.segments = plan;
         // A segment port that can (no longer) carry unicast re-decides its
@@ -876,23 +989,101 @@ impl Fdb {
         }
     }
 
-    /// Applies the BUM-flood setting of one segment port; a block is
-    /// re-asserted on every call (a recreated port is healed by the tick).
-    async fn apply_port_flood(&self, g: &mut Inner, port: &str, flood: bool) {
+    /// Applies the flood setting `(unicast, bum)` of one segment port; anything
+    /// but all-on is re-asserted on every call (a recreated port is healed by
+    /// the tick).
+    async fn apply_port_flood(&self, g: &mut Inner, port: &str, flood: (bool, bool)) {
         let prev = g.es_flood.get(port).copied();
-        if prev == Some(flood) && flood {
+        if prev == Some(flood) && flood == (true, true) {
             return;
         }
-        match self.driver.set_port_flood(port, flood).await {
+        match self.driver.set_port_flood(port, flood.0, flood.1).await {
             Ok(()) => {
                 if prev != Some(flood) {
-                    info!(domain = %self.domain, port = %port, flood, "segment port flooding set");
+                    info!(
+                        domain = %self.domain, port = %port, flood = flood.0 && flood.1,
+                        unicast = flood.0, bum = flood.1, "segment port flooding set"
+                    );
                 }
                 g.es_flood.insert(port.to_string(), flood);
             }
             Err(e) => {
                 debug!(domain = %self.domain, port = %port, error = %e, "could not set port flooding yet, retrying");
                 g.es_flood.remove(port);
+            }
+        }
+    }
+
+    /// Writes one segment port's local-bias egress filters; `false` (with a
+    /// warning, once) leaves the port on DF-only flooding.
+    async fn apply_segment_filter(
+        &self,
+        g: &mut Inner,
+        port: &str,
+        bit: u16,
+        df_filter: bool,
+        heal: bool,
+    ) -> bool {
+        if !heal && g.es_filter.get(port) == Some(&(bit, df_filter)) {
+            return true;
+        }
+        match self.driver.set_segment_filter(port, bit, df_filter).await {
+            Ok(()) => {
+                if g.es_filter.insert(port.to_string(), (bit, df_filter)) != Some((bit, df_filter))
+                {
+                    info!(domain = %self.domain, port = %port, df_filter, "segment filter set");
+                }
+                true
+            }
+            Err(e) => {
+                g.es_filter.remove(port);
+                if g.bias_warned.insert(port.to_string()) {
+                    warn!(domain = %self.domain, port = %port, error = %e, "local bias unavailable, df-only flooding");
+                } else {
+                    debug!(domain = %self.domain, port = %port, error = %e, "local bias filter not set yet, retrying");
+                }
+                false
+            }
+        }
+    }
+
+    /// Writes the ingress marking for `peers`; `false` leaves every segment
+    /// port on DF-only flooding. Re-asserted on every call (the VXLAN device
+    /// may have been recreated); an empty set removes it.
+    async fn apply_local_bias(
+        &self,
+        g: &mut Inner,
+        vni: u32,
+        peers: &BTreeMap<IpAddr, u16>,
+        heal: bool,
+    ) -> bool {
+        if (peers.is_empty() || !heal) && *peers == g.bias_peers {
+            return true;
+        }
+        match self.driver.set_local_bias(vni, peers).await {
+            Ok(()) => {
+                if *peers != g.bias_peers {
+                    if let Some(r) = &g.ready {
+                        info!(
+                            domain = %self.domain, vtep = %r.vtep,
+                            peers = %join_ips(&peers.keys().copied().collect::<Vec<_>>()),
+                            segments = %format!("{:#06x}", peers.values().fold(0u16, |a, b| a | b)),
+                            "local bias set"
+                        );
+                    }
+                }
+                g.bias_peers.clone_from(peers);
+                true
+            }
+            Err(e) => {
+                g.bias_peers.clear();
+                debug!(domain = %self.domain, error = %e, "local bias marking not set yet, retrying");
+                // Only a port that has none yet needs the warning: the one
+                // `apply_segment_filter` gives is for its own filters.
+                if !peers.is_empty() && g.bias_warned.insert(String::new()) {
+                    warn!(domain = %self.domain, error = %e, "local bias unavailable, df-only flooding");
+                }
+                false
             }
         }
     }
@@ -1303,6 +1494,7 @@ impl Fdb {
                     up: s.up,
                     single_active: s.single_active,
                     df_algorithm: s.algorithm,
+                    local_bias: g.es_bias.contains(&s.port),
                 })
                 .collect(),
             neigh_suppress: g.neigh_suppress,
@@ -1518,9 +1710,14 @@ mod tests {
             .any(|k| matches!(k, EvpnKey::MacIp { ip, .. } if ip.to_string() == "198.51.100.7")));
     }
 
-    /// Records every driver call; the second field is the ports with no carrier.
+    /// Records every driver call; the second field is the ports with no
+    /// carrier, the third makes the local-bias setup fail.
     #[derive(Default)]
-    struct Recorder(StdMutex<Vec<String>>, StdMutex<BTreeSet<String>>);
+    struct Recorder(
+        StdMutex<Vec<String>>,
+        StdMutex<BTreeSet<String>>,
+        std::sync::atomic::AtomicBool,
+    );
 
     #[async_trait]
     impl FdbDriver for Recorder {
@@ -1602,8 +1799,51 @@ mod tests {
         async fn local_macs(&self, _: &str, _: u32) -> Result<BTreeMap<Mac, String>, DriverError> {
             Ok(BTreeMap::from([([0, 0, 0, 0, 0, 7], "eth1".to_string())]))
         }
-        async fn set_port_flood(&self, port: &str, flood: bool) -> Result<(), DriverError> {
-            self.0.lock().unwrap().push(format!("flood {port} {flood}"));
+        async fn set_port_flood(
+            &self,
+            port: &str,
+            unicast: bool,
+            bum: bool,
+        ) -> Result<(), DriverError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("flood {port} uni={unicast} bum={bum}"));
+            Ok(())
+        }
+        async fn set_segment_filter(
+            &self,
+            port: &str,
+            bit: u16,
+            df: bool,
+        ) -> Result<(), DriverError> {
+            if self.2.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(DriverError::Other("no cls_fw".to_string()));
+            }
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("filter {port} bit={bit} df={df}"));
+            Ok(())
+        }
+        async fn clear_segment_filter(&self, port: &str) -> Result<(), DriverError> {
+            self.0.lock().unwrap().push(format!("unfilter {port}"));
+            Ok(())
+        }
+        async fn set_local_bias(
+            &self,
+            vni: u32,
+            peers: &BTreeMap<IpAddr, u16>,
+        ) -> Result<(), DriverError> {
+            if self.2.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(DriverError::Other("no cls_flower".to_string()));
+            }
+            let peers = peers
+                .iter()
+                .map(|(p, b)| format!("{p}={b}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            self.0.lock().unwrap().push(format!("bias {vni} {peers}"));
             Ok(())
         }
         async fn set_port_forwarding(&self, port: &str, fwd: bool) -> Result<(), DriverError> {
@@ -2034,7 +2274,8 @@ mod tests {
         assert_eq!(
             calls(&driver),
             [
-                "flood eth1 false",
+                "filter eth1 bit=1 df=true",
+                "flood eth1 uni=false bum=true",
                 "unpin eth1 00:00:00:00:00:01",
                 "set 00:00:00:00:00:01 192.0.2.9"
             ]
@@ -2240,8 +2481,16 @@ mod tests {
         let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
         fdb.set_ready(Some(ready_with_segment())).await;
         // Alone on the segment: the DF, flooding explicitly enabled.
-        assert_eq!(calls(&driver), ["ensure 10100", "flood eth1 true"]);
+        assert_eq!(
+            calls(&driver),
+            [
+                "ensure 10100",
+                "filter eth1 bit=1 df=false",
+                "flood eth1 uni=true bum=true"
+            ]
+        );
         assert!(fdb.table().await.segments[0].designated_forwarder);
+        assert!(fdb.table().await.segments[0].local_bias);
 
         // A PE with a lower address, attached to this EVI too (a per-EVI A-D
         // for our VNI): [192.0.1.9, 192.0.2.1], 10100 % 2 == 0, so it is the
@@ -2250,17 +2499,41 @@ mod tests {
             .await;
         fdb.apply_push(EvpnUpdate::Add(evi_ad(ESI, "192.0.1.9")))
             .await;
-        assert_eq!(calls(&driver), ["flood eth1 false"]);
+        // The order is the safety property: the egress filters, then the
+        // ingress marking, and only then the flood flags — the non-DF keeps
+        // flooding multicast and broadcast (local bias), unicast goes off.
+        assert_eq!(
+            calls(&driver),
+            [
+                "filter eth1 bit=1 df=true",
+                "bias 10100 192.0.1.9=1",
+                "flood eth1 uni=false bum=true"
+            ]
+        );
         let t = fdb.table().await;
         assert!(!t.segments[0].designated_forwarder);
+        assert!(t.segments[0].local_bias);
         assert_eq!(t.segments[0].pes.len(), 2);
 
-        // The block is re-asserted on every resync, then lifted when the peer goes.
+        // The flood block is re-asserted on every resync; the filters are
+        // already in place and are not rewritten.
         fdb.set_ready(Some(ready_with_segment())).await;
-        assert!(calls(&driver).contains(&"flood eth1 false".to_string()));
+        assert_eq!(
+            calls(&driver),
+            ["ensure 10100", "flood eth1 uni=false bum=true"]
+        );
+        // The peer going: the DF filter is dropped first, then the flags open
+        // and the (now empty) ingress marking goes.
         fdb.apply_push(EvpnUpdate::Remove(es_route(ESI, "192.0.1.9").key))
             .await;
-        assert_eq!(calls(&driver), ["flood eth1 true"]);
+        assert_eq!(
+            calls(&driver),
+            [
+                "filter eth1 bit=1 df=false",
+                "bias 10100 ",
+                "flood eth1 uni=true bum=true"
+            ]
+        );
 
         // A Type-4 for another segment is none of our business.
         fdb.apply_push(EvpnUpdate::Add(es_route([7; 10], "192.0.1.9")))
@@ -2272,7 +2545,15 @@ mod tests {
             .await;
         calls(&driver);
         fdb.set_ready(None).await;
-        assert_eq!(calls(&driver), ["remove 10100", "flood eth1 true"]);
+        assert_eq!(
+            calls(&driver),
+            [
+                "remove 10100",
+                "unfilter eth1",
+                "flood eth1 uni=true bum=true"
+            ]
+        );
+        assert_eq!(fdb.table().await.segments.len(), 0);
     }
 
     #[tokio::test]
@@ -2295,7 +2576,14 @@ mod tests {
         // Its per-EVI A-D arriving makes it a real candidate: we lose the election.
         fdb.apply_push(EvpnUpdate::Add(evi_ad(ESI, "192.0.1.9")))
             .await;
-        assert_eq!(calls(&driver), ["flood eth1 false"]);
+        assert_eq!(
+            calls(&driver),
+            [
+                "filter eth1 bit=1 df=true",
+                "bias 10100 192.0.1.9=1",
+                "flood eth1 uni=false bum=true"
+            ]
+        );
         assert!(!fdb.table().await.segments[0].designated_forwarder);
     }
 
@@ -2309,12 +2597,12 @@ mod tests {
 
         // Alone on the segment, so the DF — but not until the timer ends.
         fdb.set_ready(Some(ready_with_segment())).await;
-        assert!(calls(&driver).ends_with(&["flood eth1 false".to_string()]));
+        assert!(calls(&driver).ends_with(&["flood eth1 uni=false bum=true".to_string()]));
         assert!(!fdb.table().await.segments[0].designated_forwarder);
 
         // `run_local` wakes at the deadline by itself (the tick is 10s).
         tokio::time::sleep(wait * 3).await;
-        assert!(calls(&driver).contains(&"flood eth1 true".to_string()));
+        assert!(calls(&driver).contains(&"flood eth1 uni=true bum=true".to_string()));
         assert!(fdb.table().await.segments[0].designated_forwarder);
 
         // A PE joining an already-elected port does not restart the wait.
@@ -2326,7 +2614,7 @@ mod tests {
         fdb.set_ready(None).await;
         calls(&driver);
         fdb.set_ready(Some(ready_with_segment())).await;
-        assert!(calls(&driver).ends_with(&["flood eth1 false".to_string()]));
+        assert!(calls(&driver).ends_with(&["flood eth1 uni=false bum=true".to_string()]));
 
         stop.send(true).unwrap();
         local.await.unwrap();
@@ -2369,8 +2657,14 @@ mod tests {
         fdb.set_ready(Some(ready_single_active())).await;
         // Alone: the DF. It floods, and forwarding is the kernel default, so
         // it is never asserted.
-        assert_eq!(calls(&driver), ["ensure 10100", "flood eth1 true"]);
-        assert!(fdb.table().await.segments[0].single_active);
+        assert_eq!(
+            calls(&driver),
+            ["ensure 10100", "flood eth1 uni=true bum=true"]
+        );
+        let t = fdb.table().await;
+        assert!(t.segments[0].single_active);
+        // Local bias does not apply: the DF delivers what its peer got locally.
+        assert!(!t.segments[0].local_bias);
 
         // A PE with a lower address, also attached to this EVI, is the DF:
         // the port is blocked, but it still floods (only forwarding decides).
@@ -2395,7 +2689,11 @@ mod tests {
         fdb.set_ready(None).await;
         assert_eq!(
             calls(&driver),
-            ["remove 10100", "flood eth1 true", "fwd eth1 true"]
+            [
+                "remove 10100",
+                "flood eth1 uni=true bum=true",
+                "fwd eth1 true"
+            ]
         );
     }
 
@@ -2412,18 +2710,128 @@ mod tests {
         // All-active non-DF: BUM flooding off, forwarding untouched.
         fdb.set_ready(Some(ready_with_segment())).await;
         let c = calls(&driver);
-        assert!(c.contains(&"flood eth1 false".to_string()), "{c:?}");
+        assert!(
+            c.contains(&"flood eth1 uni=false bum=true".to_string()),
+            "{c:?}"
+        );
         assert!(!c.iter().any(|x| x.starts_with("fwd")), "{c:?}");
 
+        // Single-active: the local-bias filters are removed, everything floods.
         fdb.set_ready(Some(ready_single_active())).await;
         let c = calls(&driver);
-        assert!(c.contains(&"flood eth1 true".to_string()), "{c:?}");
+        assert!(c.contains(&"unfilter eth1".to_string()), "{c:?}");
+        assert!(
+            c.contains(&"flood eth1 uni=true bum=true".to_string()),
+            "{c:?}"
+        );
         assert!(c.contains(&"fwd eth1 false".to_string()), "{c:?}");
 
         fdb.set_ready(Some(ready_with_segment())).await;
         let c = calls(&driver);
-        assert!(c.contains(&"flood eth1 false".to_string()), "{c:?}");
+        assert!(
+            c.contains(&"filter eth1 bit=1 df=true".to_string()),
+            "{c:?}"
+        );
+        assert!(
+            c.contains(&"flood eth1 uni=false bum=true".to_string()),
+            "{c:?}"
+        );
         assert!(c.contains(&"fwd eth1 true".to_string()), "{c:?}");
+    }
+
+    fn seg(port: &str, pes: &[&str], df: bool, single_active: bool) -> Segment {
+        Segment {
+            esi: ESI,
+            port: port.to_string(),
+            pes: pes.iter().map(|p| p.parse().unwrap()).collect(),
+            df,
+            waiting: false,
+            up: true,
+            ad_pes: Vec::new(),
+            single_active,
+            algorithm: DfAlgorithm::Modulo,
+            ac_df: true,
+        }
+    }
+
+    #[test]
+    fn the_local_bias_plan_gives_each_all_active_segment_a_bit_and_each_peer_its_segments() {
+        let vtep: IpAddr = VTEP.parse().unwrap();
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let plan = [
+            // Sorted by port name, not plan order: bond1 -> bit 1, bond2 -> bit 2.
+            seg("bond2", &[VTEP, "192.0.1.9", "192.0.3.3"], true, false),
+            seg("bond1", &[VTEP, "192.0.1.9"], false, false),
+            // Single-active and its peer are out of it.
+            seg("bond3", &[VTEP, "192.0.9.9"], true, true),
+        ];
+        let b = plan_local_bias(vtep, &plan);
+        assert_eq!(
+            b.ports,
+            BTreeMap::from([
+                ("bond1".to_string(), (1, true)),
+                ("bond2".to_string(), (2, false)),
+            ])
+        );
+        assert_eq!(
+            b.peers,
+            BTreeMap::from([(ip("192.0.1.9"), 0b11), (ip("192.0.3.3"), 0b10)])
+        );
+        assert_eq!(b.overflow.len(), 0);
+
+        // A port in its DF wait, or without carrier, also drops core BUM.
+        let mut waiting = seg("bond1", &[VTEP, "192.0.1.9"], true, false);
+        waiting.waiting = true;
+        assert!(plan_local_bias(vtep, &[waiting]).ports["bond1"].1);
+        assert_eq!(plan_local_bias(vtep, &[]), BiasPlan::default());
+    }
+
+    #[test]
+    fn a_seventeenth_all_active_segment_has_no_bit_and_keeps_df_only_flooding() {
+        let vtep: IpAddr = VTEP.parse().unwrap();
+        let plan: Vec<Segment> = (0..17)
+            .map(|i| seg(&format!("bond{i:02}"), &[VTEP, "192.0.1.9"], true, false))
+            .collect();
+        let b = plan_local_bias(vtep, &plan);
+        assert_eq!(b.ports.len(), 16);
+        assert_eq!(b.ports["bond15"].0, 1 << 15);
+        assert_eq!(b.overflow, ["bond16"]);
+        assert_eq!(b.peers.values().copied().collect::<Vec<_>>(), [0xFFFF]);
+    }
+
+    #[tokio::test]
+    async fn a_failing_tc_setup_leaves_the_segment_on_df_only_flooding() {
+        let driver = Arc::new(Recorder::default());
+        driver.2.store(true, std::sync::atomic::Ordering::Relaxed);
+        let fdb = Fdb::new("bd1".to_string(), driver.clone(), Duration::ZERO);
+        fdb.set_ready(Some(ready_with_segment())).await;
+        fdb.apply_push(EvpnUpdate::Add(es_route(ESI, "192.0.1.9")))
+            .await;
+        fdb.apply_push(EvpnUpdate::Add(evi_ad(ESI, "192.0.1.9")))
+            .await;
+        // Never "flood on, unfiltered": the non-DF refuses all BUM, as before.
+        let c = calls(&driver);
+        assert!(
+            c.contains(&"flood eth1 uni=false bum=false".to_string()),
+            "{c:?}"
+        );
+        assert!(
+            !c.iter()
+                .any(|x| x.contains("bum=true") && x.contains("uni=false")),
+            "{c:?}"
+        );
+        assert!(!fdb.table().await.segments[0].local_bias);
+
+        // The kernel comes good: the next resync switches it on, filters first.
+        driver.2.store(false, std::sync::atomic::Ordering::Relaxed);
+        fdb.set_ready(Some(ready_with_segment())).await;
+        let c = calls(&driver);
+        let at = |what: &str| c.iter().position(|x| x.starts_with(what)).unwrap();
+        assert!(
+            at("filter") < at("bias") && at("bias") < at("flood"),
+            "{c:?}"
+        );
+        assert!(fdb.table().await.segments[0].local_bias);
     }
 
     #[test]

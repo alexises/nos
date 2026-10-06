@@ -233,7 +233,9 @@ impl LinkStatus {
     fn new(network_type: NetworkType) -> Self {
         Self {
             interface_state: match network_type {
-                NetworkType::PointToPoint => InterfaceState::PointToPoint,
+                NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
+                    InterfaceState::PointToPoint
+                }
                 NetworkType::Broadcast => InterfaceState::Waiting,
             },
             neighbors: HashMap::new(),
@@ -503,7 +505,9 @@ fn send_hello(
         .map(|(id, _)| *id)
         .collect();
     let (designated_router, backup_designated_router) = match cfg.network_type {
-        NetworkType::PointToPoint => (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED),
+        NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
+            (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED)
+        }
         NetworkType::Broadcast => (
             current.dr.unwrap_or(Ipv4Addr::UNSPECIFIED),
             current.bdr.unwrap_or(Ipv4Addr::UNSPECIFIED),
@@ -606,7 +610,7 @@ fn handle_hello(
     });
 
     match cfg.network_type {
-        NetworkType::PointToPoint => {
+        NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
             *p2p_dead_deadline =
                 Instant::now() + std::time::Duration::from_secs(u64::from(cfg.dead_interval));
             false
@@ -1825,7 +1829,12 @@ impl LinkManager {
                 .collect();
             for (prefix, cost) in loopback_prefixes.get(&area_id).into_iter().flatten() {
                 router_prefixes.push(IntraAreaPrefixEntry {
-                    options: 0,
+                    // RFC 5340 §A.4.1.1: a /128 loopback is a host address.
+                    options: if prefix.prefix_len() == 128 {
+                        lsa::PREFIX_OPT_LA
+                    } else {
+                        0
+                    },
                     metric: *cost,
                     prefix: *prefix,
                 });
@@ -2349,7 +2358,7 @@ fn router_lsa_links(
     let mut result = Vec::new();
     for (cfg, status) in links {
         match cfg.network_type {
-            NetworkType::PointToPoint => {
+            NetworkType::PointToPoint | NetworkType::PointToMultipoint => {
                 if let Some((neighbor_id, info)) = status
                     .neighbors
                     .iter()
@@ -3160,6 +3169,35 @@ mod tests {
         assert_eq!(body.prefixes.len(), 1);
         assert_eq!(body.prefixes[0].prefix, stub);
         assert_eq!(body.prefixes[0].metric, 5);
+        // RFC 5340 A.4.1.1: a /128 loopback is flagged LA, a shorter one is not.
+        assert_eq!(body.prefixes[0].options, lsa::PREFIX_OPT_LA);
+    }
+
+    #[tokio::test]
+    async fn loopback_subnet_prefix_has_no_la_bit() {
+        let manager = LinkManager::new(1, None);
+        let area = Ipv4Addr::UNSPECIFIED;
+        let router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let net: Ipv6Net = "2001:db8:9::/64".parse().unwrap();
+        manager
+            .reconcile(
+                Vec::new(),
+                HashMap::from([(area, vec![(net, 5)])]),
+                router_id,
+            )
+            .await;
+        manager.originate_all(router_id).await;
+        let lsdb = manager.lsdb_for(area).await;
+        let key = LsaKey {
+            lsa_type: lsa::LSA_TYPE_INTRA_AREA_PREFIX,
+            link_state_id: Ipv4Addr::UNSPECIFIED,
+            advertising_router: router_id,
+        };
+        let installed = lsdb.lock().await.get(&key).unwrap();
+        let LsaBody::IntraAreaPrefix(body) = &installed.body else {
+            panic!("expected intra-area-prefix lsa")
+        };
+        assert_eq!(body.prefixes[0].options, 0);
     }
 
     fn grace_status(grace: Option<Instant>) -> StatusHandle {

@@ -376,6 +376,8 @@ pub const OSPFV3_BROADCAST_ADDRESS_C: &str = "2001:db8:3::3/64";
 /// Distinct from `port-aggregate`'s "bond1" so the two phases' log greps never collide.
 pub const LACP_AGGREGATE: &str = "bond-lacp";
 pub const NETNS_HELPER_IMAGE: &str = "nos-verify-netns-helper:local";
+/// Debian + python3 (raw `AF_PACKET` injection, `lacp`'s Marker PDU).
+pub const PYTHON_HELPER_IMAGE: &str = "nos-verify-python-helper:local";
 
 pub const COMMUNITY_AA: u32 = 65001;
 pub const COMMUNITY_NN: u32 = 100;
@@ -387,6 +389,14 @@ pub const REST_PORT: u16 = 8080;
 /// Not assigned to any interface, so binding it fails with EADDRNOTAVAIL.
 pub const REST_ABSENT_ADDRESS: &str = "10.50.0.77";
 pub const REST_TX: &str = "rest-e2e";
+
+/// The `syslog` phase's collector (syslog-ng, an independent RFC 5424
+/// receiver) on the shared network.
+pub const SYSLOG_COLLECTOR: &str = "syslog-collector";
+pub const IP_SYSLOG: &str = "10.50.0.30";
+pub const SYSLOG_IMAGE: &str = "nos-e2e-syslog:local";
+/// Router-a's hostname while the phase runs (the default `nos` says nothing).
+pub const SYSLOG_HOSTNAME: &str = "e2e-a";
 
 /// `pki-rotation` runs the watchdog with certificates this short-lived and a
 /// rotation this frequent, so a daemon that never applied a rotation would be

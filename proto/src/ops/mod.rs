@@ -7,6 +7,7 @@ pub mod community_alias;
 pub mod community_group;
 pub mod interface;
 pub mod lldp;
+pub mod logging;
 pub mod ospf_area;
 pub mod ospf_instance;
 pub mod ospf_profile;
@@ -33,6 +34,7 @@ pub use community_alias::CommunityAliasOp;
 pub use community_group::CommunityGroupOp;
 pub use interface::InterfaceOp;
 pub use lldp::LldpOp;
+pub use logging::LoggingOp;
 pub use ospf_area::OspfAreaOp;
 pub use ospf_instance::OspfInstanceOp;
 pub use ospf_profile::OspfProfileOp;
@@ -94,6 +96,7 @@ pub enum ConfigOp {
     PortAggregateSubinterface(PortAggregateSubinterfaceOp),
     Lldp(LldpOp),
     User(UserOp),
+    Logging(LoggingOp),
 }
 
 impl ConfigOp {
@@ -131,6 +134,7 @@ impl ConfigOp {
             ConfigOp::PortAggregateSubinterface(op) => op.apply(config),
             ConfigOp::Lldp(op) => op.apply(config),
             ConfigOp::User(op) => op.apply(config),
+            ConfigOp::Logging(op) => op.apply(config),
         }
     }
 }
@@ -164,6 +168,8 @@ pub enum OpError {
     InterfaceAddressNotFound { name: String, address: IpNet },
     #[error("policy definition '{0}' not found")]
     PolicyDefinitionNotFound(String),
+    #[error("syslog server '{0}' not found")]
+    SyslogServerNotFound(String),
     #[error("user '{0}' not found")]
     UserNotFound(String),
     #[error("community alias '{0}' not found")]
