@@ -144,6 +144,14 @@ pub const EVPN_MOBILE_MAC: &str = "aa:bb:cc:00:00:03";
 /// `lacp`: each router's configured LACP Actor System ID (`lacp-system-id`).
 pub const LACP_SYSTEM_ID_A: &str = "02:00:00:00:0a:01";
 pub const LACP_SYSTEM_ID_B: &str = "02:00:00:00:0b:01";
+/// Actor System/Port Priorities the `lacp` phase configures per router (any
+/// distinct non-default values do), and the system priority it changes
+/// router-a to afterwards to prove a change restarts and renegotiates.
+pub const LACP_SYSTEM_PRIORITY_A: u16 = 100;
+pub const LACP_SYSTEM_PRIORITY_B: u16 = 200;
+pub const LACP_PORT_PRIORITY_A: u16 = 1000;
+pub const LACP_PORT_PRIORITY_B: u16 = 2000;
+pub const LACP_SYSTEM_PRIORITY_A_CHANGED: u16 = 150;
 /// `evpn-esi`: the Ethernet Segment on router-a's bond, the origin address of
 /// the peer PE GoBGP plays (below router-a's, so it wins the DF election for
 /// the even `EVPN_VNI`), and a MAC pinned behind the bond.

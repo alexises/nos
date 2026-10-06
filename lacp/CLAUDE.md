@@ -42,9 +42,9 @@ Unlike `interface::driver::port_aggregate_registry`'s YAML-backed bond-id alloca
 
 - **System ID**: a locally-administered unicast MAC derived (FNV-1a) from the machine's hostname and machine-id (`aggregate::local_system_id`), fixed for the life of the process — deliberately **not** derived from any member port. Bonding rewrites its slaves' MACs (the first slave enslaved lends its MAC to the bond, every other slave takes it over), so a port-derived ID changed whenever enslavement order did, which restarted every link in a loop. `ponytail:` two machines sharing both hostname and machine-id would collide; upgrade path is a persisted random id file. **Overridable per aggregate** with `PortAggregate.lacp_system_id` (`set port-aggregate <n> lacp-system-id <mac>`): `AggregateManager::reconcile` takes it as `Option<[u8; 6]>` and, like a `lacp-rate` change, restarts every member link when the effective id changes. Its purpose is EVPN multi-homing — two PEs sharing an ESI must present the same actor to the customer device, or it can't bundle its links across them — see `fdb/CLAUDE.md`.
 - **Key**: assigned sequentially in-process, per aggregate name, the first time `reconcile.rs` sees it — not persisted (only needs to differ between simultaneously-active aggregates on this instance).
-- **System/Port Priority**: fixed `32768` (802.1AX default). **Port Number**: the member's real kernel ifindex (masked to 16 bits).
+- **System/Port Priority**: `PortAggregate.lacp_system_priority` / `Interface.lacp_port_priority` (`Option<u16>`, `None` = `aggregate::DEFAULT_PRIORITY` = `32768`, the 802.1AX default). `AggregateManager::reconcile` takes the system priority (a change restarts every member, like `lacp-rate`/system id) and `(name, port_priority)` per member (a change restarts only that member; its `link::run` task owns the value for its lifetime). Both go out in the Actor Information TLV and the partner's are shown in `show lacp`. **Port Number**: the member's real kernel ifindex (masked to 16 bits).
 
-`lacp-rate` is the only CLI-exposed knob (see above) — priorities remain hardcoded 802.1AX defaults.
+`lacp-rate`, `lacp-system-id` and the two priorities are the CLI-exposed knobs. Priorities only advertise and break one tie in `selection.rs`: with config-fixed membership and no `max-links`/standby they never change which ports are selected otherwise.
 
 ## Robustness rules learned the hard way (each has a regression test)
 
@@ -59,7 +59,6 @@ Every one of these was a real hot loop or stall found by running `nos-e2e lacp` 
 
 - **Marker Generator** (§6.5.4.1, optional) — only matters for frame ordering during a live port move between aggregators; irrelevant with config-fixed membership. The **Marker Responder** (§6.5.4.2, mandatory) *is* implemented: `link::run` answers a Marker PDU (subtype 0x02, TLV 0x01) on the same port with a clean Marker Response, echoing requester port/system/transaction id, without touching any LACP machine. Own `TxLimiter` (5/s, excess dropped; LACPDUs keep their 3/s), so the port stays under 802.3 Annex 57A's 10 slow-protocol frames/s. Linux sets the Marker length byte to 0x16 where the standard says 16, so `decode_marker` reads fixed offsets only. No counters in `show lacp` (#59). IEEE 802.1AX/802.3 are paywalled: the layout was checked against Linux `bond_3ad.h`, not the standard text.
 - **Full dynamic cross-aggregate Selection Logic** — see the Selection Logic section above; permanent, not temporary.
-- **Per-port priority/system-priority knobs** — fixed at the 802.1AX default (32768).
 
 ## Modules
 
@@ -72,7 +71,7 @@ Every one of these was a real hot loop or stall found by running `nos-e2e lacp` 
 | `periodic_tx_machine.rs` | §6.4.13 Periodic Transmission Machine timing (`interval_for`) — see above |
 | `churn_machine.rs` | §6.4.17 Actor/Partner Churn Detection — pure `step`; `link.rs` runs one per side per port (60s, `NOS_LACP_CHURN_SECS` shortens it for e2e). Beyond the standard's diagnostic-only role, a port with either side `Churn` is left out of the active-member set (no traffic on it); reported as `actor_churn`/`partner_churn` in `show lacp` / `GET /v1/lacp` |
 | `mux_machine.rs` | §6.4.15 Mux Machine — pure `step`, see above |
-| `selection.rs` | Config-scoped Selection Logic — pure `select`, see above |
+| `selection.rs` | Config-scoped Selection Logic — pure `select`, see above; equal-size partner groups tie-break on the lowest (actor port priority, port number) |
 | `link.rs` | Per-port owning struct + `run()` (also answers Marker PDUs, see above) — mirrors `ospf::link.rs`'s per-link shape: owns the socket and all three state machines, drives them off real timer deadlines (`tokio::select!` over the periodic-send ticker, the `Current_While_Timer`, the Mux `Wait_While_Timer`, a `selected` watch-channel, and packet receive), reports every change into the shared observation map |
 | `aggregate.rs` | `AggregateManager` — one per configured `Lacp`-mode `PortAggregate`; `reconcile` spawns/stops member `link::run` tasks (restarting *every* member if the resolved Actor System ID changes); an internal `selection_loop` task re-runs `selection::select` on every observation change, feeds each port's own `selected` channel, and pushes the recomputed `Distributing`-state set |
 | `interface_client.rs` | Owns the persistent push connection to `nos-interfaced` (`InterfaceRequest::PushLacpMembers`) — full-resend-only (no `Full`/`Add`/`Remove` split like `RibRequest::PushBgpRoutes`; an aggregate has too few members for incremental batching to be worth the complexity), caching every aggregate's last-known state locally so a fresh/reconnected connection can resend everything in one pass |

@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::aggregate::AggregateManager;
+use crate::aggregate::{AggregateManager, DEFAULT_PRIORITY};
 use crate::config_client;
 
 /// Every currently-configured `Lacp`-mode aggregate's manager, shared with
@@ -135,11 +135,16 @@ async fn resync(
                 AggregateManager::new(name, key, push_tx.clone())
             })
             .clone();
-        let members: Vec<String> = cfg
+        let members: Vec<(String, u16)> = cfg
             .interfaces
             .iter()
             .filter(|i| i.port_aggregate.as_deref() == Some(name))
-            .map(|i| i.name.clone())
+            .map(|i| {
+                (
+                    i.name.clone(),
+                    i.lacp_port_priority.unwrap_or(DEFAULT_PRIORITY),
+                )
+            })
             .collect();
         // Config validation guarantees it parses; a bad value can only mean a
         // hand-edited file, which falls back to the derived id.
@@ -147,7 +152,12 @@ async fn resync(
             .lacp_system_id
             .as_deref()
             .and_then(nos_proto::evpn_id::parse_mac);
-        manager.reconcile(members, agg_cfg.lacp_rate, system_id);
+        manager.reconcile(
+            members,
+            agg_cfg.lacp_rate,
+            system_id,
+            agg_cfg.lacp_system_priority.unwrap_or(DEFAULT_PRIORITY),
+        );
     }
 
     debug!(count = lacp_names.len(), "reconciled lacp aggregates");

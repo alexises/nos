@@ -34,7 +34,7 @@ async fn get_summary_lists_every_aggregate_sorted_with_its_rate() {
         let manager = AggregateManager::new(name, key, push_tx.clone());
         // No members: exercises the summary/rate plumbing without needing a
         // raw socket (which needs CAP_NET_RAW).
-        manager.reconcile(Vec::new(), rate, None);
+        manager.reconcile(Vec::new(), rate, None, 32768);
         aggregates
             .lock()
             .unwrap()

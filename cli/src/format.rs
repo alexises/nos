@@ -137,8 +137,12 @@ fn render_lacp_port(port: &nos_proto::LacpPortStatus) -> String {
         ),
         _ => "partner none".to_string(),
     };
+    let partner_priority = match (port.partner_system_priority, port.partner_port_priority) {
+        (Some(system), Some(port)) => format!(", partner priority {system}/{port}"),
+        _ => String::new(),
+    };
     format!(
-        "  {}: port {}, receive {receive}, mux {mux}, {partner}, selected {}, synchronized {}, churn {}",
+        "  {}: port {}, receive {receive}, mux {mux}, {partner}, selected {}, synchronized {}, churn {}, port priority {}{partner_priority}",
         port.interface,
         port.actor_port_number,
         yes_no(port.selected),
@@ -149,6 +153,7 @@ fn render_lacp_port(port: &nos_proto::LacpPortStatus) -> String {
             (false, true) => "partner",
             (true, true) => "actor+partner",
         },
+        port.actor_port_priority,
     )
 }
 
@@ -308,10 +313,11 @@ pub fn render_lacp_summaries(summaries: &[PortAggregateLacpSummary]) -> String {
                 LacpRate::Fast => "fast",
             };
             let mut lines = vec![format!(
-                "lacp {}: system {}, key {}, rate {rate}",
+                "lacp {}: system {}, key {}, rate {rate}, system priority {}",
                 s.aggregate,
                 format_mac(s.actor_system_id),
-                s.actor_key
+                s.actor_key,
+                s.actor_system_priority
             )];
             if s.ports.is_empty() {
                 lines.push("  no member ports".to_string());
@@ -1660,6 +1666,7 @@ mod tests {
             aggregate: "bond1".to_string(),
             actor_system_id: [2, 0, 0, 0, 0, 0xab],
             actor_key: 7,
+            actor_system_priority: 100,
             rate: LacpRate::Fast,
             ports: vec![
                 nos_proto::LacpPortStatus {
@@ -1670,6 +1677,9 @@ mod tests {
                     partner_system_id: Some([2, 0, 0, 0, 0, 1]),
                     partner_key: Some(3),
                     partner_port_number: Some(9),
+                    actor_port_priority: 50,
+                    partner_system_priority: Some(200),
+                    partner_port_priority: Some(60),
                     selected: true,
                     synchronized: true,
                     actor_churn: false,
@@ -1683,6 +1693,9 @@ mod tests {
                     partner_system_id: None,
                     partner_key: None,
                     partner_port_number: None,
+                    actor_port_priority: 32768,
+                    partner_system_priority: None,
+                    partner_port_priority: None,
                     selected: false,
                     synchronized: false,
                     actor_churn: false,
@@ -1691,8 +1704,10 @@ mod tests {
             ],
         };
         let out = render_lacp_summaries(&[summary]);
-        assert!(out.contains("lacp bond1: system 02:00:00:00:00:ab, key 7, rate fast"));
-        assert!(out.contains("eth1: port 4, receive current, mux distributing, partner 02:00:00:00:00:01 key 3 port 9, selected yes, synchronized yes"));
+        assert!(out.contains(
+            "lacp bond1: system 02:00:00:00:00:ab, key 7, rate fast, system priority 100"
+        ));
+        assert!(out.contains("eth1: port 4, receive current, mux distributing, partner 02:00:00:00:00:01 key 3 port 9, selected yes, synchronized yes, churn none, port priority 50, partner priority 200/60"));
         assert!(out.contains("eth2: port 5, receive defaulted, mux detached, partner none, selected no, synchronized no, churn partner"));
     }
 
@@ -1859,6 +1874,9 @@ mod tests {
             partner_system_id: Some([2, 0, 0, 0, 0, 1]),
             partner_key: None,
             partner_port_number: None,
+            actor_port_priority: 32768,
+            partner_system_priority: None,
+            partner_port_priority: None,
             selected: false,
             synchronized: false,
             actor_churn,
@@ -1889,10 +1907,13 @@ mod tests {
             aggregate: "bond1".to_string(),
             actor_system_id: [0; 6],
             actor_key: 1,
+            actor_system_priority: 32768,
             rate: LacpRate::Slow,
             ports: Vec::new(),
         };
-        assert!(render_lacp_summaries(&[empty]).ends_with("rate slow\n  no member ports"));
+        assert!(
+            render_lacp_summaries(&[empty]).ends_with("system priority 32768\n  no member ports")
+        );
     }
 
     #[test]

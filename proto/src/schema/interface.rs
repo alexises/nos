@@ -214,6 +214,15 @@ pub struct Interface {
     #[cli(topic = InterfacePortAggregate)]
     pub port_aggregate: Option<String>,
 
+    /// The LACP Actor Port Priority `nos-lacpd` advertises for this link
+    /// (802.1AX); `None` = 32768. Lower is higher priority. Only meaningful
+    /// while `port_aggregate` names a `Lacp`-mode aggregate; ignored (not
+    /// rejected) otherwise.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = InterfaceLacpPortPriority)]
+    pub lacp_port_priority: Option<u16>,
+
     /// The link's MTU, in bytes. A link-layer property of the physical (or
     /// loopback) interface itself — unlike `addresses`/`routing_table`, it's
     /// not part of the loopback/physical addressing split (see
@@ -469,6 +478,7 @@ mod tests {
             ospf_profile: None,
             switching_profile: None,
             port_aggregate: None,
+            lacp_port_priority: None,
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,
@@ -948,6 +958,7 @@ mod tests {
             redundancy_mode: crate::schema::EsRedundancy::default(),
             df_algorithm: crate::schema::DfAlgorithm::default(),
             lacp_system_id: None,
+            lacp_system_priority: None,
             switching_profile: None,
             mtu: None,
             subinterfaces: Vec::new(),

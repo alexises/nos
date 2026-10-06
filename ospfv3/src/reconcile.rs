@@ -655,6 +655,7 @@ mod tests {
             ospfv3_profile: ospfv3_profile.map(str::to_string),
             switching_profile: None,
             port_aggregate: None,
+            lacp_port_priority: None,
             mtu: None,
             lldp_transmit: false,
             lldp_receive: false,
