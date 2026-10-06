@@ -22,6 +22,51 @@ const COLLECTOR_INFO_LEN: u8 = 16;
 /// partially parsed.
 pub const LACPDU_LEN: usize = 110;
 
+const SUBTYPE_MARKER: u8 = 0x02;
+const TLV_MARKER_INFO: u8 = 0x01;
+const TLV_MARKER_RESPONSE: u8 = 0x02;
+const MARKER_INFO_LEN: u8 = 16;
+
+/// A Marker PDU's requester fields (802.1AX §6.5.3.3) — exactly what a
+/// Marker Response must echo back. We only ever respond, never generate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Marker {
+    pub requester_port: u16,
+    pub requester_system: [u8; 6],
+    pub transaction_id: u32,
+}
+
+/// Decodes a Marker *request* (TLV 0x01); a Marker Response, a LACPDU or
+/// anything short gives `None`. Like `decode`, reads fixed offsets only: the
+/// length, version and terminator bytes are not validated (Linux sends 0x16
+/// where the standard says 16).
+pub fn decode_marker(data: &[u8]) -> Option<Marker> {
+    if data.len() < 16 || data[0] != SUBTYPE_MARKER || data[2] != TLV_MARKER_INFO {
+        return None;
+    }
+    Some(Marker {
+        requester_port: u16::from_be_bytes([data[4], data[5]]),
+        requester_system: data[6..12].try_into().unwrap(),
+        transaction_id: u32::from_be_bytes([data[12], data[13], data[14], data[15]]),
+    })
+}
+
+/// A clean Marker Response PDU (same 110-byte body as a LACPDU).
+pub fn encode_marker_response(m: &Marker) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(LACPDU_LEN);
+    buf.extend_from_slice(&[
+        SUBTYPE_MARKER,
+        VERSION_NUMBER,
+        TLV_MARKER_RESPONSE,
+        MARKER_INFO_LEN,
+    ]);
+    buf.extend_from_slice(&m.requester_port.to_be_bytes());
+    buf.extend_from_slice(&m.requester_system);
+    buf.extend_from_slice(&m.transaction_id.to_be_bytes());
+    buf.resize(LACPDU_LEN, 0); // pad, terminator TLV and reserved are all zero
+    buf
+}
+
 /// 802.1AX Table 6-4 Actor/Partner State bit positions (LSB-first).
 pub mod state_bit {
     pub const ACTIVITY: u8 = 1 << 0;
@@ -187,6 +232,38 @@ mod tests {
         });
         buf[0] = 0x02; // Marker protocol subtype, not LACP
         assert_eq!(decode(&buf), Err(PacketError::WrongSubtype(0x02)));
+    }
+
+    fn marker_pdu(tlv: u8, len_byte: u8) -> Vec<u8> {
+        let mut b = vec![0u8; LACPDU_LEN];
+        b[..4].copy_from_slice(&[0x02, 0x01, tlv, len_byte]);
+        b[4..6].copy_from_slice(&7u16.to_be_bytes());
+        b[6..12].copy_from_slice(&[2, 0, 0, 0, 0x0b, 7]);
+        b[12..16].copy_from_slice(&0x4e4f_5359_u32.to_be_bytes());
+        b
+    }
+
+    #[test]
+    fn marker_response_echoes_requester() {
+        let m = decode_marker(&marker_pdu(1, 0x16)).expect("linux-shaped marker");
+        assert_eq!(m.requester_port, 7);
+        let r = encode_marker_response(&m);
+        assert_eq!(r.len(), LACPDU_LEN);
+        assert_eq!(&r[..4], &[0x02, 0x01, 0x02, 0x10]);
+        assert_eq!(&r[4..16], &marker_pdu(1, 0)[4..16]);
+        assert!(r[16..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn decode_marker_ignores_responses_lacpdus_and_short() {
+        assert_eq!(decode_marker(&marker_pdu(2, 0x10)), None);
+        assert_eq!(decode_marker(&marker_pdu(1, 0x10)[..15]), None);
+        let lacpdu = encode(&Lacpdu {
+            actor: sample_info(),
+            partner: sample_info(),
+            collector_max_delay: 0,
+        });
+        assert_eq!(decode_marker(&lacpdu), None);
     }
 
     #[test]
