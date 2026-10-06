@@ -425,6 +425,32 @@ impl Router {
         self.logs.count(pattern)
     }
 
+    /// Asserts (#190) that the first `after` line past `after_baseline` came
+    /// under `max_ms` after the latest `before` line (both from this
+    /// router's own logs, so no cross-host clock).
+    pub fn assert_delay_under(
+        &self,
+        before: &str,
+        after: &str,
+        after_baseline: usize,
+        max_ms: u64,
+    ) -> anyhow::Result<()> {
+        let Some(d) = self.logs.delay_ms(before, after, after_baseline) else {
+            bail!("{}: no '{before}' then '{after}' pair to time", self.name());
+        };
+        log(format!(
+            "{}: '{after}' came {d}ms after '{before}'",
+            self.name()
+        ));
+        if d >= max_ms {
+            bail!(
+                "{}: '{after}' took {d}ms (>= {max_ms}ms) after '{before}'",
+                self.name()
+            );
+        }
+        Ok(())
+    }
+
     /// Waits (up to 60s) for the pattern to appear at all.
     pub async fn wait(&self, pattern: &str) -> anyhow::Result<()> {
         self.wait_new(pattern, 0, 60).await

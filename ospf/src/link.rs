@@ -1799,6 +1799,8 @@ pub struct LinkManager {
     /// multi-valued in this NOS's config schema, so a flat LSDB would leak
     /// LSAs across areas the moment a second one is configured.
     lsdbs: Mutex<HashMap<Ipv4Addr, Arc<Mutex<Lsdb>>>>,
+    /// Woken by every LSDB change; see `route_changed`.
+    route_changed: Arc<tokio::sync::Notify>,
     /// Set on every `reconcile` call, read by the background origination
     /// task started in `new`.
     router_id: Mutex<Option<Ipv4Addr>>,
@@ -1947,6 +1949,7 @@ impl LinkManager {
         let manager = Arc::new(Self {
             links: Mutex::new(HashMap::new()),
             lsdbs: Mutex::new(HashMap::new()),
+            route_changed: Arc::new(tokio::sync::Notify::new()),
             router_id: Mutex::new(None),
             stub_networks: Mutex::new(HashMap::new()),
             age_multiplier,
@@ -2138,13 +2141,11 @@ impl LinkManager {
 
     /// Gets or creates the shared LSDB for `area_id`.
     async fn lsdb_for(&self, area_id: Ipv4Addr) -> Arc<Mutex<Lsdb>> {
-        Arc::clone(
-            self.lsdbs
-                .lock()
-                .await
-                .entry(area_id)
-                .or_insert_with(|| Arc::new(Mutex::new(Lsdb::new()))),
-        )
+        Arc::clone(self.lsdbs.lock().await.entry(area_id).or_insert_with(|| {
+            Arc::new(Mutex::new(Lsdb::with_notify(Arc::clone(
+                &self.route_changed,
+            ))))
+        }))
     }
 
     /// RFC 2328 §14: ages every installed LSA, in every area, by one
@@ -2718,7 +2719,9 @@ impl LinkManager {
                 0
             };
             let (commands, commands_rx) = mpsc::unbounded_channel();
-            let link_local_lsdb = Arc::new(Mutex::new(Lsdb::new()));
+            let link_local_lsdb = Arc::new(Mutex::new(Lsdb::with_notify(Arc::clone(
+                &self.route_changed,
+            ))));
             let task = tokio::spawn(run(
                 (self.opener)(&cfg),
                 cfg.clone(),
@@ -2795,6 +2798,12 @@ impl LinkManager {
             }
         }
         result
+    }
+
+    /// Woken (one stored permit) whenever any LSDB changes, so a consumer of
+    /// `compute_routes` need not poll.
+    pub fn route_changed(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.route_changed)
     }
 
     /// Runs `crate::spf::compute` against every area's current LSDB and

@@ -1,9 +1,8 @@
 //! Pushes this instance's current SPF-computed routes to the owning
 //! `nos-ribd` instance for kernel installation — mirrors
-//! `ospf::rib_push_client` exactly (fixed 2s poll, `Full` snapshot on
-//! connect, diffed `Add`/`Remove` afterward — same rationale: this crate's
-//! `Lsdb` mutates from too many call sites for a single edge-triggered
-//! hook). `RibRequest::PushOspfRoutes`/`OspfRoute{prefix: IpNet, next_hop:
+//! `ospf::rib_push_client` exactly (recompute on every `Lsdb` change
+//! plus a 2s fallback poll, `Full` snapshot on connect, diffed
+//! `Add`/`Remove` afterward). `RibRequest::PushOspfRoutes`/`OspfRoute{prefix: IpNet, next_hop:
 //! IpAddr, ..}` are already address-family-generic, confirmed in the
 //! `OSPFv3` Phase 1 plan — this file needs no `nos-ribd`-side changes,
 //! just `IpNet::V6`/`IpAddr::V6` on the wire instead of `V4`, plus (unlike
@@ -28,7 +27,11 @@ use tracing::{debug, warn};
 use crate::link::LinkManager;
 use crate::watchdog_client::resolve_once;
 
+// ponytail: the 2s poll is only a safety net for SPF inputs that don't touch
+// an LSDB (neighbor state, area reconcile); upgrade by notifying from them.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Pause after a change before recomputing, so an LSU burst runs one SPF.
+const HOLD_DOWN: Duration = Duration::from_millis(50);
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Spawns the background task that owns the route-push connection for this
@@ -100,8 +103,9 @@ async fn run(
         let mut last_sent = routes;
         debug!(table = %table, routes = last_sent.len(), "sent initial ospfv3 route snapshot to nos-ribd");
 
+        let changed = links.route_changed();
         loop {
-            if wait_or_shutdown(POLL_INTERVAL, &mut shutdown).await {
+            if wait_for_change(&changed, &mut shutdown).await {
                 return;
             }
             let new_table = routing_table_rx.borrow().clone();
@@ -154,6 +158,20 @@ impl Pushed {
             metric: self.metric,
             discard: false,
         }
+    }
+}
+
+/// Waits for the next reason to recompute routes: an LSDB change (then a
+/// `HOLD_DOWN` pause, so an LSU burst costs one SPF, not one per LSA), the
+/// `POLL_INTERVAL` fallback, or shutdown. Returns `true` to stop entirely.
+async fn wait_for_change(
+    changed: &tokio::sync::Notify,
+    shutdown: &mut watch::Receiver<bool>,
+) -> bool {
+    tokio::select! {
+        () = changed.notified() => wait_or_shutdown(HOLD_DOWN, shutdown).await,
+        () = tokio::time::sleep(POLL_INTERVAL) => false,
+        _ = shutdown.changed() => *shutdown.borrow(),
     }
 }
 
@@ -306,5 +324,22 @@ mod tests {
         ];
         expected.sort_by_key(|u| format!("{u:?}"));
         assert_eq!(updates, expected);
+    }
+
+    /// A change wakes the loop long before the fallback poll; a burst of
+    /// changes stores one permit, so it costs exactly one wake-up.
+    #[tokio::test(start_paused = true)]
+    async fn change_wakes_early_and_bursts_coalesce() {
+        let n = tokio::sync::Notify::new();
+        let (_tx, mut rx) = watch::channel(false);
+        let start = tokio::time::Instant::now();
+        for _ in 0..5 {
+            n.notify_one();
+        }
+        assert!(!wait_for_change(&n, &mut rx).await);
+        assert_eq!(start.elapsed(), HOLD_DOWN);
+        // The burst is spent: the next wait falls back to the poll tick.
+        assert!(!wait_for_change(&n, &mut rx).await);
+        assert_eq!(start.elapsed(), HOLD_DOWN + POLL_INTERVAL);
     }
 }

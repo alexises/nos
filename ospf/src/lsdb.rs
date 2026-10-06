@@ -32,6 +32,9 @@ pub struct Lsdb {
     /// Ticks each entry has already spent at `MAX_AGE` — see
     /// `MAX_AGE_HOLD_TICKS`.
     max_age_ticks: HashMap<LsaKey, u16>,
+    /// Fired on every change that can alter SPF input (install, remove,
+    /// evict) so `rib_push_client` recomputes at once instead of on its poll.
+    notify: Option<Arc<tokio::sync::Notify>>,
     /// When each key's current instance was last accepted via flooding
     /// (`install_received`) — see `MIN_LS_ARRIVAL`. Self-originated installs
     /// don't record here: they're paced by `lsa::MIN_LS_INTERVAL` instead.
@@ -57,6 +60,20 @@ impl Lsdb {
         Self::default()
     }
 
+    /// An empty LSDB that wakes `notify` whenever its contents change.
+    pub fn with_notify(notify: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            notify: Some(notify),
+            ..Self::default()
+        }
+    }
+
+    fn kick(&self) {
+        if let Some(n) = &self.notify {
+            n.notify_one();
+        }
+    }
+
     /// Installs `lsa` if it's newer than (or new relative to) what's held —
     /// see `lsa::is_newer`.
     pub fn install(&mut self, lsa: Lsa) -> InstallOutcome {
@@ -70,10 +87,12 @@ impl Lsdb {
                 // (same sequence, age now MaxAge) starts it.
                 self.max_age_ticks.remove(&key);
                 self.entries.insert(key, Arc::new(lsa));
+                self.kick();
                 InstallOutcome::Superseded
             }
             None => {
                 self.entries.insert(key, Arc::new(lsa));
+                self.kick();
                 InstallOutcome::Installed
             }
         }
@@ -106,6 +125,7 @@ impl Lsdb {
     /// (see `link::handle_lsu`).
     pub fn remove(&mut self, key: &LsaKey) {
         self.entries.remove(key);
+        self.kick();
         self.max_age_ticks.remove(key);
         self.last_received.remove(key);
     }
@@ -165,6 +185,9 @@ impl Lsdb {
             }
             true
         });
+        if !evicted.is_empty() {
+            self.kick();
+        }
         evicted
     }
 }
@@ -172,6 +195,8 @@ impl Lsdb {
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+
+    use futures::FutureExt;
 
     use super::*;
     use crate::lsa::{LsaBody, RouterLsaBody};
@@ -361,5 +386,22 @@ mod tests {
         let t0 = Instant::now();
         db.install(lsa(1));
         assert_eq!(db.install_received(lsa(2), t0), InstallOutcome::Superseded);
+    }
+
+    /// Every change that can alter SPF input wakes the notify; a rejected
+    /// install does not.
+    #[tokio::test]
+    async fn changes_notify_and_rejects_do_not() {
+        let n = Arc::new(tokio::sync::Notify::new());
+        let mut db = Lsdb::with_notify(Arc::clone(&n));
+        let fired = |n: &tokio::sync::Notify| n.notified().now_or_never().is_some();
+        db.install(lsa(2));
+        assert!(fired(&n));
+        db.install(lsa(3));
+        assert!(fired(&n));
+        db.install(lsa(1));
+        assert!(!fired(&n));
+        db.remove(&lsa(1).header.key());
+        assert!(fired(&n));
     }
 }

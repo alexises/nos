@@ -3,12 +3,9 @@
 //! `bgp::rib_push_client`, same shape (a persistent connection, `Full`
 //! snapshot on connect, diffed `Add`/`Remove` afterward).
 //!
-//! Also driven by a fixed poll rather than an edge trigger, for the same
-//! reason `bgp::rib_push_client` is: this crate's `Lsdb` mutates from many
-//! call sites (self-origination, `handle_lsu`, a resync's link changes),
-//! with no single hook to push a notification out from. Polling and
-//! diffing gets the same converged end state for far less surface area, at
-//! the cost of up to one poll interval's propagation latency.
+//! Event-driven: every `Lsdb` change wakes it (`LinkManager::route_changed`),
+//! a 50ms hold-down coalesces an LSU burst into one SPF, and a 2s poll
+//! remains as a safety net for inputs that don't touch an LSDB.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -31,12 +28,11 @@ use tracing::{debug, warn};
 use crate::link::LinkManager;
 use crate::watchdog_client::resolve_once;
 
-// ponytail: fixed poll, not edge-triggered from `Lsdb::install`'s many call
-// sites — upgrade to a `Notify` wired through them if sub-poll-interval
-// kernel convergence is ever required. Matches `ORIGINATION_INTERVAL`
-// (`link.rs`), so a route reflects an LSDB change about as promptly as the
-// self-originated LSA that caused it.
+// ponytail: the 2s poll is only a safety net for SPF inputs that don't touch
+// an LSDB (neighbor state, area reconcile); upgrade by notifying from them.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Pause after a change before recomputing, so an LSU burst runs one SPF.
+const HOLD_DOWN: Duration = Duration::from_millis(50);
 /// Matches every other reconnect/resolve loop in this codebase.
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -111,8 +107,9 @@ async fn run(
 
         // Inner loop: same connection, same owning table, until the table
         // changes to something else (including `None`) or a write fails.
+        let changed = links.route_changed();
         loop {
-            if wait_or_shutdown(POLL_INTERVAL, &mut shutdown).await {
+            if wait_for_change(&changed, &mut shutdown).await {
                 return;
             }
             let new_table = routing_table_rx.borrow().clone();
@@ -142,6 +139,20 @@ async fn run(
         }
         // Reconnect (or idle, if the table is now None) immediately — the
         // outer loop re-reads the current snapshot from scratch.
+    }
+}
+
+/// Waits for the next reason to recompute routes: an LSDB change (then a
+/// `HOLD_DOWN` pause, so an LSU burst costs one SPF, not one per LSA), the
+/// `POLL_INTERVAL` fallback, or shutdown. Returns `true` to stop entirely.
+async fn wait_for_change(
+    changed: &tokio::sync::Notify,
+    shutdown: &mut watch::Receiver<bool>,
+) -> bool {
+    tokio::select! {
+        () = changed.notified() => wait_or_shutdown(HOLD_DOWN, shutdown).await,
+        () = tokio::time::sleep(POLL_INTERVAL) => false,
+        _ = shutdown.changed() => *shutdown.borrow(),
     }
 }
 
@@ -345,5 +356,22 @@ mod tests {
                 discard: false,
             })]
         );
+    }
+
+    /// A change wakes the loop long before the fallback poll; a burst of
+    /// changes stores one permit, so it costs exactly one wake-up.
+    #[tokio::test(start_paused = true)]
+    async fn change_wakes_early_and_bursts_coalesce() {
+        let n = tokio::sync::Notify::new();
+        let (_tx, mut rx) = watch::channel(false);
+        let start = tokio::time::Instant::now();
+        for _ in 0..5 {
+            n.notify_one();
+        }
+        assert!(!wait_for_change(&n, &mut rx).await);
+        assert_eq!(start.elapsed(), HOLD_DOWN);
+        // The burst is spent: the next wait falls back to the poll tick.
+        assert!(!wait_for_change(&n, &mut rx).await);
+        assert_eq!(start.elapsed(), HOLD_DOWN + POLL_INTERVAL);
     }
 }

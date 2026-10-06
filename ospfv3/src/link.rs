@@ -1356,6 +1356,8 @@ pub struct LinkManager {
     /// Area-scoped LSAs (Router/Network/Intra-Area-Prefix and their RFC
     /// 8362 counterparts), per area id, shared by every link in that area.
     lsdbs: Mutex<HashMap<Ipv4Addr, Arc<Mutex<Lsdb>>>>,
+    /// Woken by every LSDB change; see `route_changed`.
+    route_changed: Arc<tokio::sync::Notify>,
     /// Link-local-scoped LSAs (Link-LSA/E-Link-LSA), per attach point —
     /// exclusively that link's own, so a link's DBD summary/flood can never
     /// offer another link's Link-LSAs (RFC 5340 §4.5.1). SPF still merges
@@ -1504,11 +1506,13 @@ impl LinkManager {
         dbd_max_headers: Option<usize>,
         opener: Opener,
     ) -> Arc<Self> {
+        let route_changed = Arc::new(tokio::sync::Notify::new());
         let manager = Arc::new(Self {
             links: Mutex::new(HashMap::new()),
             lsdbs: Mutex::new(HashMap::new()),
             link_local_lsdbs: Mutex::new(HashMap::new()),
-            as_lsdb: Arc::new(Mutex::new(Lsdb::new())),
+            as_lsdb: Arc::new(Mutex::new(Lsdb::with_notify(Arc::clone(&route_changed)))),
+            route_changed,
             redistribute_raw: Mutex::new(HashSet::new()),
             redistribute_filtered: Mutex::new(HashSet::new()),
             redistribute_policy: Mutex::new(Arc::new(nos_rpl::ACCEPT_ALL.clone())),
@@ -1544,13 +1548,11 @@ impl LinkManager {
     }
 
     async fn lsdb_for(&self, area_id: Ipv4Addr) -> Arc<Mutex<Lsdb>> {
-        Arc::clone(
-            self.lsdbs
-                .lock()
-                .await
-                .entry(area_id)
-                .or_insert_with(|| Arc::new(Mutex::new(Lsdb::new()))),
-        )
+        Arc::clone(self.lsdbs.lock().await.entry(area_id).or_insert_with(|| {
+            Arc::new(Mutex::new(Lsdb::with_notify(Arc::clone(
+                &self.route_changed,
+            ))))
+        }))
     }
 
     async fn link_local_lsdb_for(&self, attach_point: &str) -> Arc<Mutex<Lsdb>> {
@@ -1559,7 +1561,11 @@ impl LinkManager {
                 .lock()
                 .await
                 .entry(attach_point.to_string())
-                .or_insert_with(|| Arc::new(Mutex::new(Lsdb::new()))),
+                .or_insert_with(|| {
+                    Arc::new(Mutex::new(Lsdb::with_notify(Arc::clone(
+                        &self.route_changed,
+                    ))))
+                }),
         )
     }
 
@@ -2202,6 +2208,12 @@ impl LinkManager {
             result.push(to_lsa_summary(Ipv4Addr::UNSPECIFIED, None, &header));
         }
         result
+    }
+
+    /// Woken (one stored permit) whenever any LSDB changes, so a consumer of
+    /// `compute_routes` need not poll.
+    pub fn route_changed(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.route_changed)
     }
 
     /// Runs `crate::spf::compute` against every area's current LSDB and
