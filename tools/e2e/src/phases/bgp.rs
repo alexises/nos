@@ -5646,5 +5646,106 @@ pub async fn bgp_role(w: &mut World) -> anyhow::Result<()> {
     a.edit(set_role(Some(nos_proto::BgpRole::Provider), false))
         .await?;
     a.wait_new(est, ea, 60).await?;
-    a.assert_quiet("bgp role negotiated", na, 3).await
+    a.assert_quiet("bgp role negotiated", na, 3).await?;
+    otc(w).await
+}
+
+/// RFC 9234 §5 Only-to-Customer (#221), router-b in the middle: a and c are
+/// its providers (a provider-learned route is not re-advertised between them),
+/// then c its customer (it receives a's route carrying OTC = a's ASN), and an
+/// ExaBGP customer sending a raw OTC is a leak, dropped by the ingress rule
+/// even though ExaBGP sent no Role capability (the configured role applies).
+async fn otc(w: &mut World) -> anyhow::Result<()> {
+    let est = "bgp session established";
+    let b_group = |group: &str, asn: u32, peer: &str, role: &str| {
+        strings(&[
+            "--address",
+            &format!("{IP_B}/24"),
+            "--asn",
+            &ASN_B.to_string(),
+            "--router-id",
+            RID_B,
+            "--peer-group",
+            group,
+            "--remote-as",
+            &asn.to_string(),
+            "--peer",
+            peer,
+            "--role",
+            role,
+        ])
+    };
+    let c_flags = |role: &str| {
+        strings(&[
+            "--address",
+            &format!("{IP_C}/24"),
+            "--asn",
+            &ASN_C.to_string(),
+            "--router-id",
+            RID_C,
+            "--remote-as",
+            &ASN_B.to_string(),
+            "--peer",
+            IP_B,
+            "--role",
+            role,
+        ])
+    };
+
+    log("otc: a and c are both providers of b; a's route is not passed from one to the other");
+    let mut flags = redistribute();
+    flags.extend(["--role", "provider"]);
+    w.a()?.provision(&flags).await?;
+    w.b()?.provision(&["--role", "customer"]).await?;
+    w.b()?
+        .provision_flags(&b_group("pg-c", ASN_C, IP_C, "customer"))
+        .await?;
+    w.start(C, Some(c_flags("provider")), &[]).await?;
+    let (b, c) = (w.b()?, w.c()?);
+    c.wait(est).await?;
+    b.wait(&format!("{} .*otc=Some({ASN_A})", learned()))
+        .await?;
+    b.wait(&loc_rib()).await?;
+    c.assert_quiet(&learned(), 0, 10).await?;
+
+    log("otc: c becomes b's customer; it now receives a's route carrying OTC = a's asn");
+    let base = c.count(est);
+    c.provision_flags(&c_flags("customer")).await?;
+    b.provision_flags(&b_group("pg-c", ASN_C, IP_C, "provider"))
+        .await?;
+    c.wait_new(est, base, 60).await?;
+    c.wait(&format!("{} .*otc=Some({ASN_A})", learned()))
+        .await?;
+
+    log("otc: a customer's OTC is a route leak, dropped although it sent no Role capability");
+    w.b()?
+        .provision_flags(&b_group("pg-g", ASN_G, IP_G, "provider"))
+        .await?;
+    ensure_exabgp(w).await?;
+    let conf = format!(
+        "neighbor {IP_B} {{\n    router-id {RID_G};\n    local-address {IP_G};\n    \
+         local-as {ASN_G};\n    peer-as {ASN_B};\n    family {{ ipv4 unicast; }}\n    \
+         static {{\n        route {OTC_LEAK_PREFIX} next-hop {IP_G} as-path [ {ASN_G} ] \
+         attribute [ 0x23 0xc0 0x0000fde8 ];\n    }}\n}}\n"
+    );
+    w.dock
+        .start_plain(
+            "router-g",
+            EXABGP_IMAGE,
+            NET,
+            IP_G,
+            &["/etc/exabgp.conf"],
+            ("/etc", "exabgp.conf", conf.as_bytes()),
+        )
+        .await?;
+    let b = w.b()?;
+    b.wait("route leak detected").await?;
+    anyhow::ensure!(
+        b.count(&format!("loc-rib best path for {OTC_LEAK_PREFIX}")) == 0
+            && b.count(&format!("learned route for {OTC_LEAK_PREFIX}")) == 0,
+        "router-b kept the leaked {OTC_LEAK_PREFIX}"
+    );
+    w.dock.container_remove("router-g").await;
+    w.remove(C).await;
+    Ok(())
 }

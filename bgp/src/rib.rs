@@ -78,6 +78,7 @@
 //! peer-keyed table for `adj_rib_in`, and `PeerSlot`'s job is strictly RFC
 //! 4271 §6.8 arbitration, not routing state.
 
+use nos_proto::BgpRole::{Customer, Peer, Provider, RouteServer, RouteServerClient};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -391,6 +392,7 @@ fn learn_prefix(
                 path_id = id,
                 atomic_aggregate = route.atomic_aggregate,
                 aggregator = ?route.aggregator.map(|a| (a.asn, a.router_id)),
+                otc = ?route.otc,
                 validation_state = ?route.validation_state,
                 communities = ?route.communities,
                 "bgp: learned route for {prefix} into adj-rib-in"
@@ -501,6 +503,8 @@ pub struct RibRoute {
     /// aggregate (`aggregate::build_aggregate`).
     pub atomic_aggregate: bool,
     pub aggregator: Option<message::Aggregator>,
+    /// RFC 9234 Only to Customer ASN (`message::PathAttributes::otc`).
+    pub otc: Option<u32>,
     /// RFC 6811 origin validation against the instance's current VRP set,
     /// computed before import policy runs (`this.bgp.validation_state`).
     pub validation_state: nos_rpl::ValidationState,
@@ -588,6 +592,8 @@ pub struct AdvertisedRoute {
     /// Transitive: forwarded unchanged to every eligible peer.
     pub atomic_aggregate: bool,
     pub aggregator: Option<message::Aggregator>,
+    /// RFC 9234 Only to Customer ASN (`message::PathAttributes::otc`).
+    pub otc: Option<u32>,
     /// RFC 7911 ADD-PATH identifier — `Some` exactly toward a peer we send
     /// ADD-PATH to for this family (`BgpRib::propagate_add_path`). `None`
     /// without ADD-PATH.
@@ -636,6 +642,8 @@ struct PeerOutbox {
     announce_rpki_state: bool,
     /// See `BgpRib::peer_asns`.
     remote_asn: u32,
+    /// RFC 9234: the peer's role (the counterpart of the configured one).
+    remote_role: Option<nos_proto::BgpRole>,
     /// Address families we send RFC 7911 ADD-PATH ids to this peer for
     /// (`fsm::negotiate_add_path`). Every NLRI of such a family must carry
     /// one, so the plain fan-out skips them and `propagate_add_path` sends
@@ -676,7 +684,7 @@ pub struct BgpRib {
     confed_peers: HashSet<IpAddr>,
     /// External peers whose peer-group sets `local-as` (`set_peer_local_as`).
     local_as_peers: HashMap<IpAddr, nos_proto::BgpLocalAs>,
-    /// Peers with a negotiated RFC 9234 role (`set_peer_role`), ours toward them.
+    /// Peers with a configured RFC 9234 role (`set_peer_role`), ours toward them.
     role_peers: HashMap<IpAddr, nos_proto::BgpRole>,
     /// iBGP peers exchanging RFC 8097 states (`set_peer_rpki_state`).
     rpki_state_peers: HashSet<IpAddr>,
@@ -975,8 +983,8 @@ impl BgpRib {
         };
     }
 
-    /// Records our negotiated RFC 9234 role toward `peer` (`None`: none
-    /// negotiated). Call before `peer_established`, like `set_peer_local_as`.
+    /// Records our configured RFC 9234 role toward `peer` (`None`: none).
+    /// RFC 9234 §4.2: the procedures apply even when the peer sent no Role. Call before `peer_established`, like `set_peer_local_as`.
     pub fn set_peer_role(&mut self, peer: IpAddr, role: Option<nos_proto::BgpRole>) {
         match role {
             Some(r) => self.role_peers.insert(peer, r),
@@ -984,7 +992,7 @@ impl BgpRib {
         };
     }
 
-    /// Our negotiated RFC 9234 role toward `peer`, if any.
+    /// Our configured RFC 9234 role toward `peer`, if any.
     pub fn peer_role(&self, peer: IpAddr) -> Option<nos_proto::BgpRole> {
         self.role_peers.get(&peer).copied()
     }
@@ -1096,6 +1104,7 @@ impl BgpRib {
                 is_rr_client,
                 is_rs_client,
                 remote_asn,
+                remote_role: self.role_peers.get(&peer).map(|r| r.counterpart()),
                 add_path_tx,
                 add_path_send_count: self.add_path_counts.get(&peer).copied().unwrap_or(
                     nos_proto::BgpPeerGroup::default_add_path_send_count(is_rs_client),
@@ -1808,6 +1817,17 @@ impl BgpRib {
                 return;
             };
             let from_confed = self.confed_peers.contains(&from);
+            // RFC 9234 §5 applies to unicast only, never EVPN.
+            let unicast =
+                !update.nlri.is_empty() || update.mp_reach.iter().any(|m| !m.nlri.is_empty());
+            // RFC 9234 §5 ingress 3: a route from a Provider, Peer or Route
+            // Server with no OTC gets the neighbor's ASN.
+            let otc = match self.role_peers.get(&from).map(|r| r.counterpart()) {
+                Some(Provider | Peer | RouteServer) if unicast && attrs.otc.is_none() => {
+                    Some(peer_as)
+                }
+                _ => attrs.otc,
+            };
             // RFC 5065 §5.3 / RFC 7606 §7.2: confederation segments only ever
             // come from inside our own confederation.
             let stray_confed = attrs.as_path.has_confed()
@@ -1833,6 +1853,17 @@ impl BgpRib {
                 warn!(
                     peer = %from, as_path = ?attrs.as_path,
                     "dropping bgp update: as_path already contains our own asn (loop prevention)"
+                );
+                self.withdraw_announced(from, update, &announced, &mut touched);
+            } else if let Some(role) = unicast
+                .then(|| self.role_peers.get(&from).map(|r| r.counterpart()))
+                .flatten()
+                .filter(|&r| otc_leak(r, attrs.otc, peer_as))
+            {
+                warn!(
+                    peer = %from, prefix = ?announced.iter().map(|a| a.0).collect::<Vec<_>>(),
+                    otc = ?attrs.otc, role = ?role,
+                    "route leak detected: dropping bgp update (rfc 9234 only-to-customer)"
                 );
                 self.withdraw_announced(from, update, &announced, &mut touched);
             } else if attrs.cluster_list.contains(&self.cluster_id) {
@@ -1894,6 +1925,7 @@ impl BgpRib {
                     large_communities: attrs.large_communities.clone(),
                     atomic_aggregate: attrs.atomic_aggregate,
                     aggregator: attrs.aggregator,
+                    otc,
                     validation_state: nos_rpl::ValidationState::NotFound,
                     received_ov,
                 };
@@ -2409,6 +2441,7 @@ fn redistributed_route() -> RibRoute {
         originator_id: None,
         atomic_aggregate: false,
         aggregator: None,
+        otc: None,
         cluster_list: Vec::new().into(),
         communities: Vec::new(),
         extended_communities: Vec::new(),
@@ -2611,6 +2644,16 @@ fn multipath_next_hops(
     hops
 }
 
+/// RFC 9234 §5 ingress rules 1 and 2: is a route with `otc` a leak from a
+/// neighbor whose role is `remote`?
+fn otc_leak(remote: nos_proto::BgpRole, otc: Option<u32>, peer_as: u32) -> bool {
+    match (remote, otc) {
+        (Customer | RouteServerClient, Some(_)) => true,
+        (Peer, Some(o)) => o != peer_as,
+        _ => false,
+    }
+}
+
 /// Decides whether `best` should be advertised to `peer` and, if so, rewrites
 /// it for that destination. `None` covers every ineligibility case
 /// (split-horizon, source-peer echo, family not negotiated by this peer, no
@@ -2668,6 +2711,14 @@ fn build_advertisement(
         &to_policy_input(prefix, &adjusted, Some((peer, outbox.remote_asn))),
     );
     let nh_edit = apply_verdict(&mut adjusted, verdict)?;
+    // RFC 9234 §5 egress, after policy so it cannot defeat it.
+    match (outbox.remote_role, adjusted.otc) {
+        (Some(Customer | Peer | RouteServerClient), None) => {
+            adjusted.otc = Some(outbox.local_as.map_or(local_asn, |l| l.asn));
+        }
+        (Some(Provider | Peer | RouteServer), Some(_)) => return None,
+        _ => {}
+    }
     // RFC 4360 §6: non-transitive extended communities (type bit 0x40)
     // don't leave the AS (kept across a confederation, like MED).
     if !outbox.is_ibgp && !outbox.is_confed {
@@ -2757,6 +2808,7 @@ fn build_advertisement(
         large_communities: best.large_communities.clone(),
         atomic_aggregate: best.atomic_aggregate,
         aggregator: best.aggregator,
+        otc: best.otc,
         path_id: None,
     })
 }
@@ -2934,6 +2986,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -4467,6 +4520,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -4498,6 +4552,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -4663,6 +4718,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -4721,6 +4777,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -4769,6 +4826,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -4814,6 +4872,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -4851,6 +4910,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -4916,6 +4976,7 @@ mod tests {
                     originator_id: None,
                     atomic_aggregate: false,
                     aggregator: None,
+                    otc: None,
                     cluster_list: vec![],
                     communities: Vec::new(),
                     extended_communities: Vec::new(),
@@ -4943,6 +5004,7 @@ mod tests {
                     originator_id: None,
                     atomic_aggregate: false,
                     aggregator: None,
+                    otc: None,
                     cluster_list: vec![],
                     communities: Vec::new(),
                     extended_communities: Vec::new(),
@@ -4961,6 +5023,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -5006,6 +5069,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -5163,6 +5227,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -5194,6 +5259,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -5250,6 +5316,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -5356,6 +5423,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -5412,6 +5480,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -5476,6 +5545,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -5528,6 +5598,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -5612,6 +5683,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -5873,6 +5945,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -5926,6 +5999,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -6000,6 +6074,7 @@ mod tests {
                 large_communities: Vec::new(),
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 path_id: None,
                 prefix: prefix("1.2.3.0/24"),
                 as_path: vec![].into(),
@@ -6049,6 +6124,7 @@ mod tests {
                 large_communities: Vec::new(),
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 path_id: None,
                 prefix: prefix("4.5.6.0/24"),
                 as_path: vec![].into(),
@@ -6122,6 +6198,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -6144,6 +6221,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: Vec::new(),
                 extended_communities: Vec::new(),
@@ -7238,6 +7316,111 @@ mod tests {
         let _src = register_peer(&mut rib, addr("10.0.0.1"), false, addr("10.0.0.9"));
         let rx = register_peer(&mut rib, addr("10.0.0.2"), false, addr("10.0.0.9"));
         (rib, rx)
+    }
+
+    const ALL_ROLES: [nos_proto::BgpRole; 5] =
+        [Provider, RouteServer, RouteServerClient, Customer, Peer];
+
+    fn otc_update(otc: Option<u32>) -> UpdateMessage {
+        let mut u = ebgp_update(vec!["198.51.100.0/24"], vec![65001], "192.0.2.1");
+        u.attributes.as_mut().unwrap().otc = otc;
+        u
+    }
+
+    /// RFC 9234 §5 ingress, every remote role x OTC absent/present/equal to
+    /// the peer's ASN; a session with no role is untouched.
+    #[test]
+    fn otc_ingress_per_remote_role() {
+        let src = addr("10.0.0.1");
+        for remote in ALL_ROLES {
+            for otc in [None, Some(65001), Some(64999)] {
+                let mut rib = new_rib(65000);
+                rib.set_peer_asn(src, 65001);
+                rib.set_peer_role(src, Some(remote.counterpart()));
+                rib.handle_update(
+                    src,
+                    false,
+                    v4("1.1.1.1"),
+                    &otc_update(otc),
+                    &accept_all_policy(),
+                );
+                let got = rib.loc_rib.get(&prefix("198.51.100.0/24")).map(|r| r.otc);
+                let want = match (remote, otc) {
+                    (Customer | RouteServerClient, Some(_)) => None,
+                    (Peer, Some(o)) if o != 65001 => None,
+                    (Provider | Peer | RouteServer, None) => Some(Some(65001)),
+                    (_, o) => Some(o),
+                };
+                assert_eq!(got, want, "{remote:?} otc={otc:?}");
+            }
+        }
+        let mut rib = new_rib(65000);
+        rib.set_peer_asn(src, 65001);
+        rib.handle_update(
+            src,
+            false,
+            v4("1.1.1.1"),
+            &otc_update(Some(7)),
+            &accept_all_policy(),
+        );
+        assert_eq!(rib.loc_rib[&prefix("198.51.100.0/24")].otc, Some(7));
+    }
+
+    /// A leaked re-announcement withdraws the earlier path.
+    #[test]
+    fn otc_leak_withdraws_earlier_path() {
+        let src = addr("10.0.0.1");
+        let mut rib = new_rib(65000);
+        rib.set_peer_asn(src, 65001);
+        rib.set_peer_role(src, Some(Provider)); // the peer is our Customer
+        rib.handle_update(
+            src,
+            false,
+            v4("1.1.1.1"),
+            &otc_update(None),
+            &accept_all_policy(),
+        );
+        assert!(rib.loc_rib.contains_key(&prefix("198.51.100.0/24")));
+        rib.handle_update(
+            src,
+            false,
+            v4("1.1.1.1"),
+            &otc_update(Some(1)),
+            &accept_all_policy(),
+        );
+        assert!(rib.loc_rib.is_empty());
+    }
+
+    /// RFC 9234 §5 egress, every destination role x OTC absent/present, with
+    /// `local-as` honoured; a destination with no role forwards unchanged.
+    #[test]
+    fn otc_egress_per_remote_role() {
+        let src = addr("10.0.0.1");
+        let dst = addr("10.0.0.2");
+        for remote in ALL_ROLES.map(Some).into_iter().chain([None]) {
+            for otc in [None, Some(65001)] {
+                let mut rib = new_rib(65000);
+                rib.set_peer_asn(src, 65001);
+                register_peer(&mut rib, src, false, addr("10.0.0.9"));
+                rib.set_peer_role(dst, remote.map(nos_proto::BgpRole::counterpart));
+                rib.set_peer_local_as(dst, Some(local_as(65009, false, false)));
+                let mut rx = register_peer(&mut rib, dst, false, addr("10.0.0.9"));
+                rib.handle_update(
+                    src,
+                    false,
+                    v4("1.1.1.1"),
+                    &otc_update(otc),
+                    &accept_all_policy(),
+                );
+                let got = announced(&mut rx, "198.51.100.0/24").map(|a| a.otc);
+                let want = match (remote, otc) {
+                    (Some(Customer | Peer | RouteServerClient), None) => Some(Some(65009)),
+                    (Some(Provider | Peer | RouteServer), Some(_)) => None,
+                    (_, o) => Some(o),
+                };
+                assert_eq!(got, want, "{remote:?} otc={otc:?}");
+            }
+        }
     }
 
     fn learn(rib: &mut BgpRib, update: &UpdateMessage) {

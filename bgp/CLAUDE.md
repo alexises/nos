@@ -201,13 +201,14 @@ EVPN origination (`evpn_out::advertise`) follows the same table. On receipt, con
 
 ### BGP roles (RFC 9234, #14, #220)
 
-`BgpPeerGroup.role: Option<BgpRole>` + `strict_mode: bool` (`set role provider|route-server|route-server-client|customer|peer`, `set strict-mode true`). Roles only here; the OTC attribute and the leak procedures are the follow-up sub-issue of #14.
+`BgpPeerGroup.role: Option<BgpRole>` + `strict_mode: bool` (`set role provider|route-server|route-server-client|customer|peer`, `set strict-mode true`). Roles plus the OTC leak procedures (#221).
 
 - **OPEN**: `Capability::Role(u8)` (code 9, length 1, other lengths dropped as unknown, `message::peer_role`); `ResolvedPeer.role/strict_mode` (so a change restarts the session) feed `NegotiationContext`, and `fsm::run` appends the capability when `role` is set.
 - **Negotiation** (`fsm::negotiate_role`, in `handle_open`): peer role must be `BgpRole::counterpart` of ours, else NOTIFICATION OPEN Message Error subcode 11 (`OpenMessageSubcode::RoleMismatch`); no peer role is refused only under `strict_mode`, else no role negotiated (`RemoteInfo.role = None`). We announce no role: the peer's is ignored. Logs `bgp role negotiated peer= local= remote=` on accept; every NOTIFICATION we send is now logged (`sent notification peer= code= subcode=`).
-- **RIB**: `BgpRib::set_peer_role` before `peer_established` (read with `peer_role`; consumed by the OTC procedures later).
+- **RIB**: `BgpRib::set_peer_role` before `peer_established` stores the *configured* role (not the negotiated one: RFC 9234 §4.2 applies the procedures even when the peer sent no Role); the remote's role is its `counterpart()` (`PeerOutbox.remote_role` for egress).
+- **OTC** (RFC 9234 §4.1/§5, #221): `PathAttributes.otc: Option<u32>` (type 35, optional transitive, length 4; another length is treat-as-withdraw), mirrored on `RibRoute`/`AdvertisedRoute`. Ingress in `handle_update` (unicast only, before import policy, after the loop checks): `otc_leak` (Customer/RS-Client with OTC, Peer with OTC != peer ASN) drops the update like an AS loop (`withdraw_announced`, log `route leak detected`); Provider/Peer/RS with no OTC gets `otc = peer ASN`. Egress in `build_advertisement` after the export policy: to Customer/Peer/RS-Client with no OTC set `open_as`; to Provider/Peer/RS with an OTC refuse (a plain refusal, frees an ADD-PATH slot; an RS-Client does receive OTC routes, per the RFC). The `learned route` log line has `otc=`. No RPL/show/REST exposure yet.
 - **Validation** (`bgp_instance::valid_role`): `strict_mode` needs `role`; no role on iBGP or confederation groups; a `route_server_client` group only takes `route-server`/`route-server-client`.
-- Verified by `nos-e2e bgp-role` (two nos routers: pair, mismatch, strict, non-strict).
+- Verified by `nos-e2e bgp-role` (two nos routers: pair, mismatch, strict, non-strict; then router-c and ExaBGP for OTC: no provider-to-provider leak, OTC reaching a customer, a customer's raw OTC dropped).
 
 ### Route reflection and route server
 

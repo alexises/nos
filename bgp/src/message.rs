@@ -111,6 +111,8 @@ const ATTR_EXTENDED_COMMUNITIES: u8 = 16;
 /// RFC 8092 §3 large community — a list of 12-byte (3×u32) values.
 const ATTR_LARGE_COMMUNITY: u8 = 32;
 const ATTR_PMSI_TUNNEL: u8 = 22;
+/// RFC 9234 §4.1 Only to Customer (optional transitive, one ASN).
+const ATTR_OTC: u8 = 35;
 /// RFC 6793 §3: the real 4-byte path, carried beside a 2-byte `AS_PATH` to/from
 /// a peer that never negotiated the four-octet AS capability.
 const ATTR_AS4_PATH: u8 = 17;
@@ -436,6 +438,8 @@ pub struct PathAttributes {
     pub atomic_aggregate: bool,
     /// RFC 4271 §5.1.7 `AGGREGATOR` (`AS4_AGGREGATOR` merged in, RFC 6793).
     pub aggregator: Option<Aggregator>,
+    /// RFC 9234 §4.1 `OTC` (Only to Customer): the ASN that marked the route.
+    pub otc: Option<u32>,
 }
 
 /// The AS and router-id of the speaker that formed an aggregate.
@@ -1310,6 +1314,7 @@ struct ParsedAttributes {
     pmsi: Option<Pmsi>,
     atomic_aggregate: bool,
     aggregator: Option<Aggregator>,
+    otc: Option<u32>,
     mp_reach: Vec<MpReachNlri>,
     mp_unreach: Vec<MpUnreachNlri>,
     /// RFC 7606 treat-as-withdraw: an attribute's content was malformed.
@@ -1345,6 +1350,7 @@ fn parse_path_attributes(
     let mut atomic_aggregate = false;
     let mut aggregator: Option<Aggregator> = None;
     let mut as4_aggregator = None;
+    let mut otc = None;
     let mut mp_reach = Vec::new();
     let mut mp_unreach = Vec::new();
     // RFC 7606 treat-as-withdraw: set by any attribute whose *content* is
@@ -1504,6 +1510,13 @@ fn parse_path_attributes(
                         router_id: Ipv4Addr::new(value[4], value[5], value[6], value[7]),
                     });
                 }
+                ATTR_OTC => {
+                    let Ok(v) = <[u8; 4]>::try_from(value) else {
+                        withdraw = true;
+                        break 'attr;
+                    };
+                    otc = Some(u32::from_be_bytes(v));
+                }
                 ATTR_PMSI_TUNNEL => pmsi = decode_pmsi(value),
                 ATTR_MP_REACH_NLRI => mp_reach.push(decode_mp_reach(value, add_path_afis)?),
                 ATTR_MP_UNREACH_NLRI => mp_unreach.push(decode_mp_unreach(value, add_path_afis)?),
@@ -1543,6 +1556,7 @@ fn parse_path_attributes(
         pmsi,
         atomic_aggregate,
         aggregator,
+        otc,
         mp_reach,
         mp_unreach,
         withdraw,
@@ -1791,6 +1805,7 @@ fn parse_update(
                     pmsi: parsed.pmsi,
                     atomic_aggregate: parsed.atomic_aggregate,
                     aggregator: parsed.aggregator,
+                    otc: parsed.otc,
                 })
             }
             _ => None,
@@ -1947,6 +1962,14 @@ fn encode_attributes(update: &UpdateMessage, two_octet_as: bool) -> Vec<u8> {
                     &v,
                 );
             }
+        }
+        if let Some(otc) = attrs.otc {
+            encode_attribute(
+                &mut out,
+                ATTR_FLAG_OPTIONAL_TRANSITIVE,
+                ATTR_OTC,
+                &otc.to_be_bytes(),
+            );
         }
         if let Some(local_pref) = attrs.local_pref {
             encode_attribute(
@@ -2182,6 +2205,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: vec![],
                 extended_communities: vec![],
@@ -2549,6 +2573,28 @@ mod tests {
     }
 
     #[test]
+    fn otc_roundtrips_and_bad_length_is_treat_as_withdraw() {
+        let mut update = as_path_update(vec![65001]);
+        update.attributes.as_mut().unwrap().otc = Some(65010);
+        assert_eq!(
+            roundtrip(BgpMessage::Update(update.clone())),
+            BgpMessage::Update(update.clone())
+        );
+        assert!(attr_types(&update, false).contains(&ATTR_OTC));
+        update.attributes.as_mut().unwrap().otc = None;
+        assert!(!attr_types(&update, false).contains(&ATTR_OTC));
+        for len in [3usize, 5] {
+            let mut attrs = Vec::new();
+            encode_attribute(&mut attrs, 0x40, ATTR_ORIGIN, &[0]);
+            encode_attribute(&mut attrs, 0x40, ATTR_AS_PATH, &[]);
+            encode_attribute(&mut attrs, 0x40, ATTR_NEXT_HOP, &[192, 0, 2, 1]);
+            encode_attribute(&mut attrs, 0xC0, ATTR_OTC, &vec![0; len]);
+            let p = parse_path_attributes(&attrs, &HashSet::new(), false).unwrap();
+            assert!(p.withdraw, "otc length {len}");
+        }
+    }
+
+    #[test]
     fn malformed_aggregate_attributes_are_discarded_not_withdrawn() {
         let mut attrs = Vec::new();
         encode_attribute(&mut attrs, 0x40, ATTR_ORIGIN, &[0]);
@@ -2833,6 +2879,7 @@ mod tests {
             originator_id: None,
             atomic_aggregate: false,
             aggregator: None,
+            otc: None,
             cluster_list: vec![],
             communities: vec![],
             extended_communities: vec![],
@@ -3125,6 +3172,7 @@ mod tests {
                 originator_id: None,
                 atomic_aggregate: false,
                 aggregator: None,
+                otc: None,
                 cluster_list: vec![],
                 communities: vec![],
                 extended_communities: vec![],
