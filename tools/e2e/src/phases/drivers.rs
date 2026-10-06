@@ -200,6 +200,33 @@ pub async fn lacp(w: &mut World) -> anyhow::Result<()> {
         }
     }
 
+    // 802.1AX §6.5 Marker responder: a real Marker PDU injected on router-b's
+    // eth1 (source = its own MAC, so only router-a answers) must come back as
+    // a byte-correct Marker Response, and router-a logs it.
+    log("router-a answers a real injected Marker PDU on eth1");
+    w.dock
+        .ensure_image(
+            PYTHON_HELPER_IMAGE,
+            "FROM debian:bookworm-slim\n\
+            RUN apt-get update && apt-get install -y --no-install-recommends python3-minimal \\\n \
+            && rm -rf /var/lib/apt/lists/*\n",
+        )
+        .await?;
+    let marker_base = a.count("lacp marker answered interface=eth1");
+    w.dock
+        .in_netns(
+            PYTHON_HELPER_IMAGE,
+            "router-b",
+            &["python3", "-c", include_str!("marker.py")],
+        )
+        .await?;
+    a.wait_new(
+        "lacp marker answered interface=eth1 requester_port=7 .* transaction_id=1313821529",
+        marker_base,
+        15,
+    )
+    .await?;
+
     // Withdraw eth2 from router-b's aggregate (its veth stays up): router-a's
     // nos-lacpd must detect the silence via its real Receive Machine timeout
     // and nos-interfaced must release eth2 — proving the enslavement is

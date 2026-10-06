@@ -9,8 +9,7 @@ pub use nos_l2_socket::is_link_down;
 pub type LacpSocket = nos_l2_socket::L2Socket;
 
 /// `ETH_P_SLOW` (IEEE 802.3, Annex 43B) — the ethertype both LACP and the
-/// Marker protocol use; `packet::decode` further rejects anything that isn't
-/// LACP's own subtype byte.
+/// Marker protocol use; `link::run` dispatches LACP vs Marker by subtype.
 const ETH_P_SLOW: u16 = 0x8809;
 
 /// The IEEE 802.1AX slow-protocols multicast destination MAC every LACPDU is
