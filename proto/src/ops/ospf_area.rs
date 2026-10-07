@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Config, OspfArea, OspfAreaRange, OspfAreaType};
+use crate::schema::{Config, OspfArea, OspfAreaRange, OspfAreaType, OspfVirtualLink};
 
 use super::ospf_instance::find_instance_mut;
 use super::OpError;
@@ -48,6 +48,17 @@ pub enum OspfAreaOp {
         instance: String,
         area_id: Ipv4Addr,
         cidr: Ipv4Net,
+    },
+    /// Upserts by `router_id`, resetting its timers and auth.
+    SetVirtualLink {
+        instance: String,
+        area_id: Ipv4Addr,
+        router_id: Ipv4Addr,
+    },
+    RemoveVirtualLink {
+        instance: String,
+        area_id: Ipv4Addr,
+        router_id: Ipv4Addr,
     },
 }
 
@@ -110,6 +121,39 @@ impl OspfAreaOp {
                         instance: instance.clone(),
                         area_id: *area_id,
                         cidr: *cidr,
+                    });
+                }
+                Ok(())
+            }
+            OspfAreaOp::SetVirtualLink {
+                instance,
+                area_id,
+                router_id,
+            } => {
+                let links = &mut find_area_mut(config, instance, *area_id)?.virtual_links;
+                let link = OspfVirtualLink {
+                    router_id: *router_id,
+                    ..Default::default()
+                };
+                match links.iter_mut().find(|v| v.router_id == *router_id) {
+                    Some(v) => *v = link,
+                    None => links.push(link),
+                }
+                Ok(())
+            }
+            OspfAreaOp::RemoveVirtualLink {
+                instance,
+                area_id,
+                router_id,
+            } => {
+                let links = &mut find_area_mut(config, instance, *area_id)?.virtual_links;
+                let before = links.len();
+                links.retain(|v| v.router_id != *router_id);
+                if links.len() == before {
+                    return Err(OpError::OspfVirtualLinkNotFound {
+                        instance: instance.clone(),
+                        area_id: *area_id,
+                        router_id: *router_id,
                     });
                 }
                 Ok(())
@@ -342,6 +386,41 @@ mod tests {
         assert!(matches!(
             remove.apply(&mut cfg),
             Err(OpError::OspfAreaRangeNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn virtual_link_upsert_and_remove() {
+        let mut cfg = Config {
+            ospf_instances: vec![instance(
+                "o1",
+                vec![OspfArea {
+                    area_id: area_id("0.0.0.1"),
+                    ..Default::default()
+                }],
+            )],
+            ..Default::default()
+        };
+        let (instance, area_id) = ("o1".to_string(), area_id("0.0.0.1"));
+        let router_id: Ipv4Addr = "2.2.2.2".parse().unwrap();
+        let set = OspfAreaOp::SetVirtualLink {
+            instance: instance.clone(),
+            area_id,
+            router_id,
+        };
+        set.apply(&mut cfg).unwrap();
+        set.apply(&mut cfg).unwrap();
+        assert_eq!(cfg.ospf_instances[0].areas[0].virtual_links.len(), 1);
+        let remove = OspfAreaOp::RemoveVirtualLink {
+            instance,
+            area_id,
+            router_id,
+        };
+        remove.apply(&mut cfg).unwrap();
+        assert_eq!(cfg.ospf_instances[0].areas[0].virtual_links, vec![]);
+        assert!(matches!(
+            remove.apply(&mut cfg),
+            Err(OpError::OspfVirtualLinkNotFound { .. })
         ));
     }
 

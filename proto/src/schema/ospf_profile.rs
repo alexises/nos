@@ -134,7 +134,7 @@ pub(crate) fn valid_crypto_keys(keys: &[OspfCryptoKey]) -> garde::Result {
 /// convention.
 const SIMPLE_PASSWORD_MAX_LEN: usize = 8;
 
-fn valid_auth(auth: Option<&OspfAuth>) -> garde::Result {
+pub(crate) fn valid_auth(auth: Option<&OspfAuth>) -> garde::Result {
     match auth {
         None => Ok(()),
         Some(OspfAuth::Simple { password }) => {
@@ -288,15 +288,19 @@ pub(crate) fn valid_profile_timers(profiles: &[OspfProfile]) -> garde::Result {
                 ));
             }
         }
-        if let (Some(hello), Some(dead)) = (p.hello_interval, p.dead_interval) {
-            if dead <= hello {
-                return Err(garde::Error::new(
-                    "dead-interval must be greater than hello-interval when both are set",
-                ));
-            }
-        }
+        valid_intervals(p.hello_interval, p.dead_interval)?;
     }
     Ok(())
+}
+
+/// Shared with `OspfVirtualLink`.
+pub(crate) fn valid_intervals(hello: Option<u16>, dead: Option<u16>) -> garde::Result {
+    match (hello, dead) {
+        (Some(h), Some(d)) if d <= h => Err(garde::Error::new(
+            "dead-interval must be greater than hello-interval when both are set",
+        )),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -332,6 +336,7 @@ mod tests {
             ranges: Vec::new(),
             nssa_translate_always: false,
             nssa_default_originate: false,
+            virtual_links: Vec::new(),
             profiles,
         }
     }

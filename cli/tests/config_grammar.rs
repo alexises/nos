@@ -36,6 +36,7 @@ fn populated() -> Config {
         nssa_translate_always: false,
         nssa_default_originate: false,
         ranges: Vec::new(),
+        virtual_links: Vec::new(),
         profiles: vec![OspfProfile {
             name: "p1".into(),
             ..Default::default()
@@ -242,6 +243,9 @@ fn ospf_area_type_and_range() {
             not_advertise: true
         }]
     );
+    let links = area(&format!("{at} virtual-link 2.2.2.2 hello-interval 5")).virtual_links;
+    assert_eq!(links[0].router_id.to_string(), "2.2.2.2");
+    assert_eq!(links[0].hello_interval, Some(5));
 }
 
 /// #25: a routing table's EVPN L3 VNI is reachable from the CLI.

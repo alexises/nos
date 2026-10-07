@@ -344,6 +344,7 @@ mod tests {
                     ranges: Vec::new(),
                     nssa_translate_always: false,
                     nssa_default_originate: false,
+                    virtual_links: Vec::new(),
                     profiles: vec![OspfProfile {
                         name: "p1".to_string(),
                         hello_interval: None,

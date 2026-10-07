@@ -5,7 +5,8 @@ use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
 
 use super::ospf_profile;
-use super::{Config, OspfProfile};
+use super::{Config, OspfAuth, OspfProfile};
+use crate::schema::sugar;
 use nos_proto_derive::Cli;
 
 /// One OSPF area within an `OspfInstance`, keyed by its dotted-quad area id
@@ -74,6 +75,40 @@ pub struct OspfArea {
     #[garde(skip)]
     #[cli(topic = OspfAreaNssaDefaultOriginate, words = "nssa-default-originate enable", alias = "nssa-default-originate")]
     pub nssa_default_originate: bool,
+
+    /// RFC 2328 §15 virtual links whose transit area is this one, keyed by
+    /// the far endpoint's router id: a backbone adjacency tunnelled across
+    /// this area to a router that is also attached to area 0.0.0.0, joining
+    /// a partitioned or detached backbone. Not allowed on the backbone or on
+    /// a stub area or NSSA. Config only for now; no adjacency is formed.
+    #[serde(default)]
+    #[garde(skip)]
+    #[cli(topic = OspfAreaVirtualLink)]
+    pub virtual_links: Vec<OspfVirtualLink>,
+}
+
+/// One RFC 2328 §15 virtual link, configured on its transit area and keyed by
+/// the far endpoint's router id. Timers and authentication are the link's own
+/// (Appendix C.3), not a profile's: a virtual link has no attach point.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Cli)]
+pub struct OspfVirtualLink {
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
+    #[cli(key)]
+    pub router_id: Ipv4Addr,
+    /// `None` defaults to 10s, as for a profile.
+    #[serde(default)]
+    #[cli(topic = OspfVirtualLinkHelloInterval)]
+    pub hello_interval: Option<u16>,
+    /// `None` defaults to 40s. Strictly greater than `hello_interval` when
+    /// both are set.
+    #[serde(default)]
+    #[cli(topic = OspfVirtualLinkDeadInterval)]
+    pub dead_interval: Option<u16>,
+    /// `None` is `AuType` 0 (no authentication). Checked like a profile's.
+    #[serde(default)]
+    #[cli(topic = OspfVirtualLinkAuth, render = sugar::render_ospf_auth, sugar(word = "simple-password", with = sugar::simple_password, topic = OspfVirtualLinkSimplePassword), sugar(word = "crypto-key", with = sugar::ospf_crypto_key, topic = OspfVirtualLinkCryptoKey))]
+    pub auth: Option<OspfAuth>,
 }
 
 /// What kind of RFC 2328 area an `OspfArea` is.
@@ -150,6 +185,30 @@ pub(crate) fn valid_area_settings(area: &OspfArea) -> garde::Result {
         Some(0) => return Err(garde::Error::new("stub-default-cost must be 1 or more")),
         _ => {}
     }
+    if !area.virtual_links.is_empty() && (area.area_id.is_unspecified() || area.area_type.is_stub())
+    {
+        return Err(garde::Error::new(
+            "virtual links can't cross the backbone, a stub area or an nssa",
+        ));
+    }
+    for (i, v) in area.virtual_links.iter().enumerate() {
+        if area.virtual_links[..i]
+            .iter()
+            .any(|o| o.router_id == v.router_id)
+        {
+            return Err(garde::Error::new(
+                "virtual link router ids must be unique within an area",
+            ));
+        }
+        ospf_profile::valid_auth(v.auth.as_ref())?;
+        // No extended sequence numbers here, so only a classic one-octet key id.
+        if let Some(OspfAuth::Crypto { keys }) = &v.auth {
+            if keys.iter().any(|k| k.key_id > 255) {
+                return Err(garde::Error::new("crypto key-id must be 0-255"));
+            }
+        }
+        ospf_profile::valid_intervals(v.hello_interval, v.dead_interval)?;
+    }
     for (i, r) in area.ranges.iter().enumerate() {
         if area.ranges[..i]
             .iter()
@@ -163,6 +222,18 @@ pub(crate) fn valid_area_settings(area: &OspfArea) -> garde::Result {
     Ok(())
 }
 
+/// The placeholder a new `OspfVirtualLink` starts from (`edit` on a missing one).
+impl Default for OspfVirtualLink {
+    fn default() -> Self {
+        OspfVirtualLink {
+            router_id: Ipv4Addr::UNSPECIFIED,
+            hello_interval: None,
+            dead_interval: None,
+            auth: None,
+        }
+    }
+}
+
 /// The placeholder a new `OspfArea` starts from (`edit` on a missing one).
 impl Default for OspfArea {
     fn default() -> Self {
@@ -174,6 +245,7 @@ impl Default for OspfArea {
             ranges: Vec::new(),
             nssa_translate_always: false,
             nssa_default_originate: false,
+            virtual_links: Vec::new(),
         }
     }
 }
@@ -184,7 +256,8 @@ mod tests {
 
     use crate::schema::{Config, OspfInstance};
 
-    use super::{OspfArea, OspfAreaRange, OspfAreaType};
+    use super::{OspfArea, OspfAreaRange, OspfAreaType, OspfVirtualLink};
+    use crate::schema::{OspfAuth, OspfCryptoAlgorithm, OspfCryptoKey};
 
     fn area(area_id: &str) -> OspfArea {
         OspfArea {
@@ -250,12 +323,70 @@ mod tests {
         assert!(!validates(a));
     }
 
+    fn link(id: &str) -> OspfVirtualLink {
+        OspfVirtualLink {
+            router_id: id.parse().unwrap(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn virtual_link_rules() {
+        let mut a = area("0.0.0.1");
+        a.virtual_links = vec![link("2.2.2.2")];
+        assert!(validates(a.clone()));
+        // Backbone, stub, nssa.
+        let mut backbone = a.clone();
+        backbone.area_id = "0.0.0.0".parse().unwrap();
+        assert!(!validates(backbone));
+        for t in [OspfAreaType::Stub, OspfAreaType::Nssa] {
+            let mut stub = a.clone();
+            stub.area_type = t;
+            assert!(!validates(stub));
+        }
+        // Duplicate endpoint.
+        let mut dup = a.clone();
+        dup.virtual_links.push(link("2.2.2.2"));
+        assert!(!validates(dup));
+        // The instance's own router id (1.1.1.1 in these tests).
+        let mut own = a.clone();
+        own.virtual_links = vec![link("1.1.1.1")];
+        assert!(!validates(own));
+        // dead <= hello.
+        let mut timers = a.clone();
+        timers.virtual_links[0].hello_interval = Some(10);
+        timers.virtual_links[0].dead_interval = Some(10);
+        assert!(!validates(timers.clone()));
+        timers.virtual_links[0].dead_interval = Some(11);
+        assert!(validates(timers));
+        // Bad crypto key list (empty) and an over-long simple password.
+        let mut keys = a.clone();
+        keys.virtual_links[0].auth = Some(OspfAuth::Crypto { keys: Vec::new() });
+        assert!(!validates(keys));
+        let mut pw = a.clone();
+        pw.virtual_links[0].auth = Some(OspfAuth::Simple {
+            password: "123456789".into(),
+        });
+        assert!(!validates(pw));
+        let mut ok = a;
+        ok.virtual_links[0].auth = Some(OspfAuth::Crypto {
+            keys: vec![OspfCryptoKey {
+                key_id: 1,
+                algorithm: OspfCryptoAlgorithm::HmacSha256,
+                key: "k".into(),
+                is_current: true,
+            }],
+        });
+        assert!(validates(ok));
+    }
+
     /// An area saved before the stub/range fields existed still loads.
     #[test]
     fn old_area_without_new_fields_loads() {
         let a: OspfArea = serde_json::from_str(r#"{"area_id":"0.0.0.1","profiles":[]}"#).unwrap();
         assert_eq!(a.area_type, OspfAreaType::Normal);
         assert_eq!(a.ranges, vec![]);
+        assert_eq!(a.virtual_links, vec![]);
         let r: OspfAreaRange = serde_json::from_str(r#"{"cidr":"10.0.0.0/8"}"#).unwrap();
         assert!(!r.not_advertise);
     }
